@@ -1,0 +1,4716 @@
+# DECISIONS.md — Architecture Decision Log
+
+Fleet Engine Migration Harness. Numbered ADR-style log; each entry is a **firm** choice.
+Status of every entry below: **Accepted**. Superseding an entry means appending a new
+numbered entry that names the one it replaces — entries are never edited in place.
+
+Scope reminder (from `CLAUDE.md`): ONE unified harness, ZERO per-language pipeline tuning.
+Per-file syntax transformation is a commodity offloaded to deterministic AST tools + LLMs.
+The differentiator is cross-repo dependency interrogation, the global DAG, and topological
+sequencing of ~250 repos into a single polyglot monorepo.
+
+---
+
+## ADR-0001 — Python 3.12 as the floor; `uv` for packaging and dependency management
+
+**Decision.** Target `requires-python = ">=3.12"`. Use `uv` as the sole dependency
+manager and virtualenv driver, with a PEP 621 `pyproject.toml`, `hatchling` as the build
+backend, and a committed `uv.lock`. No Poetry, no `requirements.txt`, no Conda.
+
+**Rationale.** 3.12 is the lowest version that gives us `TaskGroup`/`asyncio.timeout`
+(3.11), PEP 695 type params and the substantially faster/clearer error tracebacks (3.12)
+without paying the ecosystem-lag tax that 3.13's free-threading builds still carry for
+`tree-sitter` and native wheels. `uv` resolves and installs an order of magnitude faster
+than pip/Poetry, produces a universal cross-platform lockfile, and — decisive for a harness
+that spawns hundreds of throwaway sandboxes — can materialize a locked environment offline
+from a warm cache in seconds.
+
+**Alternatives rejected.** Poetry (slow resolver, non-standard lock, weak offline story);
+pip + `requirements.txt` (no real locking, no dependency groups); Conda (needless for a
+pure-Python harness); Python 3.11 floor (loses 3.12 typing/traceback ergonomics for no gain,
+since we control the runtime).
+
+---
+
+## ADR-0002 — Pydantic v2 (`>=2.11`) is the single data-contract and state-modeling layer
+
+**Decision.** Every object that crosses a process, subagent, LLM, or disk boundary is a
+`pydantic.BaseModel` (v2, floor pinned at `>=2.11,<3`), plus `pydantic-settings>=2.7` for
+configuration. `TypeAdapter.dump_json()` / `validate_json()` is the *only* sanctioned
+serialization path for durable state — no `pickle`, anywhere, ever.
+
+**Rationale.** Pydantic v2 is mandated by the project `CLAUDE.md`, and the mandate is
+correct for this workload: LLM output is untrusted text, so a schema that both generates
+the JSON Schema we hand the model *and* validates the response on the way back collapses
+two problems into one declaration, and its Rust core makes validating ~250 repos × N
+manifests × M findings free at our scale. The `>=2.11` floor is where `TypeAdapter`
+serialization of discriminated unions, `model_config` inheritance, and the
+`@model_validator` ordering semantics we rely on are all stable — the reference harness
+ships an even more conservative `pydantic>=2.13.4`, and we adopt its validate-on-load rule
+verbatim because a tampered or truncated checkpoint must produce a `ValidationError` that
+re-runs the step, never a smuggled value.
+
+**Alternatives rejected.** `dataclasses` + manual validation (no JSON Schema generation for
+LLM structured output, no coercion); `attrs` (same gap); Pydantic v1 (dead-end API, ~20×
+slower validation); raw `dict` state (the failure mode we are explicitly engineering against).
+
+**Amended by ADR-0023** (provider-agnostic LLM layer). The decision is unchanged and is now
+*load-bearing in one more place*: because backends differ in how — and whether — they honour a
+response schema, **Pydantic validation on our side is the invariant that makes them
+interchangeable**. A backend's native JSON-schema mode, its tool-calling coercion, its constrained
+decoder, and a prompted-JSON floor are four ways to *raise the odds* of a conforming response;
+none of them is trusted. `model_validate_json()` on the declared response model is the single
+acceptance test for every backend, and a response that fails it is a failure of that call
+regardless of which backend produced it. ADR-0023 also notes that this ADR — not ADR-0009 — is
+where the "one declaration generates the schema and validates the response" argument belongs, since
+it is a property of Pydantic and of JSON Schema, not of any vendor's API.
+
+---
+
+## ADR-0003 — `asyncio` orchestration; CPU-bound AST work exiled to a process pool
+
+**Decision.** The orchestrator, all I/O fan-out (LLM calls, subprocesses, git, HTTP), and
+all queueing is `asyncio`, structured with `asyncio.TaskGroup` and bounded by
+`asyncio.Semaphore` per resource class (LLM concurrency, git concurrency, container
+concurrency). CPU-bound work — tree-sitter/`ast-grep` parsing, whole-repo symbol indexing,
+DAG transitive-closure computation — is dispatched through
+`loop.run_in_executor(ProcessPoolExecutor(...))`, and every external tool invocation
+(`ast-grep`, `git`, build commands) goes through `asyncio.create_subprocess_exec` — never
+`subprocess.run`, never a bare thread. **The boundary rule: if it blocks on a socket or a
+pipe it stays on the event loop; if it burns CPU inside this interpreter it goes to a
+process.** No `ThreadPoolExecutor` in first-party harness code.
+
+**Rationale.** `asyncio` is mandated by the project `CLAUDE.md`, and the mandate is the
+right call because ~95% of harness wall-clock is waiting — on model tokens, on `git clone`,
+on container builds — which threads would serve no better while costing us non-deterministic
+interleaving in the checkpoint writer. Drawing the CPU boundary at *processes* rather than
+threads is what makes the mandate survive contact with tree-sitter: parsing 250 repos is
+genuinely GIL-bound, and a single blocking parse on the event loop stalls every in-flight
+LLM stream and heartbeat simultaneously.
+
+**Alternatives rejected.** `ThreadPoolExecutor` for LLM fan-out (the reference harness's
+choice — see *Conflicts Surfaced*, Conflict 1); Celery/RQ/Dramatiq (a broker to operate for a
+single-host batch job); `multiprocessing` as the top-level model (loses cheap I/O fan-out);
+Trio/AnyIO (excellent, but the Anthropic SDK's first-class async client is asyncio-native).
+
+---
+
+## ADR-0004 — SQLite (WAL) is the primary state and graph store; `networkx` is a derived, in-memory view
+
+**Decision.** One SQLite database file per fleet run (`state/fleet.db`, `journal_mode=WAL`,
+`foreign_keys=ON`, `busy_timeout=5000`), accessed through a thin repository module — no ORM.
+It stores: the `repos` inventory (URL, default branch, HEAD SHA, detected ecosystems), the
+`manifests` table (every parsed manifest, one row per manifest file), `edges` (the
+normalized cross-repo dependency graph: `src_repo`, `dst_coordinate`, `kind`, `version_spec`,
+`confidence`, `evidence_path`), `symbols` (the cross-repo symbol index), `phases` (per-repo ×
+per-phase status, attempt counter, terminal state), and `checkpoints` (Pydantic
+`dump_json()` BLOBs keyed by `(run_id, repo_id, phase)`). The graph algorithms
+(cycle detection, SCC condensation, topological sort, blast-radius queries) run in
+`networkx`, **built from the `edges` table on demand and never persisted** — it is a
+projection, not a source of truth.
+
+**Rationale.** SQLite gives us crash-safe, transactional, single-file, zero-daemon
+persistence with real indexes and ad-hoc SQL for the "which repos import X" questions that
+dominate Phase 1, and both reference harnesses independently converged on exactly this
+choice at exactly this scale. Keeping `networkx` derived rather than stored means the graph
+can never drift from the evidence that produced it — a re-scan of one repo rewrites its
+edges and the next topological sort is automatically correct, with no migration or graph
+GC to get wrong.
+
+**Alternatives rejected.** Neo4j (a JVM daemon, auth, and a second query language for a
+graph of ~250 nodes and a few thousand edges that fits in RAM); DuckDB (superb analytics,
+but weaker single-writer concurrent-durability story than WAL SQLite and we need durability
+far more than OLAP); pure in-memory `networkx` (loses everything on crash — see
+*Constraints Inherited From `references/`*, Constraint 2); Postgres (an operational dependency
+for a single-host batch tool).
+
+> **Editorial correction (2026-08-08).** This entry originally named the per-manifest table
+> `artifacts`. It is `manifests` — `artifacts/` is the run-output directory (SPEC §8) and the
+> collision was confusing. `SPEC.md` §6 is normative. No decision changed.
+
+**Amended by ADR-0024 — "primary state store" is scoped to *orchestration* state.** This ADR's
+list of what SQLite holds is unchanged and remains correct for every table it names. What ADR-0024
+adds is a boundary the original entry did not draw: SQLite is authoritative for **orchestration**
+state (tasks, attempts, phases, cost, events) and **Git is authoritative for code state**. The
+`mutations` write-ahead journal — added later and never contemplated here — crossed that line by
+storing tree SHAs, patch blobs, and a rollback log, and is deleted at `PRAGMA user_version` 5 → 6.
+The reasoning is this ADR's own, applied one level up: `networkx` is kept derived "so the graph can
+never drift from the evidence that produced it", and for exactly that reason the harness now keeps
+no second copy of what Git already stores atomically. Commit SHAs and `phases.base_ref` remain in
+SQLite as **pointers**, which is the same relationship `edges` has to the manifests it projects.
+
+---
+
+## ADR-0005 — Manifest interrogation via a `ManifestAdapter` plugin registry with a single normalized `Dependency` contract
+
+**Decision.** One code path, `interrogate(repo_path) -> list[DependencyEdge]`, walks the
+repo once and dispatches each candidate file to the first registered `ManifestAdapter`
+whose `matches(path)` returns true. `ManifestAdapter` is an ABC with exactly three methods
+— `matches(path) -> bool`, `parse(path) -> list[RawDependency]`,
+`coordinate(raw) -> Coordinate` — and adapters self-register into a module-level registry
+via an `@register` decorator, discovered by importing `src/fleet/manifests/`. Shipped
+adapters: Maven (`pom.xml`), Gradle (`build.gradle`, `build.gradle.kts`), npm/pnpm/yarn
+(`package.json` + lockfiles), Go (`go.mod`), Cargo (`Cargo.toml`), Python
+(`pyproject.toml`, `requirements*.txt`, `setup.cfg`). **Every adapter returns the same
+`Coordinate` model** — `(ecosystem, group, name, version_spec)` — and everything downstream
+(graph construction, sequencing, ownership resolution, PR generation) sees only
+`Coordinate` and never learns which language produced it.
+
+**Rationale.** This is the concrete mechanism by which "ZERO per-language pipeline tuning"
+becomes true rather than aspirational: the *only* place language knowledge is permitted to
+exist is inside an adapter's three methods, so adding Ruby or PHP later is one new file
+and zero edits to the orchestrator, the DAG builder, or the sequencer. Normalizing to a
+single `Coordinate` at the parse boundary is what lets a Java `groupId:artifactId` and an npm
+`@scope/name` be joined against the same internal-repo lookup table with one query instead
+of six.
+
+**Alternatives rejected.** A per-language `if/elif` ladder in the scanner (the exact
+branching the mandate forbids); one subagent per language (per-language pipeline tuning by
+another name, and unaffordable in tokens); a single universal grammar/regex (fails on
+Gradle's Groovy/Kotlin DSLs immediately); shelling out to each ecosystem's native resolver
+(`mvn dependency:tree`, `npm ls`) as the primary path — kept only as an opt-in enrichment
+step for repos where static parsing yields low-confidence edges, because it requires
+installing six toolchains and network access.
+
+**Amended by ADR-0020 — the scope of "one new file" is corrected.** This ADR's rationale claims
+that adding a language is "one new file and zero edits to the orchestrator, the DAG builder, or
+the sequencer". The clause after the comma is and remains true; the phrase "one new file" was
+not, because `ManifestAdapter` deliberately covers only the *input* side — parsing a manifest into
+`Coordinate`s. The *output* side (monorepo destination directory, `MODULE.bazel` external-dep
+dialect, `BUILD.bazel` target emission) was never in this ABC's scope and had silently accumulated
+in `bazel/generators.py`. ADR-0020 gives it a symmetric home, `EcosystemAdapter` in
+`src/fleet/ecosystems/`, using **this ADR's registry mechanism unchanged**. The honest count is
+now stated in SPEC §1 and bounded by §12.34: one `manifests/` file, one `ecosystems/` file, one
+`Ecosystem` enum member, optional `config/rules/*.yml`. Nothing about `ManifestAdapter`'s three
+methods, its `@register` decorator, or the `Coordinate` contract changes.
+
+---
+
+## ADR-0006 — `ast-grep` is the primary structural search-and-rewrite engine
+
+**Decision.** `ast-grep` (via the `ast-grep-py` binding, with the CLI as the subprocess
+fallback) is the default engine for all cross-repo structural search and for the
+deterministic tier of rewrites: import-path rewriting, package/module renames, build-file
+target updates, and codemod pattern matching. Secondary engines are permitted **only** in
+these named slots: **`tree-sitter`** (via `tree-sitter-language-pack`) wherever we need the
+parse tree itself rather than a pattern match — the cross-repo symbol index, call/import
+extraction, and chunking source for LLM context; **`libcst`** for Python-only rewrites that
+must preserve comments and formatting byte-for-byte; **`ts-morph`** for TypeScript rewrites
+that require the *type checker* (interface-aware refactors, `tsconfig` path remapping) — run
+as a Node subprocess, never linked in. `comby` is not used.
+
+**Rationale.** `ast-grep` is the only tool in the set that offers one YAML rule syntax and
+one CLI across all six of our languages, which makes it the only candidate that satisfies
+the zero-per-language-tuning mandate for the rewrite tier. The secondaries are each admitted
+for a capability `ast-grep` genuinely lacks — a persistent typed AST, lossless Python
+concrete syntax, and TypeScript type resolution respectively — and each is fenced to that
+capability so it cannot metastasize into a parallel per-language pipeline.
+
+**Alternatives rejected.** `comby` (language-agnostic but lexical rather than syntactic;
+weaker structural guarantees and a smaller rule ecosystem); `tree-sitter` as *primary*
+(a parser library, not a rewrite tool — we'd be hand-rolling `ast-grep`); `libcst`/`ts-morph`
+as primary (single-language by construction — instant mandate violation); OpenRewrite
+(genuinely excellent for Java/Maven, but JVM-only and would force a Java-shaped pipeline).
+
+---
+
+## ADR-0007 — Bazel with `bzlmod` is the target monorepo build system
+
+**Decision.** The emitted monorepo is a Bazel workspace using `bzlmod` (`MODULE.bazel`, no
+`WORKSPACE`), with `rules_java`/`rules_jvm_external`, `rules_js`/`rules_ts` (aspect),
+`rules_python` + `pip_parse`, `rules_go` + Gazelle, and `rules_rust` + `crate_universe`.
+`BUILD.bazel` files are generated, never hand-written, by per-ecosystem generators
+(Gazelle for Go, and our own generators driven by the ADR-0005 `Coordinate` data for the
+rest). Remote caching is assumed; remote execution is not required.
+
+**Rationale.** Bazel is the only build system in the candidate set that is genuinely
+polyglot *and* content-addressed — it can express a Java service depending on a Rust
+library depending on a generated protobuf as first-class typed targets, and its
+hermetic action graph is what makes "verify only the transitive reverse-dependencies of
+this migrated repo" a `bazel query` rather than a heuristic. That reverse-dependency query
+is the exact primitive Phase 4 needs, so choosing anything else would mean re-implementing
+Bazel's dependency graph inside our harness.
+
+**Alternatives rejected.** Nx and Turborepo (JS/TS-first; Java, Go, and Rust are second-class
+"run this shell command" escape hatches — disqualifying for a fleet that is majority JVM);
+Moon (promising and far friendlier, but task-runner semantics rather than a true artifact
+graph, and a much thinner ecosystem for JVM/Rust); Pants v2 (the closest rival — genuinely
+polyglot with excellent inference — rejected on ecosystem depth, remote-cache maturity, and
+the far larger pool of prior art the LLM tier can draw on for Bazel).
+
+**Amended by ADR-0020 — "per-ecosystem generators" is given a dispatch mechanism.** This ADR named
+the rulesets and said `BUILD.bazel` files are generated "by per-ecosystem generators (Gazelle for
+Go, and our own generators driven by the ADR-0005 `Coordinate` data for the rest)" without saying
+how one is selected, which in practice meant an `if ecosystem ==` ladder inside
+`bazel/generators.py`. ADR-0020 replaces that module with `bazel/emit.py`, a branch-free driver
+over the `EcosystemAdapter` registry. The **ruleset choices in this ADR are unchanged** — they
+move from prose here into the `ruleset` class variable of the six shipped adapters and the
+`build.ruleset_versions` pins in `config/fleet.yaml`, i.e. from a decision record into executable
+data. `bzlmod`-over-`WORKSPACE`, generated-never-hand-written BUILD files, remote caching
+assumed / remote execution not required, and the `bazel query rdeps` rationale all stand.
+
+---
+
+## ADR-0008 — The LLM invocation boundary: models judge, code executes
+
+**Decision.** A model may be invoked **only** for these five classes:
+(1) **classification/labeling** — service vs. library, framework family, ownership guess,
+is-this-edge-internal disambiguation; (2) **ambiguous extraction** — pulling structure out of
+prose or non-declarative config (`README`s, Groovy `build.gradle` logic, hand-rolled shell
+build scripts) that no adapter can parse; (3) **semantic rewrite** — changes requiring
+intent, i.e. resolving a genuine API incompatibility, reconciling two divergent copies of a
+shared utility, authoring a non-trivial `BUILD.bazel` target; (4) **build-failure diagnosis**
+— reading a compiler/Bazel error and proposing the next edit; (5) **prose generation** — PR
+titles, bodies, migration notes, `docs/PROGRESS.md` entries.
+Everything else is deterministic code, and specifically these are **forbidden** to the model:
+file moves and copies, git operations, dependency-graph construction, cycle detection,
+topological ordering, retry/backoff decisions, state transitions in `migration_state.json`,
+mechanical import-path rewriting (that is ADR-0006's job), version arithmetic, and any
+verification verdict. **A model may propose a patch; only code applies, builds, and judges
+it** — the model never grades its own homework.
+
+**Rationale.** This is `CLAUDE.md` Rule 5 made enforceable at the call site, and the split
+follows a single test — if the same inputs must always produce the same output, it is code —
+which keeps the expensive, nondeterministic, unauditable tier confined to the ~5% of the
+work that actually needs judgment. Forbidding the model from rendering verdicts is the
+specific defense against the failure mode both reference harnesses report most loudly: an
+agent that edits the world until its own claim becomes true and then reports success.
+
+**Alternatives rejected.** "Agent with a shell, let it figure it out" (unbounded cost,
+unreproducible, and the documented path to fabricated success); fully deterministic, zero
+LLM (cannot resolve genuine semantic conflicts across 250 heterogeneous repos); per-file
+LLM review of every file (cost scales with LOC instead of with ambiguity).
+
+---
+
+## ADR-0009 — Anthropic Claude via the official `anthropic` Python SDK, with a three-tier role→model map
+
+**Decision.** Provider: Anthropic. Client: the official `anthropic` package
+(`anthropic>=0.69`), `AsyncAnthropic` only, one module-level lazily-constructed singleton,
+SDK-native retries left on (`max_retries=4`) and never re-implemented. Adaptive thinking
+(`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role;
+streaming for any call with large `max_tokens`. **No other provider, no OpenAI-compatible
+shim, no LangChain.** Role→model assignment:
+
+| Tier | Model ID | Harness roles | Effort |
+|---|---|---|---|
+| **Heavy / semantic** | `claude-opus-5` | Cross-repo conflict resolution; genuine API-incompatibility rewrites; `BUILD.bazel` authoring for non-trivial targets; migration-plan authorship for a repo marked `REQUIRES_HUMAN_INTERVENTION`; cycle-breaking proposals | `high` |
+| **Workhorse / bulk** | `claude-sonnet-5` | Per-file transformation review and repair; build-failure diagnosis loop; ambiguous manifest/README extraction; PR body and migration-note generation | `high` |
+| **Cheap / volume** | `claude-haiku-4-5-20251001` | Repo classification (service/library/monolith); framework and ecosystem detection; internal-vs-external dependency labeling; commit-message and PR-title drafting; log-line triage | `low` |
+
+All roles are declared in one `config/models.yaml` mapping `role -> {id, effort}`, so
+re-tiering a role is a config edit, never a code edit.
+
+**Rationale.** Concentrating on one provider with one SDK removes an entire abstraction
+layer (and its bug surface) from a harness whose real complexity lives in the dependency
+graph, and Claude's structured-output + tool-use path lets ADR-0002's Pydantic models serve
+double duty as the request schema and the response validator. The three-tier split is
+driven purely by cost-per-judgment: classification runs ~250 × N times and must be cheap,
+while semantic conflict resolution runs a few dozen times and must be right, so paying
+Opus rates for the former or Haiku rates for the latter would be the same mistake in
+opposite directions.
+
+**Alternatives rejected.** LangChain/LiteLLM/DeepAgents abstraction layers (the reference
+harness carries all three and pays for it in indirection we do not need); a single model
+for every role (either overpays 100× on classification or underperforms on semantic
+rewrite); local/self-hosted models (insufficient for tier-1 semantic work); any
+non-Anthropic provider (out of scope by directive).
+
+**Superseded by ADR-0023** (provider-agnostic `ModelClient` + backend registry). The original text
+above stands unedited as the record of what was decided and why it was wrong. Three of its claims
+do not survive: the "out of scope by directive" rejection cited a directive that **does not exist**
+in `CLAUDE.md` or anywhere in `references/`; the claim that the reference harness "carries all
+three" of LangChain/LiteLLM/DeepAgents is **factually false** for LiteLLM, which appears nowhere in
+`references/`; and the structured-output rationale describes a capability that is not
+provider-specific. What survives verbatim: the **three-tier cost split**, the rule that role→model
+assignment is config and never code, and the rejection of heavyweight orchestration frameworks.
+What changes: `anthropic` becomes one backend among several behind a `ModelClient` protocol, the
+tiers are named `HEAVY`/`WORKHORSE`/`CHEAP` and carry no vendor string, and the model IDs above
+become the *default profile* in `config/models.yaml` rather than a structural commitment.
+
+---
+
+## ADR-0010 — Verification runs in a Docker container over a per-repo `git worktree`
+
+**Decision.** Two composed isolation layers, not one. **Filesystem isolation** is a
+`git worktree` per in-flight repo, cut from the monorepo's integration branch — cheap,
+instant, no re-clone, and it gives every parallel worker its own consistent checkout of a
+shared object store. **Execution isolation** is a Docker container per verification attempt,
+`--network=none` by default (build inputs come from a pre-populated, mounted toolchain and
+dependency cache), `--user $(id -u):$(id -g)` so no artifact is ever written back root-owned,
+memory- and CPU-capped, with a hard wall-clock timeout, and torn down after every attempt.
+The worktree is bind-mounted read-write; the cache is mounted read-only.
+
+**Rationale.** Neither layer is sufficient alone — a worktree gives no protection from a
+malicious or merely careless build script and cannot pin toolchain versions across six
+ecosystems, while a container without worktrees forces a full clone per attempt and
+serializes on a shared checkout. Composing them makes verification both *parallel* and
+*hermetic*, which is precisely what topological sequencing needs: many independent repos
+verifying at once, each with a reproducible answer.
+
+**Alternatives rejected.** Python `venv` alone (Python-only — a non-starter for Java/Go/Rust);
+container-only (loses cheap parallel checkouts, re-clones constantly); worktree-only
+(no toolchain pinning, no blast-radius containment, no resource caps); a full VM per attempt
+(minutes of startup per verification × 250 repos × 3 retries); running builds directly on
+the host (violates the workspace-containment rule in `CLAUDE.md` §2).
+
+---
+
+## ADR-0011 — Ingest with `git subtree` semantics implemented via `git-filter-repo`; emit stacked PRs
+
+**Decision.** **Ingest:** each source repo is cloned bare, rewritten with `git-filter-repo`
+to relocate its entire tree under its final monorepo path (`--path-rename ':<dest>/'`) and to
+scrub secrets and >10 MB blobs, then merged into the monorepo with
+`git merge --allow-unrelated-histories` (the `git subtree add` shape, executed via
+`filter-repo` so the path rewrite is applied to *history*, not just the tip). **History is
+preserved, rewritten, and attributed** — full commit history is retained for every repo,
+with paths rewritten so `git log --follow` works across the merge boundary, and each merge
+commit records the source repo URL and origin SHA in its trailer.
+**Emit:** one PR per repo, opened against the monorepo integration branch, **stacked in
+topological order** — a repo's PR is only opened once every PR it depends on is merged, so
+the DAG order from Phase 1 is the PR order. PR creation is `gh` CLI via
+`asyncio.create_subprocess_exec`.
+
+**Rationale.** Losing history across 250 repos would destroy `git blame`, bisect, and every
+ownership signal the organization has, and those signals are exactly what reviewers of a
+migration PR need most — so history preservation is a requirement, not a nicety.
+`git-filter-repo` is the only tool that rewrites paths across full history fast enough for
+this scale (it is also what upstream Git now recommends over `filter-branch`), and stacking
+PRs in DAG order means every PR's CI runs against a monorepo where its dependencies already
+exist, which is the difference between a green build and 250 simultaneously-red ones.
+
+**Alternatives rejected.** Plain file copy (discards all history — unacceptable);
+`git subtree add` alone (prefixes new commits but leaves historical paths un-rewritten, so
+`--follow` breaks); `git submodule` (does not consolidate — it is the opposite of the goal);
+`filter-branch` (orders of magnitude slower, officially discouraged); one mega-PR
+(unreviewable, and a single failure blocks all 250).
+
+**Amended by ADR-0019 — ingesting a hoisted contract node.** The per-repo ingest above is
+unchanged. A *contract* node has no repo of its own, so its history is taken from its **owning
+repo's** mirror by a second, path-filtered `git-filter-repo` pass over a throwaway clone —
+`--path <contract source> … --path-rename '<prefix>:<hoist_target_path>/'` — keeping only the
+commits that touched the contract's sources, then merged with the same
+`--allow-unrelated-histories`. The merge commit carries the owner's `Source-Repo:` and
+`Source-Sha:` plus a third trailer `Hoisted-Contract: <contract_id>`, so the provenance of a file
+that no longer lives in the repo that wrote it is recorded in git and not only in SQLite; history
+preservation and `git log --follow` therefore hold for the hoisted subtree exactly as for a whole
+repo. To keep those commits from appearing twice, the owning repo's own (later) relocation plan
+**excludes** every path already claimed by a `HOISTED` contract, resolved as the `FILE_PATH`
+collision `resolution = 'hoisted:<contract_id>'`; every vendorer's copy is dropped by the same
+rule. PR emission is unchanged, except that a contract node's PR is stacked ahead of its owner's
+and its consumers', which is simply the DAG order the amendment produces.
+
+---
+
+## ADR-0012 — `structlog` JSONL event log + `migration_state.json` as the durable checkpoint
+
+**Decision.** Three durable artifacts, with clearly separated jobs.
+(1) **`migration_state.json`** — mandated by `CLAUDE.md`; the human- and
+resume-readable snapshot of the whole fleet: one entry per repo with `phase`, `status`,
+`attempts`, `last_error`, `blocked_by`, `depends_on`, `pr_url`, `updated_at`. It is
+written **atomically** (temp file + `os.replace`) after every state transition, serialized
+from a Pydantic `MigrationState` model, and it is a *projection of the SQLite tables from
+ADR-0004*, not an independent source of truth — SQLite is authoritative on conflict.
+(2) **`logs/events-<run_id>.jsonl`** — an append-only JSONL event stream via `structlog`
+with a JSON renderer, one object per line, every line carrying `ts`, `run_id`, `repo`,
+`phase`, `event`, `level`, plus event-specific fields; token usage, cost, and latency are
+logged as `llm_call` events so per-repo spend is a `jq` away. Console output is
+`structlog`'s human renderer over the same events — **one event pipeline, two renderers**.
+(3) **`logs/errors-<run_id>.jsonl`** — recoverable errors only, written *only if one occurs*,
+so its existence is itself the signal that a run was not clean.
+
+**Rationale.** A single mutable JSON blob cannot answer "what happened and in what order",
+and an append-only event log cannot answer "where do I resume" in O(1) — so we keep both and
+give each the job it is actually good at, with SQLite underneath as the transactional
+arbiter. Making `migration_state.json` a derived projection is what prevents the classic
+harness bug where the resume file and the real state silently diverge after a crash mid-write.
+
+**Alternatives rejected.** Plain `logging` with format strings (unqueryable at 250-repo
+scale); OpenTelemetry + a collector (a whole observability stack for a batch job — revisit
+only if this becomes a service); `migration_state.json` as the sole store (no ordering, no
+concurrent-write safety, no ad-hoc queries); pickled state (CWE-502 — see
+*Constraints Inherited From `references/`*, Constraint 2).
+
+> **Editorial correction (2026-08-08).** This entry originally named the projection model
+> `FleetState`. The model is **`MigrationState`** (`src/fleet/models/state.py`), matching the
+> `migration_state.json` filename that `CLAUDE.md` Rule 6/11 mandates. There is **no
+> `FleetState` alias** — one name, one class. `SPEC.md` §5.5 is normative. No decision changed.
+
+**Amended by ADR-0024 — the checkpoint's arbiter for *code* state is Git.** All three artifacts
+keep their jobs, and "SQLite is authoritative on conflict" still holds for every orchestration
+fact. But this entry's own rationale — that making `migration_state.json` a derived projection is
+"what prevents the classic harness bug where the resume file and the real state silently diverge
+after a crash mid-write" — applies one layer down to the `mutations` journal, which was a second
+durable record of changes Git had already committed. ADR-0024 deletes it and states the invariant
+plainly: **on any disagreement about whether a change landed, Git is authoritative and the SQLite
+row is corrected, never the reverse.** `migration_state.json` remains a projection and is still
+never an input; the only change here is that one of the things SQLite projects — "which commit did
+this task produce" — is now a pointer that resume re-derives from the `Fleet-Task-Id` commit
+trailer rather than a fact SQLite owns.
+
+---
+
+## ADR-0013 — `pytest` with a layered suite; "verified" is defined per phase and is machine-checkable
+
+**Decision.** `pytest` + `pytest-asyncio` (`asyncio_mode=auto`) + `pytest-cov`, with
+`hypothesis` for the manifest adapters and the graph algorithms. Three layers:
+**unit** (pure functions — adapters, `Coordinate` normalization, DAG algorithms, retry
+policy — fully offline, no network, no Docker, must run in <30s total);
+**integration** (real SQLite, real `git` against fixture repos committed under
+`tests/fixtures/`, real `ast-grep` on real files; LLM calls replaced by a recorded-response
+fixture); **contract** (every Pydantic model round-trips `dump_json` → `validate_json`, and
+every LLM prompt's declared response schema validates against a stored golden sample).
+Tests assert *intent*, per `CLAUDE.md` Rule 9 — e.g. "a failing build increments
+`attempts` in `migration_state.json`", "a dependency cycle produces a
+`CycleDetected` finding rather than a hang", "a repo is never sequenced before its
+dependencies". **CI gate:** `pytest` green + `ruff check` + `ruff format --check` +
+`mypy --strict` on `src/fleet/` + ≥85% line coverage on `src/fleet/` — all five, or the
+change does not land.
+
+**"Verified" is phase-specific and never a model's opinion** (ADR-0008):
+- **Phase 1** — every repo has ≥1 parsed manifest or an explicit `no-manifest` finding; the
+  **ordering** edge set induces a DAG (SPEC §3.1 step 6 breaks every non-trivial SCC by edge
+  suppression, atomic-wave grouping, or an explicit `MANUAL` refusal — detection alone is not
+  sufficient), each recorded as a `CycleDetected` finding carrying its `break_strategy`; the
+  topological order covers 100% of nodes.
+- **Phase 2** — the transformed tree parses (`ast-grep` exits 0 on a parse probe for every
+  touched file) and `git diff` is non-empty and confined to the repo's own subtree.
+- **Phase 3** — `bazel build //<repo>/...` and `bazel test //<repo>/...` both exit 0 inside
+  the ADR-0010 sandbox.
+- **Phase 4** — Phase 3 green *plus* `bazel test` green for the transitive reverse-dependency
+  closure (`bazel query "rdeps(//..., //<repo>/...)"`), and a PR exists with a resolvable URL.
+
+**Rationale.** Defining "verified" as an exit code per phase — never as prose and never as a
+model's self-assessment — is what makes Rule 4's autonomous loop terminate on evidence
+instead of on vibes. Layering the suite so the unit tier is offline and sub-30s means the
+loop the harness runs hundreds of times stays fast, while the expensive Docker/Bazel tiers
+run only where they earn their cost.
+
+**Alternatives rejected.** `unittest` (no fixtures, no parametrize, no plugin ecosystem);
+live LLM calls in CI (nondeterministic, slow, expensive); coverage as the sole gate (rewards
+test volume over intent); "the model says it looks right" (explicitly forbidden by ADR-0008).
+
+---
+
+## ADR-0014 — Retry policy: 3 attempts with distinct strategies, then `REQUIRES_HUMAN_INTERVENTION`
+
+**Decision.** Per `(repo, phase)`, at most **3** attempts. The attempts are deliberately
+**not** identical — retrying the same thing is how the reference material's "infinite loop"
+failure mode begins:
+- **Attempt 1** — deterministic path only (adapters + `ast-grep` rules + generators).
+- **Attempt 2** — deterministic result plus the captured build/parse error handed to the
+  `claude-sonnet-5` repair role; the model proposes a patch, code applies and re-verifies it.
+- **Attempt 3** — escalate to `claude-opus-5` with the full failure history from both prior
+  attempts plus the repo's dependency context.
+
+After attempt 3 fails, the harness writes `status: "REQUIRES_HUMAN_INTERVENTION"` for that
+`(repo, phase)` and **moves to the next item** — it never blocks the fleet. **That state
+lives in three places, all written in one transaction:** the authoritative row in the SQLite
+`phases` table (`status`, `attempts`, `last_error`, `failure_class`); the projected entry in
+`migration_state.json` under `repos.<name>.status` (the mandated location per `CLAUDE.md`
+Rule 11); and a terminal `repo_abandoned` event in the JSONL log carrying all three attempt
+transcripts. Any repo that depends on an abandoned repo is marked `blocked_by: [<repo>]` and
+skipped rather than retried, so one human-intervention repo costs us its subtree and nothing
+more.
+
+Orthogonal to this: **transient** infrastructure failures (HTTP 429/5xx, network resets,
+Docker daemon hiccups) are *not* attempts — they are retried with exponential backoff +
+jitter inside the call, by the SDK where possible, and are capped separately. **Errors are
+classified by inspecting the response payload, not merely by exception type**, and a failure
+is never silently swallowed (`CLAUDE.md` Rule 11 — Fail Loud).
+
+**Rationale.** Three *escalating* attempts is the mandated budget spent the only way that
+gains information — identical retries just multiply the same failure and burn tokens, which
+is precisely the "infinite loop" and "silent failure" pair the reference material names as
+the top harness failure modes. Recording the terminal state in the transactional store
+first and projecting it outward guarantees a resumed run never re-attempts an abandoned
+repo, which is what keeps a 250-repo run's cost bounded.
+
+**Alternatives rejected.** Unlimited retries (unbounded cost, no termination proof); a
+single attempt (throws away trivially recoverable build errors); halting the whole fleet on
+first failure (one bad repo blocks 249 good ones); storing the terminal state only in
+`migration_state.json` (non-transactional — a crash between the write and the log leaves the
+run un-resumable).
+
+**Amended by ADR-0021** (anti-anchoring context policy). The count (3), the escalating-strategy
+principle, the transient/substantive split, and the `REQUIRES_HUMAN_INTERVENTION` terminal
+contract all stand unchanged. What changes is the *context composition* of the two LLM rungs:
+attempt 2 now runs on a **fresh slate** (`EVIDENCE_ONLY`) rather than inheriting attempt 1's
+output beyond its failure evidence, and attempt 3 receives evidence plus structured
+*rejected-approach summaries* instead of "the full failure history from both prior attempts" —
+the raw prior diffs and prior rationale are no longer rendered into any prompt by default,
+because re-showing a model its own rejected patch anchors it to an approach that was wrong at
+the approach level. A new pre-probe rejection path is added: a proposal that re-fingerprints an
+already-refuted `approach_signature` is refused before `git apply --check`, costing no attempt
+for the in-rung re-ask. The terminal `repo_abandoned` JSONL event still carries all three attempt
+transcripts — that record is for **human triage** and is explicitly never an input to a prompt or
+to a resumed run (§11.5).
+
+**Amended by ADR-0022** (stub lifecycle). The 3-attempt budget, the escalating-strategy principle,
+the transient/substantive split, and the `REQUIRES_HUMAN_INTERVENTION` terminal contract all stand
+unchanged. What changes is the sentence above about a dependent being "marked `blocked_by` and
+skipped": under `--stub-blocked` a **direct** dependent may instead migrate against a stub and be
+marked `DEGRADED`, and ADR-0022 gives that state a real exit. Two consequences bear on this ADR
+specifically. First, a stub-driven **revalidation round does not consume `phases.attempts`** — the
+harness's own escape hatch may not spend a repo's three chances, the same principle ADR-0019's
+rollback already relies on; it is capped separately by `stubs.max_revalidation_rounds` and
+`stubs.revalidation_max_cost_usd`. Second, one new failure class routes **around** the ladder
+entirely: `FailureClass.STUB_DIVERGED` (the provider was fixed but its API moved) goes straight to
+`REQUIRES_HUMAN_INTERVENTION` rather than spending rungs 2 and 3, because a version skew that the
+build event protocol has already named is not a repair the ladder can propose.
+
+**Amended by ADR-0023** (provider-agnostic LLM layer). The 3-attempt budget, the escalating-strategy
+principle, the transient/substantive split, and the terminal contract are unchanged. Two wording and
+one behavioural change. Wording: the rungs are named by **role** (`transform_repair`, `escalation`)
+resolving through `config/models.yaml` to a **tier** (`WORKHORSE`, `HEAVY`), never by a model string —
+"attempt 2 runs `claude-sonnet-5`" becomes "attempt 2 runs the `transform_repair` role, which the
+active profile routes to the `WORKHORSE` tier". Behavioural: **backend failover does not consume
+`phases.attempts`**, for the same reason a transient 429 does not — an endpoint that refused to
+answer produced no evidence about the repo. A failover exhausts the tier's backend list *inside* one
+attempt; only when every backend for that tier is unavailable does the attempt end, and it ends as
+`FailureClass.BACKEND_UNAVAILABLE` with the run halted (SPEC §11.8, exit code 8) rather than as a
+spent rung, so a two-hour outage cannot silently burn 250 repos' ladders.
+
+---
+
+## ADR-0015 — `Typer` is the CLI framework
+
+**Decision.** The `fleet` entry point (`python -m fleet`, `src/fleet/cli.py`) is a
+`typer.Typer` app with one command per phase verb (`scan`, `sequence`, `plan`, `transform`,
+`build`, `verify`, `pr`, `status`, `resume`). Command parameters are declared as annotated
+Python function signatures; `rich` output is enabled for human rendering and every command
+also supports `--json` for machine-readable stdout. No `click.Group` hand-wiring, no
+`argparse`, and no bespoke dispatch table.
+
+**Rationale.** Typer derives the parser from type-annotated signatures, which means the CLI
+surface is validated by the same `mypy --strict` gate as the rest of `src/fleet/` and cannot
+drift from the functions it calls — for a harness whose §12 acceptance criteria are literally
+"this command exits 0", the parser being type-checked is worth more than its ergonomics. It
+is a thin layer over `click`, so we inherit `click`'s maturity, shell completion, and testing
+harness (`CliRunner`) without inheriting its decorator boilerplate.
+
+**Alternatives rejected.** `argparse` (no type derivation, hand-maintained help, unpleasant
+subcommand nesting); raw `click` (the same result with substantially more decorator noise and
+a second source of truth for parameter types); `fire` (magic dispatch, no typed contract, poor
+help); a hand-rolled dispatcher (re-implements completion, help, and error handling badly).
+
+---
+
+## ADR-0016 — `aiosqlite` is the async SQLite driver, with a strict single-writer rule
+
+**Decision.** SQLite access (ADR-0004) goes through `aiosqlite>=0.20` — `sqlite3` executed on a
+per-connection worker thread owned by the driver, awaited from the event loop. **Exactly one
+writable connection exists per run**, owned by the `PhaseRunner` in the orchestrator process;
+workers return a `WorkerResult` and the runner persists it, and `ProcessPoolExecutor` children
+receive no database handle at all. Readers may open additional `mode=ro` connections, which WAL
+makes concurrent with the writer. All write transactions use `BEGIN IMMEDIATE`, with
+`busy_timeout=5000` as a backstop; `ATTACH` and cross-database transactions are forbidden.
+`state/db.py` raises if a second writable connection is requested in a process.
+
+**Rationale.** `sqlite3` is blocking, and a blocking commit on the event loop stalls every
+in-flight LLM stream and heartbeat simultaneously — the precise failure ADR-0003 draws its
+offload boundary to avoid — so the driver has to be async, and `aiosqlite` is the one that is a
+faithful `sqlite3` wrapper rather than a new API to learn. The single-writer rule is the other
+half of the decision and matters more: SQLite in WAL mode supports one writer regardless of how
+many connections exist, so *designing* for one writer converts a class of `SQLITE_BUSY` races,
+lost updates, and torn multi-table transactions into a startup error instead of an intermittent
+production failure.
+
+**Alternatives rejected.** Blocking `sqlite3` on the event loop (stalls everything at every
+commit); `sqlite3` behind `run_in_executor` with a `ThreadPoolExecutor` (forbidden by ADR-0003,
+and re-implements `aiosqlite`); SQLAlchemy async (an ORM, explicitly rejected in ADR-0004, plus
+a second dialect layer over the SQL we want to read literally); one writable connection per
+worker (the lost-update and `SQLITE_BUSY` failure mode this ADR exists to prevent);
+`sqlite3` with `check_same_thread=False` shared across tasks (undefined interleaving of
+transaction boundaries).
+
+---
+
+## ADR-0017 — `Coordinate.key` is the one join-key format: `"{ecosystem}:{group}:{name}"`, case-folded
+
+**Decision.** Every normalized dependency address carries a derived, non-optional
+`key = f"{ecosystem.value}:{group.lower()}:{name.lower()}"`, with `group = ""` when the
+ecosystem has no group concept. **It is the only join key used anywhere downstream of a
+`ManifestAdapter`**: `coordinates.coord_key` is the primary key, `edges.dst_coord_key` and
+`manifests.publishes_key` are FK-by-value against it, and internal-vs-external resolution is a
+single indexed lookup on it. The key deliberately **excludes the version** — versions live in
+`version_spec` on the edge, because ownership is a property of a coordinate and not of a
+release. Colons inside a component are rejected at validation; a duplicate key across two
+publishing repos is a `collisions` row, never a silent overwrite (SPEC §3.1 step 3).
+
+**Rationale.** Six ecosystems name things six ways — `com.acme:commons`, `@acme/ui`,
+`github.com/acme/svc`, `acme-commons` — and the entire cross-repo graph is one question asked
+~10⁵ times ("does this dependency resolve to a repo we own?"), so collapsing all six into one
+lexically-comparable string turns that question into a B-tree lookup instead of six per-ecosystem
+matchers. Case-folding is not cosmetic: npm scopes, Maven groupIds in the wild, and Go module
+paths differ in case across manifests of the same fleet, and an un-folded key silently produces
+two "different" coordinates for one artifact — which shows up as a *missing* edge, the most
+expensive kind of bug this harness can have.
+
+**Alternatives rejected.** A tuple key `(ecosystem, group, name)` (not a SQLite primary key
+without composite indexes everywhere, and unusable as a JSON-safe identifier in artifacts or
+events); including the version in the key (splits one artifact's ownership across releases and
+makes range specs unjoinable); Package-URL/`purl` (a good standard, but its type taxonomy and
+qualifier syntax carry semantics we do not use, and it would still need normalizing before
+joining); per-ecosystem key formats (the `if ecosystem == …` branch the whole architecture
+forbids); preserving case (produces phantom duplicate coordinates and missing edges).
+
+---
+
+## ADR-0018 — `SHARED_RESOURCE` and `DYNAMIC_REF` edges are recorded and reported, but excluded from DAG ordering
+
+**Decision.** Two of the six `EdgeKind`s are **advisory**: `SHARED_RESOURCE` (the same DB table,
+Kafka topic, or queue name appearing in two repos) and `DYNAMIC_REF` (reflection, dynamic
+`import`, string-built class names, DI string keys). Both are inferred, persisted to `edges`
+with evidence, surfaced in `fleet status --format dot` and in the dependent's PR body — and both
+are **excluded from `DAG_EDGE_KINDS`**, so neither orders a migration wave. The default set is
+`graph.dag_edge_kinds: [DECLARED_DEP, PUBLISHED_ARTIFACT, INTERNAL_IMPORT, API_CONTRACT]`, and
+an operator may add either kind for a specific fleet via config without a code change.
+
+**Rationale.** The DAG answers exactly one question — *in what order can these repos be built
+and merged without a red CI* — and neither signal constrains that: two services sharing a
+`users` table have no build-order relationship at all, and a reflective lookup is by
+construction invisible to the compiler that would enforce ordering. Including them would inflate
+the graph with edges that manufacture false cycles (shared infrastructure is densely connected
+by nature, so a naive `SHARED_RESOURCE` graph is nearly one giant SCC) and would push real repos
+into `ATOMIC_WAVE` handling for a coupling no build system will ever see.
+
+**Alternatives rejected.** Ordering on them (manufactures giant SCCs from shared infrastructure
+and deadlocks the sequencer for zero build-correctness gain); discarding them entirely (throws
+away the two signals most likely to explain a *runtime* failure after a green migration — a
+`NoClassDefFoundError` or a schema-migration conflict — which is precisely the class of problem
+a reviewer needs told); promoting them to full edges when confidence is high (confidence
+measures *evidence quality*, not *whether the coupling is a build-order constraint*; conflating
+the two would be a category error).
+
+**Amended by ADR-0019.** `EdgeKind` gains `CONTRACT_IMPL` and `CONTRACT_CONSUME`, and both are
+**in** `DAG_EDGE_KINDS` — which is consistent with, not an exception to, the rule above: they are
+ordering edges precisely because they exist only as the product of a hoist, and a hoist is a
+statement about migration order. The advisory status of `SHARED_RESOURCE` and `DYNAMIC_REF` is
+unchanged. The original text stands.
+
+---
+
+## ADR-0019 — DAG nodes are `(kind, id)`; shared contracts are first-class nodes, hoisted to break cycles
+
+**Decision.** A DAG node is `(kind, id)` with `kind ∈ {REPO, CONTRACT}`, not always a repo.
+A **contract node** is one declared unit of shared interface — a protobuf `package`, an OpenAPI
+document, an Avro/Thrift `namespace`, or an explicitly-configured shared library module — created
+only by the bounded extraction pass of §3.1 step 5b, never per symbol. Byte-identical vendored
+copies of one contract collapse to a single node keyed `contract_id = "{kind}:{identifier}"`;
+ownership is decided by the *existing* `owns:`-hint → non-vendored → shallowest-path →
+`commit_count` → `repo_id` ladder and recorded as a `collisions` row of the new kind `CONTRACT`,
+reusing the coordinate-collision mechanism rather than inventing a parallel one. In cycle
+breaking, a new rung **6c-H runs strictly before** whole-repo edge-breaking (6d) and before the
+atomic-wave fallback (6e): for each SCC it hoists extractable contracts greedily, ranked by
+`(repos_freed desc, extraction_confidence desc, blast_radius asc, contract_id)`, recomputing SCCs
+after each hoist, until the SCC dissolves or no contract helps — at which point control falls
+through to 6d and 6e **unchanged**. A hoisted contract migrates as its own early wave (it has no
+outbound edge into any repo, so longest-path layering places it first), its history is preserved
+by a path-filtered `git-filter-repo` pass over its owning repo's mirror, and its bindings are
+**regenerated** in-monorepo via `proto_library`/`*_proto_library` rules rather than copied.
+`graph.scc_atomic_threshold` and `graph.scc_hard_max` remain the final fallback, unmodified.
+
+**Rationale.** In a real 250-repo fleet the overwhelming majority of cross-repo cycles are not
+implementation cycles at all but shared-contract cycles — a proto package or a "commons" module
+that its owner and its consumers all depend on — and against those the pre-existing remedies were
+both bad: bundle up to 40 repos into one unreviewable atomic PR, or refuse and hand a human the
+problem. Cutting the cycle at the contract is strictly cheaper and structurally correct, because
+the shared interface genuinely *is* an independent artifact that should be built once and depended
+on by everyone, so hoisting it is the migration the organization wanted anyway.
+
+**Alternatives rejected.** Per-symbol graph nodes (unbounded — ~10⁵ symbols per repo — and the
+resulting node set is neither reviewable nor migratable, whereas declared contract artifacts are
+both); automatic repo *splitting* by heuristic (a general "carve this repo into modules" pass is a
+refactoring product, not a sequencing one, and its failure mode is silently shipping a broken
+package boundary); leaving the layout's `proto/<proto-package>/` directory as a naming convention
+with no algorithm (a directory nobody fills is a comment, not a mechanism); raising
+`scc_atomic_threshold` so large SCCs simply pass (moves the pain to reviewers and makes a single
+member's failure fail 40 repos); ordering on the existing `API_CONTRACT` edge kind alone (it
+records that a contract coupling *exists* but leaves the contract inside its owning repo, so the
+cycle survives); and hoisting *after* edge-breaking (6d would already have suppressed real
+`DECLARED_DEP` edges to achieve what a hoist achieves losslessly, so the cheaper remedy must run
+first).
+
+**Amends ADR-0011** (ingest) and **ADR-0018** (advisory edge kinds); see the amendment notes on
+each. Supersedes nothing.
+
+**Amended by ADR-0020 — contract BUILD emission gets an owner.** This ADR states that a hoisted
+contract's bindings are "**regenerated** in-monorepo via `proto_library`/`*_proto_library` rules
+rather than copied" but leaves the emitting component unnamed. ADR-0020 assigns it to a
+`ContractAdapter` keyed by `ContractKind` (`src/fleet/ecosystems/contracts/`), so each of the five
+`ContractKind`s has exactly one owner for its language-neutral rule, and the per-language binding
+*rule name* comes from `EcosystemAdapter.contract_bindings` — a declarative table, not a branch.
+`hoist_target_path` is now `ContractAdapter.layout(contract)`; the values in SPEC §3.3's
+`ContractKind` table are unchanged, and 6c-H, the ownership ladder, the `retargeted_from_repo_id`
+rollback, and the `contracts.status` lifecycle are untouched.
+
+**Amended by ADR-0024 — the un-hoist revert is its own record.** Nothing about node identity,
+contract hoisting, 6c-H, or the `retargeted_from_repo_id` restoration changes; that rollback was
+always a SQL operation on orchestration state and stays exactly as specified. One sentence in this
+ADR's rollback path does change: the `git revert -m 1` of a merged hoist was "journalled as a
+`mutations` row like any other mutation", and the `mutations` table no longer exists. The revert is
+now an ordinary trailered commit (`Fleet-Run-Id` / `Fleet-Repo-Id` / `Fleet-Phase` / `Fleet-Task-Id`
+/ `Fleet-Attempt` / `Fleet-Patch-Id`) on the integration branch, found with `git log --grep`, and
+therefore its own durable record — which strictly improves this ADR's claim that "rollback is cheap
+because 5b never mutated anything destructively", since after a crash mid-revert there is nothing
+to unwind beyond asking Git whether the revert commit landed.
+
+---
+
+## ADR-0020 — Bazel layout and target generation are adapter-driven: the `EcosystemAdapter` registry
+
+**Decision.** All *output-side* language knowledge — monorepo destination directory, `BUILD.bazel`
+target emission, `MODULE.bazel` external-dependency declarations, toolchain registration — moves
+out of `src/fleet/bazel/` and into a second adapter package, `src/fleet/ecosystems/`, using
+ADR-0005's registry mechanism verbatim (`@register` decorator, `pkgutil` discovery, duplicate
+claim is a startup error). `EcosystemAdapter` declares `ecosystems: frozenset[Ecosystem]`,
+`monorepo_dir`, `ruleset`, `uses_gazelle`, and `contract_bindings`, and implements `path_tail`,
+`workspace_deps`, `generate_targets`, `test_targets`, `gazelle_config`, and
+`toolchain_requirements` (SPEC §7.5). Six ship: `jvm` (`MAVEN` + `GRADLE`), `js`, `py`, `go`,
+`rust`, `unknown`. Contract-node emission is a sibling `ContractAdapter` keyed by `ContractKind`
+(SPEC §7.6), five of which ship. `src/fleet/bazel/generators.py` is **retired**, replaced by
+`bazel/emit.py` (driver), `bazel/module.py` (MODULE.bazel/MVS), and `bazel/render.py` (Starlark
+text) — none of which may contain an `Ecosystem` comparison. `layout()` becomes
+`adapter.monorepo_dir / adapter.path_tail(coordinate)`, total because
+`ecosystems.discover()` asserts a bijection between `Ecosystem` and the registry at startup. The
+`Ecosystem` enum stays hand-maintained. New models in `src/fleet/models/build.py`: `BuildUnit`,
+`BuildTarget`, `WorkspaceDep`, `GazelleConfig`, `ToolchainRequirement`, `BuildPlan` (SPEC §5.6).
+
+**Rationale.** The §1 invariant was self-contradictory: it promised "one new file and zero edits
+anywhere else" in one sentence and exempted `bazel/generators.py` from the no-branching rule in
+the next. Both could not be true, and the reason was that `generators.py` had no dispatch
+mechanism at all — it was specified only as "per-ecosystem BUILD generation driven by
+`Coordinate`", i.e. an `if/elif` ladder waiting to be written, which is the exact construct
+ADR-0005 was created to forbid on the input side. Symmetry is the fix: input-side language
+knowledge already had a registry, so output-side language knowledge gets the same one rather than
+a second mechanism of a different shape. The abstraction is justified by count — six ecosystem
+implementations and five contract implementations, all shipping, none speculative — and the ABC
+is deliberately sized to those eleven: `uses_gazelle` exists only because `go.py` genuinely
+delegates to Gazelle while the other five generate, and an ABC that assumed uniform generation
+would have forced `go.py` to lie. `contract_bindings` is a `dict`, not a method, because it is
+data (a rule name per IDL kind) and a method would have invited a branch inside it. What this
+does **not** buy is a shorter touchpoint list by fiat: adding a language is four edits, and SPEC
+§1, §12.34 and §14.3 now say four rather than one.
+
+**Alternatives rejected.** *Extending `ManifestAdapter` with the build methods* — the cardinalities
+differ (`maven.py` and `gradle.py` are two manifest formats with one JVM build story), so this
+forces a byte-identical `ecosystems/gradle.py` and couples a Phase 1 concern to a Phase 3 one.
+*Keeping `generators.py` as the adapter host* — preserves the §1 exemption clause that caused the
+contradiction, and leaves the pipeline package importing language knowledge. *Deriving the
+`Ecosystem` enum from adapter registration* — genuinely tempting, and rejected on evidence: the
+values appear in SQLite `CHECK` constraints (SPEC §6) and in `Coordinate.key` (ADR-0017), and
+`Ecosystem.UNKNOWN` is referenced statically in several modules, so a dynamic enum breaks
+`mypy --strict` and makes the DDL unverifiable. The startup bijection check gets the actual
+benefit — no member can exist without an adapter — without the cost. *Contract emission as a
+method on `EcosystemAdapter`* — the target that matters is the language-neutral one (one
+`proto_library` per contract regardless of consumer count), and six adapters would race to emit
+it with no single owner. *A YAML/plugin-entry-point mechanism instead of a Python ABC* — target
+generation is code, not data (`ts_project` attribute derivation is not expressible as a table),
+and an entry-point mechanism would be the third registry shape in one codebase.
+
+**Amends ADR-0005** (adapter scope), **ADR-0007** (per-ecosystem generator dispatch), and
+**ADR-0019** (contract BUILD emission ownership); see the amendment notes on each. Supersedes
+nothing.
+
+**Amended by ADR-0065 — the file layout is retired; the principle stands and is what is
+enforced.** `src/fleet/bazel/generators.py` is **not** retired and is not renamed:
+`bazel/emit.py`, `bazel/module.py` and `bazel/render.py` were never created, and the driver this
+ADR called `emit.py` is `workers/buildgen.py` (plus `cli._run_gazelle`, ADR-0056). What this ADR
+actually decided — that no module in `src/fleet/bazel/` may contain an `Ecosystem` comparison, and
+that output-side language knowledge lives only in `src/fleet/ecosystems/` — **shipped and is
+mechanically guarded** by five invariant tests in `tests/test_ecosystems.py` that grant
+`src/fleet/bazel/` no exemption. Everything else here is unchanged: the ABC, the registry
+mechanism, the six shipped adapters, the §5.6 models, the four-edit touchpoint count. Separately,
+ADR-0065 records that this ADR's **second half never shipped**:
+`src/fleet/ecosystems/contracts/{base,proto,openapi,avro,thrift,shared_lib}.py` and the
+`ContractAdapter` registry keyed by `ContractKind` do not exist, so `contract_bindings` is declared
+and read by nothing and SPEC §12.32's `contracts.discover()` criterion is unsatisfiable as written.
+
+**Amended by ADR-0066 — SPEC §7.5 no longer embeds this ABC's source.** The `EcosystemAdapter`
+listing this ADR introduced is replaced by prose plus a pointer; `src/fleet/ecosystems/base.py` is
+the normative artifact. The embedded copy had fallen two ADRs behind the shipped ABC
+(`workspace_deps(unit)` per ADR-0046, and `import_specifier` made abstract by the same ADR), and
+nothing checked it.
+
+---
+
+## ADR-0021 — The escalation ladder carries *failure evidence*, not *prior patches*; approaches are fingerprinted and repeats are refused
+
+**Decision.** Each rung of the ADR-0014 ladder declares its prompt composition explicitly as a
+`ContextPolicy`, over a hard split between **evidence** — the `FailureClass`, which probe failed,
+verbatim compiler/linter/test stderr, unresolved symbols and imports, the target file's current
+content, the relocation map, and the repo's dependency context, all of which are carried on
+*every* rung — and **priors**, meaning the previously proposed diffs and the previous model's
+rationale, which are **never rendered into a prompt by default**. Three policies exist:
+`EVIDENCE_ONLY`, `EVIDENCE_PLUS_REJECTED_APPROACHES` (evidence plus `RejectedApproach` records —
+approach signature, a one-line approach-level reason, and the failure class, with no field capable
+of holding diff text), and `EVIDENCE_PLUS_PRIORS` (the pre-amendment behaviour, opt-in only). The
+default ladder becomes: attempt 1 deterministic; attempt 2 `claude-sonnet-5` at `EVIDENCE_ONLY` —
+a **fresh slate**; attempt 3 `claude-opus-5` at `EVIDENCE_PLUS_REJECTED_APPROACHES`, so the
+strongest model gets the search-space pruning without the dead diffs. Every proposal is
+fingerprinted in deterministic code (`rewrite/approach.py`, never by a model) as
+`approach_signature = sha256` over the sorted `(path, change_kind, target_symbol)` tuples of its
+non-whitespace hunks, excluding line offsets, context lines, hunk order, and formatting; a
+proposal whose signature is already in the task's `rejected_approaches` set is an **anchoring
+loop** and is refused *before* any probe or worktree mutation, re-asked at most
+`transform.anchoring.max_reasks_per_rung` times (not an attempt, since no verification was spent),
+and then advances the rung. `MAX_ATTEMPTS` stays 3, the `REQUIRES_HUMAN_INTERVENTION` terminal
+contract is untouched, and the composition is config (`transform.ladder`) plus a CLI override
+(`fleet transform --context-policy N=POLICY`) rather than code. Because the composition changes
+what was asked, `context_policy` and a `rejected_approach_digest` over the signatures actually
+rendered become components of the `llm_cache` key (SPEC §11.6).
+
+**Rationale.** When a patch fails a build or parse probe the defect is usually in the *approach*
+— wrong target module, wrong layer, wrong direction of fix — and re-showing a model its own
+rejected diff reliably produces a re-indented restatement of it, so the ladder's second and third
+rungs converge on the same dead idea instead of searching elsewhere. Discarding the failure
+evidence along with the patch would be the opposite error and would make each rung a blind retry,
+so the amendment separates the two and keeps refutations only in the abstract, fingerprinted form
+that prunes the search space without supplying anything to copy.
+
+**Alternatives rejected.** *Keep feeding both transcripts* (the pre-amendment behaviour) — this is
+the anchoring defect itself, and it is retained only as an opt-in `EVIDENCE_PLUS_PRIORS` so the
+improvement can be A/B measured rather than merely asserted. *Drop all prior-attempt information
+and make every rung fully blind* — throws away the compiler's own diagnosis, which is the single
+most informative artifact the loop produces, and lets attempt 3 rediscover attempt 2's failure at
+full Opus cost. *Have a model summarize the prior attempt into the "rejected approach" note* —
+adds an LLM call on the failure path, makes the pruning set non-deterministic, and violates
+ADR-0008 (code decides, models propose); the one-line reason is emitted by the proposing rung's
+own structured response and the signature is pure code. *Detect anchoring by diff similarity
+(edit distance / hashing the patch text)* — whitespace, hunk offsets, and statement reordering
+defeat it, which is exactly the disguise a re-prompted model applies; fingerprinting
+`(path, change_kind, target_symbol)` is invariant to all three. *Let an anchored repeat run and
+fail its probe naturally* — burns a container, a worktree mutation, and a build attempt to learn
+something already known before `git apply --check`. *Raise `MAX_ATTEMPTS` to give the fresh-slate
+rung more room* — the mandate fixes the budget at 3, and the point of the amendment is to spend
+those three on three *different* ideas.
+
+**Amends ADR-0014** (retry/escalation policy: attempt 2 and attempt 3 context composition, and the
+new pre-probe rejection path); see the amendment note there. **ADR-0009 is unchanged** — the
+role→model map, the tiers, and `config/models.yaml` are exactly as they were; this ADR changes
+what a rung is *shown*, never which model answers. Supersedes nothing.
+
+**Amended by ADR-0023** (provider-agnostic LLM layer). Everything about context composition is
+untouched: `ContextPolicy`, the fresh-slate default, `approach_signature`, the pre-probe rejection
+path, and the rule that no raw prior diff is rendered all stand. One thing changes, and it changes
+in this ADR's own favour: the `llm_cache` key gains **`backend`** and the **resolved `model_id`**
+alongside `context_policy` and `rejected_approach_digest`, which are **preserved as key components,
+not replaced**. The reasoning is identical to this ADR's own — a cache key must carry every
+component that changes the *identity* of the call, and "which model answered" changes it at least
+as much as "what was it shown". Without `backend`, a run that fails over from a frontier model to a
+local 8B would poison the shared, run-unscoped cache with answers a later frontier-routed call would
+silently accept; the fresh-slate guarantee this ADR bought would be intact while the *quality*
+guarantee behind it quietly was not. `approach_signature` is still computed from the response and
+still never enters the key.
+
+**Amended by ADR-0024 — "the same patch is never applied twice" is re-founded on Git.** The
+anti-anchoring machinery is untouched: `approach_signature` is still a sha256 over sorted
+`(path, change_kind, target_symbol)` tuples computed from the *response* before `git apply --check`,
+`rejected_approaches` is still the ladder's memory, and a detected repeat still costs no probe, no
+container, and no `phases.attempts`. What changes is the layer beneath it. This ADR leaned on the
+`mutations` unique index over `(run_id, repo_id, patch_sha256)` to make re-application impossible;
+that index is deleted with the table, and the guarantee now rests on the **`Fleet-Patch-Id` commit
+trailer** — sha256 over the sorted `(path, sha256(diff))` pairs of the patch set, content-only and
+therefore stable across attempts and across a crash — queried with `git log
+--format='%(trailers:key=Fleet-Patch-Id,valueonly)'` and backed by `git apply --check --reverse`.
+The guarantee is *stronger* here than it was in SQLite: the trailer and the change it names are the
+same commit object, so a crash cannot leave one without the other, which a separate index could
+never promise. Note that `approach_signature` and `Fleet-Patch-Id` remain deliberately different
+functions — the signature abstracts away formatting so a retyped idea collides, while the patch id
+is byte-exact so only a genuinely identical change is skipped.
+
+---
+
+## ADR-0022 — A stub is a lie with an expiry: `DEGRADED` leaves the machine only through a budgeted, incremental revalidation round
+
+**Decision.** Every `stubs` row carries an explicit four-state lifecycle — `ACTIVE`,
+`SUPERSEDED`, `RESOLVED`, `ABANDONED` — with exactly four transitions, each with one deterministic
+trigger, implemented in `orchestrator/stubs.py` with no model in the loop (SPEC §3.5.1). The
+moment a provider repo reaches `SUCCEEDED` **with its PR `MERGED`**, the single writer supersedes
+its `ACTIVE` stub rows in the same `IMMEDIATE` transaction, rewrites each consumer's dependency
+from `//third_party/stubs/<coord>` to the provider's real `//` label, and enqueues one
+`TaskKind.REVALIDATE` task keyed
+`revalidation_key = 'r{round}:{sha256(sorted provider_repo_ids)}'`, which is the idempotency key
+that makes a replay, a `fleet resume`, and a manual `fleet stubs resolve` all converge on one
+task. The round is **incremental by construction**: Phase 2 is skipped when
+`git rev-parse migrate/<consumer>^{tree}` equals the consumer's last `APPLIED` phase-2
+`mutations.post_tree_sha` — a content hash, not an assumption — and Phases 3–4 reuse the existing
+`verify.affected_only` rdeps machinery and the shared read-write `--disk_cache`, so only actions
+downstream of the one swapped label re-execute. The consumer's draft PR is **updated in place**
+(branch rebased, `git push --force-with-lease`, body regenerated via `gh pr edit`), keeping its
+number, URL, and review history, and `fleet pr --ready` — the only path from draft to
+ready-for-review — refuses with exit 2 while any of that repo's stub rows is `ACTIVE` or
+`SUPERSEDED`. Rework is a **priced cost class**, not free: `repo_ledger.revalidation_usd` /
+`revalidation_rounds` accumulate against `stubs.revalidation_max_cost_usd` (2.0, a sub-ceiling
+inside `repo_max_cost_usd`) and `stubs.max_revalidation_rounds` (2), and
+`stubs.revalidation: eager | batched | manual` (default `batched`) coalesces every newly-superseded
+stub of one consumer into a single round per wave. `stub_fidelity` records which lie was told —
+`PUBLISHED_ARTIFACT` (behaviour-honest for `pinned_version` and for nothing else) or
+`EMPTY_FAILING` — and `VerificationReport.equivalence` is derived by a validator, so a green
+against a stub is reported as `STUB_LIMITED` and never as `FULL`. Two end conditions are
+fail-closed: stub **rot** (revalidation fails while the preceding stub-limited verification passed
+and the round's only mutation is the label swap) is `FailureClass.STUB_DIVERGED` →
+`REQUIRES_HUMAN_INTERVENTION`; and any row still open at end of run is `ABANDONED` by
+`stub_reconcile`, leaving the consumer `DEGRADED` with `PrState.HELD` and the run exiting 7.
+Contract nodes are never stubbed — they have no `phases` row, so a failed hoist takes the ADR-0019
+rollback, which restores the true graph instead of publishing a placeholder.
+
+**Rationale.** The previous spec asserted that a `DEGRADED` repo "is re-verified for free once `r`
+is fixed" while providing no state, no trigger, no query, and no budget behind that sentence, so
+the escape hatch could emit stubs it had no mechanism to retire — the exact shape of the silent
+failure the harness exists to prevent. Naming the lifecycle, the trigger, and the price converts
+an unfalsifiable claim into three testable ones (SPEC §12.37–39) and bounds the rework a late
+upstream fix can force, without touching the two constraints that already bound the blast radius:
+stubs remain direct-dependents-only and their PRs remain draft-only, so no merged work is ever
+invalidated by a resolution.
+
+**Alternatives rejected.** *Leave `DEGRADED` non-terminal and rely on `fleet resume` to notice* —
+this is the defect being fixed; "not terminal" is a statement about the enum, not a mechanism, and
+resume had no path from a fixed provider to a re-verified consumer. *Close the consumer's draft PR
+and open a fresh one on resolution* — discards review history and PR number for a branch whose
+content changed by one label, and turns every late fix into reviewer churn. *Delete the `stubs`
+rows on resolution* — destroys exactly the audit trail that answers "was this repo ever verified
+against something real?", which is the question a stub creates; the rows are retired to a terminal
+state instead. *Re-run the full pipeline for the consumer* — Phase 2 output is provably unchanged
+in the common case, so re-running it spends LLM tokens to reproduce a byte-identical tree. *Let
+stub rot enter the ADR-0014 ladder* — burns Opus on a version skew the BEP has already diagnosed,
+and the fix is a human's judgement about API compatibility, not a patch proposal. *Promote a
+`DEGRADED` repo to `SUCCEEDED` when the revalidation budget is exhausted* — the single most
+dangerous option available, since it reports as verified precisely the work that was never
+verified; exhaustion is therefore modelled as unfinished work, and `stubs.on_budget_exhausted` has
+no value other than `hold`. *A third, richer fidelity tier that synthesizes signatures* — a
+generated façade compiles against code the real artifact would reject, which is the one failure
+mode a stub must not have; `EMPTY_FAILING` fails loudly instead.
+
+**Amends ADR-0014** (retry/failure: revalidation rounds do not consume `phases.attempts`, and
+`STUB_DIVERGED` routes around the ladder); see the amendment note there. **ADR-0011 is unchanged**
+— the stacking rule is in fact what gates transition T1, since a consumer may not point at a real
+label before the provider's PR is `MERGED`. **ADR-0019 is unchanged** and is cited as the reason
+contract nodes are outside this ADR's scope. Supersedes nothing.
+
+**Amended by ADR-0024 — the "Phase 2 unchanged" check reads Git on both sides.** The lifecycle,
+the four transitions, `revalidation_key`, the budget sub-ceilings, `stub_fidelity`, the
+`STUB_LIMITED` equivalence rule, and the fail-closed end conditions are all untouched. Two
+mechanical details are re-founded, because both named the deleted `mutations` table. (1) The
+incremental-round proof compared `git rev-parse migrate/<consumer>^{tree}` against the last
+`APPLIED` phase-2 `mutations.post_tree_sha` — half Git, half SQLite, and therefore exactly the
+comparison that could disagree after a crash. Both sides now come from Git: resolve the newest
+commit on the branch whose `Fleet-Phase` trailer is `2`, then compare its tree to the branch's
+current tree. `phases.post_commit_sha` may short-circuit the walk as a cached pointer, but on
+disagreement Git wins and the column is corrected. The property this ADR relied on is preserved
+exactly — it is still a content hash, still deterministic, still gives the same answer however many
+times it is asked — and it is now immune to a lost or stale database. (2) Stub-rot detection's
+second conjunct, "the round's `mutations` set contains only the dependency-label rewrite", becomes
+"the round's **commit set** (`git rev-list <round base ref>..migrate/<consumer>`) contains only the
+dependency-label rewrite". The differential, and its distinction from `BUILD_ERROR`, are unchanged.
+
+---
+
+## ADR-0023 — The LLM layer is a `ModelClient` protocol over a backend registry; models are configuration, not architecture
+
+**Supersedes ADR-0009.**
+
+**Decision.** All model access goes through one ~70-line, framework-free `ModelClient` protocol
+(`src/fleet/llm/client.py`): `async def complete[T: BaseModel](role, payload, response_model: type[T],
+*, tier_override=None) -> ModelResponse[T]`, returning a **validated instance of the caller's Pydantic
+model** plus a `TokenUsage` carrying `backend`, `tier`, and the resolved `model_id`. Concrete
+backends self-register with the **same decorator registry** used by `ManifestAdapter` (§7.3) and
+`EcosystemAdapter` (§7.5) — one registry pattern, now five users — and four ship:
+**`anthropic`** (native Messages API), **`openai_compatible`** (any `base_url` + key: local vLLM,
+Ollama, LM Studio, llama.cpp `llama-server`, TGI, and hosted OpenAI-compatible endpoints),
+**`bedrock`**, and **`vertex`**. A new backend is one file under `src/fleet/llm/backends/` plus one
+`@register_backend` line; nothing else in the harness may import a vendor SDK. `config/models.yaml`
+becomes a set of named **profiles**, each mapping `role -> tier` and `tier -> [ordered backend
+targets]`, where a target is `{backend, model_id, base_url?, effort, capabilities_override?}`.
+The three tiers are renamed to capability names carrying no vendor string — **`HEAVY`**,
+**`WORKHORSE`**, **`CHEAP`** — and the ADR-0009 model IDs survive unchanged as the shipped
+`default` profile. **No model string may appear in Python** (§12.40), so swapping the entire fleet
+to local models is a config edit and nothing else (§12.41). Each backend declares
+`ModelCapabilities`, and structured output is negotiated down a fixed ladder — native JSON-schema
+mode → tool-calling coercion → constrained decoding → prompted JSON with one parse-and-repair
+re-ask — with **Pydantic validation on our side as the invariant at every rung** (ADR-0002).
+Failover is layered **above** §11.8's transient retry, never merged into it, and never consumes
+`phases.attempts`. **The rejection of heavyweight frameworks survives ADR-0009 intact and is now
+stated separately from vendor choice**: no LangChain, no LangGraph, no DeepAgents, no LiteLLM —
+including the operator's local LiteLLM proxy, which is currently stopped, and a design that assumed
+a proxy would be down with it.
+
+**Rationale.** ADR-0009's binding constraint — "any non-Anthropic provider (out of scope by
+directive)" — cited a directive that does not exist: `CLAUDE.md` names no vendor anywhere (its only
+LLM content is Rule 5, "use the model for judgment"), `references/` mandates none, and the sentence
+converted an unargued preference into an unfalsifiable constraint that then shielded two further
+errors — a factual one (LiteLLM is nowhere in `references/`, so "the reference harness carries all
+three" is false; `references/visa-vulnerability-agentic-harness/pyproject.toml` carries `langchain`,
+`langgraph`, `deepagents`, `openai`, and `anthropic`) and a category one (JSON-Schema-driven
+structured output is a property of Pydantic and of the schema, which OpenAI, Google, Mistral,
+vLLM's guided decoding, and `instructor`/`outlines` all provide, so it argues for ADR-0002 and for
+nothing about a vendor). Independent of that correction, a 250-repo run that can reach exactly one
+endpoint has a single point of failure with no degraded mode, and this harness is for **local
+development on this server**, where the workhorse connection is an OpenAI-compatible `base_url` —
+so the abstraction is not speculative generality but the primary use case.
+
+**Alternatives rejected.** *Keep ADR-0009 and add a second provider ad hoc* — the coupling is
+structural (`AsyncAnthropic` singleton, model strings in prose and enum comments, no `base_url`),
+so "add a provider" means rewriting the same call sites anyway, without gaining the registry that
+makes the fifth backend free. *LangChain / LangGraph / DeepAgents* — ADR-0009's own rejection, and
+it was right: we need one method, not an agent framework, and the reference harness's DeepAgents
+path is the part of its model layer we deliberately do not copy. *LiteLLM as the universal shim* —
+it would collapse the four backends into one dependency, but it buys a large surface and a proxy
+process to keep alive for a normalization we perform in ~4 small files, and the operator's own
+LiteLLM proxy is stopped, which is exactly the operational fragility a harness should not inherit;
+the `openai_compatible` backend reaches every endpoint LiteLLM would have, directly. *One universal
+`openai_compatible` backend and nothing else* — plausible, and rejected because native backends
+expose per-vendor structured-output and thinking controls that an emulation layer flattens, and
+because Bedrock/Vertex exist precisely to give the *same* model a *different* transport, which is
+the cheapest real failover available. *Vendor strings as tier names* (`opus`/`sonnet`/`haiku` tiers)
+— re-encodes the coupling in the config schema, where a local profile would have to name a tier
+after a model it does not use. *A capability-probing handshake at startup that auto-detects each
+backend's features* — attractive, but it makes every run's behaviour depend on a network probe;
+capabilities are declared in code per backend, overridable per target in config, and `fleet models
+check` probes them **on demand** and reports drift rather than silently re-planning.
+
+**Amends ADR-0002** (Pydantic validation becomes the cross-backend invariant), **ADR-0014**
+(rungs named by role/tier; failover does not consume attempts), and **ADR-0021** (`llm_cache` key
+gains `backend` + resolved `model_id`, preserving `context_policy` and `rejected_approach_digest`);
+see the amendment notes on each. **ADR-0008 is unchanged and is the reason this ADR is safe**: a
+weaker local model may propose more badly, but it still cannot apply, build, or judge anything —
+code does, and the verdict is an exit code. **ADR-0012, ADR-0013, ADR-0015 unchanged.**
+
+**Prior art.** `references/visa-vulnerability-agentic-harness/docs/models.md` is the closest thing
+in the reference material to this design, and three things are taken from it directly: (1) a
+per-role `{id, via}` shape where `via` selects the *backend* and `id` the model, which is exactly
+this ADR's `{backend, model_id}` target; (2) named **profile files** (`default.yaml`, `sdk.yaml`,
+`full.yaml`, `taint.yaml`) selected as a unit, rather than per-role edits scattered through one
+config — adopted as `config/models.yaml`'s `profiles:` map plus `--profile`; and (3) its
+observation that one OpenAI-compatible backend plus a `base_url` already covers vLLM, Ollama,
+Together, Azure, and Bedrock-in-compat-mode, which is why `openai_compatible` is the workhorse here
+rather than a fallback. Two things are deliberately **not** taken: its `deepagents` backend (a
+framework this harness rejects), and its rule that a mixed-vendor panel is refused at startup —
+that constraint exists because its personas share one endpoint, whereas our tiers are independently
+routed by construction, and mixed-vendor profiles are a supported configuration (§9).
+
+---
+
+## ADR-0024 — SQLite manages orchestration state; Git manages code state. The `mutations` write-ahead journal is deleted
+
+**Decision.** The governing principle is a boundary, and it is absolute: **SQLite is
+authoritative for orchestration state — task identity, `PENDING`/`RUNNING`/`DONE`/`FAILED`,
+attempt counts, worker/owner, timestamps, sequence, failure class, token and cost accounting —
+and Git is authoritative for code state.** Using SQLite as an orchestration event log is good
+engineering; using it as a shadow version-control system is not, and the `mutations` table had
+become the latter, storing `pre_tree_sha`, `post_tree_sha`, `patch_sha256`, patch files, and a
+manual rollback log so that a resume could reconstruct what Git already knew. The table, its two
+indexes (`ux_mutations_patch`, `ix_mutations_open`), its `PLANNED`/`APPLIED`/`ROLLED_BACK` state
+machine, and the three-branch tree-SHA reconciliation in the old §3.2 step 6 are all **deleted**
+(`PRAGMA user_version` 5 → 6) rather than shrunk to a vestigial table — everything it legitimately
+held was either Git's (tree SHAs, diffs) or already carried by `tasks`/`attempts`/`phases`/`events`
+(identity, ordering, timestamps), so a two-column survivor would only be a second place to look
+for the truth. In its place: **apply the patch and commit immediately** on `migrate/<repo>` with
+machine-readable trailers — `Fleet-Run-Id`, `Fleet-Repo-Id`, `Fleet-Phase`, `Fleet-Task-Id`,
+`Fleet-Attempt`, `Fleet-Patch-Id` — so **the commit is the durable record**. Idempotency moves
+from a SQLite unique index to the `Fleet-Patch-Id` trailer, a sha256 over the sorted
+`(path, sha256(diff))` pairs of the patch set and nothing else, checked before applying with
+`git log --format='%H %(trailers:key=Fleet-Patch-Id,valueonly)'` and backed by
+`git apply --check --reverse`. Crash recovery becomes a Git **query** rather than a SQLite↔Git
+comparison: `git rev-list --format='%H %(trailers:key=Fleet-Task-Id,valueonly)' <base>..migrate/<repo>`
+answers "did this task's work land?", and the answer is copied down into the task row. Rollback is
+Git-native — every phase anchors on a real ref, `refs/fleet/<run_id>/<repo_id>/phase-<n>/base`,
+and discarding work is `git reset --hard` + `git clean -fdx`, or `git update-ref` on the branch,
+or `git worktree remove --force` — never a diff replayed backwards. SQLite keeps commit SHAs and
+`phases.base_ref` as **pointers**, which is explicitly fine; what it may no longer keep is a tree
+SHA, a diff, or anything from which it could reverse a change itself. The resume invariant is one
+line: **on any disagreement, Git is authoritative and the SQLite row is corrected, never the
+reverse**, and the harness never writes to Git to make it agree with a row.
+
+**Rationale.** The `SIGKILL`-between-apply-and-record hazard the journal existed for is real and
+is now handled *better* by Git than by the journal, because `git commit` writes one tree covering
+every changed file and moves the branch ref by `flock` + `rename(2)` — so a partially-applied
+multi-file patch is not a state the branch can reach, only the disposable worktree can be dirty,
+and recovery collapses from three cases (tree matches `pre` → re-run, matches `post` → promote,
+matches neither → unwind) to two (commit present, commit absent) with no third case to get wrong.
+Two durable records of the same fact can disagree and eventually will, since the journal's write
+and Git's write cannot be made one transaction across a crash; keeping exactly one record of code
+state, in the system that already stores code atomically and immutably, removes that drift class
+by construction rather than by a reconciliation algorithm that has to be right.
+
+**Alternatives rejected.** *Keep the journal and harden the reconciliation* — it can be made
+correct for the cases enumerated, but every future mutation kind must remember to enumerate its
+own, and the failure is silent when one does not; the redesign removes the enumeration entirely.
+*Keep `mutations` as a thin pointer table (`task_id`, `commit_sha`)* — a vestigial table with no
+column Git does not already answer, which invites re-growth of exactly the fields just removed;
+those two facts belong on the `attempts` row that already exists for the same rung. *Use `git
+notes` instead of commit trailers* — notes live in a separate ref that can be lost by a fetch,
+push, or clone that does not know to carry it, so the identity would again be separable from the
+change; a trailer is inside the commit object and travels with it into any clone. *Use `git
+stash`/`git worktree` snapshots as the rollback anchor* — a stash is unnamed local state with its
+own reflog semantics, whereas a ref under `refs/fleet/` is addressable, greppable, survives a
+worktree being deleted, and is what `reset --hard` wants anyway. *Store `git patch-id` output as
+the idempotency key* — attractive because it is offset- and whitespace-insensitive, but it is
+defined only over a diff and would have re-introduced "keep the diff somewhere to recompute it";
+the content sha256 is computed from the patch set already in hand and is carried in the commit.
+*Leave `artifacts/diffs/` as durable state* — it is now an **export**, regenerable with
+`git format-patch --stdout <base_ref>..migrate/<repo>`, and §12.45 asserts a run resumes correctly
+after it is deleted outright.
+
+**Amends ADR-0004** (SQLite's scope is narrowed to orchestration state), **ADR-0012** (the
+resume contract's arbiter for code state is Git), **ADR-0019** and **ADR-0021** (their
+"never applied twice" guarantee is re-founded on the `Fleet-Patch-Id` trailer), and **ADR-0022**
+(its Phase-2 skip check now resolves both sides from Git); see the amendment notes on each.
+**ADR-0011 is unchanged and is the reason this is cheap**: the harness already committed every
+mutation to a per-repo `migrate/<repo>` branch, so this ADR deletes a parallel record rather than
+building a new one. **ADR-0014, ADR-0016, ADR-0023 unchanged** — attempts, transient retries, and
+failover accounting are orchestration state and stay exactly where they are.
+
+**Prior art.** Machine-readable commit trailers as the join key between an automation system and
+a repository are standard practice — Gerrit's `Change-Id`, `Signed-off-by` in the kernel workflow,
+and `Co-Authored-By` in GitHub's tooling all identify an out-of-band unit of work from inside the
+commit object precisely so the association cannot be separated from the change it describes. The
+inverse lesson comes from this project's own `references/`: Constraint 2's warning about a
+checkpoint that disagrees with reality is the same failure the `mutations` journal would have
+reproduced, one layer down.
+
+---
+
+## ADR-0025 — Edge orientation is normative: `edges` rows are dependent → dependency, and `G_rev` is the graph that orders waves
+
+**Decision.** Every row in `edges` is directed **dependent → dependency**: `(src_kind, src_id)` is
+the node that *needs* something, `(dst_kind, dst_id)` is the node that *provides* it. `graph/build.py`
+loads rows in exactly that orientation into `G`. **Every ordering question is then answered on
+`G_rev = G.reverse()`, never on `G`** — wave layering is `nx.topological_generations(G_rev)`, "what
+must land before this node" is `nx.ancestors(G_rev, n)`, and "what does stranding this node strand"
+is `nx.descendants(G_rev, n)`. Wave 0 is therefore `{n : G.out_degree(n) == 0}` — the nodes that
+depend on nothing. The orientation is stated once, normatively, in §3.1, and the identical sentence
+is repeated at §5.3 (`DependencyEdge`), in the §6 `edges` DDL comment, and in the §7 graph worker
+contract; every passage that implied the opposite is deleted rather than softened. `G` (unreversed)
+is used for exactly two things and they are named in §3.1: rendering "what does X depend on" in
+`fleet graph --explain`, and computing the blast radius of removing a provider.
+
+**Rationale.** *Agent Recommendation* (`CLAUDE.md` Guardrail 1) — this came out of a six-way
+adversarial self-review of `SPEC.md` on 2026-08-09, not from `references/` and not from any external
+requirement. The spec as written contradicted itself: §3.1 read one way and the §6 DDL comment plus
+the §13 failure rows read the other, so two implementers reading the same document would have
+produced **exactly inverted wave orders**, and each would have passed its own unit tests. The defect
+is invisible on a symmetric two-node fixture and catastrophic on a 250-repo fleet, where it means
+building every leaf last. An orientation that is only implied by prose is not a contract; naming the
+reversal explicitly, and naming the one graph object each question is asked of, is what makes it one.
+
+**Alternatives rejected.** *Store both directions, or an explicit `direction` column* — doubles the
+row count, and a disagreement between the two copies is a state no reconciliation can arbitrate.
+*Materialize the reversed graph as a second SQLite table* — a derived view of a derived view; ADR-0004
+already fixes `networkx` as the in-memory projection and `G.reverse()` is O(E) on a graph we hold
+anyway. *Adopt dependency → dependent as the canonical orientation* — equally valid in the abstract,
+but manifests are read dependent-first (a manifest declares what *it* needs), so the recording
+orientation now matches the interrogation orientation and no `ManifestAdapter` has to invert.
+
+**Amends ADR-0004** (the `networkx` view is specified as two named objects, `G` and `G_rev`) and
+**ADR-0019** (node identity is unchanged; only the direction convention is pinned).
+
+---
+
+## ADR-0026 — Logical keys replace SQLite rowids in every cross-model reference: `edge_key` and `scc_id`
+
+**Decision.** No cross-table or cross-model reference may be a SQLite `rowid` / autoincrement
+`INTEGER PRIMARY KEY`, and no reference may be a positional integer over a recomputed collection.
+Two logical keys are introduced and are the only admissible references. **`edge_key`** is
+`sha256` over the edge's semantic tuple — `(src_kind, src_id, dst_kind, dst_id, kind,
+coordinate_key)`, `\x1f`-joined, lowercase hex — and is `NOT NULL UNIQUE` on `edges`. **`scc_id`**
+is `"scc:" + sha256(sorted member node keys, "\x1f"-joined)[:16]`, so a cycle's identity is derived
+from its membership and nothing else. `cycles.broken_edge_keys`, `cycles.scc_id`,
+`rejected_approaches`, collision findings, `wave_members`, the `attempts` failure evidence, and the
+`migration_state.json` projection all carry these strings. Graph rebuild becomes
+`INSERT … ON CONFLICT(edge_key) DO UPDATE`, never `DELETE FROM edges; INSERT …`.
+
+**Rationale.** *Agent Recommendation* from the same 2026-08-09 adversarial self-review. Rowids are
+allocated by insertion order and are reassigned when the graph is rebuilt — which happens on every
+re-interrogation, on every resume that re-runs the graph phase, and after any `VACUUM`. Every
+recorded cycle-break decision (`broken_edge_ids`) therefore **silently repoints at a different
+edge**, and the failure is silent by construction: the FK still resolves, the row still reads, the
+run still completes, and it breaks the wrong dependency. An unstable integer SCC index had the same
+disease one level up — adding a single repo renumbers every cycle, so a `MANUAL` resolution recorded
+by a human in run *n* attaches to an unrelated cycle in run *n+1*. Content-derived keys make the
+reference survive a rebuild by construction rather than by remembering not to rebuild.
+
+**Alternatives rejected.** *UUID4 per edge* — stable within one run, meaningless across runs; the
+same edge re-interrogated is a different UUID, which defeats resume, the `llm_cache`, and any
+cross-run comparison. *Keep rowids and simply never rebuild the graph* — an unenforceable discipline,
+and rebuild is a legitimate, frequent operation. *Reference the composite natural key directly as a
+six-column foreign key* — correct, but six columns wide in five referring tables and unusable as a
+single token in JSONL, a commit trailer, or a CLI argument; the sha256 *is* that key, addressable in
+one column. *Truncate `edge_key` to 16 hex chars like `scc_id`* — edges are ~10⁵–10⁶ per fleet, where
+a 64-bit space is close enough to birthday range to be uncomfortable; SCC counts are ~10², so the
+short form is safe there and is the one that a human reads in a `MANUAL` resolution.
+
+**Amends ADR-0004** (identity of graph rows) and **ADR-0019** (`broken_edge_ids` is renamed and
+retyped to `broken_edge_keys`).
+
+**Amendment, 2026-08-09 — one recipe, in one place; `run_id` out, `dst_kind` in.** The sketch
+above (`\x1f`-joined, `dst_id` + `coordinate_key`, no evidence terms) was a third spelling of the
+key alongside §5's model docstring and §6's DDL, and §5 and §6 had in fact drifted apart: §6's
+UNIQUE tuple carried `run_id` and omitted `dst_kind`, and the v007 back-fill followed §6. One edge,
+two keys — the exact defect this ADR exists to prevent, one level up. Resolved by making the
+derivation a **function, not prose**: `fleet.models.graph.edge_key_for()` (with `EDGE_KEY_COLUMNS`)
+is the sole definition; inference, the v007 back-fill (as the `fleet_edge_key` SQL function), and
+the tests call it, and §6's DDL cites it. The normative preimage is `(src_kind, src_id, dst_kind,
+dst_ref, kind, evidence_path, evidence_line)`, NUL-joined, where `dst_ref` is `Coordinate.key` for
+a REPO dst and the `contract_id` for a CONTRACT dst.
+
+*`run_id` is NOT hashed.* It partitions rows — `edges` is per-run and CASCADEs — but it does not
+identify an edge, and hashing it gives one edge two keys in two runs. That breaks §11.6 by
+construction, not merely in spirit: `CycleFinding.broken_edge_keys` is an input to `run_digest`
+(`state/digest.py::_cycle_section`), and §12.21 requires a fixture run re-run **from a clean
+database** — a new `run_id` — to produce a byte-identical digest. A run-scoped key would report two
+identical runs as inequivalent, i.e. exactly the run-scoped-identity failure for which this ADR
+rejected UUID4. Row identity is therefore the pair: `edges` declares `UNIQUE (run_id, edge_key)`
+(not a global `UNIQUE (edge_key)`, which would let one run's row be silently shared by — and
+CASCADE-deleted out from under — another), and the rebuild is
+`INSERT … ON CONFLICT (run_id, edge_key) DO UPDATE`.
+
+*`dst_kind` IS hashed.* `dst_coord_key` holds a `Coordinate.key` for a REPO dst and a
+`contract_id` for a CONTRACT dst; both are `:`-separated lowercase tokens from two independently
+extensible enums. Today the two are separated only by the `edges` CHECK that ties `kind` to
+`dst_kind`, so omitting `dst_kind` makes the key collision-free *only while a constraint in
+another layer holds* — a hidden premise, for five bytes of preimage.
+
+*The same correction applies to `scc_id`, which this ADR sketched as `"\x1f"`-joined.* It is
+**NUL**-joined, and the sole definition is §5.3's `SccId` (implemented by
+`fleet.graph.cycles.scc_id_for`) — the sketch above is not a second spelling to be reconciled but
+prose that §5.3 supersedes. §3.1 6a, which restated the pre-ADR-0026 `min(sorted(member repo_ids))`
+form and survived this ADR unamended, now cites §5.3 and states no recipe of its own. One further
+consequence is spelled out where it belongs rather than here: `SccId` contains a `:`, which is
+Bazel's label separator, so the coarsened `ATOMIC_WAVE` target's label is not the `scc_id`
+verbatim — §3.3's `scc_dest`/`scc_target_name` is the one place that transformation is defined.
+
+The divergence is guarded by `test_the_edge_key_recipe_and_the_edges_unique_tuple_are_one_key`,
+which derives the key from the model and again from the columns the shipped DDL's UNIQUE clause
+actually names, and requires one string. `SCHEMA_VERSION` stays **7**: this corrects an unreleased
+baseline and folds into the existing v007 step.
+
+---
+
+## ADR-0027 — One in-process `StateWriter` actor owns every SQLite write; leases, fences, and CAS are retained anyway
+
+**Decision.** Every write to `state/fleet.db` funnels through a single `StateWriter` actor — one
+`asyncio.Task` draining an `asyncio.Queue` of typed write commands, owning the process's only
+read-write `aiosqlite` connection and the exclusive right to `BEGIN IMMEDIATE`. Every other coroutine
+holds a read-only connection (`file:state/fleet.db?mode=ro`). Callers `await` a future the writer
+resolves, so a write still reads as a normal `async` call. `state/fleet.db` **must** be on a local
+filesystem: startup probes the mount type and exits 2 on NFS/CIFS/9p/fuse rather than trusting POSIX
+advisory locks that those transports do not honour. **Lease, fence, and CAS machinery is retained**
+in full — `lease_owner`, `lease_expires_at`, a monotonic `fence` per leased row, and conditional
+updates of the form `UPDATE … WHERE … AND fence = :fence` with the caller asserting `rowcount == 1`.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. Reviewers split on
+this one and the split is the interesting part: single-writer removes writer-vs-writer contention, so
+one camp read the fencing as now-dead weight. It is not, because it defends a **different** race —
+the reaper reclaiming a lease from a worker that is merely slow rather than dead, after which the
+slow worker's write arrives at a writer that is perfectly serialized and perfectly happy to apply it.
+Serialization orders writes; it does not make a stale write wrong-looking. The fence token is what
+makes it wrong-looking. The second reason to keep it is portability: the machinery is exactly what a
+Postgres implementation needs, so the swap stays a substitution rather than a redesign.
+
+**Records the ADR-0004 exit condition.** ADR-0004 chose SQLite "until it hurts" without saying what
+hurting looks like. It is now written down: **swap the `StateRepository` implementation for Postgres
+when either sustained write throughput exceeds roughly one commit per 50 ms for a full wave, or the
+fleet must run workers on more than one host.** Both sides sit behind the same `StateRepository`
+`Protocol` (`CLAUDE.md` Guardrail 3), the actor becomes a connection pool, `BEGIN IMMEDIATE` becomes
+`SELECT … FOR UPDATE`, and the retained fence/CAS predicates port unchanged.
+
+**Alternatives rejected.** *A `threading.Lock` or an `asyncio.Lock` around every write call site* —
+correctness depends on every present and future call site remembering to take it; an actor makes the
+connection unreachable without it. *A separate writer process* — adds IPC, a supervision story, and a
+second crash mode, for a serialization guarantee we already have in-process. *Drop leases/fences now
+that writes are serialized* — see above; this is the reaper race, and it is the one that corrupts.
+*Allow a network filesystem with a documented warning* — a warning is not a mechanism, and the
+resulting corruption is silent and unrecoverable.
+
+**Amends ADR-0016** (which stated a single-writer *rule*; this ADR gives the rule an owning object)
+and **ADR-0004** (SQLite's scope, plus a named exit condition).
+
+---
+
+## ADR-0028 — Cost ceilings are enforced by the schema, not by convention: `CHECK`, conditional CAS, expiring reservations, mandatory pricing
+
+**Decision.** Spend control moves out of Python conditionals and into the `budgets` table. The row
+carries `max_usd`, `spent_usd`, `reserved_usd` under
+`CHECK (spent_usd >= 0 AND reserved_usd >= 0 AND spent_usd + reserved_usd <= max_usd)`. Reserving is
+a **conditional CAS**, never a read-then-write:
+
+```sql
+UPDATE budgets SET reserved_usd = reserved_usd + :amt
+ WHERE scope_key = :k AND spent_usd + reserved_usd + :amt <= max_usd;
+```
+
+and the caller asserts `rowcount == 1`. `rowcount == 0` is not an exception to log and swallow — it
+is **the refusal path** and the only way a call is admitted. Every reservation carries a
+`reservation_id` and a `lease_expires_at`; the reaper releases expired reservations so a `SIGKILL`ed
+worker cannot sequester budget for the rest of the run. Settlement converts reserved → spent from the
+backend's reported usage. Pricing is **mandatory per `(backend, model)` target** in config: an
+unpriced target is a startup failure, **exit 2**, never a call priced at $0.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. The previous design
+computed cost *after* the response returned and reserved nothing beforehand, so `max_usd` was an
+observation, not a ceiling — a fleet could and would overshoot it by an unbounded amount and only
+notice afterwards. Worse, any model target missing from the price map was billed at $0, which made
+the *newest and most expensive* model the one the ceiling could not see. Putting the invariant in a
+`CHECK` means even a future code path that forgets to reserve cannot drive the row past its ceiling:
+the transaction aborts. That is the difference between a budget and a budget report.
+
+**Alternatives rejected.** *Enforce in Python before the call* — a read-then-check-then-write with a
+window between the check and the write, and N concurrent workers each individually under the ceiling
+can be collectively over it. *Cap the number of calls rather than dollars* — per-call cost varies by
+roughly three orders of magnitude across the ADR-0014 ladder, so a call cap is not a cost cap.
+*Post-hoc alerting on overspend* — tells you after the money is gone. *Default unpriced targets to a
+conservative high price* — silently mis-accounts, and the mis-accounting is invisible; failing at
+startup costs one config line and is loud.
+
+**Amends ADR-0008** (the invocation boundary now has a schema-enforced admission gate) and
+**ADR-0023** (every backend registry entry must carry pricing to be selectable).
+
+---
+
+## ADR-0029 — Reserve at observed p95, not at `max_tokens`; a refused reservation is backpressure, not a failure
+
+**Decision.** A reservation is `price(model) × (measured prompt tokens + p95 completion tokens for
+this `(role, model)`)`, where the p95 is computed from the run's own observed completion lengths and
+falls back to a config-seeded value while the sample is cold. Settlement re-prices to actual usage. A
+response that overruns its reservation is allowed to complete and is charged in full — the
+reservation is an admission estimate, not a hard stop. `max_tokens` stays what it always was, the
+API's stop condition, and is no longer the accounting basis. A refused reservation parks the task as
+`BLOCKED` with `reason=BUDGET` and re-offers it when budget frees; it never marks the task failed and
+never consumes an ADR-0014 escalation rung.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review, and the finding
+here is arithmetic rather than stylistic. Reserving `max_tokens` against a per-repo ceiling made the
+**top rung of the escalation ladder mathematically undispatchable**: the rung with the largest
+`max_tokens` is by construction the one attempted last, when the least budget remains, so its
+reservation could never fit and attempt 3 could never run. The ladder had a rung no fleet could ever
+reach. Observed p95 sizes the reservation to what completions actually cost — typically a small
+fraction of `max_tokens` — and the overrun path means the rare long completion is charged rather than
+prevented. Treating refusal as backpressure keeps the distinction the escalation ladder depends on:
+"we could not afford to try" is not "we tried and it did not work".
+
+**Alternatives rejected.** *Reserve the mean* — under-reserves often enough that concurrent workers
+routinely blow the ceiling between reservation and settlement. *Reserve nothing and settle only* —
+that is the ADR-0028 defect this pairs with. *Raise the per-repo ceiling until `max_tokens` fits* —
+hides the arithmetic bug and multiplies the fleet's true ceiling by the ladder depth. *Shrink the top
+rung's `max_tokens` until it fits* — the top rung is large precisely because it carries the most
+context; shrinking it to satisfy an accounting artifact would degrade the rung that exists to salvage
+the hardest repos.
+
+**Amends ADR-0014** (a budget refusal is not an attempt) and **ADR-0028** (it supplies the amount).
+
+---
+
+## ADR-0030 — Truncate evidence, never reject it: `TruncatedStr` plus full output in `artifacts/logs/`
+
+**Decision.** Every evidence-bearing string field — `stderr_tail`, `stdout_tail`, `WorkerError.message`,
+prompt and response echoes, probe output — is typed `TruncatedStr`, an annotated `str` whose
+`BeforeValidator` **truncates to its documented budget and never raises**. Truncation keeps the head
+and the tail and elides the middle, marked
+`…[truncated N of M bytes; full: artifacts/logs/<run_id>/<task_id>/<attempt>.<stream>.log]`. The full
+stream is written to that path **before** the Pydantic model is constructed, so the path in the marker
+is always already valid, and only the path is persisted to SQLite. Length is consequently never a
+validation error anywhere in §5.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review, and it is the
+finding with the ugliest failure mode. The previous `max_length` constraint raised `ValidationError`
+when a build emitted an oversized stderr — which meant the **attempt row was never persisted at all**:
+no failure class, no attempt increment, no escalation. The repair loop then re-read a task that
+looked untouched and re-ran the identical failing build, forever, burning the container and the clock
+on a loop no retry cap could break because no retry was ever recorded. The pathology is perfectly
+inverted: it triggers precisely when a build fails most catastrophically, because that is what
+produces the most stderr. Evidence must degrade, never disappear — a truncated log still classifies
+the failure, and a missing row classifies nothing.
+
+**Alternatives rejected.** *Raise the cap* — moves the cliff, does not remove it. *Persist the full
+text in SQLite* — multi-megabyte BLOBs per attempt across 250 repos × 3 attempts, and ADR-0004's
+store is for orchestration state, not for log archival. *Catch `ValidationError` at each call site* —
+requires every present and future call site to remember, which is the class of discipline this project
+keeps replacing with mechanisms. *Keep only the tail* — a compiler or Bazel failure puts the useful
+signal at both ends (the first error and the summary), so head+tail with an elided middle is what a
+classifier actually needs.
+
+**Amends ADR-0002** (a validator may normalize evidence but may not reject it) and **ADR-0021**
+(the ladder's failure evidence is guaranteed to exist).
+
+---
+
+## ADR-0031 — `WorkerResult` is five-valued with unit accounting; `WorkerContext` carries a deadline and a cancellation signal
+
+**Decision.** `WorkerResult.status` is `Literal["ok", "partial", "failed", "timeout", "cancelled"]`,
+accompanied by `completed_units: int`, `remaining_units: int`, `units_kind: str`, and an optional
+structured `WorkerError`. `WorkerContext` gains `deadline: datetime` and `cancel: asyncio.Event`, and
+every worker in §7 is contractually required to check both at unit boundaries and to return `partial`
+rather than to raise. Orchestrator semantics are fixed per status: `partial` re-enqueues **only the
+remaining units** and does **not** consume an escalation rung; `timeout` is the worker exceeding its
+own deadline and does consume a rung; `cancelled` is external (wave abort, ADR-0029 budget refusal,
+`SIGINT`) and consumes nothing, because nothing about the work was tried and found wanting.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. A boolean result
+made partial progress unrepresentable, so a worker that migrated 40 of 60 files and hit its deadline
+reported failure, the orchestrator replayed the entire task, and the 40 already-migrated files were
+migrated again — duplicated work, and under ADR-0024's `Fleet-Patch-Id` idempotency a confusing empty
+commit. It also conflated three different things a caller must treat differently: work that failed,
+work that ran out of time, and work that was never allowed to start. Collapsing all three into
+`ok=False` meant an operator-initiated abort burned an escalation rung, so cancelling a wave to fix a
+config typo actively consumed the repo's remaining repair budget.
+
+**Alternatives rejected.** *Boolean plus a free-text reason* — unswitchable, and every consumer
+re-parses prose. *Raise typed exceptions instead of returning a status* — a raise cannot carry
+`completed_units` past a process boundary intact, and §7 workers run behind a process pool (ADR-0003).
+*Model partial work as a new task kind* — creates a second identity for the same task and breaks the
+`(repo, phase)` attempt accounting of ADR-0014.
+
+**Amends ADR-0014** (rung consumption is now status-dependent) and **ADR-0003** (the worker contract
+crossing the process-pool boundary).
+
+---
+
+## ADR-0032 — Truncation is a backend outcome, not a schema violation: `finish_reason` → `OutputTruncated`, excluded from failover
+
+**Decision.** The `ModelClient` protocol surfaces `finish_reason`, normalized across backends to
+`stop | length | tool_use | content_filter | error`. `finish_reason == "length"` raises
+**`OutputTruncated`** — a distinct exception, never a `ValidationError` — and the handler retries **the
+same target** with a bounded larger `max_tokens` (×2, capped at the model's ceiling) or a segmented
+request. `OutputTruncated` and `content_filter` are **explicitly excluded from the failover trigger
+set**; only transport errors, auth failures, rate limits, 5xx, and backend-unavailable rotate to the
+next backend in the ADR-0023 registry.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. Previously a
+truncated JSON response failed Pydantic parsing, was classified as a backend defect, and the failover
+chain retried the identical prompt on backend 2 and backend 3 — which truncated at their own
+`max_tokens` in exactly the same place. Three times the cost, the same failure, and a final run report
+claiming "all backends exhausted", which reads as a provider outage and would send an operator to
+debug an infrastructure problem that does not exist. Truncation is a property of the *request*, not
+of the *backend*, so the correct response is to change the request and hold the target fixed.
+
+**Alternatives rejected.** *Always request the model's maximum `max_tokens`* — pays for headroom on
+every call, and under ADR-0029 inflates every reservation. *Treat truncation as a hard failure and
+escalate a rung* — spends an ADR-0014 rung on a mechanical, deterministically fixable condition.
+*Detect truncation by attempting to parse the JSON* — a truncated response can still parse when the
+cut lands after a closing brace, so the parse result is not a reliable signal; `finish_reason` is the
+backend telling us directly.
+
+**Amends ADR-0023** (the failover trigger set is enumerated, and `finish_reason` joins the protocol
+surface).
+
+---
+
+## ADR-0033 — Stubbing unblocks transitively: a `DEGRADED` provider satisfies the admission gate and its subtree ships as one `STUB_LIMITED` draft stack
+
+**Decision.** A provider in `StubState.DEGRADED` — stub published, not yet revalidated —
+**satisfies the dependent-admission gate**. Its dependents are admitted to their wave and build
+against the stub, and so are *their* dependents, transitively, all the way down. The entire subtree
+downstream of a stub ships as a **single draft PR stack** labelled `STUB_LIMITED`, opened as draft
+and held (`PrState.HELD`) until the ADR-0022 revalidation round clears the root stub, at which point
+the whole stack is un-drafted together. The one exception is `StubFidelity.EMPTY_FAILING`: a stub
+that raises on every call carries no behavioural signal, so it does **not** satisfy the gate and its
+dependents remain `BLOCKED` with `reason=STUB_UNUSABLE`.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. The pre-existing
+rule unblocked only the *immediate* dependents of a stub, which is non-transitive and therefore
+useless on a real fleet: a chain `provider → A → B → C` admitted A and then stalled at B, because B's
+own provider (A) was itself blocked-behind-a-stub rather than `DEGRADED`. The fleet spent real budget
+generating stubs, admitted exactly one layer, and shipped nothing that used them — the worst of both
+outcomes, since it paid the stub's cost and collected none of its value. Transitive admission is the
+entire reason a stub is worth generating. Shipping the subtree as one held draft stack is what keeps
+that safe: nothing stub-backed merges until the stub is discharged, and the blast radius is one
+reviewable unit rather than N scattered PRs whose relationship to a stub is invisible.
+
+**Alternatives rejected.** *Unblock everything, including `EMPTY_FAILING`* — a stub that raises on
+every call produces dependents whose builds are meaningless, so it manufactures green PRs that encode
+nothing. *Allow stub-backed PRs to merge* — puts a known lie on the trunk with no forcing function to
+remove it, which is exactly the failure ADR-0022 exists to prevent. *Require a human acknowledgement
+per admitted repo* — 250 repos, and the acknowledgement carries no information the `STUB_LIMITED`
+label does not.
+
+**Amends ADR-0022** (the admission gate becomes transitive; `EMPTY_FAILING` is carved out) and
+**ADR-0011** (a stub subtree is one stacked-PR unit).
+
+---
+
+## ADR-0034 — PR merge state is ingested from the forge, never assumed: `fleet pr --sync`
+
+**Decision.** `fleet pr --sync` polls the forge for every PR the run has open
+(`gh pr view --json state,mergedAt,mergeStateStatus,…`) and writes the **observed** state into the
+`prs` table. `prs.state` is only ever written from an observation — no code path may set `MERGED`
+speculatively. `fleet run` invokes the sync at every wave boundary and immediately before any
+admission decision that reads `PrState.MERGED`. It stays a command, not a service (see ADR-0038).
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review, and the single
+worst liveness defect it surfaced. Three separate gates consumed `PrState.MERGED` — next-wave
+admission, ADR-0022 stub revalidation, and the ADR-0019 un-hoist check — and **nothing anywhere in the
+spec ever produced that value**. The fleet would complete wave 0, open its PRs, and then deadlock
+permanently, waiting on a transition no code path could make. Every one of the three gates was
+individually correct, which is why no unit test would ever have caught it: the missing piece was a
+producer, and producers are invisible to consumer tests. The general lesson is recorded with the
+decision — a state consumed by a gate must have exactly one named producer, and the spec now
+identifies it for each terminal state.
+
+**Alternatives rejected.** *Mark a PR merged when it is created* — ships unreviewed code by
+definition. *Run a webhook receiver* — an inbound port, a public endpoint, a secret, and a
+long-running process, all of which ADR-0004's zero-daemon posture rules out. *Infer merge from CI
+going green* — green CI is not a merge, and in a stacked-PR workflow the merge order is a deliberate
+human decision. *Poll continuously in a background task* — the wave boundary is the only moment the
+answer changes anything, so polling anywhere else is cost without information.
+
+**Amends ADR-0011** (the stacked-PR emit path gains its state-ingest counterpart) and **ADR-0022**
+(the revalidation gate's `MERGED` precondition now has a producer).
+
+---
+
+## ADR-0035 — Acyclicity is asserted on the condensed graph, after `ATOMIC_WAVE` and `MANUAL` SCCs are contracted
+
+**Decision.** The acyclicity invariant is stated over the **condensed** graph, not the raw one.
+Order of operations: contract hoisting (ADR-0019) runs first, then edge-breaking; every SCC that
+survives is resolved to `ATOMIC_WAVE` or `MANUAL` and is then **contracted to a single super-node**
+carrying its `scc_id` (ADR-0026); the invariant asserted, in §12 and in the §13 failure row, is
+`nx.is_directed_acyclic_graph(nx.condensation(G_rev))`. Wave layering runs over the condensed graph,
+so an `ATOMIC_WAVE` SCC occupies exactly one wave slot as a unit.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. The prior criterion
+demanded that the *raw* graph be acyclic, which is unsatisfiable for any fleet containing even one
+genuine mutual-implementation cycle — that is, the run failed its own success criterion precisely
+when the cycle machinery had worked exactly as designed and resolved the cycle to `ATOMIC_WAVE`. A
+criterion that fires on correct behaviour is worse than no criterion, because the first response to it
+is to disable it. An `ATOMIC_WAVE` SCC is not an unresolved cycle; it is a resolution that says "these
+ship together", and contraction to a super-node is precisely how such a resolution enters a
+topological order.
+
+**Alternatives rejected.** *Drop the acyclicity assertion* — it is the one check that catches a
+genuinely unordered graph, which is a real and silent defect. *Force every SCC to break* —
+manufactures artificial edge removals for cycles that are legitimately atomic, corrupting the emitted
+build order to satisfy a check. *Assert acyclicity on the raw graph but downgrade failure to a
+warning* — a warning at 250 repos is noise, and the check stops distinguishing the correct case from
+the broken one.
+
+**Amends ADR-0019** (the cycle pipeline's terminal state is a condensed DAG) and **ADR-0018**
+(advisory edges are excluded before condensation, unchanged).
+
+---
+
+## ADR-0036 — Schema migrations run only under `fleet migrate-db`; workers refuse a version mismatch; resume compares MAJOR only
+
+**Decision.** Migrations execute in exactly one place: the `fleet migrate-db` command. **Never
+implicitly at orchestrator or worker startup.** The command takes `BEGIN EXCLUSIVE`, **re-reads
+`PRAGMA user_version` inside that transaction**, applies only the ordered steps above the value it
+reads, sets the new version, and commits — so a second process that raced to the same conclusion
+outside the transaction finds nothing left to do. Every other entry point reads `user_version` at
+startup and **refuses to start** on mismatch: exit 2, with the remediation (`run fleet migrate-db`)
+in the message. Resume compatibility compares only the **MAJOR** component of `harness_version`; a
+patch or minor bump no longer invalidates an in-flight run. This ADR carries `SCHEMA_VERSION` 6 → 7
+as a single migration step, `v007_logical_keys.py`, folding every DDL change from ADR-0025 …
+ADR-0035 into one version bump rather than eleven.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. Implicit migration
+at startup means N workers racing to migrate the same file, and the check-then-migrate window between
+reading `user_version` outside a transaction and applying DDL inside one is real and hit — the second
+worker re-applies a step the first already committed, and the failure surfaces as a corrupt schema
+rather than as a lock error. Re-reading the version *inside* `BEGIN EXCLUSIVE` closes the TOCTOU
+outright. Refusing to start on mismatch is the loud-failure counterpart (`CLAUDE.md` Rule 11): a
+worker that quietly runs against an older schema writes rows that the newer code cannot read.
+Comparing the full `harness_version` on resume was over-strict to the point of hostility — every patch
+release invalidated every in-flight run, which is the strongest possible incentive never to patch.
+
+**Alternatives rejected.** *Migrate at startup under a lock* — the lock is the same `BEGIN EXCLUSIVE`,
+but attaching it to startup means every worker carries migration code and any of them can run it.
+*One version bump per ADR (6 → 17)* — eleven migration files that must be applied in order for a
+schema no deployed run has ever used; the single `v007` step is auditable in one read.
+*Auto-migrate with a `--no-migrate` opt-out* — makes the dangerous behaviour the default.
+*Compare the full `harness_version` on resume* — see above.
+
+**Amends ADR-0004** (`user_version` handling) and **ADR-0012** (the resume contract's version
+comparison is MAJOR-only).
+
+---
+
+## ADR-0037 — Bazel version resolution is real Minimal Version Selection: the minimum version satisfying **all** specs
+
+**Decision.** `bazel/module.py` resolves a `WorkspaceDep` version by **Minimal Version Selection**:
+collect every declared requirement on that module across all ingested repos, and select the
+**lowest version that satisfies every one of them**. If no version satisfies all specs, that is a
+`severity='error'` collision finding naming each conflicting spec and its declaring repo — never a
+silent pick. The resolved set is what `MODULE.bazel` records.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. The spec previously
+specified "the highest version satisfying the most specs", which is a **plurality vote**, and a
+plurality vote can — by construction, not by accident — select a version that **violates a declared
+upper bound** held by a minority of repos. That is a silent correctness break: the build succeeds, the
+constraint that existed to prevent a known incompatibility is discarded, and nothing reports it.
+Choosing real MVS also aligns us with `bzlmod`, which implements MVS itself, so our precomputed
+`MODULE.bazel` and Bazel's own resolution agree rather than disagreeing in a way that surfaces as a
+confusing post-ingest version drift.
+
+**Alternatives rejected.** *Highest-wins / always-latest* — maximally likely to violate an upper bound
+and to import behaviour changes nobody asked for during a migration, which is the worst possible time.
+*Plurality vote* — the defect being fixed. *Defer resolution entirely to `bzlmod` at build time* —
+attractive, but the pre-ingest collision report exists to surface conflicts *before* 250 repos are in
+one tree, and a build-time failure at that point is far more expensive to diagnose. *Auto-relax the
+lowest upper bound to force a solution* — silently discards a declared constraint; a `severity='error'`
+finding puts the choice in front of a human, which is where an unsatisfiable constraint set belongs.
+
+**Amends ADR-0007** (bzlmod version resolution semantics) and **ADR-0020** (the `EcosystemAdapter`
+supplies specs; `module.py` resolves them).
+
+---
+
+## ADR-0038 — Observability carve-out: `fleet status --metrics` is an output, not a service
+
+**Decision.** The "no daemon, no service, no long-running process, no port" non-goal **stands
+unchanged**, and one explicit carve-out is written next to it so the boundary is not re-litigated per
+feature. `fleet status --metrics` computes a **metrics projection** from SQLite and emits it twice: as
+JSON on stdout, and as a Prometheus **text-format file** at `artifacts/metrics/fleet.prom`, suitable
+for a node_exporter textfile collector or any scraper the operator already runs. The command binds no
+socket, opens no port, forks nothing, and exits. It is an output artifact in the same category as
+`migration_state.json` and `artifacts/diffs/`.
+
+**Rationale.** *Agent Recommendation* from the 2026-08-09 adversarial self-review. The non-goal was
+being read as "the harness must not be observable", which conflates *operational surface* with
+*visibility*. What ADR-0004's zero-daemon posture actually buys is: nothing to supervise, nothing to
+restart, no port to secure, no lifecycle to get wrong. A file written by a command that exits costs
+none of that and still lets an operator watch a multi-hour 250-repo run on infrastructure they already
+have. Naming the carve-out explicitly is the point — an unstated boundary gets eroded one reasonable
+exception at a time, and this one is now the only exception, with the reason it qualifies stated
+alongside it.
+
+**Alternatives rejected.** *An embedded HTTP `/metrics` endpoint* — a port, a bind address, a
+lifecycle, a shutdown path, and an auth question; the textfile collector already solves this for
+batch jobs. *A Prometheus push gateway* — outbound network from the harness plus a credential to
+manage and redact. *No metrics at all* — a run can occupy hours across 250 repos, and "is it making
+progress" answered only by tailing JSONL is a real operational gap. *A `--watch` mode that loops* —
+that is a long-running process wearing a flag.
+
+**Amends ADR-0004** (the zero-daemon non-goal gains one named, bounded carve-out) and **ADR-0012**
+(the observability artifact set gains the metrics projection).
+
+---
+
+## ADR-0039 — A reservation is a row, not a number: per-holder identity behind `reserved_usd`, and legacy aggregates are adopted rather than freed
+
+**Decision.** `SCHEMA_VERSION` 7 → 8 adds a `reservations` table — `reservation_id` (PK, minted by
+the reserver), `run_id`, `repo_id`, `phase`, `lease_fence`, `amount_usd`,
+`state IN ('HELD','SETTLED','EXPIRED')`, `expires_at`, `created_at`, a composite FK to `phases`, and
+`ix_reservations_expiry (run_id, state, expires_at)` for the reaper's sweep. `reservation_id` is a
+**required** argument on the nested reserve and settle primitives, so no hold is unattributable.
+`reserved_usd` on both ledgers **remains the enforced aggregate** — the fail-closed guard has to be
+one statement — and the per-row table is what *explains* it; `reservation_expires_at` on both ledgers
+becomes **derived** (`MIN(expires_at)` over surviving HELD rows) and is no longer authoritative.
+Settlement is guarded on the amount (`ABS(amount_usd - :amt) <= :epsilon`) so per-row and aggregate
+cannot drift, and a settle against a reaped hold is a typed `ReservationRefusedError`.
+`phase`/`lease_fence` are **nullable as a pair**, CHECK-enforced. The 7 → 8 step
+(`v008_reservations.py`) is additive and adopts each `repo_ledger` row with `reserved_usd > 0` as
+exactly **one** legacy HELD row; where a v7 run aggregate exceeds its repos' sum the residue stays
+held. The normative rules live in **SPEC §6 RESERVATION ACCOUNTING** and are not restated here.
+
+**Rationale.** *Agent Recommendation*, originating in our own v8 implementation work — no reference
+or external requirement asks for this. §6's own normative rule said the reaper "releases any
+reservation past `reservation_expires_at` in the same transaction that bumps the owning
+`phases.lease_fence`", and against v7 that sentence was **not implementable**. Both ledgers carried
+a scalar `reserved_usd` and a single `reservation_expires_at` that every reserver overwrote: the
+pair records *that* money is held and nothing about *whose*. So "release the expired reservation"
+could only mean "release the whole aggregate", which zeroes every live worker's hold alongside the
+dead one's, under-counts what the run has committed, and lets it overspend the ceiling ADR-0028
+exists to enforce. The mirror-image failure was already live in the other direction: an orphaned
+hold was never released at all, so `reserved_usd` ratcheted upward until a healthy run halted on a
+ceiling it never spent. One row per holder turns the release into `SUM(amount_usd)` over exactly the
+expired rows — a fix that is arithmetic rather than heuristic. Keeping the aggregate as the *enforced*
+number rather than recomputing it per reservation preserves ADR-0028's single-statement CAS, which is
+the property that makes the ceiling a constraint instead of a report. The nullable owner pair is what
+makes an unowned hold **recordable**: a pre-v8 aggregate and a scan-time dispatch have no phase lease,
+and a hold that cannot be written down is a hold the reaper cannot see. It is still reapable by
+expiry; it simply has no fence to bump. Half-set is the one shape forbidden, because a phase with no
+fence is an owner the reaper cannot invalidate.
+
+**Alternatives rejected.** *Zero the aggregate at migration* — frees money live workers are still
+spending, then lets them settle on top of the freed balance; that under-counts commitments and
+overspends, which is the exact defect this ADR closes. *Leave the pre-v8 aggregate unattributed* —
+the ratchet survives on precisely the databases that already have it, since the reaper can never
+touch dollars no row claims. *Adopt one row per in-flight worker* — invents an owner v7 never
+recorded, and makes the reaper bump the fence of a phase that never held the money. *Give the run
+ledger its own adopted rows* — double-counts, because a run dollar is the nesting of a repo dollar;
+leaving the excess held is fail-closed instead, since `MAX(reserved_usd - …, 0.0)` releases at most
+what is attributed. *Derive `reserved_usd` from the rows on every read* — a `SUM` inside the
+admission CAS, which is the read-then-write ADR-0028 refuses. *Keep `reservation_expires_at`
+authoritative and add the rows alongside* — two spellings of one fact, drifting apart under
+concurrency; a single column cannot represent N expiries and the last writer's value is not the one
+the reaper needs.
+
+**Amends ADR-0028** (its "every reservation carries a `reservation_id` and a `lease_expires_at`" is
+now a schema fact rather than a convention, and expiry is per-row) and **ADR-0036** (the ladder
+gains its eighth rung, `v008_reservations.py`).
+
+---
+
+## ADR-0040 — The forge is a `Forge` protocol with a real Gitea driver; its token is passed by `curl -K` file, never by argv
+
+**Decision.** `vcs/forge.py` defines `Forge`, a `runtime_checkable` `Protocol` of exactly the five
+methods the harness calls — `available`, `create_pr`, `mark_ready`, `view`, `sync` — plus the
+shared `PrStatus` / `PrSyncItem` types and a `ForgeError(GitError)` root so `prwriter`'s existing
+failure mapping catches one type for both drivers. `edit_body` is deliberately **not** on the
+Protocol: no caller invokes it. `vcs/gitea.py` `GiteaForge` is a second implementation against
+Gitea's `/api/v1`, selected by the config key `pr.forge` through the single factory
+`vcs.build_forge`; `github` remains the default and `gitea` requires `pr.forge_url`,
+`pr.forge_owner` and `pr.forge_token_config` or the run refuses to start.
+
+The driver shells `curl` through the existing `CommandRunner` seam rather than importing an HTTP
+client, and **the token is passed in a `curl -K` config file** — `argv()` is
+`(curl, "-sS", "-K", <config>, *args)` and holds no credential. Request bodies go to a `mkstemp`
+file (0600 at creation, deleted in a `finally`) for the same reason `github.py` uses `--body-file`.
+
+Two Gitea behaviours were established **by experiment against the live instance**, not from docs,
+and both are load-bearing:
+
+* **`draft` is a title, not a field.** `POST …/pulls` with `{"draft": true}` and a plain title
+  returns `"draft": false` — the flag is ignored — while a title beginning `WIP:` returns
+  `"draft": true`. So `create_pr(draft=True)` prepends `WIP: ` (idempotently) and never sends a
+  `draft` key; `mark_ready` reads the live title and PATCHes the prefix off.
+* **A merged PR reports `state: "closed"` with `merged: true`.** `parse_pr_json` therefore reads
+  `merged` **first** and only then falls back to `state`. Read in the other order, every landed
+  dependency classifies as `CLOSED`, which releases none of the three gates that consume
+  `PrState.MERGED` and reinstates exactly the wave-0 deadlock ADR-0034 and SPEC §3.4 step 5 exist
+  to prevent.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work — no reference
+document and no external requirement asks for a Gitea driver; this arose because the operator's
+forge is a self-hosted Gitea and the harness had no PR path against it at all. SPEC §3.4 is written
+against "the forge", but the code had `GitHubCli` wired directly into `workers/prwriter.py` and
+`cli._pr_impl`, which is the concrete-vendor coupling CLAUDE.md guardrail 3 forbids.
+
+*Why an adapter and not a base-URL swap.* `gh` is a GitHub API client, not an HTTP client: it
+speaks `/repos/{o}/{r}/pulls` with GitHub's field names, GitHub's draft semantics and GitHub's
+merge representation, none of which Gitea reproduces. Pointing it at `/api/v1` would not have
+produced wrong URLs so much as wrong *readings* — and the two divergences above are the proof:
+a base-URL swap would have created every draft as a non-draft and reported every merged PR as
+`CLOSED`. A defect that stalls the fleet at the first wave boundary is not one to discover by
+configuration.
+
+*Why `curl` through `CommandRunner`.* The seam already carries what a fresh HTTP path would have to
+re-earn: the deadline, the process-group kill, `attempts` recording, and §11.4 redaction. Adding
+`httpx` would mean a second, parallel plumbing with its own timeout and cancellation story, for a
+driver that issues fewer than a dozen requests per run — and it would have solved none of the
+token problem. The dependency set stays at what `pyproject.toml` already declares.
+
+*Why the token is a file.* `attempts.command` persists argv verbatim (`state/schema.sql`,
+`repository.record_attempt`) and `WorkerError.stderr_tail` can quote a command line, so
+`-H "Authorization: token …"` would write the credential into the state database in cleartext and
+into any log that echoes a failing command. `curl` reads `-K` from disk after `execve`: the token
+is in no argv, no environment variable and no exception message. **Known limit, recorded rather
+than papered over:** the harness does not create or `stat` that file, so "mode-600" is an operator
+convention the code never enforces — see the Gitea row in `docs/INTEGRATION_HONESTY.md`.
+
+**Alternatives rejected.** *Point `gh` at Gitea's API* — see above; wrong readings, not wrong URLs.
+*Add an HTTP client dependency* — a second subprocess-less seam with its own timeout, cancellation
+and redaction, duplicating the one that works. *Put the token in an environment variable* — better
+than argv and still wrong: it is inherited by every child of the runner and appears in `/proc`.
+*A `--forge` CLI flag* — forge choice is a property of the deployment, and a flag makes it a
+per-invocation accident that half a fleet can disagree about. *Send `{"draft": true}` and trust it*
+— measured false. *Read `state` and treat `merged` as a detail* — the wave-0 deadlock. *Make Gitea
+the default* — it would silently change the forge for any existing operator; opt-in with a
+startup-time validation is the fail-loud shape.
+
+**Amends ADR-0034** (its "polls the forge" is now a `Forge` protocol call with two implementations,
+not a `gh` invocation) and **ADR-0023's** precedent for protocol-over-registry is followed rather
+than re-argued.
+
+---
+
+## ADR-0041 — `build.ruleset_versions` is a true pin: `single_version_override` beside every `bazel_dep`
+
+**Decision.** `bazel/generators.render_module_bazel` emits, for every ruleset the adapters name, a
+`bazel_dep(name, version)` **and** a `single_version_override(module_name, version)` carrying the
+same version from `build.ruleset_versions`. A validated conflict-resolution override for the same
+module wins over the configured pin, because Bazel rejects two `single_version_override`s for one
+module. The config key keeps its name and its documented meaning.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work — this was found
+by running real Bazel for the first time, not read anywhere. `bazel_dep(version = X)` is an MVS
+*lower bound*, not a pin. Real Bazel selected `rules_python@1.7.0` for a configured `1.0.0`,
+because a transitive module in BCR declares a higher floor. §9's reproducibility guarantee is that
+two runs of the same fleet build the same bytes; a floor that any unrelated BCR publication can
+raise does not provide it, and the monorepo's Python rules would change under the fleet with no
+diff anywhere in this repository. Note what the alternative would have cost: `settings.py` called
+these "PINS" and `generators.py` said "an unpinned `bazel_dep` is a build that resolves differently
+on the next run" — both were *documentation of an intent the code did not implement*, and the
+offline tests compared our own strings to our own strings, so nothing could see it.
+
+ADR-0037 is not contradicted. MVS remains how the *artifacts* — the third-party coordinates each
+repo requires — are selected, and there is still no "pick a winner" branch in the generator. This
+ADR pins only the **rulesets**, which are harness-chosen infrastructure rather than fleet-derived
+requirements, and for which "whatever BCR floats to" is not an answer.
+
+**Alternatives rejected.** *Rename the key to `ruleset_version_floors` and document the MVS
+behaviour* — the cheaper edit, and the wrong one: it would make the documentation true by making
+§9's reproducibility guarantee false, and §9 is a requirement rather than a description.
+*Emit `single_version_override` only where a conflict was validated* — that is what the code did,
+and it is why the defect existed. *Pin with `bazel_dep(version)` plus `--check_direct_dependencies`*
+— a warning flag is not a constraint, and it says nothing about transitive floor-raising.
+*Accept the floor and record the selected version in the run digest* — makes the drift auditable
+after the fact instead of preventing it; the fleet still builds different bytes on Tuesday.
+
+**Consequence, recorded because it is the point of a real pin:** with the version no longer free to
+float, the configured version is the version that actually runs — and **five of the eight configured
+rulesets turned out not to load** under Bazel 9.2, which is defect **D8** in
+`docs/INTEGRATION_HONESTY.md`, where the cause and the resolution are stated. The pin did not
+create those incompatibilities; it stopped hiding them. **Since 2026-08-11 the pins are corrected
+and a standing test loads every one of them under the real binary**, so this ADR's cost — a pin
+that can be wrong — is now paid by a test rather than by a run.
+
+**Amends ADR-0037** (its MVS scope is narrowed to artifact coordinates; rulesets are pinned).
+
+---
+
+## ADR-0042 — Relocation is applied as an idempotent mapping: Phase 2 owns the tree, Phase 3 owns the history
+
+**Decision.** `cli._prepare_build` applies §3.3 step 1's relocation as a **mapping that is idempotent
+on a path already sitting at its image**, by passing git-filter-repo two ordered `--path-rename`
+rules: `':<dest>/'`, which roots every historical path at the destination, then
+`'<dest>/<dest>/:<dest>/'`, which collapses the one prefix that was already rooted there. The
+phase split is unchanged and is the reason this shape is necessary: **§3.2 step 1 owns the
+worktree move** (`workers/relocate.py` commits the renames) and **§3.3 step 1 owns the history
+rewrite**. Phase 2's rename commit maps to `<dest>/x → <dest>/x`, becomes empty and is pruned; the
+result is one uniformly relocated history whose tip is exactly the tree Phase 2 produced.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work. The clone handed
+to git-filter-repo has **mixed** history: every commit behind Phase 2's relocation commit still
+carries repo-root paths, while the tip already carries `<dest>/…`. A single catch-all
+`--path-rename ':<dest>/'` re-roots both, and the tip lands at `<dest>/<dest>/…` — observed as
+`py/acme_lib_py/py/acme_lib_py/pyproject.toml` with every state row green, the merge real and the
+provenance trailers correct. Rule 2 cannot misfire on a path that merely *looks* relocated, because
+Phase 2 refuses to run at all when a tracked source already sits under `<dest>/`
+(`relocate._plan_matches_tree`), so inside this clone `<dest>/` is Phase 2's work and nothing else.
+
+Doing it as a mapping rather than as a conditional is the substance of the decision: a rule set
+that is a no-op on its own output can be re-applied by a retry, a resume, or a second ingest of
+the same repo without a caller having to know which of those it is — which is the same
+re-runnability property ADR-0014 asks of every step.
+
+**Alternatives rejected.** *Drop the `--path-rename` entirely* — the tip would be correct and every
+commit behind it would keep its pre-migration path, losing the `git log --follow` continuity that
+is the entire reason §3.3 rewrites history rather than copying a tree. *Move the relocation wholly
+into Phase 3 and stop committing renames in Phase 2* — Phase 2's tree move is what the rewrite
+workers and the build worktree read; deleting it to fix a Phase 3 argv trades a two-rule mapping
+for a re-architecture of two phases. *Detect the already-relocated tip and branch on it* — a
+conditional that is correct only for the states someone enumerated, versus a mapping that is
+correct by construction. *Add an idempotency guard inside `relocate()`* — attractive, and still
+**not done**: `relocate()` remains non-idempotent by itself, so this ADR's correctness rests on a
+caller convention. That is a real weakness and it is carried as such in the `git-filter-repo
+idempotency` row of `docs/INTEGRATION_HONESTY.md`, not hidden here.
+
+**Amends ADR-0014** (re-runnability of the ingest step is now a property of the rename mapping, not
+only of the rmtree-and-re-clone).
+
+---
+
+## ADR-0043 — Lock files are *resolved* by a real resolver, behind a strict carry-over precedence
+
+**Decision.** Every file a generated `MODULE.bazel` names but no source repo supplies is a declared
+`SupportFile` owned by the adapter that names it, and it is produced by exactly one of three
+mechanisms, tried in this order and never blended:
+
+1. **carry** — if the source repo ships the file, it is taken **byte-for-byte** and **no resolver
+   runs**;
+2. **resolve** — otherwise `EcosystemAdapter.resolution()` names a real resolver
+   (`uv pip compile` for Python, `pnpm install --lockfile-only` for JS), which the driver runs as
+   **argv, never a shell string**, in a scratch directory whose inputs the adapter also declares,
+   through the `cli.RESOLVER_RUNNER` seam (guardrail 3: the driver depends on a `CommandRunner`,
+   not on `uv`);
+3. **floor** — a synthesized, deliberately poor, *parseable* placeholder, used only where no
+   resolver is declared.
+
+A resolver that fails is a loud `DependencyResolutionError` and a `DependencyResolutionFailed`
+finding naming the command (Rule 11). **There is no silent fall-through from 2 to 3** — that
+fallback is the defect this ADR exists to prevent, not a robustness feature.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work. The harness had
+**never run a resolver**: it synthesized a lock from Phase 1's declared specs, and a spec list is
+not a resolution — it has **no transitive closure**. Bazel's hubs were therefore empty of everything
+a direct requirement pulls in, which is what `no such package '@@rules_python++pip+pypi//certifi' …
+referenced by '@@rules_python++pip+pypi_312_requests//:pkg'` was saying. A synthesized lock is a
+file shaped like an answer, and every offline test that read one was checking our own arithmetic.
+
+Carry outranking resolve is the load-bearing half. **A repo that ships a lockfile has already made
+a decision, and re-resolving it silently overrides that decision with today's index state** —
+which is a migration changing what the code depends on while claiming only to move it. Byte-for-byte
+carry also means the common case costs no network and is trivially reproducible.
+
+Determinism is asserted, not assumed: resolution is byte-identical on re-run, which required
+`--no-header` — uv's banner embeds the scratch path, so two identical resolutions differed in bytes
+for a reason that had nothing to do with dependencies. That is the same class as ADR-0041's
+floating pin: a reproducibility claim that only an actual second run can falsify.
+
+**Alternatives rejected.** *Keep synthesizing and widen the specs* — no amount of widening produces
+a transitive closure; only a resolver knows it. *Require every repo to ship a lock* — the fleet is
+250 repositories we do not control, and a migration that refuses the ones without a lock migrates
+nothing. *Run the resolver always, ignoring a shipped lock* — deterministic in the wrong direction:
+it makes the migration's output depend on the day it ran. *Fall back to the floor when the resolver
+fails* — indistinguishable from success at every downstream layer, which is precisely the
+"empty hub" failure this ADR is undoing. *Call `uv` in-process* — a resolver is a subprocess with a
+deadline and evidence, and the seam is what makes the state machine testable without a network.
+
+**Consequence, recorded because it narrows the sandbox story:** resolution is a **network**
+dependency at build time, so ADR-0010's `--network=none` container cannot wrap a build whose lock
+was neither carried nor pre-resolved. Verdicts and the untested edges are in
+`docs/INTEGRATION_HONESTY.md`; they are not restated here.
+
+---
+
+## ADR-0044 — Bazel's exit code is the verdict; the taxonomy is reproduced against the real binary
+
+**Decision.** `workers/buildverify.py` classifies a Bazel step by **exit code**, from a table whose
+every row was reproduced against the vendored `tools/bin/bazel` rather than quoted from memory
+(0, 1, 2, 3, 4, 8, 9, 36 — the table itself lives beside the constants in that module and is not
+duplicated here). Three classes come out of it: exit 4 (`NO_TESTS_FOUND`) is **success** — a green
+build with nothing to run; exits 8/9/36 are **environmental** and spend no ADR-0014 attempt; and
+exits 2 and 127 are **unrepeatable** and terminate without charging the ladder. Everything else
+follows the existing failure path.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work — found by running
+real Bazel, not read anywhere. A library with no tests of its own is ordinary at fleet scale, and
+§3.3's criterion (`bazel build` exit 0 **and** `bazel test` exit 0) was never about an empty test
+set. Before the taxonomy existed, exit 4 fell through to a retryable `TEST_FAILURE`: a repo that
+built perfectly burned all three ADR-0014 rungs — each of them an LLM-bearing repair attempt on a
+tree with nothing wrong with it — and escalated to `REQUIRES_HUMAN_INTERVENTION`, taking its
+dependents down with it.
+
+**The reason it must be the code and not the message.** `bazel test` prints *"No test targets were
+found, yet testing was requested"* in **both** the empty-test case and the failed-build case, and in
+the latter it exits **1**. **Exit 1 dominates exit 4**: exit 4 is emitted only when the build that
+preceded it was green. So the message is ambiguous in exactly the situation that matters and the
+code is not — "the tree is fine, there was simply nothing to run" is a mechanical fact read off an
+integer, not an inference from prose. This is the same discipline as `references/`' constraint 3
+(classify the payload, not the exception type), arriving at the opposite-looking conclusion for the
+same reason: **use whichever channel is unambiguous**, and for a build tool that is the exit code.
+
+Reproducing the table rather than citing it is the other half of the decision, and it paid
+immediately: it exposed exit 2 (`COMMAND_LINE_ERROR`) being retried three times with **byte-identical
+argv**. A repair prompt cannot fix the harness's own command line; three identical attempts are
+three chances spent learning the same thing.
+
+**Alternatives rejected.** *Match on stderr text* — the string is ambiguous (above), locale- and
+version-sensitive, and every match would be a new guess. *Treat exit 4 as a failure and require
+every repo to have a test* — imposes a policy on 250 repositories we did not write, in order to
+avoid one integer comparison. *Treat any non-zero exit as retryable* — the status quo ante, and it
+is what burned the ladder on environmental faults and malformed argv alike. *Ask the model to
+classify the failure* — Rule 5: an exit code is deterministic routing, and no judgment call exists
+here to spend a model on.
+
+**Amends ADR-0014** (the attempt ladder is now charged only for failures a different attempt could
+plausibly repair; environmental and unrepeatable exits terminate without consuming a rung).
+
+---
+
+## ADR-0045 — A module extension tag creates *repositories*, plural: `repo_names` is a collection
+
+**Decision.** `ToolchainRequirement.repo_names` is a **`list[str]`**, and `render_module_bazel`
+unions it into the `use_repo(...)` set for the extension's proxy. There is no singular `repo_name`
+field, and the plural is not a convenience — it is the schema stating a fact about Bazel.
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work, and established
+by `bazel mod show_repo` rather than assumed. **One tag call routinely creates several importable
+repositories.** A single `python.toolchain()` yields `@python_3_12`, `@python_3_12_host` **and**
+`@pythons_hub`; rules_ts's `ext.deps` creates `npm_typescript`. A repository the root module never
+imports is not a warning — it is `no such package '@@[unknown repo 'npm_typescript' requested from
+@@]//'` at load time, for every repo in the fleet.
+
+A singular field would have been the obvious modelling choice, would have fixed the observed
+symptom, and would have been **the same defect with a smaller blast radius**: correct for
+`rules_ts`, wrong for `rules_python`, and wrong in a way that only surfaces the next time somebody
+adds a toolchain. Modelling the multiplicity in the type means the failure mode cannot recur by
+omission — a new adapter either lists its repos or lists none, and neither is a half-populated
+scalar.
+
+The same "the name is not the thing" trap sits one field over and is resolved the same way: a
+`load()` label carries an **apparent repo** name, not a module name (`rules_go` publishes
+`@io_bazel_rules_go`), so the ruleset set derived from `load_from` labels is intersected with the
+pinned `build.ruleset_versions` table instead of being emitted as a `bazel_dep` verbatim. Both are
+one lesson: **Bazel's naming layers are not interchangeable, and a generator that assumes they are
+produces a module that looks right and does not load.**
+
+**Alternatives rejected.** *`repo_name: str` plus a second `extra_repos` list* — two fields with one
+meaning, and the first call site to set only the scalar reintroduces the defect. *Derive the repo
+names from the ruleset by convention* — there is no convention; which names a ruleset exports is
+per-ruleset knowledge, which is why it belongs on the adapter's declaration. *Emit `use_repo` for
+every repository the extension creates, discovered at render time* — the generator does not run
+Bazel and must not start; discovery would make rendering depend on a network fetch.
+
+---
+
+## ADR-0046 — A cross-repo import becomes a *language name*, never a Bazel label; and first-party linking is a `workspace_deps(unit)` concern
+
+**Decision.** Two changes, one lesson.
+
+1. `EcosystemAdapter` declares **`import_specifier(coordinate, dest) -> str`**, `@abstractmethod`,
+   answering *"what does source code in another unit write to import this one after migration"*.
+   It is rendered into Phase 2's rewrite params as `{{import_specifier}}` beside `{{dest_path}}`
+   and `{{repo_id}}`. It may never return a Bazel label, and
+   `test_a_cross_repo_import_becomes_a_language_name_and_never_a_bazel_label` asserts that over
+   every `Ecosystem` member.
+2. **`workspace_deps` takes the `BuildUnit`**, not a `Sequence[Coordinate]`, and
+   `BuildUnit.internal_deps` carries `InternalDep(label, dest, published)` rather than a bare
+   label string.
+
+**Rationale.** *Agent Recommendation*, forced by a real `tsc`:
+`ts/acme/app/src/main.ts(1,29): error TS2307: Cannot find module '//ts/acme/lib:lib' or its
+corresponding type declarations.` A Bazel label had been written into a TypeScript source by a
+rewrite rule. §3.2 step 2's rewrite targets are *import paths, package declarations, `tsconfig`
+path aliases, Go module paths, Python module paths* — language names, all of them; Bazel labels
+describe the same dependency edge one phase later, in §3.3's `BuildTarget.deps`, in a notation no
+compiler reads. The rule is config and the label was the operator's, but the harness had made
+nothing else expressible: `{{dest_path}}` and `{{repo_id}}` are a directory and an id, and a
+directory plus a target name **is** a label. A defect a rule author is steered into is a harness
+defect.
+
+The second half is what made the first half insufficient. Correcting the specifier to `'@acme/lib'`
+alone does not build: rules_js resolves a first-party package through a `node_modules` link created
+by `npm_link_all_packages()` from a `link:`/`workspace:` entry in the lockfile, and an adapter
+handed only `external_coordinates` cannot name a sibling at all — the internal/external split, by
+construction, hands it the half that excludes them. Nor can the missing half be recovered from
+`internal_deps`: `//ts/acme/lib:lib` does not spell `@acme/lib`, and guessing is how `@acme/lib`
+and `@corp/lib` become one package. So the unit is handed over whole, and `JsAdapter` declares each
+sibling as `link:<dest>` in the resolver's root manifest, emits `npm_package(name = "pkg")` as the
+target the generated link resolves against, and gets `//:node_modules/@acme/lib` out of the same
+`workspace_deps` → `external_labels` path that already produced `//:node_modules/left-pad`.
+
+**Alternatives rejected.** *Map the specifier with `tsconfig` `paths` into the sibling's `.d.ts`* —
+smaller, and it works, but it is a per-consumer file rewrite that reimplements module resolution
+beside the one rules_js already performs, and it says nothing for any other language. *Add first
+party linking as a `JsAdapter`-only side channel (a `first_party_deps()` hook)* — the gap is in the
+shared method's signature, and a parallel channel leaves the next ruleset that links first-party
+packages (rules_go's `go_deps`, `crate.from_cargo`'s path dependencies) to discover it again.
+*Make the siblings pnpm `workspace:` members* — that makes each a lockfile *importer*, which
+rules_js answers with a required `.bazelignore` line and an `npm_link_all_packages()` call per
+package; `link:` keeps the monorepo root the single importer this dialect has always resolved.
+*Leave `import_specifier` concrete with a sensible default* — the whole failure was a language
+inheriting an answer that was not its own, so the method is abstract and a new `Ecosystem` must
+speak for itself.
+
+---
+
+## ADR-0047 — The parse probe scans for `ERROR` nodes; an ast-grep exit code answers "did anything match", never "did it parse"
+
+**Decision.** `AstGrepRewriter`'s parse probe runs `ast-grep scan --inline-rules <doc>`, where the
+document is a single rule of **`kind: ERROR`** carrying **`severity: error`**, and reads the verdict
+off the **exit status**: **1** = the file contains `ERROR` nodes, so it does not parse and the probe
+returns `False`; **0** = none found, so it parses. Three parts of the same decision:
+
+1. **`probe_text(path, text)` is what the pipeline injects.** The `TextProbe` seam is
+   `(path, text) -> bool`; `parse_probe(path)` cannot satisfy it, so in production
+   `FilePatch.parse_probe_ok` was **always `False`**. `probe_text` stages the buffer in a scratch
+   directory and probes that copy — the same staging discipline the driver's `apply` already uses.
+2. **`apply_patch` probes `str(repo.path / patch.path)`**, not the repo-relative `patch.path`. It
+   resolves against the git handle that actually wrote the file, so an injected `git=` is honored.
+3. **A target that is not on disk returns `False` and does not raise.**
+
+**Rationale.** *Agent Recommendation*, originating in our own implementation work — established by
+running the vendored `tools/bin/ast-grep` **0.45.1**, not read anywhere.
+
+The previous probe ran `ast-grep run --pattern '$A' --lang <l> <path>` and returned its exit code.
+Measured: `const = = ;` → **0**; `function f( {` → **0**; `class {{{ ???` → **0**; and a **valid but
+empty** `.ts` module → **1**. Python behaves identically (`def f(:` → 0, empty → 1). tree-sitter
+error-recovers and wraps the garbage in `ERROR` nodes, which `$A` matches, while a valid empty file
+gives `$A` nothing to match. **The exit code was encoding "did anything match", so broken output
+passed the gate and valid output failed it** — the probe was not weak, it was inverted, and the
+module docstring asserted the opposite of what the binary does. It had been in the tree for five
+checkpoints, and nothing found it until the real binary was run against it.
+
+`kind: ERROR` asks the parse question directly, and **`severity: error`** is what puts the answer in
+the exit code: a bare scan reports its findings and still exits 0.
+
+The second part is the same class of failure one layer up. `apply_patch` called `probe(patch.path)`
+while holding a `worktree`, so the repo-relative path was resolved against the process cwd;
+`ast-grep scan … missing.ts` prints `ERROR: No such file or directory` and exits **0**, which the
+gate read as "no `ERROR` nodes" and returned `True`. **A safety gate that passes silently when
+pointed at nothing is worse than no gate**, because the pipeline records `parse_probe_ok=True`.
+
+**Alternatives rejected.** *Read `--json` and check the match array is empty* — the obvious version,
+and it loses on the failure that matters: `ProcResult` exposes only `stdout_tail`, truncated to
+**32 KiB**, so a badly mangled file's match array arrives as unparseable JSON exactly when the file
+is at its most broken. An exit code cannot be truncated, and ast-grep's codes are **disjoint** — 1
+for a matched `severity: error` rule, 8 for an unusable rule document — so a broken tool cannot
+masquerade as a broken file. *Keep `--pattern '$A'` and invert its sense* — a valid empty module
+exits 1, so inversion trades every false pass for a false failure and blocks correct rewrites.
+*Raise `EngineUnavailableError` when the probe target is missing* — `cli._transform_criterion`
+(`cli.py:4149-4153`) buckets that exception into `parse_probe_unavailable`, which renders a
+non-blocking warning and adds **no** violation; raising would have routed a vanished file to a pass
+just as silently as the defect being fixed. Fail closed is the only option that changes the outcome.
+
+**A measured limit, recorded rather than papered over.** `kind: MISSING` is **rejected outright by
+0.45.1** — exit 8, `Cannot parse rule` — so a file that error-recovers into a `MISSING` token with
+**zero** `ERROR` nodes (an unclosed brace can do this) still reads as parsing. It is a false pass,
+not a false failure: it defers to the Phase 3 build gate rather than blocking a correct rewrite.
+*Agent judgement:* the tradeoff was accepted rather than worked around, because the only way to ask
+0.45.1 the `MISSING` question is a rule document the binary refuses to load. It is named in
+`docs/INTEGRATION_HONESTY.md`'s `ast-grep` row so it is a known gap and not an assumption.
+
+**Amends ADR-0013.** Its Phase 2 clause — *"the transformed tree parses (`ast-grep` exits 0 on a
+parse probe for every touched file)"* — is now true of the implementation and not only of the
+sentence. The wording needs no change; for five checkpoints the code beneath it exited 0 on
+`const = = ;` and 1 on a valid empty module.
+
+---
+
+## ADR-0048 — The root lockfile is a pnpm *workspace* with one importer per JS repo; a flat union keys on package name and silently drops the loser
+
+**Decision.** The monorepo's root `pnpm-lock.yaml` is resolved **once, as a pnpm workspace**, from a
+`pnpm-workspace.yaml` that lists **one package directory per JS repo**, each with its own
+`package.json`. The flat per-repo union is replaced. Three parts:
+
+1. **One importer per JS repo.** `_root_package_json` stops emitting a single flattened dependency
+   map for the whole fleet and emits one manifest per unit, under that unit's `dest`. The root
+   resolve produces ONE `pnpm-lock.yaml` carrying a separate `importers:` entry per repo.
+2. **The root `pnpm-lock.yaml` drops `carry_from`.** With ≥1 importer it is a resolution of the
+   *workspace*, which no single repo's lock is.
+3. **Python is decided the other way, on its own evidence** — one `requirements.lock`, one `@pypi`
+   hub, unchanged (see *Python* below). This is not the JS result generalized.
+
+**The defect.** `_module_inputs` (`cli.py:5868`) unions the fleet's root files with
+`support.setdefault(file.path, file)` (`cli.py:5934`) over `sorted(plans)` — **first `repo_id`
+wins**. Two JS repos each declaring `//:pnpm-lock.yaml` means one repo's external dependency is
+silently discarded; real Bazel then fails analysis with `no such target '//:node_modules/ms'`, while
+`fleet build` **exits 0**, because the losing repo's wave had already settled and nothing re-admits a
+settled wave. There is a **second, independent half**: the `_carried` short-circuit
+(`cli.py:5857`) skips the resolver entirely when a repo ships its own lock, and `js.py:521-525`
+declares `carry_from` for the root path — so two repos each shipping a *real* lock collide the same
+way, before any resolver runs.
+
+Flattening loses just as quietly one layer down, measured on the real function: `js.py:239-249`
+builds `dependencies` as a **dict keyed on package name**, so unioning two units overwrites in
+place. `_root_package_json([app ms@^2.0.0, report ms@^2.1.3])` emits `{"ms": "^2.1.3"}` — `^2.0.0`
+is gone, with no error. `_all_external` (`js.py:175`) sorts by `(key, version_spec)`, so the
+survivor is the **lexicographically largest specifier**, which has no semantic meaning.
+
+**Rationale.** *Agent Recommendation*, established by running real **pnpm 10.16.1**, not read
+anywhere. `pnpm install --lockfile-only --ignore-scripts` over a `pnpm-workspace.yaml` listing one
+package dir per repo was measured to preserve what the flat union destroys:
+
+- Three importers declaring `ms@^2.0.0`, `ms@^2.1.3` and an exact `ms@2.0.0` each kept **their own
+  `specifier:` verbatim**.
+- `ms@2.0.0` and `ms@2.1.3` **coexisted** in `packages:`/`snapshots:` with distinct integrity
+  hashes. Nothing was discarded.
+- Two independent resolves produced **byte-identical** output, so §11.6 byte-determinism holds.
+- A genuinely unsatisfiable range fails **loudly** and writes no lock:
+  `ERR_PNPM_NO_MATCHING_VERSION No matching version found for ms@^99.0.0`, exit 1, naming the
+  offending **importer path** — i.e. attributable to a repo, which is what Rule 11 needs.
+
+**An honest limit, stated rather than implied.** pnpm still dedupes *within* a satisfiable range: an
+importer declaring `^2.0.0` alongside one declaring `^2.1.3` resolves to `2.1.3`. **Only exact pins
+survive verbatim.** What multi-importer buys is that each repo's declared **specifier** is preserved
+and that **no repo's declaration is silently overwritten by another's** — not that every repo gets
+its own resolved version.
+
+**This does not violate the `carry_from` invariant.** Dropping `carry_from` on the root
+`pnpm-lock.yaml` does not contradict `models/build.py:148` — *"`carry_from` outranks `content`,
+always"*. That sentence ranks a carried lock against a **synthesized** one. With ≥1 importer the
+root lock is neither: it is a resolution of the workspace, which no single repo's lock is. This is
+`models/build.py:190`'s documented **`carry_from` → `Resolution` → `content`** precedence selecting
+the **middle** term, which exists for exactly this case.
+
+**Alternatives rejected.** *Write a second lockfile resolver that textually merges per-repo locks* —
+rejected, because the merge would have to recompute **peer resolution**: `snapshots:` keys are
+peer-suffixed (rules_js's own lock carries **43**, e.g. `'@babel/cli@7.28.3(@babel/core@7.28.5)'`),
+so a merger must know which suffixed snapshot each importer receives — that is re-implementing
+pnpm's solver. Worth recording precisely: integrity hashes alone *would* be mechanically
+preservable, since `packages:` entries are keyed `name@version` and carry `resolution: {integrity:
+…}` verbatim, so a union over disjoint keys needs no refetch. **That is not the hard part.**
+`js.py:503`'s *"nothing in this harness can reconstruct one"* therefore stands — no contradicting
+evidence was found. *Keep the flat union and make the collision loud instead* — turns a silent wrong
+build into a hard failure, which is better, but it fails every fleet where two repos legitimately
+want different versions, and pnpm already resolves that case correctly. *One `@pypi`-style hub per
+JS repo* — rejected on the same ground as ADR-0046's parallel-channel alternative: it multiplies the
+resolve when the ruleset already models exactly this shape.
+
+**Make-or-break compatibility — verified against the ruleset source, NOT against a green build.**
+`aspect_rules_js@3.4.0` — the version `src/fleet/settings.py:517` pins — consumes multi-importer
+locks natively: `npm/private/npm_translate_lock_generate.bzl:207-225` gates
+`npm_link_all_packages()` on the package being the pnpm root **or a workspace importer**, and
+`package_to_importer` (`:83-86`) maps every importer path to a Bazel package. The ruleset's own repo
+is this shape — **14 importers**, with `chalk` at `5.1.1` in `.` and `5.0.1` in
+`npm/private/test/npm_package`. **The limitation is explicit: this is a reading of the ruleset
+source, not a passing Bazel build.** Implementation must produce the green build before this ADR's
+compatibility claim is more than a source reading.
+
+**Consequences.**
+
+1. Dependency labels become **`//<dest>:node_modules/<pkg>`**, not `//:node_modules/<pkg>`.
+2. `.bazelignore` needs **one line per importer**: `npm_translate_lock_helpers.bzl:612-621` requires
+   `<importer>/node_modules`, and a bare `node_modules` line does **not** cover it.
+3. The root `npm_link_all_packages()` **stays**, because stores are emitted under `if is_root:`
+   (`npm_translate_lock_generate.bzl:418`).
+4. Three passages of prose in `src/fleet/ecosystems/js.py` are **falsified and must be corrected
+   during implementation** (not edited here):
+   - **`js.py:222-227`** — the docstring's rationale for `link:` over `workspace:`. Its stated
+     reason (`workspace:` "makes it a second lockfile importer", which is presented as the cost)
+     **inverts**: one importer per repo is now the decision, and the extra `.bazelignore` line and
+     `npm_link_all_packages()` call are the price of correctness, not an argument against it.
+     `link:` **itself still needs no change**, because `workspace:*` records `version:
+     link:../lib` anyway.
+   - **`js.py:514-515`** — *"this dialect still resolves exactly one importer"*. It resolves N.
+   - **`js.py:534-537`** — the justification for the single `node_modules` line in `.bazelignore`.
+
+**Python, decided separately and on its own evidence.** No multi-importer equivalent exists:
+`pip.parse(requirements_lock = "//:requirements.lock")` (`py.py:174`) builds **one** `@pypi` hub, and
+a requirements file is a flat set with one `==` per distribution. Python therefore **inherently
+forces one version per package fleet-wide** — that is a property of `pip.parse` plus the requirements
+format, *not* an inference carried over from the JS result. But Python's resolver input does **not**
+silently drop: `_requirements_text` (`py.py:326-349`) builds a set of full spec strings, so
+`urllib3<2` and `urllib3>=2.2` both survive into `requirements.in` and real `uv pip compile` fails
+loudly — `No solution found when resolving dependencies … unsatisfiable`, exit 1. The **carry** half
+of the defect *does* apply identically to `//:requirements.lock` (`py.py:180-210`), and a carried
+lock never reaches `uv`, so that collision is silent and must be fixed with the JS one.
+
+**Amends ADR-0046.** Its rejected alternative *"Make the siblings pnpm `workspace:` members"* was
+declined on the premise that *"`link:` keeps the monorepo root the single importer this dialect has
+always resolved"*. That premise no longer holds — the root is now a workspace with N importers — but
+ADR-0046's **decision** is untouched: `import_specifier` stays abstract, `workspace_deps` still takes
+the `BuildUnit`, and first-party siblings are still declared `link:<dest>`.
+
+---
+
+## ADR-0049 — `//:requirements.lock` is carried at **exactly one** contributing repo and **resolved** at two or more; Python is not pin-preserving and must not pretend to be
+
+**Decision.** `PyAdapter.workspace_files(units)` declares the root `//:requirements.lock` with:
+
+1. **`carry_from` set only when exactly one unit contributes** — the candidates
+   `<dest>/requirements.lock`, `<dest>/requirements.txt` of that one repo (`py.py:236-245`).
+2. **`carry_from` empty at two or more contributors**, which forces the `Resolution` — one real
+   `uv pip compile` over the union of every contributing unit's `external_coordinates`
+   (`py.py:252`).
+3. **`content` unions too** — the synthesized floor is `_requirements_text` over the concatenated
+   coordinates of every contributor, not of one.
+
+**The defect this closes.** `workspace_files` returned a **single** root `SupportFile` whose
+`carry_from` named only the **lexicographically-first** `dest`. `cli._carried` (`cli.py:5781`)
+short-circuits the resolver whenever a `carry_from` candidate exists in the merged tree, so when
+that one repo shipped a lock, **its single-package lock became the whole fleet's**: the other
+repo's distributions were absent from the `@pypi` hub, and `fleet build` **exited SUCCESS**.
+Measured on `[acme-app-py, acme-metrics-py]`: `py/acme-metrics-py` sorts before `py/acme_app_py`
+(`-` < `_`), so `requests` vanished. **Which repo won was an artifact of string ordering** — not of
+any property of the repos.
+
+`RootFileConflictError` (`cli.py:4488`) does not catch this and structurally cannot:
+`_fleet_support_files` (`cli.py:5926`) hands **every plan of one ecosystem the identical tuple**,
+so there is no byte divergence left for `_module_inputs` to detect. The union guard defends the
+root against *two adapters disagreeing*; it says nothing about *one adapter computing the wrong
+single answer*. This is the same defect as ADR-0048's, in its **carry** half rather than its
+content half, and it is worse in one specific way: the JS half produced a Bazel analysis error
+(`no such target '//:node_modules/ms'`) that a real build reported, while this one produced a
+**green build against a lock that was silently the wrong repo's**.
+
+**Rationale for the one/two split.** *Agent Recommendation.* A carried lock is honoured because
+**it is a resolution of exactly the set it must cover**. With one contributor that is true by
+construction: the fleet's Python coordinates *are* that repo's coordinates, so the repo's own lock
+is a resolution of the union, and re-resolving it would move versions the repo pinned and tested
+against — the precise harm `carry_from`'s precedence exists to prevent (ADR-0043). With two or
+more it is **false by construction**: one repo's lock is a resolution of a strict subset, and
+promoting it to the root silently deletes the other repos' distributions. The predicate is
+therefore "does this file resolve the whole union", and `len(contributors) == 1` is that predicate
+computed exactly, not a heuristic.
+
+**Dropping the carry is the `Resolution` middle term, not a violation of `carry_from` precedence.**
+`models/build.py:148` — *"`carry_from` outranks `content`, always"* — ranks a **carried** lock
+against a **synthesized** one, and that ranking is untouched here: at two or more contributors the
+root lock is neither. It is a resolution of the *union*, which no single repo's lock is. That is
+`models/build.py:190`'s documented **`carry_from` → `Resolution` → `content`** precedence selecting
+its **middle** term, which exists for exactly this case. Identical reasoning to ADR-0048's §2, and
+deliberately so: the two ecosystems reached the same rule from the same argument about what a root
+file *is*, which is the part that generalizes — not the pnpm-specific mechanism, which does not.
+
+**Python cannot be made pin-preserving, and this ADR does not attempt it.** ADR-0048 bought JS a
+per-repo `importers:` entry with each repo's `specifier:` preserved. **No Python equivalent
+exists**, and the reason is structural rather than a gap in this harness:
+`pip.parse(requirements_lock = "//:requirements.lock")` (`py.py:174`) builds **one** `@pypi` hub,
+and a requirements file is a **flat set with one `==` per distribution**. One version per package,
+fleet-wide, is a property of `pip.parse` plus the requirements format. Stating it plainly is the
+point: a reader who has just read ADR-0048 would otherwise expect the JS answer to carry over, and
+it does not.
+
+**A genuine conflict must fail loudly, and does.** `_requirements_text` (`py.py:367`) builds a
+**set of full spec strings**, not a name-keyed map — which is exactly what `js.py`'s root
+`dependencies` dict was and why *that* one overwrote in silence. So `urllib3<2` and `urllib3>=2.2`
+both survive into `requirements.in`, both reach real `uv pip compile`, and it fails
+`No solution found when resolving dependencies … unsatisfiable`, exit 1. *Agent Recommendation:*
+this is the **correct** outcome and no reconciliation should be added. Two repos that pinned
+genuinely incompatible ranges have a real disagreement that a single `@pypi` hub cannot represent;
+any automatic winner would be the ADR-0048 defect re-introduced deliberately, and the failure is
+per-repo, classified and attributable, which is what Rule 11 requires.
+
+**Evidence.** The union resolve was run, not reasoned about. The generated root lock, verbatim:
+`certifi`, `charset-normalizer`, `idna` (`# via requests`), `jinja2` (`# via -r requirements.in`),
+`markupsafe` (`# via jinja2`), `requests`, `urllib3`. **`markupsafe` and `certifi` are named by no
+manifest in the fleet** — they are the transitive closure, which is the one thing a promoted
+single-repo lock structurally cannot contain, and therefore the assertion that distinguishes a real
+resolve from the defect. Held by
+`test_a_second_python_repo_revokes_the_carry_and_forces_a_union_resolve` and, terminating in Bazel
+rather than in a file, `test_two_python_repos_with_different_pypi_dependencies_both_build`
+(`bazel build //...` over the `integration` branch, exit 0).
+
+**Alternatives rejected.** *Keep `carry_from` at N contributors and merge the carried locks* —
+rejected: merging two `==`-pinned locks requires re-resolving every transitive edge, which is
+`uv`'s job, and the harness would be writing a second resolver (ADR-0048 rejected the pnpm
+equivalent on the same ground). *Keep the carry and raise when two repos both ship locks* — turns
+a silent wrong build into a loud failure, which is better, but it fails the common and legitimate
+case where two repos' pins are perfectly compatible and `uv` would resolve them in one pass.
+*Emit one `requirements.lock` per repo and one `pip.parse` hub each* — rejected on ADR-0046's and
+ADR-0048's shared ground: it multiplies hubs to work around a resolve the tool already performs,
+and `@pypi//<pkg>` labels would stop being fleet-unique.
+
+**Consequences.**
+
+1. A single-Python-repo fleet is **unchanged** — same carried lock, same bytes, no resolver run.
+   The mechanical widening of `workspace_files` to `Sequence[BuildUnit]` was verified byte-identical
+   for the single-unit path across all six ecosystems before this rule was added on top.
+2. Adding a second Python repo to a fleet **revokes the first repo's carried lock**. That is a
+   visible behaviour change for an operator and it is intended: the alternative is the defect.
+3. `base.union_workspace_files` (`base.py:182`) is the shared union for the four adapters that
+   declare root files; the one/two carry rule is `py.py`'s own, because it is a statement about
+   what a *requirements* lock covers.
+4. **Unproven elsewhere.** `rust.py` (`Cargo.lock`) and `go.py` (`go.mod`) declare root files with
+   the same shape and have **never** been run with two repos of their ecosystem. This ADR decides
+   Python only; whether the same rule is right for a Cargo workspace is an open question, not an
+   answered one.
+
+---
+
+## ADR-0050 — The Go root `go.mod` union is **deferred** until a root `go.sum` exists; the collision is real, and fixing it first would produce a claim no test in this project could check
+
+**Decision.** `go.py`'s root-file handling is **left unchanged this round**. The Go root-file
+collision is confirmed real, recorded here in full, and **not fixed**. Three parts:
+
+1. **The collision is real and is the same defect as ADR-0048's and ADR-0049's** — one Go repo's
+   `go.mod` silently wins the root, the other's requirements vanish from the module graph.
+2. **The prerequisite is a root `//:go.sum`, and it does not exist anywhere in this project.**
+   `go.sum` has **zero** occurrences across `src/`, `tests/` and `docs/` — grepped, not recalled.
+   Without it `go_deps.from_file` cannot load a synthesized `go.mod` that carries any `require`.
+3. **Deferring is the decision, not the oversight.** Writing the union first yields a root file
+   that is more correct on paper and **equally unloadable** in Bazel, and — see below — **no
+   offline test in this suite could tell the two apart**, because nothing here runs Gazelle.
+
+**The collision, read off the code.** `GoAdapter.workspace_files` (`go.py:120`) delegates to
+`base.union_workspace_files` (`go.py:135`), whose merge is first-writer-wins —
+`merged.setdefault(file.path, file)` over units sorted by `(dest, unit_id)` (`base.py:200-202`).
+The per-unit contribution (`go.py:137-148`) is a single root `//:go.mod` whose `content` is
+`_go_mod_text(unit)` (`go.py:192`), rendering `module <that one unit's path>` (`go.py:209`),
+`go 1.23.4` (`go.py:211`, from `_GO_VERSION`, `go.py:34`) and a `require (…)` block built from
+**that one unit's** `external_coordinates` (`go.py:203`). With two Go repos the second unit's
+`go.mod` is discarded in silence: the root declares one repo's module path and one repo's
+requirements, and repo B's dependencies **do not exist in the module graph at all**.
+
+`RootFileConflictError` (`cli.py:4488`) structurally cannot fire on this, for exactly the reason
+ADR-0049 records: `_fleet_support_files` (`cli.py:5926`) hands **every plan of one ecosystem the
+identical tuple**, so `_module_inputs` (`cli.py:5977`) sees no byte divergence. The drop happens
+**inside the adapter, upstream of the guard**. This is the third instance of one shape, and the
+guard has now failed to catch all three.
+
+**What the correct shape would be — stated so the deferral is not mistaken for indecision.** One
+root module whose `module` path is the **monorepo's own**, with both repos as **packages inside
+it**, and the `require` blocks **unioned**. The supporting facts, read from bazel-gazelle's own
+`go_deps` extension source: `deps_from_go_mod` returns `(module, deps, replace_map, tools)` and
+the `module` value is consumed **only as the main module path**, while the `require` list is what
+becomes the `@com_github_…` repos. So unioning the requires is **mandatory** — it is the only term
+that produces repo B's dependencies — and the `module` line being one repo's path is the lesser
+half of the defect. Two further constraints:
+
+- **Only one `go_deps.from_file` tag is permitted per module**; a second makes gazelle fail with
+  `Multiple "go_deps.from_file" tags defined in module`. The fleet survives this today only
+  because `render_module_bazel` dedupes identical tag text —
+  `block += sorted(set(grouped[(ruleset, var)]))` (`bazel/generators.py:826`). That is a
+  coincidence of the renderer, not a property anyone designed for, and it is load-bearing.
+- **Import paths are not hostage to the `module` line.** `# gazelle:prefix <published path>` is
+  written per package (`go.py:169`, rendered by `render_gazelle_build`,
+  `bazel/generators.py:202-213`), so each repo keeps compiling from its own directory under a
+  monorepo-rooted module. Gazelle also requires `go >= 1.17` in the `go.mod`; the pinned `1.23.4`
+  passes.
+
+**The limitation on the paragraph above, stated rather than implied.** Those are readings of
+bazel-gazelle's source, in the manner ADR-0048 read `aspect_rules_js` — **not** a passing Bazel
+run. And unlike the rules_js case, the source is not even in this host's Bazel repository cache:
+`sums_from_go_mod`/`deps_from_go_mod` return **zero** hits across the whole cache, and no
+bazel-gazelle archive is in it, because **nothing in this project has ever fetched gazelle**.
+
+**The blocker.** `go_deps.bzl` calls `sums_from_go_mod` whenever the `go.mod` carries any
+`require`, and that function reads a **`go.sum` sitting beside the `go.mod`**. A **synthesized**
+union `go.mod` can never have a matching `go.sum` — the sums are content hashes of module zips
+that only a resolver can produce. So `go_deps.from_file` cannot load it. **This gap already exists
+for today's single-repo carried case**; the union does not create it. What the union does is make
+it **unavoidable**, because at one contributor a carried repo's own `go.sum` could in principle
+be carried alongside its `go.mod`, and at two it cannot.
+
+**Why nothing in this project can currently observe a Go build — the reason "just write the fix"
+is the wrong call.** `uses_gazelle = True` (`go.py:68`) makes `generate_targets()` (`go.py:150`)
+and `test_targets()` (`go.py:155`) return `[]` unconditionally. The generated Go `BUILD.bazel` is
+`render_gazelle_build` output: a header plus `# gazelle:` **directive comments and zero targets**
+(`bazel/generators.py:208-213`, whose docstring says so). `settings.py:563`'s
+`gazelle_binary = "//:gazelle"` is **referenced by nothing else in `src/`** — there is no
+`bazel run //:gazelle` call site anywhere in this codebase. Therefore a test mirroring
+`test_two_js_repos_…` / `test_two_python_repos_…` for Go would assert a `BUILD.bazel` exists and
+then run `bazel build //...` over a tree containing **no Go targets**, and **pass vacuously**.
+`docs/INTEGRATION_HONESTY.md` already carries this as UNPROVEN and states that nothing here
+compiles a line of go; this ADR is the first place that says what the consequence is for
+*fixing* the Go path: **a green Go two-repo test would be evidence of nothing.**
+
+**Host reality, since it bounds what a resolver step could do.** `go` **1.22.2** is installed at
+`/usr/bin/go`, but `go.py` pins SDK **1.23.4** for `go_sdk.download` — Bazel fetches that SDK, it
+does not adopt the host's. `GOPROXY` is `https://proxy.golang.org,direct`: a **live fetch**, in
+the same class as the live-registry fetches that produced this round's read timeouts (§19). The
+one genuinely favourable fact: unlike Rust, whose `cargo` is **absent from this host entirely**, a
+Go resolver **is** runnable here.
+
+**The correct ordering.** *Agent Recommendation.* Three steps, in this order, and the first is not
+skippable:
+
+1. **A root `//:go.sum`** — carried at **exactly one** contributing repo (ADR-0049's rule, for
+   ADR-0049's reason: that repo's sums are a resolution of exactly the set they must cover), and
+   **unsatisfiable at two or more without a `Resolution`** running **`go mod download all`**
+   (this entry originally named ~~`go mod tidy`~~ / ~~`go mod download`~~; **both are wrong** —
+   see the measured correction below) **pinned to the declared SDK version** so the sums match
+   the SDK Bazel will fetch.
+2. **Then the `go.mod` union**, in the shape above.
+3. **Then, separately, actually running Gazelle**, which is the only thing that can turn any of
+   this from a source reading into a result.
+
+> **Measured correction (2026-08-12) — step 1's resolver command was wrong, and is corrected in
+> place above.** The original text named "`go mod tidy` / `go mod download`". **Both named
+> commands are wrong.** This was measured, not reasoned: real `go 1.22.2` on this host, in a
+> scratch directory holding a synthesized `go.mod` and **no `.go` source files** — which is the
+> only shape `_run_resolution` ever produces, because it recreates the scratch directory empty
+> and writes **only `plan.inputs`** into it (`cli.py:5819-5830`), and inputs are support files,
+> never sources. The deferral itself is unaffected and still stands; what was wrong was the
+> command the eventual `Resolution` was told to run.
+>
+> - **`go mod tidy` is catastrophic here.** It printed `go: warning: "all" matched no packages`,
+>   **deleted the entire `require` block from the `go.mod`**, and wrote **no `go.sum` at all**.
+>   That is `tidy` behaving correctly: with no `.go` files nothing is imported, so every
+>   requirement is unused and is pruned. Run against the very root file this ADR is about, it
+>   would leave a `module` + `go` line and nothing else. `_run_resolution`'s "exited 0 but wrote
+>   no usable lock" guard (`cli.py:5852`) would then fire — loud, but only after the command had
+>   already destroyed its own input.
+> - **`go mod download` (bare) is incomplete, and fails *quietly*, which is worse.** It wrote a
+>   `go.sum` containing only the `/go.mod` hash lines and **no `h1:` module-zip hashes**. That
+>   file is worse than a missing one: it is non-empty, so the "exited 0 but wrote no usable lock"
+>   guard **passes it**, and `sums_from_go_mod` — which is reading for the `h1:` zip hash — still
+>   cannot use it. A silent half-answer is precisely the defect class the `Resolution` seam
+>   exists to close.
+> - **`go mod download all` is the correct command.** It wrote both the `h1:` and the `/go.mod`
+>   line for every module, and the **full transitive closure**: a `go.mod` requiring only
+>   `github.com/stretchr/testify v1.9.0` produced sums for **five** modules (`davecgh/go-spew`,
+>   `pmezard/go-difflib`, `stretchr/objx`, `testify`, `gopkg.in/yaml.v3`), four of which the
+>   `go.mod` never names. It left the `go.mod` **byte-identical** (`diff`, for bare `download`
+>   and for `download all` alike): `-mod=readonly` has been the default since Go 1.16, so the
+>   resolver **cannot** rewrite its input, and an unresolvable pin errors instead of being
+>   silently relaxed.
+
+**Supporting facts, all measured this round (2026-08-12), same host, same scratch-dir method.**
+These bear on the `Resolution` step 1 calls for; `go.py` declares **no `resolution()` today**, so
+none of them describe current behaviour.
+
+1. **`go.sum` is byte-deterministic, which is what §11.6 requires of any file the fleet writes.**
+   Two clean runs of `go mod download all` over the same `go.mod` produced **byte-identical**
+   `go.sum` (`diff`); a run against a **cold, private `GOMODCACHE`** produced a file
+   **byte-identical** to the warm-cache run; and rerunning in place over an existing `go.sum` left
+   it unchanged (idempotent). Ordering is lexicographic by module path, then version, with the
+   `h1:` line before the `/go.mod` line. So a resolved `go.sum` does not make the same plan render
+   different bytes in two processes.
+2. **The host SDK mismatch is survivable but unpinned — a named gap, not a solved problem.** Host
+   `go` is **1.22.2** and `go.py` pins **1.23.4** (`_GO_VERSION`, `go.py:34`), which
+   `_go_mod_text` writes into the `go` line. With `GOTOOLCHAIN=auto` (this host's `go env` value)
+   `go mod download all` **silently downloads go1.23.4** and succeeds; with `GOTOOLCHAIN=local` it
+   fails hard — `go: go.mod requires go >= 1.23.4 (running go 1.22.2; GOTOOLCHAIN=local)`, exit 1;
+   with `GOTOOLCHAIN=go1.23.4` it is pinned exactly and succeeds. **`Resolution` has no `env`
+   field** (`models/build.py:173` — `lock_path`, `argv`, `inputs`, `timeout_s`) and
+   **`_run_resolution` never passes `env=`** (`cli.py:5834`), *despite* `CommandRunner` accepting
+   one (`util/proc.py:115`). The consequence is exact: which SDK computes the sums depends on a
+   host environment variable **no test in this project controls**. *Agent Recommendation:* the
+   minimum honest fix is an `env` field on `Resolution` threaded through to the runner. The
+   in-contract workaround `argv = ["env", "GOTOOLCHAIN=go1.23.4", "go", "mod", "download",
+   "all"]` does work, at the cost of making the driver's not-installed error
+   (`cli.py:5839`, which quotes `plan.argv[0]`) name **`env`** instead of `go`.
+3. **`_go_mod_text` renders an unresolvable floor, so the `go.mod` input must be carry-only.**
+   Absent versions default to `v0.0.0` (`go.py:202`), and `go mod download all` rejects that
+   outright: `go: github.com/google/uuid@v0.0.0: invalid version: unknown revision v0.0.0`,
+   exit 1. Worse, for this suite's own shared parameterized unit — `Coordinate(name="left-pad",
+   version_spec="^1.3.0")`, `tests/test_ecosystems.py:903` — the renderer emits `left-pad
+   ^1.3.0`, which is neither a module path nor a Go version, and `go` refuses to parse the file:
+   `go.mod:6:2: malformed module path "left-pad": missing dot in first path element`, exit 1.
+   *Agent Recommendation:* the `Resolution`'s `go.mod` input should therefore be **carry-only**
+   (`carry_from` populated, `content` left empty), so a repo with no real `go.mod` trips the
+   driver's own loud "neither a carried file nor a synthesized floor produced any content"
+   failure (`cli.py:5824`) instead of a confusing `go` parse error about a file the harness
+   invented.
+
+   > **Amended by ADR-0051 — carry-only is retired; the `Resolution`'s `go.mod` input is now the
+   > union itself.** *Amended rather than superseded, and the distinction is the point:* ADR-0050
+   > decided **defer, in this order**, and its own **step 2 was then carried out** — this fact
+   > expired by being *acted on*, not by being *reversed*. What changed underneath it is that the
+   > two defects it measured were properties of the **renderer**, not of synthesis:
+   > `_require_line` (`go.py:353`) now validates the module path and the version and raises
+   > `GoModuleCoordinateError` (`go.py:92`) naming the coordinate, with an explicit `v0.0.0`
+   > rejection; and `_go_requires` (`go.py:387`) **excludes** non-Go coordinates by type, which is
+   > what removed the `left-pad ^1.3.0` case this fact cites. Carry-only and a unioned root file
+   > were irreconcilable in principle (ADR-0051, *The crux*), so the input is `carry_from=[]`,
+   > `content=_go_mod_text(requires)` — the same call `workspace_files` makes. The guard this fact
+   > bought is genuinely given up; it is recorded as ADR-0051 consequence 1.
+4. **`go.sum` must never be carried — `carry_from=[]`, always. This narrows step 1's carry half,
+   and the conflict is stated rather than averaged:** step 1 above reads "carried at exactly one
+   contributing repo … and a `Resolution` at two or more", by analogy to ADR-0049; on the
+   evidence below the `Resolution` is the right answer at **every** count, including one, and the
+   carry clause of step 1 should not be implemented. *Agent Recommendation:* follow
+   `js.py`'s workspace-lock rule (`js.py:618-631` — the lock drops its `carry_from` because the
+   file describes the whole workspace, not one repo) rather than `py.py`'s one-contributor rule
+   (`py.py:196-211`). A `go.sum` is a list of content hashes valid **only** against the `go.mod`
+   sitting beside it; carrying one repo's sums next to another repo's `go.mod` is wrong in both
+   directions — missing hashes for what the `go.mod` requires, stale hashes for what it does not
+   — and would **manufacture a checksum mismatch**, the one class of failure this ADR has already
+   said the harness must never invent. Adopting the Python rule at one contributor would work
+   today and become a silent regression the moment the `go.mod` union of step 2 lands, because
+   the carried sums would then cover a strict subset of the unioned requires.
+
+**Alternatives rejected.** *Write the union now and land the `go.sum` later* — rejected: it lands
+a change whose only available verification is vacuous, and this project's own record (§18's D13
+and D14, and `INTEGRATION_HONESTY`'s "third instance, same shape") is that a green result standing
+in for a check nobody ran is the failure mode that has cost the most here. *Emit `go.sum` as a
+synthesized floor the way `_go_mod_text` synthesizes `go.mod`* — rejected outright: a `go.sum`
+line is a hash of a module zip, so a synthesized one is either absent or **wrong**, and a wrong
+sum fails as a security check, which is the one class of failure that must never be invented by
+this harness. *Drop the `require` block from the root `go.mod` so `sums_from_go_mod` is never
+reached* — rejected: it loads, and it produces a module graph with **no external dependencies for
+any repo**, which is a strictly worse silent drop than the one this ADR declines to fix.
+
+**Consequences.**
+
+1. **The Go root-file collision remains open and is now documented**, not fixed. Two Go repos in
+   one fleet produce a root `go.mod` naming one repo's module path and one repo's requirements.
+   Anyone reading `go.py` should read this ADR before "fixing" it.
+
+   > **Amended by ADR-0051 — the collision is closed, by this ADR's own step 2.** *Amended, not
+   > superseded, for the same one-line reason as fact 3: the deferral was honoured and then lifted
+   > on schedule, so this entry is the record of a decision that was carried out.*
+   > `GoAdapter.workspace_files` (`go.py:188`) no longer routes through
+   > `base.union_workspace_files`; it renders **one** root file from two pure functions,
+   > `_go_requires(units)` → `_go_mod_text(requires)` (`go.py:387`, `go.py:416`), with
+   > `carry_from=[]`. The root now declares the monorepo's own module path
+   > (`_MONOREPO_MODULE = "fleet.internal/monorepo"`, `go.py:47`) over **every** Go unit's
+   > requirements, and no repo's requirements are dropped. The sentence "anyone reading `go.py`
+   > should read this ADR before fixing it" still holds — they should read ADR-0051 next.
+2. **ADR-0049 consequence 4 is narrowed for Go and stands for Rust.** Whether ADR-0049's
+   one/two carry rule is right for a Cargo workspace is still open; for Go the rule is *probably*
+   right and **provably unverifiable today**, which is a different status and is why this ADR
+   exists rather than a Go clone of ADR-0049.
+3. **`docs/INTEGRATION_HONESTY.md`'s count is corrected**: the fixture is **one** JVM repo
+   (`acme-commons-java`) and **zero** Go and **zero** Rust repos. The earlier "exactly one repo
+   for go, jvm and rust" overstated coverage for two ecosystems out of three.
+4. **The blocking item is a `go.sum` resolver step, not a `go.mod` edit.** Any future task that
+   opens with "union the Go root file" has the order backwards.
+5. **The resolver command is `go mod download all`, and the two commands this entry originally
+   named are disqualified for opposite reasons** — `go mod tidy` destroys the `go.mod` and emits
+   no lock; bare `go mod download` emits a lock that passes the harness's emptiness guard while
+   being unusable by `sums_from_go_mod`. Anyone implementing step 1 should treat the second as
+   the more dangerous of the two.
+6. **A resolved `go.sum` does not threaten §11.6.** Byte-determinism was measured across repeat
+   runs, across a cold vs. warm module cache, and on rerun in place, so the eventual step 1 does
+   not reintroduce the "same plan, different bytes" problem.
+7. **`Resolution` cannot currently pin the Go toolchain, and that is now a named gap.** Until an
+   `env` field exists (or the `env`-prefixed `argv` workaround is adopted), the SDK that computes
+   the sums is decided by the host's `GOTOOLCHAIN`, which no test controls — an implementation of
+   step 1 that ignores this is nondeterministic in a way this project's suite cannot see.
+8. **None of this is a Go build.** These measurements are of `go` itself in a scratch directory.
+   Gazelle still never runs, no Go fixture repo exists, and nothing here compiles a line of Go —
+   the standing position of `docs/INTEGRATION_HONESTY.md` and of this ADR's own §"Why nothing in
+   this project can currently observe a Go build" is unchanged.
+
+---
+
+## ADR-0051 — The Go root `go.mod` is the monorepo's own module over the **union** of every Go unit's requirements, and the `go.sum` resolver's input is that same union: one renderer, called twice
+
+**Decision.** ADR-0050 **step 2** is implemented. `GoAdapter.workspace_files` (`go.py:188`) stops
+delegating to `base.union_workspace_files` and renders **one** root `//:go.mod` from two pure
+functions — `_go_requires(units)` (`go.py:387`) → `_go_mod_text(requires)` (`go.py:416`). Five
+parts:
+
+1. **The `module` line is the monorepo's own**, `_MONOREPO_MODULE = "fleet.internal/monorepo"`
+   (`go.py:47`), never one contributing repo's path. ADR-0050 read this off bazel-gazelle's
+   `deps_from_go_mod`, which consumes the value **only** as the main module path; a main module is
+   never fetched, so the name has one job and it is to name a module that is not any repo's.
+2. **The `require` block is the union**, sorted and deduped **on the rendered line, not on the
+   module path**. Two repos pinning one module at different versions contribute **two** lines and
+   **Go's own MVS** takes the higher. This harness reconciles nothing — the same
+   "let the Go toolchain decide" rule `workspace_deps` already applied to a single file.
+3. **`carry_from=[]` on the root `go.mod`**, for `js.py`'s `pnpm-workspace.yaml` reason in Go's
+   dialect: the root file is a statement about the *fleet*, which no single repo's file is, and
+   promoting one would additionally short-circuit `cli._carried` so **no resolver ran at all**.
+   The repo's own `go.mod` is not lost; Phase 2 left it at `<dest>/go.mod`.
+4. **`resolution()`'s input is the union itself** (`go.py:244`) — `carry_from=[]`,
+   `content=_go_mod_text(requires)`, the *same call* `workspace_files` makes — replacing the
+   carry-only input the seam shipped with in §21.
+5. **Validate or fail loud, with a type filter in front of it.** `_require_line` (`go.py:353`)
+   renders only what `go` accepts and raises `GoModuleCoordinateError` (`go.py:92`) **naming the
+   coordinate** otherwise; coordinates whose ecosystem is not Go are **excluded**, not raised on.
+
+`_sum_contributor` — §21's "pick the first contributing unit's `go.mod`" helper — is **deleted**.
+The coupling ADR-0050 step 2 was told to revisit is not re-pointed; it no longer exists.
+
+**What the union renders.** For a two-unit fleet:
+
+```
+// GENERATED BY fleet — the monorepo's own module over every Go repo's requirements.
+module fleet.internal/monorepo
+
+go 1.23.4
+
+require (
+	github.com/google/uuid v1.6.0
+	github.com/stretchr/testify v1.9.0
+)
+```
+
+**The crux, and why it forced the input to change.** §21's `Resolution` used a **carry-only**
+`go.mod` input, on ADR-0050 fact 3's reasoning that the synthesized floor was invalid. A union is
+**synthesized by construction**, so carry-only and the union are irreconcilable: sums resolved
+from repo A's carried file, sitting beside a *unioned* root file, are missing a hash for every
+other repo's module. Every hash in that file would be **individually correct** and the file **as a
+whole wrong** — the checksum mismatch `workspace_files` explicitly refuses to manufacture,
+arriving by a back door. Passing the union as the input makes "the sums hash the `go.mod` that
+lands" true **by construction** rather than by a selection rule that has to be kept in step by
+hand. This is what supersedes ADR-0050 fact 3 and closes ADR-0050 consequence 1; both are marked
+in place there as **amended**, because ADR-0050's decision was *defer, in this order*, and the
+order was followed rather than reversed.
+
+**Why synthesis is now valid, which is what made that possible.** Real Go coordinates come from
+the Go manifest parser, which already rejects any requirement whose version does not start with
+`v` and takes module paths **verbatim** from a `go.mod` that `go` itself accepted. On top of that,
+`_require_line` validates the module path (regex, plus the dot-in-first-element rule `go` names in
+its own error) and the version (regex, plus an **explicit `v0.0.0` rejection** — the old default
+for a coordinate whose manifest named no version, and the one `go` answers `unknown revision
+v0.0.0` to). Both failures raise `GoModuleCoordinateError` naming the coordinate, so the error
+arrives **at the harness, naming the offending dependency**, not inside `go` naming a file the
+harness invented (Rule 11). Held by
+`test_a_go_coordinate_that_cannot_be_a_require_line_fails_loudly` (`tests/test_ecosystems.py`).
+
+**Why a non-Go coordinate is excluded rather than raised on — the one place this ADR does not
+fail loud, stated rather than implied.** `cli._external_coordinates` re-reads **every manifest a
+repo ships**, dispatching on the file and not on the unit's ecosystem, so a Go-primary repo that
+also has a `package.json` carries **npm** coordinates in its `external_coordinates`. An npm
+package is not a Go module in **any** rendering, and nothing about the Go module graph is lost by
+excluding it — the JS adapter's own root files are where that dependency is expressed. That type
+filter, not the validator, is what stops the `left-pad ^1.3.0` case ADR-0050 fact 3 cites; the
+loud path is reserved for coordinates that **claim** Go and still cannot render. *Agent
+Recommendation:* the split is deliberate — raising on a foreign-ecosystem coordinate would make
+every polyglot Go repo a hard run failure for a dependency the fleet handles correctly elsewhere.
+
+**Measured against real `go` — manually, in a scratch directory, and NOT in the suite.** The
+emitted union file **loads**: `go list -m all` reaches `missing go.sum entry`, i.e. **past
+parsing**, which is where every one of ADR-0050 fact 3's failures stopped. `go mod download all`
+over it exits **0**, writes sums for the **full transitive closure of both** repos' modules, and
+leaves the `go.mod` **byte-identical**. **Duplicate module paths at different versions are not an
+error**: a file requiring `testify` at both `v1.9.0` and `v1.8.0` loads silently and MVS selects
+`v1.9.0` — which is why part 2 emits both pins instead of picking one.
+
+> **Caveat, recorded because it bounds the measurement.** These runs were made under
+> `GOTOOLCHAIN=local` with the `go` directive **lowered to 1.21**, because the host SDK is
+> **1.22.2** while the harness pins **1.23.4**. The file that was measured is therefore the
+> emitted union with one line changed. Nothing was measured under the pinned SDK.
+
+**The `Resolution.env` round, which landed immediately before this and is its prerequisite.**
+ADR-0050 consequence 7 named the SDK pin as an open gap; it is now closed. `Resolution` gained an
+`env: dict[str, str]` field (`models/build.py:214`) with `default_factory=dict`, so **one
+resolver's environment cannot leak into another's**. The driver merges it as
+`{**os.environ, **plan.env}` **at the call site** (`cli.py:5844`) — an **overlay, never a
+replacement** — because `util/proc.run` **replaces** the child environment wholesale; forwarding
+`plan.env` alone would launch `go` with no `PATH` and surface as "`go` is not installed on this
+host". `go.py` declares `env={"GOTOOLCHAIN": f"go{_GO_VERSION}"}` (`go.py:308`) off the **existing
+SDK constant** rather than a second copy of the version, so the sums are computed by the same SDK
+Bazel will fetch. `py.py` and `js.py` resolve with an **empty** env, guarded by
+`test_a_resolution_declares_no_environment_unless_it_needs_one` and
+`test_the_python_and_js_resolvers_declare_no_environment` (`tests/test_ecosystems.py`).
+
+**Alternatives rejected.** *Keep the carry-only input and union only the workspace file* —
+rejected as the crux above shows: it produces individually-correct hashes of the wrong file, which
+is strictly worse than no sums, because a checksum mismatch inside Bazel reads as a supply-chain
+compromise. *Re-point `_sum_contributor` at whichever unit the union "mostly" came from* —
+rejected: there is no such unit, and a selection rule kept in step by hand is precisely the class
+of coupling ADR-0050 step 2 was told to revisit. *Deduplicate the union on module path and pick
+the higher version in the harness* — rejected: MVS is Go's job, it was measured doing that job,
+and a harness-side pick is a reconciliation `workspace_deps` forbids. *Raise on non-Go coordinates
+for symmetry with `_require_line`* — rejected, see the type-filter section: the driver's
+manifest-blind re-read makes foreign coordinates **normal**, not exceptional.
+
+**Consequences.**
+
+1. **The driver's "neither a carried file nor a synthesized floor produced any content" guard
+   (`cli.py:5824`) is no longer reachable for `go.mod`.** A synthesized input always has content,
+   so a Go repo shipping no `go.mod` at all no longer trips it — it trips nothing, and the union
+   simply carries no line for a repo that declared no requirement. This is a real capability given
+   up, in exchange for the crux above, and is recorded plainly rather than softened.
+2. **`GoModuleCoordinateError` is NOT caught by the driver's per-ecosystem containment.**
+   `_resolved_support_files` catches only `DependencyResolutionError` (`cli.py:5980`), so an
+   unrenderable Go coordinate **propagates as a hard run failure** for the whole fleet instead of
+   being attributed to that ecosystem's repos the way a resolver failure is. This is a **known
+   containment gap, deliberately left** — the alternative was widening a catch clause in the same
+   round that changed what it protects — and it is the top follow-up item in `docs/PROGRESS.md`
+   §22.
+3. **`go.sum` and the `Resolution` are gated on the union being non-empty, not on any unit having
+   coordinates.** A fleet whose Go units declare **only non-Go** coordinates now gets a valid,
+   require-less `go.mod` and **no `go.sum`** — `resolution()` returns `None` (`go.py:287`). Before
+   the gate, `go mod download all` over a require-less `go.mod` writes no `go.sum` and the
+   resolver would trip the driver's "exited 0 but wrote no usable lock" guard, reporting a
+   resolver failure for a fleet whose Go repos genuinely have no Go dependencies.
+4. **ADR-0050's fact 3 and consequence 1 are amended in place, not deleted.** The record of the
+   deferral, its evidence and its ordering stands unedited; only its expiry is marked.
+5. **None of this is a Go build, and the standing position does not move.** `uses_gazelle = True`
+   (`go.py:136`) still makes `generate_targets()` (`go.py:311`) return `[]`, **gazelle still never
+   runs**, there is still **no `bazel run //:gazelle` call site** anywhere in `src/`, there are
+   still **zero Go fixture repos**, and **no real `go` executes inside the suite** — the
+   measurements above are of `go` in a scratch directory, by hand. A Go two-repo Bazel test would
+   still pass **vacuously**. What this ADR changes is what the harness can *express*, not what it
+   has *proven*.
+
+---
+
+## ADR-0052 — An adapter that cannot render a coordinate raises an **ecosystem-neutral** error; the driver catches that neutral type and re-raises its own sibling of `DependencyResolutionError` under a **new** finding kind
+
+**Decision.** ADR-0051 consequence 2 — the containment gap left deliberately open — is closed, in
+the only shape §12.6 permits. Four parts:
+
+1. **A neutral adapter exception.** `AdapterCoordinateError(ValueError)` is new in
+   `src/fleet/ecosystems/base.py` (`base.py:77`) and re-exported from the package
+   (`ecosystems/__init__.py`). `GoModuleCoordinateError` (`go.py:93`) **subclasses** it. Nothing
+   in Go's message, its raise sites or its existing test
+   (`test_a_go_coordinate_that_cannot_be_a_require_line_fails_loudly`, `tests/test_ecosystems.py`)
+   changes — the class gained a base and nothing else. There was no neutral type to reuse:
+   `base.py` owned exactly one exception, `RegistryNotDiscoveredError`.
+2. **A driver-side sibling, not a widened catch.** `CoordinateRenderError(BuildStepUnavailableError)`
+   (`cli.py:4489`) sits beside `DependencyResolutionError` (`cli.py:4470`) under the **same
+   containment base**, so the containment is identical — the ecosystem's repos are abandoned, the
+   fleet continues. `_fleet_support_files` catches the **neutral** type and re-raises this one
+   (`cli.py:6027`), setting `__cause__` to the adapter's exception so the coordinate the adapter
+   named survives into the report.
+3. **A new classification bucket**, `"CoordinateRenderFailed"` (`cli.py:6908`), read off the
+   **driver's own** exception type, following the established `<Thing>Failed` convention. The
+   message names **both** the offending coordinate (the adapter's contribution) and the repos the
+   render was being performed for (the driver's).
+4. **A structural invariant that can see this class of defect**, which the existing §12.6 greps
+   could not: `test_no_adapter_package_exception_is_named_outside_the_adapter_packages`
+   (`tests/test_ecosystems.py`).
+
+Affected repos land in `REQUIRES_HUMAN_INTERVENTION` with a finding, and the wave continues.
+
+**The distinction this ADR exists to draw.** `go.py` raising on a coordinate that claims the Go
+ecosystem and cannot become a valid `require` line is **correct** and is not what changed. What
+changed is where that loudness landed. Because the per-ecosystem containment caught only
+`DependencyResolutionError`, the Go error propagated out of `_fleet_support_files` and out of
+`build`, so **one malformed coordinate in one repo cost every other ecosystem's repos their
+build**. CLAUDE.md Rule 11 asks for the other shape — *mark the target repo as
+`REQUIRES_HUMAN_INTERVENTION` and move to the next item*. **Failing loudly and failing globally
+are different things**, and only the first was ever the requirement; the second was an accident of
+which types the `except` clause listed.
+
+**Why the driver catches the NEUTRAL type — the constraint that forced two classes where one
+would do.** The obvious one-line fix is `except GoModuleCoordinateError` in `cli.py`. That is
+**language knowledge in a driver**, which §12.6 (and §13 row 33) forbid: the CLI must not know
+that an ecosystem named Go exists. It is also a defect that scales badly rather than an
+inelegance — the next adapter with a grammar for a root file writes
+`class FooCoordinateError(ValueError)`, reintroduces the original run-ending behaviour **silently**,
+and every existing test still passes, because the second `except` clause is one nobody thinks to
+add. Routing through a base that `base.py` owns puts the obligation on the adapter author (raise
+the neutral type, or subclass it) where it is discoverable, instead of on a driver author who has
+no reason to look. `ValueError` is retained in the lineage deliberately: `GoModuleCoordinateError`
+shipped as one, and dropping it would break any caller that catches it, including tests written
+before this round.
+
+**Why a *sibling* driver type rather than passing the adapter's exception through.** The adapter's
+exception is the wrong object for the driver's job in two ways. It knows the coordinate but not
+the repos — the driver adds `members`, because the root file is **one file for the whole
+ecosystem** and a render that fails fails for all of that ecosystem's repos at once, exactly as a
+resolver failure does. And a `findings.kind` read off an adapter's class name would put an
+ecosystem's vocabulary into the operator-facing taxonomy. Re-raising as
+`CoordinateRenderError` with `__cause__` set keeps the adapter's message verbatim while leaving
+every name the driver speaks ecosystem-agnostic.
+
+**Why a new finding kind instead of reusing `DependencyResolutionFailed`.** The two say different
+things to an operator, and the cheaper reuse would actively mislead. A resolution that failed is a
+fact about **something out there**: a package index did not answer, or two specs cannot both hold.
+A coordinate that cannot be rendered is a fact about **this fleet's own Phase 1 inventory** — it
+names a module path or a version that cannot be written into the ecosystem's root file at all, so
+**no resolver ever ran and no index was ever contacted**. Filing it as `DependencyResolutionFailed`
+would send a human to a registry to debug a string that is sitting in one of their own manifests.
+The `<Thing>Failed` naming convention is the existing one and is followed rather than invented.
+
+**The invariant, and what it caught on its way in.** The scan AST-collects every class name ending
+in `Error` declared anywhere in `manifests/` and `ecosystems/` **outside** their own `base.py`,
+then greps **all** of `src/` outside those two packages for any mention of those names. This is
+the one form of language knowledge the pre-existing §12.6 greps structurally **cannot** see: they
+match `if …ecosystem ==` and `Ecosystem.<MEMBER>`, and `except GoModuleCoordinateError` matches
+neither while being language knowledge in a driver just as surely. The scan needs no allowlist and
+cannot be widened without **moving the class**, which is the point of asserting it structurally
+rather than by file and line. It immediately did work: it forced **two `cli.py` docstring lines
+written by this round's own implementer** to be reworded, because they named `Ecosystem.GO` and
+the Go class by name — the invariant catching the change that introduced it.
+
+**Verified by mutation, not by assertion alone.** Replacing the new `except` clause with a
+non-matching type made **both** new e2e tests fail with the raw `AdapterCoordinateError` escaping
+the driver; the clause was restored and the tests re-verified. Held by
+`test_an_unrenderable_coordinate_is_contained_to_its_own_ecosystems_repos` and
+`test_a_coordinate_render_failure_marks_its_repos_and_the_rest_of_the_fleet_builds`
+(`tests/test_build_e2e.py`), plus
+`test_an_adapters_unrenderable_coordinate_error_is_the_neutral_one_the_driver_can_catch` and the
+invariant above (`tests/test_ecosystems.py`).
+
+**Alternatives rejected.** *`except GoModuleCoordinateError` in the driver* — rejected, see above:
+it is the §12.6 violation, and it is silently non-transferable to the next adapter.
+*Make `GoModuleCoordinateError` a subclass of `DependencyResolutionError` and change nothing else*
+— rejected: it buys the containment for free but asserts something false, that a package index was
+consulted, and it inverts the dependency by putting a driver type in an adapter's lineage.
+*Reuse the `DependencyResolutionFailed` bucket with the neutral class* — rejected for the
+operator-routing reason above. *Have adapters swallow an unrenderable coordinate and record a
+finding themselves* — rejected: adapters do not own the run's findings, and it re-opens the
+"drop a dependency with nothing recorded" hole `AdapterCoordinateError`'s own docstring refuses.
+*Agent Recommendation:* the neutral-base-plus-driver-sibling split is a judgement call about where
+the obligation should sit, not a requirement stated anywhere; the binding constraints were only
+Rule 11's containment shape and §12.6's ecosystem-agnostic driver, and those admit other shapes.
+
+**Consequences.**
+
+1. **`AdapterCoordinateError` is now the contract for adapter authors**, and the invariant enforces
+   the half of it that can be enforced mechanically (the class does not leak by name). That an
+   adapter *raises the neutral type at all* is still a convention a new adapter can ignore by
+   raising a bare `ValueError`; nothing detects that.
+2. **`AdapterCoordinateError` is NOT reachable from the build-preparation path today, and that
+   `except` clause was deliberately left alone.** An adapter raising it from `workspace_deps` or
+   `package_files` would still escape as a hard run failure. Unreachable today is not guarded
+   tomorrow; this is the standing follow-up, recorded in `docs/PROGRESS.md` §23.
+3. **Rule 11's "after 3 retries" rung is not involved.** This is a **pre-lease preparation
+   failure**, terminal on first occurrence — there is no retry ladder here to exhaust, and none
+   was added.
+4. **What the tests prove is attribution and containment, not Go.** There is still **no `go`, no
+   gazelle, no `go mod download all` and no Go repo in the fixture fleet**; the Go half is
+   exercised at the fleet-support-file layer with a **fake resolver**. Nothing here says any
+   `go.mod` or `go.sum` is correct, or that Bazel accepts one.
+5. **The full-chain "the rest of the fleet builds" test drives a PATCHED PYTHON adapter** raising
+   the neutral error, so the survival behaviour is proven for a fleet whose **surviving ecosystem
+   is JS** — **not** for a fleet that actually contains Go repos alongside others. Bazel is faked
+   in those tests, so the survivors' `SUCCEEDED` is the state machine's verdict over a faked
+   build.
+6. **ADR-0051 consequence 2 is closed by this ADR**; ADR-0051 consequence 1 (the unreachable
+   empty-content guard for `go.mod`) is untouched and still stands.
+
+---
+
+## ADR-0053 — One snapshot per **wave**, not per repo: a snapshot's *domain* is the plan set its root files were computed over, and a pre-dispatch guard refuses to dispatch a worktree that cannot contain that domain
+
+**Decision.** Phase 3 stops cutting a build worktree per repo from that repo's own merge. Four
+parts:
+
+1. **`_prepare_build` is split into three passes.** An **ingest** pass
+   (`_ingest_build_source`, `cli.py`) merges each repo's relocated history into the integration
+   branch under the writer mutex; **one** `_wave_snapshot` runs **after the wave's last ingest**;
+   a **plan** pass (`_plan_build`) cuts **every** member's worktree from that **single ref**.
+2. **A snapshot's domain is stated, not implied.** The domain is the set of plans the fleet-wide
+   root files were computed over. A worktree cut from a snapshot whose domain it cannot contain is
+   an invalid build input, and the root files are the thing that makes it invalid.
+3. **A pre-dispatch guard.** `RootFileDomainError` (`cli.py`) plus a check, before any lease is
+   taken, that every `dest` in the domain the fleet-wide root files were computed over **exists as
+   a directory** in every worktree about to be dispatched. It is **ecosystem-neutral**, **offline**,
+   and runs **before** any build system.
+4. **Snapshot immutability is untouched.** That is the property SPEC §3.3 fixes and it is
+   preserved verbatim; the per-repo *cut point* was never the property.
+
+**The defect this ADR exists to fix (D15).** Fleet-wide root files are computed over **every plan
+prepared so far**, while each build worktree was cut at **that repo's own merge**. So the root
+`Cargo.toml`'s `members` list could name a directory that repo's snapshot did not yet contain.
+Cargo does not warn and does not skip — it **hard-fails the whole workspace** on an unreadable
+member:
+
+```
+error: failed to load manifest for workspace member ...
+No such file or directory (os error 2)
+Error: Failed to generate lockfile
+```
+
+`fleet build` **exited 7** with both Rust repos `REQUIRES_HUMAN_INTERVENTION`. The **last** Rust
+repo in the wave built and tested **green**, which is the diagnostic fact: this was an **ordering
+property**, not a Rust property, and it is invisible to any fixture whose ecosystem has one repo.
+
+**Why the other two ecosystems escaped, which is the part that generalises.** Neither was correct;
+both were **tolerant**, for unrelated reasons. `npm_translate_lock` tolerates an **absent pnpm
+importer directory**. A Python requirements file names **distributions, not paths**, so there is no
+directory to be missing. Rust is the first ecosystem whose root file names **filesystem paths that
+must resolve at build time**, so it is the first to convert the latent ordering bug into an error.
+**Glob members fail identically** — including a glob that matches **nothing** — so "declare
+`members = ["*"]` instead" is not an escape.
+
+**Why the per-repo cut point was an artifact rather than an invariant.** It is recorded **nowhere**:
+not in SPEC §3.3, not in any ADR, not in a docstring. The mechanical check is stronger than the
+search: **no existing test encoded it.** The snapshot-immutability test, the wave-ordering test and
+the Phase-3/Phase-4 ref-disjointness test **all pass untouched** after the change. A property that
+three tests aimed at this exact area cannot tell you changed was not the property any of them was
+defending. *Agent Recommendation:* treating "cut at the repo's own merge" as an implementation
+detail rather than a contract is a judgement call — it is defensible precisely because it left no
+trace in spec, ADR or test, and a future round that wants it back must say so explicitly and pin
+it.
+
+**Why the guard is separate from the fix, and why it checks existence only.** The per-wave snapshot
+fixes the case that was observed. The guard is for the case that has not been observed yet: any
+future root file that names a path. Three constraints shaped it. It is **ecosystem-neutral** —
+it reads the domain the driver already computed and the worktrees the driver is about to dispatch,
+and it names no ecosystem, per §12.6. It is **offline** and needs no build system, so it holds in
+the fake-Bazel tests as well as the real ones. And it fires **before any lease**, so a run that
+cannot possibly build does not spend a worker slot discovering that. Its deliberate limit: it
+checks a dest directory **exists**, **not** that its contents are what a root file expects. That is
+the honest boundary of a check written without ecosystem knowledge, and it is recorded rather than
+narrowed by hand-waving. Verified by re-running it against the **old** behaviour, where it fires.
+
+**Alternatives rejected.** *Compute fleet-wide root files over only the plans in the current
+repo's snapshot* — rejected: it makes the root file a function of build order, which is the same
+class of bug as D13/D14's first-`repo_id`-wins, and it silently shrinks the `@crates` hub.
+*Make the members list a glob* — rejected on measurement: a glob matching nothing fails the same
+way, so this trades a legible error for an illegible one. *Tolerate the missing member by filtering
+`members` to what exists on disk* — rejected: it converts a hard, loud, correct cargo error into a
+silent drop of a crate from the workspace, which is exactly the failure shape D13 and D14 cost this
+project five checkpoints. *Re-snapshot per repo but re-render root files at cut time* — rejected:
+it multiplies snapshots by repos for no property gain and reintroduces order-dependent root-file
+content.
+
+**Consequences.**
+
+1. **Snapshot count drops from one-per-repo to one-per-wave.** Every repo in a wave builds from
+   **byte-identical** integration state, which is a strictly stronger statement than the one the
+   previous arrangement could make.
+2. **The cross-wave residue is NOT fixed, and it is the real architectural question.**
+   ~~Two Rust repos in **different waves** reproduce D15 **verbatim**~~ (**this clause is WRONG —
+   see the correction below; the surviving cross-wave shape is D13's, not D15's**): the earlier
+   wave settles with root files computed over a **smaller domain**, is **never re-admitted**, and
+   its published root files stay **stale**. The guard deliberately checks only the repos a wave
+   dispatches, and **both new tests assert only the intra-wave property**. Nothing here should be
+   read as covering it.
+3. **Fixing consequence 2 is a spec amendment with two defensible answers, and it awaits a human
+   decision.** **(i)** Scope build-time root-file content separately from published content — then
+   every repo **builds against something it does not publish**, adding a **fourth instance** of the
+   ledger's *"the harness's exit code is not a verdict on the monorepo"* failure shape.
+   **(ii)** Re-admit a settled wave when a root file changes — this touches the **scheduler** and
+   **overturns the "a settled wave is never re-admitted" property recorded in three places**.
+   *Agent Recommendation:* neither option is a requirement stated anywhere, both costs above are
+   measured or textual rather than speculative, and **no agent should one-shot this**. Recorded in
+   `docs/PROGRESS.md` §24 as the top follow-up.
+4. **The guard proves less than a build.** It runs no build system, so a domain that passes it can
+   still fail Bazel for any reason the guard does not model — starting with contents.
+
+> **Correction (2026-08-14, ADR-0055) — consequence 2's headline claim was WRONG, and the reason
+> it was wrong is the more useful fact.** Marked with a strikethrough above rather than an
+> "Amended by" note, because this is not a decision later work replaced: it is a **statement about
+> a mechanism that was never true**, and this file's precedent for that is ADR-0050's measured
+> correction, not ADR-0019's amendment.
+>
+> **Within one `fleet build` process the domain is monotone**, which forbids the failure this
+> consequence predicted. A plan exists only after its repo's merge, and every later wave's snapshot
+> descends from every earlier merge — so a later wave's worktrees contain **every earlier dest**,
+> and the fatal cargo shape (a `members` entry naming an absent directory) **is not reachable
+> forward**. D15 cross-wave, as written, cannot happen.
+>
+> **What actually survived cross-wave is the milder D13 shape**, which the rest of the consequence
+> describes correctly: a wave settles **green** against the root files that were at the root
+> *then*, a later wave replaces them, and the settled wave is **never re-checked**. That is a
+> stale-verdict defect, not a fatal-load defect — nobody's cargo hard-fails, and the harness still
+> exits 0. Read consequence 2 as that claim.
+>
+> **Consequence 3's framing is overtaken too.** ADR-0055 took **neither** of its two options: root
+> files are now computed **once per run over the whole DB-derived domain** before any dispatch, so
+> nothing builds against something it does not publish (option i) and no settled wave is
+> re-admitted (option ii). The residue that remains after ADR-0055 is the *narrow* one — a repo
+> that succeeded in an **earlier invocation** still does not rebuild — and it is recorded there.
+> The same correction is applied in `docs/PROGRESS.md` §24→§25 and `docs/INTEGRATION_HONESTY.md`
+> D15. **Two test docstrings in `tests/test_build_e2e.py` still carry the wrong claim** and need a
+> code change; see §25.
+
+---
+
+## ADR-0054 — On publish, the **planned bytes win**: `_publish` re-materializes every declared support file rather than committing whatever the build system left in the worktree
+
+**Decision.** `_publish` re-writes **every declared support file's planned bytes** through
+`buildgen.materialize` — the same loop GENERATE uses — immediately before the publish commit. The
+tree as the build system left it is **not** the source of published content; `SupportFile.content`
+is. This is a **general rule for every ecosystem**, not a Rust patch.
+
+**The defect this ADR exists to fix (D16).** `crate.from_cargo` **rewrote `//:Cargo.lock` in the
+worktree** as a normal part of building, and `_publish` committed the mutation. One repo therefore
+published a lock naming **both** members while its siblings published the **planned** bytes, and
+`git merge-tree` answered:
+
+```
+CONFLICT (add/add): Merge conflict in Cargo.lock
+```
+
+The interesting part is *which* invariant broke. §11.6 byte-determinism was violated **not by a
+nondeterministic generator** — the generator is deterministic and was innocent — but by **the build
+system editing the tree underneath the harness**. Every layer that reasons about determinism was
+reasoning about the wrong producer.
+
+**Why the fix is general rather than Rust-specific.** Two reasons, one principled and one
+empirical.
+
+The principled one is that `buildgen.materialize`'s **own docstring already made this argument**:
+bytes must come from `SupportFile.content` and never from a re-read of the tree. GENERATE obeyed
+it; publish did not. The fix is not new policy, it is applying existing policy at the second site
+that needed it — which is why it is one call to an existing loop rather than a new code path.
+
+The empirical one is that the alternative requires knowing which ecosystems mutate the worktree,
+and that was **checked rather than assumed**: `npm_translate_lock`'s `update_pnpm_lock` defaults
+**False** given the attrs `js.py` actually sets; `pip.parse` has **no writeback**; and the
+harness's own resolvers run in a **scratch dir**, not in the worktree. So Rust is the only current
+offender — and that is exactly the argument for the general rule, because the property being
+defended ("published bytes are the planned bytes") is not a fact about cargo, and the next ruleset
+that writes back would otherwise reintroduce D16 with every existing test green.
+
+**Why this cannot mint spurious commits — the `is_dirty()` reasoning, stated rather than hoped.**
+Re-asserting planned bytes can only move a path from **differing** to **identical**; it can never
+make a path differ that did not differ before. Therefore the dirty check **can never mint a commit
+it would not have minted before**. What changes is the *interpretation*: a build-system writeback
+that previously read as **real work to publish** now correctly reads as **already-published**.
+
+**Disclosed cost, because it is a real one and pretending otherwise is the failure this document
+exists to prevent.** Cargo's lock **extension is discarded every build**, so **each Phase 3/4 build
+re-extends from the seeded lock**. That is accepted deliberately: the extension is derivable work
+that cargo redoes offline-cheaply from a warm registry, whereas the alternative — letting a build
+system's writeback become published content — is a correctness property that cannot be recovered
+once lost. *Agent Recommendation:* that trade is a judgement call, not a stated requirement; the
+binding constraint was only §11.6 byte-determinism, which several arrangements could satisfy.
+
+**Alternatives rejected.** *Set `skip_cargo_lockfile_overwrite` on the Rust `crate.from_cargo` tag*
+— rejected **as the fix**, and kept only as **optional belt-and-braces**: it is **Rust-only**, it
+needs a **`bool` in `WorkspaceDep.attrs`** (which today carries strings), and it is **unverified at
+the pinned `rules_rust` version**. Making a per-ruleset opt-out the primary defence puts the
+obligation on whoever adds the next ecosystem, which is precisely the shape ADR-0052 argued against.
+*Re-read the worktree at publish and diff against the plan, failing loud on a mismatch* — rejected:
+it converts a routine, expected, harmless writeback into a run-ending error, and Rule 11's loudness
+is for things nobody can fix by re-writing a known byte string. *Publish from the tree but exclude
+`Cargo.lock` by name* — rejected: language knowledge in the driver (§12.6), and it defends exactly
+one file name. *Make the build worktree read-only* — rejected: build systems legitimately write to
+their own outputs, and this would break far more than it fixes.
+
+**Consequences.**
+
+1. **Published support-file bytes are now a function of the plan alone**, for every ecosystem, and
+   are independent of anything a build system did to the tree.
+2. **Cargo re-extends the lock on every Phase 3/4 build** (the disclosed cost above). It is offline
+   once the registry index is warm in the workspace-local `CARGO_HOME`.
+3. **`is_dirty()` semantics are narrowed, never widened** — see the reasoning above; no commit can
+   be minted that would not have been minted before.
+4. **The audit of "who else mutates the worktree" is a point-in-time measurement**, taken at the
+   currently pinned ruleset versions. A ruleset bump can invalidate it, and nothing detects that
+   automatically. The general rule holds regardless, which is the reason it is the general rule.
+
+---
+
+## ADR-0055 — A run's build domain is derived from **SQLite**, not accumulated in the process: every eligible repo is ingested and planned before the first dispatch, and the root-file guard gains a **coverage** half
+
+**Decision.** `_build_impl` runs **three run-level passes before any dispatch**, and the wave loop
+afterwards does **dispatch only**. Five parts:
+
+1. **One ingest pass for the whole run.** Every eligible repo is merged into the integration
+   branch in `(wave_index, repo_id)` order, each merge still **alone under the writer mutex**.
+2. **One snapshot, after the run's last ingest**, and **every** ingested unit is planned from it.
+   ADR-0053 moved the snapshot from per-repo to per-wave; this moves it from per-wave to per-run,
+   for the same reason and one level up.
+3. **Support files are resolved once per run**, over that whole unit set, rather than once per
+   wave over the waves seen so far.
+4. **The domain is a query, not an accumulator.** `_eligible_build_units` (`cli.py`) joins wave
+   members against `TRANSFORM`-SUCCEEDED phases across **all** waves. The process-local `plans`
+   dict is no longer what the root files are computed over.
+5. **`_check_root_file_domain` gains a second half.** Alongside the existing **containment** check
+   (every `dest` in the domain exists as a directory in every worktree about to be dispatched) it
+   now asserts **coverage**: the set the root files were actually rendered from **equals** the
+   DB-derived domain. New `RootFileDomainDriftError`. Both passes are **skipped when there are no
+   open waves**, so a settled fleet still does nothing.
+
+**The defect this ADR exists to fix (D18) — the published root files could SHRINK.** Reproduced
+with `fleet build --wave 0` followed by a plain `fleet build`. **Both invocations exited 0**, and
+the published `MODULE.bazel` had lost `rules_jvm_external` and `rules_rust` **entirely** — their
+`bazel_dep`, `single_version_override`, the whole `maven.install` block and the whole
+`crate.from_cargo` / `rust.toolchain` block; `pnpm-workspace.yaml` and `.bazelignore` swapped
+importers; the root `BUILD.bazel` stopped exporting `Cargo.toml` / `Cargo.lock`.
+
+The mechanism is three facts that are individually reasonable: `plans` is **process-local and never
+rehydrated** from SQLite; `_open_phase_waves` **excludes settled waves**; and
+`_check_root_file_domain` **structurally could not fire**, because it read its domain off the same
+shrunken `plans` and **a shrunken domain is trivially contained**. The guard ADR-0053 added was
+therefore tautological against exactly this failure.
+
+**The necessary condition, stated because it bounds the blast radius.** At least one wave still
+**unsettled** while an earlier one is **settled**. `--repo` and `--wave` on a **fully complete**
+run do **not** reproduce it — nothing is dispatched. And **`fleet resume` is `_unavailable`**, so
+re-invoking `fleet build` is the **only** way an operator continues a partial run: the defect sat on
+the sole recovery flow.
+
+**One prediction was refuted by the measurement, and it is worth keeping.** `//:Cargo.toml` was
+expected to shrink; it did **not**. With no Rust plan in the second invocation the file is **not
+regenerated at all** — it is **orphaned**, and the root `BUILD.bazel` simply stops exporting it.
+A file that stops being written looks nothing like a file that is rewritten smaller, and only the
+second was being watched for.
+
+**Why the domain comes from SQLite rather than from a process-local accumulator.** Because the
+accumulator's contents are a function of **which invocation you are in**, and the root files must
+not be. SQLite already holds the phase rows that decide eligibility, ADR-0004 already makes it the
+authority on execution state, and guardrail 4 forbids the alternative shape (a driver-side shadow
+of what git and the DB already know). A query answers the same question identically on the first
+invocation and the fifth, which is the property the root files need and the only property that
+would have prevented D18. *Agent Recommendation:* deriving the domain from the DB rather than
+rehydrating `plans` from disk is a judgement call — both would fix the observed shrink; the query
+is preferred because it has no second copy to keep correct.
+
+**Why the guard needed a second half, and which half is non-tautological.** **Containment** asks
+"does every dest in the domain exist in this worktree" — it is a check on the **tree**.
+**Coverage** asks "is the set the root files were rendered from the same set the DB says is
+eligible" — it is a check on the **derivation**, and it is the one that **fires against the old
+behaviour**, which is how it is known not to be tautological. Its own honest limit is stated in the
+consequences: it compares two **driver-side** derivations and never consults the git tree.
+
+**Why `--repo` / `--wave` stay dispatch filters.** They select **what is built**, never **what the
+monorepo is**. This is pinned by a test asserting that a narrowed run publishes **byte-identical**
+root files to a full-fleet run. *Agent Recommendation:* this is a judgement call about operator
+ergonomics — nothing in SPEC or `CLAUDE.md` says a filter may not narrow the fleet — and it is
+chosen because the alternative reintroduces D13/D14's shape, where a root file's content depends on
+which subset of the fleet an operator happened to name.
+
+**Two failure classes, because the hoisted ingest creates a hazard of its own.** The domain is
+fixed before anything builds, so a repo that later fails needs an answer:
+
+- **Pre-domain failure** (ingest or plan fails **before** the domain is fixed): the `dest` is
+  **popped from the domain**. Safe, because nothing has been dispatched and nothing published, so
+  the domain is still maximal for every wave that follows.
+- **Post-domain failure** (a re-plan fails **later**): the `dest` is **kept**, because earlier
+  waves have **already published root files naming it**, and the repo is marked
+  `REQUIRES_HUMAN_INTERVENTION`. Dropping it here would republish a smaller root file, which is
+  D18 again.
+
+**Alternatives rejected.** *Rehydrate `plans` from SQLite at startup* — rejected: it keeps a second
+representation of the domain alive and fixes only the case somebody remembered to rehydrate.
+*Re-admit settled waves so their root files are refreshed* — rejected here as it was in ADR-0053
+consequence 3: it overturns a property recorded in three places, and it is not needed, because
+computing the root files **once, maximally, before the first build** makes the refresh unnecessary.
+*Make `--repo`/`--wave` narrow the fleet as well as the dispatch* — rejected: it makes a root file
+a function of an operator's argv. *Keep the containment guard and add an assertion that the domain
+never shrinks between invocations* — rejected: it requires the driver to remember prior
+invocations, which is the shadow-state shape guardrail 4 forbids, and it detects the symptom one
+invocation after the damage.
+
+**Consequences.**
+
+1. **The root files a run publishes are a function of the DB-derived eligible set alone**, and are
+   identical whether the run dispatches one repo, one wave, or the fleet.
+2. **A settled wave is still never re-admitted.** What is fixed is that root files no longer
+   **shrink**; a repo that succeeded in an **earlier invocation** still does not rebuild against
+   the newer root files. This is the narrowed residue of ADR-0053 consequence 2/3.
+3. **The containment half still checks only that a dest directory *exists***, not that its contents
+   match — unchanged from ADR-0053.
+4. **The coverage half compares two driver-side derivations**, never a derivation against the git
+   tree. A defect that corrupts both identically is invisible to it.
+5. **A partially built branch is now legitimately un-`//...`-able.** After `--wave 0` or `--repo X`
+   the root files **correctly** name units whose packages were never generated, so
+   `bazel build //...` over that branch fails **by design**. This is a real change in what a
+   partial run leaves behind, and it is the price of (1).
+6. **The post-domain re-plan-failure path has no test.** It could not be induced deterministically
+   without a new seam, and inventing one was out of scope for this round. Recorded as a gap.
+7. **A whole-ecosystem resolve failure drops that ecosystem from the domain**, and the survivors
+   publish a `MODULE.bazel` without it. This is **pre-existing in shape** and is disclosed here for
+   the first time; it is **untested**.
+8. **Every invocation now re-clones and re-filters every eligible repo.** That cost is measured
+   only on **2–9-repo fixtures** and nothing here says what it is at 250.
+9. **No concurrency testing** of two overlapping `fleet build` processes under the new structure.
+
+---
+
+## ADR-0056 — Gazelle's output is **captured from a scratch tree as planned bytes**, produced by **one invocation over every root** of the ecosystem with `-external=static -index=all`, from a **vendored v0.51.3** binary that deliberately diverges from the BCR module pin
+
+**Decision.** `cli._build_impl` gains a **PASS 4**, build-file generation, between PASS 3 (support
+file resolution) and the wave loop. Six parts:
+
+1. **One Gazelle invocation per Gazelle-using ecosystem, over *all* of that ecosystem's repo
+   roots** — not one per repo. The multi-root argv is what resolves cross-repo imports.
+2. **The invocation runs over a scratch tree, never over a worktree.** `_assemble_gazelle_scratch`
+   builds it: each unit's `<dest>` subtree copied out of its build worktree, the directives-only
+   `BUILD.bazel` rendered from **the same `GazelleConfig` the worker uses**, the adapter's resolved
+   root files written **verbatim**, and a **comment-only `MODULE.bazel`** as the repo-root marker.
+3. **Every created or modified `BUILD.bazel` is captured** into `_BuildPlan.gazelle_files` as
+   planned `SupportFile`s, and reaches the branch through the existing
+   `materialize` → `_publish` path.
+4. **PASS 4 runs after PASS 3 and before the wave loop**, for two independent reasons:
+   `-external=static` resolves against the union `go.mod` **that PASS 3 produces**, and **one**
+   invocation must cover **every** root, which is only possible before any dispatch.
+5. **A new seam, `cli.GAZELLE_RUNNER`, mirroring `RESOLVER_RUNNER`.** Its absence is a loud
+   `BuildFileGenerationError`, **never a silent skip**. New finding kind
+   `BuildFileGenerationFailed`; a PASS-4 failure **drops that ecosystem from both `plans` and
+   `domain`**, safe for exactly the reason ADR-0055 gives for the PASS 1–3 failure path.
+6. **The generator is a vendored binary, `tools/bin/gazelle`, wrapping bazel-gazelle
+   v0.51.3**, and `GazelleConfig.args` — written long ago, populated, and never dispatched —
+   is now **the dispatched thing**, carrying `-external=static -index=all` with the
+   why-comments beside them. The driver never spells either flag (§12.6).
+
+**The user's two hard constraints, and how each is satisfied.** These were stated as hard, so they
+are answered here explicitly rather than left to be inferred.
+
+- **Constraint 1 — do not break the `Cargo.lock` determinism fix (ADR-0054's publish contract).
+  Satisfied with no carve-out.** Because the bytes are produced in a **scratch** tree and folded
+  into the plan, they are **planned** bytes; the existing `materialize` → `_publish` path commits
+  them under exactly the rule ADR-0054 established — the planned bytes win. **Nothing in ADR-0054
+  was reverted, excepted, or special-cased.** The corollary is that staging is done by **naming
+  materialized paths**, never `git add -- <dest>`: the latter would sweep in build-system writeback
+  and re-open the defect ADR-0054 closed.
+- **Constraint 2 — do not produce a Go test that drops sub-packages. Satisfied structurally, not
+  by an assertion.** Captured files are `SupportFile`s, so **arbitrary depth falls out for free**,
+  and **nothing is staged that the plan did not declare**. A sub-package at **depth 3** is captured
+  by the real binary in the integration test.
+
+**Why one invocation over every root — and the measurement that forces it.** A per-repo invocation
+**silently drops real cross-repo edges**. Measured in the integration test, with the negative
+control in the same test: with a sibling import added to `acme-clitool-go`, the multi-root run
+resolves the dep to the in-repo label **`//go/digest`**; the **identical source** run through a
+**one-root** invocation yields `deps = ["@com_github_spf13_cobra//:go_default_library"]` — the
+sibling edge is **dropped at exit 0, with no label and no warning**. So the multi-root argv is what
+is under test, not the absence of a spelling. No `require` was added to any `go.mod`; `-index=all`
+resolves the edge from the package indexed at the **other** root.
+
+**Why `-external=static` and `-index=all`, and the research claim each one refutes.** Research said
+the **default** `-external` mode was the safe one and that `-external=static` *"silently skips"*
+unknown imports. **The opposite is true, measured with logging shims.** The **default** mode shells
+out to `go get` / `go list` / `git ls-remote`, resolves in a **throwaway temp module that ignores
+the union `go.mod` pins entirely** (it fetched `x/crypto` **v0.55.0**, not the pinned version),
+tried to **reach GitHub** for an internal import, and **silently dropped a real dependency at exit
+0**. `-external=static` used **zero subprocesses and zero network** and resolved a **strict
+superset**. `-index=all` is what makes the multi-root run see the other root's packages; without it
+the cross-repo edge is not resolvable from the index at all. Zero network is not an argument, it is
+a measurement: `strace -e trace=socket,connect,sendto,sendmsg` recorded **zero** matching syscalls,
+and `-e trace=execve` shows the generator spawns nothing beyond the wrapper's own `dirname`/`exec`.
+
+**Why the vendored binary is v0.51.3 while the BCR module pin stays 0.52.2 — a decision, not
+drift.** The module pin **cannot move down**: the version table was chosen by **load-probing under
+Bazel 9.2.0** (the D8 round), and 0.52.2 is what loads. The **binary** is a separate artifact that
+never participates in module resolution, and v0.51.3 is what installs. **The divergence is
+deliberate and is recorded here precisely because an unrecorded version divergence is the D8
+shape.** Two research claims about the install were also wrong and are corrected on measurement:
+
+- **Research said `go install` was broken only at 0.52.x (upstream issue #2396).** In fact **every
+  published version from v0.48.0 declares `go 1.24.12`**, so **no downgrade reaches an installable
+  gazelle** under the pinned 1.23.4 toolchain. The install needed a **one-shot
+  `GOTOOLCHAIN=go1.24.12` override**, which the wrapper's `${VAR:-default}` idiom permits and which
+  kept the toolchain **inside the workspace** (~500 MB added, mostly the `go1.24.12` toolchain
+  module pulled in to build it).
+- **Research said `gazelle -version` identifies the binary.** It reports **`unknown`** — the
+  version is **linker-stamped only by Bazel builds**. Any version assertion must parse
+  **`go version -m`**, which is how v0.51.3 is confirmed. (`--version` exits 1; `-version` is a
+  subcommand flag.)
+
+**Why the wrapper is required rather than cosmetic.** Unwrapped, Gazelle's `findGoTool()` picks the
+**host's `/usr/bin/go`** and writes into **`$HOME/go`** — the same containment failure §24's rustup
+finding and §25's Go-telemetry finding describe, a third time. A related fact worth recording
+because it looks like a discrepancy and is not: a `go install`-built gazelle **keeps the go, proto
+and visibility languages**, because plain `go build` compiles `cmd/gazelle/langs.go`, which Bazel's
+`gazelle_binary` rule deliberately **excludes**.
+
+**A SPEC divergence, recorded as deliberate.** `settings.build.gazelle_binary` changes from
+`"//:gazelle"` to `"gazelle"`. The old value is a Bazel **label**, implying `bazel run //:gazelle`,
+which is **unrunnable over a scratch tree that is not a workspace**; it was referenced by **nothing
+in `src/`**. This **contradicts SPEC's example config** and is a divergence, not a typo fix.
+*Agent Recommendation:* keeping the setting (as a binary name resolved on PATH / in `tools/bin`)
+rather than deleting it is a judgement call — nothing requires the setting to exist at all; it is
+kept because it is the one place an operator can repoint the generator.
+
+**Two ordering facts that make this safe rather than lucky.**
+
+1. **The directives/re-entry conflict resolves by existing ordering.** `buildgen` writes the
+   directives render and **then** calls `materialize`, which overwrites from `SupportFile.content`
+   — so GENERATE's unconditional re-render on checkpoint rejection is **harmless**.
+2. **A latent bug fixed in passing.** `materialize` had been **gated on
+   `output.module_bazel_path`**, so a **publish-only re-entry staged a pathspec it had never
+   written**. It is now **unconditional**.
+
+**Alternatives rejected.** *Run Gazelle in the build worktree and commit what it leaves* — rejected:
+it is a **writeback**, precisely the shape ADR-0054 closed, and it would make the published bytes a
+function of whatever else touched the tree. *Run Gazelle once per repo* — rejected on the
+measurement above: it drops cross-repo edges at exit 0. *`git add -- <dest>` after generation* —
+rejected: it stages bytes the plan never declared, re-opening ADR-0054's defect. *Use the default
+`-external` mode* — rejected on measurement: network, subprocesses, pins ignored, a real dependency
+silently dropped. *Move the BCR module pin down to 0.51.3 so binary and module agree* — rejected:
+the pin was chosen by load-probing and 0.51.3 is not what loads; agreement bought by breaking the
+load is not agreement. *Assert the version from `gazelle -version`* — rejected: it prints `unknown`.
+*Skip generation when the seam is absent* — rejected under Rule 11; absence is loud.
+
+**Consequences.**
+
+1. **Gazelle's output is planned bytes.** Every generated `BUILD.bazel` that reaches the branch is
+   declared in the plan first, and ADR-0054's contract is honoured **unchanged**.
+2. **Sub-packages at arbitrary depth are included**, structurally — not because a test enumerates
+   them.
+3. **A PASS-4 failure removes a whole ecosystem from the run**, `plans` and `domain` together. This
+   is the ADR-0055 pre-domain shape and inherits its safety argument; like ADR-0055 consequence 7,
+   the survivors then publish a `MODULE.bazel` without that ecosystem.
+4. **The binary and the module pin are two versions on purpose**, and the *only* thing keeping them
+   honest is this ADR plus a test that parses `go version -m`. If the module pin moves, nothing
+   automatically re-probes the binary.
+5. **No Bazel has ever loaded a file this generator produced.** Nothing here shows that
+   `@com_github_spf13_cobra` or `@org_golang_x_crypto` exist under those names, that `go_deps`
+   creates them, that `//go/digest` is a loadable target, or that **any** label resolves at analysis
+   time. **Labels are asserted as text.**
+6. **No Go is compiled by anything.** Gazelle parses `import` statements; it does not typecheck. The
+   sibling import is proven to **resolve**, not to **build**.
+7. **The scratch tree is not a Bazel workspace** — its `MODULE.bazel` is a one-line comment marker —
+   so nothing about it constitutes evidence that the real tree loads.
+8. **The real-binary tests exercise `_run_gazelle` directly.** The full
+   `fleet build` → `materialize` → `_publish` path over **real** generator bytes is still covered
+   only by the fake, and **no Go repo appears in any real-Bazel test**.
+9. **The fake and the real binary diverge in shape, in two disclosed ways, neither affecting a
+   label.** The real binary **rewrites** a pre-existing directives file, putting its `load()` at the
+   top with the directives below, where the fake **appends**; and the fake prefixes created files
+   with a newline while real ones start at `load(`. *Agent Recommendation:* the fake was **not**
+   restructured this round — the divergence is disclosed rather than removed, which is a judgement
+   call and a standing invitation for a future round to close it.
+
+---
+
+## ADR-0057 — A ruleset's **apparent repo name** is adapter-level knowledge: `EcosystemAdapter.ruleset_repo_names`, unioned across adapters with disagreement **raised**, and `repo_name` emitted **only** where it diverges from the module name
+
+**Decision.** `render_module_bazel` emits `bazel_dep(name = …, version = …, repo_name = …)` where a
+ruleset publishes itself under a name that is not its module name, and the mapping lives on the
+adapter that also writes the `load()` labels. Four parts:
+
+1. **New `EcosystemAdapter.ruleset_repo_names: ClassVar[Mapping[str, str]]`** — module name →
+   apparent repo name. `GoAdapter` declares `{"rules_go": "io_bazel_rules_go"}`
+   (`ecosystems/go.py`); every other adapter declares the empty default (`ecosystems/base.py`).
+2. **A registry function, `ecosystems.ruleset_repo_names()`, unions it over every adapter and
+   RAISES if two adapters give one module different names.** This mirrors `extension_bzls()`
+   deliberately, with its argument sharpened: **a `bazel_dep` has exactly one apparent name**, and
+   a `bazel_dep` is emitted **once** for a ruleset several adapters may share, so a
+   last-writer-wins would silently break whichever adapter lost.
+3. **`bazel/generators.py` reads the union through `_registry_ruleset_repo_names()`** and takes an
+   injectable `ruleset_repo_names` parameter, the same shape `extension_bzl` already uses. The
+   renderer therefore does not know that `rules_go` asks to be spelled `@io_bazel_rules_go`; the
+   adapter that writes `@io_bazel_rules_go//go:def.bzl` into the loads is the file that knows.
+4. **`repo_name` is emitted only where it differs from the module name** (`_bazel_dep`). The
+   default case renders exactly the bytes it rendered before, so no other ecosystem's asserted
+   output moved.
+
+**The failure this fixes, and it was a LOADING failure, not an analysis one.** Gazelle writes
+`load("@io_bazel_rules_go//go:def.bzl", …)` into every Go package it creates, while the root module
+said `bazel_dep(name = "rules_go")` with no `repo_name` — so the apparent repo was `@rules_go` and
+real Bazel answered **`No repository visible as '@io_bazel_rules_go' from main repository`**. The Go
+packages never became targets at all, and it hit **every** Go repo, not a particular one. Repairing
+it forced a second disagreement immediately: `GoAdapter.extension_bzl["go_sdk"]` spelled the module
+`@rules_go` while `library_bzl` / `binary_bzl` / `test_bzl` spelled it `@io_bazel_rules_go`, and
+because a `bazel_dep` has exactly one apparent name, **fixing either spelling broke the other**. The
+decision above is what makes one spelling true rather than merely tolerated.
+
+**Why route (a) — agree with the generator — and not `# gazelle:map_kind`.** Both routes make the
+two names agree; the choice is *which side moves*, and it was made on evidence rather than taste.
+
+- **Upstream `bazel-gazelle`'s own `MODULE.bazel` declares
+  `bazel_dep(name = "rules_go", version = "0.59.0", repo_name = "io_bazel_rules_go")`.** The
+  generator's own project spells the consumer contract this way, so agreeing with the generator is
+  the canonical shape rather than a local convention.
+- **This codebase already believed it.** `tests/test_bazel.py`'s `_RULESET_LOAD_PROBES` maps
+  `"rules_go" → "io_bazel_rules_go"` and probes `@io_bazel_rules_go//go:def.bzl`, and that module
+  file **already loads under real Bazel** — the D8 guard has been asserting the correct apparent
+  name for the ruleset the renderer was spelling wrongly.
+- **`map_kind` was rejected on three counts, all structural.** It pays for the fix by **rewriting
+  generator output that other tests attest** (ADR-0056's set-for-set label comparison); it needs
+  **one directive per kind**, with **no coverage for kinds not enumerated** (`go_test`,
+  `go_proto_library`, anything a future language extension emits); and it leaves this harness's
+  label spelling **permanently divergent from the wider Go ecosystem**, so every future
+  copy-pasted upstream snippet is wrong here.
+
+**The audit of the other four ecosystems found no equivalent mismatch — Go is the only one.** Each
+adapter's `library_bzl`/`binary_bzl`/`test_bzl`/`extension_bzl` labels were read against its
+`ruleset_versions` module names: `aspect_rules_js`, `aspect_rules_ts`, `rules_python`,
+`rules_jvm_external`, `rules_rust` and `rules_proto` all publish themselves under their module
+name. So `ruleset_repo_names` is a one-entry table today, and that is a measurement, not an
+oversight. *Agent Recommendation:* keeping it as a **table** rather than hard-coding the single Go
+case in the renderer is a judgement call — nothing requires the general shape; it is chosen because
+the alternative puts ecosystem knowledge in `bazel/generators.py`, which is exactly what D1 moved
+out of there.
+
+**Alternatives rejected.** *`# gazelle:map_kind` to rewrite the generated `load()`s* — rejected on
+the three structural counts above. *Spell `bazel_dep(name = "io_bazel_rules_go")`* — rejected: that
+names **nothing in any registry**; the apparent name is set by the dependent's `repo_name`, never
+by the module's own name. *Change the adapter's `library_bzl` to `@rules_go//go:def.bzl` and let
+the generator's output be the odd one out* — rejected: the generator writes the loads for **every
+package it creates**, so this is the `map_kind` route wearing a different hat, and it loses to the
+same evidence. *Emit `repo_name` unconditionally, equal to the module name where they match* —
+rejected: it rewrites four ecosystems' attested bytes to fix one, for no behavioural gain. *Add an
+`use_repo`-style alias in the root module* — rejected: `bazel_dep(repo_name = …)` is the mechanism
+Bzlmod provides for exactly this, and inventing a second one is ADR-0045's shape in reverse.
+
+**Consequences.**
+
+1. **The generated Go tree LOADS under real Bazel for the first time.** `bazel query //go/...`
+   exits **0** over unmodified harness output, and `bazel build` reaches **108 packages loaded /
+   8796 targets configured** before hitting the *separate* version conflict ADR-0058 closes. The
+   loading failure and the version failure are two defects, and this ADR closes only the first.
+2. **Two adapters disagreeing about one module is a startup error, not a silent last-writer-wins.**
+   That refusal is the only thing standing between a shared ruleset and a `load()` that can never
+   resolve for one of its two claimants.
+3. **Only Go's rendered `MODULE.bazel` changed.** Every other ecosystem's module bytes are
+   byte-identical to before, which is why the fix cost no other test.
+4. **The table has exactly one entry and is expected to stay small.** Nothing re-audits it: if a
+   future ruleset publishes itself under a different name and nobody adds a row, the failure is the
+   same `No repository visible as …` this ADR fixed — loud, but only at real-Bazel time.
+
+---
+
+## ADR-0058 — The Go SDK pin is **1.24.12**, the minimum *both* pinned rulesets accept; the root `go.sum` did **not** move, because a lock line is a content hash of a published zip and not a toolchain artifact
+
+**Decision.** `ecosystems/go.py`'s `_GO_VERSION` is raised **1.23.4 → 1.24.12**, and every site that
+reads it moves with it. The pin is the **minimum** that satisfies both floors, not the newest
+available: a version pin that drifts upward for no measured reason is D2's shape.
+
+**The floor evidence, and the point of the table is that lowering gazelle does NOT work.** The
+obvious cheaper route — move gazelle down until it accepts 1.23.4 — was checked and rejected on
+measurement, not assumed away.
+
+| Claim | Measured |
+| --- | --- |
+| gazelle **0.52.2** (the pinned module) needs a newer SDK | its `go.work`/`go.mod` declares **`go 1.24.12`**; a 1.23.4 SDK fails `failed to build tools: go: go.work requires go >= 1.24.12` |
+| the floor is **not gazelle's alone** | **rules_go 0.61.1's own `go.mod` declares `go 1.24.0`** — above 1.23.4 by itself |
+| lowering gazelle does not shed gazelle | **rules_go 0.61.1 depends on gazelle 0.51.3**, which also declares **`go 1.24.12`** |
+| how far down the floor holds | **every gazelle v0.48.0 – v0.52.2 declares `go 1.24.12`** |
+| the first version below the floor | **v0.47.0**, which **predates the Bazel 9 fixes the D8 settings table was chosen for** |
+
+So the two pins were **individually justified and jointly impossible**, and the resolution is to
+move the SDK rather than either ruleset. This is the same failure class §26 recorded for the
+*binary* install ("no downgrade reaches an installable gazelle"), arriving a second time at the
+*module* layer.
+
+**`_GO_VERSION` is load-bearing in SIX places, and all six moved together.** Naming them is the
+decision, because a partial move is a pin that lies:
+
+1. the `go_sdk.download` version in `toolchain_requirements()` (`ecosystems/go.py`);
+2. the resolver's `GOTOOLCHAIN` env on the Go `Resolution` (`ecosystems/go.py`, ADR-0051's `env`);
+3. the union `go.mod`'s `go` directive (`_go_mod_text`);
+4. the vendored `tools/bin/go` wrapper's `GOTOOLCHAIN` default **and the SDK it points `GOROOT` at**;
+5. the `tools/bin/gazelle` wrapper's own `GOTOOLCHAIN` pin, which governs the resolver subprocess
+   and must keep matching the registered `go_sdk`;
+6. the root `go.sum`, which is **regenerated by the real declared argv**, never hand-edited.
+
+**The new SDK was installed exactly as §25's was.** Official `go.dev/dl` tarball, published SHA256
+**verified before extraction** (`bddf8e653c82429aea7aec2520774e79925d4bb929fe20e67ecc00dd5af44c50`,
+matched), extracted under `tools/go/`, **+18 MB (269 M → 287 M)**, **no sudo**, **nothing in
+`$HOME`** — the containment rule §24 and §25 each had to rediscover.
+
+**Why the `go.sum` came back BYTE-IDENTICAL, and why that is the correct result rather than a
+suspicious one.** `GO_ROOT_GO_SUM` was regenerated by the declared resolver argv and did not change
+one byte. That is what should happen: **a `go.sum` line is a content hash of a published module
+zip**, and the build list MVS computes from an **unchanged `require` set** does not depend on the
+toolchain that computes it. Only the `go` **directive** moved. Recording it here as a sanity check
+matters because the opposite outcome — a lock that churns when only the toolchain moves — would
+have meant the lock was a function of the environment, which is precisely what ADR-0043's
+carry/resolve split exists to prevent.
+
+**The MVS gap, and the two halves of it that are NOT inherent.** With both pins aligned, the build
+is green — and it is green over module versions the harness did not choose. Verbatim from the
+build:
+
+    DEBUG: …/gazelle+/internal/bzlmod/go_deps.bzl:753:36: The following Go modules were required
+    by the root module at the given versions, but were implicitly updated to higher versions due
+    to transitive dependencies:
+      golang.org/x/crypto: v0.31.0 -> v0.39.0
+      golang.org/x/sys: v0.28.0 -> v0.33.0
+
+- **The raise itself is inherent to Bzlmod.** `go_deps` is **one** module extension over the
+  **whole** Bazel module graph; rules_go and gazelle each call `go_deps.from_file` on their own
+  `go.mod`, so Go MVS runs across all three, and **a Go module path can have exactly one repository
+  in a build**. There is no "resolve only from my `go.mod`" mode, and the per-module levers
+  (`go_deps.module_override`, `archive_override`) do not change it in general. **The harness cannot
+  fix this.**
+- **The SILENCE is not inherent.** `go_deps.config(check_direct_dependencies = "error")` is a
+  **root-module-only** tag that turns that DEBUG line into a hard `fail()`. The harness renders the
+  root `MODULE.bazel`, so it **could** emit it. **It does not today.**
+- **The unverified-fetch path is not inherent either.** `go_deps.bzl`'s `_get_sum_from_module`
+  answers a raised version **with no sum** by printing `No sum for …@… found, run … mod tidy` and
+  returning `None` — i.e. **fetching that module with no checksum at all**, rather than failing.
+- **In this build no `No sum for …` line appeared**, so the raised zips *were* verified — **by
+  gazelle's own `go.sum`, not by the sums this harness resolved.** The honest statement of what a
+  green build here means: **the harness's sums are *consistent with* what Bazel selected; they are
+  not what Bazel *verified*.**
+
+*Agent Recommendation:* emitting `go_deps.config(check_direct_dependencies = "error")` is the right
+next move and is **not** taken in this ADR, because it would turn a currently-green build red on a
+condition the harness cannot resolve (see the inherent half above), and choosing to do that is a
+decision about the harness's failure posture rather than a bug fix. It is recorded as the top item
+of `docs/PROGRESS.md` §27's Next list rather than performed here.
+
+**Alternatives rejected.** *Lower gazelle to a version that accepts 1.23.4* — rejected on the
+evidence table: no such version exists above v0.47.0, and v0.47.0 predates the Bazel 9 fixes the
+settings table was load-probed for. *Lower rules_go instead* — rejected: 0.61.1's own `go.mod`
+declares `go 1.24.0` and it **depends on gazelle 0.51.3**, so the floor follows it down. *Pin the
+newest available Go SDK rather than the minimum* — rejected as D2's shape: a pin chosen for
+"newest" is a date, not an input. *Pin to ≥1.25.7 now, as §25's corpus survey says real corpus Go
+repos will need* — rejected as **out of scope and unmeasured here**: the survey's requirement stands
+and is carried forward, but nothing in this round exercised a `go 1.25` module, and raising past the
+measured minimum would put an unverified pin behind a green build. *Move only the `go_sdk`
+download and leave the wrappers* — rejected: the wrappers govern the **resolver** subprocess, so a
+split pin means the sums are computed by one toolchain and consumed by another.
+
+**Consequences.**
+
+1. **Real Bazel analyses and COMPILES the generated Go tree from unmodified harness output.**
+   `INFO: Analyzed 4 targets (116 packages loaded, 9178 targets configured)`, `GoStdlib`,
+   `GoCompilePkg`, `INFO: Build completed successfully, 21 total actions`, and real `.a` archives
+   for `digest`, `command` and `clitool_lib`. ADR-0056 consequence 6 ("no Go is compiled by
+   anything") is **retired**.
+2. **The cross-repo edge resolves at ANALYSIS time, read out of Bazel rather than out of text.**
+   `cquery deps(//go/clitool/internal/command:command, 1)` returns **`//go/digest:digest`** beside
+   `@com_github_spf13_cobra//:go_default_library`. ADR-0056 consequence 5's "labels are asserted as
+   text" is **answered**.
+3. **The harness's sums are consistent with, not authoritative over, what Bazel fetched.** This is
+   a **standing correctness gap**, recorded as a named defect in `docs/INTEGRATION_HONESTY.md`
+   rather than as a missing test, because no test would close it — a code change would.
+4. **The SDK pin is now a three-way constraint** (harness `go.mod` ⟂ gazelle ⟂ rules_go) and
+   **nothing re-derives it**. Moving any of the three re-opens the arithmetic, and only this ADR
+   records that it is arithmetic at all.
+5. **`fleet build` end to end for Go is still not proven.** The tree Bazel consumed was assembled
+   from the harness's own generated bytes; `materialize`/`_publish` over **real** generator output
+   remains covered only by the fake, which is the surviving half of ADR-0056 consequence 8.
+6. **Only linux/amd64 SDKs were fetched and hashed**, nothing exercises `go_test` (neither fixture
+   ships a `*_test.go`), and the fixture poses **no conflicting Go module version across repos** —
+   five direct requirements, one cross-repo edge, two repos.
+
+**Correction appended 2026-08-15 (ADR-0059) — two statements in the "MVS gap" bullets above are
+wrong, and the *Agent Recommendation* under them is superseded.** Nothing above is edited; this
+paragraph is the correction, per this log's never-edit-in-place rule.
+
+- **FALSE:** *"The unverified-fetch path is not inherent either … fetching that module with no
+  checksum at all, rather than failing."* The reading of `_get_sum_from_module` was correct but
+  stopped one layer short: the `None` lands in `go_repository`, where `sum` is a **mandatory**
+  attribute for every repo the extension creates (`is_module_extension_repo`, set from
+  `internal_only_do_not_use_apparent_name`, which `go_deps.bzl` passes for all of them), and it
+  **`fail()`s at fetch time**. **Measured** against the pinned gazelle 0.52.2 by deleting the single
+  `h1:` line for `github.com/spf13/cobra v1.8.1` — first established by grep to be the only source
+  of that hash in the whole module graph — after which Bazel emitted `Error in fail: No sum for
+  github.com/spf13/cobra@v1.8.1 found, update go.sum with: …` and `Build did NOT complete
+  successfully`. **Nothing is fetched without a checksum; the build fails closed.**
+- **WRONG ATTRIBUTION:** *"the raised zips were verified — by gazelle's own `go.sum`"*. **Measured:
+  it was rules_go 0.61.1's.** rules_go's `go.sum` carries `golang.org/x/crypto v0.39.0 h1:` and
+  `golang.org/x/sys v0.33.0 h1:`; gazelle 0.52.2's carries **no** `x/crypto` `h1:` line at all, and
+  `x/sys` only at v0.28.0/v0.30.0. The bullet's conclusion — the harness's sums are *consistent
+  with* what Bazel selected, not what Bazel *verified* — is unchanged and still correct.
+- **SUPERSEDED:** the *Agent Recommendation* that emitting
+  `go_deps.config(check_direct_dependencies = "error")` "is the right next move". It was measured
+  and **rejected** in **ADR-0059**: it aborts the whole monorepo at extension-evaluation time and is
+  **neither necessary nor sufficient** for the checksum question. Consequence 3's "standing
+  correctness gap" is narrowed accordingly — what stands is the **inherent** MVS raise plus a
+  **readability** limitation, not an unverified-fetch hole.
+
+---
+
+## ADR-0059 — **No `go_deps.config` is emitted.** The MVS raise stays a DEBUG line, because the checksum hole it was meant to guard **does not exist**: a Go module version with no `h1:` anywhere **fails the fetch**, measured against the pinned gazelle 0.52.2
+
+**Decision.** The root `MODULE.bazel` renderer **does not** emit
+`go_deps.config(check_direct_dependencies = "error")`, and **no code in `src/` changed**. The MVS
+raise that ADR-0058 recorded (`golang.org/x/crypto: v0.31.0 -> v0.39.0`,
+`golang.org/x/sys: v0.28.0 -> v0.33.0`) remains a **DEBUG** line. Two tests pin the decision, and
+**D19 in `docs/INTEGRATION_HONESTY.md` moves from OPEN to NARROWED AND ACCEPTED.** This entry
+supersedes ADR-0058's *Agent Recommendation* to emit the tag, and corrects two of its statements
+(see the correction appended to ADR-0058).
+
+**The finding that reversed the decision: D19's supply-chain half is FALSE, and it was refuted by
+measurement rather than by re-reading.** D19 and ADR-0058 both claimed that gazelle's
+`_get_sum_from_module`, answering a raised version with no sum by printing and returning `None`,
+means the module is **fetched with no checksum at all**. The function was read correctly; the
+reading stopped **one layer too early**. The `None` is handed to `go_repository`, where `sum` is a
+**mandatory** attribute for **every** repo the extension creates — the repo carries
+`is_module_extension_repo`, set from `internal_only_do_not_use_apparent_name`, which `go_deps.bzl`
+passes for all of them — and `go_repository.bzl` **`fail()`s at fetch time**, with
+`fetch_repo_env["GOSUMDB"] = "off"` beside it and the comment *"the sum is a mandatory attribute of
+go_repository, so we don't need to look it up."*
+
+The measurement, against the pinned gazelle **0.52.2**: exactly one `h1:` line
+(`github.com/spf13/cobra v1.8.1`) was deleted from the resolved root `go.sum` — **first verified by
+grepping every `go.sum` in the session's repository cache** to establish it was the **only** source
+of that hash in the whole module graph, so the deletion really did leave the version uncovered — and
+Bazel then refused:
+
+    DEBUG: …/go_deps.bzl:925:18: No sum for github.com/spf13/cobra@1.8.1 found, …
+    ERROR: …/gazelle+/internal/go_repository.bzl:204:21: An error occurred during the fetch of
+    repository 'gazelle++go_deps+com_github_spf13_cobra':
+       Error in fail: No sum for github.com/spf13/cobra@v1.8.1 found, update go.sum with: …
+    ERROR: no such package '@@gazelle++go_deps+com_github_spf13_cobra//': No sum for …
+    ERROR: Build did NOT complete successfully
+
+**Nothing is ever fetched without a checksum; the build fails closed.**
+
+**The tag itself was measured too, not theorised.** With
+`go_deps.config(check_direct_dependencies = "error")` in the root `MODULE.bazel`, the build fails at
+**extension-evaluation time**, naming both modules and an exact remediation argv:
+
+    Error in fail: The following Go modules were required by the root module at the given versions,
+    but were implicitly updated to higher versions due to transitive dependencies:
+      golang.org/x/crypto: v0.31.0 -> v0.39.0
+      golang.org/x/sys: v0.28.0 -> v0.33.0
+
+That abort takes down the **whole monorepo** before any target builds.
+
+**Why the tag is neither necessary nor sufficient for the question it was proposed to answer — this
+is the reason it is not adopted.** It fires on a **raised direct root requirement**. The checksum
+question is a **selected version with no `h1:` anywhere**, and that already fails hard at **every**
+setting of the flag. The two conditions are not the same set in either direction: raises of
+**indirect** requirements are **never reported at all** (`root_versions` is populated only for
+non-indirect tags), and — relevant to this harness specifically — `_go_mod_text` emits **no
+`// indirect` markers**, so **every** requirement in the union `go.mod` counts as direct.
+
+**Options considered, each rejected on evidence.**
+
+**(a) Emit `error` and raise the harness's pins to the selected versions.** Rejected: it does not
+scale, and it **relocates the problem into the source repos**. The pins come from the **fixture
+repos' own `go.mod` files**, so in production "remediation" means editing the **source repos'
+manifests** — which a migration harness must not do silently. And because the raise is a property of
+the **pinned rulesets' floors**, the pins would need re-raising on **every `ruleset_versions`
+bump, for every Go repo, forever**. §25's corpus survey (**25 Go repos, 68 `go.mod` files**) makes
+it near-certain at least one pins below some floor.
+
+**(b) Emit `error` and mark the affected repo `REQUIRES_HUMAN_INTERVENTION`.** Rejected as
+**unimplementable as stated**: the failure is at **extension-evaluation time**, before analysis and
+before any per-repo attribution exists, and it aborts the whole monorepo — there is no repo to
+mark. The DEBUG-parsing variant (leave the tag off, scrape the `DEBUG:` line) is unsound for a
+**separate measured reason**: **Bazel caches module-extension results**, so the `print` appears only
+on the evaluation that **actually ran**. A detector that is silent on a cache hit is **a check
+nobody ran**, which is `docs/INTEGRATION_HONESTY.md`'s own standing thesis.
+
+**(c) Resolve `go.sum` against the union plus the rulesets' known floors.** Rejected as **not
+soundly knowable**: it requires an enumeration of **every Bazel module in the graph that calls
+`go_deps.from_file`** — which the harness does not hold, and which **changes with BCR
+transitives** — plus a mapping from **BCR module version to Go module version**. Hardcoding
+rules_go + gazelle and assuming BCR-version ≡ Go-module-version is the **guessed-constant** shape
+**D8** and **Rule 11** forbid; it would **diverge silently on the next pin bump**, reproducing D19
+in a **harder-to-see** form.
+
+**(d) Emit nothing, pin the measurement with tests — ADOPTED.**
+
+**What was implemented: nothing in `src/`, two tests.**
+
+1. A **real-Bazel** test deletes the single uncovered `h1:` line and asserts Bazel **refuses to
+   fetch**. In the same run it pins the other half by asserting the raise line begins with
+   `DEBUG: ` and **not** `Error in fail:` — so a future flip to `error` turns **red with an
+   explanation attached** rather than turning red mysteriously.
+2. A **free, offline** test asserts the rendered root `MODULE.bazel` contains no `go_deps.config`
+   and no `check_direct_dependencies`.
+
+**The reason both exist is that the safety property belongs to the pinned gazelle version, not to
+any harness code.** A bump restoring older fetch-anyway behaviour would reopen a **real** hole
+**with no diff anywhere in this repository** — the class of regression no code review can catch,
+which is exactly why the measurement is machine-checked instead of merely written down.
+
+**Residual risk, in the form a non-expert can act on.** The monorepo's `go.sum` is **not** a
+statement about which versions the monorepo builds against — it is **one of several** checksum files
+Bazel consults. For any dependency a **pinned ruleset** requires more recently than your repos do,
+**the version and the hash that govern the build come from that ruleset's lock file**, which moves
+when `build.ruleset_versions` moves. **Guaranteed:** an attacker cannot substitute bytes — a version
+nobody covers fails the build outright. **Not guaranteed:** an operator cannot read `go.sum` and
+know what shipped; that needs a **post-build attestation read out of Bazel**, not a pre-build lock.
+
+*Agent Recommendation:* if that readability gap is ever worth closing, the shape is a
+**post-build attestation** — read the resolved module versions and hashes **out of Bazel** after the
+build (e.g. from the module extension's own resolved state) and publish them beside the tree — not
+a richer pre-build lock, which options (a) and (c) show cannot be made sound from inputs the harness
+holds. It is **not** done here, and it is a **judgement call**, not a requirement of `CLAUDE.md` or
+any reference.
+
+**Consequences.**
+
+1. **D19 is NARROWED AND ACCEPTED, not OPEN.** Its item 2 is marked **FALSE in place** in
+   `docs/INTEGRATION_HONESTY.md`; its item 1 is **WITHDRAWN** rather than pending; what stands is
+   the **inherent** MVS raise plus the **readability** limitation above.
+2. **The inherent third is unchanged and unfixable inside the harness.** `go_deps` runs MVS over the
+   **whole Bazel module graph**, and the harness cannot resolve against a graph it does not
+   enumerate. ADR-0058's first bullet stands verbatim.
+3. **`go_deps.config` is now a decision with a test behind it, not an omission.** The offline test
+   makes re-adding the tag a **deliberate, visible** act.
+4. **The tests are pinned to gazelle 0.52.2 and say nothing about any other version.** That is the
+   admitted scope, and it is why consequence 3 of ADR-0058 could not simply be deleted.
+5. **This round proves nothing new about `fleet build`, `go_test`, non-linux/amd64 platforms, or a
+   fleet with conflicting Go module versions across repos.** The tree is still **assembled**, not
+   published.
+
+---
+
+## ADR-0060 — A **discoverable C compiler is a precondition of every Bazel verdict**, not a cgo concern: `buildverify` probes for one **before the first `bazel`**, in **sandboxed runs only**, and refuses **non-retryably** — with a probe that mirrors rules_cc's `_find_generic` clause for clause, because this ADR's own first implementation probed the wrong predicate **in both directions**
+
+**Decision.** `BuildverifyWorker._c_toolchain_gate` runs when `payload.image is not None`, after
+`require_free_space` and **before the first `bazel` invocation**, executing `C_TOOLCHAIN_PROBE`
+inside the sandbox image via one `docker run`. On failure it returns a `WorkerError` with
+`failure_class=BUILD_ERROR` and **`retryable=False`**. It is deliberately **not** part of
+`preconditions_hold`. The probe is a **line-by-line mirror of rules_cc's `_find_generic(ctx,
+"gcc", "CC", overridden_tools)`** — `gcc` and a stripped `$CC` only — not the three-name
+`cc`/`gcc`/`clang` lookup the first implementation shipped.
+
+**The finding that forced the gate, and the measured claim is stronger than the one that motivated
+it.** The incoming claim was "cgo packages need a C toolchain in the image." Measured: **without a
+discoverable C compiler, ZERO Go targets analyse — cgo or not** — because `@@rules_go+//:stdlib`,
+the Go standard library itself, depends on
+`@@rules_cc++cc_configure_extension+local_config_cc//:cc-compiler-k8`. Verbatim, in order:
+
+    Auto-Configuration Error: Cannot find gcc or CC; either correct your path or set the CC
+    environment variable
+    ERROR: no such package '@@rules_cc++cc_configure_extension+local_config_cc//': …
+      … @@rules_go+//:stdlib … failed to fetch it
+      … //go/digest:digest … failed to fetch it
+    INFO: Found 0 targets
+
+That `Found 0 targets` is under **`--keep_going`**, which `BuildverifyInput.keep_going`
+**defaults to** — so the harness's own default flag turns a total refusal into a line an operator
+reads as "nothing matched". `--nobuild` and `cquery` fail identically; `--network=none` is not the
+cause, the lookup is local.
+
+**Where it fails, precisely — and this is one of the three statements the first implementation got
+wrong.** Not "the analysis phase": the lookup runs while the `local_config_cc` **repository is
+being fetched**, at loading time, and the failure is a Starlark `auto_configure_fail`. The
+`Found 0 targets` / non-zero exit is what an operator **sees** downstream of that `fail()`, not
+the mechanism of it. Both statements are true; only one names the thing to fix.
+
+**Why this was invisible until now.** The word **`cgo` appeared nowhere in `src/` or in any ADR**
+before this round. Neither Go fixture uses cgo, so the suite was **structurally blind** to the
+question; and the host carries **`gcc` 13.3.0** (no clang), so every unsandboxed run resolved a
+compiler off the same `PATH` `bazel` came from and never noticed the dependency existed. **Every
+green Bazel verdict this project has ever recorded rested on an undeclared host compiler.**
+
+**Corpus exposure, from a read-only survey of 267 bare Gitea repos (no credential read or
+logged).** **31 Go repos** — the figure this project has been carrying since §25, **25**, was
+low — and **10 of 31 carry cgo**, roughly **6 distinct codebases after dedup**. Two of them
+(`beads`, the largest by file count, and `multi-agent-vllm`) gate on **`//go:build cgo` with zero
+`import "C"`**, so the obvious `import "C"` grep misses them entirely. **But per the `//:stdlib`
+finding the missing-compiler exposure is 31/31, not 10/31.** The 10/31 figure governs only the
+**second-order** problem below.
+
+**Why a gate and not a classification.** The failure arrives as a bare exit 1, which
+`classify_build_failure` reads as a **retryable** `BUILD_ERROR`. Left alone it spends all three
+ADR-0014 rungs — two of them LLM-bearing, prompting a model to repair a `BUILD.bazel` that is
+fine — then marks the repo `REQUIRES_HUMAN_INTERVENTION`, leaving an operator to rediscover
+`//:stdlib` from a stderr about a repository fetch. Refusing costs one `command -v`.
+
+**Why NON-RETRYABLE, and it is the same mechanical argument as exit 127.** Re-running an identical
+rung cannot install a compiler any more than it can install `bazel`. `retryable=False` is what
+makes `RetryPolicy.decide` answer `TERMINATE` rather than spend the ladder.
+
+**Why NOT in `preconditions_hold`, which is the structural half of this decision.** That method is
+consulted only by `PhaseRunner._re_entry`, only when a checkpoint already exists, and its `False`
+means *"the tree is unusable — re-run the phase from `base_ref`"*. A compiler-less image answering
+`False` there would be sent **around the loop again** instead of being stopped: the gate's verdict
+is "this environment cannot produce any verdict", which is not the same proposition as "this tree
+needs rebuilding". So it sits where the other refusal that costs the run its attempt sits —
+beside `require_free_space`, before the first invocation.
+
+**Sandboxed runs only.** `payload.image is None` is the host path, where an unsandboxed run has
+already resolved `bazel` off the same `PATH` a compiler would come from; a gate there would spend
+a `docker run` to learn what the very next command learns for free, and would fail every
+offline/dry-run test that has no Docker daemon at all. The image is the case where the contents
+are **unknown** — see the consequence on `settings.verify.container_image` below.
+
+**The probe mirrors `_find_generic` clause for clause — and THE FIRST IMPLEMENTATION OF THIS ADR
+PROBED THE WRONG PREDICATE, IN BOTH DIRECTIONS. It is recorded here as a defect of this decision's
+own first pass, not smoothed over.** The first version ran
+`command -v cc || command -v gcc || command -v clang`. Bazel's actual lookup, **verified against
+`cc/private/toolchain/unix_cc_configure.bzl` in this checkout's own bazelisk repository cache**, is
+`_find_generic(repository_ctx, "gcc", "CC", overridden_tools)`, resolving in order:
+`overridden_tools` (unreachable from an image — nothing here passes any) → the environment's `CC`,
+**stripped**, and if what remains is non-empty it **replaces** the default rather than
+supplementing it → the literal name `"gcc"` → `repository_ctx.which(...)`, with an **absolute**
+`CC` short-circuiting `which` and returned **unvalidated**. Therefore **`cc` is never searched at
+all**, and **`clang` is never a lookup candidate** — it appears upstream only inside `_is_clang`,
+which *classifies* a binary the lookup already found. The old probe was wrong twice:
+
+- **Gap A — false green.** A **clang-only** image (or one where `cc` is a symlink to clang and no
+  `gcc` exists) **passed** the probe, and Bazel then refused the build anyway. A gate that passes
+  the environment it exists to reject is worse than no gate: it converts "we did not check" into
+  "we checked" without anybody deciding to.
+- **Gap B — false non-retryable refusal.** An image carrying `ENV CC=/opt/toolchain/bin/gcc` (or
+  `ENV CC=gcc-13`) **failed** the probe though Bazel would have succeeded — and failed
+  **non-retryably**, which is the most expensive possible way to be wrong.
+
+The corrected `C_TOOLCHAIN_PROBE` is one `sh -c` string whose arms are those clauses: two
+parameter expansions for Starlark's `.strip()`; `""` ⇒ `command -v gcc` (the default name reaching
+`which`); `/*` ⇒ the absolute short-circuit; the final arm ⇒ a relative `$CC` reaching `which`.
+**One deliberate divergence:** upstream returns an absolute `CC` unvalidated where the probe tests
+`[ -x "$cc" ]` — not stricter in practice, since the next thing `configure_unix_toolchain` does
+with that path is `execute([cc, "-E", …])`, so the probe asks one step early the question the
+fetch asks anyway. `command -v` is POSIX `sh`, so no `which(1)` need exist; the shell is the only
+assumption, and an image without one fails with 127, the same verdict for the same reason.
+
+**How the corrected probe is tested, and why the obvious test would not have caught either gap.**
+The tests **execute the probe program against stub binaries on `PATH`** rather than replying to it
+with a hand-chosen exit code. A fake that merely returns an exit status **cannot distinguish a
+clang-only image from a gcc one** — it would have agreed with the broken probe and the corrected
+one identically. **Mutation-checked:** restoring the three-name probe fails the Gap A test and all
+three Gap B parameters.
+
+**Three false statements in the gate's own operator message were corrected too**, because an
+operator message that misdescribes the failure is a defect with a longer half-life than the code:
+
+1. It said the probe looks for **gcc/cc/clang**. It looks for **`gcc` and a stripped `$CC`**, only.
+2. It said the failure is in **"the analysis phase"**. It is at **repository-fetch/loading** time
+   via Starlark `fail()`; the `Found 0 targets` symptom is downstream and stands as a symptom.
+3. It offered **"(or set `CC`)"** as a remedy, which was **unactionable**: `buildverify` passes no
+   `env` to either container, so a host `CC` never reaches the image and **only an image-level
+   `ENV CC` counts**. The message now says so.
+
+**Known limit — a compiler is the floor, not sufficiency.** Gazelle emits `cgo = True`
+automatically for any package containing `import "C"`, so PASS 4 will faithfully publish cgo
+targets; those additionally need the headers and system libraries their `#cgo` directives name,
+and the corpus's cgo repos reference **`ole32`, `crypt32`, `IOKit`, `sqlite3`** — none of which a
+minimal image carries and none of which this probe looks for. **This is where 10/31 applies.**
+Those failures arrive as ordinary per-repo `BUILD_ERROR`s from the build itself. The gate removes
+exactly one case: the one where **nothing** analyses.
+
+**One thing that must NEVER be done, recorded because it is the exact failure this project exists
+to catch.** `BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1` makes the missing compiler go away by
+**silently substituting an empty toolchain** — a green Bazel run over a tree whose C toolchain
+does not exist. It is not a mitigation, it is the green-with-a-broken-tree result this ledger was
+written to prevent, and it is not set anywhere in this repository.
+
+*Agent Recommendation (judgement calls, not requirements of `CLAUDE.md` or any reference).* Three
+choices here are the agent's and are labelled as such: **(i)** classifying the refusal as
+`BUILD_ERROR` rather than adding a new `FailureClass` — the operator-visible fact is
+`retryable=False`, and a new class would have to be threaded through `RetryPolicy`, the state
+schema and the reporting for no behavioural gain; **(ii)** placing the probe in its own
+`--rm` container named `…-cc-probe` rather than reusing `spec_for_attempt`'s name, because
+`on_cancel` force-removes that name and a shared probe would **race the build container it
+precedes**; **(iii)** the `[ -x "$cc" ]` divergence above. Each is reversible and none is derived
+from a directive.
+
+**Consequences.**
+
+1. **Every Bazel verdict in `docs/INTEGRATION_HONESTY.md` gains a named precondition it never
+   declared.** A green Bazel result recorded by this project has always depended on an
+   **undeclared host compiler**; the gate declares it for sandboxed runs and the ledger now says
+   so for the rest.
+2. **The §25 corpus figure of "25 Go repos" is corrected to 31** in `docs/INTEGRATION_HONESTY.md`.
+   The derived ratios computed over the 25-repo enumeration (68 non-vendor `go.mod`s, 13 of 68 at
+   `go` ≥1.25, 9 root-`go.mod` repos, 2 of 25 vendoring) were **not** re-measured over the
+   corrected set and are left as historical figures.
+3. **A larger blocker was found beside this one and is deliberately LEFT OPEN.**
+   `verify.disk_cache` and `verify.repository_cache` are bind-mounted **RW** into the verify
+   container, but `_bazel_argv` **never emits `--disk_cache=` or `--repository_cache=`** — the
+   mounts are **inert**. With `--network=none`, a cold sandboxed run therefore **cannot resolve a
+   single Bazel module** — `go_sdk.download` and every BCR `bazel_dep` included — **compiler or no
+   compiler**. This is arguably a **larger** blocker than the C toolchain. It is recorded in
+   `_bazel_argv`'s own docstring and owned by a later task; **it is not fixed here**, because
+   fixing it is a separate decision about cache identity and ADR-0014 re-runnability.
+4. **`settings.verify.container_image` is a placeholder and nothing in this repository builds it.**
+   It names `ghcr.io/acme/fleet-build:2026-08`; **there is no Dockerfile anywhere in this
+   repository**; a registry probe returned `denied`/403 without authenticating, which
+   **distinguishes nothing** (GHCR answers identically for private and nonexistent), and `acme` is
+   this project's canonical placeholder org. **No test exercises a real image.** The minimum
+   contents, enumerated from what actually executes inside the container: a **shell**; a **real
+   pinned `bazel`** — *not* bazelisk, since `--network=none` cannot download a version; a binary
+   named **`gcc`** or an image-level **`ENV CC`**; and a **writable HOME for the run uid**. Not
+   needed: a JDK (the Bazel release binary embeds a JRE), a system `go`, or `gazelle` — gazelle
+   runs **on the host** from the vendored binary per **ADR-0056**, and the Go SDK arrives via
+   `go_sdk.download`.
+5. **`rdepverify` runs containerised Bazel with the same image and has NO such gate.** Named here
+   so it is a known omission rather than an oversight.
+6. **What this ADR does NOT prove, and it is most of the operational surface.** **No real
+   container image was ever probed** — every gate test evaluates the probe against **stub files on
+   the host**, no Docker daemon ran, and the argv → container behaviour is asserted as
+   **constructed argv only**. **Bazel was never run against a clang-only or `CC`-carrying
+   environment**: the claim that it refuses the first and accepts the second rests on **reading**
+   `unix_cc_configure.bzl`, not executing it, and the one real-Bazel test in this area strips
+   `gcc`/`cc`/`clang` **and** `CC` together, so it does **not** discriminate Gap A from Gap B. The
+   probe's shell portability was checked on this host's `sh`/`dash`/`bash` only — **not busybox
+   `ash`**, which is what an Alpine image would use. **Nothing was proven about cgo actually
+   building**: no headers or libraries were probed.
+
+**Amended by ADR-0062 — consequence 4 is retired, consequence 3 is closed by ADR-0061/ADR-0063, and
+consequence 6's busybox clause is now measured.** `docker/fleet-build.Dockerfile` exists and builds,
+and `settings.verify.container_image` is the **local tag** `fleet-build:9.2.0-bookworm`, not a
+registry placeholder; the minimum contents this consequence enumerated were **met**. The cache
+mounts are no longer inert (ADR-0061 for build/test, ADR-0063 for `query`). The probe **was**
+verified working under **busybox `ash`**, so the shell was never the reason Alpine was rejected —
+**glibc was** (ADR-0062). **Consequence 5 stands unchanged: `rdepverify` still has no gate.** And
+**nothing here makes a sandboxed run work**: the repository cache the container is handed is created
+and never populated, so a cold `--network=none` run still resolves no module — see ADR-0062 blocker
+**B2**.
+
+---
+
+## ADR-0061 — A shared Bazel cache is **one object behind both the mount and the flag**: `CacheMount` renders the bind mount *and* the `--disk_cache=`/`--repository_cache=` that names it, on **the side bazel actually runs on** — and Phase 4 gets those same flags **unsandboxed, unconditionally**
+
+**Decision.** `CacheMount` (`workers/buildverify.py`, a `FleetModel` with
+`role: Literal["disk","repository"]` and an absolute host `path`) is the **single object** behind
+both halves of a shared cache: `mount()` yields the `Mount`, and `flag(sandboxed=...)` yields
+`--disk_cache=…` / `--repository_cache=…`. `cli._cache_mounts()` returns role-tagged
+`CacheMount`s instead of a bare path list. `_bazel_argv` emits one flag per mount with
+`sandboxed=payload.image is not None`, **before** `extra_args`. `RdepverifyInput` carries the same
+`list[CacheMount]`, forwarded by `VerifyWorker._rdeps`, and renders its flags with
+**`sandboxed=False` unconditionally**.
+
+**This closed a SPEC violation, not an optimisation, and the SPEC had already named the flags.**
+`settings.verify.disk_cache` and `verify.repository_cache` were bind-mounted **read-write** into
+the verify container at `/cache/<name>`, but `_bazel_argv` emitted only `--keep_going`,
+`--build_event_json_file`, `--jobs` and `extra_args` — **never `--disk_cache=` or
+`--repository_cache=`**. The mounts were **inert** unless an operator hand-wrote the flags into
+`extra_args`. **SPEC §3.4's bounds table specifies exactly those two flags**, "mounted read-write
+and shared across containers and attempts", so the code **mounted them and never named them**.
+With `verify.network = "none"` the consequence is not a lost cache hit: a cold sandboxed run
+**cannot resolve `go_sdk.download`, any BCR `bazel_dep`, or any module at all** — compiler or no
+compiler (this is the gap ADR-0060 consequence 3 recorded and deliberately left open).
+
+**Why one object rather than two cooperating call sites.** The mount TARGET and the flag VALUE are
+both derived from `path`, so renaming one **is** renaming the other and they cannot drift. `role`
+exists because the two flags are **not interchangeable** and nothing in a host path says which is
+which; the previous `_cache_mounts()` conveyed that **by position**, which is the kind of
+convention that holds until someone appends a third directory.
+
+**The sandboxed/unsandboxed branch, and why getting it backwards is silent rather than loud.**
+`flag(sandboxed=...)` branches on `payload.image is not None`: the **container-side**
+`/cache/<name>` target when sandboxed, the **host** path when not. Unsandboxed runs —
+`--no-sandbox`, every offline test, every host-side dry run — have **no container at all**, and
+`/cache/<name>` there would be created **at the host filesystem root**. The mirror error is as bad:
+a host path handed to the container names a directory that is **not mounted there**, so bazel
+creates it inside the container and `--rm` deletes it. **Neither direction fails loudly. Both throw
+the cache away** — which is precisely the shape of defect this project's ledger exists to catch, so
+the sandboxed tests read the expected value **back out of the emitted `--volume=` flags** rather
+than from a literal: renaming one side breaks the test instead of silently diverging.
+
+**`extra_args` still wins, and that was checked against the vendored binary rather than assumed.**
+Measured with the pinned Bazel 9.2.0:
+
+    bazel canonicalize-flags --for_command=build -- \
+      --disk_cache=/a --disk_cache=/b --repository_cache=/r1 --repository_cache=/r2
+    → --disk_cache=/b
+      --repository_cache=/r2
+
+Neither option is `allowMultiple`, so repeats are **last-wins**; both are accepted under
+`--for_command=test`; neither is deprecated in 9.2.0. Because the cache flags are emitted **before**
+`extra_args`, an operator who hand-wrote them — **previously the only way to reach the mounted
+cache at all** — keeps exactly the behaviour they had. This is an ordering guarantee derived from a
+measured property of the binary, not from a convention about how argv is assembled.
+
+**Phase 4 had the same gap in a different shape, and `sandboxed=False` there is unconditional on
+purpose.** `RdepverifyWorker` **never containerises** — no `image`, no `cache_mounts`, calling
+`bazel_test_argv(...)` directly on the host — so the blast-radius `bazel test` ran with **no disk
+cache and no repository cache at all**, re-executing from cold what Phase 3 had just cached. SPEC
+§3.4 places the persistent-cache row **inside the Phase 4 section** and names `bazel/query.py`
+among its enforcement points, so this was the same specified-but-unenforced bound, one phase over.
+The fix is minimal: `cache_mounts: list[CacheMount]` on `RdepverifyInput`, forwarded in
+`VerifyWorker._rdeps` (`VerifyInput` had carried the value all along — it was **one missing line
+among twelve forwarded fields**), flags rendered `sandboxed=False`. **Unconditional, because there
+is no container to be inside**: `ContainerSandbox` appears in that worker **only** as `on_cancel`
+cleanup of a container it never creates, which is a reference, not evidence of containerisation.
+**This is the one clause of this ADR that must change if Phase 4 is ever containerised** — at that
+point the flag must take the same `payload.image is not None` branch `buildverify` takes, and a
+fixed `False` would name a host path the container does not have. Non-vacuity of the forwarding was
+confirmed by **reverting `_rdeps` and watching the e2e test fail**.
+
+**One model, imported — not a second source of truth.** `CacheMount` stays in `buildverify` and is
+imported by `rdepverify`, which already imports five symbols from it. One model, one flag renderer.
+
+*Agent Recommendation (judgement calls, not requirements of `CLAUDE.md`, the SPEC, or any
+reference).* Four choices here are the agent's and are labelled as such: **(i)** siting `CacheMount`
+in `buildverify` and importing it into `rdepverify` rather than promoting it to a shared module —
+the import edge already exists and a new module would be an abstraction for two callers;
+**(ii)** emitting the cache flags **before** `extra_args` rather than after, which is what preserves
+the hand-written-flag escape hatch and is only *safe* because of the `canonicalize-flags` evidence
+above; **(iii)** deriving the container target as `/cache/<basename>` rather than a role-named
+constant, so the flag and the `--volume=` share one string; **(iv)** leaving the rdeps `bazel query`
+invocations alone (consequence 4). Each is reversible and none is derived from a directive.
+
+**Consequences.**
+
+1. **SPEC §3.4's persistent-cache bound moves from *specified* to *enforced*, in both Phase 3 and
+   Phase 4.** `docs/INTEGRATION_HONESTY.md` records that it was specified-and-unenforced until now.
+2. **An operator's hand-written `extra_args` cache flags are preserved by construction**, with the
+   last-wins property measured rather than assumed.
+3. **A test-infrastructure precedence trap now exists and is recorded, because it cost ~75
+   minutes.** A command-line `--repository_cache` **beats** a `.bazelrc` `common
+   --repository_cache=` line. `tests/conftest.py` shares one archive cache across the session via
+   that `.bazelrc`; the moment the CLI began emitting the flag from a per-workspace default, every
+   real-Bazel e2e test silently received an **empty** archive cache and re-fetched every ruleset
+   from the live registry — the first full-suite attempt was still running at **~75 minutes** when
+   it was caught. Fixed in `test_build_e2e.real_build()`, which appends
+   `verify: repository_cache: <BAZEL_REPOSITORY_CACHE>` to the workspace config so the flag and the
+   `.bazelrc` name **the same directory**; the suite returned to **~12m34s**. This is a **mechanism,
+   not weather**: it presents exactly like the live-network flake class this project tracks and is
+   **not** a member of it.
+4. **A real gap remains and is deliberately unfixed: the rdeps `bazel query` invocations still
+   carry no cache flags**, though `rdeps_closure` loads the module graph too. Changing
+   `bazel/query.py`'s **query** argv is a separate decision; the absence is **asserted explicitly**
+   in the e2e test so it is recorded rather than forgotten.
+5. **The sandboxed path is proven at the argv level only.** **No cold `--network=none` run was ever
+   exercised**: no Docker was involved, there is still **no in-tree Dockerfile**, and
+   `settings.verify.container_image` names an image nothing here can pull (ADR-0060 consequence 4).
+   What is proven is that the flags carry the mount targets and the mounts are emitted. The
+   **unsandboxed** path *is* exercised against real Bazel 9.2.0 end to end, so "the flags are
+   accepted and bazel uses those directories" is proven **there and only there**.
+6. **No real Phase 4 run has ever been exercised against real Bazel**, warm or cold — every
+   `fleet verify` test uses `FakeBazel` — so what this ADR proves for Phase 4 is **argv
+   construction, ordering, and provenance from settings**, nothing about execution.
+7. **There is no timed before/after for either round.** The cost claim — Phase 4 re-executing what
+   Phase 3 had cached — is **inference from the flags' absence**, not a measurement.
+
+**Amended by ADR-0063 — consequence 4's gap is closed, and consequence 5's Dockerfile clause is
+now false.** The rdeps `bazel query` invocations **do** carry a cache flag now: `--repository_cache`
+and **only** that one, on both queries, decided by measurement rather than by symmetry with the
+build argv (ADR-0063). Judgement call (iv) in the *Agent Recommendation* above — "leaving the rdeps
+`bazel query` invocations alone" — is therefore retired. Separately, consequence 5's "**there is
+still no in-tree Dockerfile**" is **false as of ADR-0062**: `docker/fleet-build.Dockerfile` exists
+and builds, and `settings.verify.container_image` no longer names an unpullable registry image.
+**Everything else in consequence 5 stands unchanged** — the sandboxed path is still proven at the
+**argv level only**, because no Bazel has ever run inside that image and the mounted repository
+cache is still empty (ADR-0062, blocker B2).
+
+---
+
+## ADR-0062 — The verify sandbox image is **in-tree, glibc and local-tagged**: `docker/fleet-build.Dockerfile` pins Bazel **9.2.0** by a digest verified **three ways**, kills the arbitrary-uid **exit-36** death **twice over** — and closes **B1 only**, because an **empty repository cache (B2) keeps the sandboxed path red**
+
+**Decision.** `docker/fleet-build.Dockerfile` — two stages, **332 MB**, ~10s to build — is the image
+`settings.verify.container_image` names, and that setting moves from the unpullable
+`ghcr.io/acme/fleet-build:2026-08` to the **local tag** `fleet-build:9.2.0-bookworm`. It carries a
+shell, the **official Bazel 9.2.0 release binary**, `gcc` + `libc6-dev`, `HOME`/`USER` env for a
+passwd-less uid, and a system `/etc/bazel.bazelrc` pinning `output_user_root`. It deliberately
+carries **nothing else**.
+
+**Say the limit first: this closes exactly ONE of two blockers, and the sandboxed path is still
+red.** ADR-0060 consequence 4 and ADR-0061 consequence 5 each named a reason a cold
+`--network=none` verify cannot work. Only the first is closed here.
+
+- **B1 — CLOSED. An image defect that `INFRA_EXIT_CODES` turns into an infinite re-queue.** Every
+  sandboxed command runs `--user <uid>:<gid>` (`current_user_spec()`, so the bind-mounted worktree
+  does not fill with root-owned artifacts), and that uid has **no `/etc/passwd` entry**. For a
+  passwd-less uid Docker sets **`HOME=/`** — unwritable — and leaves **`USER` unset**. Bazel's
+  **client**, computing its default output user root, calls `blaze::GetUserName()`, finds neither,
+  and dies with `LOCAL_ENVIRONMENTAL_ERROR` = **exit 36**. **36 is in `INFRA_EXIT_CODES`**, so
+  ADR-0014 spends **no attempt** on it: the fleet would re-queue the repo **forever** against a
+  defect no retry can fix. Reproduced verbatim as a **negative control** in plain
+  `debian:bookworm-slim` with the vendored 9.2.0 binary: `HOME=[/] USER=[]` → `FATAL: $USER is not
+  set, and unable to look up name of current user` → `bazel exit=36`.
+- **B2 — UNTOUCHED, and it is why the path stays red.** `cli._cache_mounts` creates
+  `<root>/cache/bazel/repo` with `mkdir(parents=True, exist_ok=True)` and **nothing ever fills it**.
+  With `--network=none` and an **empty** repository cache, **no module resolves**, so a sandboxed
+  build fails **regardless of the image**. Cache population is a separate task and is deliberately
+  not attempted here.
+
+**Base: `debian:bookworm-slim`, and Alpine was rejected on evidence rather than on taste.** The
+official Bazel release binary is **glibc-dynamic** — `ELF … dynamically linked, interpreter
+/lib64/ld-linux-x86-64.so.2` — and the rules_go / rules_rust / rules_js prebuilt toolchains a
+migrated repo pulls through the repository cache are glibc too; musl would need a source build or a
+patched loader for each. **The shell was never the objection**: the C-toolchain probe from ADR-0060
+*was* verified working under busybox `ash`, so the probe is explicitly **not** the reason Alpine
+lost, and recording that keeps a future round from re-litigating the wrong question.
+
+**Bazel is the official release binary at a digest verified three ways — not apt, not bazelisk.**
+Debian ships no Bazel, and **bazelisk resolves `.bazelversion` by downloading it**, which
+`--network=none` cannot do — a bazelisk image would fail at the *first fleet build* rather than at
+*image build* time, where a failure is cheap to see. The pin is `sha256sum -c` against
+`7668a95d…8694`, and that digest is identical at **`releases.bazel.build`**, the **GitHub release
+asset**, and **this repository's own bazelisk download cache**, whose content-addressed directory
+name *is* the digest bazelisk itself verified. Three independent sources, one digest. **No JDK
+layer**: the release binary is a self-extracting archive that **embeds a JRE**, so `default-jre`
+would add ~180 MB nothing executes. The fetch happens in a **separate stage** so `curl` and its CA
+bundle never reach an image that runs without a network.
+
+**The C toolchain is `gcc` + `libc6-dev` and nothing more, and `ENV CC` is deliberately absent.**
+`local_config_cc` resolves the literal name **`gcc`** on `PATH` (ADR-0060's probe mirrors that
+lookup line for line); `libc6-dev` supplies the headers and `crt*.o` the very next step needs; `ar`,
+`ld`, `nm`, `objdump`, `strip` arrive as `gcc`'s own binutils dependency, and the optional tools
+Bazel cannot find degrade to `/bin/false` rather than `fail()`. **Not `build-essential`** (56
+packages vs **41**) and **not `g++`** — an unused compiler is an unaudited one. **`ENV CC` is
+unset on purpose**: a non-empty `CC` **replaces** the `gcc` default in that lookup rather than
+supplementing it, so a wrong or stale `CC` is **strictly worse than none**.
+
+**The uid fix is deliberately two-layer, and the second layer is structural rather than
+cosmetic.** Layer one: `ENV HOME=/home/fleet`, `ENV USER=fleet`, with `/home/fleet` at mode
+**0777** because **the uid is unknown at build time** (the fleet passes the *host* user's uid/gid,
+which differs per machine, so no `chown` here can be correct) — and **image `ENV` survives
+`--user` with no `--env`, verified**, which matters because `buildverify` emits `docker run` with
+**no `--env` at all**. Layer two: `/etc/bazel.bazelrc` — Bazel's **system** rc, a compile-time
+constant read before the workspace `.bazelrc` and before any command line — carries
+`startup --output_user_root=…`, so the client **never needs a user name to build a default path**
+and **`GetUserName()` is never reached**. That removes the exit-36 path **structurally** instead of
+papering over it. **This cannot be done from the harness side**: `output_user_root` is a **startup**
+option and must precede the verb, while `_bazel_argv` appends every flag **after** `build`/`test`,
+where Bazel rejects it as `COMMAND_LINE_ERROR` — **exit 2**. The harness therefore *cannot* pass it
+at all, which is why the rc file is in the image and not in the argv.
+
+**The omissions are deliberate, each with a named trigger, and they exist to keep B2 visible.**
+`git`, `patch`, `unzip`/`xz-utils`, `python3`, `g++`, cgo system libraries, and any Go/Node/Rust
+toolchain are **absent by design**: those are supposed to arrive through the **mounted repository
+cache**, and baking them in would **mask B2** — an empty cache would present as a slow-but-working
+image instead of the hard failure it is. Triggers to revisit are named in the file: stderr naming
+the missing binary (`git` for a `git_repository`, `patch` for a `bazel_dep` with `patches = [...]`),
+a linker error naming a system library (`-lsqlite3` ⇒ `libsqlite3-dev`), or a C++ source failing to
+link (⇒ `g++`).
+
+**A local tag, because this fleet has no registry — and the failure mode is now loud.** There is no
+container registry here, so a registry-shaped name could only ever fail to pull. With a local tag,
+an **unbuilt** image fails at `docker run` with **125**, immediately and with a remedy that is a
+`docker build` command.
+
+**A misattribution fixed alongside it.** `_c_toolchain_gate` reported **"no C compiler in the
+sandbox image"** for **any** non-zero probe exit — **including `docker run`'s 125**, which means the
+container **never started** (absent or unpullable image, unreachable daemon, invalid flag). An
+unbuilt `docker/fleet-build.Dockerfile` is now the *most likely* 125 there is, so reporting it as a
+missing compiler would send an operator to the wrong file. The gate now **branches on 125** with a
+message naming the likely causes and the `docker build` remedy. **The classification is unchanged**
+— `BUILD_ERROR`, non-retryable — because both verdicts are "fix the image", only the pointed-at file
+differs.
+
+*Agent Recommendation (judgement calls, not requirements of `CLAUDE.md`, the SPEC, or any
+reference).* Six choices here are the agent's and are labelled as such: **(i)** `debian:bookworm-slim`
+over any other glibc base (the glibc *requirement* is measured; the *distro* is a preference);
+**(ii)** the two-stage split to keep `curl` and the CA bundle out of a network-less image;
+**(iii)** `gcc` + `libc6-dev` over `build-essential`, and omitting `g++` until a build names it;
+**(iv)** doing the uid fix **twice** — `ENV` *and* the system rc — rather than trusting either alone;
+**(v)** the tag string `fleet-build:9.2.0-bookworm`, encoding the Bazel version and base so a stale
+image is nameable; **(vi)** branching `_c_toolchain_gate` on 125 rather than widening the existing
+message. Each is reversible and none is derived from a directive.
+
+**Consequences.**
+
+1. **B1 is closed; B2 is not, and the sandboxed path remains red.** An image now exists that the
+   fleet can actually run, and the arbitrary-uid exit-36 infinite re-queue is removed on two
+   independent layers. **A sandboxed build still cannot succeed**, because `<root>/cache/bazel/repo`
+   is created and never populated and `--network=none` cannot fetch a single module. **Populating
+   that cache is the next blocker and it is not this ADR's.**
+2. **No Bazel has ever run inside this image.** The integration test checks `command -v bazel`
+   resolves a path — **which is not executing it** — plus that `HOME`/`USER` survive `--user`. The
+   exit-36 *mechanism* was reproduced in a **separate plain Debian container**, and the *fix* is
+   argued **structurally**: the `ENV` survival was verified, the rc file was written and the
+   `GetUserName` symbol was verified present in the shipped binary, but **the fixed code path was
+   never executed**.
+3. **The image is not proven *sufficient* for any real repository.** No Go/Node/Rust toolchain, no
+   `git`/`patch`/`unzip`/`python3`, no `g++`, no cgo system libraries. The first real migrated repo
+   is expected to name something missing; the triggers above are how that is meant to be read.
+4. **The new integration test gates on the image being present *locally* and never pulls**, so a
+   **stale locally-tagged image would still pass it**. The test proves "an image with this tag
+   exists and has these properties", not "the shipped Dockerfile produced it".
+5. **`settings.verify.container_image` now points at something buildable**, and an unbuilt image
+   fails **loudly at `docker run` with 125** with a `docker build` remedy, rather than being
+   misreported as a missing compiler.
+6. **Docstrings in `buildverify._c_toolchain_gate`, `tests/test_workers_build.py`,
+   `tests/test_build_e2e.py` and `tests/test_sandbox.py` asserted "there is no Dockerfile in this
+   repository" and were corrected.** ADR-0061 consequence 5 and `docs/INTEGRATION_HONESTY.md`
+   carried the same claim and are corrected too.
+7. **`rdepverify` still has no C-toolchain gate** (ADR-0060's open item), and this ADR does not
+   change that.
+
+---
+
+## ADR-0063 — The rdeps `bazel query` names the **repository cache and only it**: both flags parse, only **one of them does work**, and **a flag on the line implies a working cache**
+
+**Decision.** `bazel/query.py`'s `query_argv` gains `cache_flags: Sequence[str] = ()`, emitted on
+**both** the closure query and the depth-1 query, fed by `RdepverifyWorker._query_cache_flags`,
+which renders **`--repository_cache` only** — **no `--disk_cache`** — at **host paths**, with
+`sandboxed=False` **unconditionally**. This closes the gap ADR-0061 consequence 4 recorded and
+deliberately left open.
+
+**Both flags parse, so this was never a `COMMAND_LINE_ERROR` risk in either direction.** Measured on
+the vendored 9.2.0:
+
+    bazel canonicalize-flags --for_command=query -- --disk_cache=/a --repository_cache=/r
+    → --disk_cache=/a
+      --repository_cache=/r
+
+Both echoed back, **exit 0**. So neither flag is the exit-2 `COMMAND_LINE_ERROR` that
+`UNREPEATABLE_EXIT_CODES` would burn an attempt on, and the decision below is **not** a safety
+decision.
+
+**Parsing is not using, so it was measured.** A probe `bazel query 'deps(//:all)'` over a workspace
+with **one `bazel_dep`** wrote **2.3 MB into `--repository_cache`** and **zero files into
+`--disk_cache`** (only an empty `tmp/`). **Read-back was proven separately**: a rerun from a
+**fresh `--output_user_root`** against that same repository cache, with
+**`--repository_disable_download`**, resolved the **whole module graph** and answered the query,
+**exit 0** — the cache was read back with the network refused, which is the property that matters
+under `verify.network = "none"`.
+
+**Why the disk cache is deliberately NOT emitted.** `--disk_cache` is documented as a directory
+where Bazel reads and writes **actions and action outputs**. `query` runs the loading half of a
+build and **executes no actions at all**, so there is nothing for it to hold — which is exactly what
+the zero-file measurement shows. The rationale recorded in the code is the one that generalises:
+**a flag on the line implies a working cache**, so emitting a provably inert one is a claim the
+measurement does not support. This is an **omission by evidence**, not an oversight, and it is
+recorded so a later round does not "fix" the asymmetry by symmetry.
+
+**`query_argv` takes pre-rendered flag strings, not `CacheMount` objects, and that is a layering
+decision.** `CacheMount` lives in `workers/buildverify.py`, and `bazel/` sits **under** `workers/`
+in this project's dependency direction. Importing the model down into `bazel/query.py` would
+**invert the layering**, and re-implementing `flag()` there would **clone the one flag renderer**
+ADR-0061 exists to keep singular. Passing already-rendered strings keeps both properties: one
+renderer, no inverted edge.
+
+**`sandboxed=False`, unconditionally, for the same reason ADR-0061 gives for the `bazel test`
+wiring.** `RdepverifyWorker` has no `image`, builds no container and emits no `--volume=`, so
+`/cache/<name>` names nothing on this host and a container-side path handed to a host process
+would create it at the filesystem root. **This clause changes the day Phase 4 is containerised**,
+exactly as ADR-0061's does.
+
+**The e2e assertion that pinned the *absence* was updated, not deleted.** ADR-0061 consequence 4
+recorded the missing flags by **asserting them absent** in the e2e test. That assertion now derives
+its expectation from **`cli._cache_mounts()`** rather than from a literal, so it pins the new
+behaviour the same way it pinned the old one — a rename on either side breaks the test instead of
+silently diverging.
+
+*Agent Recommendation (judgement calls, not requirements of `CLAUDE.md`, the SPEC, or any
+reference).* Three choices are the agent's: **(i)** emitting **only** the repository cache when both
+flags parse — the measurement says the disk cache is inert for `query`, and the alternative
+(emitting both for symmetry with the build argv) is defensible and was rejected; **(ii)** the
+`Sequence[str]` signature over an inverted import; **(iii)** carrying the flags on the **depth-1**
+query as well as the closure query, on the grounds that both load the module graph.
+
+**Consequences.**
+
+1. **ADR-0061 consequence 4 is closed**, and its *Agent Recommendation* item (iv) is retired.
+2. **The argv is proven; an end-to-end cache *hit* through the worker is not.** **No real
+   `bazel query` runs through `RdepverifyWorker` anywhere in the suite** — every `fleet verify`
+   test uses `FakeBazel` — so what the suite proves is **argv construction**. The hit evidence is an
+   **out-of-band probe** over a workspace with **one `bazel_dep`**, on **Bazel 9.2.0 only**.
+3. **The disk-cache omission is a recorded decision, not a missing feature.** Anyone re-adding it
+   owes a measurement in which it holds a file.
+4. **`query` is now the third invocation site** (after Phase 3's build and Phase 4's test) whose
+   cache flags are derived from one `CacheMount` renderer. There is no fourth.
+
+---
+
+## ADR-0064 — `MODULE.bazel.lock` is a **published artifact**, read from the build worktree as planned bytes and committed **under the integration mutex** — deliberately **not** a fleet-wide root file and **never staged into a dispatch commit**, because two ecosystems' locks are an `add/add` conflict
+
+**Decision.** `_publish` reads `MODULE.bazel.lock` **once**, at the **build worktree root** — the
+directory the VERIFY unit just handed Bazel as `cwd` — and carries those bytes through
+`materialize` as **planned bytes**. That is ADR-0056's shape exactly: **bytes a tool produced,
+captured where it wrote them**. There is **no `content` floor and no `carry_from`** for this path:
+a lock the harness invented is **not a resolution anything performed**, and the two mechanisms this
+project uses for files it can author would both produce one. When the file is absent the publish
+**succeeds and warns** (`module_lock_absent`); when it is published, `BuildOutput` records it in a
+new `module_lock_published` flag.
+
+**The problem this exists to solve was misdiagnosed until it was measured, and the ADR must carry
+the measurement.** §31 and ADR-0062 recorded the sandboxed path as red because the **repository
+cache is empty (B2)**. A controlled experiment matrix in the real `fleet-build:9.2.0-bookworm`
+image, under real `docker run --network=none --user $(id -u):$(id -g)` with the cache
+bind-mounted, says the missing artifact was **never the cache**:
+
+| cache | lockfile | registry on argv | result |
+| --- | --- | --- | --- |
+| warm | **none** | none | **exit 32** |
+| warm | matching (bcr-keyed) | none | **exit 0** |
+| **empty** | matching | none | exit 32 |
+| mirror-warmed | mirror-keyed | none | exit 32 |
+| **mirror-warmed** | **bcr-keyed** | none | **exit 0** |
+| mirror-warmed | mirror-keyed | `--registry=<mirror>` | exit 0 |
+
+The failure is **identical in every red row and always before analysis**: `ERROR: Error computing
+the main repository mapping: Error accessing registry https://bcr.bazel.build/: Failed to fetch
+registry file … Unknown host: bcr.bazel.build`. **Three conclusions, each isolated by a controlled
+pair.** (i) **A warm cache alone resolves nothing** without a lockfile — with no
+`registryFileHashes` map Bazel must reach the **network** for registry metadata, so row 1 is red
+against a cache that makes row 2 green. (ii) **A lockfile alone is not enough either**, because the
+registry files themselves live in the cache (row 3). (iii) **The registry mismatch is a property of
+the LOCKFILE's URL keys, not of the cache**: a **mirror-warmed** cache with a **bcr-keyed** lock is
+**green**, because both BCR addresses serve **byte-identical** files and the cache is
+**content-addressed**. So the mismatch §31 recorded as an unresolved blocker is **fully avoidable**
+by warming and locking under the **same registry the container uses**.
+
+**And the harness had never generated, carried or mentioned one.**
+`grep -rn "MODULE.bazel.lock\|lockfile_mode" src/ tests/ docs/` returned **nothing**. This is the
+design change the project had not made, and it is why the obvious next task (seed the cache) was
+**refuted before it was dispatched**.
+
+**Why it is NOT a fleet-wide root file.** The fleet-wide root-file set is computed at **plan time**
+from **adapter** data. The lock **does not exist then** — it is written by a Bazel run that happens
+later — and it is **no ecosystem's file**: it is **Bazel's record of the root module's
+resolution**, one artifact for the whole monorepo, owned by no adapter. Both halves of the root-file
+contract (ADR-0053/ADR-0055) would have to be bent to admit it.
+
+**Why it is committed under the mutex and NOT staged into the dispatch commit — this is the
+load-bearing part.** Every other fleet-wide root file is **byte-identical across a wave's
+dispatches by construction**, so two repos adding the same path with the same bytes **merge
+cleanly**. **A lockfile is not**: each worktree records the **module extensions its own build
+evaluated**, so a JS repo's lock and a Python repo's lock **of the same wave** differ in
+`moduleExtensions`. Staged into the dispatch commit, those are **two branches adding one path with
+different content off a common base** — `CONFLICT (add/add)` on the **second** merge, leaving the
+integration worktree conflicted and **taking the run down**. Committed on the **integration
+worktree inside the `IntegrationMutex` `_publish` already holds**, it is **linear history with no
+merge to conflict**. Idempotence is by **byte comparison against the file**, not by `git status`.
+
+**The cost is stated rather than hidden: last writer wins.** `moduleExtensions` entries are
+**replaced, not unioned**. What **survives every writer** is **`registryFileHashes`**, which is a
+function of **`MODULE.bazel` alone** — the same root module every worktree carries — and it is the
+map whose **absence produces exit 32** in row 1 of the matrix. **Whether the surviving extension
+entries also suffice offline is explicitly NOT claimed** by this ADR.
+
+**Absent lock: publish nothing, loudly.** On a **first** run there is **no lock until a Bazel that
+could reach a registry has written one**, so absence is the **normal state of a first build**.
+Failing the publish would cost the repo the `BUILD.bazel`/`MODULE.bazel` it **legitimately
+generated**, over an artifact the **next** build produces. Publishing an **empty or synthesized**
+one is the *"an empty lock is indistinguishable from no dependencies"* defect at monorepo scale:
+Bazel either **overwrites it** (bought nothing) or, under `--lockfile_mode=error`, **refuses a
+resolution nobody computed** — and **either way the tree LOOKS offline-ready**. So the absent case
+emits a `module_lock_absent` warning **carrying the consequence**, and publishes nothing.
+
+**A static guard for the registry half, with the registry named by the caller.** New **pure** module
+`src/fleet/bazel/lockfile.py` exposes `check_lock_registry(text, *, registry)`. `registry` is a
+**required parameter with no default**, because **which registry an invocation contacts is a fact
+about its argv**, not a constant. The subject is the lockfile's **URL keys only**, found by
+**walking the parsed JSON** so it is robust to `lockFileVersion` churn; **archive URLs appearing as
+values inside `moduleExtensions` are deliberately excluded**, because those are served by the
+**content-addressed cache** and treating them as registry keys would **fail every real lock**. The
+failure message states the **consequence**: an offline container build dies at
+`Computing main repo mapping` with **exit 32** — *"the identical failure to shipping no lockfile at
+all, except that the tree LOOKS offline-ready"*. This guard would have caught the mirror row of the
+matrix.
+
+**A related measurement, recorded so a later round does not re-derive it:** `--registry` **is**
+accepted as a **post-verb build option** (unlike `--output_user_root`, which ADR-0062 records as
+exit 2 there), so pointing the container at a mirror would need **no `bazelrc` trick**. Not needed
+today — both BCR addresses answer **200** from this host.
+
+*Agent Recommendation (judgement calls, not requirements of `CLAUDE.md`, the SPEC, or any
+reference).* Five choices are the agent's: **(i)** publishing the lock **at all** rather than
+leaving it to a human-run `bazel mod deps`; **(ii)** committing it **under the mutex** rather than
+teaching the merge a union driver for `moduleExtensions` — the union is defensible and was
+rejected as a shadow resolver (Guardrail 4); **(iii)** **warn-and-continue** on absence rather than
+failing the publish or synthesizing bytes; **(iv)** the guard's **URL-keys-only** scope; **(v)**
+`registry` as a required parameter rather than defaulting to `build.registry`.
+
+**Consequences.**
+
+1. **§31's B2 diagnosis is superseded, not merely amended.** "The sandboxed path is red because the
+   cache is empty" is **false as a complete statement**: a warm cache with no lock is **also** red,
+   and for a **different reason**. Both artifacts are required; only one of them existed.
+2. **The lock reaches the branch; it is NOT proven sufficient offline.** **No offline container
+   build has been attempted** with a harness-published lock. What is proven is that a lock **is
+   published** and that **its registry keys can be checked** against the address the container's
+   Bazel contacts.
+3. **Last-writer-wins is a known, accepted, unmeasured cost.** A wave of N ecosystems leaves **one**
+   ecosystem's `moduleExtensions` in the committed lock. `registryFileHashes` survives; the rest is
+   untested. Anyone who later unions them owes a measurement, not a merge driver.
+4. **The claim that `registryFileHashes` is complete regardless of which targets were built is
+   reasoning about Bazel's MVS, not a measurement.**
+5. **The guard is static and deliberately not an assertion over this host's output.** On this host
+   the real-Bazel tests may resolve through the BCR **mirror**, so the locks those tests publish can
+   **legitimately** be mirror-keyed; a check that demanded bcr-keyed locks would be wrong here.
+6. **A second design change of the same shape is now named and open: `maven_install.json`.**
+   `JvmAdapter` emits `maven.install` with **no `lock_file`**, and `maven_install.json` appears
+   **nowhere in `src/` or `tests/`**. Unpinned `maven.install` resolves through **coursier, which
+   opens its own sockets and never passes through Bazel's downloader**, so `--repository_cache`
+   **cannot cover it under any warming strategy** — **the JVM ecosystem cannot build offline
+   today**. Same structural verdict at **lower confidence** (reasoned from mechanism, **not measured
+   this round**): Rust's `cargo fetch` — `ecosystems/rust.py`'s own comment already records that
+   `crate_universe` runs it **without `--locked`** — Python's `pip`-mode `whl_library`, and
+   gazelle's `go_deps` module zips.
+7. **Cache seeding is decided, and two alternatives are rejected on the record.** **Rejected:**
+   pointing `verify.repository_cache` at the suite's `/tmp/fleet-bazel-*/repos` — content-correct,
+   but it lives under a **temp fallback keyed to a hash of this checkout path**, holds **only what
+   the fixtures fetched**, and **`tests/conftest.py` deletes it whenever it exceeds the 2 GiB
+   keep-ceiling — it is at 1.8 GiB**. Pointing production at a directory the **test suite garbage
+   collects** is a landmine. **Rejected:** `--vendor_dir`, the upstream offline story — it subsumes
+   the lockfile problem, but **`bazel vendor` is a verb** and `_bazel_argv` hardcodes
+   **`build`/`test`**, so the harness **cannot dispatch the populating step**; kept as a fallback.
+   **Chosen:** a **one-off networked warm run** into the **configured** cache, with the **lockfile as
+   a first-class output**. The **cache is generated and documented, never committed** (1.8 GiB of
+   content-addressed blobs); **the lockfile is committed** — low single-digit MB, and it is **the
+   actual pin**.
+
+---
+
+## ADR-0065 — ADR-0020's **principle shipped; its file layout did not**. `bazel/generators.py` keeps its name, the no-branching invariant is what is enforced, and the `ecosystems/contracts/` half is recorded as **never built**
+
+**Decision.** Four parts, all of them corrections to *this file's own record* rather than to code.
+
+1. **ADR-0020's `bazel/{emit,module,render}.py` split is retired. `src/fleet/bazel/` ships as
+   `layout.py`, `generators.py`, `lockfile.py`, `query.py`,** and the driver ADR-0020 called
+   `emit.py` is `workers/buildgen.py` (plus `cli._run_gazelle` for ADR-0056's run-level pass).
+   `generators.py` holds what ADR-0020 assigned to `render.py` (`render_target`,
+   `render_build_bazel`, `render_root_package`, `render_gazelle_build`) *and* what it assigned to
+   `module.py` (`mvs_select`, `reconcile_versions`, `validate_override`, `render_module_bazel`).
+   No file is renamed and no code moves.
+
+2. **ADR-0020's actual decision — the one that mattered — is affirmed, and it is met.** The
+   decision was never "three files"; it was *"none of which may contain an `Ecosystem`
+   comparison"*, i.e. output-side language knowledge lives in `src/fleet/ecosystems/` and
+   `src/fleet/bazel/` is a branch-free driver. That is true of the tree as it stands:
+   `grep -n 'Ecosystem\.\|ecosystem ==\|== Ecosystem\|elif.*ecosystem' src/fleet/bazel/generators.py`
+   returns **nothing** across its 868 lines, and SPEC §12.6's own gate returns 10 hits fleet-wide,
+   **none of them in `src/fleet/bazel/`** — all are `Ecosystem.UNKNOWN` as an *assigned value* in
+   `graph/infer.py`, `workers/` and `cli.py`, which §12.6 already exempts by name. `generators.py`
+   names `Ecosystem` three times and all three are adapter-supplied data crossing a boundary:
+   two `Mapping[Ecosystem, str]` *parameter annotations* on `coarse_build_targets` (the rule map is
+   injected, per ADR-0057) and one comment.
+
+3. **The invariant is mechanically guarded, so the filename is not load-bearing.** Four tests in
+   `tests/test_ecosystems.py` enforce it, and **none of them exempts `src/fleet/bazel/`** —
+   `ADAPTER_PACKAGES = ("src/fleet/manifests/", "src/fleet/ecosystems/")`, full stop:
+   - `test_no_ecosystem_branch_exists_outside_the_adapter_packages` — no
+     `if …ecosystem ==|!=|is` outside the two packages;
+   - `test_no_ecosystem_member_other_than_the_unknown_sentinel_is_named_outside_the_packages` —
+     any `Ecosystem.<MEMBER>` other than `UNKNOWN` outside the two packages (and `models/enums.py`)
+     fails;
+   - `test_the_exemption_list_is_exactly_the_two_adapter_packages` — asserts `ADAPTER_PACKAGES`
+     *is* exactly that pair, so widening it to admit `bazel/` is a visible diff;
+   - `test_no_language_directory_is_hardcoded_in_any_driver` — `'"(java|ts|py|go|rust|misc)/'`
+     returns nothing over `bazel/`, `orchestrator/`, `graph/`.
+
+   A fifth, `test_no_adapter_package_exception_is_named_outside_the_adapter_packages`, closes the
+   form of language knowledge the greps cannot see (an adapter-private `…Error` caught by a
+   driver). *Agent Recommendation:* these five are the real ADR-0020, and they would survive any
+   renaming of the files they scan — which is the argument for treating the filename as cosmetic.
+
+4. **The second half of ADR-0020 never shipped, and is recorded as unbuilt rather than
+   re-pointed.** `src/fleet/ecosystems/contracts/{base,proto,openapi,avro,thrift,shared_lib}.py`
+   — the `ContractAdapter` registry keyed by `ContractKind` (ADR-0019 + ADR-0020, SPEC §7.6) —
+   **does not exist**. `src/fleet/ecosystems/` contains `base, jvm, js, py, go, rust, unknown` and
+   no `contracts/` subpackage. `workers/contracts.py` says so in its own module docstring: *"The
+   `ecosystems/contracts/` `ContractAdapter` registry §1 names does not exist in this tree yet, so
+   these tables are the registry in miniature and are what should move into it."* Its three
+   `Mapping[ContractKind, …]` tables honour §1's no-branch rule (there is no `if kind is …` and no
+   `match`), so the *invariant* holds on the contract side too — but `for_kind`, `neutral_targets`
+   and `binding_target` have no implementation, `EcosystemAdapter.contract_bindings` is declared
+   and read by nothing, and **SPEC §12.32's `fleet.ecosystems.contracts.discover()` set-equality
+   against `set(ContractKind)` is unsatisfiable as written**. This ADR does not fix that; it
+   records it, and SPEC §12.32 and §7.6 are marked NOT YET IMPLEMENTED in the same edit so the
+   criterion stops reading as a passing gate.
+
+**Rationale.** The record drifted, the code did not. ADR-0020 was written before ADR-0005's
+registry landed on the output side, and it specified *where the code would live* in the same
+breath as *what the code may not do*. Only the second half was ever a decision: the SPEC §1
+contradiction ADR-0020 existed to resolve ("one new file and zero edits elsewhere" versus an
+explicit `generators.py` exemption from the no-branching rule) is resolved by the exemption being
+gone, not by the file being gone. Every subsequent ADR that touched this area — ADR-0056,
+**ADR-0057** (D3, "`bazel/generators.py` reads the union through `_registry_ruleset_repo_names()`";
+D-alternatives, "puts ecosystem knowledge in `bazel/generators.py`, which is exactly what D1
+moved"), and the ADR-0058 analysis at `DECISIONS.md:2397/2401/2423` — cites `generators.py` by
+line number as the current, correct home. Four ADRs' worth of citation is itself evidence about
+which name is real.
+
+*Agent Recommendation:* **a rename was rejected.** It is a large diff — `generators.py` is 868
+lines split three ways, plus three test modules (`test_bazel.py`, `test_ecosystems.py`,
+`test_build_e2e.py`) and two importers (`workers/buildgen.py`, `cli.py`) — that changes **no
+behaviour and no assertion**, invalidates the line-number citations four landed ADRs depend on,
+and buys a property nothing checks: SPEC §8 is not asserted by any test. The success criterion
+PROGRESS Tier-0b named for this work — *"`find src -name '*.py'` matches SPEC §8 exactly (a test
+asserts the set)"* — **does not exist in `tests/`**, which is precisely why the divergence went
+unnoticed. Given a mechanically-guarded principle and an unenforced layout, the honest move is to
+amend the layout to what shipped rather than to spend a refactor defending a document.
+
+**On the stale status records.** `docs/PROGRESS.md:114` still carries Tier-0b as an unstarted task
+(including *"delete `bazel/generators.py`"*) and `:919` still lists the split as open defect 2.
+Neither is a reversal of this ADR and neither was a decision to keep the split: they are status
+lines written before `src/fleet/ecosystems/` existed and never revisited. They are **stale, not
+contradictory**, and this ADR does not edit them — `PROGRESS.md` is a log, and the correction
+belongs in a checkpoint entry, not in a retro-edit.
+
+**Alternatives rejected.** *Perform the three-way split as specified* — see above: cosmetic, and
+it discards citation anchors. *Silently re-point every `emit.py`/`module.py`/`render.py` mention in
+SPEC to `generators.py`* — that is how the record got here; a file layout named by a landed ADR is
+not corrected by an undocumented find-and-replace, so the SPEC edits below cite this ADR inline.
+*Declare ADR-0020 superseded outright* — its ABC, its registry mechanism, its six shipped adapters,
+its §5.6 models and its no-branching rule are all live; only the layout clause and the unbuilt
+`contracts/` clause are affected, which is an amendment, not a supersession. *Re-point
+`ecosystems/contracts/` to `workers/contracts.py`* — rejected as false: `workers/contracts.py` is
+Phase 1 step 5b **discovery** (ownership, extractability, hoist ranking); it emits no Bazel target
+and implements no `ContractAdapter`. Naming it as the registry would convert a known gap into an
+invisible one.
+
+**Amends ADR-0020** (file layout retired; principle affirmed; the `contracts/` half recorded as
+unbuilt). Supersedes nothing. Consequential to **ADR-0019** (its `ContractAdapter` owner is still
+unbuilt) and consistent with **ADR-0046**, **ADR-0056** and **ADR-0057**, all of which already
+name `generators.py`.
+
+---
+
+## ADR-0066 — SPEC §7.5 stops **embedding** `EcosystemAdapter`'s source: `src/fleet/ecosystems/base.py` is the normative artifact, and the SPEC carries the contract in prose
+
+**Decision.** SPEC §7.5's literal `# src/fleet/ecosystems/base.py` code block is **removed** and
+replaced by (i) prose naming every ClassVar, abstract method and default the ABC declares, (ii) an
+explicit statement that **`src/fleet/ecosystems/base.py` is normative and this section is
+descriptive** — where the two disagree, the ABC wins and the SPEC is the defect — and (iii) the
+registry contract (`@register`, `discover()`, `for_ecosystem()`) stated as behaviour rather than as
+a body. SPEC §3.3 step 2's pseudocode is corrected from
+`adapter.workspace_deps(unit.external_coordinates)` to `adapter.workspace_deps(unit)`, and §3.5's
+stub call from `workspace_deps([coord])` to a `BuildUnit` carrying that coordinate.
+
+**Rationale.** The block was declared normative by the SPEC preamble and had drifted **two landed
+ADRs** deep, in the direction that matters: it declared
+`workspace_deps(self, coordinates: list[Coordinate])` where the shipped ABC is
+`workspace_deps(self, unit: BuildUnit)`; it omitted `import_specifier` entirely; and it declared 7
+ClassVars where the ABC declares 18 (`extension`, `extension_bzl`, `ruleset_repo_names`,
+`src_suffixes`, `repo_name`, `library_rule`, `binary_rule`, `test_rule`, `library_bzl`,
+`binary_bzl`, `test_bzl`, `entrypoints`, `degraded` are all missing) and 5 methods where the ABC
+declares 9 (`workspace_files`, `package_files`, `root_targets` missing).
+
+**Both omissions are ADR-0046, and ADR-0046 is not silent about them.** Its decision item 2 —
+*"`workspace_deps` takes the `BuildUnit`, not a `Sequence[Coordinate]`"* — states the change
+outright, with the rationale that an adapter handed only `external_coordinates` *"cannot name a
+sibling at all — the internal/external split, by construction, hands it the half that excludes
+them"*; it rejected a `JsAdapter`-only side channel precisely because *"the gap is in the shared
+method's signature."* Its decision item 1 made `import_specifier` abstract. `base.py`'s own
+docstrings cite the same reasons. So this is **not** an undocumented divergence: the decision
+landed, the code landed, and only the SPEC's copy of the code was left behind — which is the
+entire argument against keeping a copy.
+
+**Option (a) chosen over option (b) — generate the block from the ABC and assert equality in a
+test.** *Agent Recommendation*, on four grounds:
+
+1. **The block is not a signature dump.** Its value to a reader is its inline commentary
+   (*"true ⇒ delegate emission, do not fake it"*, *"replaces the old hardcoded ecosystem_dir
+   map"*). A generator either drops that prose — in which case the surviving block is strictly
+   less useful than the ABC it copies, and the reader should have been sent to `base.py` — or it
+   must preserve hand-written prose across a mechanical regeneration, which moves the rot into the
+   generator.
+2. **The block is not only the ABC.** It embeds `_BY_ECOSYSTEM`, `register()` and `discover()`
+   bodies, which are module-level and not part of the ABC surface, so (b) needs either a second
+   extraction source or a hand-maintained remainder — and the remainder is where the next drift
+   lands.
+3. **The size argument runs the wrong way.** The shipped ABC is ~340 lines of declarations and
+   docstrings, against 86 lines in the SPEC. Faithfully generated, §7.5 becomes a verbatim second
+   copy of a source file inside a design document.
+4. **The precedent in this document favours asserting properties, not mirroring artifacts.** SPEC
+   §12.6 is the section that has *not* drifted, and it is enforced by tests that scan the tree for
+   a violated property — not by a copy of the tree. Rule 2 (Simplicity First) points the same way:
+   a generator plus an equality test, maintained for a documentation section, is machinery in
+   service of a copy that only needed to be a pointer.
+
+The failure mode (a) has to answer is that prose drifts too. It is mitigated by what (a) chooses to
+state: **names and responsibilities, not signatures.** ADR-0046 changed a signature and left every
+name intact, which is the usual shape — and inverting the authority (the ABC is normative, §7.5 is
+descriptive) means a future reader who finds a disagreement resolves it toward the code instead of
+"correcting" the code toward a stale document, which is exactly the mistake this pair of ADRs
+exists to undo.
+
+*Agent Recommendation for a later task (not implemented here — this session may not touch
+`tests/`):* add `test_spec_7_5_names_every_member_of_the_ecosystem_adapter_abc` to
+`tests/test_ecosystems.py`, asserting **at name level** that (1) every identifier §7.5's prose
+lists in backticks as a ClassVar or method exists on `EcosystemAdapter`, and (2) every public
+ClassVar and method the ABC declares is named somewhere in §7.5's prose — parsed from `docs/SPEC.md`
+between the `### 7.5` and `### 7.6` headings, resolved via
+`{n for n, v in vars(EcosystemAdapter).items() if not n.startswith("_")} | EcosystemAdapter.__annotations__.keys()`.
+Name-level, not signature-level, is deliberate: it catches the two failures that actually occurred
+(a method omitted entirely, a ClassVar set that fell eleven behind) without re-creating the
+brittleness of (b). **Until that test lands, SPEC §7.5 is not self-enforcing** and its accuracy
+rests on this ADR alone.
+
+**Alternatives rejected.** *A one-off re-sync of the block* — buys a correct document that begins
+rotting at the next ADR touching the ABC, which is the state this ADR is repairing. *Keep the block
+and drop the "normative" claim* — a non-normative 86-line copy of a source file is a trap with a
+disclaimer on it. *Move the block to §7.5 as an appendix generated at release time* — no release
+process exists to hang it on.
+
+**Amends ADR-0020** (§7.5's presentation of the ABC it introduced) and **records ADR-0046** as the
+source of both drifted members. Supersedes nothing.
+
+---
+
+## Constraints Inherited From `references/`
+
+Concrete lessons taken from the reference material, each with its source and the ADR it
+shaped.
+
+1. **Persistence must be designed before parallelism, and the unit of persistence is
+   `(run_id, repo, stage)` in SQLite.**
+   *"One thing that caught us out was that persistence needs to be factored in before
+   parallelism. You do not want to throw away a five-hour run because of an unforeseen
+   error. Every stage writes to one SQLite database keyed by (`run_id`, `repo`, `stage`).
+   Any stage can resume, retry, or get pulled into a later run without redoing work."*
+   — `references/cloudflare-build-your-own-vulnerability-harness.md`
+   → ADR-0004 (SQLite as primary store, keyed identically), ADR-0012, ADR-0014.
+
+2. **Checkpoints are JSON validated on load — never pickle.** The reference harness carries
+   an explicit CWE-502 note: its checkpoint module states there is *deliberately* no
+   `import pickle`, because pickle's REDUCE/BUILD opcodes are an arbitrary-callable VM, and
+   every payload is re-hydrated through Pydantic `model_validate` so a tampered checkpoint
+   produces a `ValidationError` and the step is re-run.
+   — `references/visa-vulnerability-agentic-harness/vvaharness/orchestrator/checkpoints.py`
+   (and the SQLite BLOB store in `.../orchestrator/store.py`)
+   → ADR-0002 (validate-on-load as the only deserialization path), ADR-0012.
+
+3. **A transient API error can arrive as *text* inside a `200 OK` — classify the payload,
+   not the exception type.**
+   *"Sometimes a transient API error comes back as text in the (`200 OK`) response stream
+   instead of throwing a code exception. To the orchestrator, this looks exactly like a task
+   that finished cleanly. You must explicitly classify the response text, not just trust the
+   exception type, or you end up logging empty runs as successes."*
+   — `references/cloudflare-build-your-own-vulnerability-harness.md`
+   → ADR-0014 (error classification by payload inspection; Fail Loud).
+
+4. **Cross-repo tracing requires a unified symbol index *plus* an accurate dependency graph —
+   it is the capability that finds what single-repo scans structurally cannot.**
+   *"To make this work, you need a unified, cross-repo symbol index and an accurate
+   dependency graph. This allows you to uncover deep, systemic flaws that a standard
+   single-repo scan would miss."*
+   — `references/cloudflare-build-your-own-vulnerability-harness.md`
+   → ADR-0004 (`symbols` and `edges` tables as first-class, not derived afterthoughts),
+   ADR-0005.
+
+5. **The agent cannot see what is not in the repository — push context into versioned,
+   repo-local artifacts.**
+   *"From the agent's point of view, anything it can't access in-context while running
+   effectively doesn't exist. Knowledge that lives in Google Docs, chat threads, or people's
+   heads are not accessible to the system. Repository-local, versioned artifacts (e.g. code,
+   markdown, schemas, executable plans) are all it can see."* The same source also makes the
+   app *bootable per git worktree* so an agent can drive one isolated instance per change.
+   — `references/openai-harness-engineering-codex-agent-first-world.md`
+   → ADR-0010 (git worktree per in-flight repo), and this file's own existence as a
+   repo-local decision record.
+
+6. **Agents must not grade their own homework; every claim needs mechanical proof.**
+   The reference describes agents editing source so their own exploit lands and then
+   reporting the bug they created, and prescribes a separate validator that *cannot file its
+   own findings*, with deterministic plain code mechanically verifying that cited paths
+   exist and that patches and tests actually parse: *"If a **Hunter** is allowed to grade its
+   own homework, it will confidently validate everything it outputs."*
+   — `references/cloudflare-build-your-own-vulnerability-harness.md`, reinforced by the
+   *silent failures* failure mode in
+   `references/harness-engineering-ai-complete-guide-to-agent-harness.md`
+   → ADR-0008 (models propose, code applies and judges), ADR-0013 (verified = exit code).
+
+7. **Retry limits, backoff, and loop detection are mandatory; so is validating preconditions
+   on checkpoint resume rather than blindly replaying.**
+   *"Without retry limits, backoff policies, and loop detection, this pattern can burn
+   through thousands of dollars in API calls overnight."* … *"The agent's checkpoint says
+   'step 7 of 10 complete' but the preconditions for step 8 no longer hold. The fix is
+   validation of preconditions on checkpoint resume, not blind replay."*
+   — `references/harness-engineering-ai-complete-guide-to-agent-harness.md`
+   → ADR-0014 (bounded escalating attempts), ADR-0012 (state re-validated from SQLite on
+   resume, never replayed from the JSON projection).
+
+---
+
+## Conflicts Surfaced (not averaged)
+
+Per `CLAUDE.md` Rule 7 — where references disagree, the cleaner/more-tested pattern is named
+and the loser is recorded rather than blended.
+
+**Conflict 1 — Threads vs. asyncio for LLM fan-out.**
+The Visa harness runs its parallel LLM stages on `ThreadPoolExecutor`
+(`vvaharness/pipeline/stages/s4_deepdive.py`, `s6_verify.py`, with lazily-constructed
+thread-safe SDK client singletons) and reserves `asyncio.run()` for the Agent-SDK entry
+points — a genuinely pragmatic hybrid. Our project `CLAUDE.md` mandates `asyncio`.
+**Resolved for asyncio (ADR-0003)**, because the mandate is binding *and* the hybrid's cost
+is real: mixing a thread pool with an event loop means two concurrency models, two
+cancellation stories, and two ways to corrupt a checkpoint writer. We keep the *lesson*
+underneath it — a single lazily-initialized client and bounded worker counts — and adopt the
+harness's implicit boundary explicitly, with CPU-bound parsing pushed to processes rather
+than threads.
+
+**Conflict 2 — SQLite store vs. loose per-step JSON files as the state of record.**
+The Visa harness explicitly migrated *away* from per-step `*.json` files to SQLite BLOB rows
+(`orchestrator/store.py`: *"Replaces the per-step JSON files"*), while our `CLAUDE.md`
+mandates `migration_state.json`. **Resolved by making SQLite authoritative and
+`migration_state.json` an atomically-written projection of it (ADR-0004, ADR-0012)** — the
+mandated file exists and is exactly what a human or a resuming run reads, but concurrent
+writers transact against SQLite, so we get the mandate's ergonomics without the
+lost-update and torn-write failure modes that drove the reference away from loose JSON.
+
+**Conflict 3 — "Skip cross-repo tracing until you need it" vs. our stated differentiator.**
+The same Cloudflare post that describes fleet-wide tracing also advises: *"You should skip
+cross-repo tracing entirely until you have more than one repository that matters… only build
+the next architectural stage when not having it is the specific thing slowing you down."*
+**Resolved in favor of building it first**, because the advice is scoped to a harness
+starting from one repo, whereas we start from 250 with an explicit mandate that cross-repo
+DAG construction and topological sequencing *are* the product. We do honor the underlying
+principle where it still applies: no dedup agent, no feedback/gapfill stage, and no
+speculative sub-agent fan-out until a specific bottleneck demands one.
+
+**Conflict 4 — Wire in static analysis early vs. let usage decide.**
+*"The second is to not wire in static analysis early. We plumbed Semgrep all the way
+through, and the **Hunters** invoked it zero times in a month of runs… It's worth paying
+attention to what the agents actually reach for."* — `references/cloudflare-build-your-own-vulnerability-harness.md`.
+This cuts against ADR-0006's investment in `ast-grep`. **Resolved by distinguishing
+*optional agent tools* from *pipeline primitives*:** the lesson is about a tool offered to an
+agent that the agent declined to use, whereas `ast-grep` is invoked by deterministic harness
+code on a mandatory code path — it is not something a model may choose to ignore. The
+secondary engines in ADR-0006 (`libcst`, `ts-morph`) are the ones genuinely at risk of the
+Semgrep fate, so each is fenced to a named capability and will be removed outright if its
+call count stays at zero.

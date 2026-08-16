@@ -1,0 +1,16 @@
+#!/bin/sh
+# Vendored Rust toolchain entry point (pinned 1.97.1, installed by rustup --profile minimal).
+#
+# tools/rust/cargo/bin/cargo is a rustup *shim*: it locates the toolchain through RUSTUP_HOME
+# and falls back to $HOME/.rustup when that is unset -- which on this host does not exist, so a
+# bare-PATH invocation fails with "could not choose a version of cargo to run" AND creates a
+# stray ~/.rustup. Deriving both homes from this script's own location keeps every byte inside
+# the workspace (CLAUDE.md §2) and makes a clone at any path -- or a different $HOME -- work
+# with no environment setup at all.
+set -e
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+rust_dir=$(CDPATH= cd -- "$bin_dir/../rust" && pwd -P)
+RUSTUP_HOME="${RUSTUP_HOME:-$rust_dir/rustup}"
+CARGO_HOME="${CARGO_HOME:-$rust_dir/cargo}"
+export RUSTUP_HOME CARGO_HOME
+exec "$rust_dir/cargo/bin/cargo" "$@"

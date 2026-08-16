@@ -1,0 +1,42 @@
+#!/bin/sh
+# Vendored Go toolchain entry point (pinned 1.24.12 -- the `_GO_VERSION` constant in
+# src/fleet/ecosystems/go.py, which is also the version the `go_sdk` toolchain registers).
+#
+# 1.24.12 and not 1.23.4: both PINNED rulesets are above 1.23.4's ceiling. gazelle 0.52.2's
+# `go.work` requires go >= 1.24.12 and rules_go 0.61.1's own `go.mod` declares `go 1.24.0`, so
+# a 1.23.4 SDK cannot build the `go_repository` tools `go_deps` uses to generate BUILD files for
+# every fetched module ("failed to build tools: go: go.work requires go >= 1.24.12").
+#
+# Without this wrapper the Go resolver (`go mod download all`) ran against the host's
+# /usr/bin/go 1.22.2 under GOTOOLCHAIN=auto, and only worked because a matching
+# golang.org/toolchain module happened to be cached in $HOME/go/pkg/mod -- so a cache clear
+# plus no network broke the resolver silently, and every resolve wrote into $HOME.
+#
+# Deriving GOROOT and every cache location from this script's own location keeps all bytes
+# inside the workspace (CLAUDE.md §2) and makes a clone at any path -- or a different $HOME --
+# work with no environment setup. `${VAR:-default}` throughout, so an explicit caller override
+# still wins; note GOMODCACHE follows an overridden GOPATH rather than pinning it separately.
+#
+# GOTOOLCHAIN is pinned to the exact version rather than left at `auto`: a go.mod asking for a
+# newer Go then fails loudly ("go.mod requires go >= 1.26 ... GOTOOLCHAIN=go1.24.12") instead of
+# silently downloading a different toolchain and computing go.sum bytes the registered SDK
+# would not reproduce.
+#
+# XDG_CONFIG_HOME is redirected because Go's telemetry resolves its directory through
+# os.UserConfigDir() and has NO dedicated environment variable: a bare `go version` otherwise
+# writes counter files into $HOME/.config/go/telemetry/local/. The workspace telemetry dir is
+# set to mode `off`, so nothing is written there either. Caveat: this variable is inherited by
+# child processes go spawns -- a `git` invoked for a VCS-fetched module will not see the
+# operator's $HOME/.config/git/config. Proxy-based fetches (the resolver's path) are unaffected.
+set -e
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+go_dir=$(CDPATH= cd -- "$bin_dir/../go" && pwd -P)
+GOROOT="${GOROOT:-$go_dir/sdk}"
+GOPATH="${GOPATH:-$go_dir/gopath}"
+GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
+GOCACHE="${GOCACHE:-$go_dir/cache}"
+GOENV="${GOENV:-$go_dir/env}"
+GOTOOLCHAIN="${GOTOOLCHAIN:-go1.24.12}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$go_dir/config}"
+export GOROOT GOPATH GOMODCACHE GOCACHE GOENV GOTOOLCHAIN XDG_CONFIG_HOME
+exec "$GOROOT/bin/go" "$@"

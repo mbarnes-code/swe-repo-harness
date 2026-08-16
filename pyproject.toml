@@ -1,0 +1,164 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "fleet"
+version = "0.1.0"
+description = "Polyglot monorepo migration harness: scan, transform, build, verify a 250-repo fleet."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "Proprietary" }
+authors = [{ name = "Fleet Harness" }]
+keywords = ["monorepo", "migration", "bazel", "ast-grep", "dependency-graph"]
+classifiers = [
+  "Private :: Do Not Upload",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+]
+
+# Pins per docs/DECISIONS.md: ADR-0002 (pydantic), ADR-0015 (typer), ADR-0016 (aiosqlite),
+# ADR-0012 (structlog), ADR-0023 (model backends; supersedes ADR-0009), ADR-0004 (networkx).
+#
+# ADR-0023: no LangChain, no LangGraph, no DeepAgents, no LiteLLM — the ModelClient protocol
+# (SPEC §7.7) is ~70 lines and each backend is one file. The two default-profile transports ship
+# in the core dependency set; the two failover transports are extras, because a backend whose SDK
+# is absent simply does not register and is a startup error only if the ACTIVE profile names it.
+dependencies = [
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.7",
+  "typer>=0.15",
+  "aiosqlite>=0.20",
+  "structlog>=24.4",
+  "anthropic>=0.69",   # llm/backends/anthropic.py
+  "openai>=1.60",      # llm/backends/openai_compatible.py — any base_url: local vLLM, Ollama,
+                       #   LM Studio, llama.cpp, TGI, and hosted OpenAI-compatible endpoints.
+                       #   The workhorse for local development on this host.
+  "networkx>=3.4",
+  "pyyaml>=6.0",
+]
+
+[project.scripts]
+fleet = "fleet.cli:app"
+
+[dependency-groups]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6.115",
+  "ruff>=0.8",
+  "mypy>=1.13",
+]
+
+[project.optional-dependencies]
+# ADR-0023 failover transports. Same models, different transport; installed only if a profile
+# routes a tier through them.
+bedrock = ["boto3>=1.35"]
+vertex = ["google-cloud-aiplatform>=1.70"]
+dev = [
+  "pytest>=8.3",
+  "pytest-asyncio>=0.24",
+  "hypothesis>=6.115",
+  "ruff>=0.8",
+  "mypy>=1.13",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/fleet"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/fleet", "tests", "docs", "config"]
+
+# --------------------------------------------------------------------------------------
+# pytest
+# --------------------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["src"]
+# NB: no --strict-config. `asyncio_mode` below is a pytest-asyncio ini key, and the smoke
+# suite must stay runnable in a bare pydantic+pytest environment (it drives coroutines with
+# asyncio.run rather than depending on the plugin).
+addopts = "-ra --strict-markers"
+asyncio_mode = "auto"
+# Pinned, not left to the default: pytest-asyncio warns that it is changing the async-fixture
+# loop scope from "the fixture's own caching scope" to "function", and a fixture loop that
+# silently widens is how one test's leftover tasks end up running inside the next one. Naming
+# the future default now makes the change a no-op instead of a behaviour flip on upgrade.
+asyncio_default_fixture_loop_scope = "function"
+markers = [
+  "integration: touches real SQLite / git fixtures (still offline)",
+  "contract: model round-trip and golden-schema checks",
+]
+
+# --------------------------------------------------------------------------------------
+# ruff
+# --------------------------------------------------------------------------------------
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+  "E", "W",    # pycodestyle
+  "F",         # pyflakes
+  "I",         # isort
+  "UP",        # pyupgrade
+  "B",         # bugbear
+  "C4",        # comprehensions
+  "SIM",       # simplify
+  "TID",       # tidy imports
+  "PTH",       # use pathlib
+  "RUF",       # ruff-specific
+  "ASYNC",     # async antipatterns
+  "S",         # bandit
+  "ANN",       # missing annotations
+  "TRY",       # tryceratops (Rule 11 — fail loud)
+]
+ignore = [
+  "ANN401",  # Any is legitimate at the not-yet-implemented module boundary
+  "TRY003",  # long messages inside raise are how we fail loud
+]
+# Typographic characters are deliberate: docstrings and comments quote SPEC.md prose verbatim,
+# and mangling `×` into `x` or an em dash into `-` would make a citation stop matching its source.
+allowed-confusables = ["×", "→", "—", "–", "’", "≥", "≤"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101", "ANN", "S311"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["fleet"]
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
+
+[tool.ruff.format]
+quote-style = "double"
+
+# --------------------------------------------------------------------------------------
+# mypy (strict)
+# --------------------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.12"
+mypy_path = "src"
+packages = ["fleet"]
+strict = true
+warn_unreachable = true
+warn_no_return = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+disallow_any_generics = true
+disallow_untyped_defs = true
+no_implicit_reexport = false
+show_error_codes = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["tests.*"]
+disallow_untyped_defs = false
+
+[tool.pydantic-mypy]
+init_forbid_extra = true
+init_typed = true
+warn_required_dynamic_aliases = true

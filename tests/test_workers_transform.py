@@ -1,0 +1,1012 @@
+"""Phase 2's transform workers against real git repos (SPEC §3.2, §7.1).
+
+Every test here is a bill someone would otherwise pay twice:
+
+* **`partial` is load-bearing.** 40 of 60 units land, the deadline arrives, and re-entry must not
+  redo the 40 — asserted on the *commit log*, because the returned lists are a claim and the log
+  is the fact (ADR-0024: the commit IS the record).
+* **The guard is two conditions, and the second one decides.** A trailer proves a patch was once
+  committed; it does not prove the effect survived. A trailer-only guard permanently skipped a
+  patch whose hunk a rebase had dropped, and the PR shipped pointing at a path that no longer
+  existed. Both halves are asserted: skipped when present, re-applied when reverted.
+* **`relocate` may never re-run a rename over a renamed tree** — `java/java/com/x` (§7.1).
+* **A `RuleConflict` is an operator's YAML defect**, so it leaves the file unchanged and spends
+  no rung: `RetryPolicy.decide(...).charges_attempt is False`.
+* **A repair rung sees THIS failure's verbatim stderr and no transcript** (guardrail 5): the
+  previous invocation's error text, the rejected diff, and the rejected-approach summaries a
+  higher policy would carry are all asserted ABSENT from the rendered prompt.
+* **Rollback is per TASK.** A failing unit resets to its own anchor; the earlier units' commits
+  are still on the branch, because resetting to the phase anchor would delete work whose rows are
+  already `DONE`.
+
+The engines (`ast-grep`, `libcst`, `ts-morph`) are external tools and none is a dependency, so the
+pipeline is driven with the same in-test fake engine `tests/test_rewrite.py` uses; `git` is real,
+and so is every commit asserted on. No network, no model: the `ModelClient` is a fake that records
+the prompt it was handed.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from pathlib import Path
+from time import monotonic
+from typing import Any, ClassVar
+from uuid import UUID
+
+import pytest
+from pydantic import BaseModel
+
+from fleet.llm.client import (
+    BackendReply,
+    CallBudget,
+    LadderModelClient,
+    Message,
+    ModelResponse,
+    StreamEvent,
+)
+from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter, Role
+from fleet.llm.schemas import LlmEscalationProposal, LlmPatchProposal, ProposedFileEdit
+from fleet.models.enums import (
+    ContextPolicy,
+    FailureClass,
+    ModelTier,
+    Phase,
+    RepoStatus,
+    StructuredOutputMode,
+    TransformTier,
+)
+from fleet.models.tasks import (
+    BackendTarget,
+    FilePatch,
+    ModelCapabilities,
+    Price,
+    RejectedApproach,
+    TokenUsage,
+)
+from fleet.orchestrator.retry import LadderState, RetryAction, RetryPolicy
+from fleet.rewrite.apply import make_unified_diff
+from fleet.rewrite.pipeline import RewritePipeline
+from fleet.rewrite.rules import EngineRegistry, RewriteRule
+from fleet.state.repository import PhaseRow
+from fleet.workers import relocate as relocate_mod
+from fleet.workers import rewrite as rewrite_mod
+from fleet.workers.base import (
+    BaseWorker,
+    WorkerContext,
+    assert_stateless,
+    implements_preconditions,
+)
+from fleet.workers.relocate import RelocateInput, RelocateWorker, relocated_path
+from fleet.workers.rewrite import (
+    RewriteInput,
+    RewriteWorker,
+    WorkerRepairError,
+    task_id_for,
+)
+
+RUN_ID = UUID("00000000-0000-4000-8000-0000000c0ffe")
+REPO_ID = "acme-billing"
+BRANCH = "migrate/acme-billing"
+DEST = "java/com/acme/billing"
+OWNER = "host:container:99:boot"
+
+
+# =======================================================================================
+# fakes: an engine, a read-only repository, a model client
+# =======================================================================================
+class FakeRewriter:
+    """A `Rewriter` whose transform is a plain `str -> str` keyed by rule id.
+
+    Same shape as `tests/test_rewrite.py`'s, plus an optional side effect, which is how the
+    rollback test simulates the untracked debris a killed `git apply` leaves behind.
+    """
+
+    engine = "fake"
+
+    def __init__(
+        self,
+        transforms: Mapping[str, Callable[[str], str]],
+        *,
+        on_apply: Callable[[str], None] | None = None,
+    ) -> None:
+        self._transforms = dict(transforms)
+        self._on_apply = on_apply
+        self.seen: list[tuple[str, str]] = []
+
+    async def apply(
+        self, rule: RewriteRule, path: str, source: str, params: dict[str, str]
+    ) -> FilePatch | None:
+        self.seen.append((rule.id, path))
+        if self._on_apply is not None:
+            self._on_apply(path)
+        transform = self._transforms.get(rule.id)
+        rewritten = source if transform is None else transform(source)
+        diff = make_unified_diff(path, source, rewritten)
+        if not diff:
+            return None
+        return FilePatch(
+            path=path,
+            diff=diff,
+            tier=TransformTier.DETERMINISTIC,
+            parse_probe_ok=False,
+            rule_id=rule.id,
+        )
+
+    async def parse_probe(self, path: str) -> bool:
+        return True
+
+
+class FakeDb:
+    """`ReadOnlyRepository` narrowed to the one row `BaseWorker.execute()` reads: the lease."""
+
+    async def get_phase(self, run_id: str, repo_id: str, phase: Phase) -> PhaseRow | None:
+        return None
+
+
+class FakeModelClient:
+    """A `ModelClient` that records the rendered prompt and answers with a canned proposal.
+
+    Recording the prompt is the whole point: guardrail 5 is a statement about what a repair rung
+    is SHOWN, and the only way to check it is to read what was sent.
+    """
+
+    def __init__(self, value: BaseModel) -> None:
+        self._value = value
+        self.prompts: list[str] = []
+        self.roles: list[str] = []
+
+    async def complete[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        tier_override: ModelTier | None = None,
+        max_output_tokens: int | None = None,
+        timeout_s: float | None = None,
+        budget: CallBudget | None = None,
+    ) -> ModelResponse[T]:
+        self.roles.append(role)
+        self.prompts.append("\n".join(message.content for message in messages))
+        return ModelResponse(
+            value=response_model.model_validate_json(self._value.model_dump_json()),
+            usage=TokenUsage(role=role, input_tokens=100, output_tokens=20, cost_usd=0.01),
+            mode=StructuredOutputMode.JSON_SCHEMA,
+            finish_reason="stop",
+        )
+
+    async def _empty(self) -> AsyncIterator[StreamEvent]:
+        return
+        yield StreamEvent()  # pragma: no cover - never reached; makes this an async generator
+
+    def stream[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        return self._empty().__aiter__()
+
+    async def capabilities(self, role: str) -> ModelCapabilities:
+        return ModelCapabilities()
+
+
+class ScriptedBackend:
+    """One transport, offline: it answers with a canned object and records every turn.
+
+    A real `ModelBackend` behind a real `LadderModelClient`, not a stubbed `ModelClient`, because
+    the thing these tests exist to prove is that a rung's call *travels* — through the context,
+    through routing, negotiation and validation, to something that could have been a network. A
+    fake client would short-circuit exactly the stretch that used to be missing.
+    """
+
+    name: ClassVar[str] = "fake"
+    version: ClassVar[int] = 1
+
+    def __init__(self, value: BaseModel) -> None:
+        self._value = value
+        self.prompts: list[str] = []
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+        return ModelCapabilities(supports_json_schema=True, max_output_tokens=8192)
+
+    async def invoke(
+        self,
+        target: BackendTarget,
+        messages: Sequence[Message],
+        schema: dict[str, object] | None,
+        mode: StructuredOutputMode,
+        *,
+        max_output_tokens: int,
+        timeout_s: float,
+    ) -> BackendReply:
+        self.prompts.append("\n".join(message.content for message in messages))
+        return BackendReply(
+            text=self._value.model_dump_json(),
+            usage=TokenUsage(input_tokens=200, output_tokens=40),
+            finish_reason="stop",
+        )
+
+
+def ladder_client(backend: ScriptedBackend) -> LadderModelClient:
+    """The REAL §7.7 client `RunContext` builds, over the shipped role table and one fake target.
+
+    The price is real so §11.2's pre-dispatch gate has something to refuse; the router is real so
+    `transform_repair` genuinely lands on WORKHORSE and `escalation` on HEAVY.
+    """
+    target = BackendTarget(
+        backend="fake", model_id="fake-1", price=Price(in_per_mtok=1.0, out_per_mtok=2.0)
+    )
+    router = LlmRouter(
+        dict(SPEC_ROLE_TIERS), dict.fromkeys(ModelTier, (target,)), profile="test"
+    )
+    return LadderModelClient(router, {"fake": backend})
+
+
+# =======================================================================================
+# helpers: a real repo, a real branch, a real commit log
+# =======================================================================================
+def git(repo: Path, *args: str) -> str:
+    done = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), *args],  # noqa: S607 - `git` from PATH, as every suite does
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return done.stdout.strip()
+
+
+def make_repo(tmp_path: Path, files: Mapping[str, str]) -> tuple[Path, str]:
+    """A one-commit repo already on `migrate/<repo>`, and its phase anchor."""
+    repo = tmp_path / "wt"
+    repo.mkdir()
+    git(repo, "init", f"--initial-branch={BRANCH}", ".")
+    git(repo, "config", "user.email", "fleet@example.invalid")
+    git(repo, "config", "user.name", "Fleet Test")
+    for path, text in files.items():
+        target = repo / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+    git(repo, "add", "--all")
+    git(repo, "commit", "-m", "initial")
+    return repo, git(repo, "rev-parse", "HEAD")
+
+
+def log_entries(repo: Path, anchor: str) -> list[dict[str, str]]:
+    """Every commit in `<anchor>..HEAD`, oldest first, with the trailers git itself parsed."""
+    fmt = (
+        "%H%x1f%(trailers:key=Fleet-Patch-Id,valueonly,separator=%x2c)"
+        "%x1f%(trailers:key=Fleet-Task-Id,valueonly,separator=%x2c)"
+        "%x1f%s%x1e"
+    )
+    raw = git(repo, "log", f"--format={fmt}", f"{anchor}..HEAD")
+    entries: list[dict[str, str]] = []
+    for record in raw.split("\x1e"):
+        body = record.strip()
+        if not body:
+            continue
+        sha, patch_id, task_id, subject = body.split("\x1f")
+        entries.append(
+            {
+                "sha": sha,
+                "patch_id": patch_id.strip(),
+                "task_id": task_id.strip(),
+                "subject": subject.strip(),
+            }
+        )
+    return list(reversed(entries))
+
+
+def make_ctx(
+    workdir: Path,
+    *,
+    attempt: int = 1,
+    tier: TransformTier = TransformTier.DETERMINISTIC,
+    context_policy: ContextPolicy | None = None,
+    llm: object | None = None,
+    seconds_left: float = 3600.0,
+) -> WorkerContext:
+    """A context whose only real collaborators are the worktree and (optionally) a model client.
+
+    `deadline` is an ABSOLUTE `loop.time()` and is honoured by every `git` subprocess, so it stays
+    genuinely far in the future; the deadline TEST moves the worker's clock instead.
+    """
+    sentinel: Any = object()
+    deadline = monotonic() + seconds_left
+    return WorkerContext(
+        run_id=RUN_ID,
+        repo_id=REPO_ID,
+        attempt=attempt,
+        workdir=str(workdir),
+        lease_owner=OWNER,
+        lease_fence=1,
+        deadline=deadline,
+        cancel=asyncio.Event(),
+        budget=CallBudget(remaining_tokens=200_000, remaining_usd=5.0, deadline=deadline),
+        db=FakeDb(),
+        llm=sentinel if llm is None else llm,
+        router=sentinel,
+        limits=sentinel,
+        log=sentinel,
+        tier=tier,
+        context_policy=context_policy,
+    )
+
+
+def rule(rule_id: str, *, priority: int = 100) -> RewriteRule:
+    return RewriteRule(
+        id=rule_id,
+        engine="fake",
+        languages=["python"],
+        applies_to=["**/*.py"],
+        rule={"pattern": "unused-by-the-fake"},
+        priority=priority,
+    )
+
+
+def worker_with(
+    engine: FakeRewriter, *, max_passes: int = 3
+) -> RewriteWorker:
+    """The REAL `RewriteWorker`, with only its pipeline factory pointed at an in-process engine.
+
+    `run()`, `preconditions_hold()` and the whole commit sequence under test are the shipped ones;
+    `pipeline_for` exists as a seam precisely because the three real engines are external tools.
+    """
+
+    class _Injected(RewriteWorker):
+        __slots__ = ()
+
+        def pipeline_for(self, ctx: WorkerContext, payload: RewriteInput) -> RewritePipeline:
+            return RewritePipeline(
+                payload.rules,
+                EngineRegistry([engine]),
+                max_passes=max_passes,
+                params=payload.params,
+                tier=ctx.tier,
+                repo_id=ctx.repo_id,
+            )
+
+    return _Injected()
+
+
+def rewrite_payload(anchor: str, targets: Sequence[str], **kwargs: Any) -> RewriteInput:
+    kwargs.setdefault("rules", [rule("r1")])
+    return RewriteInput(
+        branch=BRANCH,
+        phase_pre_commit_sha=anchor,
+        dest_path=DEST,
+        targets=list(targets),
+        **kwargs,
+    )
+
+
+def clock_expiring_after(deadline: float, units: int) -> Callable[[], float]:
+    """A monotonic stand-in that crosses `deadline` after exactly `units` unit-boundary checks.
+
+    `run()` reads the clock once per unit, so this is how "the wall clock ran out mid-run" becomes
+    a deterministic fact instead of a race against a real timer.
+    """
+    seen = {"calls": 0}
+
+    def fake_now() -> float:
+        seen["calls"] += 1
+        return deadline - 1.0 if seen["calls"] <= units else deadline + 1.0
+
+    return fake_now
+
+
+# =======================================================================================
+# 1. both workers are real: they claim their preconditions and can be constructed
+# =======================================================================================
+def test_both_transform_workers_are_concrete_and_claim_their_own_preconditions() -> None:
+    """A worker that inherits `preconditions_hold` is un-instantiable by construction (§7.1).
+
+    Why it matters: the default `return True` this replaced admitted every re-entry, which is the
+    blind replay the method exists to forbid — `relocate` re-running a rename produces
+    `java/java/com/x`. Both classes must therefore OVERRIDE it and be constructible.
+    """
+    for cls in (RewriteWorker, RelocateWorker):
+        assert implements_preconditions(cls)
+        assert cls.preconditions_hold is not BaseWorker.preconditions_hold
+        worker = cls()
+        assert worker.phase is Phase.TRANSFORM
+        assert_stateless(worker)  # a registry singleton may not carry instance state (§7.2)
+
+
+# =======================================================================================
+# 2. THE headline: 40 of 60 land, the deadline hits, re-entry replays none of them
+# =======================================================================================
+def test_forty_of_sixty_land_then_the_deadline_makes_it_partial_and_re_entry_replays_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Interrupted work is `partial`, and the 40 commits it left are never written twice.
+
+    Why it matters: a boolean verdict here is a lie about the tree. Reporting `failed` with no
+    output makes the next attempt replay all 60 against an already-rewritten tree and emit 40
+    no-op patches the ladder misreads as `RULE_MISS`. The proof is the commit log — the returned
+    lists are a claim, the log is the fact — so the first 40 SHAs must be byte-identical before
+    and after re-entry, and the branch must end with exactly 60 commits, not 100.
+    """
+    units = [f"{DEST}/f{i:02d}.py" for i in range(60)]
+    repo, anchor = make_repo(tmp_path, dict.fromkeys(units, "alpha\nbeta\n"))
+    worker = worker_with(FakeRewriter({"r1": lambda t: t.replace("beta", "BETA")}))
+
+    ctx = make_ctx(repo)
+    monkeypatch.setattr(rewrite_mod, "loop_now", clock_expiring_after(ctx.deadline, 40))
+    execution = asyncio.run(worker.execute(ctx, rewrite_payload(anchor, units), max_attempts=3))
+    monkeypatch.undo()
+
+    first = execution.final
+    assert first is not None
+    assert first.status == "partial", "landed work reported as failure is the whole defect"
+    assert len(first.completed_units) == 40
+    assert first.remaining_units == units[40:]
+    assert execution.status is RepoStatus.PENDING, "a partial repo is re-queued, not terminal"
+
+    landed_first = log_entries(repo, anchor)
+    assert len(landed_first) == 40, "exactly the units it claimed, no more"
+
+    # -- re-entry: the runner replays the checkpoint onto the payload and nothing else ---
+    resumed = rewrite_payload(anchor, units, completed_units=first.completed_units)
+    ctx2 = make_ctx(repo)
+    assert asyncio.run(worker.preconditions_hold(ctx2, resumed)) is True
+    second = asyncio.run(worker.run(ctx2, resumed))
+
+    assert second.status == "ok"
+    assert len(second.completed_units) == 60, "the checkpoint carries forward, cumulatively"
+    landed_all = log_entries(repo, anchor)
+    assert len(landed_all) == 60, "re-entry added 20 commits, not another 60"
+    assert [e["sha"] for e in landed_all[:40]] == [e["sha"] for e in landed_first], (
+        "the first 40 commits were not rewritten, re-created, or duplicated"
+    )
+    assert (repo / units[59]).read_text(encoding="utf-8") == "alpha\nBETA\n"
+
+
+# =======================================================================================
+# 3. the guard is TWO conditions, and the trailer alone never decides
+# =======================================================================================
+def test_the_guard_skips_a_patch_present_at_the_tip(tmp_path: Path) -> None:
+    """Both halves true → skip, no second commit, no `already_applied` work.
+
+    Why it matters: re-running a rung after a crash must be free. The trailer supplies the commit
+    SHA for the `attempts` row; the reverse-apply proves the effect is really in the tree.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\nbeta\n"})
+    worker = worker_with(FakeRewriter({"r1": lambda t: t.replace("beta", "BETA")}))
+    payload = rewrite_payload(anchor, [unit])
+
+    first = asyncio.run(worker.run(make_ctx(repo), payload))
+    assert first.status == "ok"
+    assert len(log_entries(repo, anchor)) == 1
+
+    second = asyncio.run(worker.run(make_ctx(repo), payload))
+    assert second.status == "ok"
+    assert second.output is not None and second.output.skipped == [unit]
+    assert len(log_entries(repo, anchor)) == 1, "a present patch is skipped, never re-committed"
+
+
+def test_a_patch_whose_effect_a_revert_dropped_is_re_applied_despite_its_trailer(
+    tmp_path: Path,
+) -> None:
+    """Trailer present, effect gone → RE-APPLY. This is the defect the second condition exists for.
+
+    Why it matters: a trailer-only guard permanently skipped a patch whose hunk a later rebase had
+    dropped, and the consumer shipped a PR pointing at a path that no longer existed. The trailer
+    proves the patch was once committed; only `git apply --check --reverse` proves it survived.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\nbeta\n"})
+    worker = worker_with(FakeRewriter({"r1": lambda t: t.replace("beta", "BETA")}))
+    payload = rewrite_payload(anchor, [unit])
+
+    asyncio.run(worker.run(make_ctx(repo), payload))
+    landed = log_entries(repo, anchor)
+    patch_id = landed[0]["patch_id"]
+
+    # a rebase/revert drops the effect while the trailered commit stays in the scoped range
+    git(repo, "revert", "--no-edit", "--no-commit", landed[0]["sha"])
+    git(repo, "commit", "-m", "a later rebase dropped the hunk")
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+    again = asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert again.status == "ok"
+    assert again.output is not None and again.output.skipped == [], "the trailer must not skip it"
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\nBETA\n", "the effect is restored"
+    carrying = [e for e in log_entries(repo, anchor) if e["patch_id"] == patch_id]
+    assert len(carrying) == 2, "the same content-addressed patch id, committed twice, on purpose"
+
+
+# =======================================================================================
+# 4. relocate: never a doubled path
+# =======================================================================================
+def test_relocate_run_twice_moves_the_tree_once_and_never_doubles_the_path(
+    tmp_path: Path,
+) -> None:
+    """`java/java/com/x` is what an inherited `preconditions_hold` produced (§7.1).
+
+    Why it matters: the second invocation must be a *skip*, proven by the guard's reverse-apply on
+    the rename, not by a bespoke "have I moved this already?" flag that can disagree with the tree.
+    """
+    source = "com/x/A.java"
+    repo, anchor = make_repo(tmp_path, {source: "class A {}\n"})
+    worker = RelocateWorker()
+    payload = RelocateInput(
+        branch=BRANCH, phase_pre_commit_sha=anchor, dest_path="java", sources=[source]
+    )
+
+    first = asyncio.run(worker.run(make_ctx(repo), payload))
+    assert first.status == "ok"
+    assert (repo / "java/com/x/A.java").is_file()
+    assert not (repo / source).exists()
+    assert first.output is not None and first.output.moved == {source: "java/com/x/A.java"}
+
+    second = asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert second.status == "ok"
+    assert second.output is not None and second.output.skipped == [source]
+    assert not (repo / "java/java").exists(), "the doubled path this worker exists to prevent"
+    assert len(log_entries(repo, anchor)) == 1, "one move, one commit, however often it re-runs"
+
+
+def test_relocate_refuses_a_plan_computed_against_an_already_relocated_tree(
+    tmp_path: Path,
+) -> None:
+    """A plan whose sources already sit under `dest_path` does not describe this tree.
+
+    Why it matters: this is the `java/java/com/x` case at its origin — a resumed run recomputing
+    the plan from the *current* tree. `preconditions_hold` returning False re-runs the phase from
+    `phases.base_ref` instead of moving the tree a second time.
+    """
+    repo, anchor = make_repo(tmp_path, {"java/com/x/A.java": "class A {}\n"})
+    worker = RelocateWorker()
+    already = RelocateInput(
+        branch=BRANCH,
+        phase_pre_commit_sha=anchor,
+        dest_path="java",
+        sources=["java/com/x/A.java"],
+    )
+    honest = RelocateInput(
+        branch=BRANCH, phase_pre_commit_sha=anchor, dest_path="ts", sources=["java/com/x/A.java"]
+    )
+
+    assert asyncio.run(worker.preconditions_hold(make_ctx(repo), already)) is False
+    assert asyncio.run(worker.preconditions_hold(make_ctx(repo), honest)) is True
+    assert relocated_path("java/", "com/x/A.java") == "java/com/x/A.java"
+
+
+def test_relocate_precondition_admits_a_unit_whose_move_already_landed(tmp_path: Path) -> None:
+    """A checkpoint-less re-entry over a half-moved tree is admitted, not rejected.
+
+    Why it matters: the crash window between `git commit` and the row write is normal (§3.2 step
+    6.4). A source that is gone but present at its destination is *landed work*, and the guard
+    will skip it; failing the precondition there would re-run the whole phase for nothing.
+    """
+    repo, anchor = make_repo(tmp_path, {"java/com/x/A.java": "class A {}\n", "b.txt": "b\n"})
+    payload = RelocateInput(
+        branch=BRANCH,
+        phase_pre_commit_sha=anchor,
+        dest_path="java",
+        sources=["com/x/A.java", "b.txt"],
+    )
+    assert asyncio.run(RelocateWorker().preconditions_hold(make_ctx(repo), payload)) is True
+
+    missing = payload.model_copy(update={"sources": ["com/x/A.java", "gone.txt"]})
+    assert asyncio.run(RelocateWorker().preconditions_hold(make_ctx(repo), missing)) is False
+
+
+# =======================================================================================
+# 5. a RuleConflict is an operator's defect: file unchanged, ladder unmoved
+# =======================================================================================
+def test_a_rule_conflict_leaves_the_file_unchanged_and_spends_no_rung(tmp_path: Path) -> None:
+    """Two rules claiming one span is a YAML defect, and no LLM rung can repair YAML.
+
+    Why it matters: charging it to the ladder buys a `WORKHORSE` and then a `HEAVY` call to
+    rediscover that two rules disagree. `RetryPolicy.decide` must answer TERMINATE with
+    `charges_attempt == False`, which is the executable form of the pipeline's
+    `advance_ladder=False`.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\nbeta\ngamma\n"})
+    engine = FakeRewriter(
+        {"r1": lambda t: t.replace("beta", "MIDDLE"), "r2": lambda t: t.replace("MIDDLE", "FINAL")}
+    )
+    worker = worker_with(engine)
+    payload = rewrite_payload(anchor, [unit])
+    payload.rules = [rule("r1"), rule("r2", priority=200)]
+
+    result = asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.retryable is False, "a rule defect must not advance the ladder"
+    assert "RuleConflict" in result.error.stderr_tail
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\nbeta\ngamma\n", "file unchanged"
+    assert log_entries(repo, anchor) == [], "nothing was committed"
+
+    decision = RetryPolicy().decide(LadderState(attempts=0, max_attempts=3), result.error)
+    assert decision.action is RetryAction.TERMINATE
+    assert decision.charges_attempt is False
+    assert decision.state.attempts == 0, "no rung was spent on an operator's YAML"
+
+
+# =======================================================================================
+# 6. the repair rung is shown this failure, verbatim, and nothing else
+# =======================================================================================
+def _proposal(path: str, before: str, after: str, *, marker: str) -> LlmPatchProposal:
+    return LlmPatchProposal(
+        files=(ProposedFileEdit(path=path, diff=make_unified_diff(path, before, after)),),
+        approach_summary=f"rewrite {path} ({marker})",
+        rationale="the deterministic rule could not land; patch the clean sibling instead",
+    )
+
+
+def test_the_repair_prompt_carries_this_failures_verbatim_stderr_and_no_prior_transcript(
+    tmp_path: Path,
+) -> None:
+    """Evidence, verbatim and fresh; priors, never (guardrail 5, ADR-0021).
+
+    Why it matters: a repair loop shown an accumulated transcript anchors on the approach that
+    already failed and spends rung 3 producing rung 2 with different whitespace. So the prompt
+    must contain the stderr of the failure it is repairing RIGHT NOW, and must not contain the
+    previous invocation's failure text, the rejected diff, or — under `EVIDENCE_ONLY` — the
+    rejected-approach summaries a higher policy would carry.
+    """
+    one, two, clean = f"{DEST}/one.py", f"{DEST}/two.py", f"{DEST}/clean.py"
+    repo, anchor = make_repo(
+        tmp_path, {one: "alpha\n", two: "alpha\n", clean: "keep\n"}
+    )
+    marker = "ANCHOR_ME_PRIOR_DIFF"
+    engine = FakeRewriter({"r1": lambda t: t.replace("alpha", f"alpha {marker}")})
+    worker = worker_with(engine)
+
+    # A worktree that does not match the index is a patch `git apply --index` refuses, verbatim.
+    (repo / one).write_text("alpha dirty\n", encoding="utf-8")
+    attempt_one = asyncio.run(worker.run(make_ctx(repo), rewrite_payload(anchor, [one])))
+    assert attempt_one.status == "failed" and attempt_one.error is not None
+    assert "one.py" in attempt_one.error.stderr_tail
+
+    # The task-anchored discard has already reverted the tree, so attempt 2 dirties its own file.
+    (repo / two).write_text("alpha dirty\n", encoding="utf-8")
+
+    client = FakeModelClient(_proposal(clean, "keep\n", "kept\n", marker="repair"))
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+    payload = rewrite_payload(
+        anchor,
+        [two],
+        rejected_approaches=[
+            RejectedApproach(
+                approach_signature="b" * 64,
+                reason="REJECTED_APPROACH_SUMMARY_MARKER",
+                failure_class=FailureClass.PATCH_REJECTED,
+                attempt=1,
+                tier=TransformTier.DETERMINISTIC,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.TRANSFORM_REPAIR)], "attempt 2 is the WORKHORSE rung"
+    prompt = client.prompts[0]
+    assert "does not match index" in prompt, "the verbatim git refusal, not a paraphrase"
+    assert "two.py" in prompt, "the failure being repaired right now"
+    assert "one.py" not in prompt, "the PREVIOUS invocation's failure is not carried forward"
+    assert marker not in prompt, "the rejected diff is never rendered (the anchoring hazard)"
+    assert "REJECTED_APPROACH_SUMMARY_MARKER" not in prompt, "EVIDENCE_ONLY carries no priors"
+    assert "alpha" in prompt, "the target file's current content IS evidence"
+
+    assert result.status == "ok", "the repair patch landed"
+    assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
+    assert result.usage.cost_usd == pytest.approx(0.01), "the rung's spend is reported"
+
+
+def test_the_escalation_rung_carries_rejected_approach_summaries_and_can_ask_for_a_human(
+    tmp_path: Path,
+) -> None:
+    """Attempt 3 gets search-space pruning without the dead diffs, and may say "human".
+
+    Why it matters: `abandon_recommended` is the only way for the last rung to reach
+    `REQUIRES_HUMAN_INTERVENTION` by being TOLD rather than by burning the retry budget — and the
+    summaries it is shown carry no diff text, because `RejectedApproach` has no field for one.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the unresolved case
+    client = FakeModelClient(
+        LlmEscalationProposal(
+            files=(ProposedFileEdit(path=unit, diff="diff --git a/x b/x\n"),),
+            approach_summary="cannot be done deterministically",
+            rationale="the module this import needs is not on the deps path",
+            abandon_recommended=True,
+            human_intervention_reason="the dependency is not in the monorepo at all",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_ESCALATION,
+        context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        llm=client,
+    )
+    payload = rewrite_payload(
+        anchor,
+        [unit],
+        rules=[],
+        rejected_approaches=[
+            RejectedApproach(
+                approach_signature="c" * 64,
+                reason="REJECTED_APPROACH_SUMMARY_MARKER",
+                failure_class=FailureClass.RULE_MISS,
+                attempt=2,
+                tier=TransformTier.LLM_REPAIR,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.ESCALATION)]
+    prompt = client.prompts[0]
+    assert "REJECTED_APPROACH_SUMMARY_MARKER" in prompt, "the HEAVY rung gets the pruning"
+    assert "diff --git" not in prompt, "and none of the diffs those approaches proposed"
+    assert result.status == "failed" and result.error is not None
+    assert result.error.retryable is False, "told, not discovered by exhausting the budget"
+    assert "recommends a human" in result.error.stderr_tail
+    assert log_entries(repo, anchor) == []
+
+
+def test_the_repair_rung_makes_a_real_call_through_the_context_and_lands_what_it_gets(
+    tmp_path: Path,
+) -> None:
+    """THE headline: at rung 2 the worker completes a typed call through `ctx.llm` and commits it.
+
+    Why it matters: this could not happen at all. `WorkerContext.llm` was the `LlmRouter` — role →
+    tier, no `complete()` — so the rung had nothing to call, and rather than pretend the
+    deterministic rung was the whole ladder it reported a wiring failure through a structural
+    `model_client_of()` probe. ADR-0014's repair rung was therefore unreachable under real
+    wiring: every `RULE_MISS` in the fleet terminated at rung 1. `ctx.llm` is now the `ModelClient`
+    itself, so the assertion is end-to-end — the prompt reaches a transport, the reply comes back
+    validated into `LlmPatchProposal`, and the patch it carries becomes a commit on the branch.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    backend = ScriptedBackend(
+        LlmPatchProposal(
+            files=(
+                ProposedFileEdit(path=unit, diff=make_unified_diff(unit, "alpha\n", "beta\n")),
+            ),
+            approach_summary="no rule covers this import; rewrite it directly",
+            rationale="the deterministic engines have no pattern for this construct",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=ladder_client(backend),
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit], rules=[])))
+
+    assert len(backend.prompts) == 1, "the rung reached the transport, not a wiring error"
+    assert "mod.py" in backend.prompts[0], "and it carried the failure it is repairing"
+    assert result.status == "ok", "the validated proposal landed as a commit"
+    assert (repo / unit).read_text(encoding="utf-8") == "beta\n"
+    assert result.completed_units == [unit]
+    assert result.usage.input_tokens == 200, "the rung's spend is real and reported"
+    entries = log_entries(repo, anchor)
+    assert len(entries) == 1 and entries[0]["subject"].endswith(unit)
+
+
+def test_the_escalation_rung_reaches_the_model_with_its_context_policy_applied(
+    tmp_path: Path,
+) -> None:
+    """Rung 3 completes a real HEAVY call too, and ADR-0021's policy shapes what it is shown.
+
+    Why it matters: the rung that is allowed to say "a human is needed" was behind the same wall
+    as rung 2, so a repo that needed escalation was abandoned having never once been shown to a
+    model. Reaching the transport is only half of it: `EVIDENCE_PLUS_REJECTED_APPROACHES` must put
+    the prior approach's *summary* in the prompt and keep its *diff* out, and that is now asserted
+    where the prompt actually arrives rather than at a fake client's doorstep.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))
+    backend = ScriptedBackend(
+        LlmEscalationProposal(
+            files=(
+                ProposedFileEdit(path=unit, diff=make_unified_diff(unit, "alpha\n", "gamma\n")),
+            ),
+            approach_summary="the import must move packages",
+            rationale="the dependency was relocated by an earlier wave",
+            abandon_recommended=False,
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_ESCALATION,
+        context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        llm=ladder_client(backend),
+    )
+    payload = rewrite_payload(
+        anchor,
+        [unit],
+        rules=[],
+        rejected_approaches=[
+            RejectedApproach(
+                approach_signature="d" * 64,
+                reason="REJECTED_APPROACH_SUMMARY_MARKER",
+                failure_class=FailureClass.RULE_MISS,
+                attempt=2,
+                tier=TransformTier.LLM_REPAIR,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert len(backend.prompts) == 1, "rung 3 reached the transport"
+    prompt = backend.prompts[0]
+    assert "REJECTED_APPROACH_SUMMARY_MARKER" in prompt, "the HEAVY rung gets the pruning"
+    assert "diff --git" not in prompt, "and none of the diffs those approaches proposed"
+    assert result.status == "ok"
+    assert (repo / unit).read_text(encoding="utf-8") == "gamma\n"
+
+
+def test_a_rung_the_budget_cannot_pay_for_never_reaches_the_transport(tmp_path: Path) -> None:
+    """`BudgetExhausted` is raised before dispatch, and the rung fails loudly rather than quietly.
+
+    Why it matters: §11.2 is fail-closed, and the gate lives inside `complete()` because that is
+    the only place the target's price is known. Routing the ladder through the real client rather
+    than a bespoke one is what keeps the gate on the path the rung uses — and `WorkerRepairError`
+    rather than a swallowed `None` is what stops an unaffordable rung from looking exactly like a
+    rung that ran and found nothing (Rule 11).
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))
+    backend = ScriptedBackend(
+        LlmPatchProposal(
+            files=(
+                ProposedFileEdit(path=unit, diff=make_unified_diff(unit, "alpha\n", "beta\n")),
+            ),
+            approach_summary="unaffordable",
+            rationale="this call must never be dispatched",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=ladder_client(backend),
+    )
+    ctx.budget = CallBudget(
+        remaining_tokens=200_000, remaining_usd=0.0, deadline=ctx.deadline
+    )
+
+    with pytest.raises(WorkerRepairError):
+        asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit], rules=[])))
+
+    assert backend.prompts == [], "spend is refused before the transport, never after"
+    assert log_entries(repo, anchor) == []
+
+
+# =======================================================================================
+# 7. one commit per task, each carrying its own Fleet-Patch-Id
+# =======================================================================================
+def test_each_task_lands_exactly_one_commit_carrying_its_own_trailers(tmp_path: Path) -> None:
+    """One commit per `TransformTask`, and the trailers are the index into it (§3.2 step 6).
+
+    Why it matters: the trailers are what turn "did my work land?" into a git query answerable
+    from a bare clone with no database. A batched commit, or a `Fleet-Task-Id` minted per attempt,
+    makes the §3.2 step 6.4 crash query unanswerable.
+    """
+    units = [f"{DEST}/a.py", f"{DEST}/b.py", f"{DEST}/c.py"]
+    repo, anchor = make_repo(tmp_path, dict.fromkeys(units, "alpha\n"))
+    worker = worker_with(FakeRewriter({"r1": lambda t: t.replace("alpha", "ALPHA")}))
+    ctx = make_ctx(repo)
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, units)))
+
+    assert result.status == "ok"
+    entries = log_entries(repo, anchor)
+    assert len(entries) == 3, "one commit per task, not one batched commit for the phase"
+    assert [e["subject"] for e in entries] == [f"fleet(rewrite): {u}" for u in units]
+    for unit, entry in zip(units, entries, strict=True):
+        assert len(entry["patch_id"]) == 64, "a content-addressed idempotency key"
+        assert entry["task_id"] == str(task_id_for(ctx, Phase.TRANSFORM, unit))
+        changed = git(repo, "show", "--name-only", "--format=", entry["sha"]).split()
+        assert changed == [unit], "each commit is exactly its own task's tree change"
+    assert len({e["patch_id"] for e in entries}) == 3, "distinct content, distinct ids"
+
+
+# =======================================================================================
+# 8. rollback is per TASK, never per phase
+# =======================================================================================
+def test_a_failing_task_resets_to_its_own_anchor_and_keeps_earlier_commits(
+    tmp_path: Path,
+) -> None:
+    """`git reset --hard tasks.pre_commit_sha`, not `phases.pre_commit_sha` (§3.2 step 6.5).
+
+    Why it matters: resetting a crashed task to the PHASE anchor deletes the commits of earlier
+    tasks whose rows are already `DONE` and will never re-run — the phase then passes its success
+    criterion on a tree missing most of its rewrites. The debris a killed `git apply` leaves is
+    cleaned; the earlier task's commit is not.
+    """
+    good, bad = f"{DEST}/good.py", f"{DEST}/bad.py"
+    repo, anchor = make_repo(tmp_path, {good: "alpha\n", bad: "alpha\n"})
+
+    def debris(path: str) -> None:
+        if path == bad:
+            (repo / "killed-apply.tmp").write_text("debris\n", encoding="utf-8")
+
+    worker = worker_with(
+        FakeRewriter({"r1": lambda t: t.replace("alpha", "ALPHA")}, on_apply=debris)
+    )
+    (repo / bad).write_text("alpha dirty\n", encoding="utf-8")  # worktree != index → git refuses
+
+    result = asyncio.run(worker.run(make_ctx(repo), rewrite_payload(anchor, [good, bad])))
+
+    assert result.status == "failed" and result.error is not None
+    assert result.error.failure_class is FailureClass.PATCH_REJECTED
+    assert result.completed_units == [good], "the landed task is reported, not hidden"
+
+    entries = log_entries(repo, anchor)
+    assert len(entries) == 1 and entries[0]["subject"] == f"fleet(rewrite): {good}"
+    assert git(repo, "rev-parse", "HEAD") == entries[0]["sha"], "reset to THIS task's anchor"
+    assert git(repo, "rev-parse", "HEAD") != anchor, "and never back to the phase anchor"
+    assert not (repo / "killed-apply.tmp").exists(), "`clean -fdx` took the debris"
+    assert (repo / good).read_text(encoding="utf-8") == "ALPHA\n", "earlier work survives"
+
+
+# =======================================================================================
+# 9. the shared commit helper is shared, and the deadline is honoured by both workers
+# =======================================================================================
+def test_relocate_is_partial_when_the_deadline_lands_mid_plan(tmp_path: Path,
+                                                              monkeypatch: pytest.MonkeyPatch,
+                                                              ) -> None:
+    """`relocate` owes the same `partial` contract as `rewrite`; both poll the same clock.
+
+    Why it matters: a relocation stopped halfway is a tree half at its old paths and half at its
+    new ones. Only `completed_units` tells the next invocation which half, and `preconditions_hold`
+    must then admit exactly the remainder.
+    """
+    sources = [f"com/x/F{i}.java" for i in range(4)]
+    repo, anchor = make_repo(tmp_path, dict.fromkeys(sources, "class F {}\n"))
+    worker = RelocateWorker()
+    payload = RelocateInput(
+        branch=BRANCH, phase_pre_commit_sha=anchor, dest_path="java", sources=sources
+    )
+
+    ctx = make_ctx(repo)
+    monkeypatch.setattr(relocate_mod, "loop_now", clock_expiring_after(ctx.deadline, 2))
+    result = asyncio.run(worker.run(ctx, payload))
+    monkeypatch.undo()
+
+    assert result.status == "partial"
+    assert result.completed_units == sources[:2]
+    assert result.remaining_units == sources[2:]
+    assert len(log_entries(repo, anchor)) == 2
+
+    resumed = payload.model_copy(update={"completed_units": result.completed_units})
+    assert asyncio.run(worker.preconditions_hold(make_ctx(repo), resumed)) is True
+    finished = asyncio.run(worker.run(make_ctx(repo), resumed))
+    assert finished.status == "ok"
+    assert len(log_entries(repo, anchor)) == 4, "two more commits, not four"
+    assert not (repo / "java/java").exists()

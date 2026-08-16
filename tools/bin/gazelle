@@ -1,0 +1,43 @@
+#!/bin/sh
+# Vendored Gazelle BUILD-file generator (pinned v0.51.3, built by `tools/bin/go install
+# github.com/bazelbuild/bazel-gazelle/cmd/gazelle@v0.51.3` into the workspace GOPATH/bin).
+#
+# VERSION DIVERGENCE -- DELIBERATE. This *binary* is v0.51.3 while the `gazelle` entry in the
+# ruleset table in src/fleet/settings.py pins the BCR *module* at 0.52.2. They are not the same
+# artifact and must not be assumed to match: gazelle v0.52.0-v0.52.2 publish a malformed module
+# zip (upstream bazel-gazelle#2396, open) whose `go install` fails, and upstream ships no
+# prebuilt binaries (#2195), so v0.51.3 is the newest version obtainable as a host binary. The
+# module pin cannot move down -- it was chosen by load-probing under Bazel 9.2.0.
+#
+# Note the module path is still `github.com/bazelbuild/bazel-gazelle` even though the GitHub org
+# is now bazel-contrib; the renamed path exists only as the *v2* module
+# `github.com/bazel-contrib/bazel-gazelle/v2`, which this release consumes as a dependency.
+#
+# Why a wrapper rather than a symlink: gazelle's external dependency resolver shells out to the
+# go tool (language/go/utils.go `findGoTool`), which prefers "$GOROOT/bin/go" and otherwise
+# falls back to a bare `go` on PATH. With no environment set that is the host's /usr/bin/go,
+# which resolves modules into $HOME/go -- writing outside the workspace (CLAUDE.md §2) and using
+# an unpinned toolchain. Exporting the same locations as the sibling `go` wrapper, and putting
+# this directory first on PATH, keeps every byte gazelle causes to be written inside tools/go/.
+# The child go command inherits gazelle's environment verbatim (it passes os.Environ() through),
+# so exporting here is sufficient -- there is no gazelle-side flag for any of it.
+#
+# GOTOOLCHAIN is pinned to 1.24.12 to match the sibling wrapper, which must keep matching the
+# registered go_sdk because it governs the *resolver* subprocess. It used to say 1.23.4, which
+# made a *rebuild* of this binary fail outright: bazel-gazelle's go.mod declares `go 1.24.12`
+# (every published version from v0.48.0 through v0.52.2 does) and reinstalling therefore needed
+# a one-shot `GOTOOLCHAIN=go1.24.12 tools/bin/go install ...` override. That same floor is what
+# forced the SDK pin up; no override is needed any more.
+set -e
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+go_dir=$(CDPATH= cd -- "$bin_dir/../go" && pwd -P)
+GOROOT="${GOROOT:-$go_dir/sdk}"
+GOPATH="${GOPATH:-$go_dir/gopath}"
+GOMODCACHE="${GOMODCACHE:-$GOPATH/pkg/mod}"
+GOCACHE="${GOCACHE:-$go_dir/cache}"
+GOENV="${GOENV:-$go_dir/env}"
+GOTOOLCHAIN="${GOTOOLCHAIN:-go1.24.12}"
+XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$go_dir/config}"
+PATH="$bin_dir:$PATH"
+export GOROOT GOPATH GOMODCACHE GOCACHE GOENV GOTOOLCHAIN XDG_CONFIG_HOME PATH
+exec "$GOPATH/bin/gazelle" "$@"

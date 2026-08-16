@@ -1,0 +1,868 @@
+"""ADR-0023: the `ModelClient` protocol + `ModelBackend` registry (SPEC §7.7).
+
+The ONLY module the rest of the harness imports to talk to a model. No vendor SDK, no
+framework, no `base_url`, no model string crosses this line — a backend adapter is *injected*
+(CLAUDE.md guardrail 3), which is the whole reason the harness is model-agnostic.
+
+The protocols and payload models below are SPEC §7.7 verbatim. `LadderModelClient` is the
+reference implementation of `ModelClient`: role → tier → ordered `BackendTarget`s, capability
+negotiation, budget re-check per target, truncation retry, budgeted repair, failover, and
+progress-only streaming. §8 eventually splits routing / negotiation / health tracking into
+`routing.py`, `negotiate.py` and `failover.py`; the pure functions here (`negotiate`,
+`promised_mode`, `estimate_cost_usd`) are the seams those modules take over, and `RoleRouter` is
+already a Protocol so `routing.py` plugs in without this file changing.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import pkgutil
+import time
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+from importlib import import_module
+from typing import ClassVar, Literal, Protocol, runtime_checkable
+
+from pydantic import BaseModel, Field, ValidationError
+
+from fleet.models.enums import FailureClass, ModelTier, StructuredOutputMode
+from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
+
+FinishReason = Literal["stop", "length", "refusal", "tool_call", "filtered"]
+"""Why generation stopped, as the transport reported it. Carried out of the backend because the
+five are NOT interchangeable downstream: `length` is a truncated reply, and treating it as a schema
+violation would fail the identical oversized call over three tiers to reproduce one truncation."""
+
+FailoverTrigger = Literal["CONNECTION", "SERVER_ERROR", "RATE_LIMIT", "SCHEMA_UNSATISFIED"]
+"""The §11.8 trigger set, exhaustively. `length` is deliberately absent: truncation is a property
+of the request, not of the target, so it can never move a call to the next `BackendTarget`."""
+
+
+# ---------------------------------------------------------------------------------------------
+# Errors. Typed, never bools (Rule 11): a caller must be able to tell a truncated reply from an
+# unsatisfiable schema from a spent budget WITHOUT parsing a message string, because those three
+# have three different remedies (raise the cap / fail the target over / stop).
+# ---------------------------------------------------------------------------------------------
+
+
+class LlmError(Exception):
+    """Base for every error crossing the §7.7 boundary."""
+
+
+class UnknownRole(LlmError):
+    """A role that `config/models.yaml` does not declare. A startup/config error, never a
+    default to the expensive tier."""
+
+    def __init__(self, role: str) -> None:
+        super().__init__(f"undeclared LLM role: {role!r}")
+        self.role = role
+
+
+class UnknownBackend(LlmError):
+    """A `BackendTarget.backend` naming a transport the registry does not hold — the §13 row 36
+    startup error, surfaced here because that is where the target is first dereferenced."""
+
+    def __init__(self, backend: str) -> None:
+        super().__init__(f"no registered ModelBackend named {backend!r}")
+        self.backend = backend
+
+
+class UnpricedTarget(LlmError):
+    """§9 rule 5 / §11.2: every target declares `price` or the literal `free`. An unpriced target
+    is a config error, not a $0.00 call — a hosted target nobody priced would leave `spent_usd`
+    at zero for a 250-repo run while the invoice arrived anyway."""
+
+    def __init__(self, target: BackendTarget) -> None:
+        super().__init__(f"target {target.backend}:{target.model_id} has no declared price")
+        self.target = target
+
+
+class BudgetExhausted(LlmError):
+    """The caller's REMAINING ceiling would be broken by this dispatch. Raised BEFORE the backend
+    is invoked, and again before each failover target, because a ceiling checked after the call is
+    a ceiling that has already been broken (§11.2)."""
+
+    failure_class: ClassVar[FailureClass] = FailureClass.BUDGET_EXHAUSTED
+
+    def __init__(self, reason: str, *, target: BackendTarget | None = None) -> None:
+        super().__init__(reason)
+        self.target = target
+
+
+class OutputTruncated(LlmError):
+    """`finish_reason == "length"`. NOT a schema violation, NOT a failover trigger, spends no
+    repair, and is excluded from `CapabilityDrift` accounting (§7.7, §11.8, §13 row 47). Retried
+    on the SAME target with a raised `max_output_tokens`."""
+
+    def __init__(self, target: BackendTarget, attempted_max_output_tokens: int) -> None:
+        super().__init__(
+            f"reply truncated at max_output_tokens={attempted_max_output_tokens} "
+            f"on {target.backend}:{target.model_id}",
+        )
+        self.target = target
+        self.attempted_max_output_tokens = attempted_max_output_tokens
+
+
+class MalformedReply(LlmError):
+    """The turn carried nothing this rung can parse — empty text, or `TOOL_CALL` with no
+    arguments object. Repairable exactly like a `ValidationError`; loud, never a clean finish."""
+
+
+class SchemaUnsatisfied(LlmError):
+    """The rung plus `llm.max_schema_repairs` failed to produce a reply that validates. A TARGET
+    failure, so it is a §11.8 failover trigger, not an immediate task failure."""
+
+    def __init__(self, target: BackendTarget, repairs: int, detail: str) -> None:
+        super().__init__(
+            f"{target.backend}:{target.model_id} failed the response schema after "
+            f"{repairs} repair(s): {detail}",
+        )
+        self.target = target
+        self.repairs = repairs
+        self.detail = detail
+
+
+class ModelRefused(LlmError):
+    """`finish_reason` of `refusal` or `filtered`. Like truncation this is a property of the
+    request rather than of the endpoint, so it is surfaced typed instead of being retried around
+    the tier."""
+
+    def __init__(self, target: BackendTarget, finish_reason: FinishReason) -> None:
+        super().__init__(f"{target.backend}:{target.model_id} returned {finish_reason}")
+        self.target = target
+        self.finish_reason = finish_reason
+
+
+class TransportError(LlmError):
+    """What a backend raises for a connection-level or 5xx failure that survived its own transient
+    layer. The §11.8 failover triggers 1-3; backends raise it, the client acts on it."""
+
+    def __init__(self, message: str, *, trigger: FailoverTrigger = "CONNECTION") -> None:
+        super().__init__(message)
+        self.trigger = trigger
+
+
+class TierUnavailable(LlmError):
+    """Every target for the tier is unhealthy, or `max_targets_per_call` was reached without a
+    validated response. Fail closed (§11.8, exit 8); never a silent downgrade to another tier."""
+
+    failure_class: ClassVar[FailureClass] = FailureClass.BACKEND_UNAVAILABLE
+
+    def __init__(self, tier: ModelTier, targets_tried: Sequence[str]) -> None:
+        super().__init__(f"tier {tier} exhausted after targets: {', '.join(targets_tried) or '-'}")
+        self.tier = tier
+        self.targets_tried = tuple(targets_tried)
+
+
+# ---------------------------------------------------------------------------------------------
+# Payload models (SPEC §7.7)
+# ---------------------------------------------------------------------------------------------
+
+
+class Message(BaseModel):
+    """The neutral payload. Deliberately poorer than any vendor's message type: role + text.
+    A backend that needs richer content blocks constructs them from this, never the reverse.
+    `tool` exists because the TOOL_CALL rung is a two-turn protocol — the reply's arguments have to
+    travel back in as a turn, and without this member they would be re-flattened into a user
+    message, which is the shape the negotiator is trying to avoid recording as PROMPTED."""
+
+    role: Literal["system", "user", "assistant", "tool"]
+    content: str
+
+
+class CallBudget(BaseModel):
+    """What is LEFT, not what was granted. Constructed by the runner from the §11.2 reserve-then-
+    spend ledger, carried on `WorkerContext` (§7.1), and narrowed on every dispatch. Without it the
+    `WorkerBudget.max_cost_usd` ceiling could only be observed after it was already overshot, and
+    the reservation would have nothing to reserve against."""
+
+    remaining_tokens: int = Field(ge=0)
+    remaining_usd: float = Field(ge=0.0)
+    deadline: float  # absolute `loop.time()`; the same clock as WorkerContext
+
+
+class StreamEvent(BaseModel):
+    """The ONLY thing streaming exposes. Deliberately NOT partial text: a caller handed tokens
+    would parse them, and validation happens exactly once, on the complete reply."""
+
+    output_tokens: int = 0  # cumulative, monotonic
+    elapsed_ms: int = 0
+
+
+class BackendReply(BaseModel):
+    """One transport turn, structurally. `text` and `tool_arguments` are separate because the
+    TOOL_CALL rung's answer is an arguments OBJECT: scraping it back out of a string is a parser
+    the harness would then own, and a model emitting a tool call plus an assistant turn would
+    defeat it outright."""
+
+    text: str | None = None
+    tool_arguments: dict[str, object] | None = None
+    usage: TokenUsage
+    finish_reason: FinishReason
+
+
+class ModelResponse[T: BaseModel](BaseModel):
+    """What every call returns. `value` is ALREADY validated — there is no unvalidated path out
+    of this module, which is what makes the backends interchangeable (ADR-0002)."""
+
+    value: T
+    usage: TokenUsage
+    mode: StructuredOutputMode  # which negotiation rung actually produced `value`
+    finish_reason: FinishReason  # surfaced, not swallowed; `length` never reaches Pydantic
+    repairs: int = 0  # parse-and-repair re-asks spent; > 0 is a §13 row 37 signal
+
+
+class CapabilityDrift(BaseModel):
+    """A response produced at a LOWER rung than the profile promised (§13 row 37). Emitted whether
+    or not the call succeeded, so a local server silently dropping guided JSON shows up as a
+    finding rather than as a slow rise in repair counts. Never emitted for truncation."""
+
+    role: str
+    tier: ModelTier
+    backend: str
+    model_id: str
+    promised: StructuredOutputMode
+    actual: StructuredOutputMode
+
+
+class BackendFailover(BaseModel):
+    """One `backend_failover` event (§11.8): both targets and the trigger. A failover is never an
+    attempt — it increments `attempts.llm_failovers`, not `phases.attempts`."""
+
+    role: str
+    tier: ModelTier
+    from_backend: str
+    from_model_id: str
+    to_backend: str
+    to_model_id: str
+    trigger: FailoverTrigger
+
+
+# ---------------------------------------------------------------------------------------------
+# Protocols
+# ---------------------------------------------------------------------------------------------
+
+
+class ModelClient(Protocol):
+    """The ONLY way the harness talks to a model. ~70 lines of interface, zero dependencies
+    beyond Pydantic. Explicitly NOT LangChain, LangGraph, DeepAgents, or LiteLLM: we need one
+    method, not an agent framework."""
+
+    async def complete[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        tier_override: ModelTier | None = None,
+        max_output_tokens: int | None = None,
+        timeout_s: float | None = None,
+        budget: CallBudget | None = None,
+    ) -> ModelResponse[T]:
+        """Route `role` → tier → ordered `BackendTarget`s, negotiate structured output, call,
+        validate, and return. Raises `SchemaUnsatisfied` after the repair budget, and
+        `TierUnavailable` when every target for the tier is unhealthy (§11.8).
+
+        Raises `BudgetExhausted` BEFORE dispatch when the projected cost of the call exceeds
+        `budget.remaining_usd`/`remaining_tokens`, or when `budget.deadline` has passed — the check
+        is inside the call path because that is the only place the target's price is known, and a
+        ceiling checked after the call is a ceiling that has already been broken. Failover to a
+        further `BackendTarget` re-checks against the same budget, since the next target may be
+        dearer than the one that just failed."""
+        ...
+
+    def stream[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Progress only. Its ONLY contract is token-count events the runner forwards as worker
+        heartbeats, so a legitimate 900 s HEAVY call is not reaped as a stale lease (§11.5).
+        Declared `def` returning `AsyncIterator`, not `async def`, because an async generator's
+        type is `Callable[..., AsyncIterator[...]]` and the coroutine form would not match one
+        under `mypy --strict`."""
+        ...
+
+    async def capabilities(self, role: str) -> ModelCapabilities:
+        """Declared (not probed) capabilities of the target `role` would currently route to."""
+        ...
+
+
+@runtime_checkable
+class ModelBackend(Protocol):
+    """One transport. A new provider is ONE file under `llm/backends/` + one @register_backend."""
+
+    name: ClassVar[str]  # registry key; matches `BackendTarget.backend`
+    version: ClassVar[int]  # bump invalidates nothing — the cache keys on `model_id`
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities: ...
+
+    async def invoke(
+        self,
+        target: BackendTarget,
+        messages: Sequence[Message],
+        schema: dict[str, object] | None,
+        mode: StructuredOutputMode,
+        *,
+        max_output_tokens: int,
+        timeout_s: float,
+    ) -> BackendReply:
+        """Return the raw turn — text or tool arguments — plus usage AND `finish_reason`. A backend
+        NEVER validates, never retries a schema failure, and never picks its own mode; those belong
+        to the client, so every backend behaves identically at the boundary that matters. It also
+        never DECIDES anything from `finish_reason`: it reports what the transport said and the
+        client acts on it."""
+        ...
+
+
+class TierRoute(BaseModel):
+    """What a role resolved to: the tier, and the tier's ordered target list."""
+
+    tier: ModelTier
+    targets: tuple[BackendTarget, ...] = Field(min_length=1)
+
+
+class RoleRouter(Protocol):
+    """`routing.py`'s surface, declared here so the client depends on the interface and not on the
+    YAML loader. Rejects unknown roles (`UnknownRole`), unknown backends, and empty tiers."""
+
+    def resolve(self, role: str, *, tier_override: ModelTier | None = None) -> TierRoute: ...
+
+
+# ---------------------------------------------------------------------------------------------
+# Registry (§7.2 rules, fifth user)
+# ---------------------------------------------------------------------------------------------
+
+_BACKENDS: dict[str, ModelBackend] = {}
+
+
+def register_backend[B: type[ModelBackend]](cls: B) -> B:
+    """Same decorator, same duplicate-is-a-startup-error rule as §7.2/§7.3/§7.5/§7.6."""
+    if cls.name in _BACKENDS:
+        raise RuntimeError(f"duplicate ModelBackend: {cls.name}")
+    _BACKENDS[cls.name] = cls()
+    return cls
+
+
+def registry() -> dict[str, ModelBackend]:
+    """A snapshot of what is registered. Callers inject this; nothing reaches for a global."""
+    return dict(_BACKENDS)
+
+
+def discover() -> dict[str, ModelBackend]:
+    """pkgutil walk of `fleet.llm.backends`. Unlike EcosystemAdapter's, this registry is NOT total
+    over an enum — backends are open-ended. It IS total over the active profile: every `backend`
+    named in config/models.yaml must resolve, checked at RunContext construction (§13 row 36).
+
+    A backend whose SDK is not installed fails its import here and is simply not registered, which
+    is not an error: a run that does not name it does not need it."""
+    try:
+        package = import_module("fleet.llm.backends")
+    except ImportError:
+        return registry()
+    for module in pkgutil.iter_modules(list(getattr(package, "__path__", []))):
+        try:
+            import_module(f"fleet.llm.backends.{module.name}")
+        except ImportError:
+            continue
+    return registry()
+
+
+# ---------------------------------------------------------------------------------------------
+# Pricing and the negotiation ladder — pure functions, so `negotiate.py` can adopt them unchanged
+# ---------------------------------------------------------------------------------------------
+
+_LADDER: tuple[StructuredOutputMode, ...] = (
+    StructuredOutputMode.JSON_SCHEMA,
+    StructuredOutputMode.TOOL_CALL,
+    StructuredOutputMode.CONSTRAINED,
+    StructuredOutputMode.PROMPTED,
+)
+_RANK: dict[StructuredOutputMode, int] = {mode: i for i, mode in enumerate(_LADDER)}
+
+
+def estimate_cost_usd(target: BackendTarget, input_tokens: int, output_tokens: int) -> float:
+    """`price(target, n)` of §11.2, exactly. `free` reserves and spends 0.0; an *absent* price is
+    `UnpricedTarget`, never 0.0 (§9 rule 5)."""
+    price: object = target.price
+    if isinstance(price, Price):
+        return (price.in_per_mtok * input_tokens + price.out_per_mtok * output_tokens) / 1e6
+    if price == "free":
+        return 0.0
+    raise UnpricedTarget(target)
+
+
+def negotiate(caps: ModelCapabilities) -> StructuredOutputMode:
+    """Walk the fixed ladder best-first and take the highest rung `caps` can honour. PROMPTED is
+    the floor, always available — a small local model with no structured-output support is a
+    legitimate CHEAP target and refusing to talk to it would defeat the point."""
+    if caps.supports_json_schema:
+        return StructuredOutputMode.JSON_SCHEMA
+    if caps.supports_tools:
+        return StructuredOutputMode.TOOL_CALL
+    if caps.supports_constrained_decoding:
+        return StructuredOutputMode.CONSTRAINED
+    return StructuredOutputMode.PROMPTED
+
+
+def promised_mode(caps: ModelCapabilities) -> StructuredOutputMode:
+    """The best rung `structured_output_modes` PROMISES. The booleans say what we may attempt;
+    this says what the profile claimed — the gap between the two is `CapabilityDrift`, which gives
+    the two overlapping declarations in `ModelCapabilities` one job each."""
+    return min(caps.structured_output_modes, key=lambda m: _RANK[m], default=_LADDER[-1])
+
+
+def merge_capabilities(declared: ModelCapabilities, target: BackendTarget) -> ModelCapabilities:
+    """declared ⊕ `capabilities_override` (§7.7 `capabilities.py`). An unknown override key is a
+    `ValidationError` — a config typo must be loud, not silently ignored."""
+    if not target.capabilities_override:
+        return declared
+    return ModelCapabilities.model_validate(
+        {**declared.model_dump(), **target.capabilities_override},
+    )
+
+
+def estimate_input_tokens(messages: Sequence[Message]) -> int:
+    """A deterministic pre-dispatch estimate (~4 chars/token + per-message overhead). Deliberately
+    arithmetic, not a tokenizer call: the budget gate must not itself require the vendor SDK."""
+    return sum(len(m.content) for m in messages) // 4 + 8 * len(messages)
+
+
+# ---------------------------------------------------------------------------------------------
+# Reference client
+# ---------------------------------------------------------------------------------------------
+
+_PROMPTED_INSTRUCTION = (
+    "Respond with a single JSON object and nothing else — no prose, no markdown fence. "
+    "It must validate against this JSON Schema:\n{schema}"
+)
+_REPAIR_INSTRUCTION = (
+    "That reply did not validate. Return the corrected JSON object only. "
+    "The validator said, verbatim:\n{error}"
+)
+
+
+class CallPolicy(BaseModel):
+    """The §9 `llm:` knobs this module actually reads. Injected, so a test does not have to load
+    config and a run does not have to hard-code a default."""
+
+    max_schema_repairs: int = Field(default=1, ge=0)
+    max_targets_per_call: int = Field(default=3, ge=1)
+    max_truncation_retries: int = Field(default=2, ge=0)
+    truncation_growth: float = Field(default=2.0, gt=1.0)
+    default_max_output_tokens: int = Field(default=4096, gt=0)
+    default_timeout_s: float = Field(default=120.0, gt=0.0)
+    heartbeat_interval_s: float = Field(default=5.0, ge=0.0)
+
+
+class LadderModelClient:
+    """The reference `ModelClient`. Everything it talks to is injected: a `RoleRouter`, a mapping
+    of registered `ModelBackend`s, two event sinks, and a clock. There is no vendor import here
+    and no code path that reaches for one."""
+
+    def __init__(
+        self,
+        router: RoleRouter,
+        backends: Mapping[str, ModelBackend] | None = None,
+        *,
+        policy: CallPolicy | None = None,
+        on_drift: Callable[[CapabilityDrift], None] | None = None,
+        on_failover: Callable[[BackendFailover], None] | None = None,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._router = router
+        self._backends: Mapping[str, ModelBackend] = registry() if backends is None else backends
+        self._policy = policy or CallPolicy()
+        self._on_drift = on_drift
+        self._on_failover = on_failover
+        self._clock = clock
+
+    # -- public surface ------------------------------------------------------------------------
+
+    async def complete[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        tier_override: ModelTier | None = None,
+        max_output_tokens: int | None = None,
+        timeout_s: float | None = None,
+        budget: CallBudget | None = None,
+    ) -> ModelResponse[T]:
+        """See `ModelClient.complete`."""
+        route = self._router.resolve(role, tier_override=tier_override)
+        schema: dict[str, object] = dict(response_model.model_json_schema())
+        targets = route.targets[: self._policy.max_targets_per_call]
+        timeout = self._policy.default_timeout_s if timeout_s is None else timeout_s
+        requested = max_output_tokens or self._policy.default_max_output_tokens
+
+        tried: list[str] = []
+        last: LlmError | None = None
+        for index, target in enumerate(targets):
+            backend = self._backend_for(target)
+            caps = merge_capabilities(backend.declared_capabilities(target), target)
+            tried.append(f"{target.backend}:{target.model_id}")
+
+            # Re-checked HERE, per target: the next target may be dearer than the one that just
+            # failed, so a budget cleared once is not a budget cleared for the ladder (§11.2).
+            cap = min(requested, caps.max_output_tokens)
+            self._check_budget(budget, target, estimate_input_tokens(messages), cap)
+
+            mode = negotiate(caps)
+            self._emit_drift(role, route.tier, target, caps, mode)
+            try:
+                return await self._call_target(
+                    role=role,
+                    tier=route.tier,
+                    target=target,
+                    backend=backend,
+                    caps=caps,
+                    messages=messages,
+                    response_model=response_model,
+                    schema=schema,
+                    mode=mode,
+                    max_output_tokens=cap,
+                    timeout_s=timeout,
+                    budget=budget,
+                )
+            except (SchemaUnsatisfied, TransportError) as exc:
+                # The ONLY two failover paths. `OutputTruncated`, `BudgetExhausted` and
+                # `ModelRefused` deliberately propagate: none of them says anything about whether
+                # this endpoint is worth using.
+                last = exc
+                trigger: FailoverTrigger = (
+                    "SCHEMA_UNSATISFIED" if isinstance(exc, SchemaUnsatisfied) else exc.trigger
+                )
+                if index + 1 < len(targets):
+                    self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
+        raise TierUnavailable(route.tier, tried) from last
+
+    def stream[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        """See `ModelClient.stream`. `def` returning an `AsyncIterator`, not `async def`."""
+        return self._heartbeats(role, messages, response_model, budget=budget)
+
+    async def capabilities(self, role: str) -> ModelCapabilities:
+        """Declared, never probed — a run's plan must not depend on a network call."""
+        route = self._router.resolve(role)
+        target = route.targets[0]
+        backend = self._backend_for(target)
+        return merge_capabilities(backend.declared_capabilities(target), target)
+
+    # -- internals -----------------------------------------------------------------------------
+
+    async def _heartbeats[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None,
+    ) -> AsyncIterator[StreamEvent]:
+        """Token-count progress for the liveness reaper, and nothing else. The first event is
+        emitted BEFORE the call can possibly have finished — a 900 s HEAVY call that emitted its
+        first heartbeat only on completion is exactly the stale-lease kill this exists to prevent
+        (§11.5). Counts are cumulative and monotonic; partial text is never exposed."""
+        started = self._clock()
+        task: asyncio.Task[ModelResponse[T]] = asyncio.ensure_future(
+            self.complete(role, messages, response_model, budget=budget),
+        )
+        try:
+            yield StreamEvent(output_tokens=0, elapsed_ms=self._elapsed_ms(started))
+            while not task.done():
+                await asyncio.wait({task}, timeout=self._policy.heartbeat_interval_s)
+                yield StreamEvent(output_tokens=0, elapsed_ms=self._elapsed_ms(started))
+            response = task.result()  # a failed call raises out of the stream, never silently ends
+            yield StreamEvent(
+                output_tokens=response.usage.output_tokens,
+                elapsed_ms=self._elapsed_ms(started),
+            )
+        finally:
+            if not task.done():
+                task.cancel()
+
+    def _elapsed_ms(self, started: float) -> int:
+        return max(int((self._clock() - started) * 1000), 0)
+
+    def _backend_for(self, target: BackendTarget) -> ModelBackend:
+        backend = self._backends.get(target.backend)
+        if backend is None:
+            raise UnknownBackend(target.backend)
+        return backend
+
+    def _check_budget(
+        self,
+        budget: CallBudget | None,
+        target: BackendTarget,
+        input_tokens: int,
+        max_output_tokens: int,
+    ) -> None:
+        """BEFORE dispatch, and again per failover target. `estimate_cost_usd` is what makes this
+        the only place the check can live: the price belongs to the target, not to the caller."""
+        if budget is None:
+            return
+        if self._clock() >= budget.deadline:
+            raise BudgetExhausted("call deadline passed before dispatch", target=target)
+        projected_tokens = input_tokens + max_output_tokens
+        if projected_tokens > budget.remaining_tokens:
+            raise BudgetExhausted(
+                f"projected {projected_tokens} tokens exceeds remaining "
+                f"{budget.remaining_tokens}",
+                target=target,
+            )
+        projected_usd = estimate_cost_usd(target, input_tokens, max_output_tokens)
+        if projected_usd > budget.remaining_usd:
+            raise BudgetExhausted(
+                f"projected ${projected_usd:.6f} exceeds remaining ${budget.remaining_usd:.6f} "
+                f"on {target.backend}:{target.model_id}",
+                target=target,
+            )
+
+    def _emit_drift(
+        self,
+        role: str,
+        tier: ModelTier,
+        target: BackendTarget,
+        caps: ModelCapabilities,
+        actual: StructuredOutputMode,
+    ) -> None:
+        """Emitted once per TARGET, not per retry: a truncation retry must not manufacture a
+        second drift finding against a healthy endpoint."""
+        promised = promised_mode(caps)
+        if self._on_drift is None or _RANK[actual] <= _RANK[promised]:
+            return
+        self._on_drift(
+            CapabilityDrift(
+                role=role,
+                tier=tier,
+                backend=target.backend,
+                model_id=target.model_id,
+                promised=promised,
+                actual=actual,
+            ),
+        )
+
+    def _emit_failover(
+        self,
+        role: str,
+        tier: ModelTier,
+        source: BackendTarget,
+        destination: BackendTarget,
+        trigger: FailoverTrigger,
+    ) -> None:
+        if self._on_failover is None:
+            return
+        self._on_failover(
+            BackendFailover(
+                role=role,
+                tier=tier,
+                from_backend=source.backend,
+                from_model_id=source.model_id,
+                to_backend=destination.backend,
+                to_model_id=destination.model_id,
+                trigger=trigger,
+            ),
+        )
+
+    async def _call_target[T: BaseModel](
+        self,
+        *,
+        role: str,
+        tier: ModelTier,
+        target: BackendTarget,
+        backend: ModelBackend,
+        caps: ModelCapabilities,
+        messages: Sequence[Message],
+        response_model: type[T],
+        schema: dict[str, object],
+        mode: StructuredOutputMode,
+        max_output_tokens: int,
+        timeout_s: float,
+        budget: CallBudget | None,
+    ) -> ModelResponse[T]:
+        """One target's whole life: truncation raises, budgeted repairs, and validation. The order
+        of the two guards is the point — `length` is checked FIRST, before the reply is ever handed
+        to Pydantic (§13 row 47)."""
+        base = _prepare_messages(messages, caps, schema, mode)
+        conversation = list(base)
+        repairs = 0
+        truncations = 0
+        cap = max_output_tokens
+        input_tokens = estimate_input_tokens(messages)
+
+        while True:
+            reply = await backend.invoke(
+                target,
+                conversation,
+                schema if mode is not StructuredOutputMode.PROMPTED else None,
+                mode,
+                max_output_tokens=cap,
+                timeout_s=timeout_s,
+            )
+
+            if reply.finish_reason == "length":
+                truncations += 1
+                cap = self._raise_cap(
+                    target=target,
+                    caps=caps,
+                    budget=budget,
+                    input_tokens=input_tokens,
+                    current=cap,
+                    truncations=truncations,
+                )
+                continue  # SAME target. No repair spent, no failover, no CapabilityDrift.
+
+            if reply.finish_reason in ("refusal", "filtered"):
+                raise ModelRefused(target, reply.finish_reason)
+
+            try:
+                value = _validate(reply, response_model, mode)
+            except (ValidationError, ValueError, MalformedReply) as exc:
+                detail = str(exc)
+                if repairs >= self._policy.max_schema_repairs:
+                    raise SchemaUnsatisfied(target, repairs, detail) from exc
+                repairs += 1
+                conversation = [*base, *_repair_turns(reply, mode, detail)]
+                continue
+
+            return ModelResponse(
+                value=value,
+                usage=_stamp(reply.usage, role, tier, target),
+                mode=mode,
+                finish_reason=reply.finish_reason,
+                repairs=repairs,
+            )
+
+    def _raise_cap(
+        self,
+        *,
+        target: BackendTarget,
+        caps: ModelCapabilities,
+        budget: CallBudget | None,
+        input_tokens: int,
+        current: int,
+        truncations: int,
+    ) -> int:
+        """Raise `max_output_tokens` for the SAME target, bounded by the target's declared maximum
+        and by the caller's `CallBudget`. Exhausting the raise is `FailureClass.BUDGET_EXHAUSTED`
+        — an oversized request, not a backend fault — so it must never be a failover trigger."""
+        truncated = OutputTruncated(target, current)
+        if truncations > self._policy.max_truncation_retries:
+            raise BudgetExhausted(
+                f"{truncated} and the truncation retry budget "
+                f"({self._policy.max_truncation_retries}) is spent",
+                target=target,
+            ) from truncated
+        want = min(int(current * self._policy.truncation_growth), caps.max_output_tokens)
+        if budget is not None:
+            want = min(want, max(budget.remaining_tokens - input_tokens, 0))
+        if want <= current:
+            raise BudgetExhausted(
+                f"{truncated} and max_output_tokens cannot be raised above {current} "
+                f"(declared max {caps.max_output_tokens})",
+                target=target,
+            ) from truncated
+        return want
+
+
+def _protocol_conformance(client: LadderModelClient) -> ModelClient:
+    """Compile-time only: `mypy --strict` fails here if the reference client ever drifts from the
+    protocol the rest of the harness codes against."""
+    return client
+
+
+# ---------------------------------------------------------------------------------------------
+# Rendering / parsing helpers
+# ---------------------------------------------------------------------------------------------
+
+
+def _prepare_messages(
+    messages: Sequence[Message],
+    caps: ModelCapabilities,
+    schema: dict[str, object],
+    mode: StructuredOutputMode,
+) -> list[Message]:
+    """`supports_system_prompt: false` folds the system turns into the first user message — the one
+    transformation the negotiator may perform on content (§7.7). Under PROMPTED the schema is
+    rendered into the prompt, because there is nowhere else to put it."""
+    prepared = list(messages)
+    if not caps.supports_system_prompt:
+        systems = [m.content for m in prepared if m.role == "system"]
+        rest = [m for m in prepared if m.role != "system"]
+        if systems:
+            folded = "\n\n".join(systems)
+            if rest and rest[0].role == "user":
+                rest[0] = Message(role="user", content=f"{folded}\n\n{rest[0].content}")
+            else:
+                rest.insert(0, Message(role="user", content=folded))
+        prepared = rest
+    if mode is StructuredOutputMode.PROMPTED:
+        rendered = json.dumps(schema, sort_keys=True)
+        prepared.append(
+            Message(role="user", content=_PROMPTED_INSTRUCTION.format(schema=rendered)),
+        )
+    return prepared
+
+
+def _repair_turns(reply: BackendReply, mode: StructuredOutputMode, detail: str) -> list[Message]:
+    """The re-ask carries the validator's words VERBATIM and the offending turn, nothing else —
+    no transcript history, no prior failed diffs (CLAUDE.md guardrail 5). Under TOOL_CALL the
+    offending turn travels back as a `tool` message, which is why that role member exists."""
+    if mode is StructuredOutputMode.TOOL_CALL:
+        offending = Message(
+            role="tool",
+            content=json.dumps(reply.tool_arguments or {}, sort_keys=True),
+        )
+    else:
+        offending = Message(role="assistant", content=reply.text or "")
+    return [offending, Message(role="user", content=_REPAIR_INSTRUCTION.format(error=detail))]
+
+
+def _strip_fence(text: str) -> str:
+    stripped = text.strip()
+    if not stripped.startswith("```"):
+        return stripped
+    body = stripped.split("\n", 1)[1] if "\n" in stripped else ""
+    return body.rsplit("```", 1)[0].strip()
+
+
+def _validate[T: BaseModel](
+    reply: BackendReply,
+    response_model: type[T],
+    mode: StructuredOutputMode,
+) -> T:
+    """Validation is ALWAYS Pydantic on our side, at every rung including JSON_SCHEMA: a backend's
+    enforcement is a hit-rate hint, never a guarantee. This is the invariant that makes the
+    backends interchangeable (ADR-0002, ADR-0023)."""
+    if mode is StructuredOutputMode.TOOL_CALL:
+        if reply.tool_arguments is None:
+            raise MalformedReply("TOOL_CALL rung returned no tool_arguments object")
+        return response_model.model_validate(reply.tool_arguments)
+    text = _strip_fence(reply.text or "")
+    if not text:
+        raise MalformedReply("empty reply text")
+    return response_model.model_validate(json.loads(text))
+
+
+def _stamp(usage: TokenUsage, role: str, tier: ModelTier, target: BackendTarget) -> TokenUsage:
+    """Attribute the usage to the target that actually answered, and price it — §11.2 writes this
+    row in four places, so it must not be the caller's job to reconstruct who was called."""
+    return usage.model_copy(
+        update={
+            "role": role,
+            "tier": tier,
+            "backend": target.backend,
+            "model_id": usage.model_id or target.model_id,
+            "cost_usd": estimate_cost_usd(target, usage.input_tokens, usage.output_tokens),
+        },
+    )

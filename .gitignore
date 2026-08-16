@@ -1,0 +1,64 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.eggs/
+pip-wheel-metadata/
+
+# ---- Virtualenvs / tooling caches ----
+.venv/
+venv/
+env/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.hypothesis/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# ---- Fleet harness runtime state (never committed) ----
+artifacts/
+logs/
+state/*.db
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+migration_state.json
+.worktrees/
+mirrors/
+
+# ---- Secrets ----
+.env
+.env.*
+!.env.example
+config/secrets.*
+
+# ---- Editors / OS ----
+.idea/
+.vscode/
+*.swp
+.DS_Store
+.secrets/
+
+# ---- Vendored toolchains (~2.2 GB; provisioned by docs/, not source) ----
+# The wrapper SCRIPTS in tools/bin are source and are tracked; the binaries
+# they exec, and the SDK trees, are downloaded artifacts. See docs/DECISIONS.md
+# (ast-grep, bazelisk, Rust, Go, gazelle vendoring ADRs) for how to re-provision.
+tools/bazelisk/
+tools/go/
+tools/rust/
+tools/bin/*
+!tools/bin/cargo
+!tools/bin/gazelle
+!tools/bin/go
+!tools/bin/rustc

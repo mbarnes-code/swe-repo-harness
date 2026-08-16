@@ -1,0 +1,10 @@
+#!/bin/sh
+# Vendored Rust toolchain entry point (pinned 1.97.1). See the sibling `cargo` wrapper for why
+# the rustup shims cannot be symlinked here directly: they need RUSTUP_HOME to find a toolchain.
+set -e
+bin_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+rust_dir=$(CDPATH= cd -- "$bin_dir/../rust" && pwd -P)
+RUSTUP_HOME="${RUSTUP_HOME:-$rust_dir/rustup}"
+CARGO_HOME="${CARGO_HOME:-$rust_dir/cargo}"
+export RUSTUP_HOME CARGO_HOME
+exec "$rust_dir/cargo/bin/rustc" "$@"

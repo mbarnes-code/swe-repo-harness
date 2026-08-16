@@ -1,0 +1,126 @@
+"""Dependency-graph construction, inference, cycle breaking, collision audit and
+sequencing (SPEC §3.1).
+
+One orientation rule governs every module here and is stated once, in `graph/build.py`: an
+`edges` row runs **dependent → dependency**, `G` is built that way, and `G_rev = G.reverse()` is
+built once per run for everything that asks "what depends on this?".
+"""
+
+from __future__ import annotations
+
+from fleet.graph.build import (
+    DEFAULT_MIN_CONFIDENCE,
+    FleetGraph,
+    GraphError,
+    NodeRef,
+    build_graph,
+    orders_migration,
+    validate_dag_edge_kinds,
+)
+from fleet.graph.collisions import (
+    CollisionInput,
+    CollisionReport,
+    ContractClaim,
+    CoordinateClaim,
+    DestClaim,
+    FileClaim,
+    VersionRequirement,
+    audit_collisions,
+)
+from fleet.graph.cycles import (
+    KIND_RANK,
+    CoarsePlan,
+    CoarseTarget,
+    CycleReport,
+    GraphFinding,
+    MemberSources,
+    SccResolution,
+    break_cost,
+    break_cycles,
+    classify_intra_scc_edges,
+    coarsen_atomic_scc,
+    scc_dest,
+    scc_id_for,
+    supersede_findings,
+)
+from fleet.graph.infer import (
+    EDGE_BASE_CONFIDENCE,
+    InferenceInput,
+    ManifestDependency,
+    OwnerIndex,
+    edge_key_for,
+    infer_contract_edges,
+    infer_edges,
+)
+from fleet.graph.query import ancestors, blast_radii, blast_radius, descendants
+from fleet.graph.sequence import (
+    CriteriaReport,
+    CriterionResult,
+    WavePlan,
+    append_synthetic_waves,
+    assign_waves,
+    check_criteria,
+    check_criterion_a,
+    check_criterion_b,
+    check_criterion_c,
+    check_criterion_d,
+    condense_for_ordering,
+    layer,
+    ordering_is_acyclic,
+)
+
+__all__ = [
+    "DEFAULT_MIN_CONFIDENCE",
+    "EDGE_BASE_CONFIDENCE",
+    "KIND_RANK",
+    "CoarsePlan",
+    "CoarseTarget",
+    "CollisionInput",
+    "CollisionReport",
+    "ContractClaim",
+    "CoordinateClaim",
+    "CriteriaReport",
+    "CriterionResult",
+    "CycleReport",
+    "DestClaim",
+    "FileClaim",
+    "FleetGraph",
+    "GraphError",
+    "GraphFinding",
+    "InferenceInput",
+    "ManifestDependency",
+    "MemberSources",
+    "NodeRef",
+    "OwnerIndex",
+    "SccResolution",
+    "VersionRequirement",
+    "WavePlan",
+    "ancestors",
+    "append_synthetic_waves",
+    "assign_waves",
+    "audit_collisions",
+    "blast_radii",
+    "blast_radius",
+    "break_cost",
+    "break_cycles",
+    "build_graph",
+    "check_criteria",
+    "check_criterion_a",
+    "check_criterion_b",
+    "check_criterion_c",
+    "check_criterion_d",
+    "classify_intra_scc_edges",
+    "coarsen_atomic_scc",
+    "condense_for_ordering",
+    "descendants",
+    "edge_key_for",
+    "infer_contract_edges",
+    "infer_edges",
+    "layer",
+    "ordering_is_acyclic",
+    "orders_migration",
+    "scc_dest",
+    "scc_id_for",
+    "supersede_findings",
+    "validate_dag_edge_kinds",
+]

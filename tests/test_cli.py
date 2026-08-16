@@ -1,0 +1,1160 @@
+"""§10's command surface: the flags an operator types and the exit codes CI reads.
+
+Every test here answers "why does this matter":
+
+* **`--help` on every verb, offline** — the CLI is the only entry point in the harness, and a
+  verb whose parser cannot be rendered without a database is a verb an operator cannot discover
+  on a fresh checkout. Parametrized over `command_paths()`, which is *derived from the click
+  group*, so a verb added to §10 tomorrow is covered the moment it exists.
+* **Each documented exit code produced by the condition that documents it.** §10's whole reason
+  for eleven codes is that CI can tell them apart: a budget stop that exits 1 reads as
+  "unexpected error", and an operator cannot distinguish "the wave ran out of money" (resumable
+  with `--raise-wave-budget`) from "the harness crashed" (not resumable at all).
+* **`migrate-db` on a v0 database initializes; on an older one it runs the ladder.** These are
+  different code paths in different modules (`state/db.py` vs `migrations/`) and §6 refuses to
+  let either impersonate the other — `CREATE TABLE IF NOT EXISTS` never executes an `ALTER`.
+* **`quarantine` needs no config edit.** That is the entire reason the verb exists: editing
+  `config/repos.yaml` trips drift detection, whose only escape accepts every co-edited change.
+* **`--accept-drift <section>` accepts exactly one section.** A flag that accepted its
+  neighbours would be `--force-config-drift` with a friendlier name.
+* **No secret reaches stdout or stderr.** A clone URL carrying a `github_pat_…` is the exact
+  shape §11.4 exists to stop, and an error path is where redaction is most often forgotten.
+* **A typed internal error maps to its code, not a traceback.** Rule 11.
+"""
+
+from __future__ import annotations
+
+import json
+import shutil
+import sqlite3
+from collections.abc import Iterator
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from fleet.cli import ExitCode, app, command_paths
+from fleet.llm.roles import SPEC_ROLE_TIERS
+from fleet.migrations import LATEST_VERSION
+from fleet.models.state import SCHEMA_VERSION
+from fleet.state.db import SCHEMA_PATH
+from tests.test_migrations import _v6_database
+
+runner = CliRunner()
+
+RUN_ID = "11111111-1111-4111-8111-111111111111"
+
+#: Every `Role` must be declared or `LlmRouter` refuses at startup — a role with no model behind
+#: it is a job the harness will reach and be unable to run (§7.7). Generated from the enum so a
+#: new role cannot leave this fixture quietly stale.
+ROLES_BLOCK = "".join(
+    f"  {role.value}: {tier.value}\n" for role, tier in sorted(SPEC_ROLE_TIERS.items())
+)
+
+MODELS_YAML = f"""\
+version: 2
+roles:
+{ROLES_BLOCK}\
+default_profile: default
+profiles:
+  default:
+""" + """\
+    HEAVY:
+      - { backend: anthropic, model_id: claude-opus-5, effort: high,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
+    WORKHORSE:
+      - { backend: anthropic, model_id: claude-sonnet-5, effort: high,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
+    CHEAP:
+      - { backend: anthropic, model_id: claude-haiku-4-5, effort: low,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
+"""
+
+#: ADR-0023's "swap the fleet to local models" profile — the one `--profile local` selects.
+LOCAL_PROFILE_YAML = """\
+  local:
+    HEAVY:
+      - { backend: openai_compatible, model_id: local-heavy, effort: high, price: free,
+          base_url: 'http://localhost:8001/v1', api_key_env: LOCAL_LLM_API_KEY }
+    WORKHORSE:
+      - { backend: openai_compatible, model_id: local-workhorse, effort: medium, price: free,
+          base_url: 'http://localhost:8001/v1', api_key_env: LOCAL_LLM_API_KEY }
+    CHEAP:
+      - { backend: openai_compatible, model_id: local-cheap, effort: low, price: free,
+          base_url: 'http://localhost:8001/v1', api_key_env: LOCAL_LLM_API_KEY }
+"""
+
+#: §9 rule 5's canonical exit-2 case: a HEAVY target that declares neither a price nor `free`.
+UNPRICED_MODELS_YAML = MODELS_YAML.replace(
+    "          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }",
+    "        }",
+)
+
+REPOS_YAML = """\
+version: 1
+defaults:
+  ref: main
+repos:
+  - name: acme-commons
+    url: https://github.com/acme/acme-commons
+  - name: acme-billing
+    url: https://github.com/acme/acme-billing
+"""
+
+#: The leak the redactor exists for. `redaction.patterns`'s `github_pat` detector matches it, so
+#: §9 rule 4 refuses the file at load — and the refusal must not quote the token back.
+LEAKY_TOKEN = "github_pat_" + "A1b2C3d4E5f6G7h8I9j0" + "K1l2M3n4O5p6Q7r8S9t0"
+LEAKY_REPOS_YAML = f"""\
+version: 1
+repos:
+  - name: acme-commons
+    url: https://x-access-token:{LEAKY_TOKEN}@github.com/acme/acme-commons
+"""
+
+
+FLEET_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n"
+    # See the note in `tests/test_scan_e2e.py`: the shipped 50 GiB floor would refuse every
+    # command on a developer volume, so the fixture lowers it rather than disabling it. The
+    # refusal is asserted separately, against a floor no volume can clear.
+    "preflight:\n  min_free_bytes: 1048576\n"
+)
+
+
+def write_config(
+    tmp_path: Path,
+    *,
+    fleet: str = FLEET_YAML,
+    models: str = MODELS_YAML,
+    repos: str = REPOS_YAML,
+) -> Path:
+    """The three-file `config/` directory §9 documents. Returns `config/fleet.yaml`."""
+    config_dir = tmp_path / "config"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "fleet.yaml").write_text(fleet, encoding="utf-8")
+    (config_dir / "models.yaml").write_text(models, encoding="utf-8")
+    (config_dir / "repos.yaml").write_text(repos, encoding="utf-8")
+    return config_dir / "fleet.yaml"
+
+
+def fresh_db(path: Path) -> Path:
+    """A database at the shipped baseline, built the way `migrate-db` builds one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        conn.executescript(SCHEMA_PATH.read_text(encoding="utf-8"))
+    finally:
+        conn.close()
+    return path
+
+
+def seed_run(
+    path: Path,
+    *,
+    run_id: str = RUN_ID,
+    repos: tuple[str, ...] = ("acme-commons", "acme-billing"),
+    config_digests: str = "{}",
+) -> None:
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, config_digests, "
+            "                  harness_version) VALUES (?, ?, ?, ?, ?)",
+            (run_id, "2026-08-08T12:00:00+00:00", "a" * 64, config_digests, "0.1.0"),
+        )
+        for name in repos:
+            conn.execute(
+                "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+                (name, name, f"https://example.invalid/{name}", "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+
+@pytest.fixture
+def workspace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A cwd-isolated workspace: config, a database at the baseline, and one seeded run.
+
+    The run records TODAY's per-section digests, so the default state is "no drift" and a drift
+    test has to create the drift it asserts on. Seeding `{}` instead would make every resume
+    report drift in every section — which reads as a passing drift test that proves nothing.
+    """
+    from fleet.settings import FleetSettings
+
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+    fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(
+        tmp_path / "state" / "fleet.db",
+        config_digests=json.dumps(dict(settings.section_digests), sort_keys=True),
+    )
+    monkeypatch.chdir(tmp_path)
+    yield tmp_path
+
+
+def base_args(root: Path) -> list[str]:
+    return ["--config", str(root / "config" / "fleet.yaml"), "--db", str(root / "state/fleet.db")]
+
+
+# --------------------------------------------------------------------------------------
+# --help: discoverable offline, on every verb
+# --------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", command_paths(), ids=lambda p: " ".join(p))
+def test_every_verb_renders_help_offline(path: tuple[str, ...], tmp_path: Path) -> None:
+    """`fleet <verb> --help` exits 0 with no database, no network and no model.
+
+    Why: the CLI is the only entry point, and §12's acceptance criteria are literally "this
+    command exits 0". A `--help` that needs `state/fleet.db` cannot be run on a fresh checkout,
+    which makes the surface undiscoverable exactly when an operator most needs it. Derived from
+    the click group, so a verb added to §10 is covered without editing this test.
+    """
+    result = runner.invoke(app, [*path, "--help"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / "state").exists()
+
+
+def test_root_help_lists_every_command() -> None:
+    """The group help is the operator's index; a verb missing from it is a verb nobody finds."""
+    result = runner.invoke(app, ["--help"], catch_exceptions=False)
+    assert result.exit_code == 0
+    for verb in ("scan", "sequence", "migrate", "migrate-db", "transform", "resume", "pr"):
+        assert verb in result.output
+    for verb in ("status", "quarantine", "abort", "gc"):
+        assert verb in result.output
+
+
+def test_migrate_and_migrate_db_are_distinct_verbs() -> None:
+    """§10 keeps them apart on purpose: `migrate-db` is the ONLY DDL path, and every other
+    command — `fleet migrate` included — *reads* `user_version` and refuses on a mismatch rather
+    than rebuilding tables underneath a live run. Merging them puts a table rebuild on the
+    startup path of the busiest verb in the harness."""
+    paths = {" ".join(p) for p in command_paths()}
+    assert "migrate" in paths
+    assert "migrate-db" in paths
+
+
+# --------------------------------------------------------------------------------------
+# exit 2 — configuration
+# --------------------------------------------------------------------------------------
+
+
+def test_unpriced_target_exits_2(tmp_path: Path) -> None:
+    """An unpriced target is exit 2, at startup, before a repo is touched (§9 rule 5).
+
+    Why: with no declared price the ledger reserves $0.00 for every call, so
+    `budgets.run_max_cost_usd` never trips and a 250-repo run bills unbounded dollars while every
+    cost assertion still passes. Exit 2 says "edit a file"; exit 1 would say "file a bug".
+    """
+    config = write_config(tmp_path, models=UNPRICED_MODELS_YAML)
+    result = runner.invoke(app, ["--config", str(config), "models", "list"])
+    assert result.exit_code == ExitCode.USAGE == 2, result.output
+    assert "price" in result.output.lower()
+
+
+def test_max_cost_usd_may_only_lower_the_ceiling(workspace: Path) -> None:
+    """§10: `--max-cost-usd` "overrides `budgets.run_max_cost_usd` downward only".
+
+    Why: a flag that silently raised a run ceiling would make the durable ledger's fail-closed
+    guarantee a suggestion — the one number an operator cannot raise without an audit trail.
+    """
+    result = runner.invoke(
+        app, [*base_args(workspace), "--max-cost-usd", "9999", "models", "profiles"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "downward" in result.output.lower()
+
+
+def test_context_policy_refuses_rung_one(workspace: Path) -> None:
+    """`--context-policy 1=...` is refused with exit 2, deterministically (§10).
+
+    Why: rung 1 is the deterministic rung and composes no prompt, so a context policy there
+    governs nothing. Refusing before any model call means the operator learns it in a second
+    rather than after a wave of cache misses.
+    """
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "transform", "--context-policy", "1=EVIDENCE_ONLY"],
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "rung 1" in result.output
+
+
+def test_context_policy_refuses_unknown_policy(workspace: Path) -> None:
+    """A policy outside `ContextPolicy` is exit 2 with the valid names listed.
+
+    Why: the policy is an `llm_cache` key component (§11.6). A typo accepted silently would key
+    the cache on a value no rung will ever ask for again — every call a permanent miss.
+    """
+    result = runner.invoke(
+        app, [*base_args(workspace), "transform", "--context-policy", "2=EVIDENCE_PLUS_VIBES"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "EVIDENCE_PLUS_PRIORS" in result.output
+
+
+def test_schema_version_mismatch_is_exit_2_not_a_silent_upgrade(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A database behind the harness refuses with exit 2 naming `fleet migrate-db` (§6).
+
+    Why: "every other command reads `user_version` and refuses on a mismatch rather than
+    upgrading underneath a live run". An implicit upgrade is a table rebuild racing live workers.
+    """
+    write_config(tmp_path)
+    db = fresh_db(tmp_path / "state" / "fleet.db")
+    conn = sqlite3.connect(db, isolation_level=None)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    conn.close()
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, [*base_args(tmp_path), "status"])
+    assert result.exit_code == ExitCode.USAGE
+    assert "migrate-db" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# exit 10 — the durable wave ledger
+# --------------------------------------------------------------------------------------
+
+
+def _exhaust_wave(db: Path, *, wave: int = 0, max_usd: float = 10.0, spent: float = 12.0) -> None:
+    """A wave whose members have already spent past the ceiling frozen at first admission.
+
+    §6: the wave's ceiling lives in `waves.max_usd` and its spend is `SUM(repo_ledger.spent_usd)`
+    over its REPO members — never duplicated, so this is the real durable condition, not a mock.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) VALUES (?, ?, ?, ?)",
+            (RUN_ID, wave, "2026-08-08T12:00:00+00:00", max_usd),
+        )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, ?, 'REPO', 'acme-commons')",
+            (RUN_ID, wave),
+        )
+        conn.execute(
+            "INSERT INTO repo_ledger (run_id, repo_id, spent_usd, max_usd, updated_at) "
+            "VALUES (?, 'acme-commons', ?, ?, ?)",
+            (RUN_ID, spent, spent + 1.0, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+def test_wave_cost_exhausted_exits_10(workspace: Path) -> None:
+    """A wave over its durable ceiling halts with exit 10 — not 1, and not 3.
+
+    Why: §10 gives the wave ceiling its own code because the remedy is its own flag. Exit 3 means
+    a sticky run-level `halted = 1` that only `--raise-budget` clears; exit 10 means one wave's
+    ledger, cleared by `--raise-wave-budget`. Collapsed into 1, CI reads either as a crash and
+    the operator retries the wrong thing forever.
+    """
+    _exhaust_wave(workspace / "state" / "fleet.db")
+    result = runner.invoke(app, [*base_args(workspace), "transform"])
+    assert result.exit_code == ExitCode.WAVE_COST_EXHAUSTED == 10, result.output
+    assert "--raise-wave-budget" in result.output
+
+
+def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> None:
+    """`fleet resume --raise-wave-budget` clears exit 10 and writes the finding that says so.
+
+    Why: the wave ledger is durable, so without this flag a resume re-enters the same wave
+    carrying the same spend and halts again, forever. And an unaudited raise is an unexplained
+    budget in next week's report.
+    """
+    db = workspace / "state" / "fleet.db"
+    _exhaust_wave(db)
+    halted = runner.invoke(app, [*base_args(workspace), "resume", "--dry-run"])
+    assert halted.exit_code == ExitCode.WAVE_COST_EXHAUSTED
+
+    preview = runner.invoke(
+        app, [*base_args(workspace), "resume", "--dry-run", "--raise-wave-budget", "50"]
+    )
+    assert preview.exit_code == ExitCode.SUCCESS, preview.output
+
+    # `--dry-run` previewed the clearance and wrote nothing; the real resume writes the audit
+    # BEFORE it re-enters the phase drivers (still stubs, hence exit 1) — the ordering that
+    # matters, since a raise recorded only on success is a raise lost to the next crash.
+    real = runner.invoke(app, [*base_args(workspace), "resume", "--raise-wave-budget", "50"])
+    assert real.exit_code == ExitCode.UNEXPECTED_ERROR, real.output
+
+    conn = sqlite3.connect(db)
+    try:
+        kinds = [row[0] for row in conn.execute("SELECT kind FROM findings")]
+        ceiling = conn.execute(
+            "SELECT max_usd FROM waves WHERE run_id = ? AND wave_index = 0", (RUN_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert "WaveBudgetRaised" in kinds
+    assert ceiling[0] == pytest.approx(50.0)
+
+
+# --------------------------------------------------------------------------------------
+# exit 11 — sequence refused mid-run
+# --------------------------------------------------------------------------------------
+
+
+def _put_in_flight(db: Path, repo: str = "acme-commons", status: str = "RUNNING") -> None:
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) VALUES (?,?,1,?,?)",
+            (RUN_ID, repo, status, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+def test_sequence_refused_mid_run_exits_11(workspace: Path) -> None:
+    """`fleet sequence` against a fleet in flight exits 11, having changed nothing.
+
+    Why: renumbering waves under a repo that is mid-transform moves it into a wave whose
+    dependencies have not landed — the exact failure the topological sequencer exists to prevent.
+    §10 makes it 11 rather than 3 deliberately: a refusal costs nothing and leaves no `halted`
+    ledger, while exit 3 is sticky and needs `--raise-budget`; CI cannot tell those apart from
+    one code.
+    """
+    _put_in_flight(workspace / "state" / "fleet.db")
+    result = runner.invoke(app, [*base_args(workspace), "sequence"])
+    assert result.exit_code == ExitCode.SEQUENCE_REFUSED == 11, result.output
+    assert "--force-resequence" in result.output
+
+    conn = sqlite3.connect(workspace / "state" / "fleet.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM waves").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+def test_force_resequence_overrides_the_refusal(workspace: Path) -> None:
+    """`--force-resequence` is the documented override, and it actually sequences.
+
+    Why: a refusal with no escape hatch is a run an operator cannot recover; §3.1 names the flag,
+    so it must reach the plan writer rather than merely being accepted by the parser.
+    """
+    _put_in_flight(workspace / "state" / "fleet.db")
+    result = runner.invoke(
+        app, [*base_args(workspace), "--json", "sequence", "--force-resequence"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["forced"] is True
+    assert payload["repos"] == 2
+
+
+def test_sequence_refuses_unresolved_error_collisions_with_exit_6(workspace: Path) -> None:
+    """An unresolved `severity='error'` collision fails `fleet sequence` with exit 6 (§10).
+
+    Why: §3.1 step 8 detects collisions BEFORE any transform precisely so they are resolved in
+    config rather than in a half-migrated monorepo. Exiting 0 here would migrate two repos onto
+    one destination path.
+    """
+    conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO collisions (run_id, kind, key, repo_ids, severity, detected_at) "
+            "VALUES (?, 'DEST_PATH', 'libs/acme', '[\"a\",\"b\"]', 'error', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+    result = runner.invoke(app, [*base_args(workspace), "sequence"])
+    assert result.exit_code == ExitCode.UNRESOLVED_FINDINGS == 6, result.output
+
+
+# --------------------------------------------------------------------------------------
+# migrate-db: fresh vs ladder
+# --------------------------------------------------------------------------------------
+
+
+def test_migrate_db_initializes_a_fresh_database(tmp_path: Path) -> None:
+    """A v0 (or absent) database is INITIALIZED from `schema.sql`, not refused.
+
+    Why: this is the named defect. `migrate()` refuses `user_version = 0` by name, because a
+    ladder cannot `ALTER` tables that do not exist — so the fresh branch has to be wired here or
+    `fleet migrate-db` cannot create the very database every other verb requires.
+    """
+    write_config(tmp_path)
+    db = tmp_path / "state" / "fleet.db"
+    result = runner.invoke(
+        app, ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(db), "migrate-db"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert db.exists()
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert conn.execute(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='phases'"
+        ).fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_migrate_db_runs_the_ladder_on_an_older_database(tmp_path: Path) -> None:
+    """An existing database one rung back is lifted by the ladder, not re-initialized.
+
+    Why: the other half of the same defect. `CREATE TABLE IF NOT EXISTS` creates a *missing*
+    schema and never executes an `ALTER`, so an "apply schema.sql idempotently" path would leave
+    this database at its old shape while reporting success (§6).
+    """
+    write_config(tmp_path)
+    (tmp_path / "state").mkdir()
+    # A genuine v6 database — the pre-v007 table SHAPES with data in them, not a v7 file with its
+    # PRAGMA rewound. Rewinding the pragma would test nothing: the ladder would try to add a
+    # column that already exists and fail, which is precisely what happens when the two branches
+    # of this command are conflated.
+    db = _v6_database(tmp_path / "state" / "fleet.db")
+
+    result = runner.invoke(
+        app, ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(db), "migrate-db"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert f"{LATEST_VERSION - 1} → {LATEST_VERSION}" in result.output
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == LATEST_VERSION
+    finally:
+        conn.close()
+
+
+def test_migrate_db_dry_run_writes_nothing(tmp_path: Path) -> None:
+    """`--dry-run` names the branch it would take and leaves the filesystem alone."""
+    write_config(tmp_path)
+    db = tmp_path / "state" / "fleet.db"
+    result = runner.invoke(
+        app,
+        ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(db), "migrate-db",
+         "--dry-run"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert "initialize" in result.output
+    assert not db.exists()
+
+
+# --------------------------------------------------------------------------------------
+# quarantine: state, not config
+# --------------------------------------------------------------------------------------
+
+
+def test_quarantine_writes_a_finding_and_skips_without_touching_config(workspace: Path) -> None:
+    """`fleet quarantine` records the removal as STATE and never asks for a config edit.
+
+    Why: that is the whole reason §10 gives it a verb. The alternative — deleting the repo from
+    `config/repos.yaml` — moves the `repos` section digest, so the next resume reports config
+    drift whose only escape (`--force-config-drift`) silently accepts every OTHER co-edited
+    change too. Here the config bytes are asserted byte-identical afterwards.
+    """
+    db = workspace / "state" / "fleet.db"
+    repos_yaml = workspace / "config" / "repos.yaml"
+    before = repos_yaml.read_bytes()
+    _put_in_flight(db, "acme-commons", "PENDING")
+
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "quarantine", "acme-commons", "--reason", "pathological submodule"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert repos_yaml.read_bytes() == before
+
+    conn = sqlite3.connect(db)
+    try:
+        finding = conn.execute(
+            "SELECT kind, repo_id, payload FROM findings WHERE kind = 'OperatorQuarantine'"
+        ).fetchone()
+        status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons'", (RUN_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert finding is not None
+    assert finding[1] == "acme-commons"
+    assert "pathological submodule" in finding[2]
+    assert status[0] == "SKIPPED"
+
+
+def test_quarantine_requires_a_reason(workspace: Path) -> None:
+    """`--reason` is required and non-empty: the reason IS the audit record (§10)."""
+    empty = runner.invoke(
+        app, [*base_args(workspace), "quarantine", "acme-commons", "--reason", "   "]
+    )
+    assert empty.exit_code == ExitCode.USAGE
+    missing = runner.invoke(app, [*base_args(workspace), "quarantine", "acme-commons"])
+    assert missing.exit_code != 0
+
+
+def test_quarantine_propagates_blocked_by_to_dependents(workspace: Path) -> None:
+    """A quarantined repo blocks its transitive dependents "exactly as an abandonment does".
+
+    Why: §3.5's containment rule. A dependent left `PENDING` would be admitted into its wave and
+    migrated against a dependency that is never landing.
+    """
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
+            "                   dst_coord_key, kind, base_confidence, confidence, "
+            "                   evidence_path, detected_at) "
+            "VALUES (?, ?, 'REPO', 'acme-billing', 'REPO', 'acme-commons', "
+            "        'maven:com.acme:commons', 'DECLARED_DEP', 0.95, 0.95, 'pom.xml', ?)",
+            ("b" * 64, RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        for repo in ("acme-commons", "acme-billing"):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, ?, 1, 'PENDING', ?)",
+                (RUN_ID, repo, "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "quarantine", "acme-commons", "--reason", "unfixable"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    conn = sqlite3.connect(db)
+    try:
+        status, blocked_by = conn.execute(
+            "SELECT status, blocked_by FROM phases WHERE run_id = ? AND repo_id = 'acme-billing'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == "BLOCKED"
+    assert json.loads(blocked_by) == ["acme-commons"]
+
+
+def test_quarantine_dry_run_changes_nothing(workspace: Path) -> None:
+    """`--dry-run` reports the same plan and writes no finding."""
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "quarantine", "acme-commons", "--reason", "look first",
+         "--dry-run"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    conn = sqlite3.connect(workspace / "state" / "fleet.db")
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
+    finally:
+        conn.close()
+
+
+# --------------------------------------------------------------------------------------
+# --accept-drift: exactly one section
+# --------------------------------------------------------------------------------------
+
+
+def _seed_drifted_run(workspace: Path, *, matching: tuple[str, ...]) -> None:
+    """Record a baseline in which only `matching` sections agree with today's config."""
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    baseline = {
+        name: (digest if name in matching else "0" * 64)
+        for name, digest in settings.section_digests.items()
+    }
+    conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE runs SET config_digests = ? WHERE run_id = ?",
+            (json.dumps(baseline, sort_keys=True), RUN_ID),
+        )
+    finally:
+        conn.close()
+
+
+def test_accept_drift_accepts_exactly_the_named_section(workspace: Path) -> None:
+    """`--accept-drift budgets` accepts `budgets` and still refuses every other drifted section.
+
+    Why: this granularity is the whole point of per-section digests. With one opaque hash the
+    only escape is `--force-config-drift`, which accepts every co-edited change in order to
+    accept one — §10 says in as many words that this is how an operator loses a run.
+    """
+    from fleet.settings import CONFIG_SECTIONS, FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    everything_but_budgets_and_run = tuple(
+        name for name in settings.section_digests if name not in {"budgets", "run"}
+    )
+    _seed_drifted_run(workspace, matching=everything_but_budgets_and_run)
+    assert "budgets" in CONFIG_SECTIONS
+
+    partial = runner.invoke(
+        app, [*base_args(workspace), "resume", "--dry-run", "--accept-drift", "budgets"]
+    )
+    assert partial.exit_code == ExitCode.USAGE, partial.output
+    assert "run" in partial.output
+    assert "budgets" not in partial.output.split("section(s)")[-1]
+
+    both = runner.invoke(
+        app,
+        [*base_args(workspace), "--json", "resume", "--dry-run",
+         "--accept-drift", "budgets", "--accept-drift", "run"],
+    )
+    assert both.exit_code == ExitCode.SUCCESS, both.output
+    assert set(json.loads(both.stdout)["accepted_sections"]) == {"budgets", "run"}
+
+
+def test_accept_drift_rejects_a_name_that_is_not_a_section(workspace: Path) -> None:
+    """A misspelt section is exit 2 with the valid list, never a silently ignored flag.
+
+    Why: silently ignoring `--accept-drift budget` (singular) refuses the resume for a reason the
+    operator believes they just accepted — the worst possible failure mode for an escape hatch.
+    """
+    result = runner.invoke(
+        app, [*base_args(workspace), "resume", "--dry-run", "--accept-drift", "budget"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "budgets" in result.output
+
+
+def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: Path) -> None:
+    """"Each accepted section writes its own audited `ConfigDrift` finding" (§10)."""
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    _seed_drifted_run(
+        workspace,
+        matching=tuple(n for n in settings.section_digests if n not in {"budgets", "gc"}),
+    )
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "resume", "--accept-drift", "budgets", "--accept-drift", "gc"],
+    )
+    # The resume itself cannot complete (the phase drivers are stubs) but the audit is written
+    # before it re-enters them, which is the ordering that matters: an accepted drift that is
+    # only recorded on success is an accepted drift lost to the next crash.
+    assert result.exit_code in {ExitCode.SUCCESS, ExitCode.UNEXPECTED_ERROR}, result.output
+    conn = sqlite3.connect(workspace / "state" / "fleet.db")
+    try:
+        sections = sorted(
+            json.loads(row[0])["section"]
+            for row in conn.execute("SELECT payload FROM findings WHERE kind = 'ConfigDrift'")
+        )
+    finally:
+        conn.close()
+    assert sections == ["budgets", "gc"]
+
+
+def test_profile_on_resume_is_refused_without_force(workspace: Path) -> None:
+    """`--profile` on a resume is "permitted but audited" — refused without the force flag (§10).
+
+    Why: the profile is part of `runs.config_sha256` and of the `llm_cache` key, so swapping it
+    mid-run silently re-prices and re-answers everything the run has left to do.
+    """
+    result = runner.invoke(
+        app, [*base_args(workspace), "--profile", "default", "resume", "--dry-run"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "--force-config-drift" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# §11.4 — no secret reaches stdout or stderr
+# --------------------------------------------------------------------------------------
+
+
+def test_no_secret_reaches_stdout_on_the_error_path(tmp_path: Path) -> None:
+    """A config whose remote carries a `github_pat_…` is refused WITHOUT quoting the token.
+
+    Why: §9 rule 4 refuses the file, and §11.4 says the report of a leak must not itself be the
+    leak — an error message that echoes the offending line writes the credential into the CI log
+    the redactor exists to keep it out of. Both streams are asserted, because a redactor applied
+    to stdout and forgotten on stderr is a redactor that is not applied.
+    """
+    config = write_config(tmp_path, repos=LEAKY_REPOS_YAML)
+    result = runner.invoke(app, ["--config", str(config), "models", "list"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert LEAKY_TOKEN not in result.output
+    assert "github_pat_" not in result.output
+    assert "repos.yaml" in result.output
+
+
+def test_secret_in_a_run_url_is_redacted_from_status_output(workspace: Path) -> None:
+    """Even a token that reached the database is scrubbed on the way back out (§11.4).
+
+    Why: redaction at write time is best-effort — rows predate patterns, and `--json` re-serializes
+    whatever SQLite holds. The CLI is the last egress boundary, so it redacts unconditionally.
+    """
+    conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE repos SET url = ? WHERE repo_id = 'acme-commons'",
+            (f"https://x-access-token:{LEAKY_TOKEN}@github.com/acme/acme-commons",),
+        )
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, 'acme-commons', 'PreflightFailed', "
+            "'error', ?, ?, ?)",
+            (
+                RUN_ID,
+                "c" * 64,
+                json.dumps({"url": f"https://{LEAKY_TOKEN}@github.com/acme/x"}),
+                "2026-08-08T12:00:00+00:00",
+            ),
+        )
+    finally:
+        conn.close()
+    result = runner.invoke(app, [*base_args(workspace), "--json", "status"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert LEAKY_TOKEN not in result.output
+
+
+# --------------------------------------------------------------------------------------
+# typed errors never escape as tracebacks
+# --------------------------------------------------------------------------------------
+
+
+def test_missing_database_is_a_message_not_a_traceback(tmp_path: Path) -> None:
+    """A typed internal error exits with its documented code and an actionable line (Rule 11).
+
+    Why: exit 1 with a traceback tells CI "unexpected error" and tells the operator nothing about
+    what to do. Here the refusal names the file AND the verb that creates it.
+    """
+    write_config(tmp_path)
+    result = runner.invoke(
+        app,
+        ["--config", str(tmp_path / "config/fleet.yaml"), "--db", str(tmp_path / "nope.db"),
+         "status"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "Traceback" not in result.output
+    assert "migrate-db" in result.output
+
+
+def test_unknown_run_id_names_the_run(workspace: Path) -> None:
+    """`--run` naming nothing is exit 2 with the id echoed, not a `NoneType` crash later."""
+    result = runner.invoke(app, [*base_args(workspace), "--run", "does-not-exist", "status"])
+    assert result.exit_code == ExitCode.USAGE
+    assert "does-not-exist" in result.output
+
+
+def test_unimplemented_verb_names_the_stub_module(workspace: Path) -> None:
+    """A verb whose worker is still a stub exits 1 with the module named — never a bare
+    `NotImplementedError` traceback. Rule 11: fail loud, and say which file to open.
+
+    Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers: the
+    property under test is "a stubbed verb names its stub", not "scan is stubbed", so it has to
+    follow the stubs rather than pin the harness to its own incompleteness.
+    """
+    result = runner.invoke(app, [*base_args(workspace), "plan"], catch_exceptions=False)
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR
+    assert "NotImplementedError" in result.output
+    assert "workers/relocate.py" in result.output
+    assert "Traceback" not in result.output
+
+
+# --------------------------------------------------------------------------------------
+# read-only verbs
+# --------------------------------------------------------------------------------------
+
+
+def test_status_json_is_machine_readable(workspace: Path) -> None:
+    """`--json` is a contract: §12's criteria are asserted by parsing this, not by eyeballing."""
+    _put_in_flight(workspace / "state" / "fleet.db", "acme-commons", "RUNNING")
+    result = runner.invoke(app, [*base_args(workspace), "--json", "status"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["run_id"] == RUN_ID
+    assert payload["repos"][0]["repo"] == "acme-commons"
+
+
+def test_status_metrics_out_writes_prometheus_text(workspace: Path) -> None:
+    """`--metrics-out` is an OUTPUT file, not a server: §14.5 stands and nothing binds a port."""
+    out = workspace / "metrics.prom"
+    result = runner.invoke(
+        app, [*base_args(workspace), "status", "--metrics", "--metrics-out", str(out)]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert out.read_text(encoding="utf-8").startswith("# TYPE")
+
+
+def test_status_digest_is_the_run_equivalence_proof(workspace: Path) -> None:
+    """`--digest` emits the §11.6 `run_digest` two runs are proven equivalent by."""
+    result = runner.invoke(app, [*base_args(workspace), "--json", "status", "--digest"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert len(payload["digest"]) == 64
+
+
+def test_models_list_resolves_the_active_profile_offline(workspace: Path) -> None:
+    """`fleet models list` is the "what will this run actually call" pre-flight — no network.
+
+    Why: `--profile` changes which targets every role resolves through, and both `backend` and
+    `model_id` are `llm_cache` key components. An operator has to be able to see the resolution
+    before paying for it.
+    """
+    result = runner.invoke(app, [*base_args(workspace), "--json", "models", "list"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "default"
+    assert {row["tier"] for row in payload["routes"]} == {"HEAVY", "WORKHORSE", "CHEAP"}
+
+
+def test_profile_flag_selects_the_profile_every_role_resolves_through(tmp_path: Path) -> None:
+    """`--profile local` reaches `LlmRouter`, which is the defect this wiring closes (§10).
+
+    Why: a `--profile` that is parsed and dropped means "swap the fleet to local models" silently
+    keeps calling the hosted profile — and because backend/model_id are cache-key components, the
+    operator also gets the other profile's cached answers replayed at them.
+    """
+    config = write_config(tmp_path, models=MODELS_YAML + LOCAL_PROFILE_YAML)
+    result = runner.invoke(
+        app, ["--config", str(config), "--profile", "local", "--json", "models", "list"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["profile"] == "local"
+    assert {row["model_id"] for row in payload["routes"]} == {
+        "local-heavy",
+        "local-workhorse",
+        "local-cheap",
+    }
+
+
+def test_llm_cache_flag_reaches_the_caching_client(workspace: Path) -> None:
+    """`--llm-cache off` reaches `CachingModelClient.mode`, not just the parser (§11.6).
+
+    Why: this is the other half of the named defect. A `--llm-cache off` that is accepted and
+    dropped means an operator trying to reproduce a result gets last week's cached answers
+    replayed — and, because a hit is indistinguishable from a fresh call at that boundary except
+    for cost, nothing in the output says so.
+    """
+    from fleet.cli import GlobalOptions, LlmCacheMode, caching_client
+    from fleet.llm.cache import MemoryLlmCacheStore
+    from fleet.settings import FleetSettings
+
+    surfaced = runner.invoke(
+        app, [*base_args(workspace), "--llm-cache", "off", "--json", "models", "list"]
+    )
+    assert surfaced.exit_code == ExitCode.SUCCESS, surfaced.output
+    assert json.loads(surfaced.stdout)["llm_cache"] == "off"
+
+    settings = FleetSettings.load(workspace / "config")
+    for flag, expected in (
+        (LlmCacheMode.OFF, "off"),
+        (LlmCacheMode.READ_ONLY, "read-only"),
+        (LlmCacheMode.READ_WRITE, "read-write"),
+    ):
+        client = caching_client(
+            object(),  # type: ignore[arg-type]  - the decorator never calls it here
+            settings,
+            MemoryLlmCacheStore(),
+            GlobalOptions(llm_cache=flag),
+        )
+        assert client._mode == expected
+
+
+def test_gc_refuses_to_evict_under_live_work(workspace: Path) -> None:
+    """`fleet gc` refuses a run with live phases unless `--force` (§10).
+
+    Why: `gc` trims `events`/`attempts` and the LLM cache. Doing that beneath a RUNNING worker
+    deletes the evidence of the attempt currently in progress.
+    """
+    _put_in_flight(workspace / "state" / "fleet.db", "acme-commons", "RUNNING")
+    refused = runner.invoke(app, [*base_args(workspace), "gc"])
+    assert refused.exit_code == ExitCode.USAGE
+    assert "--force" in refused.output
+
+    forced = runner.invoke(app, [*base_args(workspace), "gc", "--force", "--dry-run"])
+    assert forced.exit_code == ExitCode.SUCCESS, forced.output
+
+
+def test_abort_checkpoints_and_regenerates_the_projection(workspace: Path) -> None:
+    """`fleet abort` exits 0, resets RUNNING rows and rewrites `migration_state.json` (§10).
+
+    Why: "any non-zero exit leaves a valid checkpoint and a regenerated `migration_state.json`" —
+    the deliberate stop must uphold the same invariant, or a clean abort is worse than a crash.
+    """
+    _put_in_flight(workspace / "state" / "fleet.db", "acme-commons", "RUNNING")
+    result = runner.invoke(app, [*base_args(workspace), "abort", "--reason", "operator"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert (workspace / "migration_state.json").exists()
+
+    conn = sqlite3.connect(workspace / "state" / "fleet.db")
+    try:
+        status, fence = conn.execute(
+            "SELECT status, lease_fence FROM phases WHERE run_id = ? AND repo_id = 'acme-commons'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == "PENDING"
+    assert fence == 1
+
+
+def test_pr_ready_refuses_while_a_stub_is_unresolved(workspace: Path) -> None:
+    """`fleet pr --ready` is exit 2 while any `stubs` row is ACTIVE or SUPERSEDED (§3.5.1).
+
+    Why: `--ready` is the ONLY path from draft to ready-for-review, so it is the one gate between
+    a stubbed build and a human merging it. Nothing in the CLI may promote a repo out of
+    `DEGRADED` — only a green revalidation round does that.
+    """
+    conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, state_changed_at, created_at) "
+            "VALUES ('s1', ?, 'acme-billing', 'maven:com.acme:commons', 'acme-billing', "
+            "        'acme-commons', '1.4.0', '//third_party/stubs:commons', 'ACTIVE', "
+            "        'PUBLISHED_ARTIFACT', ?, ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00", "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+    result = runner.invoke(app, [*base_args(workspace), "pr", "--ready"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "ACTIVE" in result.output
+
+
+# --------------------------------------------------------------------------------------
+# exit 9 — the disk ceiling the spec declared and nothing enforced
+# --------------------------------------------------------------------------------------
+IMPOSSIBLE_FLOOR = 2**62
+"""~4.6 EB — larger than any volume, so the refusals below are driven by a REAL `statvfs` and
+report the free-space number the kernel actually gave the harness."""
+
+DISK_FLOOR_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n"
+    f"preflight:\n  min_free_bytes: {IMPOSSIBLE_FLOOR}\n"
+)
+
+
+def test_a_phase_refuses_to_start_below_the_disk_floor_with_exit_9(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.22 criterion 22: a run against a volume under `preflight.min_free_bytes` evicts the
+    Bazel disk cache and then exits **9**, rather than starting and meeting `ENOSPC` later.
+
+    Why this test exists: `budgets.max_disk_gb`, `preflight.min_free_bytes`,
+    `FailureClass.DISK_EXHAUSTED` and exit 9 were all declared in §9/§11.3 and, until now, read
+    by nothing except `fleet gc --disk` — while this project's own test suite drove the host to 0
+    bytes free. A ceiling nothing checks is documentation.
+
+    The refusal must name BOTH numbers. "Not enough disk space" leaves an operator unable to tell
+    a 2 GB shortfall from a 200 GB one, and those have different fixes.
+    """
+    write_config(tmp_path, fleet=DISK_FLOOR_YAML)
+    fresh_db(tmp_path / "state" / "fleet.db")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [*base_args(tmp_path), "scan"])
+
+    assert result.exit_code == ExitCode.DISK_EXHAUSTED == 9, result.output
+    assert str(IMPOSSIBLE_FLOOR) in result.output, result.output
+    assert "min_free_bytes" in result.output, result.output
+    assert str(shutil.disk_usage(tmp_path).free)[:3] in result.output, result.output
+
+
+def test_the_floor_is_checked_even_when_there_is_no_cache_directory_to_evict(
+    tmp_path: Path,
+) -> None:
+    """The first run on a host is the one that most needs the answer, and it used to be skipped.
+
+    `_gc_disk` returned early when `run.cache_dir` did not exist — which is precisely the state
+    before the first clone, i.e. before anything has been written and while the operator can
+    still act. "There is nothing to evict" and "there is room" are different claims; only the
+    second is worth exiting 0 on. Asserted against a workspace with no `cache/` at all.
+    """
+    from fleet.cli import DiskExhaustedError, _require_disk_headroom
+    from fleet.settings import FleetSettings
+
+    write_config(tmp_path, fleet=DISK_FLOOR_YAML)
+    settings = FleetSettings.load(tmp_path / "config")
+    assert not (settings.root / settings.config.run.cache_dir).exists()
+
+    with pytest.raises(DiskExhaustedError) as raised:
+        _require_disk_headroom(settings)
+
+    assert raised.value.exit_code == ExitCode.DISK_EXHAUSTED
+    assert str(IMPOSSIBLE_FLOOR) in str(raised.value)
+
+
+def test_a_reachable_floor_lets_the_phase_proceed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control. A gate that refused unconditionally would pass both tests above and
+    make the harness unable to run at all — which is why the fixture fleets lower the floor
+    rather than removing the key."""
+    from fleet.settings import FleetSettings
+
+    write_config(tmp_path)
+    fresh_db(tmp_path / "state" / "fleet.db")
+    monkeypatch.chdir(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    from fleet.cli import _require_disk_headroom
+
+    outcome: dict[str, object] = _require_disk_headroom(settings)
+    assert outcome["disk_bytes_freed"] == 0, "nothing to evict, and the floor was cleared"
+
+
+def test_each_configured_bazel_cache_is_created_and_tagged_with_the_flag_it_feeds(
+    tmp_path: Path,
+) -> None:
+    """`verify.disk_cache` → `--disk_cache`, `verify.repository_cache` → `--repository_cache`.
+
+    The two used to be conveyed by list POSITION, which is why the flags could not be emitted
+    safely at all: nothing in a host path says which cache it is, and swapping them is silent —
+    bazel would accept both directories and simply never hit either. So the configured paths here
+    are deliberately role-less names (`cache/one`, `cache/two`) rather than the defaults' `disk`
+    and `repo`: an implementation that recovered the role by sniffing the directory NAME, instead
+    of carrying it from the setting it was read from, cannot pass.
+    """
+    from fleet.cli import _cache_mounts
+    from fleet.settings import FleetSettings
+
+    write_config(
+        tmp_path,
+        fleet=FLEET_YAML + "verify:\n  disk_cache: cache/one\n  repository_cache: cache/two\n",
+    )
+    settings = FleetSettings.load(tmp_path / "config")
+
+    mounts = _cache_mounts(settings)
+
+    by_role = {mount.role: mount for mount in mounts}
+    assert set(by_role) == {"disk", "repository"}
+    assert by_role["disk"].path == str((tmp_path / "cache/one").resolve())
+    assert by_role["repository"].path == str((tmp_path / "cache/two").resolve())
+    assert all(Path(mount.path).is_dir() for mount in mounts), (
+        "docker creates a missing bind-mount source as root-owned, which the --user container "
+        "then cannot write to"
+    )
+    assert [m.flag(sandboxed=True) for m in mounts] == [
+        "--disk_cache=/cache/one",
+        "--repository_cache=/cache/two",
+    ]
+    assert [m.mount().target for m in mounts] == ["/cache/one", "/cache/two"], (
+        "the flag value IS the mount target; if these two lists ever disagree the container is "
+        "handed a cache bazel was never told about"
+    )
+
+
+def test_exit_codes_reuse_the_orchestrator_constants() -> None:
+    """`ExitCode` aliases the halt constants rather than restating their numbers.
+
+    Why: `budgets.py` already owns `WAVE_BUDGET_EXIT_CODE = 10` and `RUN_BUDGET_EXIT_CODE = 3`,
+    and `runner.py` raises `RunHalted(exit_code=...)` from them. A second set of literals in the
+    CLI is a second source of truth that drifts silently — and the symptom is CI reading a
+    resumable budget stop as a crash.
+    """
+    from fleet.orchestrator import budgets, runner
+
+    assert ExitCode.RUN_COST_EXHAUSTED == budgets.RUN_BUDGET_EXIT_CODE == 3
+    assert ExitCode.WAVE_COST_EXHAUSTED == budgets.WAVE_BUDGET_EXIT_CODE == 10
+    assert ExitCode.WAVE_WALL_CLOCK_EXHAUSTED == runner.WAVE_WALLCLOCK_EXIT_CODE == 4
+    assert ExitCode.MEMORY_EXHAUSTED == runner.HOST_MEMORY_EXIT_CODE == 5
+    assert ExitCode.TIER_UNAVAILABLE == runner.TIER_UNAVAILABLE_EXIT_CODE == 8
+    assert ExitCode.DISK_EXHAUSTED == runner.DISK_EXIT_CODE == 9
+    assert ExitCode.SEQUENCE_REFUSED == 11
