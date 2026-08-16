@@ -4,16 +4,16 @@ __pycache__/
 *$py.class
 *.so
 .Python
-build/
-dist/
+/build/
+/dist/
 *.egg-info/
 .eggs/
 pip-wheel-metadata/
 
 # ---- Virtualenvs / tooling caches ----
 .venv/
-venv/
-env/
+/venv/
+/env/
 .python-version
 .pytest_cache/
 .mypy_cache/
@@ -25,8 +25,8 @@ htmlcov/
 coverage.xml
 
 # ---- Fleet harness runtime state (never committed) ----
-artifacts/
-logs/
+/artifacts/
+/logs/
 state/*.db
 *.db
 *.db-wal
@@ -34,8 +34,8 @@ state/*.db
 *.sqlite
 *.sqlite3
 migration_state.json
-.worktrees/
-mirrors/
+/.worktrees/
+/mirrors/
 
 # ---- Secrets ----
 .env
@@ -62,3 +62,29 @@ tools/bin/*
 !tools/bin/gazelle
 !tools/bin/go
 !tools/bin/rustc
+
+# ---- Live write paths (settings.py: cache_dir, work_dir) ----
+# These are the two highest-volume targets in the system: the Bazel disk and
+# repository caches, and every per-run worktree. Previously unguarded while
+# `mirrors/` and `.worktrees/` -- which nothing in src/ ever writes -- were.
+/cache/
+/work/
+
+# ---- Bazel droppings in THIS repo (hygiene only; NOT a fix for D26) ----
+# D26 is about the generated monorepo's integration worktree under work/, in a
+# different repository that this file cannot reach. Fixing D26 means changing
+# the publish guard in code, not ignoring files here.
+/bazel-out
+/bazel-bin
+/bazel-testlogs
+/bazel-swe repo harness
+bazel-*-events.json
+
+# ---- Third-party reference corpora (their own git repos) ----
+# Cited by path in docs/DECISIONS.md; re-fetch to fact-check those citations:
+#   https://github.com/All-The-Vibes/Agent-Harness.git              @ d1aab58
+#   https://github.com/visa/visa-vulnerability-agentic-harness.git  @ 3d972f6
+references/*/
+
+# ---- Claude Code per-user local overrides (machine- and session-specific) ----
+.claude/settings.local.json
