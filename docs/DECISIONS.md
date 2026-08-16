@@ -2148,6 +2148,82 @@ parse probe for every touched file)"* — is now true of the implementation and 
 sentence. The wording needs no change; for five checkpoints the code beneath it exited 0 on
 `const = = ;` and 1 on a valid empty module.
 
+> **Measured correction (2026-08-16) — the full exit-code table is recorded as evidence; one
+> line-number citation has rotted; and a proposed correction to this entry was tested and
+> REFUTED.**
+>
+> **Mechanism, and why this one.** A dated in-place `Measured correction` blockquote, **not** an
+> `**Amended by ADR-00NN**` pointer. This file uses both and they are not interchangeable: the
+> note under ADR-0053's consequence 2 states the rule outright — "Amended by" is for *a decision
+> later work replaced*, and a measured blockquote is for *a statement about a mechanism*, on
+> ADR-0050's precedent. Nothing below replaces a decision. Items 1 and 4 are **evidence**; item 3
+> is a **citation that drifted**; item 2 is a **refutation of a claim that was never true**, which
+> is precisely ADR-0053's case. The one thing ADR-0067 genuinely *amends* here is flagged
+> separately, underneath this blockquote, in the file's usual form.
+>
+> **1. The full table, measured.** Every row is a real invocation of the vendored
+> `tools/bin/ast-grep` (`--version` → **`ast-grep 0.45.1`**) as
+> `ast-grep scan --inline-rules <doc> <target>`, with the document `_probe_document` actually
+> emits — `yaml.safe_dump({id, language, rule: {kind}, severity}, sort_keys=True)` — not a
+> hand-typed approximation of it. Recorded because it is cheap to keep and expensive to re-derive,
+> and because every future change to `_scan_for_error_nodes` is a change to how these eight
+> numbers are read:
+>
+> | case | exit | note |
+> | --- | --- | --- |
+> | valid `.ts`, `kind: ERROR` + `severity: error` | **0** | "it parses" — the pass verdict |
+> | file containing `ERROR` nodes (`const = = ;`) | **1** | "it does not parse" — the fail verdict |
+> | valid but **empty** module | **0** | the row the old `--pattern '$A'` probe got backwards (it exited 1) |
+> | **target file missing from disk** | **0** | plus `ERROR: nope.ts: No such file or directory (os error 2)` on **stderr**. The exit code does not carry it, which is why the driver guards this with its own `exists()` check and returns `False` — the fail-closed case this entry's third decision item exists for |
+> | rule **without** `severity: error` | **0** | findings still print, as `help[p]:` rather than `error[p]:`. The verdict is simply **not in the exit code** — this row is the whole argument for `severity: error` |
+> | malformed YAML rule document | **8** | `Error: Cannot parse rule INLINE_RULES` |
+> | `kind: MISSING` | **8** | *same code, same message*; cause chain ends `Kind `MISSING` is invalid` |
+> | unknown CLI flag | **2** | clap usage error, `unexpected argument … found` |
+>
+> **2. "A semantically invalid rule exits 101, and 8 is reserved for unparseable YAML" is FALSE.**
+> This entry and the `_ERROR_NODES_FOUND` docstring both say **8**, and **both are correct as
+> written** — the claim is recorded here only so it is not re-raised. Measured: `kind: MISSING`
+> exits **8**, byte-identically to malformed YAML, and so does `kind: NOSUCHKIND`, an unknown
+> `language:`, and a document missing its `rule:` key. **8 is ast-grep 0.45.1's code for "this
+> rule document is unusable", full stop** — it does not distinguish a YAML parse failure from a
+> schema failure, and **no invocation attempted here produced 101 at all**. What is true is the
+> conclusion this entry draws from the number, and it is unaffected either way: the tool-failure
+> codes (**2**, **8**) are **disjoint from 1**, so a broken tool cannot masquerade as a broken
+> file.
+>
+> **3. The citation `cli.py:4149-4153` in "Alternatives rejected" has rotted.** The
+> `except EngineUnavailableError` that buckets into `parse_probe_unavailable` is now at
+> **`cli.py:4162-4164`**; lines 4149–4153 today are the `unresolved_files` clause. The *claim* is
+> still true — grep `except EngineUnavailableError as exc:` in `_transform_criterion` — only the
+> coordinates moved. Cite the symbol, not the line.
+>
+> **4. A probe killed at its deadline does not exit 124, and any future fix keyed on 124 will
+> catch only half the cases.** `util/proc.py` returns the child's **real negative signal code**;
+> `TIMEOUT_EXIT_CODE = 124` is synthesised **only** on the never-started path. Measured directly
+> against `fleet.util.proc.run`:
+>
+> | condition | `exit_code` | `timed_out` | `started` |
+> | --- | --- | --- | --- |
+> | killed at the deadline (`SIGTERM` honoured) | **-15** | `True` | `True` |
+> | killed at the deadline (`SIGTERM` ignored, then `SIGKILL`) | **-9** | `True` | `True` |
+> | deadline had already passed at call time | **124** | `True` | **`False`** |
+>
+> So `exit_code == 124` selects the **never-started** row and misses both kill rows — and note
+> that **-9 is reachable as well as -15**, so a fix keyed on `-15` is wrong in the same way. The
+> only sound predicate is the pair of flags, which is what `_scan_for_error_nodes` already reads
+> and what ADR-0067 lifts into `util/proc.no_verdict`.
+
+**Amended by ADR-0067 — "raising routes a vanished file to a pass" stops being true of every
+raise.** Nothing about the probe document, the `kind: ERROR` reading, the `severity: error`
+argument, the `probe_text` seam, or the `MISSING` limit changes; the measured `MISSING` gap
+(item 2 above) explicitly **stands**. What ADR-0067 narrows is this entry's "Alternatives
+rejected" premise that `EngineUnavailableError` *always* lands in a non-blocking
+`parse_probe_unavailable` warning. After ADR-0067 that is true only of a **genuinely absent
+binary**; a probe that ran and produced no verdict raises `ProbeIndeterminateError` and becomes a
+**violation**. The third decision item — a missing target returns `False` rather than raising — is
+**unchanged and still right**, for the reason given here: exit **0** on a missing file (table row
+4) means fail-closed is the only safe direction.
+
 ---
 
 ## ADR-0048 — The root lockfile is a pnpm *workspace* with one importer per JS repo; a flat union keys on package name and silently drops the loser
@@ -4589,6 +4665,154 @@ process exists to hang it on.
 
 **Amends ADR-0020** (§7.5's presentation of the ABC it introduced) and **records ADR-0046** as the
 source of both drifted members. Supersedes nothing.
+
+---
+
+## ADR-0067 — A parse probe that produced **no verdict** is a **violation**, not a warning: `ProbeIndeterminateError` is deliberately **not** an `EngineUnavailableError`, the `break` becomes `continue`, and `no_verdict()` lands in the module that **creates** the three-flag invariant
+
+**Decision.** D37. §3.2's fourth success clause — *a parse probe of every rewritten file* — stops
+being skippable in silence. Four parts:
+
+1. **A new `ProbeIndeterminateError(RuntimeError)` in `rewrite/rules.py`**, exported from
+   `fleet.rewrite` alongside `EngineUnavailableError`, raised by
+   `AstGrepRewriter._scan_for_error_nodes` when the probe **ran but produced no verdict** — it was
+   killed at its deadline, or it was never started, or it exited a code that is neither `0` nor
+   `1`. It is **deliberately NOT a subclass of `EngineUnavailableError`.**
+2. **`cli._transform_criterion` grows a second `except` arm**, ordered first, that appends to
+   `violations`. A genuinely absent binary — still `EngineUnavailableError`, still raised by
+   `ensure_available()` — keeps its non-blocking `parse_probe_unavailable` warning.
+3. **The `break` becomes `continue` in *both* arms.** The indeterminate arm needs it because one
+   slow file must not excuse the other thirty-nine. The unavailable arm needs it for symmetry and
+   gets a **`(repo_id, engine)` dedupe** so a host with no `ast-grep` still emits one line per repo
+   per engine rather than one per rewritten file.
+4. **A shared `no_verdict(result: ProcResult) -> str | None` moves into `util/proc.py`**, and
+   `workers/clone.py`'s `_no_verdict` becomes a thin delegator.
+
+**Rationale.** The defect is not that the probe can fail. It is that **three different facts share
+one exception type, and the type is bucketed as a warning.** `_scan_for_error_nodes` is *correct
+locally* — it reads `if result.started and not result.timed_out:` **before** any exit code, which
+is the right predicate in the right order, and it puts `timed_out=` in the message. One layer up
+that care is undone twice: `_transform_criterion`'s single `except EngineUnavailableError` arm
+appends to `unprobed`, which `cli.py:3093` renders as *"warning: the §3.2 parse probe DID NOT RUN
+… no rewrite engine is installed on this host"* and which contributes **no** violation, so the run
+exits **0**; and the catch site is a **`break`**, which leaves the `for unit in rewritten` loop and
+abandons the clause for every remaining rewritten file in that repo. A corrupt rewrite in files
+2–40 ships as a verified transform because file 1's probe was slow, and Phase 3 writes that branch
+into monorepo history. The operator-facing text names an uninstalled engine for a host where
+`tools/bin/ast-grep` is **vendored in-tree, resolves, and ran** — measured, `0.45.1`.
+
+**A correction to how this defect is usually described, because the fix depends on it.** It is
+tempting to say `_scan_for_error_nodes` conflates *killed*, *never started* and *binary missing*.
+Verified against the tree, **it does not — it cannot.** `parse_probe` and `probe_text` both call
+`self.ensure_available()` **before** reaching the helper, and that is the only thing in the driver
+that reports a missing binary; if the binary were absent and `ensure_available()` somehow passed,
+`create_subprocess_exec` raises `FileNotFoundError`, not a `ProcResult` (measured). So the helper
+sees exactly **two** no-verdict conditions, and the conflation with the third is **at the exception
+type**, one call frame up, in a single `except` clause that cannot tell its causes apart. This is
+why the fix is a **new type** and not a new predicate inside the helper: the helper's predicate is
+already right, and there is nothing to split there.
+
+**`ProbeIndeterminateError` is not a subclass, and that is the entire decision.** Subclassing
+`EngineUnavailableError` is the natural-looking move and it is self-defeating: the existing
+`except EngineUnavailableError` arm would keep catching it, keep bucketing it into `unprobed`, and
+keep exiting 0 — the same defect wearing a more precise name, which is strictly worse than the
+defect, because the name would advertise a distinction the control flow does not make. Both derive
+from `RuntimeError` and are siblings.
+
+**Alternatives rejected.**
+
+*Silent pass — the status quo.* Worst outcome available, and named here so it is on the record as a
+rejected option rather than an unexamined default: one of §3.2's four success criteria is skipped
+and the tree ships as verified. Rule 11 and reference lesson 6 (*"agents must not grade their own
+homework"*) both forbid it, and the harness already refuses this shape elsewhere — `ProcResult.ok`
+exists precisely so a timed-out process is never `ok`.
+
+*A distinct "unmeasured" third state, neither pass nor fail.* Rejected because **it already
+exists.** `parse_probe_unavailable` **is** that bucket — a list rendered as a non-blocking warning —
+and it is the exact mechanism that laundered the timeout into a pass. Adding a second non-blocking
+bucket reproduces the defect with better vocabulary. The problem was never that the harness lacked
+a place to put "we did not find out"; it was that the place it had did not stop the run. (Rule 11.)
+
+*Route the repo to `REQUIRES_HUMAN_INTERVENTION`.* Rejected on the CLAUDE.md §4 state boundary.
+`_transform_criterion` is a **read-only verifier**: it is called after the wave loop has halted and
+after `statuses = await _transform_statuses(read_conn, run_id)` has read the frozen statuses out of
+SQLite, and it receives them as a `Mapping` it never writes. Marking RHI would put execution-state
+writes in a checker — the harness's own version of letting the validator file its own findings. It
+is also the wrong verdict: RHI (exit 7) says *this repo needs a human before it can proceed*, while
+the fact here is *the run finished, the state is readable, and a claim it makes about the tree is
+unproven*. Exit **6** already means exactly that — `TransformCriterionError.exit_code` is
+`ExitCode.UNRESOLVED_FINDINGS`, and its own docstring says *"the run finished and the state is
+readable, but a claim it makes about the tree is false, and shipping that to Phase 3 would rewrite
+it into monorepo history."* The verdict this ADR needs was already defined; it was simply not
+reachable from the probe.
+
+*Widen the missing-binary path to a hard failure too.* Rejected. That gap is **declared,
+host-level and uniform** — ADR-0047 records it, `docs/INTEGRATION_HONESTY.md` carries the
+`ast-grep` row, and it is a property of the host rather than of any repo, so a per-repo violation
+is the wrong shape for it. Widening it is a policy change nobody asked for, and it would break a
+**correct** existing test of intentional behaviour (`tests/test_transform_e2e.py` asserts on a
+populated `parse_probe_unavailable`). Making a truthful warning is this ADR's job; deciding whether
+an uninstalled engine should stop a run is not.
+
+**Where `no_verdict` lives, and why it is not `workers/clone.py`.** A sibling worker landed the
+same classifier as `clone._no_verdict` this round, with the right body and the right ordering. It
+is in the wrong module. `fleet.rewrite` importing from `fleet.workers` inverts the layering — a
+rewrite driver would depend on a worker — and the classifier is not clone-specific in the first
+place: it decodes an invariant that **`util/proc.py` itself creates**, synthesising
+`timed_out=True` **and** `started=False` **and** `exit_code=124` together for a deadline that had
+already passed. The decoder belongs with the encoder. `clone._no_verdict` becomes a delegator so
+its five call sites and their tests are untouched.
+
+**`not started` is tested BEFORE `timed_out`, and this is load-bearing rather than stylistic.** The
+passed-deadline `ProcResult` carries **both** flags, so reading `timed_out` first reports a command
+that never ran as one that ran too long — the same misattribution this ADR exists to remove, one
+layer down. `clone._no_verdict`'s docstring already argues this; moving the function must preserve
+the order, not merely the behaviour. See ADR-0047's measured correction for the three measured
+rows, including the one that matters most to any future fix: **a probe killed at its deadline exits
+`-15`, or `-9` if it ignored `SIGTERM`, never `124`** — so a fix keyed on `exit_code == 124` would
+catch only the never-started half, and one keyed on `-15` only part of the other half.
+
+**Consequences, stated plainly — three things this does NOT do.**
+
+1. **It does not make the probe a parser.** `kind: MISSING` is still unqueryable in 0.45.1 (exit
+   **8**, `Cannot parse rule`, re-measured 2026-08-16), so ADR-0047's **accepted false pass** — a
+   file that error-recovers into a `MISSING` token with zero `ERROR` nodes reads as parsing —
+   stands unchanged. This ADR makes the probe's *failures* honest, not its *successes* stronger.
+2. **It does not close the missing-engine gap**, only makes the warning truthful. After this
+   change, *"no rewrite engine is installed on this host"* is printed only when no rewrite engine
+   is installed on this host. The clause still goes unchecked in that case, and
+   `docs/INTEGRATION_HONESTY.md`'s `ast-grep` row remains the record of it.
+3. **It adds no way to raise the 60 s timeout.** `AstGrepRewriter.__init__` takes
+   `timeout_s: float = 60.0`, `TransformSection` has **no** corresponding key, and
+   `EngineRegistry.from_modules` takes each module's ready-made `REWRITER` singleton — so the
+   default is what every production probe uses and **nothing in config can change it**. An operator
+   who hits the new violation on a genuinely large file can only edit code or shrink the file.
+   *Agent Recommendation, deliberately not taken here:* a `transform.engine_timeout_s` key is the
+   obvious follow-up, and it is out of scope because this ADR is about a verdict being lost, not
+   about the deadline that loses it — adding a knob in the same change would let "raise the
+   timeout" become the answer to a violation whose point is that the answer must be "look at the
+   file."
+
+**A newly-found adjacent defect, recorded for the ledger — this is NOT a decision and NOT fixed
+here.** `TsMorphRewriter.parse_probe` calls `await self.ensure_available()` and then raises
+**`NotImplementedError`** (*"the ts-morph bridge script is not shipped"*). On a host where Node is
+absent or cannot resolve `ts-morph`, `ensure_available()` raises `EngineUnavailableError` first and
+the criterion behaves as designed — which is why this has never been seen. On a host with **Node
+and `ts-morph` both installed**, and any rewrite rule carrying `engine: ts-morph`,
+`ensure_available()` **passes** and the `NotImplementedError` escapes: **neither** `except` arm
+this ADR leaves behind catches it (`ProbeIndeterminateError` and `EngineUnavailableError` are both
+`RuntimeError` subclasses; `NotImplementedError` is not), it is not a `FleetCliError`, so
+`_mapped_errors()` does not funnel it and it surfaces as a **traceback at exit 1** — the outcome
+`cli.py`'s own module docstring calls out as telling an operator nothing. Note the direction: this
+is a *crash*, not a laundered pass, so it is strictly less dangerous than D37 and must not be
+folded into it. Found while speccing D37; **not fixed by it**, and left for
+`docs/INTEGRATION_HONESTY.md` to number (D45 is the current maximum) and own. `LibCstRewriter.parse_probe`
+is real (`libcst.parse_module`) and is **not** affected.
+
+**Amends ADR-0047** — narrowing its "Alternatives rejected" premise that `EngineUnavailableError`
+always renders as a non-blocking warning; the pointer is recorded in that entry. **Records D37**
+(`docs/INTEGRATION_HONESTY.md`) as the defect decided about, and belongs to the same four-state
+family as D34–D45. Supersedes nothing.
 
 ---
 

@@ -1050,6 +1050,151 @@ async def test_a_probe_that_never_started_is_not_reported_as_a_missing_compiler(
     )
 
 
+DAEMON_GONE = (
+    "docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
+    "Is the docker daemon running?"
+)
+"""Verbatim `docker run` stderr when the daemon is unreachable — the mid-wave restart case."""
+
+
+def _docker_cannot_run(parts: tuple[str, ...]) -> ProcResult:
+    return ProcResult(
+        argv=parts,
+        exit_code=125,
+        stdout_tail="",
+        stderr_tail=DAEMON_GONE,
+        duration_ms=40,
+        timed_out=False,
+    )
+
+
+def _docker_refuses_the_build_step(*, blips: int = 1) -> RecordingRunner:
+    """Probe green, then `docker run` for the BUILD step exits 125 for its first `blips` calls.
+
+    The probe is answered normally on purpose: this is the state the defect actually occurs in.
+    `_c_toolchain_gate` gets a real exit code out of a real container against this same image,
+    memory and cpus, and only the step AFTER it meets the 125 — which is exactly the evidence
+    that makes 125 readable as transient here and not at the probe.
+    """
+    seen: list[int] = []
+
+    def build_step(parts: tuple[str, ...]) -> ProcResult:
+        seen.append(1)
+        if len(seen) > blips:
+            return ProcResult(
+                argv=parts,
+                exit_code=0,
+                stdout_tail="INFO: Build completed successfully\n",
+                stderr_tail="",
+                duration_ms=900,
+                timed_out=False,
+            )
+        return _docker_cannot_run(parts)
+
+    return RecordingRunner(
+        [
+            (lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1], ok("")),
+            (lambda p: "build" in p, build_step),
+            (lambda p: True, ok("")),
+        ]
+    )
+
+
+async def test_a_docker_daemon_that_went_away_is_not_reported_as_a_broken_build_file(
+    tmp_path,
+) -> None:
+    """Defect D34: the BUILD step is a `docker run` too, and 125 was in neither exit-code set.
+
+    `_argv` emits `docker run …` whenever `payload.image is not None`, which is the DEFAULT
+    (`sandboxed = not no_sandbox`), so every real build step can exit 125 — docker's "the
+    container never started". With no branch for it, 125 fell through to the last line of
+    `classify_build_failure` and became a retryable `BUILD_ERROR`: a daemon restart mid-wave was
+    reported as a broken `BUILD.bazel`, and the repo then spent all three ADR-0014 rungs — two of
+    them LLM-bearing — asking a model to repair a file that was never opened, producing a repair
+    transcript about Bazel that described nothing that happened, and landing
+    `REQUIRES_HUMAN_INTERVENTION` regardless.
+
+    The 125 is read off the BUILD step here, not off the probe: `_c_toolchain_gate` answered
+    green first, which is what makes the transient reading of 125 defensible at this call site
+    (see `_DOCKER_CANNOT_RUN` — the probe, meeting it with no such evidence, still refuses).
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = _docker_refuses_the_build_step()
+
+    result = await BuildverifyWorker(runner=runner).run(
+        make_ctx(tmp_path),
+        BuildverifyInput(
+            dest=dest,
+            integration_ref=SNAPSHOT,
+            image="fleet-build:9.2.0-bookworm",
+            log_dir=str(tmp_path / "logs"),
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.exit_code == 125
+    build_argv = runner.argv_for("build")
+    assert build_argv is not None and build_argv[0] == "docker", (
+        "the premise of the defect: the build step really is a `docker run`, so it really can "
+        "exit 125 — a test whose build step were bare `bazel` would prove nothing"
+    )
+
+    assert (result.error.failure_class, result.error.retryable) == (
+        FailureClass.TRANSIENT_INFRA,
+        True,
+    ), (
+        "the docker daemon is the fleet's infrastructure, not the repo's code: TRANSIENT_INFRA "
+        "re-queues the same rung under `max_transient_retries` without charging an attempt, "
+        "where BUILD_ERROR would have bought a repair prompt for a file nothing read"
+    )
+
+    detail = str(result.error.stderr_tail)
+    assert "never started" in detail, detail
+    assert "never opened" in detail, (
+        "the message has to say the repo's files were not read; docker's own line is accurate "
+        "but arrives attached to a `bazel build //…` step and is routinely read as that step's "
+        "verdict"
+    )
+    assert "BUILD.bazel" not in detail, (
+        "nothing about the repo's generated files is implicated — the container never started, "
+        "so bazel never opened one. Naming it here is the operator story the defect got wrong"
+    )
+    assert "Cannot connect to the Docker daemon" in detail, (
+        "the verbatim docker stderr still has to survive: the explanation is a prefix, not a "
+        "replacement for the evidence"
+    )
+
+
+async def test_a_daemon_blip_costs_the_repo_no_attempt_and_reaches_no_human(tmp_path) -> None:
+    """The counters, not the class — what the fleet actually pays for a restarted daemon.
+
+    Asserting on `FailureClass` alone cannot express this defect any more than it could express
+    D9: the misclassification is the first domino, and the bill is `phases.attempts` and the
+    terminal status. Driven through the REAL `RetryPolicy` for that reason.
+
+    One 125 followed by a healthy daemon is a repo that SUCCEEDS having spent nothing. Under the
+    old classification the same two runs ended `SUCCEEDED` too — but with an attempt charged
+    against a repo that did nothing wrong, which is a rung it no longer has when a real build
+    failure arrives later.
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = _docker_refuses_the_build_step(blips=1)
+    payload = BuildverifyInput(
+        dest=dest,
+        integration_ref=SNAPSHOT,
+        image="fleet-build:9.2.0-bookworm",
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    attempts, status = await drive_the_ladder(payload, runner, tmp_path)
+    assert status is RepoStatus.SUCCEEDED
+    assert attempts == 0, (
+        "a daemon that restarted mid-wave may not consume one of this repo's three ADR-0014 "
+        "chances: TRANSIENT_INFRA re-runs the identical rung and charges nothing"
+    )
+
+
 async def test_an_unsandboxed_build_never_pays_for_the_c_compiler_probe(tmp_path) -> None:
     """`payload.image is None` is the host path, and the gate deliberately does not fire on it.
 
@@ -1988,6 +2133,12 @@ def test_every_bazel_exit_code_this_classifier_reads_was_verified_against_the_bi
     )
     assert classify(9) == (FailureClass.TRANSIENT_INFRA, True), "the output-base lock was held"
     assert classify(36) == (FailureClass.TRANSIENT_INFRA, True), "LOCAL_ENVIRONMENTAL_ERROR"
+    assert classify(125) == (FailureClass.TRANSIENT_INFRA, True), (
+        "the ONE row that is not bazel's: `_argv` emits `docker run` whenever `payload.image is "
+        "not None` (the default), and 125 is docker refusing to START the container. It is safe "
+        "to read unconditionally because bazel 9.2.0 emits no 125 — the codes above plus 127 from "
+        "the shell are the whole set — so a 125 from a step in this worker came from `docker run`"
+    )
     assert classify(127) == (FailureClass.BUILD_ERROR, False), "bazel absent from the image"
     assert classify(137) == (FailureClass.TRANSIENT_INFRA, True), "cgroup OOM kill"
     assert classify(-9) == (FailureClass.TRANSIENT_INFRA, True), "SIGKILL as a negative status"
@@ -2022,6 +2173,46 @@ def test_no_test_targets_is_read_only_off_the_test_step_and_only_from_a_finished
     )
     assert classify_build_failure(proc(), unit=BUILD_UNIT) == (FailureClass.BUILD_ERROR, True), (
         "`bazel build` cannot report NO_TESTS_FOUND; a 4 from it is an ordinary build failure"
+    )
+
+
+def test_a_step_that_never_started_is_classified_before_the_timeout_it_also_carries() -> None:
+    """The shape `util.proc.run` really produces for a deadline that had already passed.
+
+    All three flags at once — `started=False` **and** `timed_out=True` **and** `exit_code=124`
+    (`_run_locked`) — which is why the order of the two branches is the whole test. Reading
+    `timed_out` first makes `if not result.started` unreachable through the only producer of real
+    `ProcResult`s in this codebase, and reports a command that was NEVER RUN as one that ran too
+    long. The bill for that is an attempt: `TIMEOUT` is substantive on the ladder and
+    `TRANSIENT_INFRA` is not, so the fleet's own clock would spend one of a repo's three chances
+    on a process it never launched.
+
+    Constructed with `timed_out=True` deliberately. A never-started result with `timed_out=False`
+    is a shape `util.proc.run` never emits, and asserting on one passes against the broken order
+    too — it would pin nothing. `clone.py`'s `_no_verdict` orders these two the same way for the
+    same reason; the two are meant to stay in step.
+    """
+    never_started = ProcResult(
+        argv=("docker", "run", "--rm", "fleet-build:9.2.0-bookworm", "bazel", "build", "//x/..."),
+        exit_code=124,
+        stdout_tail="",
+        stderr_tail="deadline had already passed; process was not started",
+        duration_ms=0,
+        timed_out=True,
+        started=False,
+    )
+    assert classify_build_failure(never_started, unit=TEST_UNIT) == (
+        FailureClass.TRANSIENT_INFRA,
+        True,
+    ), "we never asked, so nothing was established about this repo — and nothing may be charged"
+
+    killed_at_the_deadline = replace(never_started, started=True, stderr_tail="")
+    assert classify_build_failure(killed_at_the_deadline, unit=TEST_UNIT) == (
+        FailureClass.TIMEOUT,
+        True,
+    ), (
+        "the reorder must not swallow the real timeout: a process that STARTED and was killed at "
+        "its deadline is still a TIMEOUT, and that is a fact about the repo's build"
     )
 
 

@@ -120,8 +120,24 @@ is exactly what happens when nobody has built `docker/fleet-build.Dockerfile` on
 Mechanically distinct from every other code a probe can return, and worth distinguishing because
 the two verdicts point at different files: 125 is "build the image" (or fix
 `settings.verify.container_image`), while a non-zero code from INSIDE the image is "the image is
-wrong". Reported non-retryable for the same reason as 127 — re-running an identical rung cannot
-build an image any more than it can install a compiler."""
+wrong".
+
+**`bazel` never emits it**, which is what lets `classify_build_failure` read it off a build step
+without being handed the payload: the vendored 9.2.0's codes are the table below (1, 2, 3, 4, 8,
+9, 36 …) plus 127 from a shell that cannot find the binary, and 125 is not among them. So a 125
+from a step in this worker came from `docker run` — the only other program in the argv — and that
+argv is a `docker run` exactly when `payload.image is not None` (`_argv`).
+
+**Retryability is decided per call site, and the two sites honestly differ.** The same code covers
+a daemon that restarted (back in seconds) and an image that does not exist (never appearing on its
+own). `_c_toolchain_gate` meets it FIRST and with no evidence either way, so it reports
+non-retryable for the same reason as 127 — re-running an identical rung cannot build an image any
+more than it can install a compiler. A build step meets it only AFTER that probe's own `docker
+run` returned a real exit code from inside this image, which is direct evidence that the daemon
+was reachable, the image was present and `container_memory`/`container_cpus` parsed — seconds
+earlier. The persistent causes are ruled out by that; what is left is the transient one, so the
+build step answers `TRANSIENT_INFRA` and lets §11.8's bounded `max_transient_retries` decide,
+charging no attempt and prompting no model."""
 
 C_TOOLCHAIN_PROBE: Final = (
     "cc=${CC:-}; "
@@ -365,9 +381,35 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
     against the real binary — a classifier built on remembered exit codes is a classifier that
     escalates repos for reasons nobody can reproduce.
     """
+    if not result.started:
+        # BEFORE `timed_out`, and this order is load-bearing rather than stylistic. `util.proc.run`
+        # synthesises a call made past its deadline as `started=False` **and** `timed_out=True`
+        # **and** `exit_code=124`, all three at once, so testing `timed_out` first makes this
+        # branch dead code through the only producer of real `ProcResult`s — and reports a command
+        # that never ran as one that ran too long. That misattribution costs an attempt: `TIMEOUT`
+        # is substantive on the ladder, `TRANSIENT_INFRA` is not, and "we never asked" is not
+        # evidence about the repo. `clone.py`'s `_no_verdict` draws the same line, in this order,
+        # for this reason; the two are meant to stay in step. A process that really was killed at
+        # its deadline has `started=True` and still reaches `TIMEOUT` below.
+        return FailureClass.TRANSIENT_INFRA, True
     if result.timed_out:
         return FailureClass.TIMEOUT, True
-    if not result.started:
+    if result.exit_code == _DOCKER_CANNOT_RUN:
+        # `docker run` refused to start the container, so bazel never executed and this repo's
+        # generated files were never read — the step's argv IS a `docker run` whenever
+        # `payload.image is not None`, which is the default (`sandboxed = not no_sandbox`), and
+        # bazel itself has no exit 125. Without this branch a Docker daemon restarted mid-wave
+        # fell through to a retryable BUILD_ERROR: three ADR-0014 rungs, two of them LLM-bearing,
+        # spent prompting a model to repair a `BUILD.bazel` that was never even opened, then
+        # REQUIRES_HUMAN_INTERVENTION with a repair transcript describing nothing that happened.
+        #
+        # `TRANSIENT_INFRA` because the docker daemon is the fleet's infrastructure and no part of
+        # the repo is implicated; retryable because the enduring causes of 125 are already excluded
+        # here — `_c_toolchain_gate` ran its own `docker run` against this same image, memory and
+        # cpus moments ago and got a real exit code out of the container, so it exists, it parses
+        # and the daemon answered. See `_DOCKER_CANNOT_RUN` for why the probe answers differently.
+        # `retry.py` caps this at `max_transient_retries` and then charges the ladder anyway, so a
+        # daemon that stays gone still escalates — it just does not buy a repair prompt first.
         return FailureClass.TRANSIENT_INFRA, True
     if result.exit_code in INFRA_EXIT_CODES:
         # The container hit its memory cap, the fleet interrupted the build, another command held
@@ -388,6 +430,24 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
     return (FailureClass.TEST_FAILURE if unit == TEST_UNIT else FailureClass.BUILD_ERROR), True
 
 
+_DOCKER_CANNOT_RUN_EXPLAINED: Final = (
+    f"`docker run` exited {_DOCKER_CANNOT_RUN}: the CONTAINER never started, so bazel never ran "
+    "and this repository's generated files were never opened — nothing that follows is evidence "
+    "about them, and no repair to them can change this. Look at the host: a docker daemon that "
+    "went away or restarted mid-wave is the usual cause; also check that "
+    "`settings.verify.container_image` still resolves on this host and that "
+    "`container_memory`/`container_cpus` hold values docker accepts. Re-queued on the same rung "
+    "as TRANSIENT_INFRA — no attempt charged, no repair prompted. docker stderr: "
+)
+"""Prefixed to the tail of a 125 so the failure READS as what it is.
+
+The tail is what lands in `last_error` and what a human skims, and docker's own line ("Cannot
+connect to the Docker daemon…") is accurate but arrives attached to a `bazel build //x/...` step,
+where it is routinely read as a build failure of `x`. Naming the container explicitly, and saying
+in as many words that the repo's files were never opened, is the difference between an operator
+restarting a daemon and an operator auditing a generated `BUILD.bazel` that is fine."""
+
+
 def error_from_proc(
     result: ProcResult, *, unit: str, extra: str = ""
 ) -> WorkerError:
@@ -400,6 +460,11 @@ def error_from_proc(
     """
     failure_class, retryable = classify_build_failure(result, unit=unit)
     tail = result.stderr_tail or result.stdout_tail
+    if result.started and not result.timed_out and result.exit_code == _DOCKER_CANNOT_RUN:
+        # Guarded on a FINISHED process for the same reason `no_test_targets` is: the `exit_code`
+        # of a timed-out or never-started result is not a program's verdict and must not be read
+        # as one.
+        tail = f"{_DOCKER_CANNOT_RUN_EXPLAINED}{tail}"
     return WorkerError(
         failure_class=failure_class,
         retryable=retryable,

@@ -3924,3 +3924,202 @@ audited were themselves corrections of earlier mis-records.
    container build, and `maven_install.json` for JVM (**L1**).
 7. Serialize any full-suite run against every other agent (§19's reaper constraint still holds),
    and **serialize read-only audits against writing agents** (this round's item **A**).
+
+---
+
+## 34. Checkpoint — 2026-08-16 · **the project is under version control for the first time**: `git init`, one commit of **173 files**, a **private** Gitea remote, and **~2.2 GB of vendored toolchains deliberately left out** — with the four **wrapper scripts kept, because they are the only thing holding the `$HOME` leaks shut** · the clone worker's **three misattributions (D35, D36, D41) are FIXED**, on a shared `_no_verdict` classifier that tests **`started` before `timed_out`** · **every number in §1–§33 predates the first commit**
+
+**What was completed.** Two things, and they are unrelated except in date. **(A)** The working tree
+is now a git repository with a remote. **(B)** The first three of the twelve-instance
+"four-state collapse" family recorded in §33's successor block (D34–D45) are closed in
+`src/fleet/workers/clone.py`, unblocked by the testability gap (**D45**) that explains why they
+clustered there.
+
+### A. Version control, first commit, and what was deliberately excluded
+
+`git init` on branch **`main`**; a single initial commit **`a1178f7`** — *"Initial commit: polyglot
+monorepo migration harness"* — carrying **173 files, 105,986 insertions**; remote **`origin` →
+`http://localhost:3001/redmage/swe-repo-harness.git`**, a **private** Gitea repository
+(`repository.is_private = 1`, `is_mirror = 0`). **A future reader re-provisioning this checkout
+needs the rest of this section**, because a clone of that remote is not a working harness.
+
+**Excluded — the vendored toolchains, ~2.2 GB.** `tools/bazelisk/` (**473 MB**), `tools/go/`
+(**1.1 GB**), `tools/rust/` (**617 MB**), and the binaries under `tools/bin/` (`ast-grep` **53 MB**,
+`gh` **41 MB**, `bazel` **7 MB**). These are **provisioned artifacts, not source** — every one of
+them is re-downloadable, none was authored here, and committing them would put a gigabyte of
+immutable blobs behind every future `git clone` of a repository whose actual source is 106k lines.
+`.gitignore` excludes the three SDK trees wholesale and `tools/bin/*` by wildcard.
+
+**Included — the four wrapper scripts, and this is the load-bearing part of the exclusion.**
+`.gitignore` re-admits exactly four paths with `!tools/bin/{cargo,gazelle,go,rustc}`, and
+`git ls-tree` confirms those four and **only** those four are tracked under `tools/`. They **are**
+source: each derives its toolchain root from **its own location** and exports the environment into
+the workspace — `tools/bin/go` and `tools/bin/gazelle` set `GOROOT`, `GOPATH`, `GOMODCACHE`,
+`GOCACHE`, `GOENV`, `GOTOOLCHAIN` **and `XDG_CONFIG_HOME`** (the last because Go's telemetry
+resolves its directory through it); `tools/bin/cargo` and `tools/bin/rustc` set `RUSTUP_HOME` and
+`CARGO_HOME` before exec'ing the rustup shims, which cannot be symlinked because they need
+`RUSTUP_HOME` to find a toolchain at all. **Losing these four silently re-introduces the `$HOME`
+leaks recorded in earlier checkpoints** — silently, because a toolchain writing into `$HOME` still
+builds. The binaries they exec can be re-downloaded; the knowledge of *where those bytes must land*
+lives nowhere else in the tree.
+
+**Excluded — two embedded third-party git repositories.** `references/Agent-Harness/` and
+`references/visa-vulnerability-agentic-harness/` each carry their own `.git`, and committing them
+from the parent would have written **broken gitlinks** — a commit SHA with no submodule
+registration and no way to fetch it. They show as untracked in `git status` and stay that way. The
+reference **markdown** under `references/` **is** tracked (four files). `references/` remains
+READ-ONLY per CLAUDE.md either way.
+
+**Credential hygiene.** The Gitea token was **minted, used for one push, and revoked from the Gitea
+SQLite DB in the same command chain**; **`remote.origin.url` carries no embedded credential** and no
+`credential.*` helper is configured for it, so a future push must present its own auth. This is
+**deliberately unlike the corpus mirrors**, whose origin URLs embed a plaintext PAT and which this
+project's own notes forbid reading. *Recorded precisely:* the revocation is verified **by absence** —
+no `access_token` row exists above `id 44`, and the newest surviving row (`fleet-harness-…`,
+created 2026-08-10) was last used **an hour before** this repository was created — so the push
+token's row is gone. Absence of the row is the evidence; the deletion itself was not observed here.
+
+**The consequence worth stating plainly: every count, defect and ADR recorded in §1–§33 predates
+version control.** There is **no commit history behind any of them** — no diff, no blame, no
+bisect, and no way to reconstruct which of the fourteen-then-twelve defects was introduced when.
+Those checkpoints are the only record of their own provenance, which is precisely why §33's lesson
+about the record decaying faster than the code has been so expensive. **This checkpoint is the first
+from which a diff exists.**
+
+### B. D35, D36 and D41 are fixed — one classifier, three call sites, and a bargain kept
+
+**The prerequisite that unblocked the family (D45).** `tests/test_vcs.py`'s `ScriptedRunner` gained
+**`timed_out` and `stderr`** constructor arguments. It previously could build only *"ran and
+answered"* — a plain non-zero `exit_code` — which made the other two no-verdict shapes
+(`started=False, timed_out=True, exit_code=124`, and a deadline kill) **unconstructible**. That is
+why this family was untestable in `vcs/` and, plausibly, **why it kept landing there**: the fake
+could not express the bug.
+
+**The spine: a shared `_no_verdict(result) -> str | None`** (`workers/clone.py:194`). It answers
+*why this result establishes nothing about the repo*, or `None` when the result is a real answer,
+and **it tests `not started` BEFORE `timed_out`** — because `util.proc.run` sets `timed_out=True`,
+`started=False` and `exit_code=124` **together** for a deadline that had already passed, so reading
+`timed_out` first reports **a command that never spawned as one that ran too long**: the same
+misattribution, one layer down. Its companion `_indeterminate()` raises a `GitCommandError` rather
+than returning a gate string, so `run()`'s handler routes it through the existing `_error_for`
+(`clone.py:658`), which reads `timed_out` and answers **`TIMEOUT` / `TRANSIENT_INFRA`,
+`retryable=True`**.
+
+- **D35 — `_unshallow` (`clone.py:526`).** Transient fetch failures now raise through `_error_for`:
+  the same retryable treatment the `clone` and `remote update` **on this very remote** already got
+  twelve lines above. **Retryability was NOT widened.** Two *settled* answers stay non-retryable
+  `PREFLIGHT`: `unshallow` disabled by config, and a **new** gate for a fetch that **succeeded and
+  left the mirror shallow anyway** (`clone.py:439–448`) — the remote served everything it will ever
+  serve, and `git-filter-repo` refuses a shallow repository. **That second gate is the point**: it
+  keeps the honest `PREFLIGHT` path *reachable* rather than merely unused, so the label stops being
+  a lie without becoming dead code.
+- **D36 — `_resolve_head` (`clone.py:498`).** Only a `rev-parse` that **actually ran** and
+  **actually said "no such rev"** may now mean `EmptyRepo`. The worst outcome this module can
+  produce is the one this closes: `status="ok"`, `head_sha=None`, a **durable** `EmptyRepo` finding
+  about a repo that has commits, no worktree cut, and every later worker then reporting *"worktree
+  does not exist; run the clone worker first"* — **a wrong finding delivered as SUCCESS, which
+  nothing downstream ever re-asks**. **`Git.resolve` itself is untouched**: its own contract
+  ("the one ref read allowed to miss") is correct; the defect was reading it as a preflight verdict.
+- **D41 — the three silent zeros (`_submodule_count`, `_has_lfs`, `_largest_blob_bytes`).** All
+  three now raise on no-verdict while **preserving legitimate non-zero answers**: a
+  `git show <sha>:.gitmodules` exiting non-zero **because the path is not in the tree** still means
+  `0`/`False`, and that is most repos.
+
+**The design choice worth recording.** A *"could not determine"* **finding** was **rejected in
+favour of a retryable error**. A finding beside a wrong number still leaves the wrong number in
+`repos.largest_blob_bytes`, and still leaves `has_lfs=False` **disarming the git-lfs gate** —
+**a finding does not re-arm a gate**, and no downstream consumer of those columns reads findings
+(`cli.py:1462–1476` writes them straight into the repo row; nothing joins them back to `findings`).
+The honest options were "raise" or "lie quietly", and there was no third.
+
+**Disclosed trade.** A large mirror whose `cat-file --batch-all-objects` scan **legitimately**
+exceeds the deadline now **fails the clone retryably**, where before it reported
+`largest_blob_bytes=0` and **succeeded**. That is a loud wrong-duration failure traded for a silent
+wrong number, and it is intended — but **nothing measures how often it fires on a real 250-repo
+fleet**, and no such fleet has been run.
+
+**The same defect shape survives in the same file, named by the fixer rather than left implicit.**
+`_default_branch` (`clone.py:484`) still reads `head.ok` from `symbolic-ref --short HEAD`, and still
+calls `git.ref_exists`, which is `return result.ok` (`vcs/git.py:280–282`, one of D42's four). So a
+**timed-out `symbolic-ref` silently degrades to the fallback branch list**, and a **timed-out
+`show-ref` reads as "that fallback branch does not exist"** — the wrong default branch, chosen
+confidently, from a question nobody answered. Naming it here is the point: it is the shape this
+round fixed, one function away from the code that fixed it.
+
+### What was verified
+
+**`1137 passed`** (**+4**), **0 failed, 0 skipped, 0 xfailed, 0 `xfail` markers**;
+`mypy src/fleet/ --strict` clean over **107** source files; `ruff` clean. Peak Bazel disk
+**4.20 GiB** against the untouched **6 GiB** `BAZEL_PEAK_CEILING_BYTES`, repository cache
+**1624 MiB** against the untouched **3 GiB** `BAZEL_KEEP_CACHE_CEILING_BYTES` — **neither ceiling
+raised**. **These figures are the orchestrator's**, not this checkpoint author's: **the suite was
+not re-run to write this entry** (a worker held the pytest token; §19's reaper constraint), and per
+§32/§33's precedent that distinction is recorded rather than smoothed over. The **eight** `xfail`
+hits a grep of `tests/` returns are all **prose in docstrings and comments** describing markers that
+were removed; **no `pytest.mark.xfail` decorator exists**.
+
+Everything in **A** was verified against the tree and the Gitea DB directly (Guardrail 2):
+`git log`, `git branch --show-current`, `git remote -v`, `git show --stat` for the file count,
+`git ls-tree -r HEAD` for what is tracked under `tools/` and `references/`, `du -sh` for every size
+quoted, `git config --get-regexp credential` for the absence of a helper, and a read-only
+`sqlite3` query for `is_private` and the token rows. Everything in **B** was verified at the file
+and symbol level in `src/fleet/workers/clone.py`, `src/fleet/vcs/git.py` and
+`tests/test_workers_scan.py`.
+
+### What is still NOT proven
+
+1. **The new still-shallow gate has no test.** `test_an_unshallow_that_never_ran_is_not_a_permanent_preflight_verdict`
+   asserts both halves of the D35 bargain for the *blip* and for the *config-disabled* settled
+   answer — but **no test constructs a fetch that succeeds and leaves the mirror shallow**
+   (`grep -rn 'still shallow' tests/` is empty). The gate that was added to keep the honest
+   `PREFLIGHT` path reachable is itself **reachable and unasserted**. That is the first thing a
+   reviewer of this round should close.
+2. **`docs/INTEGRATION_HONESTY.md` still reads `D35 — OPEN`, `D36 — OPEN`, `D41 — OPEN`, `D45 — OPEN`**
+   as of this writing. **Another agent owns that file this round**, and per §33's item **A** what a
+   concurrent reader can honestly report is **a snapshot with a timestamp, never a status** — so
+   this entry records the code as verified fixed and the register as not yet updated, rather than
+   guessing which will win. **If those entries still say OPEN when this is read, re-derive from
+   `clone.py`, not from either document.**
+3. **The `1137` figure was not independently reproduced here** (item above). Nothing about the
+   count is doubted; the provenance is simply not this file's.
+4. **Nine of the twelve four-state-collapse instances remain open** — D34, D37, D38, D39, D40, D42,
+   D43, D44 and the `_default_branch` sighting named above, which is D42's `ref_exists` plus an
+   unnumbered `symbolic-ref` twin **in the very file this round repaired**.
+5. **Everything §32 and §33 listed as unproven is unchanged.** No offline container build, no warmed
+   cache, the published lock still not proven sufficient offline, **the sandboxed path still RED**,
+   and `fleet build` still never drives real Bazel over a Go repo through `materialize` → `_publish`.
+   This round moved **none** of it.
+6. **Version control proves nothing about the code.** The first commit is a snapshot of a tree whose
+   claims were audited by reading, not by running; it makes the *next* round's changes reviewable
+   and does nothing for the last thirty-three.
+
+### Next subagent task, in priority order
+
+1. **D34 — `classify_build_failure`'s missing `125` branch. IN FLIGHT.** The build steps **are**
+   `docker run`, and 125 is the daemon's "container never started". Note §33's warning verbatim:
+   **D34 is the absence of a row, not a wrong row** — nothing in either table should be removed, and
+   an agent handed D34 must not "rebalance" them.
+2. **D37 — the ast-grep probe that passes the gate on timeout and `break`s out for the whole repo.
+   BEING SPECCED.** `AstGrepDriver._scan_for_error_nodes` is **correct locally**; it is undone one
+   layer up, where `cli._transform_criterion` catches `EngineUnavailableError` into a **non-blocking
+   warning** (still exit SUCCESS) **and `break`s**, skipping the probe for **every remaining
+   rewritten file in that repo**. One slow probe on file 1 of 40 turns a corrupt rewrite in files
+   2–40 green.
+3. **D26 — `_publish`'s idempotence guard**, and **D27 — the lock compared against the FILE rather
+   than the BRANCH** (with **D28**, a two-line move in the same function). D26 is the highest-severity
+   item on the older list because it converts a **transient** failure into
+   `REQUIRES_HUMAN_INTERVENTION` on the **recovery** flow.
+4. **D30 — Gazelle capture globs only `BUILD.bazel`**, so a repo carrying a legacy `BUILD` file ships
+   a package with **no targets at exit 0** — the failure shape this project keeps counting.
+5. **The two security items, D21 and D22, and they want fixing TOGETHER.** D21 wires `--replace-text`
+   end to end with a `history_scrub_file` default that points at a path that exists; D22 adds the
+   `st_mode & 0o077` refusal in `build_forge`. **The dependency is the reason for the pairing:
+   D38's wrong *"install git-filter-repo"* message covers a `--replace-text` variant that is
+   currently latent only because no caller sets `replace_text` — it goes LIVE the moment D21 lands.**
+   Fixing D21 alone converts a dead branch into an operator being told to install a tool that is
+   already installed.
+6. **Carried forward, unchanged:** §32's networked warm run, the first offline container build, and
+   `maven_install.json` for JVM (**L1**).
+7. **Now that a remote exists:** commits and pushes remain the **orchestrator's** to make. The
+   toolchain exclusions above are `.gitignore` policy, not a suggestion — an agent that "fixes" the
+   untracked `tools/` tree re-adds 2.2 GB to every future clone.
