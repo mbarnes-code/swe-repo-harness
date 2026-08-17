@@ -49,7 +49,6 @@ from pydantic import BaseModel, Field
 from fleet.llm.calls import prompt_sha256, prompt_template_version
 from fleet.llm.client import (
     CallBudget,
-    LlmError,
     Message,
     ModelClient,
     ModelResponse,
@@ -89,10 +88,21 @@ EMPTY_SHA256: Final = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7
 it as the column default so every pre-ADR-0021 row keys identically to a fresh-slate call."""
 
 
-class CacheMiss(LlmError):
+class CacheMiss(Exception):
     """A miss under `--llm-cache read-only`. Replay mode's whole purpose is that a miss is fatal:
     a re-run that quietly called a model instead of replaying one is a re-run whose "no new model
-    output" claim is false, and nothing downstream could tell."""
+    output" claim is false, and nothing downstream could tell.
+
+    **Deliberately NOT an `LlmError`.** Every worker's advice-call site catches the bare
+    `LlmError` family to degrade gracefully when the MODEL failed to answer (a transport hiccup,
+    a malformed reply, an exhausted budget) — losing that advice must never turn a recorded
+    build/repair failure into an unrecorded worker crash. A replay-integrity break is a different
+    kind of failure: the model was never even asked, so there is nothing to degrade gracefully
+    FROM. If `CacheMiss` subclassed `LlmError` those same bare `except LlmError:` sites would
+    swallow it too, turning `--llm-cache read-only`'s one job — a hard failure on replay drift —
+    into exactly the silent degradation it exists to prevent. Staying a plain `Exception` still
+    satisfies Rule 11: `BaseWorker._run_one` (`workers/base.py:897`) classifies and records every
+    exception that escapes a worker's `run()`, `LlmError` or not."""
 
     def __init__(self, role: str, key: str) -> None:
         super().__init__(

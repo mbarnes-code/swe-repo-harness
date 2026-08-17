@@ -95,6 +95,33 @@ full-suite run → commit.
   defect in its own right — candidate for a D-number. Do not close this by assuming which gate;
   measure it.
 
+## Wave 3 — research returned late, found a bug WE shipped
+
+Research ran ~10.5 h (live Docker measurement). Its Q1 caught a regression introduced by this
+wave's own `--name=` fix and committed in `8464dc6`.
+
+- **REGRESSION, orchestrator-confirmed by measurement before dispatch:** `list_by_prefix`
+  interpolated the prefix raw into `docker ps --filter name=^{prefix}`. Docker's name filter is a
+  **regex**, and `slug()` (`worktree.py:36`, `_UNSAFE = [^A-Za-z0-9_.-]+`) deliberately PRESERVES
+  `.`. Measured: `--filter 'name=^fleet-probe-a.b'` matched a container named `fleet-probe-aXb-test`;
+  `slug('my.repo.js')` → `'my.repo.js'`. So a dotted repo's sweep could `docker rm --force` a
+  DIFFERENT repo's live container — which research measured makes that run exit **137**, a code the
+  harness does not classify as infra. Dotted names are common in the JS/Go ecosystems this targets.
+- **Task 6 (F): DONE.** `re.escape(prefix)` at `container.py:229`; audited every other name/prefix
+  interpolation (`docker_run_argv --name=`, `remove`, `stop`, `cli.py`'s `--filter status=/wave=`) —
+  no other docker regex filter exists. Test uses a fake emulating Docker's real regex semantics and
+  was hand-verified to fail pre-fix and pass post-fix.
+- Task 2: the "unreachable daemon exits 125" prose corrected (measured: **1**). Six causes all
+  return 125; only stderr text distinguishes them. F did NOT build a stderr-sniffing classifier —
+  recommended a narrow `Conflict.`/`is already in use` check only if ever needed. Correct restraint.
+- **Task 3 — my premise was wrong, and so was research's refutation.** I told Worker A that
+  `_c_toolchain_gate` lacked a clock branch; research Q4 then said the bug "was already fixed".
+  F verified via `git diff 68a41ff 8464dc6` that A's clock branch was a **pure addition** (zero
+  prior clock handling) and is structurally distinct from `classify_build_failure`'s clock check
+  (`buildverify.py:421`), which is only ever invoked on the build/test step's result — never the
+  probe's (single call site, grepped). **Not redundant. Kept.** Research's Q4 was about a different
+  code path than the one A touched.
+
 ## Queued, NOT yet assigned
 
 - **`GitCommandError.started` should arguably be a required keyword.** B's evidence: 1 of 3

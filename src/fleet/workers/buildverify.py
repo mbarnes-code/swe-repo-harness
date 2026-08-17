@@ -842,9 +842,13 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
                     "because this fleet has no registry. Build it with `docker build -f "
                     "docker/fleet-build.Dockerfile -t <settings.verify.container_image> docker/`, "
                     "or point that setting at an image this host has. Other things `docker run` "
-                    "reports as 125: an unreachable daemon and an invalid flag or resource "
-                    "value (e.g. a malformed `container_memory`/`container_cpus`). Re-running an "
-                    "identical rung cannot build an image, which is why this is not retryable. "
+                    "reports as 125: a name collision with a leftover container, an invalid "
+                    "flag or resource value (e.g. a malformed `container_memory`/"
+                    "`container_cpus`), or a nonexistent `--network`/non-absolute `--workdir`. "
+                    "An UNREACHABLE daemon is not one of them — measured, it exits 1, not 125 "
+                    "(research-36 Q1(c)). Docker's exit code alone cannot tell these apart; only "
+                    "its stderr text does. Re-running an identical rung cannot build an image, "
+                    "which is why this is not retryable. "
                     f"docker stderr: {result.stderr_tail or result.stdout_tail}"
                 ),
             )

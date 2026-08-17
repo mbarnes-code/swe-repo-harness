@@ -23,6 +23,7 @@ Three things are enforced here rather than left to a caller:
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -207,14 +208,25 @@ class ContainerSandbox:
         return result.ok
 
     async def list_by_prefix(self, prefix: str, *, timeout_s: float = 30.0) -> list[str]:
-        """Names of containers (running or not) whose name starts with `prefix`."""
+        """Names of containers (running or not) whose name starts with `prefix`.
+
+        Docker's `name` filter is a REGEX, not a literal prefix, and `prefix` here is built by
+        `sandbox_name`/`slug` (`sandbox/worktree.py`), which deliberately PRESERVES `.` — a regex
+        metacharacter — in a repo id (`my.repo.js` stays `my.repo.js`). Unescaped, `^{prefix}`
+        matches any character at each `.` position, so a sweep for repo `a.b` also matches a
+        sibling container named `...aXb...`: `re.escape` is what makes the filter match this
+        prefix's literal characters and nothing else. Getting this wrong is not cosmetic — the
+        caller (`ContainerSandbox.reap`, `BuildverifyWorker.on_cancel`) force-removes every name
+        this returns, so an over-matching filter `docker rm --force`s a DIFFERENT repo's live
+        container.
+        """
         result = await self._runner(
             [
                 self._docker,
                 "ps",
                 "--all",
                 "--filter",
-                f"name=^{prefix}",
+                f"name=^{re.escape(prefix)}",
                 "--format",
                 "{{.Names}}",
             ],

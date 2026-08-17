@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 from collections.abc import Mapping, Sequence
 from pathlib import Path
@@ -347,10 +348,80 @@ async def test_reap_lists_by_run_prefix_and_spares_live_containers() -> None:
 
     assert reaped == [dead]
     listing = runner.calls[0]
-    assert f"name=^{run_prefix(RUN_ID)}" in listing
+    # The prefix is `re.escape`d before it reaches docker's `--filter` (see
+    # `test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matched`), so the argv
+    # under test carries the ESCAPED form, not the raw string `run_prefix` returns.
+    assert f"name=^{re.escape(run_prefix(RUN_ID))}" in listing
     assert "--all" in listing
     assert ("docker", "rm", "--force", dead) in runner.calls
     assert ("docker", "rm", "--force", live) not in runner.calls
+
+
+class RegexFilterRunner:
+    """Emulates Docker's REAL `--filter name=^<pattern>` semantics against a fixed pool of
+    container names — `<pattern>` is matched as a regex, exactly like the daemon does, instead of
+    a stub that treats it as a literal prefix. That distinction is the whole point: a fake that
+    special-cases prefix matching would pass even if `list_by_prefix` stopped escaping, and prove
+    nothing about the bug this guards (research-36 Q1.5(1) — MEASURED: `docker ps --filter
+    'name=^resq1d-a.b-1-t'` matched a SIBLING container `resq1d-aXb-1-t...` because `.` is a regex
+    metacharacter `slug` deliberately preserves).
+    """
+
+    def __init__(self, names: Sequence[str]) -> None:
+        self.names = list(names)
+        self.removed: list[str] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        if parts[1] == "ps":
+            raw = parts[parts.index("--filter") + 1]
+            assert raw.startswith("name=")
+            matched = [n for n in self.names if re.match(raw[len("name=") :], n)]
+            return ProcResult(
+                argv=parts, exit_code=0, stdout_tail="\n".join(matched), stderr_tail="",
+                duration_ms=1, timed_out=False,
+            )
+        assert parts[1] == "rm"
+        name = parts[-1]
+        self.removed.append(name)
+        return ProcResult(
+            argv=parts, exit_code=0, stdout_tail=name, stderr_tail="", duration_ms=1,
+            timed_out=False,
+        )
+
+
+async def test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matched() -> None:
+    """Regression test for research-36 Q1.5(1): `slug` (`sandbox/worktree.py`) deliberately
+    PRESERVES `.` in a repo id (`my.repo.js` stays `my.repo.js`), and Docker's `name` filter is a
+    REGEX, so an unescaped `^{prefix}` lets that `.` match ANY character. `_container_prefix`
+    (`buildverify.py`) builds exactly this shape — `sandbox_name(run_id, repo, attempt) + "-t"` —
+    and `on_cancel` sweeps it with `list_by_prefix`, force-removing everything it returns. Two
+    sibling repos whose names differ only where the target has a literal `.` — `my.repo.js` and
+    `myXrepo.js` — must stay distinguishable, or a cancel/sweep for one repo `docker rm --force`s
+    the OTHER repo's live container (which then exits 137, read by the harness as a substantive
+    failure, not infrastructure — research-36 Q1(d)). Without `re.escape` in `list_by_prefix`,
+    both names come back and this assertion fails.
+    """
+    target_repo = "my.repo.js"
+    victim_repo = "myXrepo.js"  # differs from target ONLY at the position of target's literal `.`
+    target_name = f"{sandbox_name(RUN_ID, target_repo, 1)}-t{'a' * 8}"
+    victim_name = f"{sandbox_name(RUN_ID, victim_repo, 1)}-t{'b' * 8}"
+    prefix = f"{sandbox_name(RUN_ID, target_repo, 1)}-t"
+    runner = RegexFilterRunner([target_name, victim_name])
+    sandbox = ContainerSandbox(runner=runner)
+
+    matched = await sandbox.list_by_prefix(prefix)
+
+    assert matched == [target_name]
+    assert victim_name not in matched
 
 
 # --------------------------------------------------------------------------------------

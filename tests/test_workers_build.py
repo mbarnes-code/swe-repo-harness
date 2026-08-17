@@ -1577,7 +1577,24 @@ async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_pr
     await BuildverifyWorker(runner=runner).on_cancel(ctx)
 
     ps_call = runner.argv_for("ps")
-    assert ps_call is not None and ps_call[-3] == f"name=^{prefix}", ps_call
+    assert ps_call is not None
+    filter_arg = ps_call[-3]
+    # Deliberately the ESCAPED form, not the raw `prefix` — do not "simplify" this back.
+    # `list_by_prefix` (`sandbox/container.py`) runs `re.escape` on the prefix before
+    # interpolating it into Docker's `name` filter, which is a REGEX: an unescaped `.` in a repo
+    # id (`slug` preserves it, e.g. `my.repo.js`) would otherwise act as a wildcard and let the
+    # filter cross-match a SIBLING repo's live container (research-36 Q1.5(1); regression-tested
+    # directly against a dotted repo id in
+    # `test_sandbox.py::test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matched`).
+    # `re.escape` changes even THIS prefix, which has no `.` at all — Python 3.7+ also escapes
+    # `-`, of which the UUID/repo-slug prefix has several — so comparing against the raw prefix
+    # broke the moment escaping was added, independent of any dot.
+    assert filter_arg == f"name=^{re.escape(prefix)}", filter_arg
+    # The property that actually matters: interpreted as Docker would interpret it, the filter
+    # matches exactly this rung's own leaked containers.
+    pattern = re.compile(filter_arg.removeprefix("name="))
+    assert pattern.match(leaked_probe)
+    assert pattern.match(leaked_build)
 
     removed = [call[-1] for call in runner.calls if call[1:3] == ("rm", "--force")]
     assert set(removed) == {leaked_probe, leaked_build}, (

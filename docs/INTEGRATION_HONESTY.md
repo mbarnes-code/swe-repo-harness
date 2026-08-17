@@ -2147,3 +2147,139 @@ the same cause can be swept for at near-zero cost, and it will be there more tha
 count for this family is now **thirteen** (D29 plus these twelve), across `workers/`, `vcs/`,
 `sandbox/`, `rewrite/` and `cli.py`, in code written by different rounds. **None of the thirteen
 would have been found by running the suite harder, and all of them have passing tests today.**
+
+**D47 — OPEN. `build_diagnosis` is generated on every rung-2/3 build or test failure and consumed
+by nothing.** `BuildverifyOutput.diagnosis` and `.diagnosis_failure_class`
+(`buildverify.py:625-630`) are written exactly once, at `buildverify.py:1152-1153`, from an LLM
+call (`_diagnose`, `buildverify.py:1120-1153`) gated only on `ctx.context_policy is not None` —
+i.e. it fires on rungs 2 and 3 for **every** non-ok build/test step, a 125 included
+(`buildverify.py:873-874`, confirmed by direct read of the call site). **No code anywhere reads
+either field.** Re-verified independently of research-36 for this entry: `grep -rn "diagnosis"
+src/` returns only the two `Field()` declarations, the two writes above, the LLM-plumbing trio
+(`roles.py:57`, `calls.py:360`, `schemas.py:151-162`), and prose comments — zero reads, zero
+`getattr`, zero string-key lookups. Traced through all three egress paths and all three are
+closed:
+
+1. **Parent handoff drops it.** `BuildWorker._handoff` (`cli.py:4983-4989`) and
+   `VerifyWorker`'s equivalent (`cli.py:5480-5486`) each copy a fixed field list — `steps`,
+   `build_ok`, `test_ok`, `tests_ran` — that does not include `diagnosis`.
+2. **Checkpoints don't carry it.** The only `checkpoints.save` call
+   (`orchestrator/runner.py:1005-1011`) persists a `PhaseCheckpoint(completed_units,
+   remaining_units, attempt)`, not the worker output object.
+3. **`migration_state.json` doesn't carry it.** No `diagnosis` field exists in
+   `state/projection.py` or `models/state.py` (checked directly — zero hits).
+
+The only thing consumed is the token cost: `response.usage` (`buildverify.py:1050`) flows into
+`WorkerResult.usage` and is billed by the budget machinery, so the harness pays WORKHORSE-tier
+tokens on every rung-2/3 build failure across the fleet and keeps only a token counter for it.
+
+**Why this is D47 and not a silent deletion (ADR-0068).** `docs/SPEC.md:1390-1392` and
+`docs/SPEC.md:6266` both name `build_diagnosis` as a mandated LLM slot — it is not an
+orphaned experiment nobody asked for, it is a shipped fraction of a spec'd feature whose
+consuming half was never built. Removing the code would make the SPEC describe a slot that does
+not exist; keeping it without recording the gap would let a reader believe the diagnosis is used
+somewhere because the SPEC says the slot exists. Neither silence is acceptable, so: **kept, and
+recorded here.**
+
+**A secondary defect found while writing this entry.** `SPEC.md:1391-1392`'s own description of
+the slot — "the model reads the Bazel error and proposes an edit, code applies it and re-runs the
+build" — does not match `LlmBuildDiagnosis` (`schemas.py:151-162`: `failure_class`, `root_cause`,
+`suspect_paths`, `suggested_action`, `confidence` — no diff/edit field of any kind) or
+`buildverify.py`'s own docstrings (`:625-630`, `:1129-1134`), which call the output "advisory
+only" because "the exit code is the verdict." The SPEC sentence instead describes
+`transform_repair` (a different role, a different ladder — SPEC.md:185, :856, :6265). The SPEC
+prose overclaims what this slot does; not corrected here (Rule 7 — surfaced, not silently
+averaged into an unrelated edit; `docs/SPEC.md` is this worker's file, but the correction is
+recorded as a known follow-up rather than bundled into this ledger entry). **Would a test catch
+it? No** — `tests/test_workers_build.py:2340` asserts only the negative case
+(`out.diagnosis == ""` when nothing failed); nothing asserts the field is ever populated, let
+alone consumed.
+
+**Severity: waste, not correctness.** Nothing downstream is wrong because of D47 — the exit code
+remains the verdict, per the harness's own design (Rule 5: models judge nothing). The cost is
+pure: WORKHORSE tokens spent fleet-wide, on every rung-2/3 failure, for advice that reaches no
+reader. **Not fixed here**: wiring a consumer would be speculative (CLAUDE.md Rule 2 forbids
+building a reader nobody asked for just to justify the writer), and deleting it would contradict
+the SPEC without a corresponding SPEC edit, which is out of scope for this pass.
+
+---
+
+**D48 — OPEN. Config drift is gated on `fleet resume`, which is `_unavailable`; the six verbs that
+actually re-enter an interrupted run go through `_phase_preflight`, which never reads
+`runs.config_digests`. Edit a prompt template or a model id, re-run the phase verb, and prior work
+is handed back — the checkpoint key `(run_id, repo_id, phase)` carries no configuration component,
+so the correctly content-addressed LLM cache below it is never consulted.**
+
+Found by a targeted audit (checkpoint 37) after a comparative read of `references/` surfaced the
+same defect class in Visa's `vvaharness`, which keys resume checkpoints on `sha256(repo path)` only.
+`fleet` does **not** have that literal bug — `run_id` is a UUID4 (`cli.py:1630`), not a path hash —
+but arrives at the same outcome by a different route, which is why it is filed as its own entry
+rather than as a note on someone else's.
+
+**The guard exists and is good.** `settings.drifted_sections(baseline)` compares per-section
+digests, not one opaque hash (`settings.py:1222`, `:1504`), and the refusal it raises is unusually
+well-written: `--accept-drift <section>` takes them one at a time, each writing its own audited
+`ConfigDrift` finding, and `--force-config-drift` warns in its own message that it "also accepts
+every OTHER co-edited change, and is how a run is lost (§10)" (`cli.py:9819-9824`). Nothing about
+the design is wrong.
+
+**It is on a dead-end path.** Its sole call site is `_resume_impl`, and `resume` terminates at
+`_unavailable("resume", "src/fleet/workers/clone.py (the phase drivers it re-enters)")`
+(`cli.py:9792`) — the drift check runs, then the command refuses to do anything. The verbs that do
+re-enter a run (`plan`, `build`, `verify`, `migrate-repos`, `transform`, `pr`) share
+`_phase_preflight` (`cli.py:866-878`), whose three refusals are `_check_schema_version`,
+`_resolve_run`, and `_refuse_concurrent_mirror_run`. **No drift read.** `grep -rn config_digests
+src/` returns schema, migration, settings and two `cli.py` comment lines — no reader on a live path.
+
+**The failure is silent and it costs the ladder.** `_resolve_run` picks the latest `run_id`;
+`_load_checkpoint` finds the row under `(run_id, repo_id, phase)` (`state/checkpoints.py:74-88`);
+`checkpoints.load` rejects on exactly three things — stored `model_name` ≠ loader class name,
+envelope `schema_version` ≠ the module-level `SCHEMA_VERSION`, and Pydantic validation
+(`checkpoints.py:141-172`). None of the three moves when a prompt, a model id, or a `budgets` limit
+changes. Worse, ladder position is preserved rather than reset (`runner.py:631`,
+`WorkerContext.attempt = phases.attempts + 1`), so a repo three rungs into an escalation under the
+old model resumes at **rung 4 under the new one**, with the old rungs' spend charged and their
+rejected approaches fed forward as `EVIDENCE_PLUS_REJECTED_APPROACHES` — evidence gathered against
+a configuration that no longer exists.
+
+**The two layers disagree, and the wrong one wins.** `llm/cache.py:10-12,138-152` keys on
+`role | tier | backend | model_id | effort | context_policy | rejected_approach_digest |
+prompt_sha256 | prompt_template_version | response_schema_sha256 | adapter_versions`, with
+`prompt_sha256` over the fully rendered prompt (`llm/calls.py:281-289`). A prompt or model change is
+correctly a cache **miss**. But the checkpoint sits above the cache: the unit is marked complete, the
+model is never called, and the miss never happens. ADR-0069 §5 records "deterministic gate strictly
+before LLM judgment" as a convergent finding across three references; this is the same ordering
+error with the sign flipped — a stale deterministic gate suppressing a correct re-derivation.
+
+**Two documentation defects found alongside it, both OPEN:**
+
+1. `workers/base.py:237-244` claims `checkpoints.load` "compares the persisted
+   `written_schema_version` against the loading class's `schema_version`". It does not — `load`
+   compares the module-level `SCHEMA_VERSION` (the DB `PRAGMA user_version`, `models/state.py:16`);
+   `written_schema_version` rides inside the payload as a plain `int` and validates against any
+   value. `WorkerOutput.checkpoint_is_current` (`base.py:257-259`) has **no caller in `src/`** —
+   `grep -rn checkpoint_is_current src/` returns 1 hit (its own definition), `tests/` returns 3.
+   Bumping a `WorkerOutput.schema_version` therefore does not invalidate that output's checkpoints,
+   contrary to what the docstring tells the next reader.
+2. `_open_run` rewrites `runs.config_digests` unconditionally on every re-scan
+   (`cli.py:1902-1906`) while `upsert_run` is `ON CONFLICT DO NOTHING` for `config_sha256`
+   (`state/repository.py:1006-1009`). A re-scan under edited config silently **resets the drift
+   baseline** and leaves `config_sha256` disagreeing with the digest map that `settings.py:1207-1210`
+   states "can never disagree".
+
+**Would a test catch it? No.** The drift machinery is tested against `_resume_impl`; nothing asserts
+that a phase verb refuses, warns, or invalidates on a changed digest, because no phase verb reads
+one. `fleet resume --reset-attempts` exists as a flag and is discarded unused (`cli.py:9786`,
+`_ = (from_phase, repo, reset_attempts, …)`).
+
+**Not fixed here.** This entry is a finding, not a change: `cli.py` is `src/` and outside the
+documentation pass that produced checkpoint 37. The fix is not obviously "call the gate from
+`_phase_preflight`" either — that would make every phase verb refuse on any drift, including drift
+the operator already accepted on a prior verb, and the accept-once-per-section audit trail is
+currently keyed to a command that does not run. **Whoever takes this must decide what a phase verb
+should do on drift before writing any code**, and that decision belongs in an ADR.
+
+**Working-tree caveat.** Verified against landed code at `8464dc6`. The uncommitted edits present
+during this audit (`llm/cache.py`, `sandbox/container.py`, `workers/buildverify.py`, three test
+files) touch no checkpoint, resume, or drift code — checked by diff before the claims above were
+written, per §33's misattribution lesson.

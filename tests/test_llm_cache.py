@@ -33,6 +33,7 @@ from fleet.llm.cache import (
 from fleet.llm.calls import prompt_sha256, render_prompt
 from fleet.llm.client import (
     CallBudget,
+    LlmError,
     Message,
     ModelCapabilities,
     ModelResponse,
@@ -359,6 +360,26 @@ def test_read_only_turns_a_miss_into_a_hard_error() -> None:
     with pytest.raises(CacheMiss) as excinfo:
         call(client)
     assert ROLE in str(excinfo.value)
+    assert inner.calls == []
+
+
+def test_cache_miss_is_not_an_llm_error() -> None:
+    """Pins the Rule 11 fix: `CacheMiss` must NOT be catchable by the bare `except LlmError:`
+    degrade-and-continue pattern every worker's advice-call site uses (`buildverify.py`,
+    `buildgen.py`, `prwriter.py`), or a `--llm-cache read-only` replay drift would be swallowed
+    exactly like a harmless "the model API hiccupped" advisory failure — silent degradation
+    instead of the hard, recorded failure replay mode exists to guarantee."""
+    assert not issubclass(CacheMiss, LlmError)
+
+    client, inner, _, _ = build(mode="read-only")
+    try:
+        call(client)
+    except LlmError:
+        pytest.fail(
+            "CacheMiss must not be swallowed by a bare `except LlmError:` advisory catch"
+        )
+    except CacheMiss:
+        pass
     assert inner.calls == []
 
 

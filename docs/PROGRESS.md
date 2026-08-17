@@ -4578,3 +4578,113 @@ carry uncommitted, concurrently-authored changes before citing their line number
 4. **The missing `blips=5` sibling test (M1) and the `clone._error_for` retryable fix or narrower
    assertion (M2)** — both named above, both need a worker with `tests/`/`clone.py` write scope
    broader than this round's grant.
+
+---
+
+## 37. Checkpoint — 2026-08-17 · a **reference acquisition and comparative evaluation**, zero `src/` changes: `langchain-ai/deepagents` vendored at a **pinned SHA into an untracked directory**, then eight parallel read-only subagents put it against the six existing references and this harness itself on **one eight-axis schema** · the headline is a **category error avoided** — deepagents authors **no loop** and ships **no local sandbox**, so it is a middleware catalogue, not a competitor · **ADR-0069** records the decision, the four adoption candidates as **Agent Recommendations**, and a **citation policy** that rules one reference's numbers inadmissible · one reference's documented invariant proved **false against its own source**, and Guardrail 2 is what caught it
+
+### What was completed
+
+1. **`references/deepagents/` acquired.** `gh repo clone` failed (unauthenticated); plain HTTPS
+   `git clone` used instead, the repo being public. Landed at
+   `1c6d358c60306aad2af0067dcca76f85f4deeba1` (2026-08-17), `deepagents` core v0.7.6, 327 MB with
+   history. `.gitignore:87` (`references/*/`) leaves it untracked, consistent with `Agent-Harness/`
+   and `visa-vulnerability-agentic-harness/`; it was **not** force-added.
+2. **Eight parallel subagents, one shared schema.** Two on deepagents (`libs/deepagents/` core;
+   `libs/code/` + `libs/cli/` + `libs/acp/`), one each on `Agent-Harness/`,
+   `visa-vulnerability-agentic-harness/`, the two Cloudflare documents together, the
+   harness-engineering guide, and the OpenAI Codex essay — plus one mapping **this harness** as the
+   baseline, so the comparison had something concrete to be measured against rather than seven
+   free-floating profiles.
+3. **`docs/DECISIONS.md:5069` — ADR-0069 appended** (190 lines). Sections: provenance and the
+   SHA-pinning rationale; the category error; a six-row table of where deepagents is *behind*
+   `fleet`; four adoption candidates; five convergent cross-reference findings; an evidence-tier
+   citation policy; five observed anti-patterns; the decision; four rejected alternatives.
+4. **A follow-up audit dispatched** on the one finding that looked like it could bite us: Visa keys
+   resume checkpoints on `sha256(repo path)` only, so a config change does not invalidate `--resume`.
+   Whether `fleet` shares that defect class is being checked against `workers/base.py`,
+   `state/`, and `llm/cache.py`. **Result not yet in at the time of this checkpoint.**
+
+### What was verified
+
+- **Every `src/fleet` citation in ADR-0069 was re-derived in the main session before it entered
+  `docs/`**, not trusted from the subagent that reported it (Guardrail 6): `retry.py:148 decide()`,
+  `container.py:135-137`'s `--network`/`--memory`/`--cpus`, ADR-0044's title at
+  `DECISIONS.md:1958`, D32 at `INTEGRATION_HONESTY.md:1539`, D47 at `:2151`, and `worktree.py`'s
+  single-owner rule.
+- **A documented invariant in a reference was falsified against its own source.** deepagents'
+  `edit_file` docstring (`middleware/filesystem.py:1247`) asserts *"You must read the file before
+  editing; this tool errors otherwise."* **No enforcement exists** — no `files_read` set, no
+  mtime/hash comparison, anywhere in the middleware or any backend. Two subagents reached this
+  independently. Taken at face value it would have entered an ADR as a real safety property; §7 of
+  ADR-0069 records it as the Guardrail 2 failure mode caught in the wild.
+- **Both deepagents subagents independently confirmed the absence of retries** in core, and the
+  absence of any local/containerised sandbox (remote SaaS providers, or bare
+  `subprocess.run(shell=True)`).
+- **`grep -c ''`** before/after: `DECISIONS.md` 5065 → 5255 lines. No `src/` or `tests/` file was
+  touched this checkpoint; the suite was **not** run, and nothing here claims it was.
+
+### What is still NOT proven / left open
+
+1. **The checkpoint-keying audit is unreturned.** Whether `fleet` shares Visa's path-only resume
+   defect is **open**, not answered. No ledger entry was opened in anticipation of a finding.
+2. **ADR-0069 §4's four candidates are unimplemented and unmeasured.** They are labelled *Agent
+   Recommendations* per Guardrail 1 and carry no authority. In particular, the claim that
+   capture-at-source offload would address the 32 KiB `stdout_tail` truncation is an **argument, not
+   a measurement** — nobody has measured what a real Bazel failure log costs us today.
+3. **The reference citations are falsifiable only against the pinned SHA**, and that tree is
+   untracked. If `references/deepagents/` is ever re-cloned or updated, every `libs/...` line number
+   in ADR-0069 must be re-derived, not assumed.
+4. **Only two of the seven references carry admissible numbers.** Cloudflare's funnel figures are
+   citable (with its "North Star" section excluded as a modelled scenario); Codex's are
+   self-reported and self-disclaiming. Visa states it has none. The harness-engineering guide's
+   figures are **inadmissible** and ADR-0069 §6 says so by name.
+5. **The uncommitted working tree persists.** `git status --short` still shows `llm/cache.py`,
+   `sandbox/container.py`, `workers/buildverify.py`, and two test files modified — carried over
+   from §36's round, not produced here. The `container.py:135-137` citation above is to the working
+   tree as read, per §36's own warning about trusting line numbers across concurrent work.
+
+### Next subagent task, in priority order
+
+1. **Integrate the checkpoint-keying audit result** — if it confirms a defect, open a D-number; if
+   `fleet` is clean, record the mechanism that prevents it so the question is not re-asked.
+2. **Everything in §36's list remains unstarted** — C1/C2's corrected strings in
+   `buildverify.py`/`base.py`, ADR-0067's four parts in `cli.py`, and the `D34/D35/D36/D41`
+   staleness re-audit that still needs a suite run. This checkpoint added documentation; it
+   discharged none of that backlog.
+3. **Measure before adopting anything from ADR-0069 §4.** The first honest step for candidate 1 is
+   measuring what a real Bazel failure log actually costs through `util/proc.py`'s tail — a number
+   nobody has.
+
+### §37 addendum — the audit returned, and it found one: **D48**
+
+Written after the section above, in the same session. The checkpoint-keying audit listed as
+"unreturned" in *What is still NOT proven* §1 has since completed, so that item is **closed** and
+its "next subagent task" §1 is **discharged**. Recorded as an addendum rather than by editing the
+text above, so the order in which this was learned stays legible.
+
+**Verdict: PARTIAL — same defect class, different route.** `fleet` does not have Visa's literal
+`sha256(repo path)` bug (`run_id` is a UUID4, `cli.py:1630`), but reaches the same outcome. The
+config-drift gate is real, well-designed, and **wired only into `fleet resume`, which dead-ends at
+`_unavailable("resume", …)` (`cli.py:9792`)**. The six verbs that actually re-enter an interrupted
+run share `_phase_preflight` (`cli.py:866-878`), which checks schema, resolves the run, and refuses
+a concurrent mirror — and never reads `runs.config_digests`.
+
+**Filed as D48** (`docs/INTEGRATION_HONESTY.md`), with two documentation defects found alongside it:
+`base.py:237-244` describes an invalidation `checkpoints.load` does not perform, and
+`WorkerOutput.checkpoint_is_current` has no caller in `src/`; and `_open_run` silently resets the
+drift baseline on every re-scan (`cli.py:1902-1906`).
+
+**Verified in the main session before filing**, not taken on the subagent's word: the
+`_unavailable` dead-end, `_phase_preflight`'s three refusals, the `(run_id, repo_id, phase)` conflict
+target at `state/checkpoints.py:74-88`, and the `checkpoint_is_current` caller counts
+(1 in `src/` — its own definition — against 3 in `tests/`). The subagent ran `git diff` first and
+confirmed the uncommitted edits touch no checkpoint, resume, or drift code; claims are against
+`8464dc6`.
+
+**Not fixed, deliberately.** D48's own entry argues the obvious fix — calling the gate from
+`_phase_preflight` — is probably wrong, because it would make every phase verb refuse on drift an
+operator already accepted, and the accept-once-per-section audit trail is keyed to a command that
+does not run. **The decision of what a phase verb should do on drift precedes any code and belongs
+in an ADR.** That is the next task, and it is now ahead of the §36 backlog in priority, because
+this one can silently reuse work from a configuration that no longer exists.

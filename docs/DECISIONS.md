@@ -4974,3 +4974,282 @@ code on a mandatory code path — it is not something a model may choose to igno
 secondary engines in ADR-0006 (`libcst`, `ts-morph`) are the ones genuinely at risk of the
 Semgrep fate, so each is fenced to a named capability and will be removed outright if its
 call count stays at zero.
+
+---
+
+## ADR-0068 — `build_diagnosis` is **kept, not deleted**, because `docs/SPEC.md` names it as an LLM slot; the unconsumed output is recorded as **D47**, not silently removed. `CacheMiss` stops being an `LlmError`, so it can no longer be swallowed by the worker degrade-and-continue pattern
+
+**Trigger.** research-36 Q3 (MEASURED): `BuildverifyOutput.diagnosis` /
+`.diagnosis_failure_class`, written at `buildverify.py:1152-1153`, have **zero readers** anywhere
+in `src/` — dropped at every egress (`cli.py:4983-4989`'s and `:5480-5486`'s `_handoff` field
+lists, the sole `checkpoints.save` at `orchestrator/runner.py:1005-1011`, and
+`state/projection.py`/`models/state.py`, neither of which declares a `diagnosis` field). Only
+`response.usage` (`buildverify.py:1050`) is consumed. **Independently re-verified**, not just
+cited: `grep -rn "diagnosis" src/` was re-run for this ADR and returns the same closed set —
+`schemas.py:151` (`LlmBuildDiagnosis`), `roles.py:57` (`BUILD_DIAGNOSIS = "build_diagnosis"`),
+`calls.py:360`, `enums.py:222`, and the four `buildverify.py` sites above — no reader anywhere.
+
+**Decision 1 — do not remove `build_diagnosis`.** CLAUDE.md's ruling for this situation is
+conditional on `docs/SPEC.md`: if the SPEC mandates the feature, deleting the code silently would
+put code and SPEC out of step, which this project treats as its signature defect. **The SPEC does
+mandate it**, checked directly, not assumed:
+
+- `docs/SPEC.md:1390-1392` lists it in the **LLM slots** enumeration for Phase 3: "build-failure
+  diagnosis on attempts 2–3 (sonnet, then opus)".
+- `docs/SPEC.md:6266` — `config/models.yaml`'s worked example — declares
+  `build_diagnosis: WORKHORSE` in the `roles:` table alongside `transform_repair` and
+  `manifest_extract`.
+
+So this is **Situation 2** of the two the ruling distinguishes: SPEC-mandated, code generates it,
+nothing consumes it. The code is kept; the gap is recorded rather than papered over, as **D47**
+in `docs/INTEGRATION_HONESTY.md`.
+
+**A second, narrower finding while checking the SPEC citation.** `SPEC.md:1391-1392`'s own prose
+— "the model reads the Bazel error and proposes an edit, code applies it and re-runs the build" —
+does **not** describe what `build_diagnosis` actually does. `LlmBuildDiagnosis`
+(`schemas.py:151-162`) has exactly five fields — `failure_class`, `root_cause`, `suspect_paths`,
+`suggested_action`, `confidence` — **none of them a diff or patch**, and `buildverify.py`'s own
+docstrings at `:625-630` and `:1129-1134` call it "advisory only" precisely because "the exit code
+is the verdict." The "proposes an edit, code applies it" sentence instead describes
+`transform_repair` (SPEC.md:185, :856, :6265 — a *different* role, on a *different* ladder, §9's
+repair loop for relocated files, not §3.3's build-verification diagnosis). This is a documentation
+defect in the SPEC prose, not a code defect — flagged here per Rule 7 (surface conflicts, don't
+average) rather than corrected unilaterally, since `docs/SPEC.md` edits of this shape belong beside
+the D47 entry, not folded silently into an unrelated ADR. See D47 for the full citation chain.
+
+**Decision 2 — `CacheMiss` (`llm/cache.py:92`) no longer subclasses `LlmError`.** Independent of
+(1): research-36 Q3(b) found `CacheMiss` raised on a `--llm-cache read-only` miss
+(`cache.py:469-470`) is caught by the bare `except LlmError:` degrade-and-continue pattern at
+every advice-call site that uses it — `buildverify.py:1148`, `buildgen.py:454`, `buildgen.py:566`,
+`prwriter.py:414`, `prwriter.py:422` (all re-verified by direct read, not just cited from
+research-36) — each of which exists to keep a genuine model-side hiccup (a malformed reply, a
+transport failure) from turning a recorded repo failure into an unrecorded worker crash. A replay
+integrity break is a different kind of event: the model was never asked, so there is nothing to
+degrade gracefully from, and CLAUDE.md Rule 11 (Fail Loud) is violated when it is swallowed
+identically to those.
+
+**Why removing `LlmError` from `CacheMiss`'s bases is safe** (checked, not assumed, so as not to
+break a caller that depends on the old shape):
+- No `isinstance(x, LlmError)` check exists anywhere in `src/` or `tests/` (`grep` confirms zero).
+- `.complete()` is called **only** from inside worker `run()` methods (`grep '\.complete('`
+  confirms zero call sites outside `llm/` and `workers/`), so every exception `CacheMiss` can
+  produce is already routed through `BaseWorker._run_one` (`workers/base.py:864-905`), whose
+  `except Exception as exc:` at `:897` classifies and records **every** escape, `LlmError` or not
+  ("every escape is classified, none is swallowed (Rule 11)" — the existing, working mechanism
+  this fix now reaches). `cli.py:489`'s top-level `except LlmError as exc:` funnel is therefore
+  unreachable for `CacheMiss` either before or after this change — nothing there regresses.
+- `classify.py:170`'s `except (LlmError, ValidationError)` maps an uncaught exception to
+  `FailureClass.UNKNOWN` via `_error_for`'s `else` arm (`classify.py:238-254`) for anything that
+  isn't `BudgetExhausted`/`TierUnavailable`/`TransportError`/`SchemaUnsatisfied`/`MalformedReply`;
+  `CacheMiss` hit that same `else` arm before this change. Falling through to
+  `_run_one`'s `classify_exception` (`base.py:500-519`) after this change lands on the same
+  `FailureClass.UNKNOWN` default — **behaviourally identical**, not a regression.
+- `rewrite.py:472`'s `except LlmError as exc:` re-wraps as `WorkerRepairError` (`RuntimeError`,
+  not an `LlmError` subclass itself) before reaching `_run_one`; without the wrap `CacheMiss`
+  reaches the same boundary with its own already-descriptive message and the same `UNKNOWN`
+  classification (`classify_exception` has no `WorkerRepairError`-specific branch either).
+
+No caller's depended-upon behaviour changes, so this did not need to be escalated as a blocking
+report before making the edit — verified first, then made, per the task's own conditional.
+
+**Not fixed here (`buildverify.py` is owned by another worker this round, and touching it was
+not needed for either decision above):** deeper hygiene — collapsing the five now-partially-dead
+`except LlmError:` sites, or teaching `classify_exception` a `CacheMiss`-specific `FailureClass`
+— is left alone. Rule 2 (simplicity first): the type-hierarchy fix is the minimum change that
+makes the miss fail loud everywhere at once; narrowing five separate catch clauses is
+speculative work nobody asked for.
+
+**Files changed:** `src/fleet/llm/cache.py` (`CacheMiss` base class + docstring),
+`tests/test_llm_cache.py` (new `test_cache_miss_is_not_an_llm_error`, pinning both the
+non-inheritance and that a bare `except LlmError:` no longer catches it). `docs/SPEC.md` was
+**not** edited (the prose defect is flagged above and in D47, not silently corrected — Rule 7).
+
+---
+
+## ADR-0069 — `deepagents` is a **mechanism catalogue, not a runtime**: it authors **no loop** and ships **no local sandbox**, so it is consumed (if ever) **behind a Protocol** per Guardrail 3 — and the four mechanisms worth taking are all **context economics**, the one axis on which a harness with no conversation has no story
+
+**Status: EVALUATION RECORD. The findings below are DECIDED; every adoption candidate in §4 is
+NOT YET IMPLEMENTED.** No candidate has a `docs/INTEGRATION_HONESTY.md` entry, because none is a
+defect in this harness — they are opportunities, and inventing D-numbers for opportunities would
+corrupt the ledger's meaning. Per Guardrail 1, §4 is explicitly labelled **Agent Recommendations**
+and confers no authority; nothing in this ADR is a directive until separately decided.
+
+### 1. Provenance, and why this ADR must carry a SHA
+
+`langchain-ai/deepagents` was cloned to `references/deepagents/` at
+**`1c6d358c60306aad2af0067dcca76f85f4deeba1`** (committed 2026-08-17T16:37:13-04:00), `deepagents`
+core **v0.7.6**. Every `libs/...` citation below is relative to that commit.
+
+The SHA is load-bearing, not decoration. `.gitignore:87` (`references/*/`) excludes the clone from
+this repository, matching how `Agent-Harness/` and `visa-vulnerability-agentic-harness/` are already
+handled. **This tree is therefore not reproducible from our own history** — the citations are
+falsifiable only against that SHA, and `deepagents` is an actively-developed monorepo whose recent
+commits are CLI/TUI work. An unpinned line-number citation to a vendored, untracked, fast-moving
+reference is an unmeasured claim in the sense of Guardrail 6; the pin is what makes it checkable.
+
+Findings were produced by eight parallel read-only subagents against a fixed eight-axis schema
+(control loop, context management, tool surface, state, sandboxing, subagents/parallelism,
+verification, failure handling) plus evidence-quality and gaps. Claims about `src/fleet` cited here
+were **re-verified directly in the main session** before entering this file (`retry.py:148`,
+`container.py:135-137`, ADR-0044's title, D32/D47, `worktree.py`'s single-owner rule).
+
+### 2. The category error this ADR exists to prevent
+
+`deepagents` **contributes no runtime of its own** (`libs/ARCHITECTURE.md:16-28`): the loop, state
+and checkpoints are LangGraph's, and `create_deep_agent` merely assembles middleware before
+returning `create_agent(...)` (`libs/deepagents/deepagents/graph.py:922-944`, `recursion_limit:
+9_999`). It is a middleware bundle.
+
+`fleet` has **no LLM agent loop at all.** `PhaseRunner._drive` (`src/fleet/orchestrator/runner.py:425`)
+is a claim→lease→dispatch→fenced-write loop; ADR-0044 already fixes that **Bazel's exit code is the
+verdict** and the model is asked only what stderr *means*. Tools are harness-side and never
+model-callable — every shell-out funnels through `src/fleet/util/proc.py:run` as argv lists.
+
+These are different layers, not competing designs. "Adopt deepagents?" is therefore the wrong
+question and would produce a wrong answer in either direction: adopting it wholesale would import a
+model-driven loop this harness deliberately does not have, and dismissing it wholesale would discard
+middleware that solves problems this harness has not yet had to face. **The right question is which
+middleware transplants into a deterministic orchestrator**, and the answer is short.
+
+### 3. Where `deepagents` is behind this harness
+
+| Axis | `deepagents` @ `1c6d358c6` | `fleet` |
+|---|---|---|
+| Retries | **None in core.** No retry, backoff, or attempt counter; errors become `ToolMessage(status="error")` strings for the model to read | `retry.py:148 decide()`, a pure function of `(LadderState, WorkerError)` that never branches on message text |
+| Sandbox | No local backend. All providers are remote SaaS (Modal/Daytona/Vercel/Runloop); the local path is bare `subprocess.run(shell=True)` (`libs/code/.../local_shell.py:302`) | `docker run --network=none --memory --cpus` (`container.py:135-137`) + `git worktree` per `(run_id, repo, attempt)`, both with owner-aware reapers |
+| Durable state | LangGraph checkpoints only — no task queue, no heartbeats, no attempt counters, no `REQUIRES_HUMAN_INTERVENTION` terminal | SQLite WAL authoritative for orchestration, git for code (ADR-0024); single-writer actor, fenced leases, stale-fence discard |
+| AST | **None.** No tree-sitter, no LSP, no unified-diff parser; mutation is whole-file write or one exact-string replace | Phase-2 core; total-order fixpoint buffer (`rewrite/pipeline.py`) |
+| Concurrency | Model-driven fan-out via the `task` tool; no scheduler, no concurrency control | Waves admitted by descending blast radius; five semaphore classes in `Limits` |
+| Staleness | None — concurrent workers clobber silently; git must be the only guard | Single-owner worktree rule, enforced structurally by name (`worktree.py`) |
+
+Its own `libs/deepagents/THREAT_MODEL.md` rates the shell allow-list *"an ergonomic auto-approve
+heuristic, not a security boundary"* (first-token matching, defeated by `python3 -c`), and
+`backends/sandbox.py:962-968` concedes `BaseSandbox` *"does not reduce or partition the trust
+boundary of `execute()`."* On the axis where a migration harness is most exposed, the reference is
+weaker than what is already shipped here.
+
+### 4. Adoption candidates — **Agent Recommendations, NOT YET IMPLEMENTED**
+
+Four, all narrow, none architectural:
+
+1. **Capture-at-source execute offload** (`backends/sandbox.py:837-870`). A shell wrapper redirects
+   combined output to a file (10 MiB cap via `head -c`), returns 5 head + 5 tail lines inline, and
+   smuggles the exit code back through a `.ec` sidecar plus sentinel line, so a large build log
+   never crosses the RPC boundary. This addresses a problem `CLAUDE.md` already documents — a
+   32 KiB `stdout_tail` truncation that makes `--json` unreliable for `ast-grep` failure detection.
+   Note it ships **off**: `enable_capture_offload` defaults `False` (`sandbox.py:974`).
+2. **Hook events as a verification insertion point** (`libs/code/.../hooks/runner.py:46-163`).
+   Twelve subprocess events; exit 2 blocks; JSON `permissionDecision` with most-restrictive-wins
+   reduction (`hooks/reducer.py:56`). This is the clean seam for a post-edit `ast-grep`/Bazel gate,
+   against a surface the ledger records as having zero coverage at five checkpoints.
+3. **`PatchToolCallsMiddleware`** (`middleware/patch_tool_calls.py:14-46`) — synthesizes missing
+   `ToolMessage`s for orphaned tool calls, distinguishing truncated-args from cancelled. The
+   crash-recovery path after a killed worker.
+4. **The sandbox-ownership idiom** (`libs/code/.../integrations/sandbox_factory.py:133`):
+   `should_cleanup = sandbox_id is None` — pass an id to attach, omit to own. This is precisely the
+   ownership discipline **D32** needs (`INTEGRATION_HONESTY.md:1539`: the container leaks on every
+   timeout because `buildverify._argv` bypasses `ContainerSandbox.run`'s `finally`).
+
+### 5. Convergent findings — the strongest evidence in the set
+
+Where mutually independent references agree, the agreement outweighs any single source's authority:
+
+- **Adversarial verification by a *different* model that cannot write its own results.**
+  Cloudflare's Validator is deliberately given no findings-emission tool; Visa's S6 opens a fresh
+  session per finding instructed to "assume it is WRONG" and refuses to launder an unparseable reply
+  into `FALSE_POSITIVE`; `deepagents`' `middleware/rubric.py` runs a separate grader agent.
+  Cloudflare states the reason plainly: *"If a Hunter is allowed to grade its own homework, it will
+  confidently validate everything it outputs."* This harness satisfies it **mechanically** for
+  builds (ADR-0044), which is stronger than an LLM judge — but has **no equivalent for semantic
+  verification of AST transforms**, where an exit code proves the tree parses, not that it means the
+  same thing.
+- **Deterministic gate strictly *before* LLM judgment.** Visa's S5 prefilter applies AST backfill
+  only *after* its evidence gate, specifically so backfill cannot satisfy the gate. The ordering is
+  the whole mechanism and is easy to invert by accident.
+- **A per-agent context ceiling.** Cloudflare holds context under 25% of the window by giving each
+  agent one narrow question; Visa imposes hard byte caps in the tool layer; `deepagents` triggers
+  summarization at 0.85 of `max_input_tokens`. Three unrelated mechanisms, one principle.
+- **Build failure is data, not harness error.** `deepagents` keeps `status="success"` on non-zero
+  exit and puts the code on `ToolMessage.artifact` (`backends/protocol.py:774-784`); ADR-0044
+  reached the same conclusion independently here. Convergence on an already-decided choice is a
+  reason to leave it alone (Rule 3), not to revisit it.
+- **An existence proof for Guardrail 3.** Visa's `vvaharness` consumes `deepagents` in production
+  behind a `Harness` ABC with vendor-neutral `ToolPolicy`/`PermissionsPolicy`/`SubagentDefinition`
+  dataclasses, backend swappable by YAML `via:`. Its `read_only_middleware()` records a hard-won
+  detail: `create_deep_agent(middleware=...)` applies to **the parent stack only** — subagents keep
+  write tools unless given their own copy. **If any `deepagents` code is ever consumed here, this is
+  the shape**, and that constraint is the first thing to test.
+
+### 6. Evidence tiers — what may and may not be cited
+
+Guardrail 6 forbids passing an unmeasured number into an ADR or spec. The references stratify, and
+the stratification is itself a finding:
+
+- **Citable.** Cloudflare's two documents carry a real measured funnel (20,799 raw candidates →
+  12,057 surviving validation; rejection rate 40% → 11%) and explicitly **refuse** to claim a
+  recall figure: *"any claimed recall number is entirely speculative."* Caveat: the "North Star"
+  section reads as a modelled scenario and the document does not disambiguate it from audited runs,
+  so only the funnel figures are safe.
+- **Citable as self-reported only.** OpenAI's Codex essay (~1,500 PRs, 3.5 PRs/engineer/day,
+  six-hour unattended runs) is first-person with no baseline, and disclaims its own generality:
+  *"should not be assumed to generalize without similar investment."*
+- **Honest, but offers nothing to cite.** Visa's harness is substantial working code and states
+  outright it has **"No published accuracy numbers yet."** That honesty is why its *mechanisms* are
+  trustworthy even though its *numbers* do not exist.
+- **Not citable.** `harness-engineering-ai-complete-guide-to-agent-harness.md` is SEO content
+  marketing; every figure in it ("83%→96% via verification", "30–50% token cost cut", the 36%
+  compounding-failure arithmetic) appears with no citation or methodology. Its six-component
+  taxonomy may be borrowed as framing; **no number from it may enter `docs/`.**
+  `Agent-Harness/`'s single quantitative claim (~40% stalled-task recovery) is likewise unsourced.
+
+### 7. Anti-patterns observed — recorded so they are not copied
+
+- **Unenforced invariants asserted in prompt text.** `deepagents`' `edit_file` docstring claims
+  *"You must read the file before editing; this tool errors otherwise"*
+  (`middleware/filesystem.py:1247`). **No such enforcement exists** — two subagents independently
+  grepped for read-tracking state across the middleware and every backend and found none: no
+  `files_read` set, no mtime or hash comparison. Had this been taken at face value it would have
+  entered an ADR as a real safety property. This is the exact failure mode Guardrail 2 exists to
+  catch, found in the wild.
+- **Reconstructing typed data by parsing your own prose.** Visa's S9 rebuilds SARIF by parsing its
+  own Markdown report rather than serializing the typed model.
+- **Masking an exit code you need.** `deepagents`' sandbox grep ends `|| true`
+  (`backends/sandbox.py:705-712`), making grep's exit 2 indistinguishable from zero matches — the
+  same four-state-collapse family already tracked here as D29/D34–D46.
+- **Building what agents do not reach for.** Cloudflare wired Semgrep in fully and *"the Hunters
+  invoked it zero times in a month of runs,"* while an informal free-text "Wishlist" tool was
+  written to 25,472 times.
+- **Interactive-assistant defaults in a batch harness.** `deepagents`' coding
+  `system_prompt.md:134` instructs the model to stop after three attempts and **ask the user** —
+  the direct opposite of Rule 11, which requires marking `REQUIRES_HUMAN_INTERVENTION` and moving
+  to the next item. A borrowed prompt can import a borrowed operating model.
+
+### 8. Decision
+
+**`deepagents` is NOT adopted as a framework, runtime, or dependency.** It is recorded as a
+mechanism catalogue and a reference implementation of context economics. `references/deepagents/`
+stays untracked and READ-ONLY under §5 of `CLAUDE.md`.
+
+**Should any `deepagents` code ever be consumed, it is consumed behind a local `Protocol`** per
+Guardrail 3 — never as a vendor singleton reached from orchestration logic — following the ABC shape
+Visa has already proven in production, and testing the parent-stack-only middleware constraint
+first.
+
+**The four §4 candidates are opportunities, not obligations.** Each requires its own decision, its
+own tests under Rule 9, and — for anything claiming a size, a rate, or a cost — its own measurement
+under Guardrail 6 before it may be written down as fact.
+
+### 9. Alternatives rejected
+
+- **Adopt `deepagents` as the agent layer.** Rejected: it authors no loop, ships no local sandbox,
+  has no retry or attempt counter, no staleness detection, and no AST layer — the four things this
+  harness most depends on. It would replace stronger machinery with weaker.
+- **Dismiss it and delete the clone.** Rejected: the context-economics middleware is genuinely ahead
+  of anything here, and this harness will need it the moment any worker holds a conversation.
+- **Fold the seven references into a single ranking.** Rejected under Rule 7 — four are prose, one
+  is a whitepaper with no code in-tree, and two are working codebases. Ranking a blog post against a
+  45.7k-LOC package on "mechanism" would average away exactly the distinction that matters. They are
+  kept in separate tiers, and §6 records why.
+- **Open D-numbers for the §4 candidates.** Rejected: `INTEGRATION_HONESTY.md` is a defect ledger.
+  An unexploited opportunity is not a defect, and diluting the ledger with wishlist items would make
+  the D-numbers stop meaning "something here is wrong."
