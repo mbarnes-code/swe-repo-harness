@@ -101,6 +101,13 @@ class GitCommandError(GitError):
 
     Carries the evidence an `attempts` row needs — redacted argv, exit code, stderr tail — so the
     repair loop can be handed verbatim error text without a transcript (CLAUDE.md guardrail 5).
+
+    `started` is carried BESIDE `timed_out` rather than folded into it, because `util.proc.run`
+    sets both flags for a call made after its deadline had already passed and a classifier reading
+    only `timed_out` cannot then tell "we never asked" from "we asked and it ran too long". Those
+    two answers cost a repo different things on the ADR-0014 ladder (see `base.clock_failure`), so
+    the distinction has to survive the trip from `ProcResult` into the exception. It defaults to
+    `True` because every other raise site here is a git process that demonstrably ran and exited.
     """
 
     def __init__(
@@ -111,13 +118,17 @@ class GitCommandError(GitError):
         *,
         cwd: Path | None = None,
         timed_out: bool = False,
+        started: bool = True,
     ) -> None:
         self.argv = redact_argv(argv)
         self.exit_code = exit_code
         self.stderr = redact_text(stderr_tail)
         self.cwd = cwd
         self.timed_out = timed_out
-        detail = "timed out" if timed_out else f"exit {exit_code}"
+        self.started = started
+        detail = (
+            "never started" if not started else "timed out" if timed_out else f"exit {exit_code}"
+        )
         super().__init__(f"git {' '.join(self.argv[1:])} failed ({detail}): {self.stderr}".strip())
 
 
@@ -244,6 +255,7 @@ class Git:
                 result.stderr_tail,
                 cwd=self.path,
                 timed_out=result.timed_out,
+                started=result.started,
             )
         return result
 

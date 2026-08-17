@@ -381,6 +381,59 @@ def test_clone_preconditions_are_false_before_the_clone_and_true_after(tmp_path:
     assert asyncio.run(worker.preconditions_hold(ctx, payload)) is True
 
 
+def test_a_shallow_file_that_declares_no_boundary_is_not_a_shallow_repository(
+    tmp_path: Path,
+) -> None:
+    """`.git/shallow` holding no grafted commit id is not a shallow repository.
+
+    Why it matters: the shallow verdict is the one that survives a *successful* `--unshallow` as a
+    non-retryable `PREFLIGHT` gate — straight to `REQUIRES_HUMAN_INTERVENTION`, no attempt charged
+    and no attempt possible. An `exists()` check hands that verdict to any complete mirror that
+    happens to carry an empty or whitespace-only `shallow` file, and the file is real enough to be
+    left behind: it is a plain list of ids, and a truncated write or an interrupted fetch leaves
+    one holding nothing. `git rev-parse --is-shallow-repository` has the same blind spot — a
+    planted zero-byte `shallow` makes it answer `true` on a complete repo — so reading the file is
+    not a shortcut around the predicate; it is strictly better than it, for one `read_text`.
+
+    The second half is the non-vacuity: a file that DOES name a root still reads as shallow, so
+    nothing about the gate was widened away.
+    """
+    from fleet.workers.clone import _is_shallow
+
+    result, payload, ctx, _ = clone_once(tmp_path)
+    assert result.status == "ok" and result.output is not None
+    mirror = Path(result.evidence[0])
+    head = result.output.head_sha
+    assert head is not None
+
+    for empty in ("", "\n", "   \n\n\t\n"):
+        (mirror / "shallow").write_text(empty, encoding="utf-8")
+        assert _is_shallow(mirror) is False, "a `shallow` file naming no root was read as a graft"
+
+    # The zero-byte file end to end, because it is the one git itself accepts and mis-reports:
+    # `remote update` succeeds against it while `rev-parse --is-shallow-repository` answers
+    # `true`. (A file holding blank or whitespace lines is instead rejected by git with `fatal:
+    # bad shallow line`, which is a loud failure of its own and never reaches this verdict.) So
+    # this is exactly the state where the old `exists()` check — and the predicate that would
+    # have replaced it — sent a complete mirror to a human, and where reading the file does not.
+    (mirror / "shallow").write_text("", encoding="utf-8")
+    assert subprocess.run(  # noqa: S603
+        ["git", "-C", str(mirror), "rev-parse", "--is-shallow-repository"],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout.strip() == "true", "git's own predicate stopped having the blind spot this documents"
+    rescan = asyncio.run(CloneWorker().run(ctx, payload))
+    assert rescan.status == "ok", rescan.error
+    assert rescan.output is not None and rescan.output.is_shallow is False
+
+    (mirror / "shallow").write_text(f"{head}\n", encoding="utf-8")
+    assert _is_shallow(mirror) is True, "a real shallow boundary stopped being detected"
+
+    (mirror / "shallow").unlink()
+    assert _is_shallow(mirror) is False
+
+
 def test_clone_reentry_refreshes_the_mirror_and_never_clones_twice(tmp_path: Path) -> None:
     """A completed clone re-run is a `remote update`, not a second `git clone`.
 
@@ -545,11 +598,19 @@ def test_an_unshallow_that_never_ran_is_not_a_permanent_preflight_verdict(
     assert blipped.error.failure_class is not FailureClass.PREFLIGHT, (
         "a fetch that never ran was reported as the repository's own immutable shape"
     )
+    assert blipped.error.failure_class is not FailureClass.TIMEOUT, (
+        "a fetch that was never SPAWNED was reported as one that ran too long — `TIMEOUT` is "
+        "substantive on the ladder, so that misattribution charges a rung for a measurement "
+        "nobody took"
+    )
     assert blipped.error.retryable is True
-    assert blipped.error.failure_class is FailureClass.TIMEOUT
-    # …and the verdict the classification feeds: no human is summoned for a network blip.
+    assert blipped.error.failure_class is FailureClass.TRANSIENT_INFRA
+    # …and the verdict the classification feeds: no human is summoned for a network blip, and —
+    # the point of the class, not a corollary of it — no rung is charged for it either.
     decision = RetryPolicy().decide(LadderState(), blipped.error)
     assert decision.terminal_status is not RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    assert decision.charges_attempt is False
+    assert decision.state.attempts == 0
 
     # The settled answer is unchanged: the operator disabled unshallowing, so the mirror's shape
     # IS the verdict and it is still non-retryable PREFLIGHT.
@@ -591,7 +652,11 @@ def test_a_rev_parse_that_never_ran_is_not_an_empty_repo(tmp_path: Path) -> None
     assert blind.output is None, "preflight columns were published from a probe that never ran"
     assert blind.error is not None
     assert blind.error.retryable is True
-    assert blind.error.failure_class is FailureClass.TIMEOUT
+    assert blind.error.failure_class is not FailureClass.TIMEOUT, (
+        "a rev-parse that was never spawned was reported as one killed at its deadline"
+    )
+    assert blind.error.failure_class is FailureClass.TRANSIENT_INFRA
+    assert RetryPolicy().decide(LadderState(), blind.error).charges_attempt is False
 
 
 def test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement(
@@ -618,6 +683,10 @@ def test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement(
     assert submodules.stalled and unmeasured.status != "ok"
     assert unmeasured.output is None, "submodule_count=0 was published for a probe that was killed"
     assert unmeasured.error is not None and unmeasured.error.retryable is True
+    # This one DID run and was killed at the deadline, so it is substantive `TIMEOUT` and charging
+    # a rung for it is correct — the other half of the bargain the never-started cases strike.
+    assert unmeasured.error.failure_class is FailureClass.TIMEOUT
+    assert RetryPolicy().decide(LadderState(), unmeasured.error).charges_attempt is True
 
     # (b) the LFS probe, never started — the gate it feeds must not be silently disarmed
     lfs = StalledRunner(":.gitattributes")
@@ -625,6 +694,8 @@ def test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement(
     assert lfs.stalled and unknown_lfs.status != "ok"
     assert unknown_lfs.output is None, "has_lfs=False was published for a probe that never ran"
     assert unknown_lfs.error is not None and unknown_lfs.error.retryable is True
+    assert unknown_lfs.error.failure_class is not FailureClass.TIMEOUT
+    assert unknown_lfs.error.failure_class is FailureClass.TRANSIENT_INFRA
 
     # (c) the blob scan, never started. It calls `util.proc.run` directly (`log_dir` is not on the
     # `CommandRunner` Protocol), so the module attribute is what a test can reach.
@@ -648,7 +719,91 @@ def test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement(
     assert unscanned.status != "ok"
     assert unscanned.output is None, "largest_blob_bytes=0 was published for a scan never taken"
     assert unscanned.error is not None and unscanned.error.retryable is True
-    assert unscanned.error.failure_class is FailureClass.TIMEOUT
+    assert unscanned.error.failure_class is not FailureClass.TIMEOUT, (
+        "a blob scan that was never spawned was reported as one that ran too long"
+    )
+    assert unscanned.error.failure_class is FailureClass.TRANSIENT_INFRA
+    assert RetryPolicy().decide(LadderState(), unscanned.error).charges_attempt is False
+
+
+def test_the_clone_and_build_classifiers_agree_on_every_clock_failure() -> None:
+    """The identical `ProcResult` must cost a repo the identical thing in either worker.
+
+    Why it matters: `buildverify.classify_build_failure` carried a comment saying "`clone.py`'s
+    `_no_verdict` draws the same line, in this order, for this reason; the two are meant to stay
+    in step" — and they did not. `clone._no_verdict` DID separate never-started from
+    killed-at-the-deadline, and then `_indeterminate` built a `GitCommandError` carrying only
+    `timed_out`, which `util.proc.run` sets for both; `_error_for` read that one flag and answered
+    substantive `TIMEOUT` either way. So a wave deadline passing while a repo sat in `_preflight`
+    charged that repo an ADR-0014 rung — three such waves burned all three attempts and reached
+    `REQUIRES_HUMAN_INTERVENTION` having gathered zero evidence about the repo — while the build
+    worker, handed the same three flags, answered free `TRANSIENT_INFRA` and charged nothing.
+
+    Neither module had a test that could see the disagreement, because every test looked at one
+    module. This one looks at both, so the comment can no longer be the only thing asserting it.
+
+    **Scope is the clock, deliberately.** `(started=True, timed_out=False)` is a process that
+    reached a verdict of its own, and there the two SHOULD differ: buildverify reads Bazel's exit
+    table (`BUILD_ERROR`/`TEST_FAILURE`/exit 4/125), clone has no such table and reports
+    `TRANSIENT_INFRA`. What is asserted for that row is only that neither invents a clock failure.
+    """
+    from fleet.util.proc import ProcResult
+    from fleet.workers.base import clock_failure
+    from fleet.workers.buildverify import BUILD_UNIT, classify_build_failure
+    from fleet.workers.clone import _indeterminate
+
+    def proc(*, started: bool, timed_out: bool, exit_code: int) -> ProcResult:
+        return ProcResult(
+            argv=("git", "rev-parse", "--verify", "--quiet", "main^{commit}"),
+            exit_code=exit_code,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=0,
+            timed_out=timed_out,
+            started=started,
+            cwd=Path("/nonexistent"),
+        )
+
+    shapes = [
+        # exactly what `util.proc.run` synthesises for a deadline that had already passed
+        proc(started=False, timed_out=True, exit_code=124),
+        # …and for a process it spawned and then killed at the deadline
+        proc(started=True, timed_out=True, exit_code=-9),
+        proc(started=True, timed_out=True, exit_code=124),
+    ]
+    worker = CloneWorker()
+    for result in shapes:
+        expected = clock_failure(started=result.started, timed_out=result.timed_out)
+        assert expected is not None, "this shape is meant to BE a clock failure"
+
+        # `_error_for` is private and is exactly the seam under test: it is where the two
+        # flags become a `FailureClass`, and no public surface exposes that step alone.
+        cloned = worker._error_for(
+            _indeterminate(result, "the probe produced no answer", cwd=Path("/nonexistent"))
+        )
+        built = classify_build_failure(result, unit=BUILD_UNIT)
+
+        assert (cloned.failure_class, cloned.retryable) == built == expected, (
+            f"clone and buildverify disagree for started={result.started} "
+            f"timed_out={result.timed_out}: clone says "
+            f"{(cloned.failure_class, cloned.retryable)}, buildverify says {built}"
+        )
+        # The disagreement's whole cost, stated as the thing an operator pays: a rung.
+        charged = RetryPolicy().decide(LadderState(), cloned).charges_attempt
+        assert charged is (expected[0] is FailureClass.TIMEOUT), (
+            "a never-started probe must cost no rung, and a real deadline kill must cost one"
+        )
+
+    # The boundary itself: a process that finished is nobody's clock failure, in either module.
+    finished = proc(started=True, timed_out=False, exit_code=1)
+    assert clock_failure(started=True, timed_out=False) is None
+    assert classify_build_failure(finished, unit=BUILD_UNIT)[0] is not FailureClass.TIMEOUT
+    assert (
+        worker._error_for(
+            _indeterminate(finished, "git said no", cwd=Path("/nonexistent"))
+        ).failure_class
+        is not FailureClass.TIMEOUT
+    )
 
 
 def test_a_credential_in_the_clone_url_reaches_git_and_nothing_else(tmp_path: Path) -> None:

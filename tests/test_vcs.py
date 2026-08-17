@@ -246,11 +246,17 @@ async def test_a_ref_read_that_never_ran_is_not_a_missing_ref(tmp_path: Path) ->
     assert "exit 124" not in str(never_started.value), (
         "a command that was never spawned was reported as a process that exited 124"
     )
+    assert never_started.value.started is False, (
+        "the exception carried `timed_out` but dropped `started`, which is the fact that "
+        "separates a measurement nobody took from one that ran too long — `workers/base."
+        "clock_failure` reads both, and a rung is charged for the second and not the first"
+    )
 
     killed = Git(tmp_path, runner=ScriptedRunner(exit_code=-9, started=True, timed_out=True))
     with pytest.raises(GitCommandError) as at_deadline:
         await killed.exec(["fetch", "--unshallow"])
     assert at_deadline.value.timed_out is True
+    assert at_deadline.value.started is True  # this one really did run; the kill is substantive
     assert "exit -9" not in str(at_deadline.value)
 
 

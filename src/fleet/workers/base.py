@@ -152,6 +152,41 @@ def is_retryable(failure_class: FailureClass) -> bool:
     return failure_class not in NON_RETRYABLE
 
 
+def clock_failure(*, started: bool, timed_out: bool) -> tuple[FailureClass, bool] | None:
+    """`(failure_class, retryable)` when a subprocess result says something about the FLEET'S CLOCK
+    rather than about the repository — or `None` when the process ran to a verdict of its own.
+
+    `util.proc.run` reports a call made after its deadline had already passed as `started=False`
+    **and** `timed_out=True` **and** `exit_code=124`, all three at once. Those two flags therefore
+    describe two different events that must not be collapsed:
+
+    * `started=False` — nothing was spawned. **No measurement was taken at all**, so there is no
+      evidence about the repo, and ADR-0014 forbids charging a ladder rung for one: it is
+      `TRANSIENT_INFRA`, which `RetryPolicy.decide` re-runs on the same rung with no attempt
+      charged.
+    * `started=True, timed_out=True` — the process ran and was killed at its deadline. Taking
+      longer than the deadline IS behaviour of the repo (a pathological history, a hanging fetch),
+      so it is substantive `TIMEOUT` and costs a rung.
+
+    Order matters and is the whole point: reading `timed_out` first makes the never-started branch
+    unreachable through the only producer of real `ProcResult`s, and reports a command that never
+    ran as one that ran too long.
+
+    **This function exists so the answer is written down once.**
+    `buildverify.classify_build_failure`
+    and `clone._error_for` used to each draw this line themselves, with a comment in one asserting
+    the two were "meant to stay in step" — and they were not: clone discarded `started` on the way
+    into its `GitCommandError` and answered `TIMEOUT` for both. A shared callee makes agreement
+    mechanical rather than aspirational, and
+    `test_workers_scan.test_the_clone_and_build_classifiers_agree_on_every_clock_failure` pins it.
+    """
+    if not started:
+        return FailureClass.TRANSIENT_INFRA, True
+    if timed_out:
+        return FailureClass.TIMEOUT, True
+    return None
+
+
 def loop_now() -> float:
     """The running loop's monotonic clock — the SAME clock `ctx.deadline` is expressed in.
 

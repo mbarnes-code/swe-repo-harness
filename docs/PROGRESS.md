@@ -4123,3 +4123,302 @@ and symbol level in `src/fleet/workers/clone.py`, `src/fleet/vcs/git.py` and
 7. **Now that a remote exists:** commits and pushes remain the **orchestrator's** to make. The
    toolchain exclusions above are `.gitignore` policy, not a suggestion — an agent that "fixes" the
    untracked `tools/` tree re-adds 2.2 GB to every future clone.
+
+---
+
+## 35. Checkpoint — 2026-08-16 · **D34 is fixed**: a `docker run` exit **125** at a build step is now free, retryable `TRANSIENT_INFRA` instead of three rungs — **two of them LLM-bearing** — spent prompting a model to repair a `BUILD.bazel` that was never opened · **four corrections to the record, and the most valuable one is the correction that was REFUSED**: an agent told to mark ADR-0047 stale declined, and re-measurement proved the ledger right — the register was one edit from acquiring a **false correction to a true statement, carrying a "measured" label** · a fifth defect (**the retry-rung divergence**) found by reviewing §34's own clone fixes, with **three new tests pinning the wrong class**
+
+**What was completed.** **(A)** D34, the most expensive open defect, is closed in
+`classify_build_failure`. **(B)** Four claims agents were handed — one of them the orchestrator's —
+were measured and found false, and the record was corrected in the direction the measurement
+pointed rather than the direction the brief did. **(C)** A code review of §34's landed clone fixes
+found a new defect and named the three tests that pin it.
+
+### A. D34 — the `125` branch, and why the two call sites honestly differ
+
+`classify_build_failure` had no branch for exit **125** while the build steps **are** `docker run`
+(`payload.image is not None`, the default under `sandboxed = not no_sandbox`). A daemon that
+restarted mid-wave therefore fell through the whole table to the last line — a retryable
+`BUILD_ERROR` — and spent **all three ADR-0014 rungs**, **two of them LLM-bearing**, prompting a
+model to repair a healthy `BUILD.bazel`, before landing `REQUIRES_HUMAN_INTERVENTION` with a repair
+transcript describing nothing that happened. It is now `TRANSIENT_INFRA`, retryable
+(`buildverify.py`, the `_DOCKER_CANNOT_RUN` branch).
+
+**The asymmetry is derived, not stylistic, and that is why it is written down.** The same 125 covers
+a daemon that restarted (back in seconds) and an image that does not exist (never appearing on its
+own). `_c_toolchain_gate` meets 125 **FIRST**, with no evidence either way, and still answers
+**non-retryable** for the same mechanical reason as 127 — re-running an identical rung cannot build
+an image. A build step meets 125 only **AFTER** that probe's own `docker run` returned a real exit
+code **from inside the same image**, with the same `container_memory`/`container_cpus`, against the
+same daemon, seconds earlier. That single fact excludes the three enduring causes — image absent or
+unpullable, malformed resource values, daemon never there — and leaves the transient one. The
+probe's refusal and the step's retry are the **same** reasoning applied to **different evidence**,
+not two opinions about one code.
+
+**125 was deliberately NOT added to `INFRA_EXIT_CODES`.** That set is documented as the codes
+**Bazel** returns — 8, 9, 36 plus `OOM_EXIT_CODES` — every row of it reproduced against the vendored
+9.2.0 binary. 125 is **docker's**, and folding a docker code into a set whose docstring says "Bazel
+said the *environment* failed" would have made the table lie to keep the diff small. It got its own
+branch, above `INFRA_EXIT_CODES`, with its own constant and its own operator-facing explanation
+(`_DOCKER_CANNOT_RUN_EXPLAINED`). §33's warning was honoured verbatim: **D34 was the absence of a
+row, not a wrong row**, and nothing in either table was removed or "rebalanced".
+
+**The branch reorder is itself a behaviour fix, not tidying.** `not result.started` now precedes
+`if result.timed_out`. `util.proc.run` synthesises a call made past its deadline as
+`started=False` **and** `timed_out=True` **and** `exit_code=124`, all three at once
+(`util/proc.py`, the pre-spawn deadline check), so reading `timed_out` first classified a command
+that **never spawned** as one that **ran too long** — `TIMEOUT`, which is substantive and **charges
+an attempt**, instead of `TRANSIENT_INFRA`, which does not (`retry.py`, the `RETRY_TRANSIENT`
+branch: *"same rung, no attempt charged"*). The old order also made the never-started branch dead
+code through the only producer of real `ProcResult`s.
+
+**Mutation-checked against the FULL suite**, and the numbers are the mutation's, not a summary of
+it: neutering the 125 branch fails **exactly 3** tests; restoring the old branch order fails
+**exactly 1**; neutering the message prefix fails **exactly 1**. *Provenance: those runs are the
+orchestrator's. The suite was not re-run to write this entry* — a worker holds the pytest token
+(§19's reaper constraint) — *and per §32/§33's precedent that is recorded rather than smoothed
+over.*
+
+### B. What D34 did NOT fix, and what it does not prove
+
+**The residual, and it is not small.** `_diagnose` is gated on **`ctx.context_policy is None`
+alone** — nothing else. It fires on rungs 2–3 for **any** failure class, so a daemon that stays down
+past `max_transient_retries` still buys **two `BUILD_DIAGNOSIS` LLM calls** on the way to terminal.
+D34 removed the **repair** prompts on a healthy file; the **diagnosis** prompts survive untouched.
+That is a diagnosis-policy question affecting **every** `TRANSIENT_INFRA` — OOM, lock held,
+unwritable output root, wave drain — not a loose end of this defect, and it wants its own round
+rather than a one-line condition bolted on here.
+
+**Not proven, stated plainly.**
+
+1. **No real Docker daemon was involved.** Every 125 in the suite is an **injected `ProcResult`**.
+   Nothing here observed docker returning 125, and nothing observed the daemon coming back.
+2. **The "Bazel never emits 125" premise was NOT re-verified against the binary.** It is asserted
+   from the file's existing verified table (0, 1, 2, 3, 4, 8, 9, 36) plus 127 from a shell that
+   cannot find the binary — a table whose rows *were* each reproduced, extended by an **absence**
+   that was not. If some Bazel path can exit 125, a **real** build failure now reads as transient.
+   Bounded by `max_transient_retries` and then charged to the ladder anyway, so it costs delay
+   rather than correctness — but it is real, and it is the one premise the fix rests on that nobody
+   measured.
+3. **The retryable reading depends on the probe running BEFORE the build, and nothing structural
+   enforces that.** Inside `BuildverifyWorker.run` the ordering is straight-line code — the
+   `_c_toolchain_gate` call sits above the unit loop — but `classify_build_failure` is a
+   module-level function **exported in `__all__`**, and `rdepverify` already calls the table
+   through `error_from_proc` **without** any probe. That worker is safe today only because it
+   **has no `image`**, builds no container and emits no `--volume=`, so its steps are host `bazel`
+   and cannot produce 125. The invariant is a property of the current call graph, not of the
+   function.
+
+### C. Corrections to the record, and the most valuable one is the one that was REFUSED
+
+**1. ADR-0047 is CORRECT as written, and the ledger nearly acquired a false "measured" correction.**
+A brief handed to an agent claimed `kind: MISSING` exits **101** and that ADR-0047's **8** was
+stale. The agent **refused to write the correction it was instructed to write**. Re-measured here,
+independently, against the vendored `tools/bin/ast-grep` **0.45.1**:
+
+| invocation | exit | stderr |
+|---|---|---|
+| `rule: {kind: MISSING}` | **8** | `Error: Cannot parse rule INLINE_RULES` |
+| `rule: {kind: NOT_A_REAL_KIND}` | **8** | `Error: Cannot parse rule INLINE_RULES` |
+| malformed YAML document | **8** | `Error: Cannot parse rule INLINE_RULES` |
+| `rule: {kind: ERROR}` over `const = = ;` | **1** | — (the real verdict) |
+
+**No invocation produced 101**, and the three rejections are **indistinguishable** — same code, same
+message. ADR-0047's *"`kind: MISSING` is rejected outright by 0.45.1 — exit 8, `Cannot parse rule`"*
+and the matching paragraph in `astgrep._probe_document` both stand, unedited.
+
+Record this plainly, because it is the round's most expensive near-miss: **the register was one edit
+away from a false correction to a true statement.** That is worse than ordinary drift — drift is a
+stale claim nobody rechecked, whereas this would have arrived stamped *"re-measured 2026-08-16"* and
+would have been **trusted more** than the correct sentence it replaced. The only thing that stopped
+it was an agent declining an instruction, which is the behaviour Guardrail 1 is for and the
+behaviour this project has to keep paying for.
+
+**2. `_scan_for_error_nodes` cannot see "the binary is missing" — the conflation is one frame up.**
+Both public entry points (`parse_probe`, `probe_text`) call **`ensure_available()` first**, and a
+genuinely absent binary makes `asyncio.create_subprocess_exec` raise **`FileNotFoundError`**:
+`util/proc.run` has **no `FileNotFoundError` handler**, so the exception propagates and **no
+`ProcResult` is ever constructed**. The helper therefore sees **two** no-verdict conditions — never
+started, and killed at the deadline — plus an out-of-range exit code, never three. Its single
+`raise EngineUnavailableError` covers all of them under one name, and *that* is the conflation.
+**This is exactly why ADR-0067's fix is a new exception type (`ProbeIndeterminateError`) rather than
+a new predicate**: the predicate is already right; the exception type is what cannot tell "no
+rewrite engine on this host" from "the probe produced no answer", and only the first is honestly a
+non-blocking warning.
+
+**3. A killed probe can exit `-9`, not only `-15`.** `util.proc._kill_process_group` is
+SIGTERM → grace → SIGKILL **on the process group**, and it returns
+`proc.returncode if proc.returncode is not None else -int(signal.SIGKILL)`. A child that ignores or
+is slow to handle SIGTERM through the grace window is reaped as **`-9`**. Any fix keyed on `-15`
+alone — or on `-9` alone — is wrong for half the cases. The flags (`started`, `timed_out`), not the
+signal number, are the reliable evidence.
+
+**4. The still-shallow gate's justification was false, and the gate is still right for a better
+reason.** At **`HEAD` (44d5550)** `clone._preflight`'s gate says, in both the comment and the
+**operator-facing string**, *"`git-filter-repo` refuses a shallow repository"*. Measured against the
+vendored upstream at `.venv/lib/python3.12/site-packages/git_filter_repo.py` (**2.47.0**):
+**zero** case-insensitive occurrences of `shallow` in **4976** lines — no check, no refusal path, no
+mention. *(The brief quoted 5007 lines; that figure did not reproduce against this checkout's copy.
+The load-bearing number — **zero** occurrences — did, and the discrepancy is left visible rather
+than averaged away, per Rule 7.)* `filter_repo.relocate()` compounds it: `filter_repo_argv` takes
+`force: bool = True` and **always appends `--force`**, bypassing the freshness check that *does*
+exist. **Nothing would stop the rewrite — and that is precisely the problem.**
+`fast-export`/`fast-import` do not carry the shallow boundary, so rewriting a shallow mirror imports
+a **silently truncated** history into the monorepo: a package whose history simply stops, with no
+error anywhere to say so. A refusal would at least be loud; the gate is what makes it loud. **The
+gate stays; its stated reason was wrong.**
+
+**5. `git fetch --unshallow` behaviour is version-stable, and the obvious "cleaner" predicate buys
+nothing.** Measured across **eight git versions, 2.20.4 → 2.49.1**: a **successful** unshallow
+**always removes** the `shallow` file, and a mirror of a genuinely shallow **remote** keeps it and
+**exits 0** — which is exactly why the still-shallow gate has to exist at all rather than trusting
+the fetch's exit code. And `git rev-parse --is-shallow-repository` reads the **same signal**: a
+planted **zero-byte** `shallow` makes it report `true` on a complete repository. Switching to it
+buys a subprocess and the identical blind spot. *Provenance: the eight-version matrix is the
+measuring agent's; it was not re-run here, and it is the one claim in this section this file did not
+reproduce itself.*
+
+**6. Clone-worker git is never containerised.** `Git.__init__` takes `git_bin: str = "git"` and
+**no call site anywhere in `src/` or `tests/` passes it** — a grep for `git_bin` returns exactly the
+two definitions (`vcs/git.py`, `sandbox/worktree.py`) and their two assignments. All **twelve**
+`Git(...)` construction sites (`workers/relocate.py`, `workers/clone.py`, `workers/rewrite.py`,
+`workers/buildgen.py` ×2, `cli.py` ×6, `rewrite/apply.py`) therefore resolve `git` off the host
+PATH: **git 2.43.0** here. The verify image ships **no git at all**, and deliberately —
+`docker/fleet-build.Dockerfile` names it in its *"what this image deliberately does NOT contain"*
+list with the trigger that would justify adding it. So any version-sensitive git reasoning is a
+**host** question, uniform across the fleet, and never an image question.
+
+### D. Newly recorded, not yet fixed — the retry-rung divergence
+
+Found by a code review of **§34's own clone fixes**, which is the second round running that
+reviewing the fix produced the next defect.
+
+`_no_verdict` carefully separates **"never spawned"** from **"killed at the deadline"** — and
+`_indeterminate`, called on the very next line by all five probes, **throws that separation away**.
+It builds its `GitCommandError` with `timed_out=result.timed_out` and **does not carry `started`**,
+so `_error_for` reads `timed_out` alone and answers **`TIMEOUT`** for a probe that never ran —
+**charging an ADR-0014 rung for a measurement nobody took**. `buildverify.classify_build_failure`
+maps the **identical `ProcResult`** to free `TRANSIENT_INFRA`, and its comment asserts the two
+*"are meant to stay in step"*. **They are not, and the comment is what made the divergence hard to
+see.**
+
+**The three new clone tests assert the wrong class and pin it.** `tests/test_workers_scan.py`'s
+`StalledRunner` defaults to **`started=False`** — its own comment reads
+*"False = the deadline had already passed; nothing spawned"* — and all three tests
+(`test_an_unshallow_that_never_ran_is_not_a_permanent_preflight_verdict`,
+`test_a_rev_parse_that_never_ran_is_not_an_empty_repo`,
+`test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement`) assert
+`failure_class is FailureClass.TIMEOUT`. Each test's **stated intent is correct and is met** — the
+verdict is retryable and no human is summoned — but the class they pin is the wrong one, so the
+suite now **defends** the divergence. A fix that corrects `_error_for` without touching these three
+turns green to red, and the red is the fix being right.
+
+### E. Version control — what the trailers buy, and the `.gitignore` correction
+
+**Checkpoint 34 (`44d5550`) is the first commit with a diff behind it.** Everything in §1–§33
+predates version control: no diff, no blame, no bisect. Commits now carry **`Checkpoint:`, `ADR:`
+and `Defect:`** trailers, which makes `git log --grep='ADR-0064'` (or `--grep='D34'`) the **reverse
+index `DECISIONS.md` structurally cannot provide** — an ADR records the decision, never the set of
+commits that later touched it, and the register has drifted from the code twice now in recorded
+memory.
+
+*A provenance wrinkle, recorded rather than smoothed:* `44d5550`'s message carries D34's fix and the
+suite figure **1133 → 1140**, while §34's prose above lists D34 as *"IN FLIGHT"* in its next-task
+list and reports **1137 (+4)**. The commit is the later and correct account; §34 is append-only and
+stands as written. This is a small instance of §33's lesson arriving inside a single checkpoint.
+
+**`.gitignore` was corrected in `d5a0d07`**, and the audit that produced it found the file guarding
+directory names the harness never writes while missing the two it does:
+
+- **`/cache/` and `/work/` are now ignored** — `settings.py` declares `cache_dir` and `work_dir`,
+  which hold the Bazel disk and repository caches and every per-run worktree: the highest-volume
+  write targets in the system, previously **unguarded**. Meanwhile `mirrors/` and `.worktrees/`,
+  which *were* guarded, have **zero occurrences in `src/`** — nothing writes them.
+- **Patterns are root-anchored.** Unanchored, they matched at any depth, and `artifacts/` was
+  **already excluding a real Python package inside `references/`**. This harness's fixtures are
+  other projects' trees, so every such pattern must be anchored or it eats fixture source silently.
+- **`.claude/settings.local.json` untracked** — per-user, machine- and session-local, and it churns
+  on every permission prompt.
+- The commit's own trailer reads **`Defect: D26 (explicitly NOT fixed here)`**: the Bazel droppings
+  it ignores are this repository's, whereas D26 concerns the **generated monorepo's** integration
+  worktree under `work/` — a different repository a `.gitignore` here cannot reach.
+
+### What was verified
+
+**A** was verified at the symbol level in `src/fleet/workers/buildverify.py`: the `_DOCKER_CANNOT_RUN`
+branch, its position **above** `INFRA_EXIT_CODES`, the absence of 125 from
+`INFRA_EXIT_CODES` (`frozenset({8, 9, 36}) | OOM_EXIT_CODES`) and from `UNREPEATABLE_EXIT_CODES`
+(`frozenset({2, 127})`), the `not started` / `timed_out` order in `classify_build_failure`, the
+probe's own non-retryable 125 refusal in `_c_toolchain_gate`, and the straight-line ordering of the
+gate above the unit loop in `run`. `util/proc.py` was read for the three-flag synthesis and
+`orchestrator/retry.py` for *"no attempt charged"*. **The mutation figures and the suite count are
+the orchestrator's; pytest was not run here.**
+
+**B's corrections were each re-measured or re-read against the tree** (Guardrail 2), not relayed:
+ast-grep's four exit codes by **running the vendored 0.45.1 binary**; `ensure_available()` and the
+absence of any `FileNotFoundError` handler in `util/proc.run`; `_kill_process_group`'s SIGKILL
+fallthrough; `wc -l` and a case-insensitive `grep -c` over the vendored `git_filter_repo.py`, plus
+`filter_repo_argv`'s unconditional `--force`; `git --version` on the host, `grep -rn git_bin` over
+`src/` and `tests/`, the twelve `Git(...)` sites, and the Dockerfile's exclusion comment.
+
+**C** was verified in `src/fleet/workers/clone.py` (`_no_verdict`, `_indeterminate`, `_error_for`)
+against `src/fleet/workers/buildverify.py`, and in `tests/test_workers_scan.py` (`StalledRunner`'s
+`started: bool = False` default and the three `FailureClass.TIMEOUT` assertions).
+
+**E** was verified with `git log`, `git show --stat`, `git log -1 --format=%B` for the trailers, and
+`git show d5a0d07 -- .gitignore`.
+
+### What is still NOT proven
+
+1. **The working tree is DIRTY as of this writing, and this checkpoint describes `HEAD`.** Four
+   files carry **uncommitted** changes — `src/fleet/vcs/git.py`, `src/fleet/workers/base.py`,
+   `src/fleet/workers/buildverify.py`, `src/fleet/workers/clone.py` — which is the **D-item fix in
+   flight**: a shared `base.clock_failure`, `started` carried on `GitCommandError`, a content-aware
+   `_is_shallow`, and a rewrite of the shallow gate's comment and string. **None of it is landed.**
+   Per §33 item **A**, what a concurrent reader can honestly report is **a snapshot with a
+   timestamp, never a status**: at `HEAD` the divergence and the false `git-filter-repo`
+   justification both **stand**. **Re-derive from `git diff HEAD`, not from this paragraph.**
+2. **`docs/INTEGRATION_HONESTY.md` still reads `D34 — OPEN`, `D35 — OPEN`, `D36 — OPEN`,
+   `D41 — OPEN`, `D45 — OPEN`** as of this writing. **Another agent owns that file this round.**
+   D34's code is verified fixed at `HEAD`; the register is not yet updated. If those entries still
+   say OPEN when this is read, **re-derive from `buildverify.py` and `clone.py`**, not from either
+   document.
+3. **No suite run backs this entry.** The pytest token was held by a worker. Every count and every
+   mutation figure in **A** is relayed with its provenance attached, and none of it was reproduced
+   here.
+4. **The `-9` / `-15` correction has no test.** `grep -rn '\-9' tests/` finds `OOM_EXIT_CODES`, not
+   a killed-probe case. It is a corrected belief, not a pinned behaviour.
+5. **The eight-version `git fetch --unshallow` matrix was not re-run here** (item **B5**). Nothing
+   about it is doubted; the provenance is simply not this file's.
+6. **Everything §32, §33 and §34 listed as unproven is unchanged.** No offline container build, no
+   warmed cache, the published `MODULE.bazel.lock` still not proven sufficient offline, **the
+   sandboxed path still RED**, and `fleet build` still never drives real Bazel over a Go repo
+   through `materialize` → `_publish`. This round moved **none** of it.
+
+### Next subagent task, in priority order
+
+1. **The retry-rung divergence — IN FLIGHT** (item **D**). Carry `started` from `_no_verdict`
+   through `_indeterminate` into `_error_for` so clone and `classify_build_failure` answer
+   identically, and **correct the three `TIMEOUT` assertions in `tests/test_workers_scan.py`** —
+   they currently defend the bug. A shared callee is worth more than a comment claiming the two are
+   "in step", because that comment is exactly what was already there and already wrong.
+2. **Constrain `ScriptedRunner`, and the three `gh` / `curl` / `filter-repo` sites it conceals.** A
+   fake that answers any argv hides which binary a code path actually invokes.
+3. **The shallow-gate comment and a content-aware check** (item **B4**). Both the comment and the
+   **operator-facing gate string** cite a refusal that does not exist; the honest reason is the
+   silently truncated history. A zero-byte `shallow` must not read as shallow.
+4. **`_diagnose` fires on every failure class** (item **B**). Two `BUILD_DIAGNOSIS` calls are still
+   bought for a dead daemon. This is a policy decision over **all** `TRANSIENT_INFRA`, not a
+   D34 loose end.
+5. **D26 — `_publish`'s idempotence guard**, and **D27 — the lock compared against the FILE rather
+   than the BRANCH** (with **D28**, a two-line move in the same function). D26 remains the
+   highest-severity item on the older list: it converts a **transient** failure into
+   `REQUIRES_HUMAN_INTERVENTION` on the **recovery** flow.
+6. **D30 — Gazelle capture globs only `BUILD.bazel`**, so a repo carrying a legacy `BUILD` file
+   ships a package with **no targets at exit 0**.
+7. **Carried forward, unchanged:** the two security items **D21 + D22** (which must land together —
+   D21 makes D38's latent `--replace-text` branch live), §32's networked warm run, the first offline
+   container build, and `maven_install.json` for JVM (**L1**).
+8. **Unchanged policy:** commits and pushes remain the **orchestrator's** to make, and the
+   `tools/` exclusions are `.gitignore` policy — an agent that "fixes" the untracked `tools/` tree
+   re-adds 2.2 GB to every future clone.

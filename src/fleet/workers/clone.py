@@ -28,8 +28,12 @@ unreachable:
   `timed_out=True` and `started=False` and `exit_code=124` together, so `if not result.ok` cannot
   tell "the repo says no" from "we never asked". `_no_verdict` draws that line once, and every
   probe that could otherwise fabricate a zero, a `False`, or a `PREFLIGHT` gate out of silence
-  raises through `_error_for` instead — retryable `TIMEOUT`/`TRANSIENT_INFRA`, because the next
-  attempt genuinely can produce the answer this one did not.
+  raises through `_error_for` instead, which hands both flags to `base.clock_failure` — the one
+  function that decides between free `TRANSIENT_INFRA` for a command that never ran and
+  substantive `TIMEOUT` for one killed at its deadline, and the same function
+  `buildverify.classify_build_failure` calls, so the two workers cannot answer differently for the
+  same `ProcResult`. Either way it is retryable, because the next attempt genuinely can produce
+  the answer this one did not.
 """
 
 from __future__ import annotations
@@ -60,6 +64,7 @@ from fleet.workers.base import (
     WorkerInput,
     WorkerOutput,
     WorkerResult,
+    clock_failure,
     loop_now,
 )
 
@@ -221,14 +226,25 @@ def _indeterminate(result: ProcResult, reason: str, *, cwd: Path) -> GitCommandE
     """The exception a probe with no verdict raises.
 
     A `GitCommandError` rather than a preflight gate string, because `run()`'s handler routes it
-    through `_error_for`, which reads `timed_out` and answers `TIMEOUT` / `TRANSIENT_INFRA` with
-    `retryable=True`. A gate would instead answer non-retryable `PREFLIGHT` — "the repo's own
-    shape; identical on every attempt" — which is exactly the claim a probe that produced no
-    output is in no position to make.
+    through `_error_for`, which answers `TIMEOUT` / `TRANSIENT_INFRA` with `retryable=True`. A gate
+    would instead answer non-retryable `PREFLIGHT` — "the repo's own shape; identical on every
+    attempt" — which is exactly the claim a probe that produced no output is in no position to
+    make.
+
+    **`started` is forwarded, not folded into `timed_out`.** `_no_verdict` above separates "never
+    spawned" from "killed at the deadline"; carrying only `timed_out` — which `util.proc.run` sets
+    for BOTH — threw that separation away one line after it was drawn, and `_error_for` then
+    answered substantive `TIMEOUT` for a measurement nobody took, charging the repo an ADR-0014
+    rung for it. The two flags travel together from here on.
     """
     tail = f"{reason}: {result.stderr_tail}".strip().rstrip(":")
     return GitCommandError(
-        result.argv, result.exit_code, tail, cwd=cwd, timed_out=result.timed_out
+        result.argv,
+        result.exit_code,
+        tail,
+        cwd=cwd,
+        timed_out=result.timed_out,
+        started=result.started,
     )
 
 
@@ -431,21 +447,29 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
                 findings=tuple(findings),
             )
 
-        is_shallow = await asyncio.to_thread((mirror / "shallow").exists)
+        is_shallow = await asyncio.to_thread(_is_shallow, mirror)
         gate: str | None = None
         if is_shallow:
             gate = await self._unshallow(ctx, git, payload)
-            is_shallow = await asyncio.to_thread((mirror / "shallow").exists)
+            is_shallow = await asyncio.to_thread(_is_shallow, mirror)
             if gate is None and is_shallow:
                 # The fetch reported success and the mirror is STILL shallow: the remote served
-                # everything it is ever going to serve. THAT is the repo's own shape, identical
-                # on every attempt, and `git-filter-repo` refuses a shallow repository — so it is
-                # the one shallow outcome that is honestly a non-retryable `PREFLIGHT` gate.
-                # Keeping it is the point of moving the *transient* fetch failures out of here:
-                # the label stops being a lie without becoming unreachable.
+                # everything it is ever going to serve. THAT is the repo's own shape, identical on
+                # every attempt, so it is the one shallow outcome that is honestly a non-retryable
+                # `PREFLIGHT` gate. Keeping it is the point of moving the *transient* fetch
+                # failures out of here: the label stops being a lie without becoming unreachable.
+                #
+                # The reason is NOT that `git-filter-repo` refuses a shallow repository — it does
+                # not. Upstream contains no shallow check and no refusal path at all, and
+                # `rewrite.relocate()` passes `--force` regardless, which bypasses the freshness
+                # check that *does* exist. Nothing would stop the rewrite; that is precisely the
+                # problem. `fast-export`/`fast-import` do not carry the shallow boundary, so
+                # rewriting a shallow mirror imports a SILENTLY TRUNCATED history into the
+                # monorepo — a package whose history simply stops, with no error anywhere to say
+                # so. A refusal would at least be loud. This gate is what makes it loud.
                 gate = (
                     "mirror is still shallow after a successful `git fetch --unshallow`; "
-                    "git-filter-repo refuses a shallow repository (§3.1 step 1)"
+                    "rewriting it would import a silently truncated history (§3.1 step 1)"
                 )
 
         submodules = await self._submodule_count(git, head_sha)
@@ -673,8 +697,20 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
                 exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
             )
         exit_code = getattr(exc, "exit_code", None)
+        # `started` and `timed_out` are read TOGETHER and handed to the one function that owns the
+        # distinction (`base.clock_failure`), which `buildverify.classify_build_failure` also
+        # calls. Reading `timed_out` alone here is the defect this replaces: `util.proc.run` sets
+        # it for a call it never made, so a probe that produced no evidence about the repo was
+        # reported as substantive `TIMEOUT` and charged a rung — while the build worker, for the
+        # identical `ProcResult`, answered free `TRANSIENT_INFRA`. An `OSError` carries neither
+        # attribute; `started=True, timed_out=False` is right for it (the syscall did happen) and
+        # falls through to the same `TRANSIENT_INFRA` this branch has always produced.
+        started = bool(getattr(exc, "started", True))
         timed_out = bool(getattr(exc, "timed_out", False))
-        failure_class = FailureClass.TIMEOUT if timed_out else FailureClass.TRANSIENT_INFRA
+        failure_class, _ = clock_failure(started=started, timed_out=timed_out) or (
+            FailureClass.TRANSIENT_INFRA,
+            True,
+        )
         return WorkerError(
             failure_class=failure_class,
             retryable=True,
@@ -682,6 +718,34 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
             stderr_tail=redact_text(str(exc)),
             exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
         )
+
+
+def _is_shallow(mirror: Path) -> bool:
+    """Does `mirror` have a shallow boundary — i.e. does `.git/shallow` name at least one root?
+
+    Content-aware rather than `(mirror / "shallow").exists()`, because the two are not the same
+    question. `shallow` is a list of grafted commit ids, and a file holding none of them (empty,
+    or whitespace only) declares no boundary: the repository is complete. Presence alone would
+    read such a file as "shallow", and since a shallow verdict that survives a successful
+    `--unshallow` is a non-retryable `PREFLIGHT` gate, a stray empty file is enough to send a
+    perfectly complete repo to a human.
+
+    **Reading the file is the right signal, and it is the same one git reads.** Measured across
+    git 2.20.4 → 2.49.1: a successful `fetch --unshallow` always REMOVES the file, so this stays
+    exactly as sensitive to the real case as the `exists()` check was; and
+    `git rev-parse --is-shallow-repository` reports `true` for a planted zero-byte `shallow` on an
+    otherwise complete repo — so spending a subprocess on the predicate would buy the identical
+    answer plus this identical blind spot. One filesystem read instead.
+
+    A missing file, and a `shallow` that is a directory or is otherwise unreadable, both answer
+    "no boundary declared": absence of evidence for a boundary is what "not shallow" means here,
+    and this returns rather than raises so it cannot be confused with a probe that got no answer.
+    """
+    try:
+        text = (mirror / "shallow").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return any(line.strip() for line in text.splitlines())
 
 
 def _mirror_is_initialized(mirror: Path) -> bool:

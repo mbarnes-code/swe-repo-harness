@@ -72,6 +72,7 @@ from fleet.workers.base import (
     WorkerOutput,
     WorkerResult,
     WorkerStatus,
+    clock_failure,
     loop_now,
 )
 
@@ -381,19 +382,15 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
     against the real binary — a classifier built on remembered exit codes is a classifier that
     escalates repos for reasons nobody can reproduce.
     """
-    if not result.started:
-        # BEFORE `timed_out`, and this order is load-bearing rather than stylistic. `util.proc.run`
-        # synthesises a call made past its deadline as `started=False` **and** `timed_out=True`
-        # **and** `exit_code=124`, all three at once, so testing `timed_out` first makes this
-        # branch dead code through the only producer of real `ProcResult`s — and reports a command
-        # that never ran as one that ran too long. That misattribution costs an attempt: `TIMEOUT`
-        # is substantive on the ladder, `TRANSIENT_INFRA` is not, and "we never asked" is not
-        # evidence about the repo. `clone.py`'s `_no_verdict` draws the same line, in this order,
-        # for this reason; the two are meant to stay in step. A process that really was killed at
-        # its deadline has `started=True` and still reaches `TIMEOUT` below.
-        return FailureClass.TRANSIENT_INFRA, True
-    if result.timed_out:
-        return FailureClass.TIMEOUT, True
+    clock = clock_failure(started=result.started, timed_out=result.timed_out)
+    if clock is not None:
+        # Never-started ⇒ free `TRANSIENT_INFRA`; killed-at-the-deadline ⇒ substantive `TIMEOUT`.
+        # This used to be two branches written out here, under a comment claiming `clone.py` drew
+        # the same line "for this reason; the two are meant to stay in step". They were not: clone
+        # discarded `started` on the way into its `GitCommandError` and charged a rung for a probe
+        # that never ran. The line is now drawn in exactly one place, which is the only form of
+        # "in step" a comment cannot get wrong.
+        return clock
     if result.exit_code == _DOCKER_CANNOT_RUN:
         # `docker run` refused to start the container, so bazel never executed and this repo's
         # generated files were never read — the step's argv IS a `docker run` whenever
