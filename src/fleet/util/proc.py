@@ -59,6 +59,32 @@ TIMEOUT_EXIT_CODE = 124
 there is no real exit status. A killed process reports its real negative signal code instead."""
 
 
+def is_producible_shape(*, started: bool, timed_out: bool, exit_code: int) -> bool:
+    """Can `run()` ever actually return a `ProcResult` carrying this `(started, timed_out,
+    exit_code)` triple? The invariant, read off `_run_locked` rather than declared separately:
+
+    * `started=False` happens in exactly ONE place — the deadline-already-passed branch at the
+      top of `_run_locked` — and that branch always returns the SAME three values together:
+      `timed_out=True` and `exit_code=TIMEOUT_EXIT_CODE`. No other combination reaches
+      `started=False`, because nothing downstream of that branch can un-set `started`.
+    * `started=True` covers every other return: a normal exit (`timed_out=False`, any
+      `exit_code`), a process killed at its deadline (`timed_out=True`, ordinarily a negative
+      signal but — per `ProcResult.ok`'s own docstring — not provably never zero, since
+      `_kill_process_group` returns whatever `proc.returncode` happened to be if the process had
+      already exited before the signal landed). So every `(timed_out, exit_code)` pair is
+      admissible once `started=True`; nothing here narrows that half.
+
+    This is what `ScriptedRunner` (`tests/test_vcs.py`) checks on construction, so a test double
+    cannot assert against a state no real invocation can generate — see
+    `tests/test_proc.py::test_scripted_runner_cannot_construct_states_the_real_runner_cannot_produce`,
+    which derives the `started=False` shape from a live call to `run()` rather than from this
+    docstring, so a change to either side breaks the test until the two agree again.
+    """
+    if not started:
+        return timed_out is True and exit_code == TIMEOUT_EXIT_CODE
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class ProcResult:
     """One subprocess invocation, as structured evidence rather than an unlabelled tuple.

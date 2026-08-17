@@ -37,6 +37,7 @@ property for a closure that is megabytes wide.
 from __future__ import annotations
 
 import contextlib
+import uuid
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import ClassVar, Final, Literal
@@ -130,15 +131,18 @@ from a step in this worker came from `docker run` — the only other program in 
 argv is a `docker run` exactly when `payload.image is not None` (`_argv`).
 
 **Retryability is decided per call site, and the two sites honestly differ.** The same code covers
-a daemon that restarted (back in seconds) and an image that does not exist (never appearing on its
-own). `_c_toolchain_gate` meets it FIRST and with no evidence either way, so it reports
-non-retryable for the same reason as 127 — re-running an identical rung cannot build an image any
-more than it can install a compiler. A build step meets it only AFTER that probe's own `docker
-run` returned a real exit code from inside this image, which is direct evidence that the daemon
-was reachable, the image was present and `container_memory`/`container_cpus` parsed — seconds
-earlier. The persistent causes are ruled out by that; what is left is the transient one, so the
-build step answers `TRANSIENT_INFRA` and lets §11.8's bounded `max_transient_retries` decide,
-charging no attempt and prompting no model."""
+an image that does not exist (never appearing on its own — the probe's case) and a surviving
+container from a prior invocation colliding on `--name=` (resolved once that invocation gets a
+fresh name — the build step's case; NOT a restarted daemon, which measures to exit 1, not 125 —
+`68a41ff` commit body, review-36 I2/I3). `_c_toolchain_gate` meets it FIRST and with no evidence
+either way, so it reports non-retryable for the same reason as 127 — re-running an identical rung
+cannot build an image any more than it can install a compiler. A build step meets it only AFTER
+that probe's own `docker run` returned a real exit code from inside this image, which is direct
+evidence that the daemon was reachable, the image was present and
+`container_memory`/`container_cpus` parsed — seconds earlier. The persistent causes are ruled out
+by that; what is left is the transient one, so the build step answers `TRANSIENT_INFRA` and lets
+§11.8's bounded `max_transient_retries` decide — free of a charged attempt only up to that cap,
+and still subject to a diagnosis call on rungs 2-3 regardless of failure class (`_diagnose`)."""
 
 C_TOOLCHAIN_PROBE: Final = (
     "cc=${CC:-}; "
@@ -334,6 +338,38 @@ def files_present(*paths: Path) -> bool:
     return all(path.exists() for path in paths)
 
 
+def _container_prefix(ctx: WorkerContext) -> str:
+    """The name-glob every `docker run` this worker issues for ONE rung shares.
+
+    `on_cancel` sweeps it with `ContainerSandbox.list_by_prefix`, and `_invocation_name` builds
+    every real container name from it plus a fresh token (see that function for why the token
+    exists at all). The trailing `-t` is load-bearing, not decorative: `list_by_prefix`'s `docker
+    ps --filter name=^<prefix>` is a REGEX anchored only at the start, so a bare `...-1` would
+    also match `...-10-t...` — attempt 10's containers. Attempts are always digits and `-t` is
+    not, so attempt 1's prefix can never be a prefix of attempt 10's name.
+    """
+    return f"{sandbox_name(ctx.run_id, ctx.repo_id, ctx.attempt)}-t"
+
+
+def _invocation_name(ctx: WorkerContext, *, suffix: str = "") -> str:
+    """A `docker run --name=` unique to THIS call — never reused by a retry of the same rung.
+
+    **The bug this removes.** `RetryPolicy.decide` re-runs a `TRANSIENT_INFRA` failure — a 125
+    among them — on the SAME rung: same `(run_id, repo, attempt)`, `phases.attempts` untouched
+    (`orchestrator/retry.py`, ADR-0014 §11.8). `spec_for_attempt` used to default the container
+    name to `sandbox_name(run_id, repo, attempt)` alone, which is IDENTICAL on every one of those
+    retries. If the docker daemon that produced the first 125 had managed to REGISTER a container
+    under that name before it died — exactly what a mid-wave daemon restart can leave behind —
+    the retry's own `docker run --name=<same>` meets docker's "the container name ... is already
+    in use" and exits 125 again, this time PERMANENTLY: no amount of retrying removes a name
+    collision, which is the one case `classify_build_failure`'s `retryable=True` for 125 is
+    actively wrong. A fresh token per call removes the collision by construction;
+    `_container_prefix` is what lets a later cleanup find whatever was left, however this call
+    happened to be named.
+    """
+    return f"{_container_prefix(ctx)}{uuid.uuid4().hex[:8]}{suffix}"
+
+
 class LoggedRunner:
     """`util.proc.run` bound to a log directory — the FULL stream stays on disk (§11.3).
 
@@ -395,10 +431,15 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
         # `docker run` refused to start the container, so bazel never executed and this repo's
         # generated files were never read — the step's argv IS a `docker run` whenever
         # `payload.image is not None`, which is the default (`sandboxed = not no_sandbox`), and
-        # bazel itself has no exit 125. Without this branch a Docker daemon restarted mid-wave
-        # fell through to a retryable BUILD_ERROR: three ADR-0014 rungs, two of them LLM-bearing,
-        # spent prompting a model to repair a `BUILD.bazel` that was never even opened, then
-        # REQUIRES_HUMAN_INTERVENTION with a repair transcript describing nothing that happened.
+        # bazel itself has no exit 125. Without this branch a surviving container from a prior
+        # invocation colliding on `--name=` fell through to a retryable BUILD_ERROR: three
+        # ADR-0014 rungs, two of them LLM-bearing, spent prompting a model to repair a
+        # `BUILD.bazel` that was never even opened, then REQUIRES_HUMAN_INTERVENTION with a repair
+        # transcript describing nothing that happened. (MEASURED, `68a41ff` commit body /
+        # review-36 I2-I3: `docker run` against an UNREACHABLE daemon exits 1, not 125 — a daemon
+        # restart is not what reaches this branch. `_invocation_name` gives every `docker run`
+        # THIS worker starts a fresh per-call token, which removes the SELF-inflicted version of
+        # the collision; this branch still exists for a residual or externally-caused one.)
         #
         # `TRANSIENT_INFRA` because the docker daemon is the fleet's infrastructure and no part of
         # the repo is implicated; retryable because the enduring causes of 125 are already excluded
@@ -406,7 +447,10 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
         # cpus moments ago and got a real exit code out of the container, so it exists, it parses
         # and the daemon answered. See `_DOCKER_CANNOT_RUN` for why the probe answers differently.
         # `retry.py` caps this at `max_transient_retries` and then charges the ladder anyway, so a
-        # daemon that stays gone still escalates — it just does not buy a repair prompt first.
+        # 125 that keeps recurring still escalates. That cap is only half the story: on rung 1 this
+        # also buys no repair prompt, but on rungs 2-3 `_diagnose` still fires for this same
+        # retry — it runs whenever the attempt's context policy is set, regardless of failure
+        # class — so a daemon blip late in the ladder is not free of a diagnosis call either.
         return FailureClass.TRANSIENT_INFRA, True
     if result.exit_code in INFRA_EXIT_CODES:
         # The container hit its memory cap, the fleet interrupted the build, another command held
@@ -430,11 +474,18 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
 _DOCKER_CANNOT_RUN_EXPLAINED: Final = (
     f"`docker run` exited {_DOCKER_CANNOT_RUN}: the CONTAINER never started, so bazel never ran "
     "and this repository's generated files were never opened — nothing that follows is evidence "
-    "about them, and no repair to them can change this. Look at the host: a docker daemon that "
-    "went away or restarted mid-wave is the usual cause; also check that "
+    "about them, and no repair to them can change this. Look at the host: a surviving container "
+    "from a prior invocation colliding on `--name=` is the usual cause (an unreachable daemon "
+    "exits 1, not 125 — measured, see D34's correction); also check that "
     "`settings.verify.container_image` still resolves on this host and that "
     "`container_memory`/`container_cpus` hold values docker accepts. Re-queued on the same rung "
-    "as TRANSIENT_INFRA — no attempt charged, no repair prompted. docker stderr: "
+    "as TRANSIENT_INFRA — but neither half of that is free forever. It costs this repo no "
+    "attempt only up to `RetryPolicy.max_transient_retries` (default 4, `retry.py`, ADR-0014 "
+    "§11.8); a daemon still gone past that many retries makes the NEXT occurrence substantive, "
+    "charging a rung like any other failure. And on rungs 2-3 this SAME retry still triggers a "
+    "diagnosis call — `_diagnose` fires whenever the attempt's context policy is set, regardless "
+    "of failure class — so a daemon blip late in the ladder is not free of a repair prompt "
+    "either, even while the attempt itself is. docker stderr: "
 )
 """Prefixed to the tail of a 125 so the failure READS as what it is.
 
@@ -718,9 +769,12 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             return None
         spec = ContainerSpec(
             image=payload.image,
-            # NOT `spec_for_attempt`'s name: `on_cancel` force-removes that one, and a probe
-            # sharing it would race the build container it precedes. `--rm` reaps this one.
-            name=f"{sandbox_name(ctx.run_id, ctx.repo_id, ctx.attempt)}-cc-probe",
+            # Not the build step's name, and not bare `sandbox_name(...)` either: the same
+            # `_invocation_name` scheme as the build step below, with its own `-cc-probe` suffix,
+            # so a retry's probe can never collide with a container a dead daemon left registered
+            # under a PRIOR probe's name (see `_invocation_name`'s docstring) and never races the
+            # build container it precedes.
+            name=_invocation_name(ctx, suffix="-cc-probe"),
             command=("sh", "-c", C_TOOLCHAIN_PROBE),
             memory=payload.container_memory,
             cpus=payload.container_cpus,
@@ -732,6 +786,43 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             deadline=ctx.deadline,
             timeout_s=C_TOOLCHAIN_PROBE_TIMEOUT_S,
         )
+        clock = clock_failure(started=result.started, timed_out=result.timed_out)
+        if clock is not None:
+            # The same distinction `classify_build_failure` draws, drawn with the same helper so
+            # the two cannot drift apart (see `clock_failure`'s docstring on why that matters).
+            # Before this branch existed, BOTH shapes below fell through to the "no C compiler"
+            # return: an immediate, PERMANENT, FABRICATED verdict about an image the probe never
+            # got to open — the never-started case is the fleet's own deadline, and the
+            # killed-at-timeout case is most often `C_TOOLCHAIN_PROBE_TIMEOUT_S` running out
+            # mid-`docker pull` of an image nobody has fetched yet (see that constant's docstring
+            # on why it pays for the first pull), neither of which says anything about `gcc`.
+            failure_class, retryable = clock
+            never_started = (
+                "the fleet's own deadline had already passed before `docker run` could be "
+                f"spawned for the C-toolchain probe against {payload.image} — nothing about "
+                "this image was consulted, so a verdict about its compiler would be "
+                "fabricated. Re-queued on the same rung as TRANSIENT_INFRA; that costs this "
+                "repo no attempt only up to `RetryPolicy.max_transient_retries` (default 4, "
+                "ADR-0014 §11.8) — past that cap the identical clock failure is charged like "
+                "any other. "
+            )
+            killed_at_deadline = (
+                f"the C-toolchain probe against {payload.image} was killed after "
+                f"{C_TOOLCHAIN_PROBE_TIMEOUT_S:.0f}s without finishing, most likely mid-pull of "
+                "an image this host has not fetched before (this probe's timeout pays that "
+                "pull's cost the first time an attempt meets this image). The probe never "
+                "reached a verdict, so this is not evidence about the image's compiler either — "
+                "it costs the repo a rung, the same as any other timeout. "
+            )
+            return WorkerError(
+                failure_class=failure_class,
+                retryable=retryable,
+                exit_code=result.exit_code,
+                stderr_tail=(
+                    (never_started if not result.started else killed_at_deadline)
+                    + (result.stderr_tail or result.stdout_tail)
+                ),
+            )
         if result.ok:
             return None
         if result.exit_code == _DOCKER_CANNOT_RUN:
@@ -892,16 +983,28 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
         )
 
     async def on_cancel(self, ctx: WorkerContext) -> None:
-        """Kill the container by NAME (§11.1): killing the `docker run` client does not stop it.
+        """Remove every container this rung could have started, by PREFIX (§11.1).
 
-        The name is derived from the context alone — `fleet-<run_id>-<repo>-<attempt>`, the same
-        string `sandbox/worktree.py` gives the worktree — so cancellation needs no payload and no
-        handle. A removal that fails because nothing by that name exists is the expected case on
-        the un-containerised path and is deliberately not an error.
+        Killing the `docker run` client does not stop the container, so cancellation has to
+        remove it by name — but `_invocation_name` means there is no longer one exact name to
+        remove: the probe and the build/test step each get a fresh per-call token so a retry can
+        never collide with whatever a dead daemon left behind (see that function's docstring).
+        The one name still derivable from the context alone is the shared `_container_prefix`, so
+        this lists every container under it — `ContainerSandbox.list_by_prefix`'s first caller in
+        `src/` (D32 recorded it implemented with zero call sites) — and removes them all. A
+        prefix with nothing under it is the expected case on the un-containerised path, or on a
+        rung that never started a container, and is deliberately not an error.
+
+        **Not the whole of D32.** This is the CANCELLATION path. A deadline TIMEOUT that is not a
+        cancel does not reach `on_cancel` at all — that dispatch is outside this file — so a
+        container orphaned by a plain timeout (rather than a cancel or a name collision) is not
+        swept here; it waits for `ContainerSandbox.reap` at `fleet resume`.
         """
         sandbox = ContainerSandbox(runner=self._runner or run)
+        prefix = _container_prefix(ctx)
         with contextlib.suppress(OSError, ValueError):
-            await sandbox.remove(sandbox_name(ctx.run_id, ctx.repo_id, ctx.attempt))
+            for name in await sandbox.list_by_prefix(prefix):
+                await sandbox.remove(name)
 
     # ------------------------------------------------------------------ internals
 
@@ -978,6 +1081,7 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             network=payload.container_network,
             extra_mounts=[cache.mount() for cache in payload.cache_mounts],
             min_free_bytes=payload.min_free_bytes,
+            name=_invocation_name(ctx),
         )
         return tuple(docker_run_argv(spec))
 

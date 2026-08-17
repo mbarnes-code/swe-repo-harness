@@ -2213,16 +2213,19 @@ sentence. The wording needs no change; for five checkpoints the code beneath it 
 > only sound predicate is the pair of flags, which is what `_scan_for_error_nodes` already reads
 > and what ADR-0067 lifts into `util/proc.no_verdict`.
 
-**Amended by ADR-0067 — "raising routes a vanished file to a pass" stops being true of every
-raise.** Nothing about the probe document, the `kind: ERROR` reading, the `severity: error`
-argument, the `probe_text` seam, or the `MISSING` limit changes; the measured `MISSING` gap
-(item 2 above) explicitly **stands**. What ADR-0067 narrows is this entry's "Alternatives
-rejected" premise that `EngineUnavailableError` *always* lands in a non-blocking
-`parse_probe_unavailable` warning. After ADR-0067 that is true only of a **genuinely absent
-binary**; a probe that ran and produced no verdict raises `ProbeIndeterminateError` and becomes a
-**violation**. The third decision item — a missing target returns `False` rather than raising — is
-**unchanged and still right**, for the reason given here: exit **0** on a missing file (table row
-4) means fail-closed is the only safe direction.
+**Amended by ADR-0067 — "raising routes a vanished file to a pass" will stop being true of every
+raise, once ADR-0067 ships.** Nothing about the probe document, the `kind: ERROR` reading, the
+`severity: error` argument, the `probe_text` seam, or the `MISSING` limit changes; the measured
+`MISSING` gap (item 2 above) explicitly **stands**. What ADR-0067 narrows is this entry's
+"Alternatives rejected" premise that `EngineUnavailableError` *always* lands in a non-blocking
+`parse_probe_unavailable` warning. Once ADR-0067 ships, that will be true only of a **genuinely
+absent binary**; a probe that ran and produced no verdict will raise `ProbeIndeterminateError` and
+become a **violation**. **As of `68a41ff` this is undelivered** — see ADR-0067's status line —
+so today `EngineUnavailableError` still covers all three causes (missing binary, never-started
+probe, killed-at-deadline probe) and all three still land in the non-blocking warning this
+sentence describes as narrowed. The third decision item — a missing target returns `False` rather
+than raising — is **unchanged and still right**, for the reason given here: exit **0** on a
+missing file (table row 4) means fail-closed is the only safe direction.
 
 ---
 
@@ -4669,6 +4672,39 @@ source of both drifted members. Supersedes nothing.
 ---
 
 ## ADR-0067 — A parse probe that produced **no verdict** is a **violation**, not a warning: `ProbeIndeterminateError` is deliberately **not** an `EngineUnavailableError`, the `break` becomes `continue`, and `no_verdict()` lands in the module that **creates** the three-flag invariant
+
+**Status: DECIDED, NOT YET IMPLEMENTED.** Unlike its neighbours ADR-0065 and ADR-0066 — both
+retrospective records of shipped state — this ADR records a decision that had **zero** of its four
+parts in the tree as of `68a41ff` (review-36 C3; re-verified here). Checked directly:
+
+1. `grep -rn "ProbeIndeterminateError" src/ tests/` → **zero hits**. No such class exists anywhere
+   in `rewrite/rules.py` or `fleet.rewrite`.
+2. `src/fleet/cli.py:4163` still has exactly **one** `except EngineUnavailableError as exc:` arm
+   in `_transform_criterion`, not two.
+3. That single arm still ends in **`break`**, not `continue` — confirmed at `cli.py:4165`.
+4. `grep -n "no_verdict" src/fleet/util/proc.py` → **zero hits**; `src/fleet/workers/clone.py:199`
+   is still the full `_no_verdict` implementation, not a thin delegator to `util/proc.py`.
+
+The gap this ADR describes is real and is tracked as **D37** in `docs/INTEGRATION_HONESTY.md`
+(OPEN, and its text matches the current tree — `cli.py:4162-4163`, the `break`, and
+`astgrep._scan_for_error_nodes` still raising plain `EngineUnavailableError`). No new ledger entry
+is needed for it; this status line exists so this ADR itself stops reading as an accomplished
+change, which the compounding error at ADR-0047's amendment below did until corrected.
+
+**A second, narrower gap this ADR did not anticipate (review-36 I1).** Part 4's own rationale
+argues `no_verdict` belongs in `util/proc.py`, not in a `workers/*` module, because "the decoder
+belongs with the encoder" and `fleet.rewrite` importing from `fleet.workers` "inverts the
+layering." One commit after this ADR landed, `68a41ff` added a **third** decoder of the identical
+`(started, timed_out)` invariant — `clock_failure` — directly in `src/fleet/workers/base.py:155`,
+the exact kind of module this ADR argues against. `clock_failure` returns a `FailureClass`, which
+is legitimately a `workers` concept and not interchangeable with the reason-string `no_verdict`
+this ADR specifies, so the two are not strictly the same function — but the placement tension is
+real and unacknowledged in either commit. `base.py:161-164`'s docstring additionally claims
+`clock_failure` is the answer "written down once," which overstates it: `clone._no_verdict`
+(`clone.py:199`) and `astgrep._scan_for_error_nodes` (`astgrep.py:198`) still hand-order the same
+two flags independently. Correcting `base.py`'s docstring is out of scope for this file (it is
+`src/`, owned by a different worker this round); recorded here so the tension is not silently
+dropped.
 
 **Decision.** D37. §3.2's fourth success clause — *a parse probe of every rewritten file* — stops
 being skippable in silence. Four parts:

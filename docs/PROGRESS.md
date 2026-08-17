@@ -4422,3 +4422,159 @@ against `src/fleet/workers/buildverify.py`, and in `tests/test_workers_scan.py` 
 8. **Unchanged policy:** commits and pushes remain the **orchestrator's** to make, and the
    `tools/` exclusions are `.gitignore` policy — an agent that "fixes" the untracked `tools/` tree
    re-adds 2.2 GB to every future clone.
+
+---
+
+## 36. Checkpoint — 2026-08-17 · docs-only honesty pass on `docs/superpowers/plans/review-36.md`, the audit of `44d5550..68a41ff`: **the missing §36 was the audit's own root cause** for C1/C2/I3 — `68a41ff`'s three retractions and one new measurement had no destination once its own diff landed, so they stayed in the commit body where nothing reads them · one ADR (0067) corrected from "shipped" to "decided, not implemented" · one new ledger entry (D46) · two test docstrings corrected · one test renamed
+
+**Scope of this checkpoint.** This is a **documentation-only** pass by a worker scoped to
+`docs/DECISIONS.md`, `docs/PROGRESS.md`, `docs/INTEGRATION_HONESTY.md`, and — narrowly — the names
+and docstrings of the specific tests review-36's M1/M2 cite. `src/fleet/workers/buildverify.py`,
+`base.py`, `cli.py`, `vcs/git.py`, `util/proc.py`, `vcs/github.py`, `vcs/gitea.py`,
+`vcs/filter_repo.py` are other workers' this round and were read for verification only, never
+edited. Findings that require changes there (**C1, C2, I2, I5, M4**) are recorded below as
+**left for a code-owning worker**, not fixed.
+
+### A. C3 — ADR-0067 documented four artifacts; none existed at `68a41ff`. Verified independently.
+
+Each of ADR-0067's four decision parts was checked against the tree at `68a41ff`, not taken on the
+reviewer's word:
+
+| Part | Claim | Check | Result |
+| --- | --- | --- | --- |
+| 1 | `ProbeIndeterminateError(RuntimeError)` in `rewrite/rules.py` | `grep -rn "ProbeIndeterminateError" src/ tests/` | **zero hits** |
+| 2 | second `except` arm in `cli._transform_criterion`, ordered first | `cli.py:4163` | still one arm |
+| 3 | `break` → `continue` in both arms, `(repo_id, engine)` dedupe | `cli.py:4165` | still `break` |
+| 4 | `no_verdict()` in `util/proc.py`; `clone._no_verdict` a thin delegator | `grep -n no_verdict src/fleet/util/proc.py`; `clone.py:199` | zero hits; full impl, not a delegator |
+
+All four are confirmed absent. `docs/DECISIONS.md`'s ADR-0067 now carries a **Status: DECIDED, NOT
+YET IMPLEMENTED** line with these four citations, replacing the implicit "this shipped" framing
+its position next to the retrospective ADR-0065/0066 invited. The ADR-0047 amendment at
+`DECISIONS.md:~2216-2225`, which had described the undelivered behavior in the indicative ("that is
+true only of a genuinely absent binary; a probe that... raises `ProbeIndeterminateError`"), is now
+future-tense ("once ADR-0067 ships, that will be true...") with an explicit "as of `68a41ff` this
+is undelivered" sentence.
+
+**No new ledger number was needed.** ADR-0067 says of itself, correctly, that it "Records D37" —
+and D37 in `docs/INTEGRATION_HONESTY.md` (line 1941) already describes this exact gap accurately
+and as OPEN, re-verified here against the same four citations. The desirable-but-absent change
+therefore already has tracked work; ADR-0067 needed a status correction, not a duplicate entry.
+
+### B. I3 — a defect measured only in `68a41ff`'s commit body now has a number: **D46**
+
+`68a41ff`'s body measured that D34's own fix creates a deterministic failure mode: `RetryPolicy`'s
+free `RETRY_TRANSIENT` re-runs re-issue the **identical** `docker run --name=`
+(`sandbox_name(run_id, repo, attempt)`, unchanged by `transient_retries`), and a dead daemon never
+runs `--rm` on the container it orphaned, so the next `docker run --name=<same>` collides and exits
+125 — permanently, for as long as the debris container exists, consuming all four free retries
+before the ladder ever charges a rung for a condition it caused. This lived nowhere but `git log`.
+It is now `D46 — OPEN` in `docs/INTEGRATION_HONESTY.md`, with citations to
+`sandbox/container.py:103-133` and `orchestrator/retry.py:132,203-217`, and an explicit,
+non-authoritative note that the current **uncommitted** working tree appears (by inspection, not
+by running anything) to carry a fix for this in `buildverify.py` — recorded as *claimed, not
+verified*, per this document's own standing convention for files another worker owns mid-round.
+
+### C. I1 and I4 — two claims about the code's own history, both wrong, both now corrected in the docs this worker owns
+
+**I1 — `clock_failure` (`base.py:155`) sits in the exact kind of module ADR-0067 argues against for
+its sibling classifier**, and `base.py:161-164`'s claim that the answer is now "written down once"
+overstates it (`clone._no_verdict` and `astgrep._scan_for_error_nodes` still hand-order the same
+two flags). Verified against the tree; both citations hold. **The docstring itself is `src/`, out
+of this worker's reach.** ADR-0067 now records the tension and the overstatement explicitly, with a
+note that correcting `base.py:161-175` is left for a code-owning worker.
+
+**I4 — the true history is the reverse of what `68a41ff` and its docstrings claim.** Read at
+`44d5550~1`: `buildverify.classify_build_failure` and `clone._error_for` **already agreed** on the
+never-started shape (both answered `TIMEOUT` — wrong, but in step). `44d5550` reordered
+buildverify's branches, added the comment asserting the two "are meant to stay in step," and **did
+not touch `clone.py` at all** (`git show 44d5550 --stat` lists no `clone.py` hunk). The comment was
+false the instant it was committed. `68a41ff`'s docstrings blame "clone discarded `started`... and
+answered `TIMEOUT` for both" as a pre-existing condition; it was manufactured by `44d5550`'s own
+half-applied reorder. This false history also appeared in `tests/test_workers_scan.py`'s
+`test_the_clone_and_build_classifiers_agree_on_every_clock_failure` docstring (line 729), which
+this worker was authorized to touch because M2 cites the same test — corrected there, with the
+`44d5550~1` evidence and an explicit note that the "build worker answered free, clone charged a
+rung" divergence held only for the ~90-minute window between `44d5550` and `68a41ff`, never in a
+real wave. **`base.py:176-179` and `clone.py:700-706` carry the same false history and remain
+uncorrected** — both are `src/`, left for a code-owning worker.
+
+### D. M1-M4 — the four Minors
+
+- **M1 — fixed.** `tests/test_workers_build.py`'s
+  `test_a_daemon_blip_costs_the_repo_no_attempt_and_reaches_no_human` (drove only `blips=1`, named
+  and asserted as if it bounded the general case) is renamed
+  `test_a_single_daemon_blip_costs_the_repo_no_attempt`, docstring and assertion message narrowed to
+  state the `blips=1` scope and name `max_transient_retries` (4, `retry.py:132`) as the untested
+  boundary. Test logic (the `blips=1` drive, the `attempts == 0` check) is unchanged — renaming and
+  message-narrowing only, per this worker's mandate. **The missing `blips=5` sibling test is not
+  added here** (new test logic, out of scope) and is left for a code-owning/test-owning worker.
+- **M2 — documented, not fixed in logic.** `test_the_clone_and_build_classifiers_agree_on_every_clock_failure`'s
+  tuple-equality assertion pins `retryable` vacuously because `clone._error_for` hardcodes
+  `retryable=True` and discards `clock_failure`'s own retryable half. The assertion itself is
+  unchanged (a logic change, explicitly out of this worker's authority — "if a test needs different
+  assertions, report it"); the docstring now says so explicitly, with the two fix options named
+  (`_error_for` consuming the returned `retryable`, or narrowing the assertion to `failure_class`
+  alone) for whichever worker owns `clone.py` next.
+- **M3 — no fix needed; recorded here instead.** The reviewer found the test's own docstring
+  ("What is asserted for that row is only that neither invents a clock failure") more honest than
+  `68a41ff`'s commit body ("pins the boundary... the two should differ"). Verified: the finished-row
+  assertion is `is not FailureClass.TIMEOUT` on each side, nothing asserts inequality. The test
+  needed no change; the overclaim is confined to the (immutable) commit body. Recorded here so the
+  gap between what shipped and what the commit said is not lost.
+- **M4 — verified, left for a code-owning worker.** `clone.py:723-745`'s `_is_shallow` docstring (a)
+  claims a "measured across git 2.20.4 → 2.49.1" range this repo's own environment header
+  (`INTEGRATION_HONESTY.md`) records as git **2.43.0**, with no matrix or fixture recording where
+  the eight-version sweep ran (§35 B5 already flags this same sweep as "not re-run here" — the
+  provenance gap is inherited, not new), and (b) claims "reading the file is... the same signal" as
+  `git rev-parse --is-shallow-repository` **in the same docstring** that goes on to say the two
+  diverge (confirmed: `tests/test_workers_scan.py:384`ff exercises exactly that divergence against
+  the real binary). `clone.py` is not this worker's file to edit (not in the explicit "do not
+  edit" list, but also not in this worker's ownership grant, which is docs plus M1/M2/M3 test
+  text only). Left as a correction for whichever worker next touches `clone.py`.
+
+### What was verified
+
+Every claim above was checked directly against the tree at `68a41ff` (working-tree reads on files
+other workers are concurrently modifying were re-confirmed with fresh `grep`/`sed` after each read,
+since line numbers were observed shifting mid-session): `grep -rn "ProbeIndeterminateError"`,
+`grep -n no_verdict src/fleet/util/proc.py`, `sed -n` over `cli.py:4155-4170`,
+`clone.py:680-748`, `base.py:150-235`, `sandbox/container.py:90-135`, `orchestrator/retry.py:190-220`,
+`git show 44d5550~1:src/fleet/workers/{buildverify,clone}.py`, `git show 44d5550 --stat`, and
+`tests/test_workers_scan.py:350-800`. `git status --short` was checked to identify which files
+carry uncommitted, concurrently-authored changes before citing their line numbers.
+
+### What is still NOT proven / left open
+
+1. **C1 and C2 are unfixed.** The operator-facing `_DOCKER_CANNOT_RUN_EXPLAINED` string
+   (`buildverify.py:430-437`) and `clock_failure`'s docstring (`base.py:161-164`) both still assert
+   the unconditional "no attempt charged, no repair prompted" that `68a41ff`'s own commit body
+   retracted. Both files are outside this worker's edit authority this round.
+2. **I2 and I5 are unfixed.** `DAEMON_GONE`'s fixture (`test_workers_build.py`) still pairs real
+   daemon-unreachable stderr with a counterfactual exit 125; `cli.py:3634`'s `GitCommandError`
+   construction still omits `started`. Both are `src/`/other-worker files.
+3. **D34/D35/D36/D41/D45 in `docs/INTEGRATION_HONESTY.md` were not re-audited for staleness this
+   pass.** Review-36's own "Documentation state" section (not a counted finding) notes these read
+   `OPEN` despite `68a41ff` appearing to fix D34/D35/D36/D41 in code. This worker's explicit
+   priority list did not include re-deriving their status, and doing so without running the suite
+   (forbidden this round) would mean trusting reads alone for a claim this document treats as
+   requiring the same rigor as everything else here — left for the orchestrator to assign.
+4. **The uncommitted working tree.** As of this checkpoint, `git status --short` shows uncommitted
+   changes to `cli.py`, `sandbox/container.py`, `util/proc.py`, `vcs/filter_repo.py`, `vcs/git.py`,
+   `vcs/gitea.py`, `vcs/github.py`, `workers/base.py`, `workers/buildverify.py`, and four test files
+   — three other workers' concurrent output this same round. Every citation above to those files is
+   to their state at the moment read, not to any committed SHA; **re-derive rather than trust these
+   line numbers once that work lands.**
+
+### Next subagent task, in priority order
+
+1. **A code-owning worker for `buildverify.py`/`base.py`: land C1 and C2's corrected strings/docstrings**
+   (see review-36 for the exact honest replacement text), then close D46 once the apparent
+   `_invocation_name` fix in the working tree is verified by the suite (not by this worker).
+2. **A code-owning worker for `cli.py`: implement ADR-0067's four parts** (now correctly marked
+   undelivered) or, if it is being deliberately deferred, say so in the ADR rather than leave the
+   status line as the only signal.
+3. **Re-audit `D34/D35/D36/D41` status in `docs/INTEGRATION_HONESTY.md`** once a suite run is
+   available to confirm rather than infer.
+4. **The missing `blips=5` sibling test (M1) and the `clone._error_for` retryable fix or narrower
+   assertion (M2)** — both named above, both need a worker with `tests/`/`clone.py` write scope
+   broader than this round's grant.

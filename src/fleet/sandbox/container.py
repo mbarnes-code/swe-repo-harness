@@ -96,12 +96,22 @@ def spec_for_attempt(
     extra_mounts: Iterable[Mount] = (),
     env: Mapping[str, str] | None = None,
     min_free_bytes: int = 0,
+    name: str | None = None,
 ) -> ContainerSpec:
-    """The §3.3 step 4 shape: the task's worktree bind-mounted read-write, name shared with it."""
+    """The §3.3 step 4 shape: the task's worktree bind-mounted read-write.
+
+    `name` defaults to `sandbox_name(run_id, repo, attempt)` — identical to the worktree's — for
+    every caller that does not override it (every `test_sandbox.py` assertion; `rdepverify`'s use
+    of the same convention). A caller whose retry loop can re-issue this SAME `(run_id, repo,
+    attempt)` more than once — `buildverify._argv`, across an ADR-0014 `TRANSIENT_INFRA` retry —
+    should pass its own: the default is deterministic across those retries, and a container a dead
+    daemon left registered under it turns the next `docker run --name=<same>` into a PERMANENT
+    name-conflict 125 that no amount of retrying removes.
+    """
     mounts = (Mount(source=worktree, target=container_workdir), *extra_mounts)
     return ContainerSpec(
         image=image,
-        name=sandbox_name(run_id, repo, attempt),
+        name=name if name is not None else sandbox_name(run_id, repo, attempt),
         command=tuple(command),
         mounts=mounts,
         workdir=container_workdir,

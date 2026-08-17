@@ -2076,7 +2076,46 @@ cannot express a state is a fake that guarantees the state is never asserted on,
 none. **Would a test catch it? The question is inverted here** — this is why the others have no
 tests. The fix is one keyword argument, and it makes six of the eleven above cheaply testable.
 
-### Cleared rather than found — the honest forms, recorded so they are not "fixed" later
+**D46 — OPEN. The `TRANSIENT_INFRA` fix D34 shipped guarantees four byte-identical, deterministic
+125s before it ever charges a rung, because the retry re-issues the same `docker run --name=`.**
+Recorded here per review-36 I3: at `68a41ff` this measurement exists only in that commit's body,
+not in this ledger, so it was invisible to anyone reading the register rather than `git log`.
+
+`sandbox/container.py`'s `sandbox_config` (`container.py:103-109`, docstring) already names the
+mechanism: `name` defaults to `sandbox_name(run_id, repo, attempt)`, which is **identical** across
+every `RetryPolicy.decide` re-run of the same `TRANSIENT_INFRA` rung — `retry.py:203-217`'s
+`RETRY_TRANSIENT` branch replays `(run_id, repo, attempt)` unchanged, only incrementing
+`transient_retries`, and `docker_run_argv` (`container.py:127-133`) emits both `--rm` and
+`--name={spec.name}` from that same spec. `--rm` is enforced by the daemon at container exit; a
+daemon that died mid-build never runs it, so a container the dead daemon registered under that
+name survives it. **MEASURED (68a41ff commit body): a surviving container makes a subsequent
+`docker run --name=X` exit 125, and that 125 is now `TRANSIENT_INFRA` per D34's own fix** —
+`buildverify.py`'s `_DOCKER_CANNOT_RUN` branch does not distinguish "daemon unreachable" from
+"name already in use," both being an unreadable one-line docker stderr. So the harness's own
+crash-recovery debris — the previous attempt's own container — manufactures a **permanent** 125
+that `RETRY_TRANSIENT` cannot resolve by retrying, because every retry reissues the identical
+name. Four free retries (`retry.py:132`, `DEFAULT_MAX_TRANSIENT_RETRIES = 4`) are consumed against
+a condition retrying cannot fix, and only then does the ladder charge a rung for a name collision
+it has never once told the operator about.
+
+**Severity: high, and worse than D34's own motivating case.** D34 wasted rungs on a *transient*
+condition that eventually clears on its own. This is *self-inflicted and deterministic*: once a
+daemon dies mid-container, every subsequent retry of that rung is guaranteed to fail identically,
+by construction, until the four free retries are exhausted and a real rung is charged — for a
+condition the harness caused and could have named. **Would a test catch it? No** — no test in
+`tests/test_workers_build.py` constructs a name-collision 125 distinct from a daemon-unreachable
+125; see review-36 I2 for the adjacent fixture defect (a `DAEMON_GONE` stderr paired with an
+exit code Docker 29.7.2 does not produce for that case) that would need correcting alongside it.
+
+**Status as of this entry (Worker D, docs-only pass; the fix belongs to `src/`).** The working
+tree at the time of writing carries **uncommitted** changes to `src/fleet/workers/buildverify.py`
+(not this worker's file to edit or verify by running anything) that appear, by inspection only, to
+address exactly this: a `_invocation_name` helper builds a fresh `uuid.uuid4().hex[:8]`-suffixed
+name per call rather than reusing `sandbox_name(run_id, repo, attempt)`, with a docstring citing
+this same mechanism. **This is claimed, not verified** — per this document's own §33-derived
+convention for concurrently-edited files, a name matching this description is not the same as a
+tested fix. Re-derive from `git diff` and the test suite once it lands, and close this entry only
+then; do not treat this paragraph as evidence of a fix already shipped.
 
 - **`cli.py`'s two timeout printers are correct.** `cli.py:6369` and `cli.py:6626` both render
   `f"{' (timed out)' if result.timed_out else ''}"` into the failure text, so the operator is told

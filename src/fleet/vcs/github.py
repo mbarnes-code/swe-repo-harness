@@ -144,14 +144,24 @@ class GitHubCli:
 
     async def _exec(self, args: Sequence[str], *, check: bool = True) -> str:
         parts = self.argv(args)
-        result = await self._runner(
-            parts, cwd=self.cwd, deadline=self.deadline, timeout_s=self.timeout_s
-        )
-        if not result.started or result.exit_code == 127:
-            raise GhUnavailableError(
-                f"{self._gh} is not available (exit {result.exit_code}); PR emission and PR state "
-                "ingestion both require it (§3.4)"
+        # No shell is ever involved (`util/proc.py`'s module docstring), so a `gh` missing from
+        # PATH never comes back as a `ProcResult` with some sentinel exit code — there is no
+        # shell to apply the "command not found: exit 127" convention. It is
+        # `asyncio.create_subprocess_exec` raising `FileNotFoundError` in THIS process, before any
+        # `ProcResult` exists, and it is caught here or it escapes raw and unclassified.
+        try:
+            result = await self._runner(
+                parts, cwd=self.cwd, deadline=self.deadline, timeout_s=self.timeout_s
             )
+        except FileNotFoundError as exc:
+            raise GhUnavailableError(
+                f"{self._gh} is not on PATH; PR emission and PR state ingestion both require it "
+                f"(§3.4): {exc}"
+            ) from exc
+        # `result.started` is false in exactly one case — `util.proc.run` synthesised a
+        # deadline that had already passed (§7.1) — never a missing binary; that case already
+        # fails `result.ok` below and is reported as the clock failure it is, not relabelled as
+        # "gh is not available".
         if check and not result.ok:
             raise GhError(
                 f"gh {' '.join(redact_argv(parts)[1:])} failed (exit {result.exit_code}): "

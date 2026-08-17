@@ -19,7 +19,7 @@ import pytest
 
 from fleet.models.base import LOG_TAIL_BYTES
 from fleet.util import proc
-from fleet.util.proc import TIMEOUT_EXIT_CODE, ProcResult, run
+from fleet.util.proc import TIMEOUT_EXIT_CODE, ProcResult, is_producible_shape, run
 
 # A child that spawns its own long-lived child, records the grandchild's pid, then sleeps.
 # The grandchild inherits the process group, which is the only reason `killpg` can reach it.
@@ -241,3 +241,65 @@ async def test_result_is_labelled_not_a_tuple() -> None:
     assert result.argv[0] == sys.executable
     assert result.stdout_tail.strip() == "ok"
     assert result.command_line().startswith(sys.executable)
+
+
+# --------------------------------------------------------------------------------------
+# the ScriptedRunner anti-drift invariant (SPEC §7.1: `not started` has exactly one cause)
+# --------------------------------------------------------------------------------------
+async def test_is_producible_shape_matches_the_real_never_started_branch() -> None:
+    """`is_producible_shape`'s claim about `started=False` is checked against a LIVE call, not
+    against its own docstring: `_run_locked`'s deadline-already-passed branch is the only place
+    `run()` ever sets `started=False`, and it always pairs that with `timed_out=True` and
+    `exit_code=TIMEOUT_EXIT_CODE`. If a future change decoupled those three, this assertion —
+    not just the docstring — would be the thing that catches it.
+    """
+    loop = asyncio.get_running_loop()
+    real = await run([sys.executable, "-c", "print('should not run')"], deadline=loop.time() - 1)
+    assert (real.started, real.timed_out, real.exit_code) == (False, True, TIMEOUT_EXIT_CODE)
+    assert is_producible_shape(
+        started=real.started, timed_out=real.timed_out, exit_code=real.exit_code
+    )
+
+    # Perturbing any one of the three away from what `run()` actually returned must be rejected:
+    # these are exactly the states a test double must never be able to construct.
+    assert not is_producible_shape(started=False, timed_out=False, exit_code=TIMEOUT_EXIT_CODE)
+    assert not is_producible_shape(started=False, timed_out=True, exit_code=1)
+    assert not is_producible_shape(started=False, timed_out=False, exit_code=0)
+
+    # `started=True` places no constraint on the other two — a real process may exit any code,
+    # timed out or not (including the pathological zero-after-SIGKILL `ProcResult.ok` documents).
+    for timed_out, exit_code in [(False, 0), (False, 3), (True, -15), (True, -9), (True, 0)]:
+        assert is_producible_shape(started=True, timed_out=timed_out, exit_code=exit_code)
+
+
+async def test_scripted_runner_cannot_construct_states_the_real_runner_cannot_produce() -> None:
+    """Anti-drift, end to end: `ScriptedRunner` (`tests/test_vcs.py`) validates every instance
+    against `is_producible_shape`, defined beside `_run_locked` — the one function that actually
+    produces a `ProcResult`. If `util/proc.py`'s contract ever changes (a different
+    `TIMEOUT_EXIT_CODE`, or `started=False` decoupled from `timed_out`) without `ScriptedRunner`
+    following, this test is what fails: the real, live `run()` call below re-derives the ground
+    truth every time rather than trusting a constant copied into the test file, so `ScriptedRunner`
+    and `util.proc.run` cannot silently drift apart the way the ladder-position counters in
+    `workers/base.py` once did (see that module's docstring for the sibling defect).
+    """
+    from tests.test_vcs import ScriptedRunner  # the double every vcs/gh/gitea test replays against
+
+    loop = asyncio.get_running_loop()
+    real = await run([sys.executable, "-c", "pass"], deadline=loop.time() - 1)
+
+    # The one state `run()` actually produces for `started=False` must remain constructible.
+    ScriptedRunner(started=real.started, timed_out=real.timed_out, exit_code=real.exit_code)
+
+    # Every other `started=False` pairing must be refused — these are exactly the "impossible"
+    # states that let a test assert against evidence no real invocation could generate.
+    for started, timed_out, exit_code in [
+        (False, False, TIMEOUT_EXIT_CODE),
+        (False, True, 1),
+        (False, False, 0),
+    ]:
+        with pytest.raises(ValueError):
+            ScriptedRunner(started=started, timed_out=timed_out, exit_code=exit_code)
+
+    # `started=True` remains unconstrained — the double must still cover every real outcome.
+    for timed_out, exit_code in [(False, 0), (False, 3), (True, -15), (True, -9), (True, 0)]:
+        ScriptedRunner(started=True, timed_out=timed_out, exit_code=exit_code)

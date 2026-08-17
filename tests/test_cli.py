@@ -24,23 +24,33 @@ Every test here answers "why does this matter":
 
 from __future__ import annotations
 
+import ast
 import json
 import shutil
 import sqlite3
 from collections.abc import Iterator
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from fleet.cli import ExitCode, app, command_paths
+from fleet.bazel.lockfile import MODULE_LOCK_PATH
+from fleet.cli import BuildInput, BuildOutput, BuildPipelineWorker, ExitCode, app, command_paths
 from fleet.llm.roles import SPEC_ROLE_TIERS
 from fleet.migrations import LATEST_VERSION
+from fleet.models.build import BuildUnit, SupportFile
+from fleet.models.enums import Ecosystem
 from fleet.models.state import SCHEMA_VERSION
 from fleet.state.db import SCHEMA_PATH
+from fleet.vcs.git import Git
+from fleet.workers.base import WorkerContext
 from tests.test_migrations import _v6_database
 
 runner = CliRunner()
+
+REPO_SRC = Path(__file__).resolve().parents[1] / "src" / "fleet"
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -1158,3 +1168,172 @@ def test_exit_codes_reuse_the_orchestrator_constants() -> None:
     assert ExitCode.TIER_UNAVAILABLE == runner.TIER_UNAVAILABLE_EXIT_CODE == 8
     assert ExitCode.DISK_EXHAUSTED == runner.DISK_EXIT_CODE == 9
     assert ExitCode.SEQUENCE_REFUSED == 11
+
+
+# --------------------------------------------------------------------------------------
+# D26, D27 — BuildPipelineWorker._publish / _publish_module_lock (docs/INTEGRATION_HONESTY.md)
+# --------------------------------------------------------------------------------------
+# Real git, real worktrees, no injected runner: the defects are both about WHICH git question
+# `_publish`/`_publish_module_lock` ask, not about argv construction, so a fake `CommandRunner`
+# would prove nothing — it would answer whatever the test told it to. `worker_ctx` (conftest.py)
+# supplies inert sentinels for `db`/`llm`/`router`/`limits`/`log`, which `_publish`'s git-only
+# path never calls EXCEPT `log.warning` on the legitimate "no lockfile in this worktree" path —
+# so `_StubLog` below stands in for `log` alone, wherever a test's worktree carries none.
+
+
+class _StubLog:
+    """A structlog-`BoundLogger`-shaped no-op. `_publish` warns (never raises) when a build
+    worktree carries no `MODULE.bazel.lock`, which is the ordinary, non-error state these tests'
+    minimal fixtures are in."""
+
+    def warning(self, *args: object, **kwargs: object) -> None:
+        pass
+
+
+async def test_publish_is_not_blocked_by_worktree_droppings_outside_the_pathspec(
+    tmp_path: Path, worker_ctx: WorkerContext
+) -> None:
+    """D26: `_publish`'s idempotence guard used to ask `is_dirty()` — `git status --porcelain`
+    over the WHOLE worktree — rather than the pathspec it had just staged. A real Bazel's own
+    `--build_event_json_file=bazel-<unit>-events.json` is a RELATIVE path
+    (`buildverify._bazel_argv`), so it lands inside this same worktree; convenience symlinks do
+    too. On a PUBLISH-only re-entry whose generated files were already committed, `git add`
+    therefore staged nothing for `paths`, but `is_dirty()` still saw those droppings and answered
+    dirty — sending `git commit` at an empty index, which fails and takes the whole dispatch down.
+    `fleet resume` does not exist, so PUBLISH is the only recovery route: this defect permanently
+    stranded any repo whose worktree carried so much as one build-tool dropping outside `paths`,
+    on every subsequent re-entry.
+    """
+    origin = tmp_path / "origin"
+    build_dir = tmp_path / "build"
+    origin.mkdir()
+    origin_git = Git(origin)
+    await origin_git.exec(["init", "-q"])
+    await origin_git.commit("init", allow_empty=True)
+    await origin_git.exec(
+        ["worktree", "add", "-q", "-b", "migrate/acme-commons", str(build_dir), "HEAD"]
+    )
+
+    build_git = Git(build_dir)
+    dest = "libs/widget"
+    build_bazel = f"{dest}/BUILD.bazel"
+    (build_dir / dest).mkdir(parents=True)
+    (build_dir / dest / "BUILD.bazel").write_text("build_rule()\n")
+    await build_git.exec(["add", "--", build_bazel])
+    await build_git.commit(f"Generate Bazel targets for {dest}")
+
+    # The re-entry state this defect needs: generated files already on the branch, and a real
+    # Bazel run's own events file — outside `paths` — sitting untracked in the worktree.
+    (build_dir / "bazel-acme-commons-events.json").write_text("{}\n")
+
+    unit = BuildUnit(unit_id="acme-commons", ecosystem=Ecosystem.UNKNOWN, dest=dest)
+    payload = BuildInput(
+        repo_id="acme-commons",
+        dest=dest,
+        unit=unit,
+        integration_ref="refs/fleet/test/integration/0",
+        integration_worktree=str(tmp_path / "unused-integration"),
+        lock_dir=str(tmp_path / "locks"),
+    )
+    output = BuildOutput(repo_id="acme-commons")
+    stub_log: Any = _StubLog()  # `WorkerContext.log` is a `structlog.BoundLogger`; conftest.py's
+    # own `worker_ctx` sentinels are `Any`-typed for the identical reason — nothing here needs a
+    # real logger to be typed as one, only to answer `.warning(...)`.
+    ctx = replace(worker_ctx, workdir=str(build_dir), log=stub_log)
+
+    result = await BuildPipelineWorker()._publish(ctx, payload, output)
+
+    assert result is None, (
+        "a re-entry whose generated files were already on the branch must be a no-op, not a "
+        f"failure over an unrelated worktree dropping: {result}"
+    )
+    assert output.already_published is True
+
+
+async def test_publish_module_lock_survives_a_crash_between_materialize_and_commit(
+    tmp_path: Path, worker_ctx: WorkerContext
+) -> None:
+    """D27: `_publish_module_lock` used to compare the lock's content against the FILE sitting in
+    the integration worktree rather than what `integration_branch` actually carries. A dispatch
+    that dies between `materialize` (which writes the bytes) and `commit` (which lands them)
+    leaves exactly that state — correct bytes on disk, nothing reachable from the branch — and
+    every later re-entry read the file, found it byte-identical to what it was about to write, and
+    returned without ever committing: `module_lock_published` said the lock had landed while the
+    branch shipped with none, and a `--network=none` container build of it exits 32 at `Error
+    computing the main repository mapping`. This reproduces the crash directly — materialize,
+    no commit, re-enter — and asserts the lock actually reaches the branch, which is D27's own
+    suggested check: "assert `git show <ref>:MODULE.bazel.lock` resolves".
+    """
+    origin = tmp_path / "origin"
+    integration_dir = tmp_path / "integration"
+    origin.mkdir()
+    origin_git = Git(origin)
+    await origin_git.exec(["init", "-q"])
+    await origin_git.commit("init", allow_empty=True)
+    await origin_git.exec(
+        ["worktree", "add", "-q", "-b", "integration", str(integration_dir), "HEAD"]
+    )
+
+    lock_content = '{"lockFileVersion": 15, "moduleFileHash": "abc"}\n'
+    # The crash: a PRIOR run's `materialize` wrote the bytes and died before `add`/`commit` ran.
+    (integration_dir / MODULE_LOCK_PATH).write_text(lock_content)
+
+    integration_git = Git(integration_dir)
+    unit = BuildUnit(unit_id="acme-commons", ecosystem=Ecosystem.UNKNOWN, dest="libs/widget")
+    payload = BuildInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        unit=unit,
+        integration_ref="refs/fleet/test/integration/0",
+        integration_worktree=str(integration_dir),
+        integration_branch="integration",
+        lock_dir=str(tmp_path / "locks"),
+    )
+    output = BuildOutput(repo_id="acme-commons")
+    lock = SupportFile(path=MODULE_LOCK_PATH, content=lock_content)
+
+    await BuildPipelineWorker()._publish_module_lock(
+        worker_ctx, payload, output, integration_git, lock
+    )
+
+    assert output.module_lock_published is True
+    landed = await integration_git.blob_at("integration", MODULE_LOCK_PATH)
+    assert landed is not None, (
+        "the lock must reach the branch even when a prior crash left byte-identical content "
+        "sitting uncommitted in the worktree — comparing against the file alone (D27) let this "
+        "state read as 'already published' forever, and the branch never actually got a lock"
+    )
+    shown = await integration_git.text(["show", f"integration:{MODULE_LOCK_PATH}"])
+    assert shown == lock_content.strip()
+
+
+# --------------------------------------------------------------------------------------
+# I5 (docs/superpowers/plans/review-36.md) — every GitCommandError construction forwards `started`
+# --------------------------------------------------------------------------------------
+
+
+def test_every_gitcommanderror_construction_forwards_started() -> None:
+    """I5: `GitCommandError.started` defaults to `True`, so a construction site that forgets to
+    forward it silently claims a process that never launched actually ran and exited — exactly
+    the misclassification the field exists to prevent (`base.clock_failure`'s ADR-0014 ladder
+    reads `started`/`timed_out` to tell "we never asked" from "we asked and it ran too long", and
+    those cost a repo differently). `cli.py:3634` dropped it once already, under a docstring that
+    (at the time) implied every site forwarded it. The class itself cannot enforce its callers'
+    keywords, so this is a source-text invariant rather than a behavioural one — the same shape
+    `vcs/git.py`'s own module docstring uses for "no shell, ever".
+    """
+    offenders: list[str] = []
+    for path in sorted(REPO_SRC.rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "GitCommandError"
+                and not any(kw.arg == "started" for kw in node.keywords)
+            ):
+                offenders.append(f"{path.relative_to(REPO_SRC.parents[1])}:{node.lineno}")
+    assert offenders == [], (
+        "GitCommandError constructed without forwarding `started` (defaults to True, silently "
+        f"claiming a never-started process ran and exited): {offenders}"
+    )

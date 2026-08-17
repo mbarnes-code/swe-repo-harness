@@ -159,12 +159,24 @@ async def relocate(
     origin remote, so pointing this at a mirror would destroy the mirror. Nothing here fetches.
     """
     argv = filter_repo_argv(spec, binary=binary)
-    result = await runner(argv, cwd=clone_dir, deadline=deadline, timeout_s=timeout_s)
-    if not result.started or result.exit_code == 127 or "No such file" in result.stderr_tail:
+    # No shell is ever involved (`util/proc.py`'s module docstring), so `git-filter-repo` missing
+    # from PATH never comes back as a `ProcResult` with some sentinel exit code or an "stderr" —
+    # there is no shell to apply the "command not found: exit 127" convention, and the process
+    # never started well enough to write anything. It is `asyncio.create_subprocess_exec` raising
+    # `FileNotFoundError` in THIS process, before any `ProcResult` exists, and it is caught here
+    # or it escapes raw and unclassified — which is what `not result.started or exit_code == 127
+    # or "No such file" in result.stderr_tail` used to guess at from a `ProcResult` that can
+    # never actually carry that evidence.
+    try:
+        result = await runner(argv, cwd=clone_dir, deadline=deadline, timeout_s=timeout_s)
+    except FileNotFoundError as exc:
         raise FilterRepoUnavailableError(
-            f"{binary} is not available (exit {result.exit_code}): Phase 3 ingest rewrites history "
-            "and has no fallback; install git-filter-repo on the host or in the sandbox image"
-        )
+            f"{binary} is not on PATH: Phase 3 ingest rewrites history and has no fallback; "
+            f"install git-filter-repo on the host or in the sandbox image: {exc}"
+        ) from exc
+    # `result.started` is false in exactly one case — `util.proc.run` synthesised a deadline that
+    # had already passed (§7.1) — never a missing binary; that case already fails `result.ok`
+    # below and is reported as the clock failure it is, via `IngestError`.
     if not result.ok:
         raise IngestError(
             f"{binary} failed (exit {result.exit_code}) in {clone_dir}: {result.stderr_tail}"

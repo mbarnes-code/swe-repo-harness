@@ -699,12 +699,20 @@ class CloneWorker(BaseWorker[CloneInput, CloneOutput]):
         exit_code = getattr(exc, "exit_code", None)
         # `started` and `timed_out` are read TOGETHER and handed to the one function that owns the
         # distinction (`base.clock_failure`), which `buildverify.classify_build_failure` also
-        # calls. Reading `timed_out` alone here is the defect this replaces: `util.proc.run` sets
-        # it for a call it never made, so a probe that produced no evidence about the repo was
-        # reported as substantive `TIMEOUT` and charged a rung — while the build worker, for the
-        # identical `ProcResult`, answered free `TRANSIENT_INFRA`. An `OSError` carries neither
-        # attribute; `started=True, timed_out=False` is right for it (the syscall did happen) and
-        # falls through to the same `TRANSIENT_INFRA` this branch has always produced.
+        # calls. Reading `timed_out` alone here is the defect this replaces — but the two
+        # classifiers did not diverge because of it until `44d5550` MADE them: before that commit
+        # both read `timed_out` alone and both answered `TIMEOUT` for a probe that never ran (per
+        # `git show 44d5550~1`), so they agreed, wrongly, in step. `44d5550` reordered only
+        # `buildverify.classify_build_failure`'s branches to check `started` first — fixing that
+        # module alone — and added a comment claiming clone already drew the same line "for this
+        # reason; the two are meant to stay in step". This file was untouched by that commit, so
+        # from `44d5550` to `68a41ff` the two genuinely disagreed (buildverify `TRANSIENT_INFRA`,
+        # clone `TIMEOUT`) for a shape neither had ever produced before — a divergence manufactured
+        # by that half-applied reorder, not inherited from any pre-existing mismatch. It existed
+        # only in this dev tree, between those two checkpoints, and no code that ran a real wave
+        # ever saw it. An `OSError` carries neither attribute; `started=True, timed_out=False` is
+        # right for it (the syscall did happen) and falls through to the same `TRANSIENT_INFRA`
+        # this branch has always produced.
         started = bool(getattr(exc, "started", True))
         timed_out = bool(getattr(exc, "timed_out", False))
         failure_class, _ = clock_failure(started=started, timed_out=timed_out) or (
@@ -730,12 +738,15 @@ def _is_shallow(mirror: Path) -> bool:
     `--unshallow` is a non-retryable `PREFLIGHT` gate, a stray empty file is enough to send a
     perfectly complete repo to a human.
 
-    **Reading the file is the right signal, and it is the same one git reads.** Measured across
-    git 2.20.4 → 2.49.1: a successful `fetch --unshallow` always REMOVES the file, so this stays
-    exactly as sensitive to the real case as the `exists()` check was; and
-    `git rev-parse --is-shallow-repository` reports `true` for a planted zero-byte `shallow` on an
-    otherwise complete repo — so spending a subprocess on the predicate would buy the identical
-    answer plus this identical blind spot. One filesystem read instead.
+    **Reading the file is a NARROWER signal than `git rev-parse --is-shallow-repository`,
+    deliberately.** That predicate reports `true` for a planted zero-byte `shallow` on an
+    otherwise-complete repo — measured against this host's git (2.43.0, per
+    `docs/INTEGRATION_HONESTY.md`) and pinned by
+    `test_a_shallow_file_that_declares_no_boundary_is_not_a_shallow_repository`, which invokes the
+    real binary — so spending a subprocess on the predicate would buy the identical blind spot
+    this function does not have. That a successful `fetch --unshallow` removes the file is
+    standard, documented git behaviour; this repo has not swept it across versions, so no version
+    range is claimed here — only the one blind spot actually measured above.
 
     A missing file, and a `shallow` that is a directory or is otherwise unreadable, both answer
     "no boundary declared": absence of evidence for a boundary is what "not shallow" means here,

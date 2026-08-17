@@ -64,6 +64,7 @@ from fleet.models.enums import (
 from fleet.models.repo import Coordinate
 from fleet.models.tasks import TokenUsage, VerificationReport
 from fleet.orchestrator.retry import LadderState, RetryAction, RetryPolicy
+from fleet.sandbox.worktree import sandbox_name
 from fleet.settings import BuildSection
 from fleet.state.repository import PhaseRow
 from fleet.util.proc import ProcResult
@@ -894,7 +895,14 @@ async def test_the_sandboxed_command_is_network_none_and_named_after_the_attempt
     tmp_path,
 ) -> None:
     """ADR-0010: `--network=none` is what makes a green build evidence that the deps are complete,
-    and the container name is what a crashed run's reaper has to work with."""
+    and the container name is what a crashed run's reaper has to work with.
+
+    The name is no longer JUST `sandbox_name(...)` — it is that PREFIX plus a fresh per-call
+    token (see `_invocation_name`'s docstring on why: a bare `sandbox_name(...)` is identical
+    across every retry of the same rung, and a dead daemon that left a container registered
+    under it turns the retry's own `docker run --name=<same>` into a PERMANENT name-conflict
+    125). So the assertion below checks the PREFIX a reaper would sweep, not the whole name.
+    """
     (tmp_path / "py/acme").mkdir(parents=True)
     (tmp_path / "py/acme/BUILD.bazel").write_text("# generated\n", encoding="utf-8")
     runner = RecordingRunner([(lambda p: True, ok(""))])
@@ -913,9 +921,52 @@ async def test_the_sandboxed_command_is_network_none_and_named_after_the_attempt
     argv = runner.calls[-1]
     assert argv[0:2] == ("docker", "run")
     assert "--network=none" in argv
-    assert any(a.startswith("--name=fleet-") and a.endswith("-2") for a in argv)
+    prefix = f"{sandbox_name(RUN_ID, REPO, 2)}-t"
+    assert any(a.startswith(f"--name={prefix}") for a in argv), argv
     assert argv[-5:-1] == ("bazel", "build", "//py/acme/...", "--keep_going")
     assert argv[-1].startswith("--build_event_json_file=")
+
+
+async def test_a_transient_retry_of_the_same_rung_never_reuses_a_container_name(
+    tmp_path,
+) -> None:
+    """The bug `_invocation_name` exists to remove: two `run()` calls at the SAME
+    `(run_id, repo, attempt)` — exactly what `RetryPolicy`'s `RETRY_TRANSIENT` re-issues after a
+    docker daemon blip (`orchestrator/retry.py`, ADR-0014 §11.8) — used to build byte-identical
+    `--name=` values, because `spec_for_attempt` defaulted the name to bare `sandbox_name(...)`.
+    If the dead daemon had managed to REGISTER a container under that name before dying — exactly
+    what a mid-wave restart can leave behind — the retry's own `docker run --name=<same>` would
+    meet docker's "name already in use" and turn a transient blip into a PERMANENT 125: the one
+    case `classify_build_failure`'s `retryable=True` for 125 was actively wrong, because no amount
+    of retrying removes a name collision. This proves the fix at the argv level, with no daemon
+    involved: the emitted name really does change between two calls at the identical rung.
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    payload = BuildverifyInput(
+        dest=dest,
+        integration_ref=SNAPSHOT,
+        image="fleet/build:latest",
+        run_tests=False,
+        log_dir=str(tmp_path / "logs"),
+    )
+    ctx = make_ctx(tmp_path)  # attempt=1 both times — the SAME rung a transient retry re-issues
+
+    runner = RecordingRunner([(lambda p: True, ok(""))])
+    await BuildverifyWorker(runner=runner).run(ctx, payload)
+    first_name = next(a for a in runner.calls[-1] if a.startswith("--name="))
+
+    runner.calls.clear()
+    await BuildverifyWorker(runner=runner).run(ctx, payload)
+    second_name = next(a for a in runner.calls[-1] if a.startswith("--name="))
+
+    assert first_name != second_name, (
+        "identical names on an identical (run_id, repo, attempt) is the collision that turns a "
+        "transient daemon blip into a permanent 'name already in use' 125 on the retry"
+    )
+    prefix = f"--name={sandbox_name(RUN_ID, REPO, 1)}-t"
+    assert first_name.startswith(prefix) and second_name.startswith(prefix), (
+        "both still share the deterministic prefix `on_cancel` sweeps by"
+    )
 
 
 async def test_a_sandboxed_build_refuses_before_bazel_when_the_image_has_no_c_compiler(
@@ -1050,11 +1101,23 @@ async def test_a_probe_that_never_started_is_not_reported_as_a_missing_compiler(
     )
 
 
-DAEMON_GONE = (
-    "docker: Cannot connect to the Docker daemon at unix:///var/run/docker.sock. "
-    "Is the docker daemon running?"
+CONTAINER_NAME_CONFLICT = (
+    'docker: Error response from daemon: Conflict. The container name '
+    '"/fleet-00000000-0000-4000-8000-0000000000b3-acme-widget-1" is already in use by container '
+    '"3f2504e04f8911d39a0c0305e82c3301d785a10". You have to remove (or rename) that container to '
+    "be able to reuse that name.\n"
+    "See 'docker run --help'.\n"
 )
-"""Verbatim `docker run` stderr when the daemon is unreachable — the mid-wave restart case."""
+"""Verbatim `docker run` stderr for the case that REALLY exits 125 (review-36 I2/I3; `68a41ff`
+commit body, MEASURED on Docker 29.7.2): a surviving container left behind by a prior invocation
+collides on `--name=`. This constant used to be named `DAEMON_GONE` and hold "Cannot connect to
+the Docker daemon..." — but `docker run` against an UNREACHABLE daemon exits **1**, not 125, so
+that `ProcResult` paired a stderr string with an exit code real docker never produces together.
+NOT the daemon-unreachable case — that exits 1; see the D34 correction in `68a41ff`.
+`_invocation_name` (`buildverify.py`) removes the SELF-inflicted version of this collision going
+forward, by giving every `docker run` this worker starts a fresh per-call token instead of the
+old deterministic `sandbox_name(...)`; this fixture is what a residual or externally-caused
+collision still looks like."""
 
 
 def _docker_cannot_run(parts: tuple[str, ...]) -> ProcResult:
@@ -1062,7 +1125,7 @@ def _docker_cannot_run(parts: tuple[str, ...]) -> ProcResult:
         argv=parts,
         exit_code=125,
         stdout_tail="",
-        stderr_tail=DAEMON_GONE,
+        stderr_tail=CONTAINER_NAME_CONFLICT,
         duration_ms=40,
         timed_out=False,
     )
@@ -1100,15 +1163,126 @@ def _docker_refuses_the_build_step(*, blips: int = 1) -> RecordingRunner:
     )
 
 
-async def test_a_docker_daemon_that_went_away_is_not_reported_as_a_broken_build_file(
+async def test_a_probe_the_fleets_own_deadline_killed_is_not_reported_as_a_missing_compiler(
+    tmp_path,
+) -> None:
+    """`_c_toolchain_gate` had NO clock branch: `util.proc.run` reports a call made after the
+    deadline had already passed as `started=False, timed_out=True` — no measurement was taken at
+    all — and without a branch reading that, it fell to the same line a genuine `exit 1` from
+    inside the image reaches: an immediate, PERMANENT, FABRICATED "no C compiler in the sandbox
+    image" verdict about an image the probe never got a chance to open. `clock_failure` (shared
+    with `classify_build_failure`, so the two answers cannot drift apart) reads `started=False` as
+    `TRANSIENT_INFRA` — the fleet's clock, not the repo's fault, retried free of an attempt.
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = RecordingRunner(
+        [
+            (
+                lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1],
+                lambda parts: ProcResult(
+                    argv=parts, exit_code=124, stdout_tail="", stderr_tail="",
+                    duration_ms=0, timed_out=True, started=False,
+                ),
+            ),
+            (lambda p: True, ok("")),
+        ]
+    )
+    result = await BuildverifyWorker(runner=runner).run(
+        make_ctx(tmp_path),
+        BuildverifyInput(
+            dest=dest, integration_ref=SNAPSHOT, image="fleet/build:latest",
+            log_dir=str(tmp_path / "logs"),
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    # The structural proof that no compiler verdict was fabricated, not a prose search: this
+    # worker carries no separate "is this a compiler verdict" flag, so `failure_class` (with
+    # `retryable`) IS the field that carries it. A fabricated "no C compiler" verdict is
+    # CATEGORICALLY `FailureClass.BUILD_ERROR, retryable=False` (see the two branches below this
+    # one in `_c_toolchain_gate`) — mutually exclusive with `TRANSIENT_INFRA, retryable=True`, so
+    # asserting the latter already rules out the former. A substring search over the human-
+    # readable message cannot make that distinction: prose can DENY a claim while still
+    # containing its exact words, which is what broke this test's sibling below before this fix
+    # (review-36 follow-up) — the message quoted the forbidden phrase inside its own denial.
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+    assert result.error.retryable is True
+    assert runner.argv_for("build") is None, "bazel never ran; the deadline fired before the probe"
+
+
+async def test_a_probe_killed_mid_pull_is_a_substantive_timeout_not_a_missing_compiler(
+    tmp_path,
+) -> None:
+    """The OTHER clock shape: `started=True, timed_out=True` — the probe's own `docker run` was
+    SPAWNED and killed at `C_TOOLCHAIN_PROBE_TIMEOUT_S`, most plausibly mid-pull of an image this
+    host has never fetched (that constant's docstring: it pays the FIRST pull's cost). This is
+    substantive `TIMEOUT`, not `TRANSIENT_INFRA` — the process ran long enough to be genuinely
+    killed, which `clock_failure` treats as behaviour worth a rung, same as any other timeout —
+    but it is still not evidence about the image's compiler, so the message must not claim one.
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = RecordingRunner(
+        [
+            (
+                lambda p: p[-3:-1] == ("sh", "-c") and "command -v gcc" in p[-1],
+                lambda parts: ProcResult(
+                    argv=parts, exit_code=-15, stdout_tail="", stderr_tail="",
+                    duration_ms=120_000, timed_out=True, started=True,
+                ),
+            ),
+            (lambda p: True, ok("")),
+        ]
+    )
+    result = await BuildverifyWorker(runner=runner).run(
+        make_ctx(tmp_path),
+        BuildverifyInput(
+            dest=dest, integration_ref=SNAPSHOT, image="fleet/build:latest",
+            log_dir=str(tmp_path / "logs"),
+        ),
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    # Structural, not prose: see the sibling test above for why `failure_class`/`retryable` is
+    # the field that actually carries the compiler-verdict distinction here, and why a substring
+    # search over the message cannot safely stand in for it. Concretely, THIS test is the proof
+    # of that claim — its first version asserted `"no C compiler" not in detail`, and the
+    # production message denied a fabricated verdict by literally saying "so 'no C compiler'
+    # would be fabricated here too", which contains the forbidden substring inside its own
+    # denial. The substring check could not tell the difference; `failure_class` can, because a
+    # real fabricated verdict is categorically a different enum value (`BUILD_ERROR`, not
+    # `TIMEOUT`) and a different `retryable`.
+    assert result.error.failure_class is FailureClass.TIMEOUT
+    assert result.error.retryable is True, "substantive, but still a re-queueable rung, not a stop"
+    detail = str(result.error.stderr_tail)
+    assert "pull" in detail.lower(), (
+        "an operator staring at a killed probe needs the likely cause named, not just a code — "
+        "this one IS a plain presence check (not a forbidden-phrase check), so a message that "
+        "mentions 'pull' cannot accidentally fail it the way the removed check could pass "
+        "vacuously"
+    )
+    assert runner.argv_for("build") is None
+
+
+async def test_a_docker_run_that_exits_125_is_not_reported_as_a_broken_build_file(
     tmp_path,
 ) -> None:
     """Defect D34: the BUILD step is a `docker run` too, and 125 was in neither exit-code set.
 
+    **Renamed from `test_a_docker_daemon_that_went_away_...` (review-36 I2).** The old name and
+    fixture (`DAEMON_GONE`, "Cannot connect to the Docker daemon...") paired a daemon-unreachable
+    STDERR with `exit_code=125` — a `ProcResult` real docker never emits. MEASURED (`68a41ff`
+    commit body): `docker run` against an unreachable daemon exits **1**, not 125; what exits 125
+    is `docker run --name=X` when a SURVIVING container is already registered under `X`. This test
+    now injects that stderr (`CONTAINER_NAME_CONFLICT`), so the exit code and the text it carries
+    can actually co-occur. NOT the daemon-unreachable case — that exits 1; see D34's correction
+    in `68a41ff`.
+
     `_argv` emits `docker run …` whenever `payload.image is not None`, which is the DEFAULT
     (`sandboxed = not no_sandbox`), so every real build step can exit 125 — docker's "the
     container never started". With no branch for it, 125 fell through to the last line of
-    `classify_build_failure` and became a retryable `BUILD_ERROR`: a daemon restart mid-wave was
+    `classify_build_failure` and became a retryable `BUILD_ERROR`: a surviving container was
     reported as a broken `BUILD.bazel`, and the repo then spent all three ADR-0014 rungs — two of
     them LLM-bearing — asking a model to repair a file that was never opened, producing a repair
     transcript about Bazel that described nothing that happened, and landing
@@ -1117,6 +1291,14 @@ async def test_a_docker_daemon_that_went_away_is_not_reported_as_a_broken_build_
     The 125 is read off the BUILD step here, not off the probe: `_c_toolchain_gate` answered
     green first, which is what makes the transient reading of 125 defensible at this call site
     (see `_DOCKER_CANNOT_RUN` — the probe, meeting it with no such evidence, still refuses).
+
+    **What this does NOT cover, named rather than hidden (review-36 I2/I3).** The scenario that
+    originally motivated D34 — a docker daemon restarted mid-wave — measures to exit 1, not 125.
+    `classify_build_failure` has no exit-1 branch (by design: it never reads stderr text, and
+    exit 1 is also bazel's own generic `BUILD_FAILURE`, so the two cannot be told apart on the
+    exit code alone), so that scenario still falls through to the file's last classification line
+    and is still a retryable `BUILD_ERROR` today. This test proves nothing about it, and no test
+    in this file currently does.
     """
     dest = a_package(tmp_path, "go/acme_digest_go")
     runner = _docker_refuses_the_build_step()
@@ -1160,14 +1342,15 @@ async def test_a_docker_daemon_that_went_away_is_not_reported_as_a_broken_build_
         "nothing about the repo's generated files is implicated — the container never started, "
         "so bazel never opened one. Naming it here is the operator story the defect got wrong"
     )
-    assert "Cannot connect to the Docker daemon" in detail, (
+    assert "already in use" in detail and "Conflict" in detail, (
         "the verbatim docker stderr still has to survive: the explanation is a prefix, not a "
-        "replacement for the evidence"
+        "replacement for the evidence — and it has to be evidence for a case 125 can ACTUALLY "
+        "produce (a name collision), not the daemon-unreachable text that pairs with exit 1"
     )
 
 
-async def test_a_daemon_blip_costs_the_repo_no_attempt_and_reaches_no_human(tmp_path) -> None:
-    """The counters, not the class — what the fleet actually pays for a restarted daemon.
+async def test_a_single_daemon_blip_costs_the_repo_no_attempt(tmp_path) -> None:
+    """The counters, not the class — what the fleet actually pays for ONE restarted daemon.
 
     Asserting on `FailureClass` alone cannot express this defect any more than it could express
     D9: the misclassification is the first domino, and the bill is `phases.attempts` and the
@@ -1177,6 +1360,11 @@ async def test_a_daemon_blip_costs_the_repo_no_attempt_and_reaches_no_human(tmp_
     old classification the same two runs ended `SUCCEEDED` too — but with an attempt charged
     against a repo that did nothing wrong, which is a rung it no longer has when a real build
     failure arrives later.
+
+    **Scope, stated because the old name overran it (review-36 M1).** This drives exactly one
+    125 (`blips=1`); it says nothing about `blips >= max_transient_retries` (4, `retry.py:132`),
+    which is where `RetryPolicy.decide` stops re-running for free and charges a rung — see
+    `retry.py:200-217`. That boundary has no test here or elsewhere in this file.
     """
     dest = a_package(tmp_path, "go/acme_digest_go")
     runner = _docker_refuses_the_build_step(blips=1)
@@ -1190,8 +1378,86 @@ async def test_a_daemon_blip_costs_the_repo_no_attempt_and_reaches_no_human(tmp_
     attempts, status = await drive_the_ladder(payload, runner, tmp_path)
     assert status is RepoStatus.SUCCEEDED
     assert attempts == 0, (
-        "a daemon that restarted mid-wave may not consume one of this repo's three ADR-0014 "
-        "chances: TRANSIENT_INFRA re-runs the identical rung and charges nothing"
+        "a SINGLE daemon blip (blips=1) costs this repo no attempt: TRANSIENT_INFRA re-runs "
+        "the identical rung and charges nothing. This says nothing about blips >= "
+        "max_transient_retries (4), where the same failure starts charging a rung — untested here"
+    )
+
+
+async def test_a_docker_run_that_keeps_failing_past_the_retry_cap_charges_a_rung(
+    tmp_path,
+) -> None:
+    """The boundary the sibling test above explicitly disclaims (review-36 M1): `blips=5` — one
+    MORE than `RetryPolicy.max_transient_retries` (4, `retry.py:132`) — is exactly where
+    `retry.py:200-217`'s free-retry window ends.
+
+    The first four 125s re-run the identical rung for free: each meets
+    `state.transient_retries < self.max_transient_retries` (0<4, 1<4, 2<4, 3<4) and takes
+    `RETRY_TRANSIENT` — `attempts` untouched. The FIFTH 125 is met with `transient_retries == 4`;
+    `4 < 4` is false, so `decide()` falls through to the substantive branch and charges rung 1
+    (`ADVANCE_LADDER`) — the identical `TRANSIENT_INFRA` failure, now billed like any other. The
+    docker run then succeeds on the sixth call (`_docker_refuses_the_build_step`'s `blips=5` means
+    calls 1-5 fail, 6 succeeds), on the NEW rung (attempt 2), so the repo still ends `SUCCEEDED` —
+    but having spent the one rung the cap makes it spend, not zero. This is the boundary
+    `_DOCKER_CANNOT_RUN_EXPLAINED`'s corrected message describes in prose; here it is pinned by an
+    assertion, which is the whole point of this review round (C1/C2 were prose claims nothing
+    checked).
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = _docker_refuses_the_build_step(blips=5)
+    payload = BuildverifyInput(
+        dest=dest,
+        integration_ref=SNAPSHOT,
+        image="fleet-build:9.2.0-bookworm",
+        log_dir=str(tmp_path / "logs"),
+    )
+
+    attempts, status = await drive_the_ladder(payload, runner, tmp_path)
+    assert status is RepoStatus.SUCCEEDED, (
+        "the daemon-side condition does clear by the sixth call — this test pins the COST of "
+        "getting there, not a different terminal outcome"
+    )
+    assert attempts == 1, (
+        "four 125s re-run free (transient_retries 1..4); the fifth meets "
+        "`transient_retries == max_transient_retries` and stops being free — the `< "
+        "max_transient_retries` guard at `retry.py:202` fails, and that SAME failure charges "
+        "rung 1 exactly like a genuine build failure would"
+    )
+
+
+async def test_the_docker_cannot_run_message_bounds_its_free_retry_claim(tmp_path) -> None:
+    """`_DOCKER_CANNOT_RUN_EXPLAINED` used to say "no attempt charged, no repair prompted"
+    unconditionally. Both halves are false past `RetryPolicy.max_transient_retries` (default 4,
+    `retry.py:200-202`, ADR-0014 §11.8): a 125 that outlives the free-retry cap is charged a rung
+    like any other substantive failure, and — independent of the cap — `_diagnose` still fires on
+    rungs 2-3 for this SAME retry regardless of failure class, because it runs whenever the
+    attempt's context policy is set (`buildverify.run`). An operator reading this message on a
+    daemon that has been down for hours, or mid-way through the ladder, must not be told the repo
+    has spent nothing.
+    """
+    dest = a_package(tmp_path, "go/acme_digest_go")
+    runner = _docker_refuses_the_build_step(blips=1)
+    result = await BuildverifyWorker(runner=runner).run(
+        make_ctx(tmp_path),
+        BuildverifyInput(
+            dest=dest, integration_ref=SNAPSHOT, image="fleet-build:9.2.0-bookworm",
+            log_dir=str(tmp_path / "logs"),
+        ),
+    )
+    assert result.status == "failed"
+    assert result.error is not None, (
+        "the whole premise of this test is a FAILED result carrying the corrected message; a "
+        "None here would mean the runner's 125 stopped producing a failure at all, which would "
+        "make every assertion below vacuous rather than a check of the actual message"
+    )
+    detail = str(result.error.stderr_tail)
+    assert "no attempt charged" not in detail and "no repair prompted" not in detail, (
+        "those exact unconditional phrases were the false claim; the corrected message must not "
+        "repeat either without qualification"
+    )
+    assert "max_transient_retries" in detail, detail
+    assert "never started" in detail and "never opened" in detail, (
+        "the correction must not have cost the original evidence about what the 125 means"
     )
 
 
@@ -1227,8 +1493,9 @@ async def test_the_c_compiler_probe_asks_the_one_question_bazel_asks(tmp_path) -
     command -v clang`) got both directions wrong; the two tests below pin those directions.
     `command -v` is POSIX `sh`, so no `which(1)` need exist in the image.
 
-    The probe container is deliberately NOT named after the attempt — `on_cancel` force-removes
-    that name, and a probe sharing it would race the build it precedes.
+    The probe container shares the attempt's `_container_prefix` (so `on_cancel`'s prefix sweep
+    finds it too) but never the build step's exact name — each gets its own fresh per-call token,
+    so the probe cannot race the build container it precedes.
     """
     dest = a_package(tmp_path, "go/acme_digest_go")
     runner = RecordingRunner([(lambda p: True, ok("/usr/bin/gcc\n"))])
@@ -1259,10 +1526,64 @@ async def test_the_c_compiler_probe_asks_the_one_question_bazel_asks(tmp_path) -
     assert "command -v cc " not in C_TOOLCHAIN_PROBE, "`cc` is not a name Bazel ever looks for"
     assert "clang" not in C_TOOLCHAIN_PROBE, "`clang` is not a name Bazel ever looks for"
     name = next(a for a in probe if a.startswith("--name="))
-    assert name.endswith("-3-cc-probe"), name
+    prefix = f"{sandbox_name(RUN_ID, REPO, 3)}-t"
+    assert name.startswith(f"--name={prefix}"), name
+    assert name.endswith("-cc-probe"), name
     build_name = next(a for a in runner.calls[-1] if a.startswith("--name="))
     assert name != build_name, "the probe would race the build container it precedes"
+    assert build_name.startswith(f"--name={prefix}"), (
+        "the probe and the build step share ONE prefix — this is what makes a single "
+        "`list_by_prefix` sweep in `on_cancel` catch both, however each happened to be named"
+    )
     assert "--network=none" in probe, "the probe is a local filesystem question; it needs no net"
+
+
+async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_prefix(
+    tmp_path,
+) -> None:
+    """`on_cancel` can no longer remove ONE exact name: `_invocation_name` gives the probe and
+    the build/test step their own fresh per-call token (see its docstring), so there is no single
+    name left to compute from the context alone. What IS still derivable is the shared prefix, so
+    this lists everything docker still has registered under it
+    (`ContainerSandbox.list_by_prefix` — this worker's first real caller of that method; D32
+    recorded it implemented with zero call sites in `src/`) and removes each one.
+
+    Two fake leftovers are seeded under THIS rung's prefix — shaped like a leaked probe and a
+    leaked build step, the two containers `_c_toolchain_gate` and `_argv` can start — and the
+    `docker ps --filter` argv itself is asserted on, to prove the query is scoped to THIS
+    `(run_id, repo, attempt)` and not to every container the run has ever started.
+    """
+    ctx = make_ctx(tmp_path, attempt=1)
+    prefix = f"{sandbox_name(RUN_ID, REPO, 1)}-t"
+    leaked_probe = f"{prefix}deadbeef-cc-probe"
+    leaked_build = f"{prefix}cafef00d"
+
+    def ps(parts: tuple[str, ...]) -> ProcResult:
+        return ProcResult(
+            argv=parts,
+            exit_code=0,
+            stdout_tail=f"{leaked_probe}\n{leaked_build}\n",
+            stderr_tail="",
+            duration_ms=5,
+            timed_out=False,
+        )
+
+    runner = RecordingRunner(
+        [
+            (lambda p: p[1:3] == ("ps", "--all"), ps),
+            (lambda p: True, ok("")),
+        ]
+    )
+    await BuildverifyWorker(runner=runner).on_cancel(ctx)
+
+    ps_call = runner.argv_for("ps")
+    assert ps_call is not None and ps_call[-3] == f"name=^{prefix}", ps_call
+
+    removed = [call[-1] for call in runner.calls if call[1:3] == ("rm", "--force")]
+    assert set(removed) == {leaked_probe, leaked_build}, (
+        "a cancellation that only removed one exact name would leave the other container leaked "
+        "forever — the defect `list_by_prefix` sweeping exists to close"
+    )
 
 
 # =======================================================================================
@@ -2814,7 +3135,26 @@ async def test_every_file_the_generated_files_name_exists_after_the_phase_that_w
     for target in payload.targets:
         for attr in ("src", "srcs"):
             value = target.attrs.get(attr)
-            named = [value] if isinstance(value, str) else list(value or [])
+            # `BuildTarget.attrs` is `dict[str, str | int | bool | list[str]]` because OTHER
+            # attribute names legitimately hold an int or a bool (e.g. a numeric flag) — that
+            # union is correct and not what's under test here. `src`/`srcs` specifically are
+            # always a single path or a list of paths by Bazel convention; `value or []` used to
+            # paper over that with truthiness, which silently turned an unexpected `0`/`False`
+            # into "no paths to check" rather than flagging the adapter that produced it. Fail
+            # loud instead (Rule 11): if a ruleset ever emits an int/bool under `src`/`srcs`, that
+            # is a real defect this test exists to catch, not a shape to shrug past.
+            if value is None:
+                continue
+            if isinstance(value, str):
+                named: list[str] = [value]
+            elif isinstance(value, list):
+                named = value
+            else:
+                pytest.fail(
+                    f"{eco.value}: {target.rule}({target.name})'s `{attr}` is {value!r} "
+                    f"({type(value).__name__}) — src/srcs attrs are always a path or a list of "
+                    "paths, never int/bool"
+                )
             for path in named:
                 assert (tmp_path / dest / path).exists(), (
                     f"{eco.value}: {target.rule}({target.name}) names {path!r} in `{attr}` and "

@@ -161,9 +161,14 @@ def clock_failure(*, started: bool, timed_out: bool) -> tuple[FailureClass, bool
     describe two different events that must not be collapsed:
 
     * `started=False` — nothing was spawned. **No measurement was taken at all**, so there is no
-      evidence about the repo, and ADR-0014 forbids charging a ladder rung for one: it is
-      `TRANSIENT_INFRA`, which `RetryPolicy.decide` re-runs on the same rung with no attempt
-      charged.
+      evidence about the repo, and ADR-0014 forbids charging a ladder rung for it — for a while:
+      it is `TRANSIENT_INFRA`, which `RetryPolicy.decide` re-runs on the same rung with no attempt
+      charged, but only up to `RetryPolicy.max_transient_retries` (default 4, `retry.py:200-202`).
+      Past that cap the identical clock failure is charged exactly like any other substantive
+      failure (§11.8) — "no attempt charged" is a bounded reprieve, not a standing exemption, and
+      a caller reporting it to an operator has to say so. (Whether a given caller ALSO prompts a
+      model for this same retry is that caller's own choice, not something this function decides
+      or promises either way — see the caller's own docstring, e.g. `buildverify._diagnose`.)
     * `started=True, timed_out=True` — the process ran and was killed at its deadline. Taking
       longer than the deadline IS behaviour of the repo (a pathological history, a hanging fetch),
       so it is substantive `TIMEOUT` and costs a rung.

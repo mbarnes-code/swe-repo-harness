@@ -3637,6 +3637,7 @@ async def _git_output(worktree: Path, args: Sequence[str]) -> str:
                 result.stderr_tail,
                 cwd=worktree,
                 timed_out=result.timed_out,
+                started=result.started,
             )
         return await asyncio.to_thread(result.stdout_path.read_text, encoding="utf-8")
 
@@ -5098,14 +5099,14 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
         # which is precisely what ADR-0054 exists to keep out of a commit. The set staged is
         # therefore still "the planned files", just no longer assumed to be one file at one depth.
         #
-        # `is_dirty()`'s semantics are unchanged: it is `git status --porcelain` over the whole
-        # worktree and has always seen untracked files at any depth, so a generated sub-package
-        # already counted as dirty — what changes is that the commit now contains it, which is
-        # what turns a dirty tree into a publish rather than into a commit that omits the file
-        # that made it dirty. Re-materializing before the check can still only move a path from
-        # differing to identical, so `already_published` still means what it says: on a re-run the
-        # worktree is cut from a snapshot that already carries these files, the rewrite is
-        # byte-identical, `git add` stages nothing and no empty commit is minted.
+        # The idempotence check below is scoped to `paths` (D26): it asks `git diff --cached`
+        # restricted to exactly what `add` just staged, never `git status --porcelain` over the
+        # whole worktree. A generated sub-package at any depth is still IN `paths`, so it is still
+        # seen when `add` actually stages it. What changes is everything OUTSIDE `paths` — a
+        # `bazel-*-events.json` real Bazel writes relative to `cwd`, a convenience symlink,
+        # `MODULE.bazel.lock` (deliberately excluded from `paths` and published separately below)
+        # — none of which can any longer make a re-entry that staged nothing look like one that
+        # staged something.
         #
         # D10: the lockfiles and configs MODULE.bazel names travel in the SAME commit. A
         # generated module that reaches `integration` without them is the identical defect one
@@ -5123,15 +5124,17 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
         # the same, and the old gate left exactly that path staging a pathspec it had not written.
         #
         # Idempotence is unchanged, and re-asserting before the check is what makes it exact.
-        # `is_dirty()` is `git status --porcelain` over the whole worktree, so it answers
-        # "does this tree differ from the snapshot it was cut from?". Re-writing planned bytes
-        # can only move a path from differing to identical — GENERATE wrote these same bytes
-        # into this same worktree minutes ago — so the guard can never mint a commit it would
-        # not have minted before. What changes is the false positive: a build-system writeback
-        # used to read as real work to publish, and now the answer is No and the re-run is
-        # correctly recorded as `already_published`. A tip that genuinely disagrees with the
-        # plan (D10's fleet-wide superset grew since this snapshot) still reads as dirty and
-        # still publishes — which is the case the guard exists for.
+        # The pathspec-scoped `git diff --cached -- paths` answers "does the INDEX, restricted to
+        # exactly these paths, differ from the snapshot it was cut from?". Re-writing planned
+        # bytes can only move a path from differing to identical — GENERATE wrote these same bytes
+        # into this same worktree minutes ago — so the guard can never mint a commit it would not
+        # have minted before. What changes from the whole-worktree `is_dirty()` this replaced
+        # (D26) is that unrelated dirt outside `paths` can no longer make a re-entry that staged
+        # nothing look like one that staged something, which is what used to send `git commit` at
+        # an empty index and fail the whole dispatch on every subsequent re-entry. A tip that
+        # genuinely disagrees with the plan (D10's fleet-wide superset grew since this snapshot)
+        # still stages a real diff for `paths` and still publishes — which is the case the guard
+        # exists for.
         #
         # The cost, stated: cargo's extension of the lock is discarded on every build, so each
         # Phase 3 and Phase 4 build re-extends from the seeded lock rather than from the
@@ -5176,7 +5179,13 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
             )
         try:
             await git.exec(["add", "--", *paths])
-            published = await git.is_dirty()
+            # D26: scoped to `paths` — exactly what was just staged — never `is_dirty()`'s
+            # whole-worktree `git status --porcelain`, which also sees droppings `add` was never
+            # asked to stage (a relative `bazel-*-events.json`, a convenience symlink,
+            # `MODULE.bazel.lock`) and would read a re-entry that staged nothing as "dirty",
+            # sending `git commit` at an empty index and failing the whole dispatch.
+            staged = await git.diff_stat(staged=True, paths=paths)
+            published = bool(staged.files)
             output.already_published = not published
             sha = ""
             if published:
@@ -5262,9 +5271,21 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
         build is NOT established here and is not claimed: no container build has been run against
         a published tree.
 
-        Idempotent by byte comparison rather than by `git status`: a re-run whose Bazel produced
-        the identical lock writes nothing and mints no commit, and the comparison is against the
-        file rather than the index so it is unaffected by whatever else a merge just staged.
+        Idempotent by blob SHA against what is actually ON `integration_branch` (D27), never
+        against the worktree file alone: a re-run whose Bazel produced the identical lock writes
+        nothing and mints no commit, but "identical" is answered by `Git.blob_at` reading the
+        BRANCH, because a dispatch that dies between `materialize` and `commit` used to leave
+        correct bytes on disk, untracked or staged but never committed, and every later read of
+        that same file compared equal to itself and returned without ever committing — so the
+        branch shipped with no lock while `module_lock_published` said otherwise. Comparing
+        `Git.hash_object` of the just-materialized file against `Git.blob_at(integration_branch,
+        …)` means an uncommitted materialize is never mistaken for a publish: the two SHAs can
+        only agree once a commit has actually landed. Neither call reads the file's content back
+        into Python — both are small, fixed-size answers, which also keeps this comparison correct
+        for a lock file whose bytes exceed the 32 KiB tail-truncation `util.proc.run` applies to
+        every capture (SPEC §11.3). The comparison is still against the branch's committed tree
+        rather than the index, so — same as before — it is unaffected by whatever else a merge
+        just staged.
 
         **The registry check, and why it WARNS instead of refusing.** `check_lock_registry` is the
         comparison this module's docstring exists for: a lock keyed by a mirror is, to a Bazel
@@ -5313,11 +5334,15 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
                 detail=str(exc),
             )
         root = Path(payload.integration_worktree)
-        current = await asyncio.to_thread(_read_text_or_none, root / MODULE_LOCK_PATH)
-        output.module_lock_published = True
-        if current == lock.content:
-            return
+        # D27: `materialize` runs FIRST and unconditionally (it is idempotent, same as the
+        # dispatch commit's re-assertion above), so the comparison below reads the same bytes
+        # `add`/`commit` would stage rather than a state before this run touched the file.
         await asyncio.to_thread(materialize, root, [lock])
+        local_sha = await integration.hash_object(MODULE_LOCK_PATH)
+        branch_sha = await integration.blob_at(payload.integration_branch, MODULE_LOCK_PATH)
+        output.module_lock_published = True
+        if local_sha == branch_sha:
+            return
         await integration.exec(["add", "--", MODULE_LOCK_PATH])
         await integration.commit(
             f"Record {MODULE_LOCK_PATH} from {payload.dest}'s build",

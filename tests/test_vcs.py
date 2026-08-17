@@ -35,7 +35,7 @@ from uuid import UUID
 import pytest
 
 from fleet.models.enums import PrState
-from fleet.util.proc import ProcResult, run
+from fleet.util.proc import ProcResult, is_producible_shape, run
 from fleet.vcs import commits as C
 from fleet.vcs import filter_repo as FR
 from fleet.vcs import github as GH
@@ -162,6 +162,14 @@ class ScriptedRunner:
     deadline, and a plain non-zero `exit_code` is a command that ran and answered. A fake that
     can only build the third makes the first two untestable — which is how "not ok" keeps being
     read as "the repo said no".
+
+    **Anti-drift, enforced at construction.** `util.proc.is_producible_shape` is the invariant
+    read off `util/proc.py`'s only producer of a real `ProcResult`; the constructor below checks
+    every instance against it. Without this, a test could build `started=False, timed_out=False`
+    — a state `run()` can never return, because its one `started=False` branch always sets
+    `timed_out=True` and `exit_code=TIMEOUT_EXIT_CODE` together — and pass by asserting against
+    evidence no real invocation could produce. See
+    `tests/test_proc.py::test_scripted_runner_cannot_construct_states_the_real_runner_cannot_produce`.
     """
 
     def __init__(
@@ -173,6 +181,14 @@ class ScriptedRunner:
         timed_out: bool = False,
         stderr: str = "",
     ) -> None:
+        if not is_producible_shape(started=started, timed_out=timed_out, exit_code=exit_code):
+            raise ValueError(
+                f"ScriptedRunner(started={started}, timed_out={timed_out}, exit_code={exit_code}) "
+                "is a state util.proc.run can never produce: started=False is synthesised in "
+                "exactly one place, and it always pairs with timed_out=True and "
+                "exit_code=TIMEOUT_EXIT_CODE (§7.1) — a test built against any other pairing "
+                "would pass against a ProcResult no real invocation can generate"
+            )
         self.calls: list[tuple[str, ...]] = []
         self.stdout = stdout
         self.exit_code = exit_code
@@ -201,6 +217,34 @@ class ScriptedRunner:
             started=self.started,
             cwd=cwd,
         )
+
+
+class RaisingRunner:
+    """A `CommandRunner` that raises instead of returning a `ProcResult` — what a genuinely
+    missing binary looks like at this seam.
+
+    No shell is ever involved (`util/proc.py`'s module docstring), so a binary absent from PATH
+    is never a `ProcResult` with some sentinel `exit_code`: `asyncio.create_subprocess_exec`
+    raises `FileNotFoundError` in the PARENT, before any process exists to report an exit code.
+    `ScriptedRunner(exit_code=127, ...)` therefore cannot stand in for this case — nothing
+    produces that `ProcResult` for real — and this double exists so `github.py`/`gitea.py`/
+    `filter_repo.py`'s `except FileNotFoundError` branches are exercised against the actual
+    failure mode instead of an invented exit code.
+    """
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        raise self.exc
 
 
 # --------------------------------------------------------------------------------------
@@ -570,10 +614,45 @@ async def test_relocate_names_a_missing_git_filter_repo_instead_of_falling_back(
     tmp_path: Path,
 ) -> None:
     """Rule 11. A missing rewriter must be a named failure, never a silent degradation to
-    `filter-branch`, which has different semantics and would produce a different history."""
-    runner = ScriptedRunner(exit_code=127)
+    `filter-branch`, which has different semantics and would produce a different history.
+
+    The double is `RaisingRunner`, not `ScriptedRunner(exit_code=127, ...)`: no shell is ever
+    involved, so a genuinely missing `git-filter-repo` is `FileNotFoundError` raised by
+    `asyncio.create_subprocess_exec` before any `ProcResult` exists — never an exit code.
+    """
+    runner = RaisingRunner(FileNotFoundError("git-filter-repo"))
     with pytest.raises(FR.FilterRepoUnavailableError):
         await FR.relocate(tmp_path, FR.RelocationSpec(dest_path="ts/x"), runner=runner)
+
+
+async def test_relocate_exit_127_is_an_ordinary_failure_not_a_missing_binary(
+    tmp_path: Path,
+) -> None:
+    """`exit_code == 127` on a returned `ProcResult` used to be read as "binary missing", but
+    nothing in this stack can produce that: no shell means no shell "command not found"
+    convention. A `git-filter-repo` that RAN and happened to exit 127 of its own accord is an
+    ordinary rewrite failure, not an unavailable binary."""
+    runner = ScriptedRunner(exit_code=127, started=True, stderr="boom")
+    with pytest.raises(FR.IngestError):
+        await FR.relocate(tmp_path, FR.RelocationSpec(dest_path="ts/x"), runner=runner)
+
+
+async def test_relocate_a_passed_deadline_is_not_mistaken_for_a_missing_binary(
+    tmp_path: Path,
+) -> None:
+    """`not started` is `util.proc.run`'s call-past-deadline synthesis (§7.1) and nothing else —
+    never a missing binary. Misreading it as `FilterRepoUnavailableError` blames the operator's
+    PATH for the fleet's own clock instead of surfacing the retryable clock failure it is."""
+    never_ran = ScriptedRunner(
+        exit_code=124,
+        started=False,
+        timed_out=True,
+        stderr="deadline had already passed; process was not started",
+    )
+    with pytest.raises(FR.IngestError) as exc_info:
+        await FR.relocate(tmp_path, FR.RelocationSpec(dest_path="ts/x"), runner=never_ran)
+    assert not isinstance(exc_info.value, FR.FilterRepoUnavailableError)
+    assert "deadline had already passed" in str(exc_info.value)
 
 
 async def test_the_integration_mutex_admits_exactly_one_writer(tmp_path: Path) -> None:
@@ -859,11 +938,44 @@ async def test_create_pr_returns_the_url_and_keeps_the_body_out_of_argv(tmp_path
 
 async def test_a_missing_gh_is_named_not_retried_forever() -> None:
     """`gh` absent or unauthenticated is an operator-visible condition, not a transient the poll
-    loop should retry for 48 hours."""
-    cli = GH.GitHubCli(runner=ScriptedRunner(exit_code=127, started=False))
+    loop should retry for 48 hours.
+
+    The double is `RaisingRunner`, not `ScriptedRunner(exit_code=127, ...)`: no shell is ever
+    involved, so a genuinely missing `gh` is `FileNotFoundError` raised in the parent — never an
+    exit code on a `ProcResult` that was never produced.
+    """
+    cli = GH.GitHubCli(runner=RaisingRunner(FileNotFoundError("gh")))
     with pytest.raises(GH.GhUnavailableError):
         await cli.view("https://x/pull/1")
     assert await cli.available() is False
+
+
+async def test_gh_exit_127_is_an_ordinary_failure_not_a_missing_binary() -> None:
+    """`exit_code == 127` on a returned `ProcResult` is dead code as a "missing binary" signal:
+    nothing in this stack can produce it, because there is no shell to apply the "command not
+    found" convention. A `gh` that RAN and exited 127 of its own accord is an ordinary `GhError`,
+    not `GhUnavailableError`."""
+    cli = GH.GitHubCli(runner=ScriptedRunner(exit_code=127, started=True, stderr="boom"))
+    with pytest.raises(GH.GhError) as exc_info:
+        await cli.view("https://x/pull/1")
+    assert not isinstance(exc_info.value, GH.GhUnavailableError)
+
+
+async def test_gh_a_passed_deadline_is_not_mistaken_for_a_missing_binary() -> None:
+    """`not started` is `util.proc.run`'s call-past-deadline synthesis (§7.1) — never a missing
+    binary. Misreading it as `GhUnavailableError` blames the operator's PATH for the fleet's own
+    clock instead of surfacing the retryable clock failure it actually is."""
+    never_ran = ScriptedRunner(
+        exit_code=124,
+        started=False,
+        timed_out=True,
+        stderr="deadline had already passed; process was not started",
+    )
+    cli = GH.GitHubCli(runner=never_ran)
+    with pytest.raises(GH.GhError) as exc_info:
+        await cli.view("https://x/pull/1")
+    assert not isinstance(exc_info.value, GH.GhUnavailableError)
+    assert "deadline had already passed" in str(exc_info.value)
 
 
 @pytest.mark.integration

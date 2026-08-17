@@ -281,18 +281,27 @@ class GiteaForge:
             if body is not None:
                 data_file = self._write_request(body)
             parts = self._request_argv(method, url, data_file=data_file)
-            result = await self._runner(
-                parts, cwd=self.cwd, deadline=self.deadline, timeout_s=self.timeout_s
-            )
+            # No shell is ever involved (`util/proc.py`'s module docstring), so `curl` missing
+            # from PATH never comes back as a `ProcResult` with some sentinel exit code — there
+            # is no shell to apply the "command not found: exit 127" convention. It is
+            # `asyncio.create_subprocess_exec` raising `FileNotFoundError` in THIS process,
+            # before any `ProcResult` exists, and it is caught here or it escapes raw.
+            try:
+                result = await self._runner(
+                    parts, cwd=self.cwd, deadline=self.deadline, timeout_s=self.timeout_s
+                )
+            except FileNotFoundError as exc:
+                raise GiteaUnavailableError(
+                    f"{self._curl} is not on PATH; PR emission and PR state ingestion both "
+                    f"require it (§3.4): {exc}"
+                ) from exc
         finally:
             if data_file is not None:
                 data_file.unlink(missing_ok=True)
 
-        if not result.started or result.exit_code == 127:
-            raise GiteaUnavailableError(
-                f"{self._curl} is not available (exit {result.exit_code}); PR emission and PR "
-                "state ingestion both require it (§3.4)"
-            )
+        # `result.started` is false in exactly one case — `util.proc.run` synthesised a
+        # deadline that had already passed (§7.1) — never a missing binary; that case already
+        # fails `result.ok` below and is reported as the clock failure it is.
         if result.exit_code in _CURL_CONNECT_FAILURES:
             raise GiteaUnavailableError(
                 f"cannot reach the Gitea instance at {self._api} (curl exit {result.exit_code}): "

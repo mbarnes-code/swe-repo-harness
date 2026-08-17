@@ -65,9 +65,18 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 
 ## 5. Workspace Directory Layout
 - `references/` — **READ-ONLY.** Never modify.
-- `docs/` — Specifications (`SPEC.md`), decisions (`DECISIONS.md`), progress logs (`PROGRESS.md`).
+- `docs/` — `SPEC.md`, `DECISIONS.md` (ADRs), `PROGRESS.md` (checkpoints), `INTEGRATION_HONESTY.md` (defect ledger, D-numbers).
 - `src/` — Executable Python codebase (`asyncio`, `Pydantic v2`).
 - `tests/` — Automated test suites.
+- `tools/bin/` — pinned toolchain wrappers (`bazel` `ast-grep` `gazelle` `go` `cargo` `rustc` `gh`). Use these; never the system binary.
+
+## 6. Build & Test Operations
+- Full suite ≈9 min — run it in the background. Green = `xfail: 0` **and** a clean `bazel disk` line.
+- **Never run two pytest sessions concurrently.** `pytest_sessionfinish` deletes every `BAZEL_ROOT` child except `repos/`; parallel sessions reap each other's output bases.
+- **Never export `FLEET_*`** in a shell that runs the harness or tests. `settings.py` pairs `env_prefix="FLEET_"` with `extra="forbid"`, so one stray var makes every settings load exit 2.
+- A command-line `--repository_cache` **overrides** a `.bazelrc` `common` line. A real-bazel test that omits it re-downloads ~206 MB / 9,241 files (179 s vs 17 s).
+- A repository-cache keep-ceiling breach fails the session and **keeps the bytes**. Prune with the `rm -rf` path the failure names; never code around the ceiling.
+- `ast-grep` exits **0 on a missing file** — always probe an absolute path. Detect parse failure with `kind: ERROR` + `severity: error` and read the **exit code**, not `--json` (`stdout_tail` truncates at 32 KiB).
 
 ## Architectural & Subagent Guardrails
 
@@ -87,3 +96,7 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 
 5. **Fresh Context on Error Retries**
    - Repair loops and LLM re-prompts must provide fresh, verbatim error logs (`stderr`, build output) and target source files rather than appending full transcript histories or failed diff patches.
+
+6. **Measurement Discipline & the Multi-Agent Audit Hazard**
+   - Never pass an unmeasured number into an ADR or spec brief. Re-measure before it enters `docs/`; a false claim carrying a "measured" label is worse than no claim.
+   - A read-only audit subagent **cannot distinguish landed code from another agent's uncommitted edits**. Check `git status` before telling a worker it duplicated work.

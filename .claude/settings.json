@@ -59,7 +59,10 @@
       "Bash(git status:*)",
       "Bash(git diff:*)",
       "Bash(git log:*)",
-      "Bash(mkdir:*)"
+      "Bash(mkdir:*)",
+      "Bash(mypy *)",
+      "Bash(.venv/bin/mypy *)",
+      "Bash(.venv/bin/ruff check src/ tests/)"
     ]
   }
 }

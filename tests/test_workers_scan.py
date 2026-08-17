@@ -729,23 +729,41 @@ def test_an_unmeasured_preflight_probe_is_never_published_as_a_measurement(
 def test_the_clone_and_build_classifiers_agree_on_every_clock_failure() -> None:
     """The identical `ProcResult` must cost a repo the identical thing in either worker.
 
-    Why it matters: `buildverify.classify_build_failure` carried a comment saying "`clone.py`'s
-    `_no_verdict` draws the same line, in this order, for this reason; the two are meant to stay
-    in step" — and they did not. `clone._no_verdict` DID separate never-started from
-    killed-at-the-deadline, and then `_indeterminate` built a `GitCommandError` carrying only
-    `timed_out`, which `util.proc.run` sets for both; `_error_for` read that one flag and answered
-    substantive `TIMEOUT` either way. So a wave deadline passing while a repo sat in `_preflight`
-    charged that repo an ADR-0014 rung — three such waves burned all three attempts and reached
+    Why it matters, corrected per review-36 I4: `44d5550` reordered
+    `buildverify.classify_build_failure`'s two branches (`not started` before `timed_out`) and, in
+    the SAME hunk, added a comment claiming `clone.py`'s `_no_verdict` "draws the same line, in
+    this order, for this reason" and that the two "are meant to stay in step" — without touching
+    `clone._error_for`, which still read `timed_out` alone (via `_indeterminate`'s
+    `GitCommandError`, which dropped `started`) and answered substantive `TIMEOUT` for a probe
+    that never ran. The comment was false the instant `44d5550` committed it: before that commit
+    the two answered identically (both `TIMEOUT`, both wrong, per `44d5550~1`), so the divergence
+    was manufactured by the half-applied reorder, not inherited from a pre-existing mismatch. Once
+    manufactured: a wave deadline passing while a repo sat in `_preflight` charged that repo an
+    ADR-0014 rung — three such waves burned all three attempts and reached
     `REQUIRES_HUMAN_INTERVENTION` having gathered zero evidence about the repo — while the build
-    worker, handed the same three flags, answered free `TRANSIENT_INFRA` and charged nothing.
+    worker, handed the same three flags, answered free `TRANSIENT_INFRA` and charged nothing. That
+    divergence held only for the window between `44d5550` and this fix (`68a41ff`); no code that
+    ran a real wave ever saw it.
 
     Neither module had a test that could see the disagreement, because every test looked at one
-    module. This one looks at both, so the comment can no longer be the only thing asserting it.
+    module. This one looks at both, so a comment can no longer be the only thing asserting it.
 
     **Scope is the clock, deliberately.** `(started=True, timed_out=False)` is a process that
     reached a verdict of its own, and there the two SHOULD differ: buildverify reads Bazel's exit
     table (`BUILD_ERROR`/`TEST_FAILURE`/exit 4/125), clone has no such table and reports
     `TRANSIENT_INFRA`. What is asserted for that row is only that neither invents a clock failure.
+
+    **`retryable` is pinned directly, not via equality with `built`/`expected` (review-36 M2
+    fix).** The original three-way tuple equality compared `cloned.retryable` against `built[1]`
+    and `expected[1]`, but `built` and `expected` are both computed from the SAME
+    `clock_failure(...)` call — `classify_build_failure` returns it verbatim — so they always move
+    together, and comparing clone's value to two numbers guaranteed equal to each other cannot
+    isolate a clone-specific regression. `clone._error_for` hardcodes `retryable=True` for every
+    clock failure (`clone.py:716`) and never reads `clock_failure`'s own retryable half
+    (`failure_class, _ = clock_failure(...)` at `clone.py:710`) — that hardcoding matches
+    `clock_failure`'s current answer for both its branches, so it is not wrong today, but nothing
+    failed if the literal were flipped. The assertion below now pins `cloned.retryable is True`
+    directly, so flipping that literal is what makes it fail.
     """
     from fleet.util.proc import ProcResult
     from fleet.workers.base import clock_failure
@@ -783,10 +801,22 @@ def test_the_clone_and_build_classifiers_agree_on_every_clock_failure() -> None:
         )
         built = classify_build_failure(result, unit=BUILD_UNIT)
 
-        assert (cloned.failure_class, cloned.retryable) == built == expected, (
-            f"clone and buildverify disagree for started={result.started} "
-            f"timed_out={result.timed_out}: clone says "
-            f"{(cloned.failure_class, cloned.retryable)}, buildverify says {built}"
+        assert cloned.failure_class == built[0] == expected[0], (
+            f"clone and buildverify disagree on failure_class for started={result.started} "
+            f"timed_out={result.timed_out}: clone says {cloned.failure_class}, buildverify says "
+            f"{built[0]}"
+        )
+        # Pinned directly rather than by comparing to `built`/`expected` — see the docstring's M2
+        # note: those two are guaranteed to agree with each other regardless of what
+        # `clone._error_for` does, so only a direct assertion on clone's own output can catch a
+        # regression in it.
+        assert cloned.retryable is True, (
+            "clone._error_for must report every clock failure as retryable — it has no exit-code "
+            "table to say otherwise, unlike buildverify"
+        )
+        assert built[1] == expected[1], (
+            f"buildverify's retryable disagrees with clock_failure's own answer for "
+            f"started={result.started} timed_out={result.timed_out}"
         )
         # The disagreement's whole cost, stated as the thing an operator pays: a rung.
         charged = RetryPolicy().decide(LadderState(), cloned).charges_attempt

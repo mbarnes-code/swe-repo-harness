@@ -42,7 +42,7 @@ from pydantic import ValidationError
 
 from fleet.models.enums import PrState
 from fleet.settings import PrSection
-from fleet.util.proc import ProcResult, run
+from fleet.util.proc import CommandRunner, ProcResult, run
 from fleet.vcs import build_forge
 from fleet.vcs import gitea as GT
 from fleet.vcs import github as GH
@@ -97,6 +97,47 @@ class RecordingRunner:
         )
 
 
+class RaisingRunner:
+    """A `CommandRunner` that raises instead of returning a `ProcResult` — what a genuinely
+    missing `curl` looks like at this seam. No shell is ever involved, so a binary absent from
+    PATH is `FileNotFoundError` raised by `asyncio.create_subprocess_exec` in the PARENT, before
+    any process exists to report an exit code — never a `ProcResult` with `exit_code=127`."""
+
+    def __init__(self, exc: BaseException) -> None:
+        self.exc = exc
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        raise self.exc
+
+
+class FixedResultRunner:
+    """A `CommandRunner` that replays one exact `ProcResult`, for asserting the two clock-vs-exec
+    edge cases `RecordingRunner` cannot build: a never-started call and an ordinary non-zero
+    `curl` exit that happens to equal 127."""
+
+    def __init__(self, result: ProcResult) -> None:
+        self.result = result
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        return self.result
+
+
 def _fake_config(tmp_path: Path) -> Path:
     """A `curl -K` file in the shape the operator's is: one `header =` line, mode 600."""
     path = tmp_path / "gitea-curl.conf"
@@ -105,7 +146,7 @@ def _fake_config(tmp_path: Path) -> Path:
     return path
 
 
-def _forge(tmp_path: Path, runner: RecordingRunner, **kwargs: Any) -> GT.GiteaForge:
+def _forge(tmp_path: Path, runner: CommandRunner, **kwargs: Any) -> GT.GiteaForge:
     return GT.GiteaForge(
         owner=OWNER,
         base_url=BASE_URL,
@@ -359,6 +400,51 @@ def test_a_rejected_token_is_an_UNAVAILABLE_error_not_a_verdict(tmp_path: Path) 
     forge = _forge(tmp_path, runner)
     with pytest.raises(GT.GiteaUnavailableError):
         asyncio.run(forge.view(f"{BASE_URL}/{OWNER}/m/pulls/1"))
+
+
+def test_a_missing_curl_is_named_not_retried_forever(tmp_path: Path) -> None:
+    """`curl` absent is an operator-visible condition, not a transient the poll loop should
+    retry for 48 hours. `RaisingRunner`, not a scripted `exit_code=127`: no shell is ever
+    involved, so a genuinely missing `curl` is `FileNotFoundError` raised in the parent — never
+    an exit code on a `ProcResult` that was never produced."""
+    runner = RaisingRunner(FileNotFoundError("curl"))
+    forge = _forge(tmp_path, runner)
+    with pytest.raises(GT.GiteaUnavailableError):
+        asyncio.run(forge.view(f"{BASE_URL}/{OWNER}/m/pulls/1"))
+
+
+def test_curl_exit_127_is_an_ordinary_failure_not_a_missing_binary(tmp_path: Path) -> None:
+    """`exit_code == 127` on a returned `ProcResult` used to be read as "curl is missing", but
+    nothing in this stack can produce that: no shell means no "command not found" convention. A
+    `curl` that RAN and exited 127 of its own accord is an ordinary `GiteaError`."""
+    result = ProcResult(
+        argv=("curl",), exit_code=127, stdout_tail="", stderr_tail="boom", duration_ms=1,
+        timed_out=False, started=True,
+    )
+    forge = _forge(tmp_path, FixedResultRunner(result))
+    with pytest.raises(GT.GiteaError) as exc_info:
+        asyncio.run(forge.view(f"{BASE_URL}/{OWNER}/m/pulls/1"))
+    assert not isinstance(exc_info.value, GT.GiteaUnavailableError)
+
+
+def test_a_passed_deadline_is_not_mistaken_for_a_missing_curl(tmp_path: Path) -> None:
+    """`not started` is `util.proc.run`'s call-past-deadline synthesis (§7.1) — never a missing
+    binary. Misreading it as `GiteaUnavailableError` blames the operator's PATH for the fleet's
+    own clock instead of surfacing the retryable clock failure it actually is."""
+    result = ProcResult(
+        argv=("curl",),
+        exit_code=124,
+        stdout_tail="",
+        stderr_tail="deadline had already passed; process was not started",
+        duration_ms=0,
+        timed_out=True,
+        started=False,
+    )
+    forge = _forge(tmp_path, FixedResultRunner(result))
+    with pytest.raises(GT.GiteaError) as exc_info:
+        asyncio.run(forge.view(f"{BASE_URL}/{OWNER}/m/pulls/1"))
+    assert not isinstance(exc_info.value, GT.GiteaUnavailableError)
+    assert "deadline had already passed" in str(exc_info.value)
 
 
 # --------------------------------------------------------------------------------------
