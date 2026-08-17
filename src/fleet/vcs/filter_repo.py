@@ -52,6 +52,7 @@ __all__ = [
     "SOURCE_REPO_TRAILER",
     "SOURCE_SHA_TRAILER",
     "FilterRepoUnavailableError",
+    "HistoryScrubUnavailableError",
     "IngestError",
     "IngestResult",
     "IntegrationMutex",
@@ -64,6 +65,7 @@ __all__ = [
     "integration_snapshot",
     "merge_source",
     "relocate",
+    "resolve_replace_text",
 ]
 
 DEFAULT_FILTER_REPO_BIN: Final = "git-filter-repo"
@@ -78,6 +80,18 @@ _SEQ_RE: Final = re.compile(r"/(\d+)$")
 class FilterRepoUnavailableError(GitError):
     """`git-filter-repo` is not on PATH. A hard, named failure rather than a silent fallback to
     `git filter-branch`, which would rewrite history with different (and slower) semantics."""
+
+
+class HistoryScrubUnavailableError(GitError):
+    """`redaction.history_scrub_file` (§11.4) names a path that does not exist on disk.
+
+    Deliberately a different type from `FilterRepoUnavailableError`: that one means the
+    `git-filter-repo` binary itself is missing. This one means the binary is fine but the
+    `--replace-text` scrub LIST it would be handed is not there — a typo in
+    `history_scrub_file`, or an un-provisioned `config/` directory. Collapsing the two into one
+    message is the exact "four-state collapse" shape this codebase's own audit (D34-D45) warns
+    about: a caller catching one must not silently also catch the other.
+    """
 
 
 class IngestError(GitError):
@@ -142,6 +156,34 @@ def filter_repo_argv(
         argv.append("--force")
     argv += list(spec.extra_args)
     return tuple(argv)
+
+
+def resolve_replace_text(root: Path, configured: str) -> Path | None:
+    """Resolve `redaction.history_scrub_file` into `RelocationSpec.replace_text` (§11.4, D21).
+
+    Mirrors `cli._forge_token_config`'s resolution of the Gitea credential path — both are
+    file-shaped settings resolved against `FleetSettings.root` — so the two file-shaped settings
+    in this codebase behave the same way instead of diverging by accident.
+
+    An empty/blank `configured` disables the file-based scrub explicitly: the caller wanted no
+    `--replace-text` and says so, rather than the setting silently doing nothing the way it did
+    before any caller read it at all (D21: *"the setting that would feed it… is read by
+    nothing"*). A non-empty `configured` naming a path that is not there is refused loudly
+    (Rule 11) rather than resolved to `None`: D21's own severity note is that a scrub which is
+    "implemented but never invoked means secrets that were supposed to be redacted ship into the
+    monorepo" — silently dropping a typo'd or un-provisioned path would reproduce exactly that.
+    """
+    cleaned = configured.strip()
+    if not cleaned:
+        return None
+    path = (root / cleaned).resolve()
+    if not path.is_file():
+        raise HistoryScrubUnavailableError(
+            f"redaction.history_scrub_file={cleaned!r} does not exist at {path}; §11.4 promises "
+            "secrets are scrubbed out of rewritten history, and proceeding without this file "
+            "would pass no --replace-text at all — the exact silent gap this function closes"
+        )
+    return path
 
 
 async def relocate(

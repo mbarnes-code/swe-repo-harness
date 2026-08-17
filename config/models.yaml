@@ -1,0 +1,40 @@
+# §9 / ADR-0023 `config/models.yaml` — the ONLY place a model id or a base_url may appear.
+#
+# Two levels: `roles` (a named job → capability tier, §9's table, essentially fixed) and
+# `profiles` (tier → ordered backend targets, what an operator actually edits). `roles` below is
+# `fleet.llm.roles.SPEC_ROLE_TIERS` verbatim — the harness's own "§9's roles: block as shipped"
+# constant — so this file does not invent a routing table, it transcribes the real one.
+#
+# `profiles.default` targets the `anthropic` backend (native Messages API, no `base_url` needed)
+# at real, current per-million-token prices (§9 rule 5 requires a declared price on every
+# target). `api_key_env` names the environment variable the key is read from at call time
+# (§9: "API keys come from the environment only") — never a key value.
+version: 2
+roles:
+  conflict_resolution: HEAVY
+  api_incompat_rewrite: HEAVY
+  build_authoring: HEAVY
+  cycle_break_proposal: HEAVY
+  escalation: HEAVY
+  transform_repair: WORKHORSE
+  build_diagnosis: WORKHORSE
+  manifest_extract: WORKHORSE
+  pr_body: WORKHORSE
+  repo_classify: CHEAP
+  dep_disambiguate: CHEAP
+  pr_title: CHEAP
+default_profile: default
+profiles:
+  default:
+    HEAVY:
+      - { backend: anthropic, model_id: claude-opus-5, effort: high,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
+    WORKHORSE:
+      - { backend: anthropic, model_id: claude-sonnet-5, effort: high,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
+    CHEAP:
+      - { backend: anthropic, model_id: claude-haiku-4-5, effort: low,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }

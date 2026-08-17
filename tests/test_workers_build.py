@@ -46,6 +46,7 @@ from fleet.cli import (
     _module_inputs,
     _resolve_support_files,
 )
+from fleet.llm.cache import CacheMiss
 from fleet.llm.client import CallBudget, ModelResponse, TierUnavailable
 from fleet.llm.schemas import BuildFileProposal, PrBody, PrTitle, VersionConflictResolution
 from fleet.models.build import BuildTarget, BuildUnit, SupportFile, WorkspaceDep
@@ -101,6 +102,7 @@ from fleet.workers.rdepverify import (
     RdepverifyInput,
     RdepverifyWorker,
 )
+from tests.test_bazel import _fail_if_registry_unreachable
 
 RUN_ID = UUID("00000000-0000-4000-8000-0000000000b3")
 REPO = "acme-widget"
@@ -230,6 +232,26 @@ class UnavailableModelClient:
         raise TierUnavailable(ModelTier.WORKHORSE, ("fake:fake-workhorse",))
 
     def stream(self, role, messages, response_model, **kwargs):  # pragma: no cover
+        raise NotImplementedError("these workers use complete(), never stream()")
+
+    async def capabilities(self, role):  # pragma: no cover
+        raise NotImplementedError
+
+
+class _CacheMissModelClient:
+    """A `ModelClient` shaped like `CachingModelClient` in `read-only` mode meeting a miss.
+
+    `test_llm_cache.py::test_cache_miss_is_not_an_llm_error` pins `CacheMiss not issubclass
+    LlmError` and a reproduction of the bare `except LlmError:` pattern in isolation, but never
+    drives an actual worker through it. This fake is what closes that gap here: `.complete()`
+    raises `CacheMiss`, not `LlmError`, so a worker whose advice-call site widened its catch to
+    swallow `CacheMiss` again would hide it right here instead of raising.
+    """
+
+    async def complete(self, role, messages, response_model, **kwargs):
+        raise CacheMiss(str(role), "deadbeef" * 8)
+
+    def stream(self, role, messages, response_model, *, budget=None):  # pragma: no cover
         raise NotImplementedError("these workers use complete(), never stream()")
 
     async def capabilities(self, role):  # pragma: no cover
@@ -858,6 +880,46 @@ async def test_a_build_failure_persists_a_truncated_stderr_with_its_exit_code_an
     assert result.output is not None and result.output.integration_ref == SNAPSHOT
 
 
+async def test_a_read_only_cache_miss_during_diagnosis_is_not_swallowed_by_the_advisory_catch(
+    tmp_path,
+) -> None:
+    """The regression `test_llm_cache.py::test_cache_miss_is_not_an_llm_error` names in its
+    docstring but never drives: `_diagnose`'s bare `except LlmError:` (`buildverify.py:1192`)
+    must not catch a `CacheMiss` the way it catches an ordinary advisory failure. Rung 1 is
+    deterministic (`ctx.context_policy is None`, `buildverify.py:1179`) and never calls
+    `_diagnose` at all, so rung 2 (`ContextPolicy.EVIDENCE_ONLY`) is what makes this reachable;
+    the runner fails the build unconditionally so `_diagnose` fires, and `ctx.llm` is a fake
+    shaped like a `--llm-cache read-only` cache meeting a miss (`_CacheMissModelClient`). If
+    `except LlmError:` ever widens to catch `CacheMiss` again, `run()` returns a normal `failed`
+    `WorkerResult` instead of raising, and this test fails.
+    """
+    (tmp_path / "java/com/acme/widget").mkdir(parents=True)
+    (tmp_path / "java/com/acme/widget/BUILD.bazel").write_text("# generated\n", encoding="utf-8")
+    runner = RecordingRunner(
+        [
+            (
+                lambda p: True,
+                lambda parts: ProcResult(
+                    argv=parts, exit_code=1, stdout_tail="", stderr_tail="ERROR: bad code",
+                    duration_ms=90_000, timed_out=False,
+                ),
+            )
+        ]
+    )
+    ctx = make_ctx(
+        tmp_path, attempt=2, context_policy=ContextPolicy.EVIDENCE_ONLY,
+        model=_CacheMissModelClient(),
+    )
+    with pytest.raises(CacheMiss):
+        await BuildverifyWorker(runner=runner).run(
+            ctx,
+            BuildverifyInput(
+                dest="java/com/acme/widget", integration_ref=SNAPSHOT,
+                log_dir=str(tmp_path / "logs"),
+            ),
+        )
+
+
 async def test_a_test_failure_and_an_oom_are_not_the_same_failure(tmp_path) -> None:
     """`retry.py` branches on `retryable`, never on message text: exit 1 is a repair prompt and
     exit 137 from the OOM killer is a re-queue that must not be classed as the repo's fault."""
@@ -1172,7 +1234,10 @@ async def test_a_probe_the_fleets_own_deadline_killed_is_not_reported_as_a_missi
     inside the image reaches: an immediate, PERMANENT, FABRICATED "no C compiler in the sandbox
     image" verdict about an image the probe never got a chance to open. `clock_failure` (shared
     with `classify_build_failure`, so the two answers cannot drift apart) reads `started=False` as
-    `TRANSIENT_INFRA` — the fleet's clock, not the repo's fault, retried free of an attempt.
+    `TRANSIENT_INFRA` — the fleet's clock, not the repo's fault, retried on the same rung with no
+    attempt charged, up to `RetryPolicy.max_transient_retries` (4, `retry.py`); past that cap the
+    identical clock failure is charged like any other (`8464dc6`). This test drives one
+    occurrence, so it pins the free half only.
     """
     dest = a_package(tmp_path, "go/acme_digest_go")
     runner = RecordingRunner(
@@ -2247,16 +2312,6 @@ async def test_a_hand_written_rdeps_cache_flag_in_extra_args_still_wins(tmp_path
 # =======================================================================================
 
 
-REGISTRY_UNREACHABLE = (
-    "Could not resolve",
-    "Connection",
-    "Error accessing registry",
-    "Connect timed out",
-    "Read timed out",
-)
-"""How a Bazel that could not reach BCR says so (the same enumeration `test_bazel.py` uses)."""
-
-
 def bazel_exits(code: int, *, unit: str = TEST_UNIT, stderr: str = "") -> RecordingRunner:
     """A runner whose `build` is green and whose `unit` step exits `code`."""
     return RecordingRunner(
@@ -2619,7 +2674,7 @@ async def test_a_build_is_not_gated_by_a_floor_the_volume_clears(tmp_path) -> No
     "ProcResults instead, which proves the classifier but not what Bazel actually returns",
 )
 def test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it(
-    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...]
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry: str
 ) -> None:
     """The premise the whole classification rests on, taken from the binary rather than from memory.
 
@@ -2633,6 +2688,13 @@ def test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it(
 
     Deliberately dependency-free — one `genrule` per package, no `bazel_dep` — so it needs no
     network and cannot fail for a reason that is not the one under test.
+
+    The `bazel_registry` fixture is requested for its side effect, not its value: it is what
+    proves — once, at session scope, before this test's own `bazel build` runs — that a registry
+    answers at all, which is the premise `_fail_if_registry_unreachable` below rests on (see its
+    docstring in `test_bazel.py`). It also carries the `FLEET_TEST_ALLOW_OFFLINE_BAZEL=1` escape
+    hatch: an operator with genuinely no registry gets a named skip there, before this test ever
+    shells out.
     """
     (bazel_workspace / "MODULE.bazel").write_text('module(name = "probe")\n', encoding="utf-8")
     (bazel_workspace / "pkg").mkdir()
@@ -2654,12 +2716,12 @@ def test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it(
         )
 
     built = bazel("build", "//pkg/...")
-    # Even a dependency-free MODULE.bazel resolves `bazel_tools`' own deps through BCR, so an
-    # unreachable registry must SKIP rather than be reported as a wrong exit code — the two are
-    # not remotely the same finding. The markers match `test_bazel.py`'s enumerated list rather
-    # than "any non-zero exit", which would turn this test into a no-op exactly when it matters.
-    if any(marker in built.stderr for marker in REGISTRY_UNREACHABLE):
-        pytest.skip(f"Bazel Central Registry unreachable from this host: {built.stderr[-400:]}")
+    # Even a dependency-free MODULE.bazel resolves `bazel_tools`' own deps through BCR, so a
+    # registry error here is a FAIL, not a skip: `bazel_registry` above already proved a registry
+    # answered before this test started, so reaching this point means it died mid-run or Bazel
+    # cannot use the one configured — a finding, not weather. Same guard `test_bazel.py` uses,
+    # imported rather than re-implemented so the marker list cannot drift between the two files.
+    _fail_if_registry_unreachable(built, ())
     assert built.returncode == 0, built.stderr[-2000:]
 
     empty = bazel("test", "//pkg/...")

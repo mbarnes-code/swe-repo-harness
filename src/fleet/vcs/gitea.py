@@ -103,6 +103,32 @@ class GiteaUnavailableError(GiteaError, ForgeUnavailableError):
     """`curl` is missing, or the Gitea instance is unreachable/unauthenticated."""
 
 
+def _require_private_credential_file(path: Path) -> None:
+    """Refuse a `curl -K` credential file that group or other can read (§11.4, D22).
+
+    This module's own docstring has promised *"the mode-600, gitignored config file"* since it was
+    written, and nothing ever checked it — `chmod`, `st_mode` and `0o600` had zero occurrences
+    anywhere in `src/` before this. A world-readable token file works silently right up until
+    another user on the same host reads the Gitea API token straight off disk, so this fails loud
+    at construction (Rule 11) instead of only in prose.
+
+    Existence is deliberately not checked here: a missing file is `curl`'s own, already-surfaced
+    failure (`-K`: no such file, or `FileNotFoundError` if `curl` itself is absent) at the first
+    request. This function's only job is the permission bits of a file that IS there — conflating
+    "missing" with "insecure" would misdiagnose an operator who simply has not created it yet.
+    """
+    try:
+        mode = path.stat().st_mode
+    except OSError:
+        return
+    if mode & 0o077:
+        raise GiteaError(
+            f"{path} is readable by group or other (mode {oct(mode & 0o777)}); refusing to use "
+            "it as the `curl -K` credential file for the Gitea API token. `chmod 600` it first — "
+            "any other user on this host can otherwise read the token straight off disk (§11.4)"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class PrRef:
     """The `{owner}/{repo}#{index}` triple an API path needs, recovered from a PR's web URL."""
@@ -240,6 +266,7 @@ class GiteaForge:
         self._owner = owner
         self._api = f"{base_url.rstrip('/')}{API_PREFIX}"
         self._curl_config = Path(curl_config)
+        _require_private_credential_file(self._curl_config)
         self._repo = repo
         self._runner = runner
         self._curl = curl_bin

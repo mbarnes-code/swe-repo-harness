@@ -1,0 +1,9 @@
+# §9 `config/repos.yaml` — the fleet manifest: one entry per source repo to migrate.
+#
+# Empty on purpose: no source repos have been enrolled in this harness checkout yet. An operator
+# appends real entries (`name`, `url`, optional `ref`/`owns`/`dest`/`skip`) as repos are added to
+# the run; inventing placeholder repos here would be fixture data pretending to be config.
+version: 1
+defaults:
+  ref: main
+repos: []

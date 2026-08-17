@@ -474,18 +474,22 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
 _DOCKER_CANNOT_RUN_EXPLAINED: Final = (
     f"`docker run` exited {_DOCKER_CANNOT_RUN}: the CONTAINER never started, so bazel never ran "
     "and this repository's generated files were never opened — nothing that follows is evidence "
-    "about them, and no repair to them can change this. Look at the host: a surviving container "
-    "from a prior invocation colliding on `--name=` is the usual cause (an unreachable daemon "
-    "exits 1, not 125 — measured, see D34's correction); also check that "
-    "`settings.verify.container_image` still resolves on this host and that "
-    "`container_memory`/`container_cpus` hold values docker accepts. Re-queued on the same rung "
-    "as TRANSIENT_INFRA — but neither half of that is free forever. It costs this repo no "
-    "attempt only up to `RetryPolicy.max_transient_retries` (default 4, `retry.py`, ADR-0014 "
-    "§11.8); a daemon still gone past that many retries makes the NEXT occurrence substantive, "
-    "charging a rung like any other failure. And on rungs 2-3 this SAME retry still triggers a "
-    "diagnosis call — `_diagnose` fires whenever the attempt's context policy is set, regardless "
-    "of failure class — so a daemon blip late in the ladder is not free of a repair prompt "
-    "either, even while the attempt itself is. docker stderr: "
+    "about them, and no repair to them can change this. Several distinct conditions all exit "
+    "125 — a leftover container still holding this name, an image that will not resolve, a "
+    "malformed `container_memory`/`container_cpus`, a nonexistent `--network`, a non-absolute "
+    "`--workdir` — and the exit code alone cannot tell them apart; only the docker stderr below "
+    "can. (An unreachable daemon is not among them: measured, it exits 1, not 125 — see D34's "
+    "correction.) Of these, a name collision is the one this harness can act on directly: "
+    "`_invocation_name` gives every `docker run` this worker starts a fresh per-call token, so a "
+    "collision here is residual or externally caused, never self-inflicted — look for a "
+    "container left running under this repo's prefix by something outside this run. Re-queued "
+    "on the same rung as TRANSIENT_INFRA, but neither half of that is free forever: it costs "
+    "this repo no attempt only up to `RetryPolicy.max_transient_retries` (default 4, `retry.py`, "
+    "ADR-0014 §11.8), after which a 125 that keeps recurring is charged a rung like any other "
+    "failure. And on rungs 2-3 this SAME retry still triggers a diagnosis call — `_diagnose` "
+    "fires whenever the attempt's context policy is set, regardless of failure class — so a "
+    "daemon blip late in the ladder is not free of a repair prompt either, even while the "
+    "attempt itself is. docker stderr: "
 )
 """Prefixed to the tail of a 125 so the failure READS as what it is.
 
@@ -814,6 +818,12 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
                 "reached a verdict, so this is not evidence about the image's compiler either — "
                 "it costs the repo a rung, the same as any other timeout. "
             )
+            if result.started:
+                # `util.proc.run` killed the probe's `docker run` CLIENT at the deadline; the
+                # container it started is still registered with the daemon (`on_cancel`'s
+                # docstring). This resolves inside `run()`, before `_run_one`'s outer watchdog
+                # could ever call `on_cancel`, so the sweep has to happen HERE.
+                await self._sweep_containers(ctx)
             return WorkerError(
                 failure_class=failure_class,
                 retryable=retryable,
@@ -937,6 +947,12 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
 
             argv = self._argv(ctx, payload, unit=unit, worktree=worktree)
             result = await runner(argv, cwd=worktree, deadline=ctx.deadline)
+            if result.timed_out and result.started:
+                # Same reasoning as `_c_toolchain_gate`'s clock branch: `util.proc.run` killed
+                # this `bazel build`/`bazel test` step's `docker run` CLIENT at the deadline, the
+                # container survives the daemon side of that, and `run()` resolving on its own
+                # means `_run_one` never calls `on_cancel` for this. Swept here instead.
+                await self._sweep_containers(ctx)
             output.steps.append(
                 StepRecord(
                     unit=unit,
@@ -999,10 +1015,34 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
         prefix with nothing under it is the expected case on the un-containerised path, or on a
         rung that never started a container, and is deliberately not an error.
 
-        **Not the whole of D32.** This is the CANCELLATION path. A deadline TIMEOUT that is not a
-        cancel does not reach `on_cancel` at all — that dispatch is outside this file — so a
-        container orphaned by a plain timeout (rather than a cancel or a name collision) is not
-        swept here; it waits for `ContainerSandbox.reap` at `fleet resume`.
+        **`_run_one` (`base.py:887`) is a real caller, not a hypothetical one**: it fires when
+        `ctx.cancel` is set and `run()` does not settle within `cancel_grace_s` — in production
+        that is `_heartbeat`'s `LeaseStolenError` branch (`orchestrator/runner.py:794-818`)
+        setting `ctx.cancel` on a stolen lease, not a code path nothing ever exercises.
+
+        **Not the whole of D32 — and no longer the gap it used to be.** This method is reached
+        only through explicit cancellation. A plain deadline TIMEOUT that `run()` resolves on its
+        own — `util.proc.run`'s `asyncio.timeout_at` firing and killing the `docker run` child
+        before `_run_one`'s outer watchdog ever wakes — used to leak: `run_task` completes by
+        itself, so `_run_one` never calls `on_cancel`, and the container the killed client left
+        behind was previously left for `ContainerSandbox.reap` at `fleet resume` — a mechanism
+        with zero callers in `src/`, guarding a command that is itself `_unavailable`
+        (`cli.py:9792`), i.e. it was never actually swept. `run()` now calls `_sweep_containers`
+        itself at both points a `docker run` child can be killed at its own deadline (the
+        C-toolchain probe and the build/test step) instead of relying on either mechanism, so that
+        half of D32 no longer depends on `on_cancel` or on `reap`/`resume` ever running.
+        """
+        await self._sweep_containers(ctx)
+
+    async def _sweep_containers(self, ctx: WorkerContext) -> None:
+        """The force-remove-by-prefix used by `on_cancel` and by a self-resolved deadline kill.
+
+        Shared because both are removing the same thing for the same reason: a `docker run` child
+        killed by signal (cancellation, or `util.proc.run`'s own `asyncio.timeout_at`) leaves its
+        container running in the daemon — killing the CLIENT does not stop it. `on_cancel` reaches
+        this via `_run_one`'s outer watchdog; `run()` reaches it directly, at the point it reads
+        `result.timed_out and result.started`, because THAT deadline resolves inside `run()` and
+        never reaches `on_cancel` at all (see `on_cancel`'s docstring).
         """
         sandbox = ContainerSandbox(runner=self._runner or run)
         prefix = _container_prefix(ctx)

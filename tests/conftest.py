@@ -442,6 +442,19 @@ def pytest_runtest_teardown(item: pytest.Item) -> None:
     _peak_bytes = max(_peak_bytes, tree_bytes(BAZEL_ROOT))
 
 
+def _skip_reason(report: pytest.TestReport) -> str:
+    """The human-readable reason a skipped report carries, tolerant of both skip shapes.
+
+    A marker-based `@pytest.mark.skipif` and an in-body `pytest.skip(...)` both land here as a
+    `(path, lineno, reason)` triple on `.longrepr`, but nothing guarantees that shape forever —
+    a bare string is treated as the reason outright rather than raising.
+    """
+    longrepr = report.longrepr
+    if isinstance(longrepr, tuple) and len(longrepr) == 3:
+        return str(longrepr[2])
+    return str(longrepr)
+
+
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     """Leave no output base behind, and say what the run actually cost.
 
@@ -451,6 +464,12 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     archives, ~3 minutes of fetching); it has its own ceiling, and over it the session FAILS
     naming the directory rather than deleting the thing every real-Bazel test now fetches
     through.
+
+    It also reports how many tests skipped and why, for the same reason it reports disk: a run
+    that stayed green while covering less than the run before it is a silent regression, and
+    "1141 passed" alone cannot distinguish that from a run that covered everything. This does
+    NOT fail the session on a skip — some skip conditions are legitimate (an offline lane, a
+    tool genuinely absent) — it only makes the count and the reason impossible to miss.
     """
     _ = exitstatus
     if not BAZEL_ROOT.exists():
@@ -486,6 +505,23 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
         )
         for breach in breaches:
             reporter.write_line(f"DISK CEILING BREACHED: {breach}", red=True)
+        reporter.write_sep("-", "test coverage")
+        skipped_reports = reporter.stats.get("skipped", [])
+        if skipped_reports:
+            reasons: dict[str, int] = {}
+            for rep in skipped_reports:
+                reason = _skip_reason(rep)
+                reasons[reason] = reasons.get(reason, 0) + 1
+            reporter.write_line(
+                f"{len(skipped_reports)} test(s) skipped this session — a green run that covers "
+                f"less than a prior green run is exactly the failure mode this reports, not just "
+                f"a diff count:",
+                yellow=True,
+            )
+            for reason, count in sorted(reasons.items()):
+                reporter.write_line(f"  ({count}x) {reason}")
+        else:
+            reporter.write_line("0 tests skipped this session — full collected coverage ran")
     if breaches:
         session.exitstatus = 1
 

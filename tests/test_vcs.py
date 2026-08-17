@@ -610,6 +610,66 @@ def test_filter_repo_argv_encodes_the_relocation_plan() -> None:
     assert "proto/:contracts/billing/" in hoisted
 
 
+def test_filter_repo_argv_renders_replace_text_when_set(tmp_path: Path) -> None:
+    """§11.4 / D21: `--replace-text` had zero test hits of any kind before this — this is the
+    render half of the wiring gap. `resolve_replace_text` below is the settings half."""
+    scrub_file = tmp_path / "secrets.txt"
+    scrub_file.write_text("literal:SECRET==>«redacted»\n", encoding="utf-8")
+
+    with_scrub = FR.filter_repo_argv(FR.RelocationSpec(dest_path="ts/x", replace_text=scrub_file))
+    assert "--replace-text" in with_scrub
+    assert str(scrub_file) in with_scrub
+
+    without_scrub = FR.filter_repo_argv(FR.RelocationSpec(dest_path="ts/x"))
+    assert "--replace-text" not in without_scrub
+
+
+async def test_relocate_passes_replace_text_through_to_the_executed_argv(tmp_path: Path) -> None:
+    """The test D21 asked for: a caller that threads `RelocationSpec.replace_text` through
+    `relocate()` must reach the real, executed `git-filter-repo` argv. If a future edit stops
+    rendering `--replace-text` (or stops passing the spec's field into `filter_repo_argv`), THIS
+    fails. It does not prove any production caller sets the field — only that the mechanism, once
+    fed a spec that carries it, is not lost between here and the process that runs.
+    """
+    scrub_file = tmp_path / "secrets.txt"
+    scrub_file.write_text("literal:SECRET==>«redacted»\n", encoding="utf-8")
+    runner = ScriptedRunner(exit_code=0)
+
+    await FR.relocate(
+        tmp_path, FR.RelocationSpec(dest_path="ts/x", replace_text=scrub_file), runner=runner
+    )
+
+    assert len(runner.calls) == 1
+    executed = runner.calls[0]
+    assert "--replace-text" in executed
+    assert str(scrub_file) in executed
+
+
+def test_resolve_replace_text_disables_the_scrub_on_an_empty_setting() -> None:
+    """An operator who wants no file-based scrub sets the field to `""` explicitly; before this
+    function existed there was no code path that read the setting at all (D21)."""
+    assert FR.resolve_replace_text(Path("/nonexistent-root"), "") is None
+    assert FR.resolve_replace_text(Path("/nonexistent-root"), "   ") is None
+
+
+def test_resolve_replace_text_resolves_an_existing_file_against_the_settings_root(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "config" / "rules").mkdir(parents=True)
+    scrub_file = tmp_path / "config" / "rules" / "secrets.txt"
+    scrub_file.write_text("literal:x==>y\n", encoding="utf-8")
+    resolved = FR.resolve_replace_text(tmp_path, "config/rules/secrets.txt")
+    assert resolved == scrub_file.resolve()
+
+
+def test_resolve_replace_text_refuses_a_configured_but_missing_file(tmp_path: Path) -> None:
+    """D21's own severity note: a scrub that is configured but silently no-ops is worse than one
+    that is visibly absent. `config/` does not exist in THIS repository at all — the exact
+    condition the docs entry names as the default's real-world state today."""
+    with pytest.raises(FR.HistoryScrubUnavailableError, match=r"config/rules/secrets\.txt"):
+        FR.resolve_replace_text(tmp_path, "config/rules/secrets.txt")
+
+
 async def test_relocate_names_a_missing_git_filter_repo_instead_of_falling_back(
     tmp_path: Path,
 ) -> None:

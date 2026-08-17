@@ -108,12 +108,12 @@ class GitCommandError(GitError):
     two answers cost a repo different things on the ADR-0014 ladder (see `base.clock_failure`), so
     the distinction has to survive the trip from `ProcResult` into the exception.
 
-    The keyword defaults to `True` for a hand-constructed raise that names no real process, but
-    **every construction site built from a `ProcResult` must forward its `started` explicitly** —
-    the default does not mean "safe to omit here". `vcs/git.py:252` and `workers/clone.py:241` do;
-    an omission elsewhere silently renders a process that never started as `"timed out"` rather
-    than `"never started"`, which is exactly the misclassification this field exists to prevent
-    (found in review as I5, `docs/superpowers/plans/review-36.md`).
+    `started` is a required keyword rather than a defaulted one: a default of `True` let a
+    construction site that forgot to forward it silently claim a process that never launched
+    actually ran and exited — exactly the misclassification this field exists to prevent (found
+    in review as I5, `docs/superpowers/plans/review-36.md`, which cost `cli.py:3634` a real
+    regression). Making the keyword required turns that omission into a `TypeError` at the call
+    site instead of a wrong answer fed to the clock-failure classifier.
     """
 
     def __init__(
@@ -124,7 +124,7 @@ class GitCommandError(GitError):
         *,
         cwd: Path | None = None,
         timed_out: bool = False,
-        started: bool = True,
+        started: bool,
     ) -> None:
         self.argv = redact_argv(argv)
         self.exit_code = exit_code

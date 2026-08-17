@@ -198,6 +198,19 @@ def _write_config(root: Path, sources: dict[str, Path], *, engine_module: str) -
         FLEET_YAML.format(engine_module=engine_module), encoding="utf-8"
     )
     (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    # D21/§11.4: `redaction.history_scrub_file` defaults to `config/rules/secrets.txt` and
+    # `resolve_replace_text` (vcs/filter_repo.py) refuses to proceed with a non-empty configured
+    # path that is not on disk — the same rule production `config/` satisfies. A fixture that
+    # left this unprovisioned would make every test reaching Phase 3 ingest raise
+    # `HistoryScrubUnavailableError` the moment `cli.py`'s `_ingest_build_source` started passing
+    # `replace_text` through. One inert regex entry is enough to be real without asserting
+    # anything about its content — nothing here is a real secret.
+    rules_dir = config / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    (rules_dir / "secrets.txt").write_text(
+        "regex:-----BEGIN [A-Z ]*PRIVATE KEY-----==>***REDACTED:private_key***\n",
+        encoding="utf-8",
+    )
     entries = "".join(
         f"  - name: {name}\n    url: {sources[name]}\n"
         + (f"    dest: {DESTINATIONS[name]}\n" if name in DESTINATIONS else "")

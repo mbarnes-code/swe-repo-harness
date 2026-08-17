@@ -122,6 +122,43 @@ wave's own `--name=` fix and committed in `8464dc6`.
   probe's (single call site, grepped). **Not redundant. Kept.** Research's Q4 was about a different
   code path than the one A touched.
 
+## Wave 4 (base f12a954) — 3 workers + research + review
+
+- **Task 9 (I): COMPLETE — the skip was not a flake, it was a banned pattern with a straggler.**
+  `test_workers_build.py:2662` used `pytest.skip` when the Bazel Central Registry was unreachable.
+  `test_bazel.py:1248-1258` documents why that pattern was REMOVED everywhere else: "every one of
+  these tests skipped on this host … and the only real check the suite has on generated
+  `MODULE.bazel` output quietly stopped running while looking green." One call site was missed.
+  Converted to `_fail_if_registry_unreachable` (imported, not duplicated — two marker lists drift),
+  `bazel_registry` fixture for the session-scoped reachability proof, `FLEET_TEST_ALLOW_OFFLINE_BAZEL=1`
+  preserved as the declared escape hatch. Other `pytest.skip` sites swept: three, all legitimate.
+  Also added a **coverage block** to `pytest_sessionfinish` (skip count grouped by reason) beside the
+  existing `bazel disk` block, so a run that covers less says so. Announces, does not enforce.
+  I did NOT reproduce the skip live (network was up) and said so — identification rests on
+  documentary evidence, correctly labelled.
+- **Task 10 (J): COMPLETE.** `GitCommandError.started` now a required keyword; all 3 construction
+  sites already forwarded it, so this guards against future regression rather than fixing a present
+  defect. Protocol verdict: **Pyright was right, the protocol was mis-declared** —
+  `LayoutAdapter.monorepo_dir` was `@property` while every implementation uses `ClassVar[str]`;
+  mypy accepts that under PEP 544 read-only-property leniency, Pyright does not. Proven with
+  venv-independent repros, then confirmed on the real file via `git stash` before/after.
+- **Task 8 (H): D22 CLOSED, D21 partially.** D22: zero `chmod`/`st_mode`/`0o600` existed in `src/`
+  before the change — the mode-600 rule was documented and wholly unenforced. Now refuses a
+  group/world-readable credential file loudly; missing file still allowed (curl's own error).
+  Verified `.secrets/gitea-curl.conf` is 0600 via `stat` only, no content read. D21: the
+  `--replace-text` scrub is **genuinely unwired** — `cli.py:7116`'s sole `RelocationSpec(...)` never
+  set `replace_text` and `settings.history_scrub_file` had zero readers, so every history rewrite
+  ships what the scrub should redact.
+- **Task 11 (K): dispatched.** J investigated the D21 wiring and correctly REFUSED to do it:
+  `settings.py:310` defaults `history_scrub_file` to `config/rules/secrets.txt` and `config/` does
+  not exist, so wiring would raise for every default caller. J recommended defaulting to `""`.
+  **Orchestrator overruled, with evidence:** `.gitignore:44` ignores only `config/secrets.*`
+  (the rest of `config/` is meant to be tracked) and FOUR settings defaults point into `config/`
+  (`:310`, `:447`, `:888`, `:1384` roles validation), plus SPEC §11.4 names the scrub file. The
+  directory is missing, not the default wrong. Defaulting to `""` would hide a missing config tree
+  behind a permanently disabled security feature AND leave `fleet <verb>` exiting 2. K creates the
+  tree, proves the CLI loads, then wires D21. K was given my reasoning to VERIFY, not accept.
+
 ## Queued, NOT yet assigned
 
 - **`GitCommandError.started` should arguably be a required keyword.** B's evidence: 1 of 3

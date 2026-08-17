@@ -1,0 +1,7 @@
+# §9 `config/fleet.yaml` — the run's machinery.
+#
+# Every key here has a typed §9 default in `src/fleet/settings.py`'s `FleetConfig` sections, so
+# an empty (all-defaults) file is a fully valid, real starting point: nothing is invented here —
+# an operator adds a key only to diverge from a §9 default (e.g. `run.monorepo_path`, which
+# defaults to the placeholder `../acme-monorepo`). CLI flags beat `FLEET_*` env, which beats this
+# file, which beats the defaults (§9).

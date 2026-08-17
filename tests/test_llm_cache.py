@@ -364,11 +364,15 @@ def test_read_only_turns_a_miss_into_a_hard_error() -> None:
 
 
 def test_cache_miss_is_not_an_llm_error() -> None:
-    """Pins the Rule 11 fix: `CacheMiss` must NOT be catchable by the bare `except LlmError:`
-    degrade-and-continue pattern every worker's advice-call site uses (`buildverify.py`,
-    `buildgen.py`, `prwriter.py`), or a `--llm-cache read-only` replay drift would be swallowed
-    exactly like a harmless "the model API hiccupped" advisory failure — silent degradation
-    instead of the hard, recorded failure replay mode exists to guarantee."""
+    """Pins the class hierarchy the Rule 11 fix depends on — `CacheMiss` is not a subclass of
+    `LlmError` — and reproduces the bare `except LlmError:` pattern in isolation to show that
+    shape alone lets a `CacheMiss` pass through it. It does NOT construct or run a worker, so
+    none of `buildverify.py`, `buildgen.py` or `prwriter.py`'s real advice-call sites execute
+    here; a regression in one of those specific `except` clauses (widened to `except (LlmError,
+    CacheMiss):`, say) would not be caught by this test. The worker-level regression —
+    `BuildverifyWorker.run()` actually raising `CacheMiss` out of `_diagnose` instead of
+    swallowing it — is
+    `tests/test_workers_build.py::test_a_read_only_cache_miss_during_diagnosis_is_not_swallowed_by_the_advisory_catch`."""
     assert not issubclass(CacheMiss, LlmError)
 
     client, inner, _, _ = build(mode="read-only")

@@ -4994,6 +4994,21 @@ conditional on `docs/SPEC.md`: if the SPEC mandates the feature, deleting the co
 put code and SPEC out of step, which this project treats as its signature defect. **The SPEC does
 mandate it**, checked directly, not assumed:
 
+**Correction (review-38 I4) — the `transform_repair` attribution further below is half-wrong, and
+the true finding is stronger than what was recorded.** "reads the Bazel error" and "re-runs the
+build" do not describe `transform_repair` either: its prompt (`calls.py:171-182`) is *"You repair
+a source file whose deterministic rewrite failed"*, evidenced by a `RULE_MISS` or a `git apply
+--check` stderr (`rewrite.py:325-330`, `:362-366`), and `rewrite.py` never invokes a build
+(`grep -ci bazel src/fleet/workers/rewrite.py` → 0). Its ladder is **§3.2** (`SPEC.md:783`, the
+attempt table at `:854-856`; `calls.py:374`'s own docstring says so), not "§9" — `SPEC.md:5878` is
+`## 9. Configuration`, an unrelated section. Only the "proposes an edit, code applies it" half is
+real, and it belongs to `propose_repair` (`calls.py:371-375`, returning `LlmPatchProposal`)
+applied via `land_patches` (`rewrite.py:397-408`). **No role in the codebase performs the
+apply-and-rerun-the-build behaviour `SPEC.md:1391-1392` describes** — the SPEC sentence conflates
+`build_diagnosis`'s advisory role with `transform_repair`'s apply role, and neither one, alone or
+combined, reads a Bazel error and re-runs a build. The paragraph below is left as originally
+written for its own record; this note supersedes its "§9" and "re-runs the build" claims.
+
 - `docs/SPEC.md:1390-1392` lists it in the **LLM slots** enumeration for Phase 3: "build-failure
   diagnosis on attempts 2–3 (sonnet, then opus)".
 - `docs/SPEC.md:6266` — `config/models.yaml`'s worked example — declares
@@ -5043,7 +5058,15 @@ break a caller that depends on the old shape):
   isn't `BudgetExhausted`/`TierUnavailable`/`TransportError`/`SchemaUnsatisfied`/`MalformedReply`;
   `CacheMiss` hit that same `else` arm before this change. Falling through to
   `_run_one`'s `classify_exception` (`base.py:500-519`) after this change lands on the same
-  `FailureClass.UNKNOWN` default — **behaviourally identical**, not a regression.
+  `FailureClass.UNKNOWN` default. **Correction (review-38 I2): not fully identical.**
+  `failure_class` (`UNKNOWN`), `retryable` (`True`) and `exception_type` match — 3 of 4 fields —
+  but `_error_for` (`classify.py:238-264`) writes `stderr_tail=redact_text(str(exc))` while
+  `error_from_exception` (`base.py:532`) writes `stderr_tail=str(exc)` unredacted. The message
+  text bypasses the redaction pass after this change; the failure classification does not
+  regress. `rewrite.py:472` (re-raises as `WorkerRepairError`, a plain `RuntimeError` with no
+  catcher, landing at the same `UNKNOWN`) and `cli.py:489`/`:490` (`except LlmError as exc:
+  _fail(str(exc), ExitCode.USAGE)`, unreachable in practice since `cli.py` makes no `.complete()`
+  call) also name `LlmError`; neither changes outcome either.
 - `rewrite.py:472`'s `except LlmError as exc:` re-wraps as `WorkerRepairError` (`RuntimeError`,
   not an `LlmError` subclass itself) before reaching `_run_one`; without the wrap `CacheMiss`
   reaches the same boundary with its own already-descriptive message and the same `UNKNOWN`
@@ -5051,6 +5074,25 @@ break a caller that depends on the old shape):
 
 No caller's depended-upon behaviour changes, so this did not need to be escalated as a blocking
 report before making the edit — verified first, then made, per the task's own conditional.
+
+**The guarantee's scope, stated precisely (review-38 I1).** `CacheMiss` makes a read-only `.complete()`
+**call** fail loud; it does not and cannot make a **skipped unit** fail loud. The checkpoint layer
+sits above the cache: on a re-entered run, a unit already recorded complete is returned from the
+checkpoint before any model call is attempted (`runner.py:458`, `:474-475` — D48,
+`docs/INTEGRATION_HONESTY.md`), so no `.complete()` call is made and no `CacheMiss` can be raised.
+A resume that reuses a checkpoint written under a different prompt or model id therefore satisfies
+`--llm-cache read-only` **vacuously** for that unit — the guarantee this decision installs applies
+only to calls that reach the cache, not to calls the checkpoint skips before they are attempted.
+This bound is D48's finding, not a new one; it is stated here because this ADR is the artifact
+that claims the guarantee and D48 is where the exception to it already lives, with no
+cross-reference previously connecting the two.
+
+Separately, and outside this ADR's own two decisions: a `CacheMiss` raised from `_diagnose`
+(`buildverify.py:1124-1158`, called at `:969` inside `run()`) propagates out of `run()` entirely,
+discarding the `WorkerResult` already built from the measured build/test verdict at that point —
+not merely the advice. The repo then records `UNKNOWN` for a unit whose build result was in fact
+known. Whether that trade is correct is not re-litigated here; it is recorded so a reader does not
+assume the cost is confined to the missing advice field.
 
 **Not fixed here (`buildverify.py` is owned by another worker this round, and touching it was
 not needed for either decision above):** deeper hygiene — collapsing the five now-partially-dead
@@ -5116,7 +5158,7 @@ middleware transplants into a deterministic orchestrator**, and the answer is sh
 | Axis | `deepagents` @ `1c6d358c6` | `fleet` |
 |---|---|---|
 | Retries | **None in core.** No retry, backoff, or attempt counter; errors become `ToolMessage(status="error")` strings for the model to read | `retry.py:148 decide()`, a pure function of `(LadderState, WorkerError)` that never branches on message text |
-| Sandbox | No local backend. All providers are remote SaaS (Modal/Daytona/Vercel/Runloop); the local path is bare `subprocess.run(shell=True)` (`libs/code/.../local_shell.py:302`) | `docker run --network=none --memory --cpus` (`container.py:135-137`) + `git worktree` per `(run_id, repo, attempt)`, both with owner-aware reapers |
+| Sandbox | No local **shell** backend. `libs/partners/` ships five packages; the four implementing a sandbox backend are all remote SaaS (`langchain-modal`, `-daytona`, `-runloop`, `-vercel-sandbox`). The fifth, `langchain-quickjs`, **is** local but is a JavaScript-REPL middleware (`CodeInterpreterMiddleware`), not a `SandboxBackendProtocol` implementation — a JS interpreter, not a place to run `bazel build`. The local shell path is bare `subprocess.run(shell=True)` (`libs/code/.../local_shell.py:302`) | `docker run --network=none --memory --cpus` (`container.py:135-137`) + `git worktree` per `(run_id, repo, attempt)`, both with owner-aware reapers |
 | Durable state | LangGraph checkpoints only — no task queue, no heartbeats, no attempt counters, no `REQUIRES_HUMAN_INTERVENTION` terminal | SQLite WAL authoritative for orchestration, git for code (ADR-0024); single-writer actor, fenced leases, stale-fence discard |
 | AST | **None.** No tree-sitter, no LSP, no unified-diff parser; mutation is whole-file write or one exact-string replace | Phase-2 core; total-order fixpoint buffer (`rewrite/pipeline.py`) |
 | Concurrency | Model-driven fan-out via the `task` tool; no scheduler, no concurrency control | Waves admitted by descending blast radius; five semaphore classes in `Limits` |
@@ -5253,3 +5295,465 @@ under Guardrail 6 before it may be written down as fact.
 - **Open D-numbers for the §4 candidates.** Rejected: `INTEGRATION_HONESTY.md` is a defect ledger.
   An unexploited opportunity is not a defect, and diluting the ledger with wishlist items would make
   the D-numbers stop meaning "something here is wrong."
+
+### 10. Scope correction — `examples/better-harness/`, and the one citable number in the whole reference set
+
+**The eight-agent sweep in §1 scoped to `libs/`. It never read `examples/`.** That gap is closed here
+rather than in a new ADR, because it corrects this entry's own coverage and reverses none of its
+decisions. Nothing in §1–§9 changes.
+
+**What the artifact is.** `examples/better-harness/` (3,405 LOC, `version = "0.1.0"`,
+`dependencies = []`) is a **harness optimizer**: an outer Deep Agent reads eval failures and edits an
+inner agent's declared *surfaces* — prompt text, tool files, skill files, middleware implementation,
+and **middleware registration** — after which the evals rerun and the edit is kept only if the score
+improves. It calls itself "a research artifact."
+
+**Its lineage claims were verified against canonical sources in-session, not recalled.** All three
+exist:
+
+- **arXiv 2603.28052** — *"Meta-Harness: End-to-End Optimization of Model Harnesses"* (Lee, Nair,
+  Zhang, Lee, Khattab, Finn; submitted 30 Mar 2026). Genuinely an automated harness-search paper.
+- **`github.com/karpathy/autoresearch`** — exists, is karpathy's, ~94k stars. **The
+  characterization is a stretch**: it optimizes *nanochat training code* against `val_bpb`, not
+  another agent's harness, and its `program.md` instruction file is human-edited by design. The
+  README says only "inspired by," so this is a stretch and not a falsehood. **It carries no licence
+  file**, so it is all-rights-reserved and not reusable despite being cited.
+- **LangChain's "Improving Deep Agents with harness engineering"** (Vivek Trivedy, 17 Feb 2026).
+
+**The citable figure, and exactly what it does and does not support.** That blog post reports
+**"13.7 points from 52.8 to 66.5 on Terminal Bench 2.0,"** with the model held fixed at
+`gpt-5.2-codex`, across 89 tasks orchestrated by Harbor on Daytona sandboxes. Under §6's tiers this
+is **citable as a vendor's own measurement on a public benchmark** — the second-best-evidenced claim
+in the reference set after Cloudflare's funnel, and the only one anywhere in `references/` that
+isolates a harness change against a fixed model. Its limits, which must travel with it: it is a
+**single before/after pair** with no variance, no seed count, and no per-intervention ablation in
+what was retrieved; and it is LangChain measuring LangChain's own product.
+
+**Read the attribution before borrowing the number.** The 13.7 points came from **hand-engineered**
+interventions the post names — self-verification loops, context injection, loop-detection
+middleware, and a staged reasoning budget. **They were not produced by running `better-harness`.**
+The optimizer is the attempt to *automate* what the post did by hand, and it is the weakest link in a
+chain whose other two are strong. Citing the figure as evidence for the optimizer would be a
+category error of exactly the kind Guardrail 6 exists to prevent.
+
+**Why the artifact is a specification and not an instrument.** For a tool whose entire purpose is
+measurement-driven optimization, the measurement apparatus is the weakest component:
+
+1. **No determinism control of any kind** — `temperature|seed|random|repeat|n_trials` returns zero
+   hits across the package. **One un-seeded eval run per split per candidate** is the sole basis for
+   keep/discard, and the shipped example gates on 2 train + 2 holdout cases, so **a single flaky case
+   flips an accept**. No repeated trials, no significance test, no re-verification of the incumbent.
+2. **Infrastructure failure is scored as regression.** The pytest runner maps `<failure>` and
+   `<error>` to the same `status="failed"`, and an absent case to `status="missing", score=0.0`;
+   `returncode` is stored and never consulted. An import error is indistinguishable from a real
+   regression, so the loop can hill-climb on noise. (A *missing* `junit.xml` does instead abort the
+   whole split — loud, but a different shape.)
+3. **The holdout reaches the outer agent through three channels**, not one: the acceptance gate sums
+   `train.passed + holdout.passed`; train artifacts are copied **by whole file**, and the shipped
+   demo puts train, holdout and scorecard cases in a single test file, so the private assertions ship
+   verbatim into the proposer workspace; and each iteration's accept/reject verdict is carried
+   forward in `visible_history.md`, a one-bit readout of the holdout delta. `README:118` concedes the
+   split "is not a hard sandbox boundary yet."
+4. **The acceptance criterion is pinned by no test.** Changing it to train-only leaves the suite
+   green — both end-to-end fakes fix every surface at once, so train and holdout move together and no
+   test distinguishes the criteria. Combined with a dead `combined_passed` helper and a decision
+   record that persists train counts only, the holdout's presence in the gate reads as **drift rather
+   than a considered tradeoff**.
+5. **Nothing prevents a surface targeting the evals.** Validation checks kinds, split names, id
+   uniqueness and strata parity; it never compares `surface.target` against the eval paths or grader
+   module, and `module_attr` reaches any importable attribute inside the eval process.
+6. **Revert is exception-safe but not crash-safe** — a proper `finally`, but in-memory backups, no
+   journal and no atomic rename. SIGKILL mid-eval leaves agent-authored code in the real target
+   workspace, and the next run then snapshots the mutated file as "original."
+
+**Decision. Not adopted, and not a defect here** — no ledger entry, per §8's rule that an
+unexploited opportunity is not a defect and an external artifact's flaws are not ours. Three things
+are kept as ideas, all **Agent Recommendations**: the *declared-surface* pattern as a containment
+primitive; the observation at its `README:46` that **middleware needs both implementation and wiring
+exposed** or the outer agent cannot switch it on; and the three-tier `train`/`holdout`/`scorecard`
+split, whose unbiased tier — run on baseline and final only — is the design this artifact already has
+and ships as **optional**, which is the same shape as **D48**: the correct guard exists and is not on
+the path that runs.
+
+**A note on method, since it recurs.** The web summarizer used during citation checking reported
+`autoresearch` as MIT-licensed; the GitHub licence API returned `Not Found`, and the primary source
+won. That is the third instance in this evaluation of a confident secondary source contradicted by
+the artifact it describes — after `edit_file`'s unenforced read-before-edit invariant (§7) and
+`ARCHITECTURE.md`'s phantom default-stack middleware. **Prefer the primary source, every time.**
+
+---
+
+## ADR-0070 — The `openai_compatible` backend is **one file**, and its hard part is **error translation, not transport**: `classify_exception` branches on our own typed exceptions, so every wire condition a local vLLM can produce must be mapped inside `invoke` or it lands in `UNKNOWN` — with a **400 on `guided_json` reclassified as capability drift, not failure**, and **input-side context overflow given its own class** because `OutputTruncated` covers only `finish_reason == "length"`
+
+**Status: DECIDED, NOT YET IMPLEMENTED.** Verified against `f12a954`. `src/fleet/llm/backends/`
+**does not exist**: `discover()` (`llm/client.py:355-365`) catches the `ImportError` on
+`fleet.llm.backends` and returns the empty registry, and `grep -rn register_backend src/` finds only
+the decorator's own definition. `docs/INTEGRATION_HONESTY.md`'s LLM-backends row already states the
+consequence exactly — **"FAKE, correctly. Every model call in the suite goes through a fake
+`ModelClient` … no request has ever left the process"** — and names the closing move as "a
+recorded-cassette or live-endpoint contract test per backend." This ADR decides the shape of that
+backend; it writes none of it.
+
+### 1. Why now, and what is already built
+
+The operator runs NVIDIA DGX Spark hardware serving open-weight models through **vLLM behind an
+OpenAI-compatible endpoint**. Everything needed to point a role at it exists **except the backend**:
+
+- `BackendTarget.base_url: str | None` — `src/fleet/models/tasks.py:88`, commented *"required by
+  `openai_compatible`; ignored by others"*.
+- `SHIPPED_BACKENDS` already contains `"openai_compatible"` (`settings.py:107`), and
+  `_REQUIRED_TARGET_FIELDS` already enforces `openai_compatible → ("base_url",)`
+  (`settings.py:110-114`).
+- `StructuredOutputMode.CONSTRAINED` is annotated **"server-side constrained decoding (e.g. vLLM
+  guided JSON)"** (`models/enums.py:231`) and gated on
+  `ModelCapabilities.supports_constrained_decoding` (`models/tasks.py:67`).
+- The cache key covers `backend` and `model_id` (`llm/cache.py`), so repointing a role cannot serve
+  an Anthropic-authored answer to a vLLM-routed call.
+- `ModelBackend`'s own docstring already declares the target shape: **"One transport. A new provider
+  is ONE file under `llm/backends/` + one `@register_backend`"** (`llm/client.py:295-296`).
+
+So a `config/models.yaml` profile naming `backend: openai_compatible` with a Spark `base_url`
+**passes settings validation today** and dies at `UnknownBackend` on first dereference. The gap is
+one file, and the config surface is not what makes it hard.
+
+### 2. Decision — the backend's contract
+
+**One module, `src/fleet/llm/backends/openai_compatible.py`, one `@register_backend` class**, meeting
+`ModelBackend` (`client.py:295-303`): `name`/`version` ClassVars, `declared_capabilities(target)`,
+and `async invoke(target, messages, schema, mode, *, max_output_tokens, timeout_s) -> BackendReply`.
+Per the Protocol's existing contract, **backends never validate, never retry, and never pick their
+own mode** — negotiation stays in `LadderModelClient`, Pydantic validation stays at
+`client.py:839-854`.
+
+`declared_capabilities` is **read from config, not probed**. A vLLM deployment's tool-calling and
+guided-decoding support depends on the server's launch flags, which the harness cannot see; guessing
+from `model_id` would be the unmeasured-number failure Guardrail 6 forbids. Per-target capability
+overrides already exist and are the honest mechanism.
+
+### 3. The error-translation table — this is the actual work
+
+`workers/classify.py:245-254` branches on **our** typed exceptions and never on an HTTP status:
+`BudgetExhausted→BUDGET_EXHAUSTED`, `TierUnavailable→BACKEND_UNAVAILABLE`,
+`TransportError→TRANSIENT_INFRA`, `SchemaUnsatisfied|MalformedReply|ValidationError→PARSE_ERROR`,
+**else `UNKNOWN`**. Any raw SDK exception escaping `invoke` is therefore an `UNKNOWN` — the bucket
+that means "we do not know what happened," charged against the retry ladder.
+
+| Wire condition from a local vLLM | `invoke` must raise | Resulting `FailureClass` |
+|---|---|---|
+| Connection refused, DNS failure, read timeout | `TransportError(trigger="CONNECTION")` (`client.py:136-140`) | `TRANSIENT_INFRA` |
+| `429` | `TransportError(trigger="RATE_LIMIT")` | `TRANSIENT_INFRA` |
+| `5xx` | `TransportError(trigger="SERVER_ERROR")` | `TRANSIENT_INFRA` |
+| Reply present but unparseable / schema-violating | `MalformedReply` / `SchemaUnsatisfied` | `PARSE_ERROR` |
+| `finish_reason == "length"` | `OutputTruncated` (`client.py:92`) | ladder-handled |
+| **`400`, server rejected our `guided_json` schema** | **NOT an error — see §4** | **capability drift** |
+| **`400`, input context length exceeded** | **new `ContextOverflow`— see §5** | **new class** |
+
+The two bolded rows have **no home today** and are the reason this ADR exists rather than being a
+one-line task.
+
+### 4. A `400` on `guided_json` is a **capability discovery**, not a failure
+
+If `declared_capabilities` claims `supports_constrained_decoding` and the server rejects the schema,
+the true fact learned is *this deployment cannot compile this grammar* — not *this call failed*.
+Retrying is guaranteed to fail identically, so classifying it as any retryable `FailureClass` burns
+a rung for nothing.
+
+**Decision:** the backend raises a dedicated `ConstrainedDecodingUnsupported`, and
+`LadderModelClient` treats it exactly as it already treats a down-rung move — emit `CapabilityDrift`
+(`client.py:631`) and re-invoke at the next rung of the §7.7 ladder (`CONSTRAINED` → `TOOL_CALL` →
+`PROMPTED`). The ladder and its drift signal already exist; this adds one trigger, not a mechanism.
+The alternative — letting it reach `classify_exception` — spends a retry to learn a static fact
+about the deployment.
+
+### 5. Input-side context overflow needs its own class
+
+`OutputTruncated` covers `finish_reason == "length"` — the **output** side — and its exhaustion path
+becomes `BUDGET_EXHAUSTED` (`client.py:761`). A vLLM `400` for *input* context length is a different
+fact with a different remedy: the prompt must shrink, which is a `ContextPolicy` concern
+(ADR-0021's rung ladder), not a budget one.
+
+**Decision:** add `ContextOverflow(LlmError)` raised by the backend, and map it to a new
+`FailureClass.CONTEXT_OVERFLOW` that is **retryable only via a context-reducing rung change**, never
+as a same-rung repeat. **Cost, stated plainly:** `FailureClass` is consumed widely and adding a
+member touches its exhaustiveness sites. That cost is accepted because the alternative — leaving it
+in `UNKNOWN` — makes the single most predictable open-weight failure mode indistinguishable from
+"we do not know what happened," which is precisely the four-state-collapse family this project
+already tracks as D29 and D34–D46.
+
+### 6. What the Nemotron profile contributes, and what of it applies here
+
+Source: `references/deepagents` at the SHA pinned in **ADR-0069 §1**
+(`1c6d358c60306aad2af0067dcca76f85f4deeba1`), file
+`libs/deepagents/deepagents/profiles/harness/_nvidia_nemotron_3_ultra.py` (1,826 lines) — the
+densest record of driving an open-weight model that exists in the reference set. **Tailoring it
+matters more than copying it**, because that profile is written for an *agent loop with
+model-callable tools* and this harness has neither.
+
+**Applies directly:**
+
+1. **Retry classification must be string- and attribute-based, not type-based.**
+   `_is_rate_limit_exception` (`:209`) matches on exception **class name** containing "ratelimit",
+   `status_code == 429`, **and** the substring "rate limit" in the message — because an arbitrary
+   server behind an arbitrary client library does not raise a typed `RateLimitError`. Our
+   `classify_exception` is type-based **by design and stays so**; this lesson lands entirely inside
+   `invoke`, which is exactly where the translation table in §3 lives. Directly informs §3's first
+   three rows.
+2. **Reasoning tags leak into content.** `_strip_reasoning_tags` (`:571`) removes `<think>…</think>`
+   from the message body while preserving it under `additional_kwargs["reasoning_content"]`. For us
+   this is a **`PROMPTED`-rung correctness requirement**: an un-stripped `<think>` block makes
+   parse-and-repair fail on output the model considered non-final. Strip, but record — a discarded
+   reasoning block is unattributable when the parse later fails.
+3. **Empty content is a wire hazard.** `NemotronToolCallShim` substitutes `"(empty tool result)"`
+   (`:110`) because some providers reject empty content blocks. Applies to any message we construct
+   with an empty body.
+4. **Nothing gives you context sizing for free** (`summarization.py:266-291`) — absent model
+   metadata, conservative fixed defaults are assumed silently. For us this is the argument that
+   `max_input_tokens` belongs in **config per target**, and it is the same fact §5 addresses from the
+   error side: know the window, or discover it by 400.
+
+**Applies only in `TOOL_CALL` mode:** `NemotronTextToolCallParser` (`:687`) parses tool calls the
+model emitted as plain text in three shapes — `<function=name><parameter name=x>`, an alternate
+`<function><name>`, and bare JSON `{"tool":…, "args":…}` — and **validates every parsed name against
+the live tool set** (`:484`) so hallucinated tools are dropped. This harness exposes **no
+model-callable tools**: `TOOL_CALL` is schema-smuggling only (`enums.py:229`). The transferable part
+is therefore narrow but real — **an open-weight model may emit our smuggled schema call as text
+rather than as a structured `tool_calls` field**, and a backend that reads only the structured field
+will see an empty reply and raise `MalformedReply` for what is actually a recoverable format
+variance. The name-validation half is unnecessary for us; there is exactly one legal tool name.
+
+**Does not apply — recorded so nobody ports it by analogy:** the pagination continuation notice
+(`:134`, `:465`), the per-turn progress budgets of 16 model calls / 48 tool results / 3 repeats
+(`:990`), and roughly 700 lines of regex behavioural guards (`:1069`, `:1336`, `:1416`, `:1647`).
+All three presuppose an autonomous agent loop that self-terminates badly. `PhaseRunner._drive` is not
+that loop, and its bounds are the retry ladder and the five `Limits` semaphore classes.
+`ChatNVIDIAMessageCompatibilityMiddleware` (`:587`) is a client-library quirk with no OpenAI-wire
+analogue.
+
+**Evidence caveat, per Guardrail 6.** `libs/evals/MODEL_GROUPS.md:149` records **`nvidia` (0
+models)**, and Nemotron 3 Ultra appears in **no eval group at all** — so that 1,826-line profile is
+**not covered by its own project's published eval matrix**. Its lessons are specific, plausible, and
+**unvalidated**. They are adopted here as *design inputs to a translation table*, never as measured
+claims, and each must be confirmed against a real Spark endpoint before any of it is written down as
+fact.
+
+### 7. Out of scope
+
+Streaming (`ModelClient.stream` exists but no phase consumes it); prompt caching, which has no
+OpenAI-compatible equivalent to Anthropic's; a second backend — `anthropic.py` is named in
+`pyproject.toml:33-36` and remains unwritten, and nothing here decides it; and the
+recorded-cassette contract test the honesty ledger asks for, which is a testing decision this ADR
+deliberately does not pre-empt.
+
+### 8. Alternatives rejected
+
+- **Ship a generic `openai` backend and let errors fall to `UNKNOWN`.** Rejected: it makes the two
+  most predictable open-weight failure modes — an uncompilable grammar and an over-long prompt —
+  indistinguishable from an unclassified crash, and both would be charged against the retry ladder as
+  if retrying could help.
+- **Probe capabilities at startup instead of declaring them in config.** Rejected: a probe measures
+  the endpoint at one instant and the answer is a launch-flag property; a stale probe is an unmeasured
+  number wearing a measured label.
+- **Reuse `OutputTruncated` for input overflow.** Rejected: it collapses two conditions with opposite
+  remedies (shrink the prompt vs. raise the output cap) into one class — the same failure this project
+  already tracks thirteen times over.
+- **Port the Nemotron middleware stack wholesale.** Rejected: over half of it governs an agent loop
+  this harness does not have, and per §6 its own project does not eval it.
+
+---
+
+## ADR-0071 — `open-swe` is **`deepagents` plus an application**, and four of its parts are worth **lifting as code**: the **prepare-run fingerprint** (the wired drift gate D48 says we lack), **capture-at-source offload** (measured thresholds at last), **model-proposes/host-adjudicates** (the semantic-verification shape ADR-0069 §5 said we had no answer for), and **`shlex`-parse-don't-regex** — against a fifth finding that is a **review heuristic, not a mechanism**: safety code that is built, tested, documented, and **wired nowhere**, while operators are told to grant real permissions on its basis
+
+**Status: DECIDED as an extraction list. Every item in §3 is NOT YET IMPLEMENTED.** No `src/`
+change accompanies this entry, no ledger number is opened (per ADR-0069 §8, an unexploited
+opportunity is not a defect), and each extraction still needs its own decision, its own tests under
+Rule 9, and its own measurement under Guardrail 6.
+
+### 1. Provenance and licence — read this before copying anything
+
+`langchain-ai/open-swe` cloned to `references/open-swe/` at
+**`e712a9ef950cda7200e7761400b169e09fb075be`** (2026-08-17T17:43:56-04:00). 36 MB, 398 Python files,
+235 TS/TSX. Untracked by the same `.gitignore:87` (`references/*/`) rule as the other references, so
+**the SHA is what makes these citations falsifiable** — see ADR-0069 §1 for why that matters.
+
+**Licence: MIT, "Copyright (c) LangChain, Inc."** (`LICENSE:1-3`, corroborated by
+`pyproject.toml` `license = { text = "MIT" }`). Lifting code is therefore permitted **provided the
+copyright notice and permission text travel with it.** Any file in `src/fleet/` that carries
+adapted open-swe code must name the upstream file and this SHA in a header comment. This is not
+optional politeness; it is the licence condition. Note the same does **not** hold for every
+reference — `karpathy/autoresearch`, cited in ADR-0069 §10, ships **no licence at all** and is not
+reusable.
+
+**Every citation below was re-derived in the main session, not taken from the subagent that found
+it.** Two the subagent reported did not survive: there is no `agent/tools/file.py` (open-swe has no
+file tools of its own at all), and `filter_findings_for_publish` could not be located as a symbol —
+the publish cap is described in `agent/review/publish.py:1-12`'s module docstring and the
+deterministic normalizers are `agent/review/findings.py:61,70`. Both corrections are recorded rather
+than quietly dropped.
+
+### 2. What open-swe is, structurally
+
+It **authors no loop, no context management, and none of its file/shell tools.** All nine
+(`read_file, write_file, edit_file, delete, ls, glob, grep, execute, task`) come verbatim from the
+pinned `deepagents==0.7.6`. Five LangGraph factories call `create_deep_agent`; termination is
+ceilings (`recursion_limit` 9,999; a 5,000 model-call limit), never a verdict. There is **no
+in-loop verification in code** — lint/test discipline is prompt text, and nothing gates a push or a
+PR on a green run.
+
+**Consequence worth internalising: the read-before-edit lie ADR-0069 §7 recorded is present here
+too, one dependency hop away**, invisible to an open-swe-only audit. We caught it because ADR-0069
+scoped to deepagents directly — that was scoping luck, not method. **Audit the pins, not just the
+repo.**
+
+### 3. The four extractions
+
+#### 3.1 Prepare-run fingerprint — the D48 precedent
+
+**Upstream:** `agent/middleware/prepare_run.py` — `_latest_message_fingerprint` (`:25`), the latch
+(`:60-67`: compute, compare `prepared_state.get("run_prepared_for") == fingerprint`, return
+`{"run_prepared": True, "run_prepared_for": fingerprint}`), and `_prepare_fingerprint` (`:69-76`).
+Config side: `agent/server.py:906 _prepare_config_fingerprint`.
+
+**What it does.** Hashes the latest message **plus** `{prepare_run_id, thread_id, source, repo,
+plan_mode, draft_prs, model, effort}`. Setup is skipped only on an exact match, so **changing the
+model re-prepares the run.**
+
+**Why it fits.** D48 records that our own drift gate (`settings.drifted_sections`) is wired only to
+`fleet resume`, which dead-ends at `_unavailable` (`cli.py:9792`), while the six verbs that actually
+re-enter a run share `_phase_preflight` (`cli.py:866-878`) and never read `runs.config_digests`.
+D48's entry argues the obvious fix — calling the gate from `_phase_preflight` — is wrong, because it
+would make every phase verb *refuse* on drift an operator already accepted. **This is the shape that
+resolves that objection: a fingerprint mismatch invalidates the prepared work rather than refusing
+the command.** Re-derive, don't refuse.
+
+**What to change.** Their fingerprint **does not cover the prompt template**, so a resume after a
+prompt deploy reuses a cached `rendered_system_prompt` — they solved the model half and have our
+exact gap on the prompt half. Ours must include `prompt_template_version`, and we already compute
+it: `llm/cache.py`'s key covers `prompt_template_version` and `prompt_sha256` today. The layers
+disagree exactly as D48 describes — the cache re-derives while the checkpoint above it hands back
+pre-change work — so the fingerprint's job is to make the **checkpoint** as discriminating as the
+**cache key** already is.
+
+#### 3.2 Capture-at-source offload — measured thresholds
+
+**Upstream (deepagents, at ADR-0069 §1's SHA):**
+`libs/deepagents/deepagents/backends/sandbox.py` — the shell wrapper at `:843-873`. The mechanism in
+one line (`:851`):
+
+```sh
+{ ( eval "$__da_cmd" ); echo "$?" > "$__da_ecf"; } 2>&1 | { head -c __MAXBYTES__ > "$__da_f"; cat > /dev/null; }
+```
+
+plus the head/tail readback (`:869-873`), the flag `enable_capture_offload: bool = False` (`:974` —
+**ships off**), and `execute_with_offload` (`:1005`). Generic ToolMessage eviction:
+`libs/deepagents/deepagents/middleware/filesystem.py:1678` (`_large_tool_results_prefix`), `:2742`
+(capture path). **open-swe deliberately preserves the path** rather than breaking it behind its own
+wrapper: `agent/utils/sandbox_state.py:277` (`execute_with_offload`), `:288-298`
+(`aexecute_with_offload`).
+
+**The measured numbers, which is what this section adds over ADR-0069 §4 candidate 1:** offload
+triggers above **80,000 bytes** (4 chars/token × 20,000); readback is **5 lines / 2,000 bytes from
+each end**; hard cap **10 MiB**; the exit code is preserved. Against `util/proc.py`'s 32 KiB tail
+that is a **2.4× larger window plus a pointer instead of a truncation.**
+
+**What to change — and this half matters.** Their `.ec` sidecar exists because `execute()` crosses
+an **RPC boundary to a remote sandbox** and the exit code cannot ride back any other way. We run
+Docker locally through `util/proc.py` and **already hold the real return code**. Do **not** port the
+sidecar: re-encoding an exit code we already have as a string in a file is precisely the
+four-state-collapse family this project tracks as D29 and D34–D46, and `ProcResult.ok` already
+conflates started / timed-out / exit-124. **Take the head/tail-plus-file-pointer; leave the exit-code
+smuggling upstream.**
+
+**Measure before adopting.** `research-38` is already investigating what a real Bazel failure log
+costs through `util/proc.py`. That number, not this ADR, is what justifies the change.
+
+#### 3.3 Model proposes, host adjudicates — the semantic-verification shape
+
+**Upstream:** `agent/review/approval.py` — `build_approval_assessment` (`:60`), the zeroing (`:82-84`:
+`if effective_score is not None and blocking_ids: effective_score = 0`), and the deterministic
+blocker list (`:86-96`: `invalid_assessment`, `team_auto_approve_disabled`,
+`repo_auto_approve_disabled`, `open_blocking_findings`, `score_below_threshold`). In-diff anchoring:
+`agent/tools/add_finding.py:120-125`, using `agent/review/diff.py:138 compute_diff_line_set` and
+`:184 is_range_in_diff`. Host-formatted output: `agent/review/publish.py:1-12` — *"Review body: a
+fixed, host-formatted summary line. The agent never writes prose here."* Deterministic normalizers:
+`agent/review/findings.py:61 clip_suggestion`, `:70 normalize_finding_title`.
+
+**The pattern.** The model self-scores 0–100 and proposes findings; **host code then overrides it**
+— zeroes the score when any blocking finding is open, rejects findings anchored outside the diff at
+creation time, caps and filters what publishes, and writes the summary prose itself so the model
+never authors the verdict text.
+
+**Why it fits.** ADR-0069 §5 recorded that we satisfy adversarial verification **mechanically** for
+builds (ADR-0044) but have **no equivalent for semantic verification of AST transforms** — an exit
+code proves the tree parses, not that it means the same thing. This is the missing shape, and it
+preserves Rule 5: the model supplies judgment, deterministic code supplies the verdict.
+
+**Where it lands.** `build_diagnosis` is generated on every rung-2/3 failure and **has zero readers**
+(**D47**, ADR-0068). A host adjudicator would be its first legitimate consumer — but note D47's own
+argument that wiring a reader merely to justify the writer is speculative under Rule 2. **That
+tension is unresolved and this ADR does not resolve it**; it records that a principled consumer now
+has a known shape.
+
+#### 3.4 `shlex`-parse, don't regex
+
+**Upstream:** `agent/middleware/pr_creation_guard.py` — `import shlex` (`:8`), the depth-limit
+sentinel (`:20`), `_split_shell_tokens` (`:55`, `shlex.split(command, posix=True)`), and
+`_expand_nested_shell_tokens` (`:85-98`), which recurses into nested `sh -c` payloads to
+`_MAX_SHELL_EXPANSION_DEPTH` and rejects by returning an error ToolMessage **without invoking the
+handler**.
+
+**Honest applicability — this is the weakest of the four for us, and it is included because it was
+asked for and because it is cheap insurance.** We do not have the problem it solves: `util/proc.py`
+takes **argv lists and never a shell**, which is strictly stronger than parsing a shell string
+after the fact. The pattern becomes relevant only where a **command string originates outside the
+harness** — a model-proposed repair command, or any future model-callable surface. Should that ever
+exist, this is the correct technique: parse and expand, never regex, and reject before dispatch.
+Recorded now so nobody reaches for a regex later.
+
+### 4. The fifth finding is a review heuristic, not a mechanism
+
+This evaluation has catalogued **claim-without-code** four times (ADR-0069 §7, §10). open-swe adds a
+worse variant: **code that exists, is tested, is documented — and is wired into nothing, while
+operators are told to grant real permissions on its basis.**
+
+- `WorkflowPushGuardMiddleware` — genuine human approval (Slack block, SHA fingerprint, refspec
+  rewrite), implemented, exported, unit-tested, **instantiated in no agent stack**, while
+  `INSTALLATION.md` instructs operators to grant **`Workflows: Read & write`** because of that flow.
+- `ci_monitor` / `ci_autofix` — documented in `AGENTS.md`, **absent from the tree entirely**
+  (`grep` returns nothing), and `INSTALLATION.md` justifies GitHub App permissions by them.
+
+A permission grant justified by a control that never executes is **more dangerous than an
+unimplemented docstring**, because it produces a real capability increase in the world. Two more in
+the family: plan mode omits `edit_file`/`write_file`/`execute` from its exclusion list while two
+files assert the agent is read-only, and the "read-only" reviewer receives write tools from
+`create_deep_agent` on an unwrapped backend.
+
+**The heuristic, adopted for our own reviews:** *treat every "the agent cannot X" as prompt text
+until you have located the code that blocks it — and when a permission or capability is granted on
+the strength of a control, verify the control is wired, not merely present.*
+
+### 5. What is deliberately NOT taken
+
+The sandbox (a rented LangSmith VM; the only vendor-free option is `SANDBOX_TYPE=local`, whose own
+docstring says "no isolation… runs commands directly on the host", with `inherit_env=True`); the
+GitHub proxy, which is **auth header injection, not egress control** — `match_hosts` attaches an
+`Authorization` header and there is no deny rule anywhere, so it is not the network boundary it
+resembles; sandbox lifecycle, where nothing is torn down by design (*"Intentionally has no
+delete"*), leaking a live VM for up to 2 h and a stopped one for 30 days — the inverse of D32's
+treatment of the same behaviour as a defect; and the reviewer eval, which has no holdout, learns its
+per-repo prompt from a crawl of the goldens' own source repos, and measures an eval-only prompt at a
+severity threshold the deployment does not use.
+
+**One credit, recorded because it is rare:** open-swe publishes **no accuracy number anywhere** — no
+F1, no precision, no recall. Under ADR-0069 §6's tiers it therefore joins Cloudflare and Visa in the
+honest tier: no claim outruns its evidence, because no claim is made.
+
+### 6. Alternatives rejected
+
+- **Adopt open-swe as a coding-agent layer.** Rejected: it authors no loop, has no in-loop
+  verification, no queue, no leases, no attempt counters, and no terminal human-escalation state —
+  and its `execute` takes a raw shell string with no allow-list.
+- **Take the offload wholesale, sidecar included.** Rejected in §3.2: the sidecar solves an RPC
+  problem we do not have and re-introduces an exit-code collapse we already track thirteen times.
+- **Open ledger entries for §3's four items.** Rejected on ADR-0069 §8's rule; these are
+  opportunities, and the ledger means "something here is wrong."
+- **Cite open-swe's reviewer eval as evidence for anything.** Rejected under Guardrail 6 and §5.

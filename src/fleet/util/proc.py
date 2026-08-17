@@ -16,10 +16,14 @@ Every shell-out in this harness — `git`, `bazel`, `ast-grep`, `gh`, `docker` �
   "10 minute" subprocesses outlive a 10-minute worker.
 * **Output capture is bounded by construction.** A Gradle or Bazel failure can emit hundreds of
   megabytes; `stdout=PIPE` + `communicate()` would hold all of it as a Python object. Both
-  streams are written straight to files and only the last `LOG_TAIL_BYTES` are ever read back
-  (SPEC §11.3: "tail-truncated to 32 KiB at capture time, before it reaches Python memory").
-  The full stream stays on disk at `ProcResult.stdout_path` — that path is what
-  `WorkerError.artifact_ref` records.
+  streams are written straight to files and at most `LOG_TAIL_BYTES` are ever read back (SPEC
+  §11.3's budget: 32 KiB at capture time, before it reaches Python memory) — split between the
+  START and the END of the stream (`_read_head_and_tail`), not the end alone: a multi-target
+  `bazel --keep_going` failure's first target is usually the root cause, and a tail-only window
+  was measured to discard exactly that (research round 38, Q3). **NOTE for whoever next reviews
+  SPEC §11.3 (docs/ ownership): the phrase "tail-truncated" there predates this change and now
+  describes only half of what `util/proc.py` does.** The full stream stays on disk at
+  `ProcResult.stdout_path` — that path is what `WorkerError.artifact_ref` records.
 * **Tails are redacted at capture** (SPEC §11.4): a build log that echoes a token must never
   exist unredacted as a Python object beyond the read buffer.
 
@@ -193,29 +197,77 @@ async def _kill_process_group(proc: asyncio.subprocess.Process, grace_s: float) 
     return proc.returncode if proc.returncode is not None else -int(signal.SIGKILL)
 
 
-def _read_tail(path: Path) -> tuple[str, int]:
-    """Read at most `LOG_TAIL_BYTES` from the END of a log file, redacted.
+HEAD_BYTES = 8_192
+"""Kept from the START of a capture that overflows `LOG_TAIL_BYTES`, out of that same budget.
 
-    Only the window is ever resident, so a 400 MB stderr costs 32 KiB of RSS here. The single
-    truncator (`models.base._truncate_tail`, the `TruncatedStr` validator) is applied as a guard
-    rather than re-implemented: decoding with `errors="replace"` can expand a 1-byte sequence
-    into a 3-byte U+FFFD and push the window back over the durable-row bound.
+`bazel build --keep_going` interleaves multiple targets' `ERROR:` blocks with progress noise,
+and the FIRST failing target is ordinarily the root cause — everything reported after it is
+cascade. A pure tail keeps the build's summary and throws away the cause it is summarising.
+Measured on a real 79,337-byte `--keep_going` failure log (research round 38, Q3.2-Q3.4): a
+tail-only window kept 41.3% of the bytes and 37.7% of the `error[...]` diagnostic headers, and
+the ones it dropped were the FIRST target's — the whole of `acme-case-rs`'s failure, gone,
+while `error: aborting due to 240 previous errors` and the final `ERROR: Build did NOT complete
+successfully` (i.e. the consequence, not the cause) survived. A head slice fixes that without
+raising the 32 KiB ceiling `LOG_TAIL_BYTES` bounds token cost at: the tail slice shrinks by
+exactly `HEAD_BYTES` plus one elision marker to pay for it (see `_read_head_and_tail`)."""
+
+
+def _guard_slice(text: str) -> str:
+    """Re-apply the single truncator (`models.base._truncate_tail`) to one slice, as a guard
+    rather than a re-implementation: decoding with `errors="replace"` can expand a 1-byte
+    sequence into a 3-byte U+FFFD and push a slice back over its own share of the budget. Each
+    slice here is always well under `LOG_TAIL_BYTES` on its own, so in practice this never fires
+    — it exists so the guarantee is enforced, not merely believed."""
+    guarded = _truncate_tail(text)
+    return guarded if isinstance(guarded, str) else text
+
+
+def _read_head_and_tail(path: Path) -> tuple[str, int]:
+    """Read at most `LOG_TAIL_BYTES` total from a log file, redacted: the first `HEAD_BYTES`
+    plus the remainder of the budget from the END, with an elision marker between them when the
+    file is bigger than both slices combined. Only the two windows are ever resident, so a
+    400 MB stderr still costs ~32 KiB of RSS.
+
+    The return value's total length — content plus every marker it adds — is kept strictly
+    within `LOG_TAIL_BYTES` by construction: the elision marker's width is reserved against the
+    tail slice's share of the budget up front (sized off `size`, an upper bound on how large the
+    real elided-byte count can ever be, so one pass suffices). This matters beyond RSS: the
+    return value is re-validated by `TruncatedStr` wherever it lands next
+    (`WorkerError.stderr_tail`, `buildverify.error_from_proc`), and an over-budget return here
+    used to mean that second validator would silently re-truncate it and stack a second
+    "[truncated]" marker on top of this function's own — the double-truncation defect
+    research round 38 (Q3.3) measured on the real 79 KiB fixture. Landing inside the budget the
+    first time makes that second validation pass a true no-op instead.
     """
     try:
         size = path.stat().st_size
     except OSError:  # pragma: no cover - the stream file always exists while we own it
         return "", 0
+
+    if size <= LOG_TAIL_BYTES:
+        with path.open("rb") as handle:
+            window = handle.read()
+        text = _guard_slice(window.decode("utf-8", errors="replace"))
+        return redact_text(text), size
+
     with path.open("rb") as handle:
-        if size > LOG_TAIL_BYTES:
-            handle.seek(size - LOG_TAIL_BYTES)
-        window = handle.read(LOG_TAIL_BYTES)
-    text = window.decode("utf-8", errors="replace")
-    guarded = _truncate_tail(text)
-    tail = guarded if isinstance(guarded, str) else text
-    dropped = size - len(window)
-    if dropped > 0:
-        tail = f"{tail}\n[truncated {dropped} bytes]"
-    return redact_text(tail), size
+        head_bytes = handle.read(HEAD_BYTES)
+        # Worst-case elision marker width, computed once from `size` (an upper bound on the
+        # true elided-byte count, since elided-bytes < size always) so the tail slice's budget
+        # is known before we read it — no second pass, no risk of a second overflow.
+        worst_case_marker_len = len(f"\n[... {size} bytes elided ...]\n".encode())
+        tail_budget = max(0, LOG_TAIL_BYTES - len(head_bytes) - worst_case_marker_len)
+        handle.seek(max(len(head_bytes), size - tail_budget))
+        tail_bytes = handle.read()
+
+    elided = size - len(head_bytes) - len(tail_bytes)
+    head_text = _guard_slice(head_bytes.decode("utf-8", errors="replace"))
+    tail_text = _guard_slice(tail_bytes.decode("utf-8", errors="replace"))
+    if elided > 0:
+        combined = f"{head_text}\n[... {elided} bytes elided ...]\n{tail_text}"
+    else:
+        combined = f"{head_text}{tail_text}"
+    return redact_text(combined), size
 
 
 async def run(
@@ -336,8 +388,8 @@ async def _run_locked(
                 raise
 
         duration_ms = int((loop.time() - started_at) * 1000)
-        stdout_tail, stdout_bytes = _read_tail(out_path)
-        stderr_tail, stderr_bytes = _read_tail(err_path)
+        stdout_tail, stdout_bytes = _read_head_and_tail(out_path)
+        stderr_tail, stderr_bytes = _read_head_and_tail(err_path)
         return ProcResult(
             argv=parts,
             exit_code=exit_code,

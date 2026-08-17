@@ -209,6 +209,7 @@ from fleet.vcs.filter_repo import (
     ingest,
     integration_snapshot,
     relocate,
+    resolve_replace_text,
 )
 from fleet.vcs.forge import (
     NON_TERMINAL_STATES,
@@ -7116,6 +7117,9 @@ async def _ingest_build_source(
         RelocationSpec(
             dest_path=dest,
             extra_args=("--path-rename", f"{dest}/{dest}/:{dest}/"),
+            replace_text=resolve_replace_text(
+                settings.root, settings.config.redaction.history_scrub_file
+            ),
         ),
         runner=FILTER_REPO_RUNNER or proc_run,
     )

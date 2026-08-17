@@ -159,6 +159,37 @@ def _forge(tmp_path: Path, runner: CommandRunner, **kwargs: Any) -> GT.GiteaForg
 
 
 # --------------------------------------------------------------------------------------
+# THE other security property (D22): the credential file's mode is enforced, not documented
+# --------------------------------------------------------------------------------------
+@pytest.mark.parametrize("mode", [0o644, 0o640, 0o604, 0o666])
+def test_a_group_or_world_readable_credential_file_is_refused(tmp_path: Path, mode: int) -> None:
+    """WHY: this module's docstring has promised "the mode-600, gitignored config file" since it
+    was written; `chmod`/`st_mode`/`0o600` had zero occurrences anywhere in `src/` before this
+    check existed. A group- or world-readable file leaks the API token to any other user on the
+    host, silently, forever — refusing to construct the driver is Rule 11's loud failure."""
+    path = tmp_path / "gitea-curl.conf"
+    path.write_text(f'header = "Authorization: token {FAKE_TOKEN}"\n', encoding="utf-8")
+    path.chmod(mode)
+    with pytest.raises(GT.GiteaError, match="mode"):
+        GT.GiteaForge(owner=OWNER, base_url=BASE_URL, curl_config=path, repo="monorepo")
+
+
+def test_a_mode_600_credential_file_is_accepted(tmp_path: Path) -> None:
+    """WHY: the enforcement above must not become a false-positive refusal of the correct mode —
+    every other test in this module depends on `_fake_config`'s 0600 file continuing to work."""
+    path = _fake_config(tmp_path)
+    GT.GiteaForge(owner=OWNER, base_url=BASE_URL, curl_config=path, repo="monorepo")  # no raise
+
+
+def test_a_missing_credential_file_is_not_refused_by_the_mode_check(tmp_path: Path) -> None:
+    """WHY: existence is `curl`'s own failure at the first request (§ this module's `_exec`), not
+    this constructor's job — conflating "missing" with "insecure" is the exact four-state-collapse
+    misdiagnosis a later audit of this codebase (D34-D45) found and named."""
+    missing = tmp_path / "does-not-exist.conf"
+    GT.GiteaForge(owner=OWNER, base_url=BASE_URL, curl_config=missing, repo="monorepo")  # no raise
+
+
+# --------------------------------------------------------------------------------------
 # THE security property: no credential in any argv this harness records
 # --------------------------------------------------------------------------------------
 def test_the_token_never_appears_in_the_argv_of_a_create_pr_call(tmp_path: Path) -> None:

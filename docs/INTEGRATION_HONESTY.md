@@ -2107,15 +2107,44 @@ condition the harness caused and could have named. **Would a test catch it? No**
 125; see review-36 I2 for the adjacent fixture defect (a `DAEMON_GONE` stderr paired with an
 exit code Docker 29.7.2 does not produce for that case) that would need correcting alongside it.
 
-**Status as of this entry (Worker D, docs-only pass; the fix belongs to `src/`).** The working
-tree at the time of writing carries **uncommitted** changes to `src/fleet/workers/buildverify.py`
-(not this worker's file to edit or verify by running anything) that appear, by inspection only, to
-address exactly this: a `_invocation_name` helper builds a fresh `uuid.uuid4().hex[:8]`-suffixed
-name per call rather than reusing `sandbox_name(run_id, repo, attempt)`, with a docstring citing
-this same mechanism. **This is claimed, not verified** — per this document's own §33-derived
-convention for concurrently-edited files, a name matching this description is not the same as a
-tested fix. Re-derive from `git diff` and the test suite once it lands, and close this entry only
-then; do not treat this paragraph as evidence of a fix already shipped.
+**Status — CLOSED, FIXED in `8464dc6`.** Corrected by review-38 C1: this entry and the fix it
+disbelieved are **the same commit**. `git log --oneline -S"_invocation_name" -- src/fleet/workers/buildverify.py`
+and `git log --oneline -S"D46 — OPEN" -- docs/INTEGRATION_HONESTY.md` both resolve to `8464dc6`
+alone — there was never an "uncommitted, unverified" state to hedge; the paragraph above described
+the tree as it stood before its own commit's code lane landed, not a separate later event.
+
+`_invocation_name` (`buildverify.py:354-370`) gives every `docker run` this worker issues a fresh
+`uuid.uuid4().hex[:8]`-suffixed name per call, replacing the bare `sandbox_name(run_id, repo,
+attempt)` this entry's defect depended on. It is called at the probe (`:777`, `-cc-probe` suffix)
+and the build step (`:1088`). Pinned by
+`tests/test_workers_build.py:931-965`
+(`test_a_transient_retry_of_the_same_rung_never_reuses_a_container_name`), which drives two `run()`
+calls at the identical `(run_id, repo, attempt)` — exactly what `RetryPolicy`'s free
+`RETRY_TRANSIENT` re-issues — and asserts the emitted `--name=` differs between them while still
+sharing the deterministic prefix `on_cancel` sweeps by.
+
+Two further premises this entry rested on are also superseded, in the same commit:
+
+1. **The central mechanism no longer holds.** `buildverify.py:438-442`'s inline comment (citing
+   the same `68a41ff` commit-body measurement this entry cites) states an unreachable docker
+   daemon exits **1, not 125** — so the self-inflicted, permanent-125 scenario this entry built on
+   cannot occur. The residual `_DOCKER_CANNOT_RUN` branch covers a residual or externally-caused
+   collision only, not the daemon-restart case.
+2. **"Would a test catch it? No"** no longer holds — see the test cited above, added by this same
+   commit.
+3. The `DAEMON_GONE` → `CONTAINER_NAME_CONFLICT` fixture correction this entry called an adjacent,
+   still-needed fix is also in this commit: `tests/test_workers_build.py:1105-1129`, with the
+   rename and rationale recorded at `:1275-1279`.
+
+**Structural cause, recorded so the next round does not repeat it.** This entry and its own fix
+were written by different workers in the same round against different tree states — the docs lane
+against the pre-fix tree, the code lane against the post-fix one — then both landed in the same
+commit without being reconciled against each other first. `PROGRESS.md §36`'s "What is still NOT
+proven" list and "Next subagent task" carried the identical mismatch (see §36, corrected
+2026-08-17). The fix is not only to flip this status: a docs lane must either be written against
+the tree state that will actually be committed, or be re-verified immediately before `git commit`
+— a "claimed, not verified" hedge is only honest while it remains true, and lands false the moment
+it is committed alongside the fix it doubts.
 
 - **`cli.py`'s two timeout printers are correct.** `cli.py:6369` and `cli.py:6626` both render
   `f"{' (timed out)' if result.timed_out else ''}"` into the failure text, so the operator is told
@@ -2150,10 +2179,16 @@ would have been found by running the suite harder, and all of them have passing 
 
 **D47 — OPEN. `build_diagnosis` is generated on every rung-2/3 build or test failure and consumed
 by nothing.** `BuildverifyOutput.diagnosis` and `.diagnosis_failure_class`
-(`buildverify.py:625-630`) are written exactly once, at `buildverify.py:1152-1153`, from an LLM
-call (`_diagnose`, `buildverify.py:1120-1153`) gated only on `ctx.context_policy is not None` —
-i.e. it fires on rungs 2 and 3 for **every** non-ok build/test step, a 125 included
-(`buildverify.py:873-874`, confirmed by direct read of the call site). **No code anywhere reads
+(`buildverify.py:625-630`) are written exactly once, at `buildverify.py:1156-1157`, from an LLM
+call (`_diagnose`, `buildverify.py:1124-1158`) gated only on `ctx.context_policy is not None` —
+i.e. it fires on rungs 2 and 3 for **every** non-ok build/test step, a 125 included. **Correction
+(review-38 I3):** the call site is `buildverify.py:967-969` (`if not result.ok and not
+nothing_to_test:` guarding `usage = await self._diagnose(...)`), not `:873-874` as an earlier
+version of this entry cited — that line is prose inside the C-toolchain probe's stderr string, not
+a call site, and was already prose at the commit this entry was first written against, so this is
+a correction to a citation wrong at authoring, not line drift. The "confirmed by direct read of
+the call site" phrase attached to the wrong line is dropped; the underlying claim holds and is
+re-verified at `:967-969`, with no failure-class branch in the guard. **No code anywhere reads
 either field.** Re-verified independently of research-36 for this entry: `grep -rn "diagnosis"
 src/` returns only the two `Field()` declarations, the two writes above, the LLM-plumbing trio
 (`roles.py:57`, `calls.py:360`, `schemas.py:151-162`), and prose comments — zero reads, zero
@@ -2169,7 +2204,8 @@ closed:
 3. **`migration_state.json` doesn't carry it.** No `diagnosis` field exists in
    `state/projection.py` or `models/state.py` (checked directly — zero hits).
 
-The only thing consumed is the token cost: `response.usage` (`buildverify.py:1050`) flows into
+The only thing consumed is the token cost: `response.usage` (`buildverify.py:1158`, corrected from
+an earlier `:1050` citation — that line is inside `_bazel_argv`, unrelated) flows into
 `WorkerResult.usage` and is billed by the budget machinery, so the harness pays WORKHORSE-tier
 tokens on every rung-2/3 build failure across the fleet and keeps only a token counter for it.
 
@@ -2191,8 +2227,10 @@ only" because "the exit code is the verdict." The SPEC sentence instead describe
 prose overclaims what this slot does; not corrected here (Rule 7 — surfaced, not silently
 averaged into an unrelated edit; `docs/SPEC.md` is this worker's file, but the correction is
 recorded as a known follow-up rather than bundled into this ledger entry). **Would a test catch
-it? No** — `tests/test_workers_build.py:2340` asserts only the negative case
-(`out.diagnosis == ""` when nothing failed); nothing asserts the field is ever populated, let
+it? No** — `tests/test_workers_build.py` asserts only the negative case (`out.diagnosis == ""`
+when nothing failed, at line 2357 in the tree this entry was authored against; `git status` shows
+that file with uncommitted, unrelated edits above this point as of this correction, so re-derive
+the exact line rather than trust either number); nothing asserts the field is ever populated, let
 alone consumed.
 
 **Severity: waste, not correctness.** Nothing downstream is wrong because of D47 — the exit code

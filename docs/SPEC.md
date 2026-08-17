@@ -5824,7 +5824,7 @@ src/fleet/
     events.py                 # emit() helpers; monotonic seq; mirrors into the `events` table
     redact.py                 # the single redact() applied at EVERY egress boundary (§11.4)
   util/
-    proc.py                   # create_subprocess_exec wrapper: timeout, capture, tail truncation
+    proc.py                   # create_subprocess_exec wrapper: timeout, capture, head+tail truncation
     fs.py                     # atomic_write (temp + os.replace), scoped temp dirs
     hashing.py                # sha256 helpers for manifests and config
 
@@ -6635,8 +6635,17 @@ memory, and by `fleet gc --disk`; and a breach that eviction cannot clear is
 | Query results | `SELECT *` folding | `state/repository.py` exposes `iter_*` generators over `aiosqlite` cursors with `arraysize = 1 000` for every table that can exceed 10 000 rows (`symbols`, `edges`, `events`, `attempts`). Returning a `list` from any of those is a review-blocking defect |
 | Projection | 250 × `RepoState` | ~250 objects; bounded by construction. `migration_state.json` stays under a few MB and is the only whole-fleet object that is ever resident |
 
-`git` and `bazel` output is tail-truncated to 32 KiB at capture time (`util/proc.py`), before it
-reaches Python memory, and never re-expanded.
+`git` and `bazel` output is capped at 32 KiB at capture time (`util/proc.py`), before it reaches
+Python memory, and never re-expanded — split as a **head-and-tail window**, not a tail-only one:
+the first `HEAD_BYTES` of the stream plus the remainder of the 32 KiB budget from the end, with an
+elision marker between when the file exceeds both slices combined (`_read_head_and_tail`). Under
+`bazel --keep_going`, the first failing target is ordinarily the root cause and later ones are
+cascade; a tail-only window was measured (research round 38, Q3.2–Q3.4, on a real 79,337-byte
+`--keep_going` failure log) to keep only 41.3% of bytes and 37.7% of `error[...]` diagnostic
+headers, discarding the first failing target's diagnostics while keeping the closing summary — the
+consequence, not the cause. The head/tail split is what that measurement justifies; the specific
+`HEAD_BYTES = 8_192` (25% of the 32 KiB budget) is an unmeasured Agent Recommendation, not itself
+derived from the measurement.
 
 ### 11.4 Redaction — mandatory, at the write boundary, not at review time
 
@@ -7044,7 +7053,7 @@ a CLI flag. A row whose "Where enforced" column reads only as prose is a defect 
 | 5 | **Missing edges** — undeclared internal imports; transitive-only deps | Import symbol resolving to another repo's `coordinates.key` with no manifest entry | `INTERNAL_IMPORT` at 0.8 is the undeclared-dependency detector; transitive deps are deliberately **never** materialized as edges — the DAG's own reachability is the closure (§3.1 step 5) | `graph/infer.py`; `symbols`; `ix_symbols_fqn` |
 | 6 | **Two repos publish the same coordinate** | `coordinates.coord_key` PK conflict on insert | `ON CONFLICT DO NOTHING` + `collisions` row; ownership by `owns:` hint → shallowest path → `commit_count` → `repo_id`; loser's key suffixed; affected edges marked `ambiguous` and ordered against **both** candidates (over-ordering is safe) | `collisions` (kind `COORDINATE`); `edges.ambiguous` / `dst_candidate_repo_ids`; §3.1 step 3; §12.27 |
 | 7 | **Version-range ambiguity / unresolvable private-registry coordinate** | `version_spec` is an open range; coordinate resolves to no `coordinates` row | ×0.9 confidence modifier; unresolved coordinates stay external (`dst_kind='REPO' AND dst_id IS NULL`) and simply do not order anything — an unknown dependency never becomes a phantom ordering constraint | `edges.confidence_factors['open_range']`; `DependencyEdge.is_internal` |
-| 8 | **Memory bloat at 250 repos × 125k files** | RSS sampled every 30 s by `budgets.py` | Per-file process-pool unit of work; `executemany` batches of `symbol_batch_rows`; cursor-based `iter_*` readers; graph nodes are repos and declared contracts, never files or symbols — the contract node set is bounded by declared artifacts precisely so this bound survives (§3.1 5b); file/patch size caps; tail-truncated subprocess output. Breach → shed concurrency → exit 5 (§11.3) | `budgets.max_rss_mb`; `scan.symbol_batch_rows` / `max_symbols_per_repo` / `max_file_bytes`; `transform.max_patch_bytes`; `graph.max_edges`; `util/proc.py`; §12.22 |
+| 8 | **Memory bloat at 250 repos × 125k files** | RSS sampled every 30 s by `budgets.py` | Per-file process-pool unit of work; `executemany` batches of `symbol_batch_rows`; cursor-based `iter_*` readers; graph nodes are repos and declared contracts, never files or symbols — the contract node set is bounded by declared artifacts precisely so this bound survives (§3.1 5b); file/patch size caps; head-and-tail-bounded subprocess output (§11.3). Breach → shed concurrency → exit 5 | `budgets.max_rss_mb`; `scan.symbol_batch_rows` / `max_symbols_per_repo` / `max_file_bytes`; `transform.max_patch_bytes`; `graph.max_edges`; `util/proc.py`; §12.22 |
 | 9 | **Orchestrator context compaction / agent amnesia** | Nothing to detect — assumed to happen at any instant | The run is resumable from `state/fleet.db` + `config/` alone; `migration_state.json` is an output, never an input; `fleet resume` is an 8-step reconciliation that makes no network call and invokes no model (§11.5) | `runs.config_sha256` / `harness_version`; `phases`; `tasks`; `attempts.commit_sha`; `checkpoints`; `fleet resume --dry-run`; §12.15 |
 | 10 | **Crash mid-mutation** — `SIGKILL` between "patch applied" and "row written" | Two Git-local conditions, and there is no third: a `RUNNING` task **with** a commit on `migrate/<repo>` carrying its `Fleet-Task-Id`, or **without** one (plus, possibly, a dirty worktree) | **The commit is the record (ADR-0024).** `git commit` writes one tree covering every changed file and moves the branch ref by `flock`+`rename(2)`, so a *partially applied* multi-file patch is not a state the branch can reach — only the disposable worktree can be dirty. Resume asks Git which of the two cases holds and **corrects the SQLite row to match**: commit present → mark the task done with that SHA, re-run nothing; commit absent → `git reset --hard <phases.base_ref>` + `git clean -fdx` and re-run the rung. No attempt is consumed either way (`TRANSIENT_INFRA`). Re-application is blocked by the `Fleet-Patch-Id` trailer, which lives in the same object as the change it names | `vcs/commits.py`; `Fleet-Task-Id` / `Fleet-Patch-Id` trailers; `phases.base_ref`; `attempts.commit_sha`; §3.2 step 6; §11.5 step 4; §12.15, §12.45; row 41 |
 | 11 | **LLM drift — same input, different output** | `run_digest` differs between two runs of the same inputs | Content-addressed `llm_cache` keyed by role+**tier**+**backend**+model_id+effort+**context_policy**+**rejected_approach_digest**+prompt+schema+versions (ADR-0021 — omitting the policy pair lets a fresh-slate call hit an entry made with priors; ADR-0023 — omitting the backend pair lets a failover's answer stand in for a frontier one); thinking modes forbid temperature pinning and a role may be answered by a different backend next call, so determinism comes from the cache, not the sampler; `--llm-cache read-only` makes "no new model output" provable (§11.6) | `llm_cache`; `LlmCallRecord.cache_key`; `--llm-cache`; `--profile`; `fleet status --digest`; `state/digest.py`; §12.21, §12.44 |

@@ -19,7 +19,8 @@ import pytest
 
 from fleet.models.base import LOG_TAIL_BYTES
 from fleet.util import proc
-from fleet.util.proc import TIMEOUT_EXIT_CODE, ProcResult, is_producible_shape, run
+from fleet.util.proc import HEAD_BYTES, TIMEOUT_EXIT_CODE, ProcResult, is_producible_shape, run
+from fleet.workers.base import WorkerError
 
 # A child that spawns its own long-lived child, records the grandchild's pid, then sleeps.
 # The grandchild inherits the process group, which is the only reason `killpg` can reach it.
@@ -121,12 +122,146 @@ async def test_huge_output_is_tail_bounded_but_fully_on_disk(tmp_path: Path) -> 
     total = 1024 * 8192
     assert result.stdout_bytes == total
     assert result.stdout_truncated is True
-    # The tail is the durable-row bound plus only the truncation marker.
-    assert len(result.stdout_tail.encode()) < LOG_TAIL_BYTES + 128
-    assert "[truncated " in result.stdout_tail
+    # The capture — content plus every marker it adds — must fit the durable-row bound exactly,
+    # not "roughly": a return value over LOG_TAIL_BYTES here is what silently re-truncates the
+    # next time it passes through a `TruncatedStr` field (`WorkerError.stderr_tail`), stacking a
+    # second marker on top of this one. See test_proc.py's double-truncation regression tests
+    # below for the defect this bound exists to prevent.
+    assert len(result.stdout_tail.encode()) <= LOG_TAIL_BYTES
+    assert "bytes elided" in result.stdout_tail
 
     assert result.stdout_path is not None
     assert result.stdout_path.stat().st_size == total, "the full stream must survive on disk"
+
+
+# --------------------------------------------------------------------------------------
+# a REALISTIC multi-target `bazel build --keep_going` failure log (research round 38, Q3).
+#
+# `"x" * 100_000` proves the truncator's arithmetic and nothing about the use case it exists
+# for: a real Bazel failure interleaves multiple targets' diagnostics with progress noise, and
+# under `--keep_going` the FIRST failing target is ordinarily the root cause while everything
+# after it is cascade. The shape below is modelled on the real 79,337-byte fixture research-38
+# measured (Q3.2/Q3.3) — an unresolved-import/no-method pair for the first target
+# (`acme-case-rs`), a long run of a second target's generated-module diagnostics
+# (`acme-codec-rs`), and Bazel's own closing summary lines.
+# --------------------------------------------------------------------------------------
+
+_FIRST_TARGET_ERRORS = """\
+INFO: Analyzed 2 targets (0 packages loaded, 0 targets configured).
+ERROR: /workspace/rust/acme-case-rs/BUILD.bazel:3:11: Compiling Rust rlib acme_case_rs
+  (2 files) failed: (Exit 101): rustc failed
+error[E0432]: unresolved import `heck::ToSnakeCaseMissing`
+ --> rust/acme-case-rs/src/lib.rs:3:5
+error[E0599]: no method named `to_snake_case_missing` found for reference `&str`
+ --> rust/acme-case-rs/src/lib.rs:9:24
+error: aborting due to 2 previous errors
+ERROR: Build did NOT complete successfully for target //rust/acme-case-rs:acme-case-rs
+"""
+
+_CASCADE_MARKER_MODULE = "acme_codec_generated_marker_module"
+
+
+def _second_target_cascade(n_modules: int = 150, marker_at: int = 75) -> str:
+    """`n_modules` generated-source diagnostics for the SECOND target — the cascade, not the
+    cause. One module (`marker_at`) is tagged uniquely so a test can assert it was elided."""
+    blocks = []
+    for m in range(n_modules):
+        tag = _CASCADE_MARKER_MODULE if m == marker_at else f"generated_{m:03d}"
+        blocks.append(
+            f"ERROR: /workspace/rust/acme-codec-rs/BUILD.bazel:5:11: Compiling Rust rlib "
+            f"acme_codec_rs ({m}) failed\n"
+            f"error[E0433]: failed to resolve: use of undeclared crate or module `missing_{tag}`\n"
+            f"  --> rust/acme-codec-rs/src/{tag}.rs:{m + 1}:5\n"
+            f"error[E0599]: no method named `decode_{tag}` found\n"
+            f"  --> rust/acme-codec-rs/src/{tag}.rs:{m + 20}:12\n"
+        )
+    return "".join(blocks)
+
+
+_BUILD_SUMMARY = """\
+error: aborting due to 240 previous errors
+For more information about this error, try `rustc --explain E0432`.
+INFO: Elapsed time: 42.734s, Critical Path: 38.2s
+INFO: 12 processes: 10 internal, 2 linux-sandbox.
+FAILED: Build did NOT complete successfully
+"""
+
+
+def _realistic_bazel_failure_log() -> str:
+    log = _FIRST_TARGET_ERRORS + _second_target_cascade() + _BUILD_SUMMARY
+    assert len(log.encode()) > LOG_TAIL_BYTES, "fixture must actually force truncation"
+    return log
+
+
+async def test_first_targets_diagnostics_survive_a_large_multitarget_failure_log(
+    tmp_path: Path,
+) -> None:
+    """The head/tail decision, pinned: under `--keep_going`, the FIRST target's errors are
+    usually the root cause and the rest is cascade (research-38 Q3.2). A tail-only truncator
+    was measured to discard exactly the first target's diagnostics while keeping only the
+    build's closing summary — the consequence, not the cause. This asserts the fix: the first
+    target's unique error text AND the final summary both survive, while a marker planted deep
+    in the cascade does not.
+    """
+    log = _realistic_bazel_failure_log()
+    script = f"import sys\nsys.stderr.write({log!r})\n"
+    result = await run([sys.executable, "-c", script], timeout_s=30, log_dir=tmp_path / "logs")
+
+    assert result.stderr_truncated is True
+    tail = result.stderr_tail
+    assert "ToSnakeCaseMissing" in tail, "the first (root-cause) target's error was dropped"
+    assert "no method named `to_snake_case_missing`" in tail
+    assert "Build did NOT complete successfully" in tail, "the closing summary was dropped"
+    assert _CASCADE_MARKER_MODULE not in tail, (
+        "a marker planted deep in the second target's cascade survived — the head/tail split "
+        "did not actually elide the middle"
+    )
+    assert "bytes elided" in tail
+    # The head slice is bounded by HEAD_BYTES, not the whole first target's block, by design.
+    assert len(tail.encode()) <= LOG_TAIL_BYTES
+
+
+async def test_head_and_tail_split_never_double_truncates_through_workererror(
+    tmp_path: Path,
+) -> None:
+    """Regression test for the defect research-38 Q3.3 found: `_read_head_and_tail`'s own
+    output landing OVER `LOG_TAIL_BYTES` (content plus its `[truncated N bytes]` marker) meant
+    the next `TruncatedStr` validator downstream — `WorkerError.stderr_tail`, exactly what
+    `buildverify.error_from_proc` constructs from a real `ProcResult` — silently re-truncated it
+    and stacked a SECOND marker on top of the first. Reproduced against the same realistic
+    multi-target log used above, not a synthetic blob, because the defect only manifests once
+    the capture is big enough to truncate at all.
+    """
+    log = _realistic_bazel_failure_log()
+    script = f"import sys\nsys.stderr.write({log!r})\n"
+    result = await run([sys.executable, "-c", script], timeout_s=30, log_dir=tmp_path / "logs")
+    tail = result.stderr_tail
+
+    assert len(tail.encode()) <= LOG_TAIL_BYTES, (
+        "proc.py's own capture already overflowed the durable-row bound; every downstream "
+        "TruncatedStr field will silently re-truncate it"
+    )
+
+    # The exact consumer path: buildverify.error_from_proc hands `ProcResult.stderr_tail`
+    # straight to `WorkerError(stderr_tail=...)`, a `TruncatedStr` field.
+    error = WorkerError(
+        failure_class="BUILD_ERROR", retryable=True, exit_code=1, stderr_tail=tail
+    )
+
+    assert error.stderr_tail.count("bytes elided") == 1, "the elision marker must not multiply"
+    assert "[truncated" not in error.stderr_tail, (
+        "a second, differently-shaped truncation marker appeared — the double-truncation defect"
+    )
+    # Modulo FleetModel's `str_strip_whitespace`, the WorkerError must carry the SAME text
+    # proc.py produced: no bytes were cut a second time.
+    assert error.stderr_tail == tail.strip()
+
+
+def test_head_bytes_is_smaller_than_the_total_budget() -> None:
+    """Sanity bound on the constant itself: a head slice that consumed the whole budget would
+    leave no room for the tail's build summary, and one bigger than `LOG_TAIL_BYTES` would make
+    `_read_head_and_tail`'s tail-budget arithmetic go negative."""
+    assert 0 < HEAD_BYTES < LOG_TAIL_BYTES
 
 
 async def test_exit_code_and_stderr_survive_a_normal_failure() -> None:

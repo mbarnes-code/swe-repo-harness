@@ -1261,6 +1261,13 @@ def test_build_reaches_phase_three_and_lands_the_generated_files(
         assert rename.removeprefix(":").rstrip("/") in set(DESTINATIONS.values()), rename
         assert "--strip-blobs-bigger-than" in call.argv, call.argv
         assert call.cwd is not None and "ingest" in call.cwd.parts, call.cwd
+        # D21/§11.4: `redaction.history_scrub_file` (default `config/rules/secrets.txt`, as
+        # `_write_config` provisions it) must actually reach `git-filter-repo` as
+        # `--replace-text`, not just sit in `FleetConfig` unread — the exact gap D21 named.
+        assert "--replace-text" in call.argv, call.argv
+        scrub_path = Path(call.argv[call.argv.index("--replace-text") + 1])
+        assert scrub_path == (fleet / "config" / "rules" / "secrets.txt").resolve(), scrub_path
+        assert scrub_path.is_file(), scrub_path
 
     # No reduction to disclose: every repo in this fleet has an adapter, so the degraded path is
     # not merely unused here — it is unreported, which is the difference between a warning that
@@ -4519,6 +4526,83 @@ def test_build_against_a_real_bazel(
 #: (`monorepo_dir` + `path_tail`), restated here only so the assertions below can be read.
 RUST_DESTS: tuple[str, ...] = ("rust/acme-case-rs", "rust/acme-codec-rs")
 
+RUST_MODULE_LOCK_FIXTURE: Path = Path(__file__).parent / "fixtures" / "rust" / "MODULE.bazel.lock"
+"""`MODULE.bazel.lock` for the exact `only_repos(fleet, ["acme-codec-rs", "acme-case-rs"])`
+monorepo below, captured VERBATIM from a real, networked `bazel build` of this same fixture pair
+(research-38 §Q1, run against `BCR_DEFAULT_REGISTRY`).
+
+**Committed as fixture data, not generated at test setup.** Generating it in a setup step would
+mean running the very networked `cargo fetch` this file exists to avoid on every test run — a
+"fix" that only moves the flake from inside the assertion to inside the fixture and proves
+nothing. A committed lock is the only one of the two shapes that actually removes the network
+dependency: research-38 measured a build with this exact artifact present succeeding OFFLINE in
+32.4 s (run2) and reproduced today's flake byte-for-byte with it invalidated (run4,
+`Failed to fetch crates for lockfile: exit status: 101`).
+
+**Why seeding it works even though the Rust e2e build is always a "first" build.** `rust.py`
+emits no `crate.from_cargo(lockfile=...)` attribute, so `repin` is unconditionally `True` and the
+extension always re-evaluates (`crate_universe/extensions.bzl`'s own
+`repin = not lockfile or determine_repin(...)`) — but re-evaluating is not the same as
+re-SPLICING. Bazel replays a module extension's `generatedRepoSpecs` from `MODULE.bazel.lock`
+whenever the extension's `recordedInputs` (env vars, repo mapping, and hashes of `//:Cargo.toml`,
+`//:Cargo.lock` and both member manifests) still match what it reads, and only falls through to
+`cargo-bazel splice` — the step that opens a socket to `index.crates.io` — when they do not. This
+fixture's `recordedInputs` were captured against these exact fixture files, so seeding it before
+the FIRST `fleet build` on a fresh monorepo turns that first evaluation into a replay too.
+
+**It goes stale, and that is `_assert_no_cargo_splice` below's whole job.** The pairing is only
+valid while `MODULE.bazel` (coupled to this exact two-repo composition), `//:Cargo.toml`,
+`//:Cargo.lock` and the `acme-case-rs`/`acme-codec-rs` manifests in `POLYGLOT_REPOS` stay
+byte-identical to what produced it. Bazel's own `--lockfile_mode=update` default degrades a
+mismatch SILENTLY back to today's splice-on-every-run behaviour rather than erroring — which
+means the fixture can only ever make this test flake LESS, never introduce a new failure mode —
+but silent is also how this exact defect went unnoticed for three incidents. Regenerate by
+running this test once with network available and recapturing
+`<integration-checkout>/MODULE.bazel.lock`.
+
+**What was deliberately NOT done: adding `lockfile=` to `rust.py`'s `crate.from_cargo` tag.**
+That is the structurally-correct fix for PRODUCTION (research-38 Q1.4's `maven_install.json`
+analogue) but it needs a `cargo-bazel-lock.json` producer this harness does not have — `rust.py`
+declares no Cargo `resolution()` step, so there is nothing to point `lockfile=` at without a new
+design (an ADR), which is out of this task's scope. Fixing only the test's hermeticity does not
+require it: `repin` staying unconditionally `True` is exactly why the replay-vs-splice branch
+above is worth guarding at all.
+"""
+
+
+_CARGO_SPLICE_MARKERS: tuple[str, ...] = ("Updating crates.io index", "Splicing Cargo workspace")
+"""The two literal lines `cargo-bazel splice` prints before it opens a socket, verbatim from the
+reproduced flake (research-38 Q1.1: `$Q/run4.err:22`). Either one, anywhere in a real Bazel
+invocation's output, means `crate.from_cargo` re-ran the splicer instead of replaying
+`MODULE.bazel.lock` — i.e. that `RUST_MODULE_LOCK_FIXTURE` went stale and this run reached
+`index.crates.io` live."""
+
+
+def _assert_no_cargo_splice(fleet: Path) -> None:  # noqa: F811  (`fleet` is the imported fixture)
+    """No bazel invocation this run made printed a cargo-splice marker (see above).
+
+    Reads the FULL stdout/stderr `util/proc.py`'s `LoggedRunner` writes under
+    `<fleet>/artifacts/logs/` — not `attempts.stderr_tail`, which `LOG_TAIL_BYTES` truncates to
+    the last 32 KiB (research-38 Q3) and could scroll `Updating crates.io index` (one of the
+    FIRST lines a splice prints) out of, on a build whose log grows past that window. This is the
+    proof the network dependency is gone: not "the build was green," which a working network
+    would also produce, but "no process this run ran ever printed the line cargo prints before it
+    contacts crates.io."
+    """
+    logs = sorted((fleet / "artifacts" / "logs").rglob("*.std*.log"))
+    assert logs, "no bazel invocation logged anything at all — the build never ran"
+    hits = [
+        (log, marker)
+        for log in logs
+        for marker in _CARGO_SPLICE_MARKERS
+        if marker in log.read_text(encoding="utf-8", errors="replace")
+    ]
+    assert not hits, (
+        f"cargo spliced instead of replaying the seeded {MODULE_LOCK_PATH} — the fixture has "
+        f"gone stale (regenerate tests/fixtures/rust/MODULE.bazel.lock, see its docstring above "
+        f"RUST_MODULE_LOCK_FIXTURE): {hits}"
+    )
+
 
 @pytest.mark.integration
 def test_two_rust_repos_in_one_wave_both_build(
@@ -4602,6 +4686,17 @@ def test_two_rust_repos_in_one_wave_both_build(
     territory and it is offline, so nothing below should be read as covering it.
     """
     only_repos(fleet, ["acme-codec-rs", "acme-case-rs"])
+    # Seeded and COMMITTED before `real_build` for the same reason its own `.bazelrc` is: Phase 3
+    # cuts its build worktree from the `integration` tip, so an untracked root file is not in the
+    # tree Bazel ever sees. This is what turns the very first `crate.from_cargo` evaluation of
+    # this fresh monorepo into a lockfile REPLAY instead of a splice against live crates.io — see
+    # `RUST_MODULE_LOCK_FIXTURE`'s docstring for the mechanism and `_assert_no_cargo_splice` below
+    # for the guard that catches it silently going stale.
+    (monorepo / MODULE_LOCK_PATH).write_text(
+        RUST_MODULE_LOCK_FIXTURE.read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    git(monorepo, "add", "-A")
+    git(monorepo, "commit", "-m", "seed MODULE.bazel.lock so crate.from_cargo replays, not splices")
     result = real_build(
         fleet,
         monorepo,
@@ -4609,6 +4704,10 @@ def test_two_rust_repos_in_one_wave_both_build(
         bazel_registry,
         bazel_fetch_bazelrc,
     )
+    # The proof this test no longer depends on live crates.io: not "the build was green," which a
+    # working network would also produce, but that no bazel invocation this run made ever printed
+    # the line `cargo-bazel splice` prints before it opens a socket to `index.crates.io`.
+    _assert_no_cargo_splice(fleet)
     assert wave_index(fleet, "acme-codec-rs") == wave_index(fleet, "acme-case-rs"), (
         "the two Rust repos landed in different waves, so this test would be exercising the "
         "CROSS-wave case, which one snapshot per wave does not address"

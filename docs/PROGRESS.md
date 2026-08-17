@@ -4545,39 +4545,80 @@ carry uncommitted, concurrently-authored changes before citing their line number
 
 ### What is still NOT proven / left open
 
-1. **C1 and C2 are unfixed.** The operator-facing `_DOCKER_CANNOT_RUN_EXPLAINED` string
-   (`buildverify.py:430-437`) and `clock_failure`'s docstring (`base.py:161-164`) both still assert
-   the unconditional "no attempt charged, no repair prompted" that `68a41ff`'s own commit body
-   retracted. Both files are outside this worker's edit authority this round.
-2. **I2 and I5 are unfixed.** `DAEMON_GONE`'s fixture (`test_workers_build.py`) still pairs real
-   daemon-unreachable stderr with a counterfactual exit 125; `cli.py:3634`'s `GitCommandError`
-   construction still omits `started`. Both are `src/`/other-worker files.
+**Correction (review-38 C1, applied 2026-08-17) — items 1 and 2 below described the tree as it
+stood before `8464dc6`'s own code lane landed, and that commit is the one this section was written
+in.** `git log --oneline -S"_invocation_name" -- src/fleet/workers/buildverify.py` and
+`git log --oneline -S"D46 — OPEN" -- docs/INTEGRATION_HONESTY.md` both resolve to `8464dc6` alone:
+the fix and the entry doubting it are the same commit, not sequential events. Re-verified directly
+against the current tree:
+
+- **C1 and C2 landed in `8464dc6`, not left open.** `base.py:161-171` already states the
+  `max_transient_retries`-bounded reprieve ("a bounded reprieve, not a standing exemption").
+  `buildverify.py:438-442`'s inline comment already carries the corrected 125 prose (an
+  unreachable daemon exits 1, not 125). `git show 8464dc6:src/fleet/workers/base.py | grep "no
+  repair prompted"` → no hits.
+- **I4(clone) landed.** `clone.py:700-713` carries the corrected classifier history verbatim,
+  added by `8464dc6`. `cli.py:3635-3641`'s `GitCommandError` construction passes
+  `started=result.started` — also added by `8464dc6`, so "still omits `started`" no longer holds.
+- **M4 landed.** `clone.py:731-758`'s `_is_shallow` docstring now says "no version range is
+  claimed here", citing git 2.43.0; the "measured across git 2.20.4 → 2.49.1" claim is gone.
+- **D46 is closed** — see `docs/INTEGRATION_HONESTY.md` D46, corrected in this same pass, for the
+  full evidence (`_invocation_name` at `buildverify.py:354-370`, used at `:777`/`:1088`, pinned by
+  `tests/test_workers_build.py:931-965`).
+
+**What genuinely remains open**, re-verified against the current tree rather than assumed clean:
+
+1. **`base.py:180-186`'s classifier-history docstring still carries the false account** I4
+   corrected in `clone.py` — it still frames "clone discarded `started`... and answered `TIMEOUT`
+   for both" as a pre-existing condition rather than the artifact `44d5550`'s half-applied reorder
+   manufactured between `44d5550` and `68a41ff`, never seen by a real wave. `base.py` is `src/`,
+   outside this worker's edit authority.
+2. **ADR-0067's four parts remain undelivered** (`ProbeIndeterminateError`, the reordered `except`
+   arm, `break`→`continue`, `no_verdict` as a thin delegator) — status already correctly marked
+   `DECIDED, NOT YET IMPLEMENTED`; implementation itself is `cli.py`/`rewrite/rules.py` work.
 3. **D34/D35/D36/D41/D45 in `docs/INTEGRATION_HONESTY.md` were not re-audited for staleness this
-   pass.** Review-36's own "Documentation state" section (not a counted finding) notes these read
-   `OPEN` despite `68a41ff` appearing to fix D34/D35/D36/D41 in code. This worker's explicit
-   priority list did not include re-deriving their status, and doing so without running the suite
-   (forbidden this round) would mean trusting reads alone for a claim this document treats as
-   requiring the same rigor as everything else here — left for the orchestrator to assign.
-4. **The uncommitted working tree.** As of this checkpoint, `git status --short` shows uncommitted
-   changes to `cli.py`, `sandbox/container.py`, `util/proc.py`, `vcs/filter_repo.py`, `vcs/git.py`,
-   `vcs/gitea.py`, `vcs/github.py`, `workers/base.py`, `workers/buildverify.py`, and four test files
-   — three other workers' concurrent output this same round. Every citation above to those files is
-   to their state at the moment read, not to any committed SHA; **re-derive rather than trust these
-   line numbers once that work lands.**
+   pass** — unchanged from the original assessment; still needs a worker to re-derive status
+   against a suite run rather than reads alone.
+4. **The working tree carries other workers' concurrent, uncommitted output** as of any given
+   read; re-derive line numbers rather than trust either this entry's or the superseded one's.
 
 ### Next subagent task, in priority order
 
-1. **A code-owning worker for `buildverify.py`/`base.py`: land C1 and C2's corrected strings/docstrings**
-   (see review-36 for the exact honest replacement text), then close D46 once the apparent
-   `_invocation_name` fix in the working tree is verified by the suite (not by this worker).
-2. **A code-owning worker for `cli.py`: implement ADR-0067's four parts** (now correctly marked
-   undelivered) or, if it is being deliberately deferred, say so in the ADR rather than leave the
-   status line as the only signal.
+1. **A code-owning worker for `base.py`: correct the classifier-history docstring at
+   `base.py:180-186`** per I4 above — `clone.py:700-713` already shows the corrected wording to
+   match.
+2. **A code-owning worker for `cli.py`/`rewrite/rules.py`: implement ADR-0067's four parts**, or
+   record in the ADR that they are being deliberately deferred.
 3. **Re-audit `D34/D35/D36/D41` status in `docs/INTEGRATION_HONESTY.md`** once a suite run is
    available to confirm rather than infer.
 4. **The missing `blips=5` sibling test (M1) and the `clone._error_for` retryable fix or narrower
-   assertion (M2)** — both named above, both need a worker with `tests/`/`clone.py` write scope
-   broader than this round's grant.
+   assertion (M2)** — both need a worker with `tests/`/`clone.py` write scope broader than this
+   round's grant.
+
+**Process note, so this does not recur.** The mismatch above was structural, not a slip: the docs
+lane and the code lane of `8464dc6` were written by different workers against different tree
+states within the same round, then committed together without being reconciled against each
+other. A "claimed, not verified" hedge in a docs entry is only honest while it remains true, and a
+docs lane that lands in the same commit as the code it hedges against stops being true at `git
+commit`. Going forward: a docs lane must either be (a) written against the tree state that will
+actually be committed, verified by re-reading the landed diff immediately before commit, or (b)
+explicitly marked as pre-commit and re-verified as a first action by whoever picks up the next
+round — not left as a standing "not yet verified" note inside a commit that itself supplies the
+verification.
+
+**Provenance note (review-38 I8).** `8464dc6` also shipped a new `CLAUDE.md` §6 "Build & Test
+Operations" (five rules, including the pytest-serialization rule and the `FLEET_*` export
+prohibition), a `tools/bin/` line in §5, a new Guardrail 6 "Measurement Discipline & the
+Multi-Agent Audit Hazard", and three new `Bash` permissions in `.claude/settings.json`
+(`git log 68a41ff..f12a954 -- CLAUDE.md .claude/settings.json` → `8464dc6` only). None of this is
+named in that commit's message, which enumerates work down to "new D46; new PROGRESS.md 36" and
+stops there. This is recorded here as what it is — an orchestrator-level directive and permission
+change riding along in a docs/code checkpoint commit, not a worker's undisclosed scope expansion —
+because `CLAUDE.md` is the directive authority Guardrail 1 makes lineage claims against, and its
+provenance should not live only in a commit message about container names and `CacheMiss`.
+Content re-verified: `tools/bin/` holds exactly the seven named wrappers (`ast-grep bazel cargo
+gazelle gh go rustc`); `tests/conftest.py:500` writes the "bazel disk" separator the new rule
+cites.
 
 ---
 
@@ -4688,3 +4729,173 @@ operator already accepted, and the accept-once-per-section audit trail is keyed 
 does not run. **The decision of what a phase verb should do on drift precedes any code and belongs
 in an ADR.** That is the next task, and it is now ahead of the §36 backlog in priority, because
 this one can silently reuse work from a configuration that no longer exists.
+
+---
+
+## 37b. Checkpoint — 2026-08-17 · the §37 evaluation continued into **two more reference bodies and one decision**: `examples/` was a hole in §37's own sweep, and what was in it — `better-harness` — turns out to **select on its own holdout through three channels** while its accept gate is **pinned by no test** · the `nvidia_deep_agent` example is **hosted NIM + a remote Modal A10G** and runs nothing on local hardware, but the **1,826-line Nemotron harness profile beside it is the densest record of driving an open-weight model in the whole reference set** · which surfaced the fact that makes it matter: **this harness has no `ModelBackend` implementations at all** — `src/fleet/llm/backends/` does not exist and every model call in the suite is a fake · **ADR-0070** decides the one file that closes it, and its hard part is **error translation, not transport**
+
+**Numbering.** `37b`, not `38`, on the `36b` precedent: `docs/superpowers/plans/research-38.md` and
+`review-38.md` are untracked plans belonging to another worker's round, and `review-38` audits
+`68a41ff..f12a954`. Taking `38` here would leave that round's checkpoint homeless. Noted also
+because **`research-38` is investigating "what a real Bazel failure log costs through
+`util/proc.py`" — which is §37's own next-task item 3**, picked up by someone else while this thread
+ran.
+
+### What was completed
+
+1. **`docs/DECISIONS.md` ADR-0069 §10 — scope correction.** §37's eight-agent sweep scoped to
+   `libs/` and never read `examples/`. §10 closes that for `examples/better-harness/` (3,405 LOC, a
+   self-described "research artifact" that lets an outer Deep Agent edit an inner agent's declared
+   *surfaces* against evals), records its three lineage claims as verified, and admits **one figure**
+   into §6's citation tiers.
+2. **`docs/DECISIONS.md` ADR-0070 — the `openai_compatible` backend.** DECIDED, NOT YET IMPLEMENTED.
+   Decides a wire-condition → typed-exception → `FailureClass` table; reclassifies a **`400` on
+   `guided_json` as capability drift rather than failure** (the fact learned is static, so retrying
+   burns a rung to relearn it); and gives **input-side context overflow its own class**, because
+   `OutputTruncated` covers `finish_reason == "length"` — the output side, with the opposite remedy.
+3. **Six more read-only subagents**, three on `better-harness` (internals, test suite, citation
+   verification against canonical URLs) and three on the NVIDIA surface (the example app, the
+   library profiles, and this harness's own model-config surface).
+
+### What was verified
+
+- **Every `src/fleet` citation in ADR-0070 was re-derived in the main session at `f12a954`**, not
+  taken from the subagent: `BackendTarget.base_url` (`models/tasks.py:88`), `SHIPPED_BACKENDS`
+  already listing `openai_compatible` (`settings.py:107`), `_REQUIRED_TARGET_FIELDS`
+  (`settings.py:110-114`), the four `StructuredOutputMode` rungs with `CONSTRAINED` annotated **"e.g.
+  vLLM guided JSON"** (`models/enums.py:226-233`), the `ModelBackend` Protocol
+  (`llm/client.py:295-303`), `discover()`'s `ImportError` swallow (`:355-365`), the
+  `classify_exception` mapping (`workers/classify.py:245-254`), `FailoverTrigger` (`client.py:36`),
+  and `ModelCapabilities.supports_constrained_decoding` (`models/tasks.py:67`).
+- **`src/fleet/llm/backends/` does not exist**, confirmed by `ls`. This file's own LLM-backends row
+  already said so in other words — *"FAKE, correctly … no request has ever left the process"* — and
+  names the closing move as a recorded-cassette or live-endpoint contract test per backend.
+- **A subagent corrected this orchestrator, and it was right.** Its brief was told
+  `src/fleet/llm/cache.py` was uncommitted; it ran `git status` first and reported otherwise.
+  `f12a954` had landed mid-session and committed it. The stale instruction came from this thread, not
+  from the agent — the §33 hazard, in the same direction as before.
+- **`better-harness`'s three lineage claims were fetched at canonical URLs, not recalled**: arXiv
+  2603.28052 exists (*"Meta-Harness: End-to-End Optimization of Model Harnesses"*);
+  `karpathy/autoresearch` exists but optimizes *training code*, not harnesses, and carries **no
+  licence file**; the LangChain post exists and reports **52.8 → 66.5 on Terminal Bench 2.0** with
+  the model fixed. During that check a web summarizer reported `autoresearch` as MIT and the GitHub
+  licence API returned `Not Found` — **the third case this evaluation has found of a confident
+  secondary source contradicted by its primary.**
+
+### What is still NOT proven / left open
+
+1. **ADR-0070 is a decision, not code.** No backend exists, nothing was measured against a real
+   endpoint, and every Nemotron-derived lesson in §6 is explicitly recorded as an **unvalidated
+   design input** — `libs/evals/MODEL_GROUPS.md:149` shows `nvidia (0 models)`, so that profile is
+   not covered by its own project's eval matrix.
+2. **Adding `FailureClass.CONTEXT_OVERFLOW` touches every exhaustiveness site.** ADR-0070 §5 accepts
+   that cost and says why; nobody has counted the sites.
+3. **D48 still has no ADR.** Its entry argues the obvious fix is wrong and that what a phase verb
+   should do on config drift must be decided before code. Unstarted.
+4. **`docs/PROGRESS.md` was edited concurrently.** §37 and its addendum were swept into `f12a954` by
+   another worker's commit, and this file has since diverged from HEAD by 67 insertions / 26
+   deletions from work that is not this thread's. This section was appended at the end to avoid
+   their edits; **it does not reconcile them.**
+5. **Zero `src/` or `tests/` changes across §37 and §37b, and the suite was not run.** Nothing in
+   either section claims otherwise.
+
+### Next subagent task, in priority order
+
+1. **Decide D48 in an ADR** — what a phase verb does on config drift — before any code touches
+   `_phase_preflight`. It is ahead of the §36 backlog because it can silently reuse work from a
+   configuration that no longer exists.
+2. **Count the `FailureClass` exhaustiveness sites** ADR-0070 §5 would touch, so the decision's
+   stated cost stops being an assertion.
+3. **Implement ADR-0070's backend** only after (2), and only with the error-translation table as the
+   acceptance criterion — a backend that passes traffic but lands `400`s in `UNKNOWN` is the failure
+   this ADR exists to prevent.
+4. **§36's backlog remains unstarted** — C1/C2's corrected strings in `buildverify.py`/`base.py`,
+   ADR-0067's four parts in `cli.py`, and the `D34/D35/D36/D41` staleness re-audit. Two consecutive
+   documentation checkpoints have now added records without discharging it.
+
+---
+
+## 37c. Checkpoint — 2026-08-17 · a second reference acquired and swept: `langchain-ai/open-swe` at a pinned SHA, **six parallel read-only subagents on the same eight-axis schema** · the structural finding is that open-swe **authors no loop, no context management, and none of its file or shell tools** — all nine come verbatim from `deepagents==0.7.6`, so **the read-before-edit lie ADR-0069 §7 recorded is present here one dependency hop away, invisible to an open-swe-only audit** · **ADR-0071** records four extractions with verified upstream coordinates and the **MIT licence condition that must travel with any lifted code** · and a **new failure mode**, worse than claim-without-code: safety code built, tested, documented and **wired nowhere**, while `INSTALLATION.md` tells operators to grant real GitHub permissions on its basis
+
+**Numbering.** `37c`, continuing the `36b`/`37b` precedent. `docs/superpowers/plans/research-38.md`
+and `review-38.md` still belong to another worker's round; **`research-38` is measuring what a real
+Bazel failure log costs through `util/proc.py`**, which is the number ADR-0071 §3.2 says must exist
+before the offload change is justified. That measurement is not this thread's to make.
+
+### What was completed
+
+1. **`references/open-swe/` acquired** at `e712a9ef950cda7200e7761400b169e09fb075be`
+   (2026-08-17T17:43:56-04:00), 36 MB, 398 Python / 235 TS-TSX files. `gh` is still unauthenticated,
+   so plain HTTPS `git clone` again; `.gitignore:87` leaves it untracked, as with every other
+   reference.
+2. **Six read-only subagents on the ADR-0069 eight-axis schema**, non-overlapping: control
+   loop/state; sandbox and network policy; tools and middleware; verification and evals; docs-vs-code
+   claims; skills and integrations. Each carried this evaluation's accumulated precedent rather than
+   starting cold — the tools agent was pointed at the exact line where deepagents asserts
+   read-before-edit, and the evals agent at `better-harness`'s holdout-in-the-gate.
+3. **`docs/DECISIONS.md:5564` — ADR-0071** (~200 lines). Four extractions with verified upstream
+   coordinates: the **prepare-run fingerprint** (`agent/middleware/prepare_run.py:25,60-67,69-76`;
+   `agent/server.py:906`), **capture-at-source offload** (deepagents `backends/sandbox.py:843-873`,
+   `:974`, `:1005`; open-swe's preserving proxy `agent/utils/sandbox_state.py:277,288-298`),
+   **model-proposes/host-adjudicates** (`agent/review/approval.py:60,82-84,86-96`;
+   `agent/tools/add_finding.py:120-125`; `agent/review/diff.py:138,184`), and **`shlex`-parse**
+   (`agent/middleware/pr_creation_guard.py:8,20,55,85-98`).
+
+### What was verified
+
+- **Every ADR-0071 citation was re-derived in the main session at `f12a954`**, and **two subagent
+  citations did not survive**: there is no `agent/tools/file.py` (open-swe has no file tools of its
+  own at all), and `filter_findings_for_publish` could not be located as a symbol. Both are recorded
+  as corrections inside ADR-0071 §1 rather than silently dropped — a citation meant for code
+  extraction that points at nothing is worse than no citation.
+- **The licence was checked before anything was described as liftable.** MIT, "Copyright (c)
+  LangChain, Inc." (`LICENSE:1-3`, `pyproject.toml`). ADR-0071 §1 makes carrying the notice a
+  condition, not politeness, and contrasts it with `karpathy/autoresearch` (ADR-0069 §10), which
+  ships **no licence** and is not reusable.
+- **The offload numbers are now measured upstream values, not a shape**: trigger above **80,000
+  bytes**, readback **5 lines / 2,000 bytes each end**, hard cap **10 MiB**, exit code preserved.
+  Against `util/proc.py`'s 32 KiB tail that is 2.4× the window plus a pointer instead of a
+  truncation.
+- **A speculation of this orchestrator's was refuted by its own subagent and is recorded as such.**
+  On dispatch this thread guessed that open-swe's "sandbox proxy" might be a real allow-listed egress
+  boundary — the one thing missing from every other reference. It is not: `match_hosts` **attaches an
+  `Authorization` header**, there is no deny rule anywhere in `agent/`, `scripts/` or `docs/`, and
+  the Dockerfile states build-time egress is unrestricted. It is auth injection, not a network
+  boundary.
+- **`sfw` (Socket Firewall) is installed in the sandbox image and invoked by nothing** — a second
+  independent instance of Cloudflare's Semgrep finding, where a security tool is present as furniture
+  rather than as a control.
+
+### What is still NOT proven / left open
+
+1. **All four ADR-0071 extractions are unimplemented and unmeasured.** §3.2 explicitly defers to
+   `research-38`'s measurement; §3.4 states plainly it is the **weakest** of the four for us, since
+   `util/proc.py` takes argv lists and never a shell, which is already stronger.
+2. **§3.3 leaves a real tension unresolved.** The host-adjudicator pattern would give
+   `build_diagnosis` (**D47**, zero readers) a principled consumer, but D47's own argument is that
+   wiring a reader merely to justify the writer is speculative under Rule 2. ADR-0071 records the
+   shape and **declines to resolve** whether it justifies wiring.
+3. **The transitive-defect finding has not been applied to ourselves.** open-swe inherits a defect
+   from its pin that an open-swe-only audit cannot see. Nothing in this project has audited its own
+   pinned dependencies for the same class of problem.
+4. **D48 still has no ADR**, though ADR-0071 §3.1 now supplies the precedent its entry said was
+   missing — a fingerprint mismatch that **re-derives** rather than refuses, which answers D48's own
+   objection to calling the drift gate from `_phase_preflight`.
+5. **Zero `src/` or `tests/` changes across §37, §37b and §37c, and the suite was not run** in any of
+   them. Three consecutive documentation checkpoints.
+6. **`docs/PROGRESS.md` remains concurrently edited.** This section was appended at the end to avoid
+   another worker's mid-file changes and **does not reconcile them**.
+
+### Next subagent task, in priority order
+
+1. **Write D48's ADR**, now that ADR-0071 §3.1 supplies a working precedent for the mechanism its
+   entry said needed deciding first.
+2. **Count the `FailureClass` exhaustiveness sites** ADR-0070 §5 would touch — still an accepted but
+   uncounted cost, and still ahead of writing the backend.
+3. **Audit this project's own pinned dependencies** for the transitive-defect class §37c found in
+   open-swe. `pyproject.toml` ships `anthropic` and `openai` against backends that do not exist, so
+   the exposure today is small — which makes this the cheapest moment to establish the habit.
+4. **§36's backlog is now three checkpoints old and unstarted** — C1/C2's corrected strings in
+   `buildverify.py`/`base.py`, ADR-0067's four parts in `cli.py`, and the `D34/D35/D36/D41` staleness
+   re-audit that needs a suite run. Documentation has outpaced code for three rounds; the next round
+   should not be a fourth.

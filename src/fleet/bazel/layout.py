@@ -24,7 +24,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Final, Protocol
+from typing import ClassVar, Final, Protocol
 
 from fleet.graph.cycles import RESERVED_SCC_SEGMENT, scc_dest, scc_target_name
 from fleet.models.enums import Ecosystem
@@ -70,9 +70,19 @@ class LayoutAdapter(Protocol):
     adapter package: `bazel/` is a driver, and a driver that imports its plugins is not one.
     """
 
-    @property
-    def monorepo_dir(self) -> str:
-        """The single root this adapter owns, e.g. the JVM adapter's. Never named here."""
+    monorepo_dir: ClassVar[str]
+    """The single root this adapter owns, e.g. the JVM adapter's. Never named here.
+
+    Declared `ClassVar`, not `@property`: every real `EcosystemAdapter` (`jvm.py`, `py.py`,
+    `rust.py`, `go.py`, `js.py`, `unknown.py`) defines this as a plain `ClassVar[str]` class
+    constant, never a computed property — `path_tail` below is the one that's actually derived
+    per-call. A `@property` declaration here was structurally looser than the real contract, and
+    Pyright's protocol-conformance check (unlike mypy's) treats a directly-declared `ClassVar`
+    member as failing to satisfy a `@property` protocol member ("monorepo_dir is not defined as a
+    ClassVar in protocol") — confirmed by isolated repro to trigger specifically when the checked
+    class declares the attribute as `ClassVar` at that level (inherited-and-reassigned members
+    don't trigger it), independent of venv import resolution. Declaring it `ClassVar` here matches
+    the real shape and satisfies both checkers."""
 
     def path_tail(self, coordinate: Coordinate) -> str:
         """The dest path below `monorepo_dir`. Pure and deterministic (§7.5)."""
