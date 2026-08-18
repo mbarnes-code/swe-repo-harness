@@ -12,7 +12,13 @@ Three properties are load-bearing, and each is a defect this module exists to ma
 * **Results are structured, not stdout.** Callers get `CommitInfo`, `DiffStat`, `bool`, or a SHA —
   never a blob of text they must re-parse. Ref reads that can legitimately miss (`resolve`) return
   `None`; everything else raises `GitCommandError`, so a failure is loud (Rule 11) and carries the
-  argv, exit code, and stderr tail needed to diagnose it.
+  argv, exit code, and stderr tail needed to diagnose it. That includes the four `check=False`
+  probes (`resolve`, `ref_exists`, `apply_check`, `is_ancestor`): each answers a yes/no question
+  about history, but `result.ok` is false for three different reasons — the process never
+  started, it was killed at its deadline, or it ran and genuinely answered "no" — and only the
+  last is a fact about the question asked (D42). Each probe checks `util.proc.no_verdict` first
+  and raises `GitCommandError` on the first two; only a settled `ProcResult` is allowed to become
+  the method's bool/`None` answer.
 * **Nothing returned or raised can carry a credential.** `util.proc` redacts both output tails at
   capture, so every string this module returns is already scrubbed (§11.4). The gap that leaves is
   the *argv*: mirror remotes in this environment embed a plaintext `github_pat_…` in their origin
@@ -34,7 +40,7 @@ from pathlib import Path
 from typing import Final
 
 from fleet.obs.redact import redact_text
-from fleet.util.proc import CommandRunner, ProcResult, run
+from fleet.util.proc import CommandRunner, ProcResult, no_verdict, run
 
 __all__ = [
     "DEFAULT_IDENTITY",
@@ -265,6 +271,28 @@ class Git:
             )
         return result
 
+    def _require_settled(self, result: ProcResult) -> None:
+        """Raise when `result` establishes nothing about the question a `check=False` probe asked
+        (D42). `no_verdict` orders `started` before `timed_out` — a call made past an already-passed
+        deadline carries both flags, and reading `timed_out` first would misreport a command that
+        never ran as one that ran too long — and `GitCommandError`'s own `detail` computation
+        preserves that same ordering, so the raised message names the right cause.
+
+        Every `check=False` probe in this class must call this BEFORE reading `result.ok`: a bool
+        or `None` derived from an unsettled `ProcResult` is not the probe's answer, it is the
+        fleet's clock reported as if it were one.
+        """
+        reason = no_verdict(result)
+        if reason is not None:
+            raise GitCommandError(
+                result.argv,
+                result.exit_code,
+                result.stderr_tail,
+                cwd=self.path,
+                timed_out=result.timed_out,
+                started=result.started,
+            )
+
     async def text(
         self,
         args: Sequence[str],
@@ -282,9 +310,18 @@ class Git:
     # -- revisions and refs -------------------------------------------------------------
     async def resolve(self, rev: str) -> str | None:
         """Full SHA of `rev`, or None if it does not exist. The one ref read allowed to miss:
-        "has this run's anchor been created yet?" is a question, not a failure."""
+        "has this run's anchor been created yet?" is a question, not a failure.
+
+        That miss must be a SETTLED "no such rev", not a rev-parse that never started or was
+        killed at its deadline — collapsing the two is D42/D43: `cli.py` treats a `None` here as
+        licence to force-reset a migration branch, and a timeout is not licence for that. So a
+        probe with no verdict (`util.proc.no_verdict`) raises `GitCommandError` instead of
+        returning `None`; only a rev-parse that actually ran and actually said "no such rev" may
+        mean "does not exist".
+        """
         result = await self.exec(["rev-parse", "--verify", "--quiet", f"{rev}^{{commit}}"],
                                  check=False)
+        self._require_settled(result)
         sha = result.stdout_tail.strip()
         return sha if result.ok and sha else None
 
@@ -296,7 +333,12 @@ class Git:
         return sha
 
     async def ref_exists(self, ref: str) -> bool:
+        """Whether `ref` resolves. A `check=False` non-zero exit is only "no" once the call
+        actually ran to completion (D42): a probe that never started or was killed at its
+        deadline has not established that `ref` is absent, and `_require_settled` raises rather
+        than let that indeterminate state be reported as `False`."""
         result = await self.exec(["show-ref", "--verify", "--quiet", ref], check=False)
+        self._require_settled(result)
         return result.ok
 
     async def update_ref(self, ref: str, new_value: str, *, message: str | None = None) -> None:
@@ -360,8 +402,16 @@ class Git:
 
     # -- patches ------------------------------------------------------------------------
     async def apply_check(self, patch: Path | str, *, reverse: bool = False) -> bool:
-        """`git apply --check [--reverse] <patch>` as a boolean probe. Never raises on a refused
-        patch: "does this patch apply?" is the question, and a non-zero exit is the answer *No*.
+        """`git apply --check [--reverse] <patch>` as a boolean probe. Does not raise on a
+        genuinely refused patch: "does this patch apply?" is the question, and a settled non-zero
+        exit is the answer *No*.
+
+        It DOES raise on an exit that settles nothing (D42, corrected here — this docstring used
+        to claim "a non-zero exit is the answer No" without qualification, which is exactly the
+        false claim D42 quotes: `exit 124` from a call that never started, or a kill at the
+        deadline, is not the answer No, it is the fleet's clock). `_require_settled` checks
+        `util.proc.no_verdict` first and raises `GitCommandError` for those two cases, so only a
+        `git apply` that actually ran to completion can become this method's `bool`.
 
         With `reverse=True` this is guard (b) of SPEC §3.2 step 6.1 — it succeeds exactly when the
         patch's effect is present in the CURRENT tree, which is the only check that survives a
@@ -372,6 +422,7 @@ class Git:
             args.append("--reverse")
         args.append(str(patch))
         result = await self.exec(args, check=False)
+        self._require_settled(result)
         return result.ok
 
     async def apply(self, patch: Path | str, *, index: bool = True) -> None:
@@ -519,10 +570,18 @@ class Git:
 
     async def is_ancestor(self, ancestor: str, descendant: str) -> bool:
         """`git merge-base --is-ancestor`. Used to prove a rollback anchor is actually *behind*
-        the tip it is about to rewind, so a "rollback" can never silently move history sideways."""
+        the tip it is about to rewind, so a "rollback" can never silently move history sideways.
+
+        A rollback anchor is exactly the kind of claim D42 warns about: `RollbackAnchorError`
+        downstream (`vcs/commits.py`) asserts "the anchor is not an ancestor of the current tip"
+        as a fact about history, and a `False` derived from a probe that never started or was
+        killed at its deadline would make that a false claim. `_require_settled` raises on both
+        before either can be reported as *No*.
+        """
         result = await self.exec(
             ["merge-base", "--is-ancestor", ancestor, descendant], check=False
         )
+        self._require_settled(result)
         return result.ok
 
 

@@ -264,25 +264,27 @@ async def test_ref_reads_are_typed_and_a_missing_ref_is_loud(git: Git) -> None:
 
 
 async def test_a_ref_read_that_never_ran_is_not_a_missing_ref(tmp_path: Path) -> None:
-    """`resolve()` answers `None` for a rev-parse that was never started, exactly as it does for a
-    ref that is absent — so a caller turning that `None` into a durable claim about the repository
-    must read the `ProcResult`, and this test pins the evidence that lets it.
-
-    Why it matters: `util.proc.run` reports a deadline that passed before the call as
-    `started=False` AND `timed_out=True` AND `exit_code=124`, all at once, and `ProcResult.ok` is
-    `started and not timed_out and exit_code == 0` — false for a missing ref and false for a call
-    that never happened. `workers/clone.py` read that `None` as an `EmptyRepo` finding and
-    returned `status="ok"` beside it. The distinguishing facts live here, at the seam, and both
-    orderings of the flags are asserted: a never-started call must not be reported as one that
-    ran out of time, and neither may be reported as a real exit status.
+    """`resolve()` USED TO answer `None` for a rev-parse that was never started, exactly as it
+    does for a ref that is genuinely absent — that collapse was D42. `util.proc.run` reports a
+    deadline that passed before the call as `started=False` AND `timed_out=True` AND
+    `exit_code=124`, all at once, and `ProcResult.ok` is `started and not timed_out and
+    exit_code == 0` — false for a missing ref and false for a call that never happened.
+    `workers/clone.py` read that `None` as an `EmptyRepo` finding and returned `status="ok"`
+    beside it. The fix makes `resolve()` raise `GitCommandError` instead of returning `None` for
+    an unsettled `ProcResult`, so only a rev-parse that ACTUALLY ran and said "no such rev" may
+    mean "does not exist" — the distinguishing facts are pinned here, at the seam.
     """
     never_ran = ScriptedRunner(exit_code=124, started=False, timed_out=True)
     git_ = Git(tmp_path, runner=never_ran)
 
-    assert await git_.resolve("refs/heads/main") is None, "resolve collapses the two causes"
+    with pytest.raises(GitCommandError) as never_resolved:
+        await git_.resolve("refs/heads/main")
+    assert never_resolved.value.started is False
+    assert never_resolved.value.timed_out is True
+
     probe = await git_.exec(["rev-parse", "--verify", "--quiet", "main"], check=False)
     assert probe.ok is False
-    assert (probe.started, probe.timed_out) == (False, True)  # the evidence `resolve` discards
+    assert (probe.started, probe.timed_out) == (False, True)  # the evidence `resolve` now raises on
 
     with pytest.raises(GitCommandError) as never_started:
         await git_.exec(["rev-parse", "main"])
@@ -327,6 +329,77 @@ async def test_apply_check_reverse_distinguishes_applied_from_not_applied(
     await git.apply(patch)
     assert await git.apply_check(patch, reverse=True) is True
     assert await git.apply_check(patch) is False
+
+
+# --------------------------------------------------------------------------------------
+# git.py — D42: `resolve`, `ref_exists`, `apply_check`, and `is_ancestor` are check=False
+# probes whose `result.ok` collapses "the process never started", "it was killed at its
+# deadline", and "it ran and genuinely answered no" into one boolean/`None`. Only the last is a
+# real answer to the question each method asks; the fix raises `GitCommandError` on the first
+# two rather than let a clock failure be reported as the probe's negative branch. `ScriptedRunner`
+# gained a real `timed_out` (D45) precisely so these states could be pinned here.
+# --------------------------------------------------------------------------------------
+async def _run_probe(name: str, git_: Git) -> object:
+    if name == "resolve":
+        return await git_.resolve("HEAD")
+    if name == "ref_exists":
+        return await git_.ref_exists("refs/heads/main")
+    if name == "apply_check":
+        return await git_.apply_check("some.patch")
+    if name == "is_ancestor":
+        return await git_.is_ancestor("HEAD", "HEAD")
+    raise AssertionError(f"unknown probe {name!r}")
+
+
+PROBE_NAMES = ("resolve", "ref_exists", "apply_check", "is_ancestor")
+
+
+@pytest.mark.parametrize("probe", PROBE_NAMES)
+async def test_d42_probe_never_started_raises_naming_it_never_started(
+    tmp_path: Path, probe: str
+) -> None:
+    """`started=False` always pairs with `timed_out=True` (§7.1's passed-deadline synthesis) —
+    the one shape where both flags carry a non-default value, and exactly where the started-first
+    ordering matters: the raised message must say "never started", not "timed out", even though
+    `timed_out` is also `True` on this result. Getting the order backwards would report a rev-parse
+    that never ran as one that merely took too long."""
+    git_ = Git(tmp_path, runner=ScriptedRunner(exit_code=124, started=False, timed_out=True))
+    with pytest.raises(GitCommandError) as caught:
+        await _run_probe(probe, git_)
+    assert caught.value.started is False
+    assert caught.value.timed_out is True
+    assert "never started" in str(caught.value)
+    assert "timed out" not in str(caught.value), "started must be checked before timed_out"
+
+
+@pytest.mark.parametrize("probe", PROBE_NAMES)
+async def test_d42_probe_killed_at_deadline_raises_naming_the_kill(
+    tmp_path: Path, probe: str
+) -> None:
+    """A probe that genuinely ran (`started=True`) and was killed at the deadline is equally not
+    an answer to the question it was asked: `-15` is SIGTERM's negative signal code, not a git
+    verdict, and reporting it as the probe's `False`/`None` would assert a fact about history that
+    was never measured."""
+    git_ = Git(tmp_path, runner=ScriptedRunner(exit_code=-15, started=True, timed_out=True))
+    with pytest.raises(GitCommandError) as caught:
+        await _run_probe(probe, git_)
+    assert caught.value.started is True
+    assert caught.value.timed_out is True
+    assert "timed out" in str(caught.value)
+    assert "exit -15" not in str(caught.value)
+
+
+@pytest.mark.parametrize("probe", PROBE_NAMES)
+async def test_d42_probe_genuine_no_still_returns_the_old_answer_without_raising(
+    tmp_path: Path, probe: str
+) -> None:
+    """The case that proves the fix is not a blanket "raise on any non-zero exit": a settled
+    `started=True, timed_out=False` non-zero exit is a REAL negative answer — the repo really
+    lacks the ref, the patch really does not apply, the anchor really is not an ancestor — and
+    must still come back as the method's ordinary `False`/`None`, not an exception."""
+    git_ = Git(tmp_path, runner=ScriptedRunner(exit_code=1, started=True, timed_out=False))
+    result = await _run_probe(probe, git_)
+    assert result in (False, None)
 
 
 # --------------------------------------------------------------------------------------
