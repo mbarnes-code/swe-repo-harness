@@ -379,12 +379,12 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         except* RunHalted as raised:
             halt = _flatten(raised)
 
-        # The wave's last drain. `_drive` flushes after every dispatch, so this is normally a
-        # no-op; it exists for the narrow window where a dispatch raised between the client's
-        # synchronous `on_drift` / `on_failover` callback and that flush. Deliberately NOT
-        # suppressed — the sink writes through the run's one writer, so a failure here means the
-        # writer is gone, and that is not a condition to report a green wave through (Rule 11).
-        await self.ctx.llm_findings.flush()
+        # The wave's last drain, and the retry for anything a per-dispatch drain could not land.
+        # Isolated for the same reason as that one, plus a sharper one here: it runs AFTER
+        # `halt` has been captured from the TaskGroup, so an exception escaping would discard a
+        # real `RunHalted` and make an exit-8 tier outage surface as `UNEXPECTED_ERROR` at
+        # `cli.py`. A diagnostics write must not be able to rewrite the run's exit code either.
+        await self._drain_llm_findings(None)
 
         self.ctx.project()
         state = await self.scheduler.wave_state(wave_index)
@@ -479,7 +479,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             # success included — because a `CapabilityDrift` is emitted whether or not the call
             # SUCCEEDED (§13 row 37: a local server that silently drops guided JSON is still a
             # finding, and would otherwise never be flushed by a green wave).
-            await self.ctx.llm_findings.flush()
+            await self._drain_llm_findings(repo_id)
 
             execution, breach = dispatched.execution, dispatched.breach
             if dispatched.re_entry is ReEntry.REJECTED:
@@ -615,11 +615,26 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 # that would make it true is §13 row 43's own (large) ticket. A log line scrolls
                 # away; a finding is what a human reads afterwards, so only the finding is fixed
                 # here — it must not carry the claim.
-                await self.ctx.llm_findings.record_backend_unavailable(
-                    repo_id=repo_id,
-                    phase=self.phase,
-                    observed=self._detail(failure) or str(failure.failure_class),
-                )
+                #
+                # Isolated for the same reason as `_drain_llm_findings`, and here the stake is
+                # higher than a wrong repo verdict: an exception escaping this line propagates
+                # out of `_drive` into `_isolated`'s `except Exception`, so the `RunHalted`
+                # below is NEVER RAISED and the tier outage vanishes — the run continues into a
+                # dead tier and exits 0. The finding is best-effort; the halt is not.
+                try:
+                    await self.ctx.llm_findings.record_backend_unavailable(
+                        repo_id=repo_id,
+                        phase=self.phase,
+                        observed=self._detail(failure) or str(failure.failure_class),
+                    )
+                except Exception as exc:
+                    self.ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback
+                        "backend_unavailable_finding_not_written",
+                        repo_id=repo_id,
+                        phase=int(self.phase),
+                        exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                        error=str(exc),
+                    )
                 raise RunHalted(
                     HaltReason.TIER_UNAVAILABLE,
                     f"every backend target for {repo_id}'s tier is DOWN: {decision.reason}",
@@ -931,6 +946,43 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             return None
         self.ctx.project()
         return status
+
+    async def _drain_llm_findings(self, repo_id: str | None) -> None:
+        """Persist what the LLM client buffered. **Never lets a diagnostics write become the
+        repo's verdict.**
+
+        The unguarded version of this call sat between `_dispatch` and the outcome handling, so a
+        busy timeout or a closed writer propagated out of `_drive`, was caught by `_isolated`'s
+        `except Exception`, and recorded a repo that had just SUCCEEDED as `FailureClass.UNKNOWN`
+        / PENDING with its execution never processed — the phase not advanced, the attempt row
+        never written, the work redone on resume. An observability path that can take down the
+        thing it observes is strictly worse than the silence it replaced.
+
+        Swallowing here does not violate Rule 11, and the precedent is this codebase's own:
+        `obs/events.py` makes exactly this trade for exactly this reason ("the caller is a worker
+        mid-transform and the failing operation is *telemetry*"), and makes it the same way —
+        **swallowed and surfaced, never swallowed and hidden.** The failure is logged at `error`
+        with the buffer depth, and `flush()` re-buffers everything that did not land, so the next
+        drain (or the wave-final one) retries it rather than losing it.
+
+        `except Exception`, not `BaseException`: a `CancelledError` must still propagate, or a
+        cancelled wave would be held open by its own telemetry.
+        """
+        try:
+            await self.ctx.llm_findings.flush()
+        except Exception as exc:
+            # `log.error`, never `log.exception`: §11.4 forbids a formatted traceback in the
+            # durable record because locals carry credentials, which is the same rule
+            # `error_from_exception` (workers/base.py:536-539) states for `WorkerError`. The
+            # qualified type name and the message carry everything a diagnosis needs.
+            self.ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback
+                "llm_findings_flush_failed",
+                repo_id=repo_id,
+                phase=int(self.phase),
+                pending=self.ctx.llm_findings.pending,
+                exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+                error=str(exc),
+            )
 
     async def _record_diagnostics(
         self, repo_id: str, fence: int, error: WorkerError, ladder: LadderState

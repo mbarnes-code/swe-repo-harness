@@ -384,6 +384,32 @@ def make_router() -> LlmRouter:
     )
 
 
+class ExplodingSink:
+    """A findings sink whose every write refuses, as a closed `StateWriter` or an exhausted
+    SQLITE_BUSY budget would. Counts attempts so a test can tell "isolated" from "never called",
+    and keeps `pending` non-zero because the real sink re-buffers what did not land."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.pending = 1
+
+    def on_drift(self, drift: object) -> None:
+        return None
+
+    def on_failover(self, event: object) -> None:
+        return None
+
+    async def flush(self) -> int:
+        self.attempts += 1
+        raise RuntimeError("findings writer is closed")
+
+    async def record_backend_unavailable(
+        self, *, repo_id: str, phase: Phase, observed: str
+    ) -> None:
+        self.attempts += 1
+        raise RuntimeError("findings writer is closed")
+
+
 @dataclass(slots=True)
 class Harness:
     repo: SqliteStateRepository
@@ -1515,7 +1541,11 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
     # target without reading `TransportError.trigger`) and `BackendHealth.DOWN` is computed
     # nowhere in `src/`. The log line scrolls away — the finding is what a human reads later.
     assert payload["asserts_outage"] is False
-    assert payload["failover_triggers_recorded"] is False
+    assert payload["failover_triggers_recorded"] == "none", (
+        "no failover fired in this wave, so 'none' is the true value — but see "
+        "`test_the_finding_reports_the_partial_trigger_set_it_actually_holds`: when triggers ARE "
+        "held the row must say 'partial', never a flat false that reads as 'nothing known'"
+    )
     assert "down" not in json.dumps(
         {k: v for k, v in payload.items() if k != "caveat"}
     ).lower(), "`decision.reason`'s DOWN claim must not be copied into the row"
@@ -1563,6 +1593,54 @@ async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harne
     assert payload["promised"] == str(StructuredOutputMode.JSON_SCHEMA)
     assert payload["actual"] == str(StructuredOutputMode.PROMPTED)
     assert payload["model_id"] == "fake-1"
+
+
+async def test_a_failing_findings_sink_cannot_rewrite_a_successful_repos_verdict(
+    harness: Harness,
+) -> None:
+    """F2. The drain sits between `_dispatch` and the outcome handling, so an unguarded exception
+    escapes `_drive`, is caught by `_isolated`'s `except Exception`, and records a repo that just
+    SUCCEEDED as `FailureClass.UNKNOWN` / PENDING with its execution never processed — no phase
+    advance, no attempt row, the work redone on resume.
+
+    An observability path that can take down the thing it observes is strictly worse than the
+    silence it replaced. The repo's verdict is the assertion; `pending` afterwards is the second
+    half, because "isolated" must mean *deferred*, not *dropped* — swallowing the failure AND the
+    records would trade one instance of this lane's bug class for another.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [ok("landed")]
+    object.__setattr__(harness.ctx, "llm_findings", ExplodingSink())
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is None, "a telemetry write must not halt the run either"
+    status, attempts, _, failure_class, _ = await harness.phase_row("repo-a")
+    assert (status, attempts) == ("SUCCEEDED", 1), (
+        "the repo did its work; a diagnostics writer failing is not its failure"
+    )
+    assert failure_class is None
+    sink = cast(ExplodingSink, harness.ctx.llm_findings)
+    assert sink.attempts >= 1, "the drain was still attempted"
+    assert sink.pending == 1, "isolated must mean deferred, not dropped"
+
+
+async def test_a_failing_findings_sink_cannot_swallow_the_exit_8_halt(harness: Harness) -> None:
+    """F5, the same defect on the halt path. The wave-final drain runs AFTER `halt` is captured
+    from the TaskGroup, so an exception escaping it discards a real `RunHalted` and `cli.py`'s
+    funnel maps the resulting `StateDbError` to `UNEXPECTED_ERROR` — a documented, operator-facing
+    exit 8 silently becoming an unexpected error because telemetry failed."""
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [fails(FailureClass.BACKEND_UNAVAILABLE)]
+    object.__setattr__(harness.ctx, "llm_findings", ExplodingSink())
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is not None, "the tier outage was swallowed by its own diagnostics"
+    assert report.halt.exit_code == 8
+    assert report.halt.reason is HaltReason.TIER_UNAVAILABLE
 
 
 async def test_a_full_volume_halts_the_run_with_exit_9_and_leaves_the_repo_untouched(

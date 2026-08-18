@@ -83,9 +83,10 @@ _CAVEAT: Final = (
     "Tier exhaustion only. This is NOT evidence that any backend is down: llm/client.py fails a "
     "target over without inspecting TransportError.trigger, so sustained RATE_LIMIT throttling "
     "reaches this finding identically to a CONNECTION or SERVER_ERROR failure (SPEC 13 row 43 -- "
-    "a 429 alone can never mean DOWN). The per-target triggers are not recorded, so this row "
-    "cannot tell the two apart. If the account was being throttled, the correct action is to run "
-    "at lower concurrency, not to repair infrastructure."
+    "a 429 alone can never mean DOWN). Check failover_triggers and throttling_observed below, "
+    "and the backend_failover events for this run_id: they carry the trigger for every target "
+    "EXCEPT the one that exhausted the tier, which never reports its own. If throttling is what "
+    "you see, the correct action is to run at lower concurrency, not to repair infrastructure."
 )
 
 
@@ -123,6 +124,7 @@ class LlmFindingSink:
     clock: Callable[[], datetime] = utcnow
     _drifts: list[CapabilityDrift] = field(default_factory=list, init=False, repr=False)
     _failovers: list[BackendFailover] = field(default_factory=list, init=False, repr=False)
+    _triggers: dict[str, str] = field(default_factory=dict, init=False, repr=False)
 
     # -- the two callbacks `LadderModelClient` calls ------------------------------------------
 
@@ -134,13 +136,33 @@ class LlmFindingSink:
         self._drifts.append(drift)
 
     def on_failover(self, event: BackendFailover) -> None:
-        """`LadderModelClient(on_failover=...)`. Same contract, same reason."""
+        """`LadderModelClient(on_failover=...)`. Same contract, same reason.
+
+        Also records WHY the source target was retired, keyed by target. That map is what stops
+        `BackendUnavailable` from claiming it knows nothing about the triggers — see
+        `record_backend_unavailable`. In-memory and per-run, the same lifetime SPEC §11.8 gives
+        `BackendHealth`: a resumed run must re-observe rather than inherit a stale verdict.
+        """
         self._failovers.append(event)
+        self._triggers[f"{event.from_backend}:{event.from_model_id}"] = event.trigger
 
     @property
     def pending(self) -> int:
         """How much is buffered. Diagnostics and tests; never a control-flow input."""
         return len(self._drifts) + len(self._failovers)
+
+    @property
+    def observed_triggers(self) -> dict[str, str]:
+        """`{"<backend>:<model_id>": "<FailoverTrigger>"}` for every target retired so far.
+
+        A COPY, so a caller cannot mutate the sink's state. Run-scoped and keyed by target rather
+        than by call, which is the right grain for the same reason `CapabilityDrift` carries no
+        `repo_id`: a trigger is a fact about an endpoint, not about whichever repo happened to be
+        holding it. Necessarily PARTIAL — `client.py:539-541` guards `_emit_failover` with
+        `index + 1 < len(targets)`, so the target that exhausts a tier never reports its trigger,
+        and a single-target tier reports none at all.
+        """
+        return dict(self._triggers)
 
     # -- persistence -------------------------------------------------------------------------
 
@@ -149,15 +171,30 @@ class LlmFindingSink:
 
         The swap is atomic on an event loop (no `await` between the read and the rebind), so a
         concurrent flush from a sibling repo's task cannot write the same record twice.
+
+        **Anything that did not land is put BACK.** Detaching the buffer and then losing it to a
+        busy timeout or a closed writer would be "computed, then discarded" — the exact defect
+        this module exists to close — reinstated one layer up, and reinstated on the error path,
+        which is the path most likely to be carrying interesting drift. Re-buffering is at the
+        FRONT so emission order survives, and the guard is `BaseException` so a cancelled wave
+        keeps its records too.
         """
         drifts, self._drifts = self._drifts, []
         failovers, self._failovers = self._failovers, []
         written = 0
-        if drifts:
-            written += await self._write_drifts(drifts)
-        for event in failovers:
-            await self._write_failover(event)
-            written += 1
+        unsent = 0
+        try:
+            if drifts:
+                written += await self._write_drifts(drifts)
+                drifts = []
+            while unsent < len(failovers):
+                await self._write_failover(failovers[unsent])
+                unsent += 1
+                written += 1
+        except BaseException:
+            self._drifts[:0] = drifts
+            self._failovers[:0] = failovers[unsent:]
+            raise
         return written
 
     async def _write_drifts(self, drifts: Sequence[CapabilityDrift]) -> int:
@@ -258,15 +295,29 @@ class LlmFindingSink:
         message text, and re-deriving the target list from the router would answer a *different*
         question (what the route says now) than the one the finding asks (what was tried then).
 
-        **What it cannot say, and says so in the row:** which `FailoverTrigger` retired each
-        target. `TierUnavailable` carries `tier` and `targets_tried` (client.py:149-155) and no
-        triggers, and `_emit_failover` never fires for the LAST target, so even the wired
-        `on_failover` stream cannot reconstruct the full set. Rather than infer one,
-        `failover_triggers` is `null` and `failover_triggers_recorded` is `false`. Plumbing the
-        triggers means changing `TierUnavailable`'s constructor and every raise site — a
-        different lane's work, and not something to fake here.
+        **What it can say about the triggers, and what it cannot.** `TierUnavailable` carries
+        `tier` and `targets_tried` (client.py:149-155) and no triggers, and `_emit_failover` is
+        guarded by `index + 1 < len(targets)` (client.py:539-541) — so the target that EXHAUSTS
+        the tier never reports what retired it, and a single-target tier reports nothing. The
+        complete set is genuinely unreconstructable.
+
+        The set this run actually holds, however, is **not empty**, and saying so would have been
+        a second false statement in the opposite direction. For an N-target tier the first N-1
+        triggers are emitted, `on_failover` is now wired, and this same sink both persists them as
+        `backend_failover` events and keeps them in `observed_triggers`. An operator who read
+        "triggers: none recorded" and concluded the throttle-vs-outage question was unanswerable
+        would be repairing infrastructure while N-1 `RATE_LIMIT` rows sat in `events` for the same
+        run. So `failover_triggers` carries what is known and `failover_triggers_recorded` is a
+        three-valued STRING — `"none"` or `"partial"`, never `"complete"`, because completeness
+        is structurally unreachable until `TierUnavailable` itself carries the triggers.
+
+        `throttling_observed` is the derived answer to the only question that changes the
+        operator's next action. It is a fact about what was measured, not an inference: it is true
+        iff some target on this run was retired by a `RATE_LIMIT`. It is deliberately NOT the
+        negation of `asserts_outage` — both may be false, which means "we do not know".
         """
         stamp = _iso(self.clock())
+        triggers = self.observed_triggers
         params = (
             self.run_id,
             repo_id,
@@ -278,11 +329,14 @@ class LlmFindingSink:
                     "repo_id": repo_id,
                     "phase": phase.name,
                     "observed": observed,
-                    # The three honesty fields. Machine-readable on purpose: a later reader
-                    # deciding whether to trust this row must not have to parse the caveat.
+                    # The honesty block. Nothing in `src/` reads these today — `projection.py:135`
+                    # and `digest.py:110` both filter to `CycleDetected` — so their live function
+                    # is the regression tripwire in `tests/test_llm_findings.py`, which fails if a
+                    # future edit starts asserting a cause. The human-facing channel is `caveat`.
                     "asserts_outage": False,
-                    "failover_triggers": None,
-                    "failover_triggers_recorded": False,
+                    "failover_triggers": triggers,
+                    "failover_triggers_recorded": "partial" if triggers else "none",
+                    "throttling_observed": any(t == "RATE_LIMIT" for t in triggers.values()),
                     "caveat": _CAVEAT,
                 }
             ),

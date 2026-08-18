@@ -32,8 +32,10 @@ import pytest
 from pydantic import BaseModel
 
 from fleet.llm.client import (
+    BackendFailover,
     BackendReply,
     CallPolicy,
+    CapabilityDrift,
     LadderModelClient,
     Message,
     StructuredOutputMode,
@@ -48,6 +50,7 @@ from fleet.orchestrator.findings import (
     BACKEND_FAILOVER_EVENT,
     BACKEND_UNAVAILABLE,
     CAPABILITY_DRIFT,
+    LlmFindingSink,
 )
 from fleet.settings import FleetConfig
 from fleet.state import db as dbmod
@@ -396,12 +399,11 @@ async def test_backend_unavailable_refuses_to_assert_an_outage(tmp_path: Path) -
             "a finding claiming the backend is DOWN turns a correctable throttle into a durable "
             "false record — and `DOWN` is a state nothing in `src/` computes"
         )
-        assert payload["failover_triggers"] is None
-        assert payload["failover_triggers_recorded"] is False, (
-            "`TierUnavailable` carries no per-target `FailoverTrigger`, and `_emit_failover` "
-            "never fires for the LAST target, so the set cannot be reconstructed — the row must "
-            "say it does not know rather than infer"
+        assert payload["failover_triggers"] == {}
+        assert payload["failover_triggers_recorded"] == "none", (
+            "no failover was observed on this run, so there is genuinely nothing to report"
         )
+        assert payload["throttling_observed"] is False
         assert "429" in str(payload["caveat"]) or "RATE_LIMIT" in str(payload["caveat"]), (
             "the operator-facing text has to name the alternative explanation, or the honesty "
             "flags above are unactionable"
@@ -449,3 +451,229 @@ async def test_run_context_supplies_both_callbacks_to_the_client(tmp_path: Path)
         sink = h.ctx.llm_findings
         assert client._on_drift == sink.on_drift
         assert client._on_failover == sink.on_failover
+
+
+# ======================================================================================
+# F1 — the partial trigger set: refuse to diagnose, but do not understate what is known
+# ======================================================================================
+
+
+async def test_the_finding_reports_the_partial_trigger_set_it_actually_holds(
+    tmp_path: Path,
+) -> None:
+    """The first cut said `failover_triggers_recorded: false` unconditionally. That was a second
+    false statement, in the opposite direction from the one it was fixing.
+
+    For an N-target tier, `client.py:539-541` emits the first N-1 triggers and this same sink both
+    persists them as `backend_failover` events and keeps them. An operator who read "none
+    recorded", concluded the throttle-vs-outage question was unanswerable, and went to repair
+    infrastructure would have been doing so while a `RATE_LIMIT` row for the same run sat in
+    `events`. The row must report what the run holds.
+
+    It still refuses `"complete"`: the target that EXHAUSTS the tier never reports its own
+    trigger, so completeness is structurally unreachable until `TierUnavailable` carries them.
+    """
+    backend = ScriptedBackend(
+        HONEST_CAPS,
+        script=[
+            TransportError("429 slow down", trigger="RATE_LIMIT"),
+            BackendReply(
+                text=Verdict(summary="ok").model_dump_json(),
+                usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),
+                finish_reason="stop",
+            ),
+        ],
+    )
+    async for h in _build(tmp_path, backend, make_router("fake-1", "fake-2")):
+        await h.ctx.model_client.complete(ROLE, [Message(role="user", content="x")], Verdict)
+        await h.ctx.llm_findings.record_backend_unavailable(
+            repo_id="repo-a",
+            phase=Phase.TRANSFORM,
+            observed="tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
+        )
+        _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
+
+        assert payload["failover_triggers"] == {"fake:fake-1": "RATE_LIMIT"}
+        assert payload["failover_triggers_recorded"] == "partial", (
+            "'partial' is the only true value: N-1 triggers are held, the Nth is unknowable"
+        )
+        assert payload["failover_triggers_recorded"] != "complete"
+        assert payload["throttling_observed"] is True, (
+            "THE field that changes the operator's next action — run slower, do not repair"
+        )
+        assert payload["asserts_outage"] is False, (
+            "knowing the triggers still does not license the DOWN claim: the exhausting target's "
+            "trigger is unknown, so an outage cannot be ruled in"
+        )
+
+
+async def test_throttling_observed_is_not_the_negation_of_asserts_outage(tmp_path: Path) -> None:
+    """Both false means "we do not know", which is a third state and must stay reachable. A
+    CONNECTION-triggered failover is genuine evidence of unreachability — and still not enough to
+    assert `DOWN`, because `BackendHealth` is computed nowhere in `src/`."""
+    backend = ScriptedBackend(
+        HONEST_CAPS,
+        script=[
+            TransportError("connection refused", trigger="CONNECTION"),
+            BackendReply(
+                text=Verdict(summary="ok").model_dump_json(),
+                usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),
+                finish_reason="stop",
+            ),
+        ],
+    )
+    async for h in _build(tmp_path, backend, make_router("fake-1", "fake-2")):
+        await h.ctx.model_client.complete(ROLE, [Message(role="user", content="x")], Verdict)
+        await h.ctx.llm_findings.record_backend_unavailable(
+            repo_id="repo-a", phase=Phase.TRANSFORM, observed="tier WORKHORSE exhausted"
+        )
+        _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
+
+        assert payload["failover_triggers"] == {"fake:fake-1": "CONNECTION"}
+        assert payload["throttling_observed"] is False
+        assert payload["asserts_outage"] is False
+
+
+# ======================================================================================
+# F3 — a failing writer must not destroy what was computed
+# ======================================================================================
+
+
+class BrokenWriter:
+    """A `StateWriter` whose `submit` refuses. Models the two real cases `flush()` can meet:
+    `StateWriterClosedError` at shutdown and an exhausted SQLITE_BUSY retry budget."""
+
+    def __init__(self) -> None:
+        self.attempts = 0
+        self.broken = True
+
+    async def submit(self, unit: object) -> object:
+        self.attempts += 1
+        if self.broken:
+            raise RuntimeError("writer is closed")
+        return None
+
+
+class BrokenRepository:
+    def __init__(self) -> None:
+        self.broken = True
+        self.events: list[object] = []
+
+    async def append_event(self, row: object) -> int:
+        if self.broken:
+            raise RuntimeError("writer is closed")
+        self.events.append(row)
+        return len(self.events)
+
+
+def _sink(writer: object, repository: object) -> LlmFindingSink:
+    return LlmFindingSink(
+        run_id=RUN,
+        writer=cast(Any, writer),
+        repository=cast(Any, repository),
+        clock=lambda: NOW,
+    )
+
+
+def _drift() -> CapabilityDrift:
+    return CapabilityDrift(
+        role=ROLE,
+        tier=ModelTier.WORKHORSE,
+        backend="fake",
+        model_id="fake-1",
+        promised=StructuredOutputMode.JSON_SCHEMA,
+        actual=StructuredOutputMode.PROMPTED,
+    )
+
+
+def _failover(model_id: str = "fake-1") -> BackendFailover:
+    return BackendFailover(
+        role=ROLE,
+        tier=ModelTier.WORKHORSE,
+        from_backend="fake",
+        from_model_id=model_id,
+        to_backend="fake",
+        to_model_id="fake-2",
+        trigger="RATE_LIMIT",
+    )
+
+
+async def test_a_failed_flush_keeps_the_records_instead_of_destroying_them() -> None:
+    """F3, and it is the lane's own bug class one layer up.
+
+    `flush()` detaches the buffers before writing. If the write then fails and the records are not
+    put back, they are gone forever — "computed, then discarded", reinstated on the error path,
+    which is the path most likely to be carrying interesting drift. A later successful flush would
+    write nothing and the table would look clean.
+
+    The proof is that the SAME records land once the writer recovers, not merely that `pending` is
+    non-zero: retention that cannot be drained is not retention.
+    """
+    writer, repository = BrokenWriter(), BrokenRepository()
+    sink = _sink(writer, repository)
+    sink.on_drift(_drift())
+    sink.on_failover(_failover())
+    assert sink.pending == 2
+
+    with pytest.raises(RuntimeError):
+        await sink.flush()
+
+    assert sink.pending == 2, "the records were detached and dropped — the exact defect"
+
+    writer.broken = False
+    repository.broken = False
+    assert await sink.flush() == 2
+    assert sink.pending == 0
+    assert writer.attempts == 2, "the drift retried; it was not silently skipped"
+    assert len(repository.events) == 1
+
+
+async def test_a_partly_failed_flush_re_buffers_only_what_did_not_land() -> None:
+    """Retention must not become duplication. The drifts write in one `executemany`; the failovers
+    write one row at a time, so a failure mid-loop has to put back the remainder and NOT the ones
+    already committed — otherwise recovering from a transient busy timeout mints duplicate
+    `events` rows, which are not deduped (`event_uid` is a fresh uuid4 per emit)."""
+
+    class HalfBrokenRepository:
+        def __init__(self) -> None:
+            self.written: list[object] = []
+
+        async def append_event(self, row: object) -> int:
+            if len(self.written) >= 2:
+                raise RuntimeError("busy")
+            self.written.append(row)
+            return len(self.written)
+
+    writer, repository = BrokenWriter(), HalfBrokenRepository()
+    writer.broken = False
+    sink = _sink(writer, repository)
+    sink.on_drift(_drift())
+    for model_id in ("t1", "t2", "t3", "t4"):
+        sink.on_failover(_failover(model_id))
+
+    with pytest.raises(RuntimeError):
+        await sink.flush()
+
+    assert len(repository.written) == 2
+    assert sink.pending == 2, (
+        "the two events that landed must NOT be re-buffered, and the two that did not must be"
+    )
+    assert writer.attempts == 1, "the drift committed; a retry must not re-write it"
+
+
+async def test_the_buffer_survives_cancellation() -> None:
+    """`BaseException`, not `Exception`: a wave cancelled mid-flush would otherwise lose whatever
+    the client had already computed, and cancellation is exactly when a run is being torn down
+    for a reason worth recording."""
+
+    class CancellingWriter:
+        async def submit(self, unit: object) -> object:
+            raise asyncio.CancelledError
+
+    sink = _sink(CancellingWriter(), BrokenRepository())
+    sink.on_drift(_drift())
+
+    with pytest.raises(asyncio.CancelledError):
+        await sink.flush()
+
+    assert sink.pending == 1
