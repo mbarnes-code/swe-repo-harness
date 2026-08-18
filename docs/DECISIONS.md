@@ -6365,3 +6365,233 @@ a hope up as a control (the exact confusion §4's mirror warns against).
   makes a claim falsifiable at all, and an un-anchored one fails silently exactly when a reader
   most needs it, which is precisely why this ADR's rule (§2) treats a citation as part of the status
   claim rather than as decoration on it.
+
+## ADR-0074 — The agent-worktree/branch correspondence is enforced by a `pre-commit` hook, not a brief: `.githooks/pre-commit` refuses a commit whose branch and checkout side disagree, installed via `core.hooksPath` set to an **absolute** path into the primary because a relative one silently reduces to no enforcement at all
+
+**Status: DECIDED AND IMPLEMENTED.** Verified against landed code and by direct execution in this
+session (commands and output below, and in
+`.superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md`). This closes the round CLAUDE.md's own brief
+for this task opens with: five concurrent subagents sharing one primary checkout, told by prompt
+alone to keep to their lanes, produced **four separate incidents of one agent's staged work landing
+in another agent's commit** and one case of hand-built `git apply --cached` surgery to undo it.
+Guardrail 1 forbids a subagent from citing a brief as a control; this ADR is the record that turns
+"stay in your lane" from a sentence in a prompt into something git itself refuses to violate on one
+specific, narrow axis — the branch/checkout correspondence, not the broader lane discipline, which
+§4 states plainly this mechanism does not and cannot cover.
+
+### 1. The rule
+
+- A **linked worktree** is a subagent's lane. A commit made there must land on a branch matching
+  `agent/*` — never `main`, never any other name, never detached.
+- The **primary checkout** (`/home/redmage/swe repo harness`) is the orchestrator's. A commit made
+  there must **not** land on an `agent/*` branch. `main` — or any other non-`agent/*` branch — is
+  unrestricted there; that is where the orchestrator's own work, including its constant commits to
+  `main`, belongs.
+
+Git already refuses to check out the same branch in two worktrees at once, so a worktree
+necessarily has *some* branch of its own — but nothing before this ADR stopped an agent creating a
+differently-named branch inside its worktree, or committing directly in the primary checkout
+instead. Both are exactly what happened in the round that motivated this task.
+
+### 2. Detection: `--absolute-git-dir` vs. `--git-common-dir`, verified rather than assumed
+
+The hook (`.githooks/pre-commit`) tells a linked worktree from the primary by comparing
+`git rev-parse --absolute-git-dir` to `git rev-parse --git-common-dir` (the latter resolved to an
+absolute path by `cd`-ing into it, since it can print a path relative to the working tree's top
+level — e.g. plain `.git` in the primary). **In the primary these are identical; in a linked
+worktree they differ**, because a linked worktree gets its own per-worktree administrative
+directory (`<common-dir>/worktrees/<name>/`) while sharing the common dir — refs, config, and (via
+`core.hooksPath`, §3) this very hook — with the primary. Measured directly in this session:
+
+```
+# primary:
+$ git rev-parse --absolute-git-dir
+/home/redmage/swe repo harness/.git
+$ git rev-parse --git-common-dir
+.git                                    # resolves to the same path, cd'd from the worktree top
+
+# linked worktree (worktrees/wt-WT1-example):
+$ git rev-parse --absolute-git-dir
+/home/redmage/swe repo harness/.git/worktrees/wt-WT1-example
+$ git rev-parse --git-common-dir
+/home/redmage/swe repo harness/.git     # different from the above
+```
+
+This is not a new pattern invented for this ADR: `tools/worktree/new-worktree.sh` already uses the
+identical comparison (`git_dir` vs. `common_dir`, both resolved to absolute paths) to refuse running
+itself from a worktree instead of the primary. The hook reuses it for the opposite classification.
+
+**Hooks firing in a linked worktree at all was verified, not assumed.** Before writing anything, a
+throwaway `#!/bin/sh … exit 1` was dropped in the primary's (untracked) `.git/hooks/pre-commit` and
+a commit attempted from the linked worktree — it fired (`HOOK FIRED in
+/home/redmage/swe repo harness worktrees/wt-WT1-example`, exit 1). This confirms git's documented
+behavior: hooks are read from the **common** dir by default, not the per-worktree admin dir, so a
+linked worktree was never going to be silently exempt.
+
+### 3. Installation: `core.hooksPath`, and why it is an absolute path into the primary
+
+`.git/hooks/` is never committed — it is exactly the untracked, per-clone directory the throwaway
+probe in §2 lived in, which is unusable as a distributable control. `core.hooksPath`
+(`tools/worktree/install-hooks.sh`) points git at `.githooks/` instead, which **is** tracked.
+`core.hooksPath` lives in the shared `.git/config`, so setting it once from the primary was verified
+to apply to an *already-existing* linked worktree immediately, no per-worktree step required:
+
+```
+$ git config core.hooksPath   # (run from the primary, after install-hooks.sh)
+/home/redmage/swe repo harness/.githooks
+$ cd "worktrees/wt-WT1-example" && git config core.hooksPath
+/home/redmage/swe repo harness/.githooks    # same value, same file, no separate config
+```
+
+**The path is absolute, anchored to the primary checkout, not the repo-relative `.githooks` that
+would be the more obvious choice.** The reason is a second thing verified empirically rather than
+assumed, and it is the sharpest finding in this task: **when `core.hooksPath` names a directory
+that does not exist, git skips `pre-commit` entirely — no error, no message, exit 0, commit
+succeeds.**
+
+```
+$ git config core.hooksPath /does/not/exist
+$ echo probe > f && git add f && git commit -m x
+[main bdfb15c] x
+ 1 file changed, 1 insertion(+)
+ create mode 100644 f
+$ echo $?
+0
+```
+
+A repo-relative `.githooks` is resolved against whatever the **current worktree's own branch** has
+checked out at that path. An agent worktree branched before this hook merged into its base ref — or
+one that simply never picks up a later docs/tooling commit, which is the normal case for a
+short-lived task branch — would have no `.githooks/pre-commit` file on disk at all, and by the
+measurement above that is not a missing-hook error, it is **silent, total, unannounced loss of
+enforcement**, indistinguishable from a checkout where this ADR was never implemented. Pointing
+`core.hooksPath` at an absolute path into the primary sidesteps that: the file that runs is always
+the primary's copy of `.githooks/pre-commit`, regardless of which commit any given worktree's
+branch happens to have checked out. The tradeoff, stated plainly: if the primary checkout is ever
+moved or renamed, `core.hooksPath` goes stale and `install-hooks.sh` must be re-run — a rarer,
+louder failure (every commit everywhere silently ungated, easy to notice fast) than a per-branch gap
+that only ever affects whichever worktrees happen to predate a merge.
+
+`core.hooksPath` is **local** config — `.git/config` is never committed — so a fresh clone, or a
+primary checkout moved to a new path, has **zero** enforcement until `tools/worktree/install-hooks.sh`
+is run in it. `install-hooks.sh` prints this loudly on every run rather than leaving it to be
+discovered the hard way; this ADR states it again here so it does not depend on the script's stdout
+being read.
+
+### 4. Fail-closed, and the escape hatch
+
+Every git command the hook depends on (`--absolute-git-dir`, `--git-common-dir`, `git branch
+--show-current`) is wrapped so that a command failure **refuses the commit**, printing the raw
+condition and pointing at the override, rather than falling through to "allow" because the
+classification could not be completed. A hook that goes silent on its own edge cases is worse than
+no hook — it teaches an operator that the absence of a refusal means the commit is safe, which
+§3 already shows is false in at least one case (a missing `hooksPath` directory) that this hook
+cannot itself detect, because git never runs it.
+
+**The orchestrator override is `HARNESS_ALLOW_BRANCH_OVERRIDE=1`, prefixed on the commit itself**
+(`HARNESS_ALLOW_BRANCH_OVERRIDE=1 git commit …`), not a shell-exported variable and not `FLEET_*` —
+`settings.py` pairs `env_prefix="FLEET_"` with `extra="forbid"`, so one stray `FLEET_*` variable
+left in an environment makes every settings load exit 2 (CLAUDE.md; `tools/worktree/new-worktree.sh`
+carries the identical constraint). Setting it skips the **entire** guard, in both directions, and
+prints a visible line to stderr (`pre-commit: HARNESS_ALLOW_BRANCH_OVERRIDE=1 set -- …`) so its use
+is never silent. It is documented here as an emergency valve for the human operator, not something a
+subagent brief should ever instruct — handing it out routinely would recreate exactly the unwired
+control §0 (Guardrail 1) warns against, this time by teaching an agent that a `git commit -m` prefix
+makes the hook go away.
+
+**Direct answer to the question this ADR exists partly to settle: committing to `main` from the
+primary needs no override.** Under the rule in §1, primary + non-`agent/*` branch is the default
+**allowed** path — `main` was never blocked, so there is nothing for the orchestrator to invoke for
+ordinary work. `HARNESS_ALLOW_BRANCH_OVERRIDE=1` exists only for the cases the rule *does* block
+(primary on an `agent/*` branch; a worktree on a non-`agent/*` branch) and an operator judges, in
+that moment, to be a deliberate exception.
+
+### 5. Verification matrix
+
+All four combinations were exercised with throwaway files, real `git commit` invocations, and
+explicit pathspecs (never `-A`) to avoid touching the other lane's concurrently staged
+`tools/worktree/README.md` / `land-worktree.sh` — this session ran inside the live primary checkout
+while that work was in progress, not a clean sandbox. Refused cases create no commit and need no
+cleanup; the two allowed cases were undone with `git revert --no-edit`, not history rewriting, to
+stay safe under concurrent commits from the sibling lane. Full transcript:
+`.superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md`.
+
+| # | Location | Branch | Expected | Result |
+|---|----------|--------|----------|--------|
+| A | linked worktree (`wt-WT1-example`) | `agent/WT1-example` | allowed | **allowed** — commit `1dc9397`, reverted via `reset --soft` |
+| B | linked worktree | `not-an-agent-branch-2` (non-`agent/*`; `main` itself cannot be checked out there — git already refuses two worktrees on one branch) | refused | **refused**, teaching message, exit 1, no commit |
+| C | primary | `main` | allowed | **allowed** — commit `49341fa`, undone by revert `6cf9ff7` |
+| D | primary | `agent/hook-test-primary` (new branch, not checked out elsewhere) | refused | **refused**, teaching message, exit 1, no commit |
+| E | linked worktree | non-`agent/*`, with `HARNESS_ALLOW_BRANCH_OVERRIDE=1` | allowed (override) | **allowed** — commit `a76a12f`, printed the bypass warning, branch deleted after |
+
+Test B could not literally use `main` as its branch name, because git already refuses to check out a
+branch that is checked out in another worktree — `main` is checked out in the primary for the
+duration of this task. A differently-named non-`agent/*` branch (`not-an-agent-branch-2`) exercises
+the identical code path in the hook (the `case "$branch" in agent/*)` test does not special-case
+`main`), so the substitution is faithful to what the hook actually checks, not a weaker stand-in for
+it.
+
+**A near-incident during this verification is itself evidence for §3's fail-closed design being the
+right call.** The throwaway `.git/hooks/pre-commit` probe from §2 (`exit 1` unconditionally) was
+left in place between the detection experiment and the `core.hooksPath` work; because
+`core.hooksPath` was already pointed at `.githooks/` by the time other work resumed in this checkout,
+the stub was masked rather than firing — but it blocked at least one legitimate commit from the
+concurrent `tools/worktree/` lane before that lane's agent noticed, and that agent **retried instead
+of reaching for `--no-verify`**. The stub has been removed (`rm .git/hooks/pre-commit`, confirmed
+absent — only `*.sample` files remain) and this ADR names the incident rather than omitting it,
+per Guardrail 6: an unmeasured claim of "clean" is worse than a documented near-miss.
+
+### 6. What this hook cannot catch — stated plainly, not left to be discovered
+
+This is the section CLAUDE.md's own brief for this task warned against skipping, and ADR-0071 §4's
+mirror (safety code that exists, is wired nowhere, while operators are told to rely on it) makes the
+cost of skipping it concrete:
+
+- **It cannot stop `git add -A` or any other broad-pathspec stage.** The hook inspects only the
+  current branch name and which side of the primary/worktree line the commit runs on — it never
+  reads `git diff --cached` and has no opinion on *which files* are staged. An agent that stages a
+  sibling's edits alongside its own on a correctly-named `agent/*` branch, inside its own worktree,
+  produces a commit this hook allows without comment.
+- **It cannot detect a pathspec-less `git commit`.** Same reason: nothing here inspects the diff.
+  The four "swept into another agent's commit" incidents this ADR's motivating round produced are
+  a staging-discipline failure, not a branch/checkout failure, and this hook's rule (§1) was never
+  aimed at that axis.
+- **It cannot prevent an agent editing files outside its declared lane.** A brief's "touch only
+  these paths" instruction remains exactly that — a sentence in a prompt — for anything this hook
+  does not check. Lane discipline beyond the branch/checkout correspondence has no mechanical gate
+  anywhere in this project today.
+- **It cannot enforce its own installation.** §3's measurement is the sharpest form of this: an
+  unset or wrongly-pointed `core.hooksPath` makes every commit succeed with **zero** indication
+  enforcement is off. No script running *as* the hook can defend against the hook not being invoked
+  at all — this is a property of git's hook-dispatch, not a gap in `.githooks/pre-commit` specifically.
+- **It cannot survive `--no-verify`.** Anyone (human or agent) who passes `--no-verify` bypasses
+  every hook `git` has, unconditionally, with no visible refusal for this hook to phrase a teaching
+  message into. §5's near-incident is notable precisely because the blocked agent did not do this.
+
+**A brief that says "stay in your lane" is still required.** This ADR closes exactly one narrow gap
+in that instruction — the branch a commit lands on matches where it was made — and documents the
+rest as open, the same way §3 of ADR-0071 asks every control in this project to be described:
+honestly, by what it is wired to, not by what it was hoped to cover.
+
+### 7. Alternatives rejected
+
+- **A `commit-msg` or `post-commit` hook instead of `pre-commit`.** Rejected: both run after the
+  commit object already exists, so "refuse" would mean "commit, then tell the operator to undo it"
+  — strictly worse than refusing before the object is created, with no compensating benefit for this
+  rule (unlike a `commit-msg` hook, which legitimately needs the composed message `pre-commit` does
+  not yet have).
+- **A CI check that audits branch/checkout correspondence after the fact.** Rejected under this
+  task's own constraint and Rule 2 (simplicity first): this project has no CI pipeline to attach it
+  to, and building one to catch a defect a three-line comparison in a hook already prevents
+  before it happens is the premature-abstraction failure Rule 2 names directly.
+- **Leaving `core.hooksPath` repo-relative (`.githooks`), matching the more common convention.**
+  Rejected by §3's own measurement: a relative path's resolution depends on the committing
+  worktree's own checked-out tree, and the failure mode (an agent branch missing `.githooks/`
+  entirely) is silent and total — indistinguishable from no hook at all — which is precisely the
+  category of control this task exists to prevent.
+- **No override at all, on the theory that an unconditional gate is the safest gate.** Rejected:
+  CLAUDE.md's Server Safety rules already forbid destructive unattended operations, but a hook with
+  no human escape hatch for a genuine edge case (a corrupted worktree, a one-off repair commit) turns
+  "refuse and teach" into "block and strand" — the brief for this task asked explicitly whether an
+  escape hatch was needed and this ADR answers yes, scoped to a human-invoked, visibly-logged,
+  non-`FLEET_*` variable rather than a standing config toggle.

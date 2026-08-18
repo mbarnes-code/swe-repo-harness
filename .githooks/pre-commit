@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# Pre-commit hook: enforce the agent-worktree / branch correspondence.
+#
+# Rule (docs/DECISIONS.md ADR-0074):
+#   - A LINKED WORKTREE is a subagent's lane. A commit made there must land on a branch
+#     matching `agent/*` -- never on `main`, never detached.
+#   - The PRIMARY checkout is the orchestrator's. `main` lives there, and a commit made there
+#     must NOT land on an `agent/*` branch -- that work belongs in that agent's own worktree.
+#
+# Installed via `core.hooksPath` (tools/worktree/install-hooks.sh) so every checkout shares
+# this ONE tracked file, instead of each clone's own untracked (and un-distributable)
+# .git/hooks/pre-commit.
+#
+# Primary vs. linked-worktree detection: `git rev-parse --absolute-git-dir` differs from
+# `--git-common-dir` (resolved to an absolute path) in a linked worktree -- a worktree gets its
+# own per-worktree git-dir under .git/worktrees/<name>/, but shares the common dir (refs,
+# config, and -- because of how core.hooksPath is installed -- this very hook) with the primary.
+# In the primary checkout the two are identical. Verified empirically; see
+# .superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md for the transcript. This is the same
+# comparison tools/worktree/new-worktree.sh already uses to refuse running from a worktree, so
+# it is not a novel pattern in this codebase.
+#
+# FAILS CLOSED: any git command below that errors refuses the commit rather than guessing which
+# side of the primary/worktree line it is on. The one deliberate exception is the override belt.
+#
+# KNOWN GAP THIS HOOK CANNOT CLOSE: if `core.hooksPath` names a directory that does not exist
+# (e.g. someone points it somewhere else, or this file is deleted), git skips pre-commit
+# ENTIRELY and the commit succeeds with no message at all -- verified directly (see the report).
+# No script running as the hook can defend against its own hook not being invoked. That is why
+# install-hooks.sh points core.hooksPath at an ABSOLUTE path into the PRIMARY checkout rather
+# than a repo-relative one: a relative `.githooks` would resolve against whatever an individual
+# worktree's own branch has checked out, and an agent branch cut before this hook existed (or
+# one that never merges docs/tooling changes) would silently have no `.githooks/pre-commit` on
+# disk at all -- same silent bypass, reachable without anyone touching git config.
+
+set -uo pipefail
+
+fail() {
+  printf 'pre-commit refused: %s\n\n' "$1" >&2
+  printf '%s\n' "$2" >&2
+  exit 1
+}
+
+# Escape hatch. Deliberately NOT a FLEET_* var: settings.py pairs env_prefix="FLEET_" with
+# extra="forbid", so one stray FLEET_* var makes every settings load exit 2 (CLAUDE.md,
+# tools/worktree/new-worktree.sh). For the human operator's emergency use, not for a subagent
+# brief to hand out routinely -- it bypasses the ENTIRE rule, in both directions.
+if [ "${HARNESS_ALLOW_BRANCH_OVERRIDE:-0}" = "1" ]; then
+  printf 'pre-commit: HARNESS_ALLOW_BRANCH_OVERRIDE=1 set -- branch/worktree guard skipped.\n' >&2
+  exit 0
+fi
+
+git_dir=$(git rev-parse --absolute-git-dir 2>/dev/null) || fail \
+  "could not resolve 'git rev-parse --absolute-git-dir'." \
+  "This should not happen inside a real commit. Refusing rather than guessing whether this is
+the primary checkout or an agent worktree. If you are certain this commit is safe, re-run it
+with HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+
+common_dir_raw=$(git rev-parse --git-common-dir 2>/dev/null) || fail \
+  "could not resolve 'git rev-parse --git-common-dir'." \
+  "Refusing rather than guessing, same as above. Override: HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+
+# --git-common-dir can print a path relative to the current worktree's top level (e.g. plain
+# \".git\" in the primary checkout). Hooks run with cwd at the top of the working tree, so cd
+# there and re-resolve, the same way tools/worktree/new-worktree.sh normalizes it.
+common_dir=$(CDPATH= cd -- "$common_dir_raw" 2>/dev/null && pwd -P) || fail \
+  "could not resolve common git dir '$common_dir_raw' to an absolute path." \
+  "Refusing rather than guessing. Override: HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+
+branch=$(git branch --show-current 2>/dev/null) || fail \
+  "could not determine the current branch ('git branch --show-current' failed)." \
+  "Refusing rather than guessing. Override: HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+
+case "$branch" in
+  agent/*) is_agent_branch=1 ;;
+  *)       is_agent_branch=0 ;;
+esac
+
+# The primary checkout's top level, for the teaching messages below -- common_dir is that
+# tree's own \".git\", so its parent is the checkout root.
+primary_dir=$(dirname -- "$common_dir")
+
+if [ "$git_dir" = "$common_dir" ]; then
+  # PRIMARY CHECKOUT: git-dir and the common dir are the same place.
+  if [ "$is_agent_branch" = 1 ]; then
+    fail "commit on branch '$branch' from the PRIMARY checkout ($primary_dir)." \
+"'$branch' is an agent lane branch, and its commits belong in that agent's own linked worktree
+-- not in the orchestrator's primary checkout, even if that branch happens to be checked out
+here right now. What to do instead:
+  * If this is genuinely orchestrator work: commit it on a non-'agent/*' branch (main is the
+    normal case) -- that is what the primary checkout is for.
+  * If this is agent work: 'cd' into that agent's own worktree (see
+    tools/worktree/new-worktree.sh and tools/worktree/README.md) and commit there.
+  * Emergency-only override (docs/DECISIONS.md ADR-0074): re-run with
+    HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+  fi
+else
+  # LINKED WORKTREE: git-dir is the per-worktree administrative dir under
+  # <common_dir>/worktrees/<name>, distinct from the common dir itself.
+  if [ "$is_agent_branch" != 1 ]; then
+    branch_desc=${branch:-"(detached HEAD)"}
+    fail "commit on branch '$branch_desc' inside a linked worktree." \
+"Every linked worktree is a subagent's isolated lane. This project's rule (docs/DECISIONS.md
+ADR-0074) is that a lane commits only on a branch matching 'agent/*' -- never 'main', never
+anything else, never detached -- so that one agent's work cannot land on a branch another agent
+or the orchestrator is relying on. What to do instead:
+  * Check out this worktree's own agent/* branch (tools/worktree/new-worktree.sh created one
+    named 'agent/<task-id>' for you): 'git checkout agent/<task-id>'.
+  * If you actually meant to touch 'main' or another shared branch: that belongs in the PRIMARY
+    checkout ($primary_dir), not this worktree.
+  * Emergency-only override (docs/DECISIONS.md ADR-0074): re-run with
+    HARNESS_ALLOW_BRANCH_OVERRIDE=1."
+  fi
+fi
+
+exit 0
