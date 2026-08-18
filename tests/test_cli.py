@@ -30,8 +30,9 @@ import json
 import shutil
 import sqlite3
 import subprocess
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -39,14 +40,27 @@ import pytest
 from typer.testing import CliRunner
 
 from fleet.bazel.lockfile import MODULE_LOCK_PATH
-from fleet.cli import BuildInput, BuildOutput, BuildPipelineWorker, ExitCode, app, command_paths
+from fleet.cli import (
+    BuildInput,
+    BuildOutput,
+    BuildPipelineWorker,
+    ExitCode,
+    TransformStepUnavailableError,
+    _abandon_repo,
+    _prepare_repo,
+    _TransformPlan,
+    app,
+    command_paths,
+)
 from fleet.llm.roles import SPEC_ROLE_TIERS
 from fleet.migrations import LATEST_VERSION
 from fleet.models.build import BuildUnit, SupportFile
-from fleet.models.enums import Ecosystem
+from fleet.models.enums import Ecosystem, Phase
 from fleet.models.state import SCHEMA_VERSION
-from fleet.state.db import SCHEMA_PATH
-from fleet.vcs.git import Git
+from fleet.state.db import SCHEMA_PATH, StateWriter
+from fleet.util.proc import ProcResult
+from fleet.util.proc import run as proc_run
+from fleet.vcs.git import Git, GitCommandError, GitError
 from fleet.workers.base import WorkerContext
 from tests.test_migrations import _v6_database
 
@@ -1722,4 +1736,281 @@ def test_every_gitcommanderror_construction_forwards_started() -> None:
     assert offenders == [], (
         "GitCommandError constructed without forwarding `started` (defaults to True, silently "
         f"claiming a never-started process ran and exited): {offenders}"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# D43 (docs/INTEGRATION_HONESTY.md) — `_prepare_repo`'s `resolve(branch)` must not let a
+# timed-out probe reach `checkout -B`
+# --------------------------------------------------------------------------------------
+# D43's mechanism: `Git.resolve` used to return `None` for BOTH "the branch does not exist" and
+# "the probe never settled" (never started past a passed deadline, or killed at its deadline).
+# `_prepare_repo` (cli.py:3787-3789) reads a `None` tip as licence to run `git checkout -B
+# <branch> HEAD` — `-B` is CREATE-OR-RESET-HARD, so if `migrate/<repo>` already carries this
+# run's committed work, a `rev-parse` that merely FAILED TO ANSWER force-resets it to HEAD, and
+# that work becomes reachable only from the reflog. D42's fix (`d37f4ba`) made `Git.resolve` call
+# `_require_settled` and raise `GitCommandError` instead of returning `None` on an unsettled
+# probe, and `_prepare_repo`'s caller (cli.py:4296) already wraps the call in
+# `except (TransformStepUnavailableError, GitError, OSError): await _abandon_repo(...)` — so the
+# destructive branch should now be structurally unreachable from a timeout. Nothing pinned that:
+# an audit found `_prepare_repo` has no dedicated regression test, and the protection is
+# inherited entirely from `Git.resolve`'s own tests in `tests/test_vcs.py`. One refactor of
+# `_prepare_repo`'s `except` clause — or of `_prepare_repo` itself — would silently restore the
+# branch-destroying bug with nothing here to fail.
+#
+# `_prepare_repo` builds its own `Git(worktree)` internally with no runner-injection parameter
+# (cli.py:3783), so `tests/test_vcs.py`'s `ScriptedRunner` idiom cannot be handed to it directly.
+# `_TimeoutOnResolveRunner` below follows that same idiom — a `CommandRunner` is the injected
+# seam (CLAUDE.md guardrail 3) — but wraps the REAL runner rather than replacing it wholesale:
+# only the one `rev-parse --verify --quiet <branch>^{commit}` probe that decides "reset or reuse"
+# is scripted to the passed-deadline shape `util.proc.run` synthesises for a probe that never
+# started (§7.1: `started=False`, `timed_out=True`, `exit_code=124` — the one shape
+# `util.proc.is_producible_shape` admits for `started=False`); `is_dirty`, `checkout`, `log`,
+# `ls-tree` and everything else run for real. A blanket fake would make every git call fail
+# identically, which would pass a "does not reach checkout -B" test for the wrong reason — ANY
+# git failure here routes to `_abandon_repo`, not specifically an unsettled resolve. The test that
+# proves the DISTINCTION (timeout vs. genuine absence) needs real git for the genuine-absence
+# case too, so `test_a_genuinely_absent_branch_still_takes_the_checkout_b_path` runs
+# `_prepare_repo` with no monkeypatching at all — real git, real worktree, same idiom the D26/D27
+# section above uses for questions that are about WHICH git answer is read, not about argv shape.
+
+
+class _TimeoutOnResolveRunner:
+    """`CommandRunner` that answers every git call for real except the ONE probe that resolves
+    `target` — which it answers with the shape `util.proc.run` synthesises for a call that never
+    got to start past an already-passed deadline (`started=False`, `timed_out=True`,
+    `exit_code=124`). That is D43's exact scenario: `Git.resolve(target)` asked a question and
+    got back the fleet's clock, not an answer, and the caller must not read that as "no such
+    ref".
+    """
+
+    def __init__(self, target: str) -> None:
+        self._needle = f"{target}^{{commit}}"
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if parts and parts[-1] == self._needle:
+            return ProcResult(
+                argv=parts,
+                exit_code=124,
+                stdout_tail="",
+                stderr_tail="",
+                duration_ms=0,
+                timed_out=True,
+                started=False,
+                cwd=cwd,
+            )
+        return await proc_run(argv, cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
+async def _real_worktree_with_migrate_branch(root: Path, repo_id: str) -> tuple[Path, str, str]:
+    """A real git repo at `<root>/work/<repo_id>` (the Phase 1 cut `_prepare_repo` requires)
+    whose `migrate/<repo_id>` branch already carries one commit `checkout -B` would discard —
+    exactly the "committed work reachable only from the reflog" D43 describes. Returns
+    `(worktree, branch, migrated_sha)`.
+    """
+    worktree = root / "work" / repo_id
+    worktree.mkdir(parents=True)
+    git = Git(worktree)
+    await git.exec(["init", "-q", "-b", "main"])
+    (worktree / "README.md").write_text("hello\n")
+    await git.exec(["add", "--", "README.md"])
+    await git.commit("init")
+
+    branch = f"migrate/{repo_id}"
+    await git.exec(["checkout", "-b", branch])
+    (worktree / "migrated.txt").write_text("phase 2 work product\n")
+    await git.exec(["add", "--", "migrated.txt"])
+    migrated_sha = await git.commit("migration work this test must not lose")
+    await git.exec(["checkout", "main"])
+    return worktree, branch, migrated_sha
+
+
+def _seed_phase_row(db_path: Path, repo_id: str) -> None:
+    """The `phases` row `_prepare_repo` UPDATEs into and `_abandon_repo`'s `WHERE status =
+    'PENDING'` requires — created by `repository.upsert_phase` before `_prepare_repo` runs in the
+    real `fleet transform` flow (cli.py:4276-4282), reproduced directly here rather than driving
+    the whole orchestrator for a test that is about `_prepare_repo`'s git handling alone.
+    """
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, updated_at) VALUES (?, ?, ?, ?)",
+            (RUN_ID, repo_id, int(Phase.TRANSFORM), "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+async def test_a_timed_out_resolve_never_reaches_checkout_b(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D43: a `resolve(branch)` that times out must not be read as "the branch does not exist".
+
+    `git checkout -B <branch> HEAD` (cli.py:3789) is CREATE-OR-RESET-HARD: if `migrate/<repo>`
+    already carries this run's committed work, a `rev-parse` that merely FAILED TO ANSWER —
+    rather than genuinely finding no such ref — must not reset it, or that work becomes reachable
+    only from the reflog. `Git.resolve` now raises `GitCommandError` on an unsettled probe
+    instead of returning `None` (D42's fix), so `_prepare_repo`'s `if tip is None: checkout -B`
+    is structurally unreachable on a timeout — the exception propagates out of `_prepare_repo`
+    before that branch is ever considered. Proven here by asserting `checkout` never once
+    appears among the git calls this run made, and that the branch's tip is untouched.
+    """
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    repo_id = "acme-commons"
+    worktree, branch, migrated_sha = await _real_worktree_with_migrate_branch(workspace, repo_id)
+    _seed_phase_row(workspace / "state" / "fleet.db", repo_id)
+
+    fake_runner = _TimeoutOnResolveRunner(branch)
+    monkeypatch.setattr("fleet.cli.Git", lambda path: Git(path, runner=fake_runner))
+
+    db_path = workspace / "state" / "fleet.db"
+    async with StateWriter(db_path, owner="test-d43-timeout") as writer:
+        with pytest.raises(GitCommandError) as excinfo:
+            await _prepare_repo(
+                settings,
+                writer=writer,
+                run_id=RUN_ID,
+                repo_id=repo_id,
+                dest_path="libs/widget",
+                import_specifier=repo_id,
+                rules=(),
+                now=datetime.now(UTC),
+            )
+
+    assert excinfo.value.timed_out is True, (
+        "the raised error must carry timed_out=True — the evidence that this was an unsettled "
+        "probe, not a settled 'no such branch'"
+    )
+    checkout_calls = [c for c in fake_runner.calls if "checkout" in c]
+    assert checkout_calls == [], (
+        "a timed-out resolve() must never reach `checkout -B` — the destructive command this "
+        f"test exists to keep unreachable: {checkout_calls}"
+    )
+    tip_after = await Git(worktree).text(["rev-parse", branch])
+    assert tip_after == migrated_sha, (
+        "the migration commit must still be the branch's tip — a `checkout -B` here would have "
+        "force-reset it onto main's HEAD, discarding it (reachable only via reflog afterwards)"
+    )
+
+
+async def test_a_timed_out_resolve_routes_to_abandon_not_a_branch_reset(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D43: `_prepare_repo`'s caller (cli.py:4296) catches exactly `(TransformStepUnavailableError,
+    GitError, OSError)` around this call and routes to `_abandon_repo`, which marks the repo's
+    phase row `REQUIRES_HUMAN_INTERVENTION` rather than sending it down the branch-reset path
+    (§11.1: one repo's git failure is contained, not silently sent through the destructive
+    branch). This replicates that exact except clause rather than driving the full `fleet
+    transform` CLI command end to end, so a future refactor of either side — the clause's
+    exception tuple, or `_prepare_repo` itself — that reopens the timeout-as-absence gap fails
+    this test without needing the whole orchestrator wired up.
+    """
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    repo_id = "acme-commons"
+    worktree, branch, migrated_sha = await _real_worktree_with_migrate_branch(workspace, repo_id)
+    db_path = workspace / "state" / "fleet.db"
+    _seed_phase_row(db_path, repo_id)
+
+    fake_runner = _TimeoutOnResolveRunner(branch)
+    monkeypatch.setattr("fleet.cli.Git", lambda path: Git(path, runner=fake_runner))
+
+    async with StateWriter(db_path, owner="test-d43-abandon") as writer:
+        now = datetime.now(UTC)
+        try:
+            await _prepare_repo(
+                settings,
+                writer=writer,
+                run_id=RUN_ID,
+                repo_id=repo_id,
+                dest_path="libs/widget",
+                import_specifier=repo_id,
+                rules=(),
+                now=now,
+            )
+        except (TransformStepUnavailableError, GitError, OSError) as exc:
+            await _abandon_repo(writer, RUN_ID, repo_id, detail=str(exc), now=now)
+        else:
+            pytest.fail("resolve() was scripted to time out; _prepare_repo must not succeed")
+
+    read_conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = read_conn.execute(
+            "SELECT status, failure_class FROM phases WHERE run_id = ? AND repo_id = ? "
+            "AND phase = ?",
+            (RUN_ID, repo_id, int(Phase.TRANSFORM)),
+        ).fetchone()
+    finally:
+        read_conn.close()
+
+    assert row == ("REQUIRES_HUMAN_INTERVENTION", "PREFLIGHT"), (
+        "the unsettled probe must abandon this repo's phase row, not leave it PENDING for a "
+        f"branch-reset retry: {row}"
+    )
+    tip_after = await Git(worktree).text(["rev-parse", branch])
+    assert tip_after == migrated_sha, (
+        "the abandon path must still leave the migration commit as the branch's tip — routing "
+        "to _abandon_repo must not itself have touched git"
+    )
+
+
+async def test_a_genuinely_absent_branch_still_takes_the_checkout_b_path(
+    workspace: Path,
+) -> None:
+    """The distinguishing case, without which the two tests above could be satisfied by simply
+    deleting the `checkout -B` call rather than fixing the timeout/absence distinction. `resolve`
+    on a branch that genuinely does not exist is a SETTLED "no such rev" (git ran to completion
+    and said no) — §3.2 step 6's ordinary first-transform case — and must still create it. No
+    monkeypatching here: real git, real worktree, the default `Git(worktree)` `_prepare_repo`
+    builds itself, the same idiom the D26/D27 section above uses for questions that are about
+    WHICH git answer is read rather than about argv construction.
+    """
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    repo_id = "acme-commons"
+    worktree = workspace / "work" / repo_id
+    worktree.mkdir(parents=True)
+    git = Git(worktree)
+    await git.exec(["init", "-q", "-b", "main"])
+    (worktree / "README.md").write_text("hello\n")
+    await git.exec(["add", "--", "README.md"])
+    await git.commit("init")
+    # migrate/<repo_id> deliberately never created — the branch genuinely does not exist.
+
+    db_path = workspace / "state" / "fleet.db"
+    _seed_phase_row(db_path, repo_id)
+    async with StateWriter(db_path, owner="test-d43-real-absence") as writer:
+        plan = await _prepare_repo(
+            settings,
+            writer=writer,
+            run_id=RUN_ID,
+            repo_id=repo_id,
+            dest_path="libs/widget",
+            import_specifier=repo_id,
+            rules=(),
+            now=datetime.now(UTC),
+        )
+
+    assert isinstance(plan, _TransformPlan)
+    branch = f"migrate/{repo_id}"
+    assert plan.branch == branch
+    current = await git.text(["rev-parse", "--abbrev-ref", "HEAD"])
+    assert current == branch, (
+        f"a genuinely absent branch must still take the `checkout -B` path and land on it: "
+        f"{current!r}"
     )
