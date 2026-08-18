@@ -5559,6 +5559,46 @@ deliberately does not pre-empt.
 - **Port the Nemotron middleware stack wholesale.** Rejected: over half of it governs an agent loop
   this harness does not have, and per §6 its own project does not eval it.
 
+### 9. Amendment — §4 was greedy, and an unmatched `400` must fall through to `UNKNOWN`
+
+Appended rather than edited into §4, because ADR-0070 is committed (`32365cf`) and this file's header
+rule keeps entries intact. §4 stands as written for the case it names; this section bounds it.
+
+**The defect in §4 as written.** §4 says a `400` on `guided_json` is reclassified as
+`ConstrainedDecodingUnsupported` — capability drift, not failure. But **§3's table carries rows for
+two different `400`s** (an uncompilable grammar, and input context length exceeded), and **§6.1
+concedes that an arbitrary server behind an arbitrary client library requires string- and
+attribute-based matching** rather than typed exceptions. Those three statements cannot all hold: if
+matching is heuristic, then assigning *any* `400` to whichever named cause is tested first is a
+substring proxy standing in for a fact it did not establish. That is the four-state-collapse family
+(D29, D34–D46) reintroduced prospectively, in the very ADR that cites it as the reason for §5.
+
+Found by a read-only subagent auditing the "unknown is never laundered into a negative" pattern from
+Visa's S6 against our own ledger — i.e. by the ledger's own thesis applied to a decision written two
+hours earlier.
+
+**Amendment.** The backend's `400` handling is **ordered and non-exhaustive**, and the fall-through is
+mandatory:
+
+1. Match a **positive, specific** signal for an uncompilable grammar → `ConstrainedDecodingUnsupported`
+   → `CapabilityDrift` → next rung down (§4 unchanged).
+2. Match a **positive, specific** signal for input context overflow → `ContextOverflow` (§5).
+3. **Anything else — including a `400` whose body matches neither — raises the generic transport
+   error and lands in `FailureClass.UNKNOWN`.** It is **not** assigned to (1) or (2) by elimination,
+   by ordering, or by "it was probably the schema."
+
+**Why `UNKNOWN` is the right floor and not a cop-out.** `workers/classify.py`'s `else` arm sets
+`UNKNOWN` with `retryable=True`, so the ladder advances and a persistent case terminates at
+`REQUIRES_HUMAN_INTERVENTION`. It is never silent and never a success. An unmatched `400` costs
+retries — real, and the honest cost of not knowing. Guessing costs a **wrong verdict**, and §4's
+guess would specifically suppress a real failure by re-labelling it a capability property of the
+deployment, which is the expensive direction.
+
+**Consequence for the eventual test.** A backend test suite that only feeds it the two recognised
+`400` bodies proves nothing about this rule. The acceptance criterion is a **third** case: an
+unrecognised `400` body must reach `UNKNOWN`, and a test must fail if a future matcher widens to
+swallow it.
+
 ---
 
 ## ADR-0071 — `open-swe` is **`deepagents` plus an application**, and four of its parts are worth **lifting as code**: the **prepare-run fingerprint** (the wired drift gate D48 says we lack), **capture-at-source offload** (measured thresholds at last), **model-proposes/host-adjudicates** (the semantic-verification shape ADR-0069 §5 said we had no answer for), and **`shlex`-parse-don't-regex** — against a fifth finding that is a **review heuristic, not a mechanism**: safety code that is built, tested, documented, and **wired nowhere**, while operators are told to grant real permissions on its basis

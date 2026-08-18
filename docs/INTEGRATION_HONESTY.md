@@ -2321,3 +2321,79 @@ should do on drift before writing any code**, and that decision belongs in an AD
 during this audit (`llm/cache.py`, `sandbox/container.py`, `workers/buildverify.py`, three test
 files) touch no checkpoint, resume, or drift code — checked by diff before the claims above were
 written, per §33's misattribution lesson.
+
+---
+
+**D49 — OPEN. The model-repair rewrite path lands patches that are neither size-checked nor
+path-checked, and the one advertised size ceiling is unreachable code. `check_diff` has exactly one
+call site — the *deterministic* branch (`workers/rewrite.py:332`) — and it omits the `max_bytes`
+argument, so `transform.max_patch_bytes` is enforced nowhere while `docs/SPEC.md` asserts in three
+places that it is. The LLM branch (`workers/rewrite.py:397-410`) calls `land_patches` with no diff
+check and no parse probe at all. Compounding it, `_record` appends the deterministic **unit name**,
+never the landed `edit.path`, so `_transform_criterion` probes a name the model may not have
+touched.**
+
+Found twice, independently, by two read-only subagents that never saw each other's output — one
+auditing "deterministic gate strictly before LLM judgment" (Visa S5), one auditing "blast-radius caps
+on writes" (Visa S10). Same line, two lenses. Every citation below was re-derived in the main session
+at `32365cf` after that commit moved the tree.
+
+**What is genuinely strong here, so the entry is not read as broader than it is.** The *schema* half
+of this is exemplary and is not in question. `llm/schemas.py:16-18` states the rule — *"a model that
+could assert it could assert its own patch parses. That is why `ProposedFileEdit` exists instead of
+reusing `FilePatch`"* — and `workers/rewrite.py:528-531` enforces it by constructing every lifted
+patch with `parse_probe_ok=False` hard-coded. The model **cannot** certify its own patch, and under
+`extra="forbid"` it cannot acquire the field to try. That is stronger than the reference pattern this
+was measured against, where the same property is one moved call from inverting. The defect is not
+that the model can certify; it is that **nothing else does either, on that path.**
+
+**The three legs, each verified.**
+
+1. **The size ceiling is dead code.** `rewrite/apply.py:269` takes `max_bytes: int | None = None` and
+   enforces it at `:277-278`, returning a message that *names the setting*: `"patch is larger than
+   transform.max_patch_bytes (… bytes)"`. `settings.py:452` declares
+   `max_patch_bytes: int = Field(default=1_048_576, gt=0)`. The only production call site
+   (`workers/rewrite.py:332`) passes no `max_bytes`; the other two occurrences are internal to
+   `apply.py` (`:295`, `:336`). **Setting, enforcement, and error message all exist and are not
+   connected.**
+2. **The SPEC asserts the ceiling works, in three places.** `SPEC.md:6059` (*"larger →
+   PATCH_REJECTED, never held in RAM"*), `:6634` (*"Patches over `transform.max_patch_bytes` (1 MiB)
+   are rejected as `PATCH_REJECTED` rather than held in memory or sent to a model"*), and `:7056`,
+   where it is listed as a live mitigation for **"Memory bloat at 250 repos × 125k files"**. That
+   third one is the reason severity is not merely cosmetic: a documented memory-bound mitigation is
+   not running.
+3. **The LLM branch skips the check entirely.** `workers/rewrite.py:397-410` calls `land_patches` on
+   `repair.patches`; that path reaches `apply_and_commit` (`vcs/commits.py:232-264`), which performs
+   an idempotency check and `git apply --check` and **neither `check_diff` nor a parse probe** — it
+   is not `rewrite/apply.py:apply_patch`. Every commit is `--no-verify` (`vcs/git.py`), so hooks
+   cannot backstop it either.
+
+**The evidence-domain half, which is the subtler defect.** `_record`
+(`workers/rewrite.py:535-541`) appends **`unit`** — the deterministic target name — to
+`output.rewritten`, and never `edit.path`. `cli._transform_criterion` probes exactly
+`output.rewritten`. A model returning a `ProposedFileEdit` for a *different* path inside the same
+dest subtree therefore gets that file written and never probed, while the file that **is** probed may
+be one it did not touch. The gate's domain is deterministic — which is correct — but it is **not
+derived from the diff that actually landed**. Only `cli.py`'s changed-path clause catches
+out-of-subtree escapes, and it runs after the wave loop has already committed: an audit, not a gate.
+
+**Severity: correctness, and it is the model path specifically.** Nothing here affects the
+deterministic bulk rewrite, which is bounded by rule coverage and is reviewable — a legitimate
+migration rewrite may touch every file in a repo, so a global `max_files_touched` would be actively
+wrong and is **not** what this entry asks for. The asymmetry is inverted from what it should be: the
+reviewable path carries the containment check, the model-authored path carries none.
+
+**Would a test catch it? No.** No test asserts that a model-supplied patch is size-checked, path-checked,
+or probed; `transform.max_patch_bytes` has no test that exercises a patch exceeding it, because no
+call site can produce that rejection. `models/tasks.py` declares a `files_changed` field that is never
+written, and `cli.py` computes the staged set from a real `DiffStat` and collapses it to a bool — so
+the data a cap would need is already produced and discarded.
+
+**Not fixed here.** The mechanical part is roughly one line —
+`check_diff(..., max_bytes=settings…max_patch_bytes)` on `repair.patches` at
+`workers/rewrite.py:397` — and that single change closes legs 1 and 3 together. But the *rule* is a
+decision this ledger should not make: **deterministic writes bounded by rule coverage, model-authored
+writes bounded by size and path.** That belongs in an ADR, along with whether `_record` should track
+landed paths (changing what `output.rewritten` means, which the §3.2 criterion reads) and whether
+`SPEC.md`'s three claims are corrected or the code is brought up to them. Rule 7: surfaced, not
+averaged into an unrelated edit.
