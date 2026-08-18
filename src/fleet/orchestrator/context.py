@@ -45,6 +45,7 @@ from fleet.llm.client import LadderModelClient
 from fleet.models.base import utcnow
 from fleet.models.enums import Phase, TransformTier
 from fleet.obs.log import get_logger
+from fleet.orchestrator.findings import LlmFindingSink
 from fleet.settings import FleetConfig
 from fleet.workers.base import WorkerContext
 
@@ -145,11 +146,32 @@ class RunContext:
     above so that the assembly happens once per run and in one place, and so that no rung can
     quietly build a differently-configured client of its own."""
 
+    llm_findings: LlmFindingSink = field(init=False, repr=False, compare=False)
+    """Where the client's `CapabilityDrift` and `BackendFailover` records are PERSISTED.
+
+    Derived rather than injected because it is the client's other half: the client accepts
+    `on_drift`/`on_failover` precisely so that it does not have to hold a database handle, and
+    for the whole life of that design **nobody supplied either callback** — every drift and
+    every failover the fleet computed was discarded at the `is None` guards in `_emit_drift` and
+    `_emit_failover`. Building the sink here, beside the client it feeds, is what makes that
+    impossible to forget again. `PhaseRunner` drains it; see `orchestrator/findings.py`."""
+
     def __post_init__(self) -> None:
         """Assemble the client. `object.__setattr__` because the dataclass is frozen and this is
         a derived field, not a mutation of run identity."""
+        sink = LlmFindingSink(
+            run_id=str(self.run_id),
+            writer=self.writer,
+            repository=self.repository,
+            clock=self.clock,
+        )
+        object.__setattr__(self, "llm_findings", sink)
         client: ModelClient = LadderModelClient(
-            self.llm, self.backends, policy=self.llm_policy
+            self.llm,
+            self.backends,
+            policy=self.llm_policy,
+            on_drift=sink.on_drift,
+            on_failover=sink.on_failover,
         )
         if self.llm_cache is not None:
             client = CachingModelClient(

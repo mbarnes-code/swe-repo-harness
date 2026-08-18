@@ -379,6 +379,13 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         except* RunHalted as raised:
             halt = _flatten(raised)
 
+        # The wave's last drain. `_drive` flushes after every dispatch, so this is normally a
+        # no-op; it exists for the narrow window where a dispatch raised between the client's
+        # synchronous `on_drift` / `on_failover` callback and that flush. Deliberately NOT
+        # suppressed — the sink writes through the run's one writer, so a failure here means the
+        # writer is gone, and that is not a condition to report a green wave through (Rule 11).
+        await self.ctx.llm_findings.flush()
+
         self.ctx.project()
         state = await self.scheduler.wave_state(wave_index)
         return WaveReport(
@@ -465,6 +472,15 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 cancel=cancel,
                 checkpoint=checkpoint,
             )
+            # Whatever the LLM layer computed during that dispatch is written NOW, before the
+            # dispatch's own outcome is acted on. `on_drift`/`on_failover` are synchronous
+            # callbacks on the client's hot path, so they can only buffer; this is the await
+            # that makes them durable, and it sits here — after every dispatch, on every path,
+            # success included — because a `CapabilityDrift` is emitted whether or not the call
+            # SUCCEEDED (§13 row 37: a local server that silently drops guided JSON is still a
+            # finding, and would otherwise never be flushed by a green wave).
+            await self.ctx.llm_findings.flush()
+
             execution, breach = dispatched.execution, dispatched.breach
             if dispatched.re_entry is ReEntry.REJECTED:
                 # The worker refused the checkpoint, so it is gone: the phase re-ran whole and
@@ -580,6 +596,18 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 # §11.8: terminal for the RUN, never for the repo. The lease is left to expire
                 # and the row stays for `fleet resume`, so no attempt is charged to a repo that
                 # did nothing wrong.
+                #
+                # §13 row 40's `BackendUnavailable` finding is written FIRST, and deliberately
+                # not after: `RunHalted` unwinds the TaskGroup, and an exit-8 whose cause exists
+                # only in a log line leaves the operator reconstructing which tier died and
+                # which targets were tried from a stderr tail. `failure.stderr_tail` is
+                # `TierUnavailable`'s own message (client.py:151-155) and already names both.
+                await self.ctx.llm_findings.record_backend_unavailable(
+                    repo_id=repo_id,
+                    phase=self.phase,
+                    detail=self._detail(failure),
+                    reason=decision.reason,
+                )
                 raise RunHalted(
                     HaltReason.TIER_UNAVAILABLE,
                     f"every backend target for {repo_id}'s tier is DOWN: {decision.reason}",

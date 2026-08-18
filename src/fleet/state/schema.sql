@@ -261,7 +261,26 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'HoistBrokeOwner' | 'HoistRollbackDemotion'
                                                   -- | 'BaselineRed' | 'RuleConflict'
                                                   -- | 'RuleOscillation' | 'UnmergedDependency'
-                                                  -- | 'OperatorQuarantine' | 'ConfigDrift' | ...
+                                                  -- | 'OperatorQuarantine' | 'ConfigDrift'
+                                                  -- | 'CapabilityDrift'    -- §13 row 37, the
+                                                  --     answering rung was below the promised
+                                                  --     one. repo_id IS NULL, because a drift is
+                                                  --     a property of a TARGET and not of any
+                                                  --     one repository
+                                                  -- | 'BackendUnavailable' -- §13 row 40, every
+                                                  --     target for a tier spent. Written by
+                                                  --     PhaseRunner immediately before the
+                                                  --     exit-8 halt
+                                                  -- | ...
+                                                  -- CAVEAT. "Shipped" above means DECLARED, not
+                                                  --   emitted. Several names in this list are
+                                                  --   READ by Python that nothing writes
+                                                  --   ('BaselineRed', 'PreflightFailed',
+                                                  --   'RuleConflict') and five have no Python at
+                                                  --   all ('WeakEdge' and the four Contract/Hoist
+                                                  --   kinds). The two annotated above each have a
+                                                  --   live INSERT behind them, in
+                                                  --   orchestrator/findings.py
     severity   TEXT NOT NULL DEFAULT 'warn',
     fingerprint TEXT NOT NULL,                    -- sha256 of the semantic identity of the finding
     payload    TEXT NOT NULL,                     -- Pydantic dump_json, post-redaction

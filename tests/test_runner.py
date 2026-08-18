@@ -26,6 +26,7 @@ The properties pinned here are the ones whose absence is silent or catastrophic:
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -64,6 +65,7 @@ from fleet.orchestrator.budgets import (
     Limits,
 )
 from fleet.orchestrator.context import RunContext, default_logger
+from fleet.orchestrator.findings import BACKEND_UNAVAILABLE, CAPABILITY_DRIFT
 from fleet.orchestrator.retry import RetryAction, RetryDecision, RetryPolicy
 from fleet.orchestrator.runner import HaltReason, PhaseCheckpoint, PhaseRunner
 from fleet.orchestrator.scheduler import (
@@ -223,6 +225,36 @@ def fails(failure_class: FailureClass, *, retryable: bool = True) -> Behaviour:
     return behaviour
 
 
+def asks_the_model(role: str = "transform_repair") -> Behaviour:
+    """A worker that actually uses `ctx.llm`. The LLM findings only exist if a model was called,
+    so a behaviour that never calls one cannot exercise the drift path at all."""
+
+    async def behaviour(
+        ctx: WorkerContext, payload: ScriptedInput
+    ) -> WorkerResult[ScriptedOutput]:
+        answer = await ctx.llm.complete(role, [Message(role="user", content="go")], Verdict)
+        return WorkerResult(status="ok", output=ScriptedOutput(note=answer.value.summary))
+
+    return behaviour
+
+
+def fails_with(failure_class: FailureClass, stderr_tail: str) -> Behaviour:
+    """Like `fails`, but with the worker's OWN message — which is what the §13 row 40 finding
+    carries, so a test that let `fails` synthesise one would be asserting on the fixture."""
+
+    async def behaviour(
+        ctx: WorkerContext, payload: ScriptedInput
+    ) -> WorkerResult[ScriptedOutput]:
+        return WorkerResult(
+            status="failed",
+            error=WorkerError(
+                failure_class=failure_class, retryable=False, stderr_tail=stderr_tail
+            ),
+        )
+
+    return behaviour
+
+
 def partial(completed: Sequence[str], remaining: Sequence[str]) -> Behaviour:
     async def behaviour(
         ctx: WorkerContext, payload: ScriptedInput
@@ -315,9 +347,13 @@ class ScriptedBackend:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        #: Mutable so a test can make the endpoint DISHONEST — promising the top rung in
+        #: `structured_output_modes` while the booleans can honour none of it, which is exactly
+        #: the §13 row 37 shape `_emit_drift` reports.
+        self.caps = ModelCapabilities(supports_json_schema=True, max_output_tokens=8192)
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
-        return ModelCapabilities(supports_json_schema=True, max_output_tokens=8192)
+        return self.caps
 
     async def invoke(
         self,
@@ -431,6 +467,17 @@ class Harness:
             )
 
         await self.writer.submit(unit)
+
+    async def findings(self, kind: str) -> list[tuple[str | None, str, dict[str, object]]]:
+        """`(repo_id, severity, payload)` per `findings` row of a kind — read raw, because what
+        is under test is what an operator would find on disk after the run stopped."""
+        async with self.read_conn.execute(
+            "SELECT repo_id, severity, payload FROM findings "
+            "  WHERE run_id = ? AND kind = ? ORDER BY finding_id",
+            (RUN, kind),
+        ) as cursor:
+            rows = await cursor.fetchall()
+        return [(r[0], str(r[1]), dict(json.loads(r[2]))) for r in rows]
 
     async def phase_row(self, repo_id: str) -> tuple[str, int, int, str | None, str | None]:
         """`(status, attempts, transient_retries, failure_class, last_error)` — read raw, so the
@@ -1425,6 +1472,88 @@ async def test_a_tier_outage_halts_the_run_and_leaves_the_repo_untouched(
     assert report.halt.exit_code == 8
     _, attempts, _, _, _ = await harness.phase_row("repo-a")
     assert attempts == 0, "an outage consumed one of the repo's three chances"
+
+
+async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halts(
+    harness: Harness,
+) -> None:
+    """§13 row 40. An exit-8 halt whose cause exists only in a log line makes the operator
+    reconstruct which tier died and what was tried from a stderr tail — and `RunHalted` unwinds
+    the TaskGroup, so "we will record it afterwards" has no afterwards. The finding is therefore
+    written BEFORE the raise, and this test reads it back off disk after the halt.
+
+    `targets_tried` carries the worker's own `stderr_tail` verbatim, which on the real path is
+    `TierUnavailable`'s message (client.py:151-155) — the tier and, in order, every target the
+    ladder spent. Verbatim rather than parsed: nothing in this codebase branches on message text.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [
+        fails_with(
+            FailureClass.BACKEND_UNAVAILABLE,
+            "tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
+        )
+    ]
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is not None and report.halt.exit_code == 8
+    rows = await harness.findings(BACKEND_UNAVAILABLE)
+    assert len(rows) == 1, "the halt was recorded nowhere an operator can query"
+    repo_id, severity, payload = rows[0]
+    assert repo_id == "repo-a"
+    assert severity == "error", "the reason the run stopped must not rank beside a warning"
+    assert payload["phase"] == PHASE.name
+    tried = str(payload["targets_tried"])
+    assert "WORKHORSE" in tried
+    assert "fake:fake-1" in tried and "fake:fake-2" in tried, (
+        "EVERY target, not just the last: an operator deciding whether to fail a whole profile "
+        "over needs to know the fallback was tried too"
+    )
+
+
+async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harness) -> None:
+    """The end-to-end proof that `CapabilityDrift` survives the process, with NO explicit flush.
+
+    Everything here is the shipped path: `RunContext` assembles the client and its sink, the
+    worker calls `ctx.llm.complete`, the endpoint answers at PROMPTED while its config promised
+    JSON_SCHEMA, and the runner drains the sink after the dispatch. Before this lane the same
+    scenario produced a green wave and an empty `findings` table.
+
+    The wave SUCCEEDS, deliberately. `_emit_drift` fires per target regardless of call outcome
+    (§13 row 37), so a flush that only ran on the failure paths would lose exactly the case the
+    row exists for: an endpoint that answers happily at a rung below the one it advertised.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    harness.backend.caps = ModelCapabilities(
+        supports_json_schema=False,
+        supports_tools=False,
+        supports_constrained_decoding=False,
+        max_output_tokens=8192,
+        structured_output_modes=(
+            StructuredOutputMode.JSON_SCHEMA,
+            StructuredOutputMode.PROMPTED,
+        ),
+    )
+    BEHAVIOURS["repo-a"] = [asks_the_model()]
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is None
+    status, _, _, _, _ = await harness.phase_row("repo-a")
+    assert status == "SUCCEEDED", "drift is a finding, never a failure"
+
+    rows = await harness.findings(CAPABILITY_DRIFT)
+    assert len(rows) == 1, (
+        "the client computed the drift and nobody wrote it — the exact defect this lane closes"
+    )
+    repo_id, severity, payload = rows[0]
+    assert repo_id is None, "a drift belongs to a TARGET, not to whichever repo was in flight"
+    assert severity == "warn"
+    assert payload["promised"] == str(StructuredOutputMode.JSON_SCHEMA)
+    assert payload["actual"] == str(StructuredOutputMode.PROMPTED)
+    assert payload["model_id"] == "fake-1"
 
 
 async def test_a_full_volume_halts_the_run_with_exit_9_and_leaves_the_repo_untouched(
