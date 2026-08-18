@@ -208,6 +208,14 @@ class RewriteInput(WorkerInput):
         default_factory=dict, description="Relocation-map substitutions, e.g. {{new_pkg}}"
     )
     max_passes: int = Field(default=DEFAULT_MAX_PASSES, ge=1)
+    max_patch_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="`transform.max_patch_bytes` (`settings.py:452`), whose Settings default "
+        "this mirrors so `check_diff` enforces the cap even before a driver threads the live "
+        "configured value onto this field — see `ContractsInput.config` (`workers/contracts.py`) "
+        "for the shape a driver uses to pass a non-default value explicitly.",
+    )
     completed_units: list[str] = Field(
         default_factory=list,
         description="The `partial` checkpoint replayed by the runner; never replayed by this "
@@ -329,7 +337,11 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         f"rules considered: {[r.id for r in pipeline.rules_for(unit)]}",
                     )
                 else:
-                    reason = check_diff(outcome.patch.diff, payload.dest_path)
+                    reason = check_diff(
+                        outcome.patch.diff,
+                        payload.dest_path,
+                        max_bytes=payload.max_patch_bytes,
+                    )
                     if reason is not None:
                         # §3.2 step 6.6: rejected BEFORE `git apply`, so an out-of-tree write is
                         # never even intended. A rule that writes outside the subtree is a rule
@@ -389,6 +401,26 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         failure,
                         retryable=repair is None or repair.abandon_reason is None,
                         detail=f"{unit} ({probe}): {stderr}",
+                        landed=landed,
+                        remaining=owed[index:],
+                        output=output,
+                        usage=usage,
+                    )
+                rejected = _rejected_patch(
+                    repair.patches, payload.dest_path, payload.max_patch_bytes
+                )
+                if rejected is not None:
+                    # The model cannot certify its own patch (`_as_patches` hard-codes
+                    # `parse_probe_ok=False`), and nothing downstream of here checks size or
+                    # path either — `apply_and_commit` runs an idempotency check and `git apply
+                    # --check`, never `check_diff`. Gate it here, before `land_patches`, the same
+                    # way the deterministic branch gates its own patch above.
+                    path, reason = rejected
+                    output.unresolved.append(unit)
+                    return self._failed(
+                        FailureClass.PATCH_REJECTED,
+                        retryable=True,  # a later rung may propose a smaller or in-tree patch
+                        detail=f"{unit} ({path}): {reason}",
                         landed=landed,
                         remaining=owed[index:],
                         output=output,
@@ -641,6 +673,22 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
 
 def _unwrap(evidence: tuple[FailureClass, str, str] | None) -> tuple[FailureClass, str, str]:
     return evidence or (FailureClass.RULE_MISS, "deterministic rules", "no evidence captured")
+
+
+def _rejected_patch(
+    patches: Sequence[FilePatch], dest_path: str, max_bytes: int
+) -> tuple[str, str] | None:
+    """The first `check_diff` rejection among a repair rung's proposed patches, or `None`.
+
+    A `(path, reason)` pair rather than a bare reason: a repair rung may propose several files in
+    one call (`LlmPatchProposal.files`, `max_length=64`), and the failure detail should name which
+    one is at fault, not just that one of them was.
+    """
+    for patch in patches:
+        reason = check_diff(patch.diff, dest_path, max_bytes=max_bytes)
+        if reason is not None:
+            return patch.path, reason
+    return None
 
 
 def _targets_are_present(root: Path, units: Sequence[str], subtree: str) -> bool:

@@ -636,6 +636,75 @@ def test_a_rule_conflict_leaves_the_file_unchanged_and_spends_no_rung(tmp_path: 
 
 
 # =======================================================================================
+# 5b. D49 — the dead patch cap enforced, and the LLM branch gated the same way
+# =======================================================================================
+def test_an_oversize_deterministic_patch_is_rejected_before_it_is_ever_committed(
+    tmp_path: Path,
+) -> None:
+    """`transform.max_patch_bytes` was declared, enforced inside `check_diff`, and connected to
+    nothing: the one production call site omitted `max_bytes` (D49 leg 1), so the ceiling §11.3
+    and `SPEC.md:6059,6634,7056` all describe was unreachable code — no diff could ever be too
+    big. `RewriteInput.max_patch_bytes` closes that: the deterministic call site now threads it,
+    and the error names the setting so an operator reading `stderr_tail` knows which knob to
+    turn, not just that something was rejected.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({"r1": lambda t: t.replace("alpha", "ALPHA" * 200)}))
+    payload = rewrite_payload(anchor, [unit], max_patch_bytes=64)
+
+    result = asyncio.run(worker.run(make_ctx(repo), payload))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.PATCH_REJECTED
+    assert "transform.max_patch_bytes" in result.error.stderr_tail, (
+        "the message must name the setting an operator would need to raise"
+    )
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\n", (
+        "the oversize patch never applied"
+    )
+    assert log_entries(repo, anchor) == [], "nothing was committed"
+
+
+def test_a_model_patch_outside_dest_path_is_rejected_before_it_is_ever_landed(
+    tmp_path: Path,
+) -> None:
+    """D49 leg 3: the LLM branch called `land_patches` with no diff check and no parse probe at
+    all — `apply_and_commit` runs an idempotency check and `git apply --check`, never
+    `check_diff`, and `parse_probe_ok=False` is hard-coded because the model may not certify its
+    own patch (`llm/schemas.py`). Nothing else stood between a model-authored patch that names a
+    path outside the repo's own monorepo subtree and a commit. This pins that the same
+    `check_diff` gate the deterministic branch already had now runs on `repair.patches` too,
+    BEFORE `land_patches`, so the escape is refused rather than merely audited after the fact.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    client = FakeModelClient(
+        _proposal("elsewhere/other.py", "old\n", "new\n", marker="escape")
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit])))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.PATCH_REJECTED
+    assert result.error.retryable is True, "a later rung may still propose an in-tree patch"
+    assert "elsewhere/other.py" in result.error.stderr_tail
+    assert "escape the repo subtree" in result.error.stderr_tail
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\n", "the target file is untouched"
+    assert log_entries(repo, anchor) == [], "the out-of-subtree patch was never committed"
+
+
+# =======================================================================================
 # 6. the repair rung is shown this failure, verbatim, and nothing else
 # =======================================================================================
 def _proposal(path: str, before: str, after: str, *, marker: str) -> LlmPatchProposal:
