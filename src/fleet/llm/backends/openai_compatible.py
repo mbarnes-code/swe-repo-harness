@@ -37,6 +37,7 @@ import os
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from typing import Any, ClassVar, Final, Protocol, cast
 
+import httpx
 from openai import (
     APIConnectionError,
     APIStatusError,
@@ -57,6 +58,7 @@ from fleet.llm.client import (
 )
 from fleet.models.enums import StructuredOutputMode
 from fleet.models.tasks import BackendTarget, ModelCapabilities, TokenUsage
+from fleet.obs.log import get_logger
 
 #: Sent when a target declares no `api_key_env`. The OpenAI SDK refuses to construct without an
 #: api_key, and a local vLLM/Ollama/LM Studio server ignores whatever arrives — so "no key
@@ -86,6 +88,10 @@ _FINISH_REASONS: Final[Mapping[str, FinishReason]] = {
 #: The SDK's own transient layer. `TransportError` documents itself as what survives it, so the
 #: number belongs here rather than being left to whatever the SDK's default happens to be.
 _SDK_TRANSIENT_RETRIES: Final[int] = 2
+
+#: (declared, served) pairs already reported by `_warn_if_renamed`. Process-lifetime, and
+#: bounded by the profile rather than by the call count.
+_RENAME_WARNED: Final[set[tuple[str, str]]] = set()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -161,7 +167,23 @@ class ChatTransport(Protocol):
 
 class _SdkTransport:
     """The ONLY object in the harness that imports `openai`. Everything it hands back is a plain
-    mapping, so no SDK type escapes this class."""
+    mapping, so no SDK type escapes this class.
+
+    Both constructor arguments default, so `OpenAICompatibleBackend()` — and therefore
+    `register_backend`'s `cls()` — still builds this with no arguments and no HTTP client. They
+    exist so a test can hand the SDK an `httpx.MockTransport` and drive this class for real: the
+    request that leaves here is otherwise the one piece of the module nothing exercises, and it is
+    where a wrong wire shape (a `strict` flag over a schema we do not control, a misplaced
+    `extra_body`) hides from a fake-transport suite.
+    """
+
+    def __init__(
+        self,
+        http_client: httpx.AsyncClient | None = None,
+        max_retries: int = _SDK_TRANSIENT_RETRIES,
+    ) -> None:
+        self._http_client = http_client
+        self._max_retries = max_retries
 
     async def __call__(
         self,
@@ -177,7 +199,8 @@ class _SdkTransport:
             base_url=base_url,
             api_key=api_key,
             timeout=timeout_s,
-            max_retries=_SDK_TRANSIENT_RETRIES,
+            max_retries=self._max_retries,
+            http_client=self._http_client,
         )
         # The SDK's `create` is an overloaded TypedDict-keyed signature; the payload is built
         # above from `StructuredOutputMode`, not from user input, so it is passed through one
@@ -314,9 +337,19 @@ def build_payload(
     if schema is None:
         return payload
     if mode is StructuredOutputMode.JSON_SCHEMA:
+        # NO `"strict": true`. Strict mode is a SUBSET of JSON Schema — every property must appear
+        # in `required` — and the schema here is whatever `response_model.model_json_schema()`
+        # produced (`client.py:498`), which we do not control and which legitimately carries
+        # optional fields: 8 of the 12 §9 roles do, across all three tiers. Asserting strict over
+        # one is a 400 from any endpoint that enforces it, and a 400 becomes a `CONNECTION`
+        # failover that walks the whole tier and ends in `TierUnavailable` — a permanent outage
+        # for that role, not a degraded answer. vLLM ignores the flag, so a local-only test suite
+        # never sees it; hosted OpenAI-compatible endpoints are explicitly in this module's scope.
+        # Omitted rather than set false: `strict` defaults to false, and the absent key is the
+        # honest statement that we make no claim about a schema we did not write.
         payload["response_format"] = {
             "type": "json_schema",
-            "json_schema": {"name": _TOOL_NAME, "schema": schema, "strict": True},
+            "json_schema": {"name": _TOOL_NAME, "schema": schema},
         }
     elif mode is StructuredOutputMode.TOOL_CALL:
         payload["tools"] = [
@@ -349,6 +382,7 @@ def _render(message: Message) -> dict[str, str]:
 
 def parse_reply(raw: Mapping[str, object], target: BackendTarget) -> BackendReply:
     """Decoded body → `BackendReply`. Reports, decides nothing."""
+    _warn_if_renamed(raw, target)
     message = _first_message(raw, target)
     text = message.get("content")
     tool_arguments = _tool_arguments(message)
@@ -357,6 +391,43 @@ def parse_reply(raw: Mapping[str, object], target: BackendTarget) -> BackendRepl
         tool_arguments=tool_arguments,
         usage=_usage(raw, target),
         finish_reason=_finish_reason(raw, target, text, tool_arguments),
+    )
+
+
+def _warn_if_renamed(raw: Mapping[str, object], target: BackendTarget) -> None:
+    """Warn once per (declared, served) pair when the endpoint answers under another name.
+
+    `_usage` deliberately discards the served name so the cache key stays the config string. That
+    is right for the cache and blind for the operator: a vLLM `--served-model-name`, a swapped
+    Ollama tag or a silently bumped hosted snapshot would otherwise be undetectable — the profile
+    says one thing, the GPU runs another, and every artefact in the run attributes the output to
+    the model nobody actually called.
+
+    A log line rather than a field on `TokenUsage`: detection costs nothing here, while carrying
+    it in the ledger would mean a schema change and a second model-name string one refactor away
+    from reaching the cache key that this module just spent a fix keeping clean.
+
+    Deduplicated because it would otherwise fire on every call of a 250-repo run — thousands of
+    identical lines, which is how a real signal gets filtered out. The set is bounded by the
+    number of DISTINCT pairs, i.e. by the profile, not by the call count.
+    """
+    served = raw.get("model")
+    if not isinstance(served, str) or not served or served == target.model_id:
+        return
+    pair = (target.model_id, served)
+    if pair in _RENAME_WARNED:
+        return
+    _RENAME_WARNED.add(pair)
+    get_logger("fleet.llm.backends.openai_compatible").warning(
+        "served_model_mismatch",
+        backend=OpenAICompatibleBackend.name,
+        base_url=target.base_url,
+        declared_model_id=target.model_id,
+        served_model_id=served,
+        detail=(
+            "the endpoint answered under a different model name than config/models.yaml "
+            "declares; usage, cost and the cache key are all attributed to the DECLARED id"
+        ),
     )
 
 

@@ -34,8 +34,14 @@ profiles:
       - { backend: anthropic, model_id: claude-sonnet-5, effort: high,
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
+    # No `effort:` on this target, deliberately. The Anthropic reasoning-effort parameter's
+    # support on Haiku 4.5 is documented inconsistently upstream — one page says the parameter
+    # itself is rejected, another says only the `max` level is — and under the stricter reading
+    # every CHEAP call on this profile would 4xx. Omitting it is strictly safer and loses
+    # nothing: `BackendTarget.effort` defaults to `medium` and the anthropic backend is free to
+    # send nothing at all. (Orchestrator decision, recorded per CLAUDE.md guardrail 1.)
     CHEAP:
-      - { backend: anthropic, model_id: claude-haiku-4-5, effort: low,
+      - { backend: anthropic, model_id: claude-haiku-4-5,
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 
@@ -80,9 +86,16 @@ profiles:
           capabilities_override: { supports_tools: true, supports_constrained_decoding: true,
                                    max_context: 32768, max_output_tokens: 8192,
                                    structured_output_modes: [TOOL_CALL, CONSTRAINED, PROMPTED] } }
-    # CHEAP is deliberately left at the backend's declared floor: no override, no structured
-    # output of any kind. `negotiate()` lands on PROMPTED, validation is still Pydantic on our
-    # side (ADR-0002), and a small model that can only be asked nicely stays a legitimate target.
+    # CHEAP declares NO structured-output support, deliberately: `negotiate()` lands on
+    # PROMPTED, validation is still Pydantic on our side (ADR-0002), and a small model that can
+    # only be asked nicely stays a legitimate target. That is the whole point of this profile.
+    #
+    # `max_output_tokens` is nonetheless declared, and must be > `llm.default_max_output_tokens`
+    # (4096). §13 row 47's truncation retry raises the cap on the SAME target and bounds the
+    # raise by this number, so leaving it at the backend's 4096 default would make the first
+    # `length` reply an immediate `BudgetExhausted` — the retry the spec promises would be
+    # unreachable on this target rather than merely unused (`client.py` `_raise_cap`).
     CHEAP:
       - { backend: openai_compatible, model_id: qwen3-1.7b, effort: low, price: free,
-          base_url: 'http://localhost:8000/v1' }
+          base_url: 'http://localhost:8000/v1',
+          capabilities_override: { max_output_tokens: 8192 } }

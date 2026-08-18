@@ -14,16 +14,19 @@ from __future__ import annotations
 import asyncio
 import json
 import textwrap
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
+import httpx
 import pytest
+import structlog.testing
 from pydantic import BaseModel
 
 from fleet.llm.backends import openai_compatible as oc
 from fleet.llm.cache import CachingModelClient, MemoryLlmCacheStore
 from fleet.llm.client import (
     BackendReply,
+    CallPolicy,
     LadderModelClient,
     Message,
     TierRoute,
@@ -193,7 +196,10 @@ def test_prompted_rung_sends_no_structuring_field() -> None:
     assert set(payload) == {"model", "messages", "max_tokens"}
 
 
-def test_json_schema_rung_sends_a_strict_response_format() -> None:
+def test_json_schema_rung_sends_the_schema_without_asserting_strict() -> None:
+    """WHY: see `test_the_json_schema_rung_does_not_assert_strict_on_the_wire` — strict mode is a
+    subset of JSON Schema that 8 of the 12 §9 role schemas do not satisfy, and we do not own those
+    schemas. The absent key is the honest claim; `strict` defaults to false."""
     payload = oc.build_payload(
         target(), [Message(role="user", content="hi")], SCHEMA,
         StructuredOutputMode.JSON_SCHEMA, 512,
@@ -202,7 +208,7 @@ def test_json_schema_rung_sends_a_strict_response_format() -> None:
 
     assert isinstance(fmt, dict)
     assert fmt["type"] == "json_schema"
-    assert fmt["json_schema"] == {"name": "emit_response", "schema": SCHEMA, "strict": True}
+    assert fmt["json_schema"] == {"name": "emit_response", "schema": SCHEMA}
     assert "tools" not in payload
 
 
@@ -518,9 +524,9 @@ def test_a_local_target_without_base_url_is_refused_at_load_naming_the_field(
     WHICH line — profile, tier, target index, and the missing field."""
     models = (SHIPPED_CONFIG / "models.yaml").read_text(encoding="utf-8")
     broken = models.replace(
-        "      - { backend: openai_compatible, model_id: qwen3-1.7b, effort: low, price: free,\n"
-        "          base_url: 'http://localhost:8000/v1' }\n",
-        "      - { backend: openai_compatible, model_id: qwen3-1.7b, effort: low, price: free }\n",
+        "          base_url: 'http://localhost:8000/v1',\n"
+        "          capabilities_override: { max_output_tokens: 8192 } }\n",
+        "          capabilities_override: { max_output_tokens: 8192 } }\n",
     )
     assert broken != models  # the replacement actually matched
 
@@ -598,3 +604,219 @@ def test_no_test_in_this_module_can_reach_a_socket() -> None:
 
     assert "AsyncOpenAI(" in sdk_class
     assert source.count("AsyncOpenAI(") == 1  # one construction site, inside the seam
+
+
+# ---------------------------------------------------------------------------------------------
+# `_SdkTransport` for real, under `httpx.MockTransport` — still no network
+# ---------------------------------------------------------------------------------------------
+
+
+def wire(
+    handler: Callable[[httpx.Request], httpx.Response],
+    *,
+    schema: dict[str, object] | None = SCHEMA,
+    mode: StructuredOutputMode = StructuredOutputMode.JSON_SCHEMA,
+    max_retries: int = 0,
+) -> Mapping[str, object]:
+    """Drive the REAL `_SdkTransport` — real `AsyncOpenAI`, real request serialisation — against
+    an in-memory `httpx` transport. Nothing is faked below the HTTP boundary."""
+    transport = oc._SdkTransport(httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                                 max_retries=max_retries)
+    payload = oc.build_payload(
+        target(), [Message(role="user", content="hi")], schema, mode, 512,
+    )
+    return asyncio.run(
+        transport(base_url="http://localhost:8000/v1", api_key="k",
+                  payload=payload, timeout_s=5.0),
+    )
+
+
+def test_the_sdk_transport_puts_the_negotiated_request_on_the_wire() -> None:
+    """WHY: every other test in this file stops at `ChatTransport`, so the actual serialised
+    request — the thing a server rejects — was never asserted on. This is the one test that reads
+    the bytes."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["url"] = str(request.url)
+        seen["auth"] = request.headers.get("authorization")
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=body(content='{"verdict": "ok"}'))
+
+    decoded = wire(handler)
+    sent = seen["body"]
+
+    assert seen["url"] == "http://localhost:8000/v1/chat/completions"
+    assert seen["auth"] == "Bearer k"
+    assert isinstance(sent, dict)
+    assert sent["model"] == "local-model"
+    assert sent["max_tokens"] == 512
+    assert sent["messages"] == [{"role": "user", "content": "hi"}]
+    assert decoded["choices"]  # the decoded body comes back as a plain mapping
+
+
+def test_the_json_schema_rung_does_not_assert_strict_on_the_wire() -> None:
+    """WHY: strict mode is a SUBSET of JSON Schema — every property must be `required` — and the
+    schema is whatever `response_model.model_json_schema()` produced, which we do not control.
+    8 of the 12 §9 roles declare optional fields, across all three tiers. A hosted endpoint that
+    enforces strict answers 400, which this backend maps to `CONNECTION`, which walks the tier and
+    ends in a permanent `TierUnavailable` for that role.
+
+    vLLM ignores the flag entirely, which is exactly why a local-only fake-transport suite stayed
+    green over it. Asserting on the wire is what makes this catchable at all."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=body(content='{"verdict": "ok"}'))
+
+    partial: dict[str, object] = {
+        "type": "object",
+        "properties": {"verdict": {"type": "string"}, "note": {"type": "string"}},
+        "required": ["verdict"],  # `note` optional — exactly what strict mode forbids
+    }
+    wire(handler, schema=partial)
+    sent = seen["body"]
+
+    assert isinstance(sent, dict)
+    fmt = sent["response_format"]
+    assert fmt["type"] == "json_schema"
+    assert "strict" not in fmt["json_schema"], "strict asserted over a schema we do not control"
+    assert fmt["json_schema"]["schema"] == partial
+
+
+def test_constrained_extra_body_is_merged_into_the_wire_body() -> None:
+    """WHY: `extra_body` is an SDK-level argument, not a wire field. If it were sent as a literal
+    `extra_body` key the server would ignore it and the CONSTRAINED rung would silently degrade to
+    an unconstrained call — a rung that reports success while enforcing nothing."""
+    seen: dict[str, object] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        return httpx.Response(200, json=body(content='{"verdict": "ok"}'))
+
+    wire(handler, mode=StructuredOutputMode.CONSTRAINED)
+    sent = seen["body"]
+
+    assert isinstance(sent, dict)
+    assert sent["guided_json"] == SCHEMA  # top level, not nested under `extra_body`
+    assert "extra_body" not in sent
+
+
+@pytest.mark.parametrize(
+    ("status", "trigger"),
+    [(500, "SERVER_ERROR"), (503, "SERVER_ERROR"), (429, "RATE_LIMIT"), (400, "CONNECTION")],
+)
+def test_http_failures_map_to_the_documented_failover_triggers(
+    status: int, trigger: str,
+) -> None:
+    """WHY (§11.8): the trigger decides whether the ladder moves on. A 429 read as `CONNECTION`
+    would retry a rate limit as if the socket were broken; a 500 read as anything but
+    `SERVER_ERROR` misreports which endpoint is unhealthy."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "nope"}})
+
+    with pytest.raises(TransportError) as excinfo:
+        wire(handler)
+
+    assert excinfo.value.trigger == trigger
+
+
+def test_a_broken_socket_is_a_connection_trigger() -> None:
+    """WHY: a refused connection to a local server that is simply not running is the single most
+    common failure of this backend, and it must fail the target over rather than crash the run."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("connection refused")
+
+    with pytest.raises(TransportError) as excinfo:
+        wire(handler)
+
+    assert excinfo.value.trigger == "CONNECTION"
+
+
+def test_the_sdk_transport_round_trips_through_the_backend_to_a_validated_value() -> None:
+    """WHY: the full stack with only the socket replaced — `LadderModelClient` → backend →
+    `_SdkTransport` → real SDK → wire → parse → Pydantic. If the pieces only fit together through
+    `FakeTransport`, this is the test that says so."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=body(content='{"verdict": "ok"}'))
+
+    tgt = target(api_key_env=None)
+    backend = oc.OpenAICompatibleBackend(
+        oc._SdkTransport(httpx.AsyncClient(transport=httpx.MockTransport(handler)), max_retries=0),
+        env={},
+    )
+    client = LadderModelClient(_SingleTargetRouter(tgt), {"openai_compatible": backend})
+    response = asyncio.run(
+        client.complete("repo_classify", [Message(role="user", content="q")], Answer),
+    )
+
+    assert response.value.verdict == "ok"
+    assert response.usage.model_id == "local-model"  # config string, not the served name
+
+
+# ---------------------------------------------------------------------------------------------
+# Served-model observability, and the shipped truncation-retry headroom
+# ---------------------------------------------------------------------------------------------
+
+
+def test_a_renaming_server_is_reported_once_per_distinct_pair() -> None:
+    """WHY: `_usage` discards the served name to keep the cache key stable, which leaves the
+    operator blind — a vLLM `--served-model-name`, a swapped Ollama tag or a bumped hosted
+    snapshot means the profile says one thing and the GPU runs another, and every artefact in the
+    run attributes the output to a model nobody called.
+
+    Deduplicated on purpose: undeduplicated this fires on every call of a 250-repo run, and a
+    signal repeated thousands of times is a signal nobody reads."""
+    oc._RENAME_WARNED.clear()
+    fake = FakeTransport(body(content='{"verdict": "ok"}', model="qwen3-1.7b-q4-served"))
+    backend = oc.OpenAICompatibleBackend(fake, env={})
+    tgt = target(model_id="qwen3-1.7b", api_key_env=None)
+
+    with structlog.testing.capture_logs() as logs:
+        for _ in range(3):
+            invoke(backend, tgt=tgt)
+
+    renames = [line for line in logs if line.get("event") == "served_model_mismatch"]
+
+    assert len(renames) == 1, "warned per call, not per distinct pair"
+    assert renames[0]["declared_model_id"] == "qwen3-1.7b"
+    assert renames[0]["served_model_id"] == "qwen3-1.7b-q4-served"
+    assert renames[0]["log_level"] == "warning"
+
+
+def test_a_server_answering_under_the_declared_name_is_silent() -> None:
+    """WHY: the warning is only useful if the ordinary case does not trip it."""
+    oc._RENAME_WARNED.clear()
+    backend = oc.OpenAICompatibleBackend(
+        FakeTransport(body(content='{"verdict": "ok"}', model="qwen3-1.7b")), env={},
+    )
+
+    with structlog.testing.capture_logs() as logs:
+        invoke(backend, tgt=target(model_id="qwen3-1.7b", api_key_env=None))
+
+    assert [line for line in logs if line.get("event") == "served_model_mismatch"] == []
+
+
+def test_every_local_tier_can_actually_retry_a_truncated_reply() -> None:
+    """WHY (§13 row 47): the truncation retry raises `max_output_tokens` on the SAME target and
+    bounds the raise by the target's declared maximum. A target whose declared maximum equals
+    `llm.default_max_output_tokens` cannot be raised at all, so `_raise_cap` turns the FIRST
+    truncated reply into `BudgetExhausted` — the retry the spec promises is not merely unused on
+    that target, it is unreachable. The backend's declared floor is exactly 4096, so a local
+    target with no `max_output_tokens` override has this defect silently."""
+    settings = FleetSettings.load(SHIPPED_CONFIG, env={}, cli_overrides={"llm.profile": "local"})
+    router = LlmRouter.from_models_config(settings.models, profile="local")
+    backend = oc.OpenAICompatibleBackend()
+    policy = CallPolicy()
+
+    for tier in (ModelTier.HEAVY, ModelTier.WORKHORSE, ModelTier.CHEAP):
+        first = router.resolve("escalation", tier_override=tier).targets[0]
+        caps = merge_capabilities(backend.declared_capabilities(first), first)
+        cap = min(policy.default_max_output_tokens, caps.max_output_tokens)
+        raised = min(int(cap * policy.truncation_growth), caps.max_output_tokens)
+
+        assert raised > cap, f"{tier.value} cannot raise its cap: truncation retry is unreachable"

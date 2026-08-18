@@ -94,7 +94,7 @@ profiles:
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
     CHEAP:
-      - { backend: anthropic, model_id: claude-haiku-4-5, effort: low,
+      - { backend: anthropic, model_id: claude-haiku-4-5,
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 """
