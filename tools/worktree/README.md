@@ -4,8 +4,9 @@ One isolated checkout per development subagent, so `git add` / `git commit` in o
 sweep up another lane's staged work.
 
 ```sh
-tools/worktree/new-worktree.sh <task-id> [base-ref]   # create + provision + verify
-tools/worktree/rm-worktree.sh  <task-id> [--force] [--delete-branch]
+tools/worktree/new-worktree.sh  <task-id> [base-ref]   # create + provision + verify
+tools/worktree/land-worktree.sh <task-id>               # rebase onto main + ff-only merge (§6)
+tools/worktree/rm-worktree.sh   <task-id> [--force] [--delete-branch]
 ```
 
 A brief can then say **"work in `/home/redmage/swe repo harness worktrees/wt-<task-id>`"** and
@@ -191,29 +192,73 @@ the full suite" as the thing to not do**, independently of the reaping question.
 
 ---
 
-## 6. Branch model — needs a decision, flagged not taken
+## 6. Branch model — decided: rebase, then `--ff-only` merge
 
 A worktree **must** be on its own branch: git refuses to check out `main` in two worktrees at
 once. So the branchless status quo is not available here; `new-worktree.sh` creates
 `agent/<task-id>` from `HEAD`.
 
 This project's entire history is direct commits to `main` (`checkpoint NN: …`), so how lane
-branches rejoin it is a real decision with consequences for how checkpoints read:
+branches rejoin it is a real decision with consequences for how checkpoints read. Three models
+were costed out:
 
-* **A — rebase + `--ff-only` merge (recommended).** The orchestrator does
-  `git rebase main` in the lane, then `git merge --ff-only agent/<task>` on `main`. History stays
-  linear and the checkpoint style survives untouched. Cost: the orchestrator resolves conflicts
-  serially, one lane at a time — which is the point, since that is where the
-  `docs/INTEGRATION_HONESTY.md` contention lands (§7).
-* **B — `git merge --no-ff` per lane.** Preserves each lane as a visible unit and records who did
-  what. Cost: `main` becomes a braid, and `git log --oneline` no longer reads as the checkpoint
-  ledger it currently is.
-* **C — cherry-pick the lane's commits onto `main`.** Keeps linearity with no rebase in the lane.
-  Cost: duplicate SHAs, and the lane branch is then a lie about what landed.
+* **A — rebase + `--ff-only` merge (chosen).** The orchestrator does `git rebase main` in the
+  lane, then `git merge --ff-only agent/<task>` on `main`. History stays linear and the checkpoint
+  style survives untouched. Cost: the orchestrator resolves conflicts serially, one lane at a
+  time. **That cost is accepted** — it is arguably where contention belongs anyway, since it is
+  the same place `docs/INTEGRATION_HONESTY.md` contention already lands (§7).
+* **B — `git merge --no-ff` per lane.** Rejected. Preserves each lane as a visible unit and
+  records who did what, but `main` becomes a braid and `git log --oneline` no longer reads as the
+  checkpoint ledger it currently is — every `docs/PROGRESS.md` section and every ledger SHA-pin
+  assumes a linear `checkpoint NN:` history.
+* **C — cherry-pick the lane's commits onto `main`.** Rejected. Keeps linearity with no rebase in
+  the lane, but produces duplicate SHAs (the cherry-picked commit and the original lane commit are
+  different objects with the same message), and the lane branch is then a lie about what actually
+  landed on `main`.
 
 `rm-worktree.sh` refuses to drop a worktree with uncommitted changes and warns when the branch has
-commits not on `main`, so no model can silently lose work. **Pick one before the next multi-agent
-round** — the scripts do not assume any of the three.
+commits not on `main`, so no model can silently lose work.
+
+### Landing procedure
+
+```sh
+tools/worktree/land-worktree.sh <task-id>
+```
+
+Run from the primary checkout once a lane's work is committed and ready. It:
+
+1. Refuses if the worktree (or the primary checkout) has uncommitted changes.
+2. Refuses if `agent/<task-id>` has no commits ahead of `main` — nothing to land.
+3. Rebases `agent/<task-id>` onto `main`, **in the worktree**. If that conflicts, it stops and
+   leaves the rebase in progress for the operator to resolve by hand (`git rebase --continue` or
+   `--abort` in the worktree) — this script never attempts automatic conflict resolution.
+4. Fast-forward-merges `agent/<task-id>` onto `main`, **from the primary checkout** (git refuses
+   to check out `main` in the worktree too, since the primary already has it checked out).
+   `--ff-only` is the safety property this whole model rests on: if the rebase did not actually
+   leave the branch as a fast-forward of `main`, the merge refuses rather than silently creating a
+   merge commit.
+5. Prints the landed SHA range and the commit subjects that landed.
+
+**On "fetch main first":** this repo has an `origin` remote configured for `main`
+(`branch.main.remote=origin`, pointed at the local Gitea mirror), but `origin/main` is a stale
+copy far behind local `main` — this project's real history is unpushed commits made directly in
+the primary checkout — and `git fetch origin` hangs on a credential prompt in a non-interactive
+shell on this host. `land-worktree.sh` does not fetch. It treats the primary checkout's local
+`main` as trunk, which is exactly right for worktrees specifically: a linked worktree shares its
+git-dir with the primary (only `HEAD` is per-worktree), so `main` is not a copy that can go
+stale between the two checkouts — the worktree already sees the same ref the primary does, with
+no sync step possible or needed.
+
+`land-worktree.sh` deliberately does **not** run the test suite before or after landing (~9
+minutes, and `CLAUDE.md` forbids two concurrent pytest sessions). Run it yourself, in the primary
+checkout, after landing:
+
+```sh
+cd "/home/redmage/swe repo harness" && ./.venv/bin/pytest
+```
+
+If a lane's rebase conflicts, it is a real conflict between two lanes' work — `land-worktree.sh`
+will not paper over it, and re-running it after resolving is exactly the retry path.
 
 ---
 
