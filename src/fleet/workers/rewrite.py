@@ -341,6 +341,7 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         outcome.patch.diff,
                         payload.dest_path,
                         max_bytes=payload.max_patch_bytes,
+                        declared_path=outcome.patch.path,
                     )
                     if reason is not None:
                         # §3.2 step 6.6: rejected BEFORE `git apply`, so an out-of-tree write is
@@ -698,7 +699,7 @@ def _rejected_patch(
     one is at fault, not just that one of them was.
     """
     for patch in patches:
-        reason = check_diff(patch.diff, dest_path, max_bytes=max_bytes)
+        reason = check_diff(patch.diff, dest_path, max_bytes=max_bytes, declared_path=patch.path)
         if reason is not None:
             return patch.path, reason
     return None

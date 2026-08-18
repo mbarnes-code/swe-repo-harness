@@ -709,6 +709,132 @@ def test_a_model_patch_outside_dest_path_is_rejected_before_it_is_ever_landed(
 
 
 # =======================================================================================
+# 5c. `check_diff`'s `declared_path` gate is actually wired into both call sites
+# =======================================================================================
+def test_a_model_patch_whose_declared_path_disagrees_with_its_diff_is_rejected_before_landing(
+    tmp_path: Path,
+) -> None:
+    """`ProposedFileEdit.path` and `.diff` are two independently model-supplied fields
+    (`llm/schemas.py`); nothing upstream of `_as_patches` forces them to name the same file.
+    `git apply` only ever looks at the diff's own `---`/`+++` headers, so a mismatch means the
+    file the diff actually writes and the file `FilePatch.path` claims was written are different —
+    and `cli._transform_criterion`'s §3.2 parse probe reads exactly `output.rewritten`
+    (`patch.path`), so the file really on disk would ship unprobed while an unrelated path is
+    certified clean. Both paths stay inside `dest_path` here, so this fails ONLY on the
+    declared/diff mismatch, not on the (already-covered) subtree escape.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    decoy = f"{DEST}/decoy.py"
+    diff = make_unified_diff(unit, "alpha\n", "beta\n")
+    client = FakeModelClient(
+        LlmPatchProposal(
+            files=(ProposedFileEdit(path=decoy, diff=diff),),
+            approach_summary="rewrite mod.py",
+            rationale="the deterministic rule could not land",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit])))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.PATCH_REJECTED
+    assert result.error.retryable is True, "a later rung may still propose a self-consistent patch"
+    assert decoy in result.error.stderr_tail
+    assert unit in result.error.stderr_tail
+    assert (repo / unit).read_text(encoding="utf-8") == "alpha\n", (
+        "the diff's real target is untouched"
+    )
+    assert log_entries(repo, anchor) == [], "the mismatched patch was never committed"
+
+
+def test_a_model_patch_whose_declared_path_agrees_with_its_diff_still_lands(
+    tmp_path: Path,
+) -> None:
+    """The regression pin for the case above: a self-consistent `ProposedFileEdit` — declared
+    `path` equal to the one path its own diff writes — must not be caught by the new gate."""
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    client = FakeModelClient(_proposal(unit, "alpha\n", "beta\n", marker="repair"))
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit])))
+
+    assert result.status == "ok", result.error
+    assert (repo / unit).read_text(encoding="utf-8") == "beta\n"
+    assert result.output is not None and result.output.rewritten == [unit]
+
+
+def test_a_model_patch_declaring_a_renames_destination_path_is_still_accepted(
+    tmp_path: Path,
+) -> None:
+    """`diff_paths` resolves a rename to its POST-image path only (`794ee24`), so a model that
+    declares the destination of its own rename must be accepted — declaring the stale source
+    would be the actual bug. This is the shape most likely to break under a naive
+    `declared_path == diff's-only-path` check, exercised here through the real `RewriteWorker`
+    and a real `git apply --index`, not just `check_diff` in isolation.
+    """
+    old_path = f"{DEST}/old.py"
+    new_path = f"{DEST}/new.py"
+    before = "alpha\nbeta\ngamma\ndelta\n"
+    repo, anchor = make_repo(tmp_path, {old_path: before})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    rename_and_edit_diff = (
+        f"diff --git a/{old_path} b/{new_path}\n"
+        "similarity index 75%\n"
+        f"rename from {old_path}\n"
+        f"rename to {new_path}\n"
+        f"--- a/{old_path}\n"
+        f"+++ b/{new_path}\n"
+        "@@ -1,4 +1,4 @@\n"
+        "-alpha\n"
+        "+ALPHA\n"
+        " beta\n"
+        " gamma\n"
+        " delta\n"
+    )
+    client = FakeModelClient(
+        LlmPatchProposal(
+            files=(ProposedFileEdit(path=new_path, diff=rename_and_edit_diff),),
+            approach_summary="rename old.py to new.py and fix the header",
+            rationale="the deterministic rule cannot rename; the model can",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [old_path])))
+
+    assert result.status == "ok", result.error
+    assert not (repo / old_path).exists(), "the source path is gone"
+    assert (repo / new_path).read_text(encoding="utf-8") == "ALPHA\nbeta\ngamma\ndelta\n"
+    assert result.output is not None and result.output.rewritten == [new_path], (
+        "the declared DESTINATION path landed and was recorded — never the stale source"
+    )
+
+
+# =======================================================================================
 # 6. the repair rung is shown this failure, verbatim, and nothing else
 # =======================================================================================
 def _proposal(path: str, before: str, after: str, *, marker: str) -> LlmPatchProposal:
