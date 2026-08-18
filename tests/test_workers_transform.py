@@ -483,6 +483,10 @@ def test_the_guard_skips_a_patch_present_at_the_tip(tmp_path: Path) -> None:
     first = asyncio.run(worker.run(make_ctx(repo), payload))
     assert first.status == "ok"
     assert len(log_entries(repo, anchor)) == 1
+    assert first.output is not None and first.output.rewritten == [unit], (
+        "D49 leg 3, deterministic branch: `unit` genuinely IS the landed path here, so `_record` "
+        "must still report it — this is the no-regression case for the fix below"
+    )
 
     second = asyncio.run(worker.run(make_ctx(repo), payload))
     assert second.status == "ok"
@@ -779,6 +783,56 @@ def test_the_repair_prompt_carries_this_failures_verbatim_stderr_and_no_prior_tr
     assert result.status == "ok", "the repair patch landed"
     assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
     assert result.usage.cost_usd == pytest.approx(0.01), "the rung's spend is reported"
+    assert result.output is not None and result.output.rewritten == [clean], (
+        "D49 leg 3: the model repaired `two` by patching `clean` instead — `_record` must report "
+        "the landed `clean`, never the deterministic unit name `two`, which the model never wrote"
+    )
+
+
+def test_a_multi_file_repair_records_every_landed_path_not_just_the_unit(
+    tmp_path: Path,
+) -> None:
+    """D49 leg 3: `LlmPatchProposal.files` allows up to 64 entries (`llm/schemas.py:199`), and
+    `land_patches` commits every one of them in the SAME commit (`patch_id` is over the whole
+    sequence). Recording only `unit` would under-report a multi-file repair by 63 files at worst —
+    `_transform_criterion`'s §3.2 parse probe reads exactly `output.rewritten`, so an unrecorded
+    landed file is a parse failure that ships unprobed.
+    """
+    unit = f"{DEST}/mod.py"
+    sibling = f"{DEST}/sibling.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n", sibling: "keep\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the rung-2 case
+    client = FakeModelClient(
+        LlmPatchProposal(
+            files=(
+                ProposedFileEdit(path=unit, diff=make_unified_diff(unit, "alpha\n", "beta\n")),
+                ProposedFileEdit(
+                    path=sibling, diff=make_unified_diff(sibling, "keep\n", "kept\n")
+                ),
+            ),
+            approach_summary="mod.py's failure traces to a stale constant in its sibling",
+            rationale="the deterministic rule cannot span two files; the model can",
+        )
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+
+    result = asyncio.run(worker.run(ctx, rewrite_payload(anchor, [unit])))
+
+    assert result.status == "ok"
+    assert (repo / unit).read_text(encoding="utf-8") == "beta\n"
+    assert (repo / sibling).read_text(encoding="utf-8") == "kept\n"
+    assert result.output is not None
+    assert sorted(result.output.rewritten) == sorted([unit, sibling]), (
+        "both landed paths are recorded — a bare `[unit]` would silently drop `sibling`, the "
+        "genuinely-written file that would then go unprobed by the §3.2 parse-probe loop"
+    )
+    assert len(log_entries(repo, anchor)) == 1, "both files land in the same repair commit"
 
 
 def test_the_escalation_rung_carries_rejected_approach_summaries_and_can_ask_for_a_human(
@@ -879,6 +933,10 @@ def test_the_repair_rung_makes_a_real_call_through_the_context_and_lands_what_it
     assert result.usage.input_tokens == 200, "the rung's spend is real and reported"
     entries = log_entries(repo, anchor)
     assert len(entries) == 1 and entries[0]["subject"].endswith(unit)
+    assert result.output is not None and result.output.rewritten == [unit], (
+        "D49 leg 3, LLM branch: the model's `path` matches `unit` here — the no-regression case "
+        "for the common repair shape, alongside the mismatch case exercised elsewhere"
+    )
 
 
 def test_the_escalation_rung_reaches_the_model_with_its_context_policy_applied(

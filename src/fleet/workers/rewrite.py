@@ -378,7 +378,7 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         )
                     else:
                         landed.append(unit)
-                        self._record(output, unit, commit)
+                        self._record(output, patches, commit)
                         continue
 
                 # Unresolved after the deterministic rung: escalate, or carry the evidence out.
@@ -450,7 +450,7 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         usage=usage,
                     )
                 landed.append(unit)
-                self._record(output, unit, commit)
+                self._record(output, repair.patches, commit)
 
         return WorkerResult(
             status="ok",
@@ -565,12 +565,25 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         )
 
     @staticmethod
-    def _record(output: RewriteOutput, unit: str, commit: CommitOutcome) -> None:
+    def _record(
+        output: RewriteOutput, patches: Sequence[FilePatch], commit: CommitOutcome
+    ) -> None:
+        """Record what actually landed — every `patch.path`, not the deterministic target name.
+
+        The LLM repair branch may land up to `ProposedFileEdit`'s cap of 64 distinct paths
+        (`llm/schemas.py:199`) for a single unit; recording only the unit name would under-report
+        the landed set to `_transform_criterion`'s §3.2 parse probe, which reads exactly
+        `output.rewritten` (`cli.py`) — an unprobed landed file is a parse failure that ships. The
+        deterministic RULE_MISS shortcut has no `FilePatch` to source paths from and keeps
+        appending `unit` directly (`unit` *is* the path there, `root / unit`).
+        """
         if commit.skipped:
-            output.skipped.append(unit)
+            for patch in patches:
+                output.skipped.append(patch.path)
         if commit.commit_sha is not None:
             output.commits.append(commit.commit_sha)
-        output.rewritten.append(unit)
+        for patch in patches:
+            output.rewritten.append(patch.path)
 
     @staticmethod
     async def _apply_stderr(
