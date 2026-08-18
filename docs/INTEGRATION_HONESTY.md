@@ -2300,7 +2300,14 @@ error with the sign flipped — a stale deterministic gate suppressing a correct
    Bumping a `WorkerOutput.schema_version` therefore does not invalidate that output's checkpoints,
    contrary to what the docstring tells the next reader.
 2. `_open_run` rewrites `runs.config_digests` unconditionally on every re-scan
-   (`cli.py:1902-1906`) while `upsert_run` is `ON CONFLICT DO NOTHING` for `config_sha256`
+   (**`cli.py:1907-1910`** — corrected from `:1902-1906`. That earlier range was accurate at
+   `8464dc6`, the commit the caveat below pins the whole entry to: `digests = json.dumps(...)`
+   through the SQL string sat at those five lines there. This is line drift, not a citation wrong
+   at authoring (contrast D47's `:873-874`) — `32365cf` and `e605f0d` both touched `cli.py` after
+   `8464dc6` and before this correction, shifting `_open_run`'s body down five lines. Re-verified
+   against a frozen `git show 2a72f9f:src/fleet/cli.py`, this correction's own HEAD, not the
+   working tree, which had `cli.py` under a sixth agent's concurrent, uncommitted edit at the time
+   of this correction) while `upsert_run` is `ON CONFLICT DO NOTHING` for `config_sha256`
    (`state/repository.py:1006-1009`). A re-scan under edited config silently **resets the drift
    baseline** and leaves `config_sha256` disagreeing with the digest map that `settings.py:1207-1210`
    states "can never disagree".
@@ -2321,6 +2328,12 @@ should do on drift before writing any code**, and that decision belongs in an AD
 during this audit (`llm/cache.py`, `sandbox/container.py`, `workers/buildverify.py`, three test
 files) touch no checkpoint, resume, or drift code — checked by diff before the claims above were
 written, per §33's misattribution lesson.
+
+**Post-hoc line-drift correction.** Item 2's `_open_run` citation was re-pinned to `2a72f9f`
+(above) two commits after this entry's own `8464dc6` baseline moved `cli.py`'s line numbers under
+it — see the inline correction for the commits responsible. Nothing else in this entry was
+re-checked past `8464dc6`; a fuller re-derivation, if the tree keeps moving under `cli.py`, should
+re-verify the whole entry against one fresh SHA rather than patch citations one at a time.
 
 ---
 
@@ -2397,6 +2410,66 @@ writes bounded by size and path.** That belongs in an ADR, along with whether `_
 landed paths (changing what `output.rewritten` means, which the §3.2 criterion reads) and whether
 `SPEC.md`'s three claims are corrected or the code is brought up to them. Rule 7: surfaced, not
 averaged into an unrelated edit.
+
+**Correction (`c5ab3b1`) — two of the three legs above are closed in code; D49 stays OPEN because
+the third leg is untouched and the first leg's fix cannot be reached from a live config.** Verified
+directly against `git show c5ab3b1` and current `HEAD` (`2a72f9f`), not the working tree — `cli.py`
+is under a sixth agent's concurrent, uncommitted edit as this correction is written.
+
+1. **Leg 1 (size ceiling) — fixed in the worker, not reachable from config.** The deterministic
+   call site now threads it: `check_diff(outcome.patch.diff, payload.dest_path,
+   max_bytes=payload.max_patch_bytes)` at `workers/rewrite.py:340-344`. `RewriteInput` gained the
+   field (`:209-217`, same `1_048_576` default as `TransformSection`). This is a real fix of what
+   leg 1 described — but leg 1's own severity claim was that `transform.max_patch_bytes`, the
+   *operator's* setting, never reached the check. It still doesn't. `TransformInput`
+   (`cli.py:3200-3218`, committed) declares no `max_patch_bytes` field, and `_rewrite_input`
+   (`cli.py`, the method building the `RewriteInput` passed to the worker) never sets one —
+   confirmed directly: `grep -n "max_patch_bytes" src/fleet/cli.py` against `HEAD` returns **zero
+   hits**. `RewriteInput.max_patch_bytes` therefore always takes its own field default; nothing an
+   operator writes in `fleet.yaml`'s `transform:` block can ever change it.
+2. **Leg 3 in the original numbered list (the LLM branch skipping `check_diff` entirely) — closed.**
+   A new `_rejected_patch()` helper (`workers/rewrite.py:678-691`) runs `check_diff` over every
+   entry in `repair.patches`, called at `:409-411` before the repair-path `land_patches` at `:430`.
+   Traced every route that reaches that call: `repair` comes from the single `_repair()` call at
+   `:385`, whose evidence originates either from `RULE_MISS` (no rule matched, `:333-338`) or from
+   a caught `PatchApplyError`/`GitCommandError` on the deterministic branch's own `land_patches`
+   (`:373-378`) — both funnel into the same `_repair()` call, and `_repair()` itself branches on
+   `ctx.tier` between `LLM_REPAIR` (`propose_repair`) and `LLM_ESCALATION` (`escalate_repair`,
+   `:491-500`) before returning. `_rejected_patch` runs unconditionally after `_repair()` returns,
+   regardless of which evidence produced the call or which tier answered it — no route reaches
+   `land_patches` at `:430` without passing through it first.
+3. **The sharp consequence of leg 1 only being fixed in the worker.** The rejection message
+   `_rejected_patch`/`check_diff` produce *names* the setting: `"patch is larger than
+   transform.max_patch_bytes (… bytes)"` (`rewrite/apply.py:278`). Since no config value ever
+   reaches `RewriteInput.max_patch_bytes`, that message always reports the field default
+   (`1_048_576`), never whatever an operator actually put in `fleet.yaml`. An operator who raises
+   `transform.max_patch_bytes` to admit large legitimate migration diffs keeps getting patches
+   rejected, and the rejection cites the exact setting they already raised — worse than inert,
+   because it reads as confirmation that the operator's edit took effect when it never reached the
+   check at all.
+4. **The irony.** D49's own fix has landed in **D50's shape**: an operator-settable key
+   (`transform.max_patch_bytes`) that validates, has a real enforcement point downstream
+   (`check_diff`), and still reaches no live config path — the same "written and consumed by
+   nothing" defect class D50 catalogs 26 instances of, except this one is a *config* key whose
+   *code*-side consumer is real and gated correctly, just never wired to it. D49 and D50 now
+   describe the identical gap from opposite ends: D50 found the dead key; this correction found
+   the live check it was supposed to feed.
+5. **Leg 3 (the evidence-domain half) — untouched, remains open.** `_record`
+   (`workers/rewrite.py:567-573`) still appends `unit` — the deterministic target name — to
+   `output.rewritten`, never `edit.path` from the landed patch. Nothing in `c5ab3b1` touches
+   `_record` or its call sites (`:381`, `:453`). The original entry's description of this leg is
+   unchanged and still accurate.
+
+**Two deferred minors, both against the leg-1 fix specifically.** No accept-at-boundary test
+exists: `check_diff` rejects with a strict `>` (`rewrite/apply.py:277-278`,
+`len(diff.encode("utf-8")) > max_bytes`), so a patch at *exactly* `max_bytes` is accepted, and
+nothing in `tests/test_workers_transform.py` pins that acceptance — both new tests only exercise
+the rejection side. And the fix is verified only off-default: both tests construct their payload
+via `rewrite_payload(anchor, [unit], max_patch_bytes=64)`, a value chosen to keep the fixture small,
+not `RewriteInput`'s real default of `1_048_576`. Nothing in the tree asserts that default
+(`workers/rewrite.py:212`) still equals `TransformSection.max_patch_bytes`'s default
+(`settings.py:452`) — the two literals could drift apart with no test noticing, on top of neither
+ever being reachable from a config file per point 1 above.
 
 ---
 
@@ -2517,3 +2590,111 @@ build/test worker, not a wiring fix, and deciding what §14.1's gate should refu
 ADR, not this ledger. The other four groups are individually small, but batching six unrelated
 config sections into one fix would violate Rule 2 (no speculative abstraction) for what is, in
 each case, a single-purpose branch or accessor.
+
+---
+
+**D51 — OPEN, narrowly. `workers/relocate.py` lands its patches through the exact same
+`land_patches` that D49 gated, entirely outside `check_diff` — but D49's own fix is the wrong fix
+here. The patches are 100% deterministic renames, not model-authored content, and neither of
+`check_diff`'s two protections transfers cleanly: a byte cap measures the wrong thing for a
+rename, and the subtree-escape check would reject every legitimate relocation outright. The
+residual gap is narrower than "unbounded": there is no runtime assertion, anywhere, that the
+destination path a relocate patch commits actually lands under `dest_path` — that guarantee is a
+property of one function's string concatenation, unverified at the call site and untested.**
+
+Found by a reviewer auditing D49's shape for siblings after `c5ab3b1` landed; D49 scoped itself
+explicitly to `rewrite.py`'s two `land_patches` call sites and never named this one. Verified
+against `HEAD` (`2a72f9f`); `workers/relocate.py` carries no uncommitted edits in this pass
+(`git status` — absent from the modified list).
+
+**The bypass is real.** `relocate.py:48` imports `land_patches` from `workers/rewrite.py` directly
+(`from fleet.workers.rewrite import land_patches, units_owed`); `RelocateWorker.run` calls it at
+`:184-194` on a single `FilePatch` built two lines above. `check_diff` is never imported into this
+module — `grep -n check_diff src/fleet/workers/relocate.py` is empty. `land_patches` itself
+documents the sharing as deliberate, not an oversight: its docstring (`workers/rewrite.py:154-156`)
+reads *"Shared with `workers/relocate.py` — a rename and a rewrite differ in how the diff is
+produced, never in how it is committed, and two copies of this sequence would be two chances to
+skip the guard."* That sentence is about `apply_and_commit`'s idempotency-check-plus-`git apply
+--check` guard, which both workers do get uniformly. It says nothing about `check_diff`, which
+only `rewrite.py` calls — the omission from `relocate.py` reads, on this evidence, as intentional
+rather than a gap nobody considered, which is exactly why it is worth confirming rather than
+assuming.
+
+**What reaches this path: purely deterministic, plan-computed renames — not model output.** The
+one `FilePatch` built at `relocate.py:175-182` is `rename_diff(unit, new_path)` (`:84-95`): a fixed
+four-line template — `diff --git`, `similarity index 100%`, `rename from`, `rename to` — with zero
+hunks and zero file content. `unit` comes from `payload.sources`, which `RelocateInput` documents
+as "supplied by the caller rather than derived from `git ls-files` here" (`:106-112`); tracing the
+one production call site, `cli.py`'s `_relocate_input` passes `sources=list(payload.sources)`
+(`cli.py:3362`, reading `TransformInput.sources`, declared `:3213`), which is populated as
+`plan.sources` inside `_transform_payloads` (`cli.py:4028`) — a driver-computed plan object, never
+an LLM response. No
+rung, no `ctx.llm`, no `ProposedFileEdit` exists anywhere in this file. This is the "purely
+deterministic" case the brief asked to check for, confirmed: `grep -n "ctx.llm\|propose_repair\|escalate_repair"
+src/fleet/workers/relocate.py` is empty.
+
+**Why D49's provenance rule does not imply the same gate — the byte cap.** D49's own severity
+paragraph already states the general form: *"a legitimate migration rewrite may touch every file
+in a repo, so a global `max_files_touched` would be actively wrong."* The relocate case is a
+sharper instance of the same point applied to bytes instead of file count. `rename_diff`'s output
+size is a function of two path lengths, never of file content — a repo with 100,000 files each
+under a long path still produces one small diff per file, one `land_patches` call per file
+(`relocate.py:164-194`, one iteration of `owed` per commit). There is no accumulation point where
+`transform.max_patch_bytes` (tuned for a content diff, default 1 MiB) would ever fire short of a
+single path being megabytes long. Applying it here would not guard against anything real; it would
+just be a check that always passes, giving false confidence that this path is "covered" the way
+D49's leg 1 is.
+
+**Why D49's provenance rule does not imply the same gate — the subtree-escape check.** `check_diff`'s
+second protection rejects any hunk path that is not `.is_relative_to(dest_subtree)`
+(`rewrite/apply.py:255-262`). For `relocate.py`'s renames this check is backwards. The
+*destination* path (`new_path = relocated_path(payload.dest_path, unit)`, `:174`) is always inside
+`dest_path` by construction — `relocated_path` (`:79-81`) is `f"{dest_path.rstrip('/')}/{source.lstrip('/')}"`,
+which cannot produce a path outside `dest_path` for any non-empty `source`. But the *source* path
+(`unit`, the `rename from` side) is, by the entire purpose of this worker, expected to sit
+**outside** `dest_path` before the move — that is what "relocate this repo's tree to its monorepo
+path" means. Reusing `check_diff(diff, payload.dest_path)` unmodified would reject the `rename
+from` hunk of every single legitimate relocation patch, which would not harden this worker, it
+would break it. `check_diff` does carry an `allow_paths_outside_dest=True` escape hatch
+(`:270`, checked at `:285-286`) that would dodge this — but reading its implementation shows it
+returns `None` immediately when set, skipping not just the subtree check but also `_escapes`'s
+unconditional absolute-path/`..`-traversal check (`:255-258`), so it is an all-or-nothing flag,
+not a scoped one;
+it was not designed for "outside this subtree but still traversal-safe," and bolting it on here
+would need its own review, not a drive-by.
+
+**The residual gap, once both of the obvious gates are ruled out.** `new_path`'s
+containment-in-`dest_path` is real and currently guaranteed, but the guarantee lives entirely
+inside `relocated_path()`'s one line of string concatenation (`relocate.py:81`) — nothing at the
+`land_patches` call site (`:184-194`) or anywhere else in the worker asserts it. A future edit to
+`relocated_path`, to how `new_path` is computed, or to `dest_path`'s validation (currently only
+`Field(min_length=1)`, `:105`) would have no runtime check and no test catching a relocation that
+committed a rename to somewhere other than the plan's destination before it landed on the branch.
+That is a narrower, structural claim — not "unbounded," not "needs D49's cap" — and it is the one
+part of this finding that is actually open.
+
+**Would a test catch it? No, on any dimension.** `grep -n "def test_" tests/test_workers_transform.py`
+shows four `relocate` tests (`:528`, `:557`, `:583`, `:1050`, `test_workers_transform.py`) covering
+double-move idempotency and mid-plan interruption; none constructs an oversize patch, a source or
+destination path that would escape a subtree, or asserts anything about `new_path`'s relationship
+to `dest_path` at commit time. `check_diff` itself is unit-tested in `tests/test_rewrite.py:1020-1028`,
+but nothing there or in `test_workers_transform.py`'s relocate tests exercises it against a rename
+diff. The absence is consistent with the verdict above — there is no size/path defect to catch —
+but it also means the one real residual claim (no runtime assertion on `new_path`'s containment)
+is equally uncovered.
+
+**Verdict: not a D49-shaped defect. Closing this without a cap is the correct fix, not an
+oversight left unfixed.** A blast-radius cap belongs on a write whose shape or size a caller does
+not fully control — that describes D49's LLM branch and does not describe this one. Recorded here,
+rather than as NEEDS_CONTEXT, because the reviewer's premise (an unchecked `land_patches` call
+D49 never named) is factually correct and worth a permanent note explaining why it stays unchecked
+on purpose, so a future pass does not "fix" it by bolting on `check_diff` and breaking every
+relocation in the fleet.
+
+**Not fixed here.** The one real residual item — a cheap runtime assertion that `new_path` is
+`.is_relative_to(payload.dest_path)` before `land_patches` at `relocate.py:184`, plus a test that
+exercises it — is small and in `src/`, out of this docs-only lane (Rule 3). It is deliberately not
+folded into D49's "Not fixed here" ADR-bound decision either: D49's open question is what *cap*
+model-authored writes should carry; this worker's open question is an *invariant* check on a
+deterministic write whose shape is already fully controlled, which is a different kind of fix and
+does not need the same ADR.
