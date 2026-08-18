@@ -5144,3 +5144,204 @@ produced `9644406`).
    `workers/buildverify.py` are mid-edit under that separate thread now; this round's D34/D35/D36/D41
    ledger corrections and round 38's own audit (`68a41ff..f12a954`) both touch clone/build-worker
    history and should be read together, not independently, once both are committed.
+
+## 37f. Checkpoint — 2026-08-18 · the back half of the same `sdd-backlog-a` round §37e left running, fourteen more commits off `a330e08` closing almost everything that section listed as open — **D49's third leg closes at `9a7148c`, and the fix ships a Critical regression in the same round**: repointing `output.rewritten` from unit names to landed `FilePatch.path` silently breaks `cli._TransformEvidence.record()`'s dedup, which was still keyed on the old identity semantics, so a genuinely-unresolved unit can vanish behind a sibling's collateral edit and a run reports SUCCESS over a broken, unprobed file — found by the reviewer, not the implementer, who had filed it as a follow-up note; closed at `2976a7e` by re-keying the dedup on `completed_units` · **D39, D40, D44 close** (`854189a`, `f1aac12`) — D44 was the data-loss member of the family, an unsettled probe authorising an `rmtree` · **D42's fix closes D43 as a side effect, and `bda7afd` gives it its own test** rather than leaving the protection inherited from `Git.resolve`'s · **the four-state-collapse family's "thirteen, all real" thesis is retired**, re-measured at `a2c4000` to **9 fixed-and-tested, 4 never reproducible, 0 open as filed** — the pattern holds, only the count was wrong · **ADR-0073** (`cbc01ae` — every status claim names the SHA it was verified against) was applied against its own author within hours: P1 refused to enter "46" as the committed `KNOWN_INERT` count because it existed only in an uncommitted edit · **a `patch.path` validation gap partially closes at `794ee24`** — `check_diff` now cross-checks a model-declared `FilePatch.path` against its own diff's hunk headers — but the two production call sites in `workers/rewrite.py` that would actually invoke it are, as this section is written, still an **uncommitted, in-progress edit**, the fifth time this round a lane's finished-looking work sat unlanded
+
+**Numbering.** `37f`. `36`, `37`, `37b`, `37c`, `37d` and `37e` are the only occupied slots in this
+file; `38` is reserved by a separate worker's round (`docs/superpowers/plans/research-38.md` /
+`review-38.md`, both tracked but still uncommitted as their own checkpoint — `git log --oneline --
+docs/superpowers/plans/research-38.md` shows no commit past the file's creation), and its checkpoint
+has not landed, so `38` stays untaken per this task's own instruction. `37f` is the next free suffix
+in the `37`-series and carries no collision the way `37d` did.
+
+### What was completed
+
+1. **N1 — ADR-0073, DONE** (`cbc01ae`). "A status claim without the SHA it was measured against is
+   not a claim, it is a guess with a timestamp." Binds re-derivation to a status *flip*, not a
+   periodic sweep — the choice N1 argued makes the rule survivable, since a periodic sweep is the
+   discipline nobody performs (the exact failure ADR-0071 §4 catalogues for unwired safety code).
+   All nine cited staleness cases were independently re-derived via `git show`/`diff`/`log -S`
+   rather than trusted from the round that reported them, and two of the nine (§1.9, §1.10) turned
+   out wrong in the brief and were corrected before landing — treated in the ADR's own text as
+   corroborating evidence for its thesis, not an embarrassment to smooth over. Argues overstated
+   debt is worse than underreporting: a missed bug is self-correcting under this project's own
+   "only running things finds defects" thesis; a phantom ledger entry has no equivalent corrective.
+2. **O1 — D49 leg 3, DONE** (`9a7148c`) — **then W1 — the Critical regression it introduced, DONE**
+   (`2976a7e`). O1 verified before coding that `output.rewritten` has no consumer outside
+   `rewrite.py`/`cli.py` and that resumption uses a separate `completed_units`/`landed` field, so
+   repointing `_record` to append every landed `patch.path` (up to 64 per unit, per
+   `ProposedFileEdit`'s `max_length=64`) instead of the unit name once looked safe. It flagged, out
+   of lane, that `cli._TransformEvidence.record()`'s dedup — `unit not in set(prior.rewritten)` —
+   had been an identity check when `rewritten` held unit names and became a coincidental filename
+   match once it held paths; O1 framed this as "a pre-existing edge case, worth a follow-up note."
+   The reviewer disagreed and made it the review's primary question: a unit whose own name
+   coincides with a sibling's collaterally-landed path has its own genuine failure **silently
+   dropped** from `unresolved` — no log line, no repeat-repair block (retry admission is gated by
+   `completed_units`, name-keyed, unaffected) — reachable in a single run via
+   `PhaseRunner._drive`'s in-process retry into one `_TransformEvidence` per CLI invocation. W1
+   proved the regression rather than assuming it: stashed only `src/fleet/cli.py`, ran the two new
+   tests against pre-fix `record()`, watched both fail (via `TypeError`, since the fix necessarily
+   threads `completed_units` into `record()` for the first time) and pass post-fix. Re-keyed the
+   dedup on `completed_units` — traced end to end as populated on every path that legitimately
+   resolves a unit and never on a collateral edit. The reviewer went further than W1's own framing:
+   even setting aside the `TypeError`, the new assertion (`unresolved == ["dest/x.py"]` in a
+   scenario the old logic empties) would catch a **future** regression that reintroduced the bug
+   while keeping the new signature — the realistic reintroduction path — so the protection is
+   substantive, not incidental to how the test happens to fail today.
+3. **Q1 — retroactive §37d, DONE** (`dee9886`). Backfilled the section `9644406`'s own commit
+   message claimed but never wrote, sourced entirely from `git show 9644406`, correctly positioned
+   between §37c and §37e, and described D49 as **OPEN with all three legs outstanding at that
+   commit** — not backfilled with this round's later closures. Not chasing later fixes into a
+   backdated section is the same restraint the section exists to enforce elsewhere.
+4. **T1 — D39, fully closed, DONE** (`854189a`). `available()` no longer routes an unsettled `gh`
+   probe through `_exec`'s `check=True` path, which collapsed "ran and said no" and "never settled"
+   into one opaque `GhError` string; it now calls the runner directly and checks
+   `util.proc.no_verdict` before the exit code, mirroring `d37f4ba`'s `Git._require_settled`
+   pattern for D42. Deliberately did not reuse `_exec` — reusing it would have been the defect
+   again, not the fix. **First of two "no production caller" findings this half**: `available()`
+   has no production caller anywhere in `src/fleet` — `prwriter.py`/`cli.py` call
+   `create_pr`/`view`/`sync` and catch `ForgeError`, never `available()`; its only callers are
+   tests, as a skip gate. T1 said so plainly rather than overselling the fix's reach.
+5. **E2 — config-key scan, third stripper blind spot closed, DONE** (`6ad64e0`) — **P1 — D50,
+   second correction, DONE** (`79d3b2e`). E2 first confirmed no genuine string-mediated config read
+   exists anywhere in `src/fleet/` before blanking every `ast.Constant` string (not just
+   module/class/function docstrings) — the check that made blanking safe rather than a blind
+   ratchet. Result: `KNOWN_INERT` 46, `QUALIFIED_MATCH_KEYS` 11, `UNVERIFIABLE` 1, `DECLARATIVE` 6,
+   180 keys walked, unchanged total throughout every recount today. Two of R5's nine candidates from
+   §37e's still-open work — `redaction.enabled`/`redaction.patterns` — did **not** reproduce as
+   inert: both are genuinely read at config-load time (`_check_redaction_switch`,
+   `_refuse_secret_material`) and landed in `DECLARATIVE` instead, which E2 called out as the
+   near-miss it was rather than silently absorbing. **P1 refused the orchestrator's supplied
+   number**: told "now 46," P1 measured the *committed* state (37/5/1/3, at `dee9886`) and would
+   not enter 46 as fact while it existed only in an uncommitted working-tree edit — while separately
+   confirming 46/11/1/6 reproduces exactly there. ADR-0073's rule applied against its own author,
+   hours after landing, on its first live test.
+6. **S1 — D40/D44, DONE** (`f1aac12`) — **Y1 — `WorktreeManager.reap()` containment, DONE**
+   (`4a421a3`). S1's `worktree_presence` (`interrogate.py`) and `WorktreeManager.remove`
+   (`worktree.py`) both now check `no_verdict` before trusting a settled answer; D44 — the
+   data-loss member, an unsettled probe authorising an `rmtree` — closes with three tests pinning
+   never-started and killed-at-deadline both sparing the directory. S1 flagged its own boundary
+   call for review: "path exists but is a regular file" is classified a settled negative (same
+   bucket as genuine absence), on the grounds `Path.stat()` on a file is fully determinate, not an
+   indeterminate outcome — the reviewer ruled the classification correct but the operator-facing
+   message ("run the clone worker first") misleading for that specific case; Minor, not a
+   retry-axis defect. The reviewer then found the shape D44's own fix reopened one layer up:
+   `reap()` called `remove()` unwrapped inside its sweep loop, so the new `WorktreeError` now
+   propagates out of `reap()` entirely, discarding the already-accumulated `reaped` list and
+   abandoning every subsequent worktree — self-healing (unlike D32's permanent leak) but a real
+   behaviour change with zero coverage at the `reap()` level. Y1 returned `ReapResult(reaped,
+   failed)` instead of a bare list — a live-owner-spared worktree is filtered out *before* the try
+   block, so it lands in neither list, keeping "deliberately spared" distinct from "attempted and
+   unresolved"; each `remove()` is now wrapped, and the loop continues past a failure. **Second and
+   third "no production caller" findings**: `grep -rn '\.reap(' src/` is zero hits (`fleet resume`
+   step 2 doesn't exist yet), so no existing caller could have been misled by the old collapse — Y1
+   fixed it anyway because the docstring promises the method to a future caller. The reviewer's
+   trace also surfaced a genuinely new, still-open sibling: `ContainerSandbox.reap()`
+   (`sandbox/container.py:239-254`) reports every removal as reaped regardless of whether `docker
+   rm` actually succeeded — a reporting collapse adjacent to D32, queued, not fixed this round.
+7. **V4 — D43, independently pinned, DONE** (`bda7afd`, plus SHA-correction commits `2aadf53`,
+   `4bbc0c0`). Three new `test_cli.py` tests exercise `_prepare_repo` directly rather than relying
+   on the protection D42's fix inherits from `Git.resolve`'s own tests — including a negative
+   control (a genuinely absent branch still takes `checkout -B`) proving the distinction is pinned,
+   not merely the destructive call disabled. Proved the counterfactual without touching tracked
+   code: a scratchpad-only script neutered `Git._require_settled` at runtime, reproduced the
+   pre-D42 bug, and confirmed `checkout -B` did discard the seeded migration commit — stronger
+   evidence than reading. Disclosed a near-miss honestly: briefly edited `src/fleet/vcs/git.py`
+   out of lane intending an immediate revert; a permission block interrupted before any test ran
+   against it, and it reverted to byte-identical-with-HEAD before redoing the check the safe way.
+8. **X1 — consolidated ledger pass, DONE, rescued and committed by the orchestrator** (`a2c4000`).
+   One pass instead of a fifth piecemeal correction: D39/D40/D44 marked CLOSED in
+   `INTEGRATION_HONESTY.md` with citations re-derived (not transcribed) against committed `git
+   show`; D50's **third** count correction, 37 → 46, parsed directly with `ast` against `git show
+   6ad64e0:tests/...`; the family thesis paragraph replaced with a freshly re-measured **9 fixed
+   and tested, 4 never reproducible, 0 open as filed** — retiring both "thirteen, all real" and the
+   handed-forward replacement sentence R7 supplied in §37e's half, which X1 found was **itself
+   already stale on arrival**: D39 had closed in `854189a` and D40/D44 in `f1aac12` between R7's
+   measurement and X1's use, so it was re-measured fresh rather than propagated. **X1 corrected the
+   orchestrator's own brief**: the "path exists but is a regular file = settled negative"
+   classification had been attributed to `worktree.py` (the D44 fix); X1 verified it actually lives
+   in `interrogate.py` (the D40 fix) and corrected the attribution rather than transcribing it.
+   **Fourth uncommitted-work rescue of the round**: X1's staged content was swept by a concurrent
+   agent's pathspec-less `git commit`; that agent (V4) caught it and unwound correctly
+   (`reset --soft HEAD~1` + `restore --staged`, non-destructive) before recommitting its own work
+   with explicit pathspecs — which left X1's content unstaged after X1 had already verified it as
+   landed. **Both agents behaved correctly at every step; the interleaving still lost the work.**
+9. **Z1 — `patch.path` validation, DONE** (`794ee24`). Added an optional `declared_path` kwarg to
+   `check_diff` (membership in `diff_paths(diff)`, not equality — a rename's post-image path and a
+   hypothetical multi-file diff both stay valid) and wired it into `apply_patch`. Confirmed no
+   legitimate shape is over-tightened: a rename diff's post-image path is accepted, its stale
+   source path rejected. Flagged, correctly, that the fix is not complete: `workers/rewrite.py`'s
+   two actual call sites (`:340` the deterministic gate, `:701` `_rejected_patch` — the branch
+   `9a7148c` made load-bearing) pass only `patch.diff`, never `patch.path`, and that file was out
+   of Z1's lane. **Fourth "no production caller" finding**: `apply_patch` itself has no caller in
+   `src/` either — the real landing path is `land_patches` → `apply_and_commit` via a concatenated
+   patch file, so `check_diff` functions as a pre-gate, not part of the apply; that's fine for the
+   D49 fix but means `apply_patch`'s own post-apply probe protects nothing in production today.
+10. **AB1 — the two-line completion, IN PROGRESS, uncommitted.** `git diff --stat` shows
+    `src/fleet/workers/rewrite.py` modified, adding `declared_path=outcome.patch.path` and
+    `declared_path=patch.path` at the two call sites Z1's report named. As this section is written
+    this is a **working-tree-only** edit with no commit SHA — see "still NOT proven," below.
+
+### What was verified
+
+- **The Critical regression is genuinely closed, not just patched around its symptom.** W1's
+  reviewer traced `completed_units` end to end across every landing path (idempotent shortcut,
+  deterministic land, repair-rung land, and every early-return branch) and confirmed it is always
+  the loop's own unit, never a collateral path — which is what makes the over-correction failure
+  mode (a genuinely-resolved unit staying wrongly `unresolved`) structurally impossible with the new
+  key. It also ruled out the other three §3.2 clauses as implicated: the empty-diff and
+  outside-subtree checks derive from a live `git diff` with no dependency on `rewritten` at all, and
+  the parse-probe clause's exposure predates `2976a7e` and was correctly left unaudited.
+- **`mypy --strict src/fleet` stayed clean at 107 files across this half's commits too**, and the
+  D43 test-coverage gap (`bda7afd`) reproduced the pre-fix bug against a live counterfactual, not a
+  reading-only argument.
+- **D50's final count (46/11/1/6, 180 walked) was independently re-parsed with `ast` against the
+  committed `6ad64e0` blob**, not transcribed from that commit's own message, and the two keys an
+  earlier sweep would have wrongly called dead (`redaction.enabled`/`redaction.patterns`) were
+  confirmed to have landed in `DECLARATIVE`, not `KNOWN_INERT` — the exact false positive the
+  qualification mechanism could have produced, and didn't.
+- **All nine ADR-0073 citations were independently re-run against `git show`/`diff`/`log -S`**
+  rather than carried over from whichever round originally reported them.
+
+### What is still NOT proven / left open
+
+1. **The full suite (~9 min) has still never been run across this entire round, either half.**
+   Every agent in both `sdd-backlog-a` waves ran only the test files covering its own lane, per the
+   plan's constraint. Twenty-four commits now touch `cli.py`, `workers/rewrite.py`, `vcs/git.py`,
+   `vcs/github.py`, `sandbox/worktree.py`, three test files and four docs files with zero cross-lane
+   regression check.
+2. **AB1's two-line completion is uncommitted as this section is written.** Until it lands, the LLM
+   repair branch — the one `9a7148c` made load-bearing for `_transform_criterion`'s probe — still
+   calls `check_diff` without `declared_path`, so the cross-check Z1 built at `794ee24` exists and
+   is not yet invoked on the path that motivated it.
+3. **`ContainerSandbox.reap()`'s reporting collapse (`sandbox/container.py:239-254`) is queued, not
+   fixed.** `docker rm` failures are still reported as successful reaps; `git diff` shows the file
+   clean at HEAD.
+4. **A reviewer finding the orchestrator flagged as possibly wrong against `CLAUDE.md` was never
+   resolved in this round's visible record.** Y1's reviewer claimed `util/proc.py`'s
+   `_run_locked` calls `asyncio.create_subprocess_exec` unguarded, so a missing `git` binary
+   (`FileNotFoundError`), fd exhaustion, or a `PermissionError` on `cwd` would propagate out of
+   `remove()` uncaught, reinstating an abort-mid-sweep bug through a narrower trigger. The
+   orchestrator did not take this at face value — `CLAUDE.md` states `proc.run` returns
+   `started=False` for a missing binary and that `test_proc.py` drives that case for real, which
+   would mean either the reviewer or `CLAUDE.md` is wrong — and dispatched it verification-first
+   rather than fix-first. No task report resolves which.
+5. **D51 (relocate.py's containment-assertion verdict, H1) still has no second reviewer**, unchanged
+   from §37e.
+6. **Round 38 reconciliation is still pending**: `research-38.md`/`review-38.md` remain tracked but
+   uncommitted as their own checkpoint; `workers/base.py`/`workers/buildverify.py` history from that
+   thread has not been read against this round's D34/D35/D36/D41 corrections.
+
+### Next subagent task, in priority order
+
+1. **Land AB1's completion** — the two `declared_path=` call sites in `workers/rewrite.py` — so
+   Z1's `check_diff` validation actually protects the branch it was built for.
+2. **Resolve the `util/proc.py`/`CLAUDE.md` disagreement Y1's reviewer raised**, verification-first:
+   read `_run_locked` and `test_proc.py` directly rather than trusting either source, then fix or
+   correct the record accordingly.
+3. **Fix `ContainerSandbox.reap()`'s reporting collapse** (`sandbox/container.py:239-254`) — same
+   family as D32/D44, currently unqueued to a commit.
+4. **Second review for D51** — flagged in §37e, still not dispatched two sections later.
+5. **Run the full suite** (~9 min, background) — the only check that would catch a cross-lane
+   regression among twenty-four commits, and has not run once across either half of this round.
+6. **Reconcile with round 38** once `research-38.md`/`review-38.md` land its own checkpoint.
