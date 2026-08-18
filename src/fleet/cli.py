@@ -77,6 +77,7 @@ from fleet.llm.client import (
     ModelClient,
     TierUnavailable,
     UnknownRole,
+    discover,
     registry,
 )
 from fleet.llm.roles import LlmRouter, TierNotConfigured, UnknownProfile
@@ -511,6 +512,20 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
     `--profile` is routed here and nowhere else, so it reaches `LlmRouter` and the `llm_cache`
     key through `FleetSettings.profile` exactly as §10 describes — the CLI never carries a second
     notion of "the active profile" beside the settings object's.
+
+    **§7.7's startup step lives here, not in the `main` callback.** `llm.discover()` is the fifth
+    registry's walk, and unlike `ecosystems.discover()` it is NOT total over an enum — backends are
+    open-ended. What it IS total over is the active profile (§13 row 36), and the only place that
+    can be checked is where the profile is resolved: `known_backends` below is the §9 rule 2 gate's
+    name set, and passing the LIVE registry instead of settings' `SHIPPED_BACKENDS` fallback is
+    what makes "every `backend` resolves" mean *registered* rather than *spelled like a name we
+    ship*. Without this call the registry is empty at run time, the gate passes on a hard-coded
+    tuple, and `UnknownBackend` surfaces in wave 7 with repos already cloned — vacuously satisfying
+    row 36's "checked at RunContext construction". It also feeds `registry()` for
+    `fleet models check`, and `RunContext(backends=None)`, both of which read the same table.
+
+    Idempotent: `import_module` is `sys.modules`-cached, so a second call re-registers nothing and
+    cannot trip `register_backend`'s duplicate check.
     """
     overrides: dict[str, Any] = {}
     if opts.profile is not None:
@@ -518,7 +533,10 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
     if opts.max_rss_mb is not None:
         overrides["budgets.max_rss_mb"] = opts.max_rss_mb
 
-    settings = FleetSettings.load(opts.config_dir, cli_overrides=overrides)
+    backends = tuple(discover())
+    settings = FleetSettings.load(
+        opts.config_dir, cli_overrides=overrides, known_backends=backends
+    )
     if opts.max_cost_usd is None:
         return settings
 
@@ -530,7 +548,9 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
             "raising a run ceiling is `fleet resume --raise-budget`, which is audited."
         )
     overrides["budgets.run_max_cost_usd"] = opts.max_cost_usd
-    return FleetSettings.load(opts.config_dir, cli_overrides=overrides)
+    return FleetSettings.load(
+        opts.config_dir, cli_overrides=overrides, known_backends=backends
+    )
 
 
 def llm_router(settings: FleetSettings) -> LlmRouter:

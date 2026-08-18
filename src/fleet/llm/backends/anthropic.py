@@ -161,7 +161,22 @@ class AnthropicBackend:
         timeout_s: float,
     ) -> BackendReply:
         """Return the raw turn plus usage AND `finish_reason`. Decides nothing (see the module
-        docstring): the reason is reported as the transport gave it and `client.py` acts on it."""
+        docstring): the reason is reported as the transport gave it and `client.py` acts on it.
+
+        `target.effort` is sent as `output_config.effort` on EVERY request. `BackendTarget.effort`
+        is a `Literal["low", "medium", "high"]` with a default, so it is never absent — and it is
+        already part of the `llm_cache` key (`CacheKeyParts.effort`), which means a cached row
+        already claims the call was made at that effort. Reading the field is therefore the only
+        honest option: discarding an operator's declared routing parameter while the cache records
+        it as honoured is a silent degradation of exactly the kind Rule 11 forbids, and a loud 4xx
+        from a target that rejects the parameter is strictly better than a run that quietly bills
+        at the wrong tier.
+
+        The parameter NAME and nesting are not from memory: `output_config: {effort: ...}`, inside
+        `output_config` rather than top-level. Not every model this transport can reach accepts it
+        — see the fix-round report for the citation and for the one shipped target whose declared
+        value the vendor documentation says will be refused. That is a `config/models.yaml`
+        question, and this adapter is deliberately not the place it gets papered over."""
         _validate_target(target)
         api_key = _api_key(target)
         system, turns = _render(target, messages)
@@ -170,10 +185,18 @@ class AnthropicBackend:
             "model": target.model_id,
             "max_tokens": max_output_tokens,
             "messages": turns,
+            "output_config": {"effort": target.effort},
         }
         if system is not None:
             request["system"] = system
-        request.update(_rung(target, schema, mode))
+        for key, value in _rung(target, schema, mode).items():
+            # `output_config` is MERGED, never replaced: `effort` and the JSON_SCHEMA rung's
+            # `format` are siblings under it, and overwriting the key would silently drop the
+            # operator's declared effort on exactly the rung that carries a schema.
+            if key == "output_config":
+                request["output_config"].update(value)
+            else:
+                request[key] = value
 
         async with anthropic.AsyncAnthropic(
             api_key=api_key,
@@ -320,7 +343,23 @@ def _from_status(target: BackendTarget, exc: anthropic.APIStatusError) -> LlmErr
 def _reply_from(target: BackendTarget, message: anthropic.types.Message) -> BackendReply:
     """One transport turn → `BackendReply`. `text` and `tool_arguments` stay separate because the
     TOOL_CALL rung's answer is an arguments OBJECT and scraping it back out of a string is a parser
-    the harness would then own."""
+    the harness would then own.
+
+    **`usage.model_id` echoes `target.model_id` VERBATIM, and must never carry the dated snapshot
+    id this transport returns in `message.model`.** It is the single highest-consequence line in
+    this file, and both `TokenUsage.model_id`'s own comment ("the RESOLVED model id, as the backend
+    reported it") and `schema.sql`'s ("RESOLVED id") actively invite the other choice. Here is why
+    they must not be followed:
+
+    `_stamp` (§7.7) resolves `usage.model_id or target.model_id` — backend-reported WINS. The
+    `llm_cache` READ key is built from the config string (`_key_parts` takes `target.model_id`),
+    while the WRITE key is built from `usage.model_id` (`_store_response`). Report the snapshot id
+    and the two keys differ on every single call: a permanent 100% cache miss across the entire
+    fleet, silent, indistinguishable from a cold cache because `attempts.llm_cache_hit` simply
+    stays 0. Nothing in the harness detects it, and the bill is the only symptom.
+
+    The snapshot id is genuinely useful provenance and is genuinely lost here. Recovering it needs
+    its own field and a schema migration; it must not be smuggled through the cache key."""
     finish = _FINISH_REASONS.get(message.stop_reason or "")
     if finish is None:
         raise MalformedReply(
@@ -341,7 +380,7 @@ def _reply_from(target: BackendTarget, message: anthropic.types.Message) -> Back
             break
 
     usage = TokenUsage(
-        model_id=message.model,  # the RESOLVED id, as the backend reported it
+        model_id=target.model_id,  # the CONFIG string, verbatim — see below
         input_tokens=message.usage.input_tokens,
         output_tokens=message.usage.output_tokens,
         cache_read_tokens=message.usage.cache_read_input_tokens or 0,

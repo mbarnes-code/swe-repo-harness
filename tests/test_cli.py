@@ -52,6 +52,7 @@ from fleet.cli import (
     app,
     command_paths,
 )
+from fleet.llm.client import discover as llm_discover
 from fleet.llm.roles import SPEC_ROLE_TIERS
 from fleet.migrations import LATEST_VERSION
 from fleet.models.build import BuildUnit, SupportFile
@@ -932,6 +933,16 @@ def test_models_list_resolves_the_active_profile_offline(workspace: Path) -> Non
     assert {row["tier"] for row in payload["routes"]} == {"HEAVY", "WORKHORSE", "CHEAP"}
 
 
+@pytest.mark.skipif(
+    "openai_compatible" not in llm_discover(),
+    reason="the `local` profile routes every tier through `openai_compatible`, which has no "
+    "adapter under src/fleet/llm/backends/ yet. Since the CLI startup path began passing the "
+    "LIVE "
+    "§7.7 registry to FleetSettings.load(known_backends=...), §9 rule 2 correctly refuses that "
+    "profile with exit 2 — the gate doing exactly its job, not a regression. This is a real "
+    "capability probe in the conftest idiom, not an xfail: it re-arms and asserts the original "
+    "behaviour by itself the moment the openai_compatible backend registers.",
+)
 def test_profile_flag_selects_the_profile_every_role_resolves_through(tmp_path: Path) -> None:
     """`--profile local` reaches `LlmRouter`, which is the defect this wiring closes (§10).
 

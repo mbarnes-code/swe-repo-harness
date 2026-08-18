@@ -12,6 +12,7 @@ and `tests/test_llm_client.py`.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 import sys
@@ -23,6 +24,7 @@ import httpx
 import pytest
 from anthropic.types import Message as SdkMessage
 from anthropic.types import StopReason
+from pydantic import BaseModel
 
 from fleet.llm import client as client_module
 from fleet.llm.backends import anthropic as backend_module
@@ -31,11 +33,25 @@ from fleet.llm.backends.anthropic import (
     AnthropicBackendError,
     MalformedReply,
 )
-from fleet.llm.client import Message, TransportError, negotiate, promised_mode
-from fleet.models.enums import StructuredOutputMode
+from fleet.llm.cache import CachingModelClient, MemoryLlmCacheStore
+from fleet.llm.client import (
+    LadderModelClient,
+    Message,
+    TransportError,
+    negotiate,
+    promised_mode,
+)
+from fleet.llm.roles import LlmRouter
+from fleet.models.enums import ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, ModelCapabilities
 
 KEY_ENV = "FLEET_TEST_ANTHROPIC_KEY"  # a NAME only; never a FLEET_* var read by settings.py
+
+
+class Answer(BaseModel):
+    """The typed handoff, matching the canned tool arguments in `sdk_message`."""
+
+    verdict: str
 
 
 def make_target(**overrides: Any) -> BackendTarget:
@@ -85,7 +101,9 @@ class FakeMessages:
         self._recorder = recorder
 
     async def create(self, **kwargs: Any) -> SdkMessage:
+        calls = self._recorder.get("calls", 0)
         self._recorder.update(kwargs)
+        self._recorder["calls"] = calls + 1
         if isinstance(self._outcome, Exception):
             raise self._outcome
         return self._outcome
@@ -351,7 +369,9 @@ def test_the_tool_call_rung_forces_the_single_mandatory_tool(transport: Any) -> 
     assert [t["name"] for t in recorder["tools"]] == ["emit_response"]
     assert recorder["tools"][0]["input_schema"] is schema
     assert reply.tool_arguments == {"verdict": "ok"}
-    assert reply.usage.model_id == "resolved-model-id"
+    # NOT "resolved-model-id": see test_usage_model_id_echoes_the_config_string_not_the_
+    # resolved_snapshot for why the config string has to win here.
+    assert reply.usage.model_id == "target-under-test"
     assert (reply.usage.input_tokens, reply.usage.output_tokens) == (11, 7)
     assert reply.usage.cache_read_tokens == 3
 
@@ -389,7 +409,7 @@ def test_the_prompted_floor_sends_no_tools_and_no_schema(transport: Any) -> None
     ))
     reply = asyncio.run(_invoke(make_target(), mode=StructuredOutputMode.PROMPTED, schema=None))
     assert "tools" not in recorder
-    assert "output_config" not in recorder
+    assert "format" not in recorder["output_config"]  # effort still rides here; the schema must not
     assert reply.text == '{"verdict": "ok"}'
 
 
@@ -471,3 +491,170 @@ async def _invoke(
         max_output_tokens=256,
         timeout_s=timeout_s,
     )
+
+
+# ---------------------------------------------------------------------------------------------
+# FIX ROUND 1 — regressions for the three defects the review found
+# ---------------------------------------------------------------------------------------------
+
+
+def test_usage_model_id_echoes_the_config_string_not_the_resolved_snapshot(
+    transport: Any,
+) -> None:
+    """The single highest-consequence line in the adapter.
+
+    `_stamp` resolves `usage.model_id or target.model_id` — backend-reported WINS. The `llm_cache`
+    READ key takes `target.model_id` (`_key_parts`) while the WRITE key takes `usage.model_id`
+    (`_store_response`). This transport returns a DATED snapshot id in `message.model`, so
+    reporting it would make read key != write key on every call: a permanent 100% cache miss
+    across the whole fleet, silent, indistinguishable from a cold cache because
+    `attempts.llm_cache_hit` merely stays 0. `TokenUsage.model_id`'s own comment ("as the backend
+    reported it") and `schema.sql`'s ("RESOLVED id") both invite the wrong choice, so this is
+    pinned here rather than left to convention."""
+    transport(sdk_message(model="resolved-snapshot-20260101"))
+    target = make_target(model_id="config-string")
+    reply = asyncio.run(_invoke(target))
+    assert reply.usage.model_id == target.model_id == "config-string"
+    assert reply.usage.model_id != "resolved-snapshot-20260101"
+
+
+def test_a_cache_write_and_the_next_read_produce_the_same_key(transport: Any) -> None:
+    """The end-to-end form of the assertion above, driven through the real `CachingModelClient`
+    over a real `LadderModelClient` wrapping this adapter.
+
+    Two identical calls. If the write key and the read key disagree for ANY reason, the second
+    reaches the transport again and `recorder["calls"]` is 2 — which is exactly the fleet-wide
+    silent-miss failure, reproduced in one dict and one assertion. Nothing else in the repo
+    covers it: `test_llm_cache.py` drives a `FakeClient` that sets `usage.model_id` to the config
+    string by convention, so it can never observe a backend that does not."""
+    target = make_target(model_id="config-string")
+    router = LlmRouter(
+        {"repo_classify": ModelTier.CHEAP}, {ModelTier.CHEAP: (target,)}, required_roles=(),
+    )
+    recorder = transport(sdk_message(model="resolved-snapshot-20260101"))
+    client = CachingModelClient(
+        LadderModelClient(router, {"anthropic": AnthropicBackend()}),
+        router,
+        MemoryLlmCacheStore(),
+    )
+    messages = [Message(role="user", content="classify")]
+
+    first = asyncio.run(client.complete("repo_classify", messages, Answer))
+    second = asyncio.run(client.complete("repo_classify", messages, Answer))
+
+    assert first.value.verdict == second.value.verdict == "ok"
+    assert recorder["calls"] == 1, "the second call re-hit the transport: write key != read key"
+
+
+def test_the_declared_effort_is_sent_under_output_config(transport: Any) -> None:
+    """§9 declares `effort:` per target and `CacheKeyParts.effort` already records it as part of
+    the cache identity, so a cached row CLAIMS the call was made at that effort. Discarding the
+    field while the cache says otherwise is a silent degradation (Rule 11). The nesting matters —
+    `effort` is a key inside `output_config`, not a top-level request parameter."""
+    recorder = transport(sdk_message())
+    asyncio.run(_invoke(make_target(effort="low")))
+    assert recorder["output_config"]["effort"] == "low"
+    assert "effort" not in recorder
+
+
+def test_effort_and_the_json_schema_rung_coexist_under_output_config(transport: Any) -> None:
+    """`effort` and the JSON_SCHEMA rung's `format` are siblings under `output_config`. Building
+    the rung fragment by assignment rather than merge would silently drop the operator's declared
+    effort on exactly the rung that carries a schema — and the cache would still record it."""
+    recorder = transport(sdk_message(
+        stop_reason="end_turn", content=[{"type": "text", "text": "{}"}],
+    ))
+    schema: dict[str, object] = {"type": "object", "properties": {}}
+    asyncio.run(_invoke(
+        make_target(effort="high"), mode=StructuredOutputMode.JSON_SCHEMA, schema=schema,
+    ))
+    assert recorder["output_config"]["effort"] == "high"
+    assert recorder["output_config"]["format"] == {"type": "json_schema", "schema": schema}
+
+
+STARTUP_PROBE = '''
+import json, pathlib, sys, tempfile
+
+import fleet.cli as cli
+from fleet.llm.client import registry
+
+# Snapshot BEFORE anything touches the registry. `import fleet.cli` alone must not register a
+# backend -- if it did, this probe would pass for the wrong reason.
+before = {"imported": "fleet.llm.backends.anthropic" in sys.modules, "registry": sorted(registry())}
+
+from tests.test_cli import write_config  # writes three YAML files; imports no backend
+
+config = write_config(pathlib.Path(tempfile.mkdtemp()))
+settings = cli._load_settings(cli.GlobalOptions(config_path=config))
+
+print(json.dumps({
+    "before": before,
+    "after": sorted(registry()),
+    "profile_loaded": settings.profile,
+}))
+'''
+
+
+def test_the_cli_startup_path_calls_discover_without_anyone_importing_the_backend() -> None:
+    """The defect this guards is the one a backend's own unit tests structurally cannot see.
+
+    `@register_backend` fires on IMPORT. This test module imports the adapter directly, so every
+    other test here observes a populated registry no matter what the CLI does. In a real run
+    nothing imported `fleet.llm.backends`: `discover()` had zero call sites in `src/`,
+    `RunContext.backends` defaulted to `None` so `LadderModelClient` fell back to an empty
+    `registry()`, and §9 rule 2 validated `backend:` against the hard-coded `SHIPPED_BACKENDS`
+    tuple rather than the live registry. Net effect: startup passed clean, `fleet models check
+    --strict` reported UNREGISTERED, and the first `complete()` raised `UnknownBackend` in wave 7
+    with repos already cloned — vacuously satisfying §13 row 36's "checked at RunContext
+    construction".
+
+    So this runs in a FRESH interpreter that imports only `fleet.cli`, asserts the registry is
+    empty at that point, and then drives the real `_load_settings` startup path. Delete the
+    `discover()` call and `after` comes back empty.
+    """
+    root = Path(backend_module.__file__).parents[4]
+    env = {k: v for k, v in os.environ.items() if not k.startswith("FLEET_")}
+    env["PYTHONPATH"] = os.pathsep.join([str(root), str(root / "src")])
+    out = subprocess.run(  # noqa: S603
+        [sys.executable, "-c", STARTUP_PROBE],
+        capture_output=True, text=True, check=True, env=env, cwd=str(root),
+    )
+    result = json.loads(out.stdout.strip().splitlines()[-1])
+
+    assert result["before"]["imported"] is False, "fleet.cli imported the adapter by itself"
+    assert result["before"]["registry"] == [], result["before"]["registry"]
+    assert "anthropic" in result["after"], (
+        "the CLI startup path did not populate the §7.7 registry; every target routed through "
+        "this backend is unreachable and row 36's startup gate is vacuous"
+    )
+
+
+def test_the_startup_gate_checks_the_live_registry_not_the_shipped_name_tuple(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§9 rule 2 must mean "this backend is REGISTERED", not "this name is spelled like one we
+    ship". `SHIPPED_BACKENDS` lists four names; only the ones whose SDK actually imported are
+    reachable, so validating against the constant passes a profile naming a backend that can
+    never answer. `FleetSettings.load` already takes `known_backends=` for exactly this — it was
+    simply never supplied."""
+    from fleet import cli as cli_module
+    from fleet.settings import SHIPPED_BACKENDS
+
+    seen: dict[str, Any] = {}
+
+    def spy(config_dir: Any, **kwargs: Any) -> Any:
+        seen.update(kwargs)
+        raise _Stop
+
+    monkeypatch.setattr(cli_module.FleetSettings, "load", spy)
+    with pytest.raises(_Stop):
+        cli_module._load_settings(cli_module.GlobalOptions())
+
+    passed = seen["known_backends"]
+    assert passed is not None, "known_backends was not supplied; the gate falls back to a constant"
+    assert "anthropic" in passed
+    assert tuple(passed) != SHIPPED_BACKENDS or set(passed) == set(client_module.discover())
+
+
+class _Stop(Exception):
+    """Stops `_load_settings` once the spy has recorded what it was called with."""
