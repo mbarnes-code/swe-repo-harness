@@ -6698,3 +6698,86 @@ two spellings of absence (`NULL` and `""`) for a value whose only job is to hash
 **Provenance.** The doc contradiction was surfaced by the BK1 lane against the `claude-api` skill
 source; the `"medium"` substitution was caught in re-review of BK2 fix round 2; this entry is the
 orchestrator's decision, recorded per CLAUDE.md guardrail 1.
+---
+
+## ADR-0075 — "`fleet resume` reconciled everything it can and cannot continue" is **exit 2, not exit 1**, and it reuses §10's existing usage code rather than minting a twelfth: retrying it unchanged produces the identical refusal, which is exactly what exit 2 already tells CI — and the cost of getting this wrong is a retry loop that spends one forge call per open PR per iteration
+
+**Status:** accepted, `agent/RS1`. **Supersedes nothing.** Anchored at `4a519b3` (the landing this
+corrects) on base `7a8bfbb`.
+
+### 1. The decision
+
+`fleet resume`, having completed every §11.5 step that exists — the config-drift audit, any budget
+raise, the `--repoll-prs` re-poll, the step-3 stale-lease sweep and the step-7 projection — and
+stopping only because step 5 (re-check preconditions and demote to the earliest phase whose
+precondition holds) has no implementation, exits **2**, via a dedicated
+`ResumeIncompleteError(FleetCliError)` whose `exit_code` is `ExitCode.USAGE`.
+
+Exit **1** is retained for the case where something actually failed: a `PrEmissionError` out of
+`--repoll-prs` (the forge was unreachable, unauthenticated or rate-limited) still exits 1, and it
+outranks the step-5 refusal when both are true.
+
+**What CI should branch on**, and this is the whole point of the split:
+
+| Exit | Meaning for `fleet resume` | Correct CI behaviour |
+|---|---|---|
+| 0 | `--dry-run` health check passed; nothing written | continue |
+| 1 | the forge call failed — **the reconciliation still committed** | retry is legitimate, but fix credentials/rate limits first |
+| 2 | reconciled; cannot continue until step 5 is implemented, or a flag was refused | **do not retry**; a human must change code or the command |
+| 3, 10 | budget halts | `--raise-budget` / `--raise-wave-budget` |
+
+### 2. Why exit 1 was wrong, measured rather than asserted
+
+At `4a519b3` a single code covered three materially different outcomes: reconciled-but-incomplete,
+forge-failed-and-nothing-reconciled, and a genuine crash. Exit 1 is `UNEXPECTED_ERROR`, and the
+reflex wrapper around a verb that exits 1 is a retry loop.
+
+The cost is not hypothetical and it scales with fleet size. Each `fleet resume --repoll-prs`
+iteration issues one `gh pr view` per **open** PR (`vcs/github.py::sync`, sequential and bounded by
+the `git_net` semaphore, but bounded by nothing across invocations). A 250-repo fleet mid-run
+therefore spends up to 250 forge calls per retry on a refusal whose answer cannot change until
+somebody writes code. That trips GitHub's secondary rate limit, at which point `_pr_sync_impl`
+starts raising — converting a clean, idempotent reconciliation into a failing one, and sending the
+operator to debug a rate limit instead of reading "step 5 is not implemented".
+
+A verb whose refusal is **stable under retry** must not share a code with one whose refusal is
+transient. That is the same argument §10 already makes for exit 11 ("deliberately not 3") and for
+exit 9, and it is the argument applied here.
+
+### 3. Why exit 2 specifically, and why not a twelfth code
+
+`UsageError`'s contract in this codebase is "the operator must edit a file, a flag **or a stub**
+before retrying", and §10's own prose already stretches exit 2 past mistyped commands: it covers a
+profile with an unpriced target, `fleet pr --ready` against an unresolved stub, and a second run
+started against a mirror another live run owns. None of those is a typo. The unifying property is
+**the harness refused deliberately, and an identical re-invocation gets an identical refusal** —
+which describes this case exactly.
+
+Rejected alternatives, each for a specific reason:
+
+- **A new `ExitCode` member (12).** SPEC §10 enumerates exactly `0`–`11` and calls that set the
+  contract CI composes against; adding a member makes the spec's own table wrong until SPEC.md is
+  edited, and SPEC.md is the main session's to change (CLAUDE.md §3), not a lane's. It would also
+  oblige every existing wrapper to learn a code for a condition that disappears the day step 5
+  lands. Minting a permanent code for a temporary state is the wrong trade.
+- **Exit 7 (`REQUIRES_HUMAN_INTERVENTION`).** Semantically close and therefore actively dangerous:
+  exit 7 means "the run *completed* and a repo needs a human". Overloading it with "the harness is
+  incomplete" is the same corruption §13 row 45 warns about for `stub_reconcile` — the moment two
+  unrelated conditions share exit 7, an operator can no longer read it as a statement about repos.
+- **Exit 11 (`SEQUENCE_REFUSED`).** Its documented property is "changed nothing and costs nothing".
+  A resume that reached this point has changed a great deal, all of it durable.
+- **Exit 0 with a warning.** Rejected outright: the run did not resume. A green exit for a verb
+  that did not do the thing it is named after is how a nightly pipeline reports success on a fleet
+  that has not moved in a week.
+
+### 4. Consequences, including the one that is unpleasant
+
+- Exit 2 is now overloaded three ways for this verb (config error, refused flag, incomplete
+  resume). CI cannot tell them apart from the code alone. Accepted: all three are "do not retry,
+  a human must change something", which is the only decision a wrapper makes on a non-retryable
+  code, and the message and the `--json` payload distinguish them for anyone reading.
+- The payload is emitted on stdout **before** the refusal is raised, so `--json` consumers get the
+  full reconciliation report on the exit-2 path. That ordering is load-bearing and is asserted by
+  `tests/test_cli.py`.
+- **This ADR is temporary by construction.** When §11.5 step 5 lands, `ResumeIncompleteError`
+  should be deleted, not repurposed. If it is still here after step 5 exists, that is a defect.

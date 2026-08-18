@@ -3223,5 +3223,14 @@ declare a live worker dead" remains prose. An operator who sets `run.stale_after
 resume sweep's cutoff and does NOT move the TTL the reaper compares against
 (`SqliteStateRepository.reap_expired_phase_leases` keys on `lease_expires_at`, not on this
 column) — two liveness horizons from one key, which is exactly the drift the per-phase capture was
-supposed to prevent. **Not fixed here**: the fix belongs in `claim_phase`'s parameter list and in
-the `PhaseRecord` construction path, neither of which is in RS1's lane (Rule 3).
+supposed to prevent.
+
+**Contained, not fixed.** The resume sweep does not get to pick a winner between the two clocks: it
+reclaims a row only when the row has outlived **both**, so a lowered `run.stale_after_s` can never
+reclaim a lease the per-row TTL still calls live (the two-writer collision on `migrate/<repo>`),
+and a raised one only makes a resume more conservative than the reaper. That bounds the blast
+radius of the disagreement wherever RS1's code reads it; it does not remove the disagreement.
+**Still not fixed**: the fix belongs in `claim_phase`'s parameter list and in the `PhaseRecord`
+construction path, neither of which is in RS1's lane (Rule 3). When it lands, the conjunction in
+`_STALE_HEARTBEAT_PREDICATE` becomes a redundant no-op rather than a wrong answer, which is the
+property that makes it safe to leave in place until then.

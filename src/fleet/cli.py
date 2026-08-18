@@ -343,15 +343,35 @@ class SequenceRefusedError(FleetCliError):
 
 
 class CommandUnavailableError(FleetCliError):
-    """A piece of the verb's implementation does not exist yet, and the verb says which piece.
+    """The verb's implementation is a `NotImplementedError` stub elsewhere in the package.
 
-    Exit 1 with the missing thing named, rather than a `NotImplementedError` traceback: exit 1 IS
-    "an unexpected error", and an operator who is told what is absent can act on it. `_unavailable`
-    raises this for a verb whose worker body is a stub; `fleet resume` raises it directly, because
-    what it is missing is not a stub module but an assembly that was never written (see there).
+    Exit 1 with the module named, rather than a `NotImplementedError` traceback: exit 1 IS "an
+    unexpected error", and an operator who is told which file is a stub can act on it.
     """
 
     exit_code = ExitCode.UNEXPECTED_ERROR
+
+
+class ResumeIncompleteError(FleetCliError):
+    """§10 exit 2: `fleet resume` reconciled everything it can and will not continue.
+
+    **Deliberately NOT exit 1, and the distinction is the whole point of the class.** Exit 1 is
+    "an unexpected error" — the harness fell over and the ledger may be anywhere. This is the
+    opposite: every step of §11.5 that exists ran to completion and committed, and the verb is
+    stopping because a documented step of its own has no implementation. Sharing a code with a
+    crash makes a CI wrapper retry, and a retry of `--repoll-prs` costs one forge call per open
+    PR — 250 on a full fleet — which trips a secondary rate limit and converts a clean
+    reconciliation into a failed one.
+
+    Exit 2 rather than a twelfth code because §10's exit-2 contract is already "the operator must
+    edit a file, a flag or a stub before retrying", and it already covers refusals that are not
+    mistyped commands (`fleet pr --ready` against an unresolved stub, the mirror mutex). Retrying
+    this unchanged produces the identical refusal, which is exactly what exit 2 tells CI. See
+    ADR-0075 in docs/DECISIONS.md; `_refuse_unbuilt_resume_flags` refuses the same missing step
+    with the same code.
+    """
+
+    exit_code = ExitCode.USAGE
 
 
 # --------------------------------------------------------------------------------------
@@ -9798,12 +9818,43 @@ _RESET_RUNNING_TO_PENDING_SQL: Final = (
 #: Appended to the statement above by `fleet resume`, and to the COUNT that previews it under
 #: `--dry-run`. Abort stops the whole run so it reclaims unconditionally; a resume may be racing a
 #: worker that is still alive and heart-beating, and reclaiming that one produces the two-writer
-#: collision the lease exists to prevent. `heartbeat_at IS NOT NULL` mirrors
-#: `PhaseRecord.is_stale`, which reports a NULL heartbeat as NOT stale: a RUNNING row with no
-#: heartbeat is a row `claim_phase` is still mid-write on, not a corpse. The cutoff is computed in
-#: Python from `run.stale_after_s` (§11.5 step 3 names that key) and compared as TEXT, which is
-#: sound because every persisted instant is one fixed-width UTC rendering (`_iso`).
-_STALE_HEARTBEAT_PREDICATE: Final = " AND heartbeat_at IS NOT NULL AND heartbeat_at < ?"
+#: collision the lease exists to prevent.
+#:
+#: **Two horizons, and the gate is their CONJUNCTION — never either one alone.** The harness
+#: carries two answers to "is this worker dead":
+#:
+#: * `run.stale_after_s`, live config, named by §11.5 step 3 itself; and
+#: * `phases.heartbeat_ttl_seconds`, per row, which `PhaseRecord.is_stale` (`models/state.py`)
+#:   compares against and which `settings.py` says exists "captured per phase so a config change
+#:   cannot retroactively declare a live worker dead".
+#:
+#: They can disagree, because that second promise is **not kept today**: `claim_phase`
+#: (`state/repository.py`) writes `lease_owner`, `lease_fence`, `lease_expires_at`, `heartbeat_at`
+#: and `started_at`, and never `heartbeat_ttl_seconds` — so every row carries the schema's
+#: hardcoded `DEFAULT 300` no matter what the operator configured (recorded in
+#: docs/INTEGRATION_HONESTY.md). Reading live config alone is therefore an active hazard: an
+#: operator who sets `run.stale_after_s: 30` to make the reaper responsive would have a resume
+#: reclaim rows that `PhaseRecord.is_stale` and `reap_expired_phase_leases` both still call ALIVE,
+#: which is the two-writer collision on `migrate/<repo>` the lease exists to prevent.
+#:
+#: So a row is reclaimed only when it is stale by BOTH clocks. Lowering `stale_after_s` can then
+#: never reclaim a live lease (the per-row TTL still guards it), and raising it only makes a
+#: resume MORE conservative than the reaper — the safe direction for a step whose failure mode is
+#: two writers on one worktree. When `claim_phase` is fixed to stamp the column, the two collapse
+#: back into one number and this conjunction becomes a no-op rather than a wrong answer.
+#:
+#: `heartbeat_at IS NOT NULL` mirrors `PhaseRecord.is_stale`, which reports a NULL heartbeat as
+#: NOT stale: a RUNNING row with no heartbeat is a row `claim_phase` is still mid-write on, not a
+#: corpse. The config cutoff is computed in Python and compared as TEXT, which is sound because
+#: every persisted instant is one fixed-width UTC rendering (`_iso`); the per-row half needs
+#: arithmetic against a column, so it uses `julianday`, which parses that same rendering.
+#: Both are evaluated inside the writer's statement, not read-then-written, so a worker that
+#: heartbeats mid-resume cannot be reclaimed on a stale read.
+_STALE_HEARTBEAT_PREDICATE: Final = (
+    " AND heartbeat_at IS NOT NULL "
+    "   AND heartbeat_at < ? "
+    "   AND (julianday(?) - julianday(heartbeat_at)) * 86400.0 > heartbeat_ttl_seconds"
+)
 
 
 async def _abort_impl(
@@ -9937,7 +9988,19 @@ def resume(
         _emit(opts, result, _resume_lines(result))
         if dry_run:
             return
-        raise CommandUnavailableError(
+        # Ordering: a forge failure is a REAL failure (exit 1) and outranks the step-5 refusal
+        # (exit 2), which reports a reconciliation that succeeded. Both are raised only after the
+        # sweep, the projection and `_emit` — see `_resume_impl`.
+        failure = result["pr_sync_error"]
+        if isinstance(failure, str):
+            raise PrEmissionError(
+                f"{failure}\n"
+                "§11.5 steps 3 and 7 ran anyway and are committed: the stale-lease sweep and "
+                "`migration_state.json` are purely local, and a flag added to do MORE must never "
+                "subtract the steps a plain `fleet resume` would have done. Fix the forge access "
+                "and re-run; the re-poll is the only part that did not happen."
+            )
+        raise ResumeIncompleteError(
             "`fleet resume` reconciled the ledger and stopped: §11.5 step 5 — re-check every "
             "phase's declared preconditions and demote each repo to the earliest phase whose "
             "precondition holds — has no implementation. All twelve workers implement "
@@ -9947,7 +10010,10 @@ def resume(
             "reap), 4 (ask Git whether the commit landed) and 6 (recompute `blocked_by`) are "
             "absent too. The work reported above IS durable — the drift audit, any budget raise, "
             "the PR re-poll, the stale-lease sweep and `migration_state.json` are all written "
-            "before this refusal, so re-running the verb is safe and idempotent."
+            "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
+            "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
+            "forge call per open PR for a refusal that cannot change until step 5 is written "
+            "(ADR-0075)."
         )
 
 
@@ -9995,6 +10061,12 @@ async def _resume_impl(
     finally:
         await conn.close()
 
+    # `--raise-budget` is validated read-only FIRST, in both modes. A `--dry-run` that returned
+    # 0 for a figure the real run would refuse is the failure this whole preview exists to catch.
+    ledger: _LedgerRow | None = None
+    if raise_budget is not None:
+        ledger = await _with_ro(path, lambda c: _refuse_bad_raise_budget(c, run_id, raise_budget))
+
     if not dry_run and accepted:
         await _record_drift_findings(path, run_id, accepted, settings)
     if not dry_run and raise_wave_budget is not None and wave is not None:
@@ -10006,10 +10078,29 @@ async def _resume_impl(
     # `fleet pr --sync`'s code path invoked once — NOT a second sync — so `MERGED` still has
     # exactly one writer. It is opt-in because §11.5 promises steps 1–7 make no network call, and
     # that promise is what makes `--dry-run` a free health check; `--dry-run --repoll-prs`
-    # therefore skips it rather than quietly reaching the forge.
+    # therefore skips it rather than quietly reaching the forge, and SAYS it skipped it — a
+    # `"pr_sync": null` an operator cannot tell apart from "the flag was never passed" is the same
+    # silent-discard defect `_refuse_unbuilt_resume_flags` exists to kill.
+    #
+    # A forge failure is caught rather than propagated, and this is the reason: steps 3 and 7 are
+    # purely local, and the natural command after a crash — `fleet resume --repoll-prs`, on a host
+    # whose `gh` credentials expired in the meantime — would otherwise reconcile NOTHING, leaving
+    # every dead worker's row RUNNING. A flag that adds a step must never subtract the steps that
+    # would have run without it. Nothing is swallowed (Rule 11): the message is carried out in the
+    # payload and re-raised as exit 1 by the caller, after the reconciliation has committed.
     pr_sync: dict[str, object] | None = None
-    if repoll_prs and not dry_run:
-        pr_sync = await _pr_sync_impl(opts, settings, path, run_id=run_id)
+    pr_sync_error: str | None = None
+    if not repoll_prs:
+        repoll = "not-requested"
+    elif dry_run:
+        repoll = "skipped-dry-run"
+    else:
+        try:
+            pr_sync = await _pr_sync_impl(opts, settings, path, run_id=run_id)
+            repoll = "polled"
+        except PrEmissionError as exc:
+            pr_sync_error = str(exc)
+            repoll = "failed"
 
     # ---------------------------------------------------------------------------------
     # `stub_reconcile` (§3.5.1, §13 row 45) BELONGS HERE — immediately below the re-poll and
@@ -10017,17 +10108,27 @@ async def _resume_impl(
     # `UnresolvedStub` finding per open row, which is what makes the run exit 7. Run before the
     # re-poll, it would report as "a human is needed" every stub whose resolving PR a human had
     # ALREADY merged and the harness simply had not observed yet, and exit 7 would come to mean
-    # "the fleet gave up waiting" instead of "a human is needed". It does not exist on `main`
-    # yet; when it lands, it goes on the next line.
+    # "the fleet gave up waiting" instead of "a human is needed".
+    #
+    # RELATIVE ORDER IS NOT ENOUGH, because the line above is CONDITIONAL. `repoll` is
+    # `"not-requested"` on a plain `fleet resume` (the flag is opt-in), `"skipped-dry-run"` under
+    # `--dry-run`, and `"failed"` when the forge refused — in all three the PR state
+    # `stub_reconcile` would judge is whatever was last observed, possibly hours stale, and row 45
+    # fires exactly as if the re-poll had been ordered after it. So whoever lands it must ALSO
+    # decide what it does when `repoll != "polled"`: either gate it on that, or make
+    # `--repoll-prs` implied by it. It does not exist on `main` yet; when it lands, it goes on the
+    # next line, with that decision made explicitly rather than inherited from this ordering.
     # ---------------------------------------------------------------------------------
 
-    # §11.5 step 3. The cutoff is `run.stale_after_s` before now, per the step's own wording.
-    cutoff = _iso(_now() - timedelta(seconds=settings.config.run.stale_after_s))
+    # §11.5 step 3. `cutoff` is the config horizon `run.stale_after_s` names; `now` drives the
+    # per-row `heartbeat_ttl_seconds` half. Both are required — see `_STALE_HEARTBEAT_PREDICATE`.
+    now = _now()
+    horizons = (_iso(now - timedelta(seconds=settings.config.run.stale_after_s)), _iso(now))
     if dry_run:
-        stale = await _with_ro(path, lambda conn: _count_stale_running(conn, run_id, cutoff))
+        stale = await _with_ro(path, lambda conn: _count_stale_running(conn, run_id, horizons))
         projection: str | None = None
     else:
-        stale = await _reset_stale_running(path, run_id, cutoff)
+        stale = await _reset_stale_running(path, run_id, horizons)
         # §11.5 step 7 — the projection is an OUTPUT regenerated from SQLite, never an input.
         projection = str(
             await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
@@ -10039,30 +10140,70 @@ async def _resume_impl(
         "accepted_sections": list(accepted),
         "earliest_open_wave": wave,
         "raise_budget": raise_budget,
+        # What was ASKED is `raise_budget`; whether it HAPPENED is this. A payload that reported
+        # only the request let `--dry-run --raise-budget 50 --json` assert a cleared halt beside
+        # `"dry_run": true` while `budget_ledger.halted` was still 1.
+        "raise_budget_applied": raise_budget is not None and not dry_run,
+        "budget_ledger_before": None if ledger is None else ledger.payload(),
         "raise_wave_budget": raise_wave_budget,
+        "raise_wave_budget_applied": raise_wave_budget is not None and not dry_run,
         "stale_running_reset": stale,
+        "repoll_prs": repoll,
         "pr_sync": pr_sync,
+        "pr_sync_error": pr_sync_error,
         "projection": projection,
         "dry_run": dry_run,
     }
 
 
 def _resume_lines(result: Mapping[str, object]) -> list[str]:
+    """Every flag the operator passed accounted for, including the ones that did nothing."""
     run_id = result["run_id"]
     stale = result["stale_running_reset"]
-    if result["dry_run"]:
-        return [
-            f"dry-run: run {run_id} is resumable",
-            f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)",
-        ]
+    dry = bool(result["dry_run"])
     lines = [
-        f"run {run_id}: {stale} stale RUNNING row(s) reset to PENDING (attempts retained)",
-        f"  projection at {result['projection']}",
+        f"dry-run: run {run_id} is resumable"
+        if dry
+        else f"run {run_id}: {stale} stale RUNNING row(s) reset to PENDING (attempts retained)"
     ]
-    sync = result["pr_sync"]
-    if isinstance(sync, Mapping):
-        lines[1:1] = _pr_sync_lines(sync)
+    if dry:
+        lines.append(
+            f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)"
+        )
+    lines.extend(_budget_lines(result))
+    lines.extend(_repoll_lines(result))
+    if not dry:
+        lines.append(f"  projection at {result['projection']}")
     return lines
+
+
+def _budget_lines(result: Mapping[str, object]) -> list[str]:
+    ceiling = result["raise_budget"]
+    before = result["budget_ledger_before"]
+    if ceiling is None or not isinstance(before, Mapping):
+        return []
+    verb = "raised" if result["raise_budget_applied"] else "WOULD raise (nothing written)"
+    halt = " and clear the sticky halt" if before["halted"] else ""
+    return [
+        f"  --raise-budget: {verb} max_usd ${float(before['max_usd']):.2f} -> "
+        f"${float(cast(float, ceiling)):.2f}{halt}"
+    ]
+
+
+def _repoll_lines(result: Mapping[str, object]) -> list[str]:
+    match result["repoll_prs"]:
+        case "not-requested":
+            return []
+        case "skipped-dry-run":
+            return [
+                "  --repoll-prs: SKIPPED under --dry-run — it is the one network call on this "
+                "verb, and §11.5 promises a resume's reconciliation makes none"
+            ]
+        case "failed":
+            return [f"  --repoll-prs: FAILED — {result['pr_sync_error']}"]
+        case _:
+            sync = result["pr_sync"]
+            return _pr_sync_lines(sync) if isinstance(sync, Mapping) else []
 
 
 def _refuse_unbuilt_resume_flags(
@@ -10100,22 +10241,26 @@ def _refuse_unbuilt_resume_flags(
         )
 
 
-async def _count_stale_running(conn: aiosqlite.Connection, run_id: str, cutoff: str) -> int:
+async def _count_stale_running(
+    conn: aiosqlite.Connection, run_id: str, horizons: tuple[str, str]
+) -> int:
     """What `--dry-run` previews: the row count the sweep below would reclaim, read-only."""
     rows = await _rows(
         conn,
         "SELECT COUNT(*) FROM phases WHERE run_id = ? AND status = 'RUNNING'"  # noqa: S608
         + _STALE_HEARTBEAT_PREDICATE,
-        (run_id, cutoff),
+        (run_id, *horizons),
     )
     return 0 if not rows else int(rows[0][0])
 
 
-async def _reset_stale_running(path: Path, run_id: str, cutoff: str) -> int:
+async def _reset_stale_running(path: Path, run_id: str, horizons: tuple[str, str]) -> int:
     """§11.5 step 3: reclaim the leases of workers that died, and NOTHING else.
 
-    Returns the number of rows reclaimed. See `_RESET_RUNNING_TO_PENDING_SQL` for why `attempts`
-    is untouched and why the fence bump is the part that makes this safe.
+    `horizons` is `(config_cutoff, now)` — the two clocks `_STALE_HEARTBEAT_PREDICATE` requires a
+    row to have outlived BOTH of. Returns the number of rows reclaimed. See
+    `_RESET_RUNNING_TO_PENDING_SQL` for why `attempts` is untouched and why the fence bump is the
+    part that makes this safe.
     """
     stamp = _iso(_now())
     async with StateWriter(path, owner="fleet-resume") as writer:
@@ -10123,7 +10268,7 @@ async def _reset_stale_running(path: Path, run_id: str, cutoff: str) -> int:
         async def unit(db: aiosqlite.Connection) -> int:
             cursor = await db.execute(
                 _RESET_RUNNING_TO_PENDING_SQL + _STALE_HEARTBEAT_PREDICATE,
-                (stamp, run_id, cutoff),
+                (stamp, run_id, *horizons),
             )
             return int(cursor.rowcount)
 
@@ -10219,6 +10364,79 @@ async def _raise_wave_ceiling(path: Path, run_id: str, wave: int, ceiling: float
         await writer.submit(unit)
 
 
+@dataclass(frozen=True, slots=True)
+class _LedgerRow:
+    """`budget_ledger` as `--raise-budget` needs to see it: before the change, and for the JSON."""
+
+    spent_usd: float
+    reserved_usd: float
+    max_usd: float
+    halted: bool
+
+    @property
+    def committed_usd(self) -> float:
+        return self.spent_usd + self.reserved_usd
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "spent_usd": self.spent_usd,
+            "reserved_usd": self.reserved_usd,
+            "max_usd": self.max_usd,
+            "halted": self.halted,
+        }
+
+
+async def _refuse_bad_raise_budget(
+    conn: aiosqlite.Connection, run_id: str, ceiling: float
+) -> _LedgerRow:
+    """Every reason `--raise-budget` cannot be honoured, decided read-only so `--dry-run` says so.
+
+    Run in BOTH modes and before anything is written. A `--dry-run` that exited 0 for a figure the
+    real invocation refuses is worse than no preview: an operator recovering from a sticky exit-3
+    halt dry-runs precisely to learn whether their number works.
+
+    The name says RAISE. `ceiling < max_usd` is refused for that reason and not out of pedantry:
+    the CAS would happily accept `--raise-budget 5` against a $100 ceiling, clear the halt, and
+    write an audited `RunBudgetRaised` finding recording the LOWERING as a raise — after which the
+    run re-halts almost immediately with an audit trail that says the opposite of what happened.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT spent_usd, reserved_usd, max_usd, halted FROM budget_ledger WHERE run_id = ?",
+        (run_id,),
+    )
+    if not rows:
+        raise UsageError(
+            f"--raise-budget: run {run_id} has no `budget_ledger` row, so there is no ceiling to "
+            "raise. The ledger is opened when the run first admits work (§11.2); a run that has "
+            "not reached that point is not budget-halted and needs no raise."
+        )
+    ledger = _LedgerRow(
+        spent_usd=float(rows[0][0]),
+        reserved_usd=float(rows[0][1]),
+        max_usd=float(rows[0][2]),
+        halted=bool(rows[0][3]),
+    )
+    if ceiling < ledger.committed_usd:
+        raise UsageError(
+            f"--raise-budget {ceiling:.2f} is below what run {run_id} has already committed: "
+            f"${ledger.spent_usd:.2f} spent + ${ledger.reserved_usd:.2f} still reserved against a "
+            f"${ledger.max_usd:.2f} ceiling. `budget_ledger` refuses a ceiling under "
+            "`spent_usd + reserved_usd` by CHECK constraint, so pass a figure greater than "
+            f"{ledger.committed_usd:.2f}. Nothing was written."
+        )
+    if ceiling < ledger.max_usd:
+        raise UsageError(
+            f"--raise-budget {ceiling:.2f} would LOWER run {run_id}'s ceiling from "
+            f"${ledger.max_usd:.2f}, and this flag only raises. Lowering it here would clear "
+            "`halted` and write a `RunBudgetRaised` finding recording a cut as a raise, and the "
+            "run would re-halt almost at once with an audit trail that says otherwise. If a lower "
+            "ceiling is genuinely wanted, that is a config change plus a fresh run, not a "
+            "resume. Nothing was written."
+        )
+    return ledger
+
+
 async def _raise_run_ceiling(path: Path, run_id: str, ceiling: float) -> None:
     """§10 exit 3's only exit: raise `budget_ledger.max_usd` and clear the sticky halt, audited.
 
@@ -10241,8 +10459,8 @@ async def _raise_run_ceiling(path: Path, run_id: str, ceiling: float) -> None:
         async def unit(db: aiosqlite.Connection) -> bool:
             cursor = await db.execute(
                 "UPDATE budget_ledger SET max_usd = ?, halted = 0, updated_at = ? "
-                " WHERE run_id = ? AND spent_usd + reserved_usd <= ?",
-                (ceiling, stamp, run_id, ceiling),
+                " WHERE run_id = ? AND spent_usd + reserved_usd <= ? AND max_usd <= ?",
+                (ceiling, stamp, run_id, ceiling, ceiling),
             )
             if int(cursor.rowcount) != 1:
                 return False
@@ -10256,8 +10474,11 @@ async def _raise_run_ceiling(path: Path, run_id: str, ceiling: float) -> None:
                     run_id,
                     _fingerprint(run_id, f"{ceiling:.6f}"),
                     json.dumps(
-                        {"new_max_usd": ceiling, "halt_cleared": True, "raised_by":
-                         "--raise-budget"},
+                        {
+                            "new_max_usd": ceiling,
+                            "halt_cleared": True,
+                            "raised_by": "--raise-budget",
+                        },
                         sort_keys=True,
                     ),
                     stamp,
@@ -10268,26 +10489,14 @@ async def _raise_run_ceiling(path: Path, run_id: str, ceiling: float) -> None:
         if await writer.submit(unit):
             return
 
-    rows = await _with_ro(
-        path,
-        lambda conn: _rows(
-            conn,
-            "SELECT spent_usd, reserved_usd, max_usd FROM budget_ledger WHERE run_id = ?",
-            (run_id,),
-        ),
-    )
-    if not rows:
-        raise UsageError(
-            f"--raise-budget: run {run_id} has no `budget_ledger` row, so there is no ceiling to "
-            "raise. The ledger is opened when the run first admits work (§11.2); a run that has "
-            "not reached that point is not budget-halted and needs no raise."
-        )
-    spent, reserved, max_usd = float(rows[0][0]), float(rows[0][1]), float(rows[0][2])
+    # A zero-rowcount here means the ledger moved between `_refuse_bad_raise_budget`'s read and
+    # this CAS — another process spent, reserved or raised in the gap. Re-read and report what it
+    # says NOW rather than repeating the stale numbers the validator already approved.
+    await _with_ro(path, lambda conn: _refuse_bad_raise_budget(conn, run_id, ceiling))
     raise UsageError(
-        f"--raise-budget {ceiling:.2f} is below what run {run_id} has already committed: "
-        f"${spent:.2f} spent + ${reserved:.2f} still reserved against a ${max_usd:.2f} ceiling. "
-        "`budget_ledger` refuses a ceiling under `spent_usd + reserved_usd` by CHECK constraint, "
-        f"so pass a figure greater than {spent + reserved:.2f}. Nothing was written."
+        f"--raise-budget {ceiling:.2f} on run {run_id} matched no `budget_ledger` row and the "
+        "re-read found nothing to object to, so the ledger changed underneath this command. "
+        "Nothing was written; re-run and the fresh numbers will be checked again."
     )
 
 

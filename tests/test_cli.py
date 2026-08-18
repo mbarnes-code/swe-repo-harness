@@ -32,7 +32,7 @@ import sqlite3
 import subprocess
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -411,10 +411,11 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
     assert preview.exit_code == ExitCode.SUCCESS, preview.output
 
     # `--dry-run` previewed the clearance and wrote nothing; the real resume writes the audit
-    # BEFORE it re-enters the phase drivers (still stubs, hence exit 1) — the ordering that
-    # matters, since a raise recorded only on success is a raise lost to the next crash.
+    # BEFORE it stops on the unbuilt §11.5 step 5 (exit 2, ADR-0075 — a reconciliation that
+    # succeeded, not a crash) — the ordering that matters, since a raise recorded only on success
+    # is a raise lost to the next crash.
     real = runner.invoke(app, [*base_args(workspace), "resume", "--raise-wave-budget", "50"])
-    assert real.exit_code == ExitCode.UNEXPECTED_ERROR, real.output
+    assert real.exit_code == ExitCode.USAGE, real.output
 
     conn = sqlite3.connect(db)
     try:
@@ -762,10 +763,10 @@ def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: P
         app,
         [*base_args(workspace), "resume", "--accept-drift", "budgets", "--accept-drift", "gc"],
     )
-    # The resume itself cannot complete (the phase drivers are stubs) but the audit is written
-    # before it re-enters them, which is the ordering that matters: an accepted drift that is
-    # only recorded on success is an accepted drift lost to the next crash.
-    assert result.exit_code in {ExitCode.SUCCESS, ExitCode.UNEXPECTED_ERROR}, result.output
+    # The resume itself cannot complete (§11.5 step 5 is unbuilt) but the audit is written
+    # before it stops, which is the ordering that matters: an accepted drift that is only
+    # recorded on success is an accepted drift lost to the next crash.
+    assert result.exit_code in {ExitCode.SUCCESS, ExitCode.USAGE}, result.output
     conn = sqlite3.connect(workspace / "state" / "fleet.db")
     try:
         sections = sorted(
@@ -1087,6 +1088,34 @@ def test_abort_checkpoints_and_regenerates_the_projection(workspace: Path) -> No
 # §11.5 — what `fleet resume` reconciles today (steps 1, 3, 7, --repoll-prs, --raise-budget)
 # --------------------------------------------------------------------------------------
 
+IMPATIENT_STALE_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n  stale_after_s: 30\n"
+    "preflight:\n  min_free_bytes: 1048576\n"
+)
+"""`FLEET_YAML` with the config liveness horizon cut to 30 s — the operator action that makes the
+two clocks disagree, since `phases.heartbeat_ttl_seconds` stays at the schema's 300."""
+
+
+def _reseal_config_digests(workspace: Path) -> None:
+    """Record TODAY's per-section digests as the run's baseline, after a test edits `config/`.
+
+    A test that changes `config/fleet.yaml` to exercise something else would otherwise be testing
+    §10 drift detection instead: the resume refuses at step 1 and never reaches the code under
+    test.
+    """
+    from fleet.settings import FleetSettings
+
+    settings = FleetSettings.load(workspace / "config")
+    conn = sqlite3.connect(workspace / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE runs SET config_digests = ? WHERE run_id = ?",
+            (json.dumps(dict(settings.section_digests), sort_keys=True), RUN_ID),
+        )
+    finally:
+        conn.close()
+
+
 STALE_HEARTBEAT = "2020-01-01T00:00:00.000000+00:00"
 """Older than any `run.stale_after_s` a config could name, so the sweep's gate is exercised by
 the AGE of the heartbeat and not by an artificially tiny TTL."""
@@ -1100,18 +1129,24 @@ def _put_leased(
     attempts: int = 2,
     fence: int = 4,
     phase: int = 2,
+    ttl_s: int = 300,
 ) -> None:
     """One `RUNNING` phase row as a live worker would have left it: an owner, a fence it was
-    granted at claim time, and `attempts` already spent on real work."""
+    granted at claim time, `attempts` already spent on real work, and the per-phase liveness TTL.
+
+    `ttl_s` defaults to 300 because that is what every real row carries: `claim_phase` never
+    writes `heartbeat_ttl_seconds`, so `schema.sql`'s DEFAULT is what production rows hold
+    regardless of `run.stale_after_s`.
+    """
     conn = sqlite3.connect(db, isolation_level=None)
     try:
         conn.execute(
             "INSERT INTO phases (run_id, repo_id, phase, status, attempts, heartbeat_at, "
             "                    heartbeat_ttl_seconds, lease_owner, lease_fence, "
             "                    lease_expires_at, updated_at) "
-            "VALUES (?, ?, ?, 'RUNNING', ?, ?, 300, 'host:cid:1:boot', ?, ?, ?)",
+            "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, 'host:cid:1:boot', ?, ?, ?)",
             (
-                RUN_ID, repo, phase, attempts, heartbeat_at, fence,
+                RUN_ID, repo, phase, attempts, heartbeat_at, ttl_s, fence,
                 heartbeat_at, "2026-08-08T12:00:00+00:00",
             ),
         )
@@ -1152,8 +1187,9 @@ def test_resume_reclaims_a_stale_lease_without_charging_an_attempt(workspace: Pa
     _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
 
     result = runner.invoke(app, [*base_args(workspace), "resume"])
-    # Step 5 is not built, so the verb still refuses — but AFTER the reconciliation is durable.
-    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    # Step 5 is not built, so the verb still refuses — but AFTER the reconciliation is durable,
+    # and with exit 2, which is "retrying unchanged is futile", not "the harness crashed".
+    assert result.exit_code == ExitCode.USAGE, result.output
 
     status, attempts, fence, owner, heartbeat = _phase_row(db, "acme-commons")
     assert status == "PENDING"
@@ -1177,7 +1213,7 @@ def test_resume_leaves_a_lease_that_is_still_heart_beating_alone(workspace: Path
     _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=1, fence=7)
 
     result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert result.exit_code == ExitCode.USAGE, result.output
 
     status, attempts, fence, owner, _heartbeat = _phase_row(db, "acme-commons")
     assert (status, attempts, fence, owner) == ("RUNNING", 1, 7, "host:cid:1:boot")
@@ -1307,7 +1343,7 @@ def test_resume_repoll_prs_ingests_the_merge_the_harness_never_saw(
     monkeypatch.setattr(cli, "GH_RUNNER", forge)
 
     result = runner.invoke(app, [*base_args(workspace), "resume", "--repoll-prs"])
-    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert result.exit_code == ExitCode.USAGE, result.output
 
     conn = sqlite3.connect(db)
     try:
@@ -1391,7 +1427,7 @@ def test_raise_budget_clears_the_sticky_halt_and_is_audited(workspace: Path) -> 
     _halt_ledger(db, spent=10.0, max_usd=10.0)
 
     result = runner.invoke(app, [*base_args(workspace), "resume", "--raise-budget", "50"])
-    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    assert result.exit_code == ExitCode.USAGE, result.output
 
     assert _ledger(db) == (50.0, 0)
     conn = sqlite3.connect(db)
@@ -1425,6 +1461,220 @@ def test_raise_budget_below_committed_spend_is_refused_with_the_real_numbers(
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "10.00" in result.output
     assert _ledger(db) == (10.0, 1), "a refused raise still moved the ledger"
+
+
+def test_resume_will_not_reclaim_a_row_the_per_phase_ttl_still_calls_alive(
+    workspace: Path,
+) -> None:
+    """Lowering `run.stale_after_s` must NOT let a resume reclaim a lease the harness calls live.
+
+    Why this is the dangerous one. Two clocks answer "is this worker dead":
+    `run.stale_after_s` (live config, named by §11.5 step 3) and `phases.heartbeat_ttl_seconds`
+    (per row, what `PhaseRecord.is_stale` and every liveness check in the orchestrator compare
+    against). `settings.py` says the column exists so "a config change cannot retroactively
+    declare a live worker dead" — but `claim_phase` never writes it, so every real row carries
+    the schema default of 300 no matter what the operator configured, and the two clocks CAN
+    disagree.
+
+    The scenario, if the sweep trusted config alone: an operator sets `stale_after_s: 30` to make
+    the reaper responsive. Live workers heart-beating every few seconds hold rows stamped
+    `ttl = 300`. A `fleet resume` — which `--dry-run`'s framing as a health check actively invites
+    running against a live fleet — would see every heartbeat older than 30 s, reset live `RUNNING`
+    rows to `PENDING` and bump their fences, while `is_stale` and `reap_expired_phase_leases`
+    both still call those workers alive. That is two writers on `migrate/<repo>`.
+
+    So the gate is the CONJUNCTION of both horizons, and this test pins the conservative side:
+    60 s of silence, a 30 s config horizon, a 300 s row horizon — not reclaimed.
+    """
+    db = workspace / "state" / "fleet.db"
+    write_config(workspace, fleet=IMPATIENT_STALE_YAML)
+    # Re-seal, or the resume refuses for config drift and never reaches the sweep under test.
+    _reseal_config_digests(workspace)
+    sixty_s_ago = (datetime.now(UTC) - timedelta(seconds=60)).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=sixty_s_ago, attempts=3, fence=9, ttl_s=300)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
+    assert (status, attempts, fence, owner) == ("RUNNING", 3, 9, "host:cid:1:boot"), (
+        "a lowered `run.stale_after_s` reclaimed a lease the per-phase TTL still calls live"
+    )
+
+
+def test_resume_reclaims_once_both_horizons_are_breached(workspace: Path) -> None:
+    """The other half of the conjunction: a row past BOTH clocks is still swept.
+
+    Why it is asserted separately: a gate made conservative by breaking it would pass the test
+    above and quietly stop reconciling anything, which is the failure §11.5 step 3 exists to
+    prevent. Same fixture, same config, one row whose silence exceeds the 300 s per-row TTL too.
+    """
+    db = workspace / "state" / "fleet.db"
+    long_gone = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=long_gone, attempts=3, fence=9, ttl_s=300)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
+    assert (status, attempts, fence, owner) == ("PENDING", 3, 10, None)
+
+
+def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
+    workspace: Path,
+) -> None:
+    """A reconciliation that fully succeeded exits 2, never 1 (ADR-0075).
+
+    Why CI cares, concretely: exit 1 is "unexpected error", and the reflex wrapper retries it.
+    Retrying `fleet resume --repoll-prs` costs one `gh pr view` per open PR per iteration, so a
+    250-PR fleet burns 250 forge calls per retry and trips GitHub's secondary rate limit — at
+    which point the re-poll starts failing and the operator is debugging a rate limit instead of
+    reading "step 5 is not implemented". Exit 2 is §10's "the operator must edit a file, a flag
+    or a stub before retrying", which is exactly true here and is the signal not to loop.
+    """
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code != ExitCode.UNEXPECTED_ERROR, result.output
+    assert result.exit_code == ExitCode.USAGE
+    assert "step 5" in result.output
+
+
+def test_a_forge_failure_under_repoll_prs_still_reconciles_and_then_reports(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A flag that adds a step must not subtract the steps that would have run without it.
+
+    Why: `fleet resume --repoll-prs` is the natural command after a crash that stranded PRs, and
+    a crashed host is exactly where `gh` credentials have expired. If the forge error propagated,
+    that invocation would reconcile NOTHING — every dead worker's row still `RUNNING` with its
+    old fence, `migration_state.json` still describing the pre-crash fleet — while the plain
+    `fleet resume` the operator did not run would have reclaimed them. The operator would have
+    been punished for being more thorough.
+
+    Nothing is swallowed (Rule 11): the forge error is the exit code and it is in the output.
+    """
+    from fleet import cli
+
+    db = workspace / "state" / "fleet.db"
+    _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
+    _seed_pr_record(db, "acme-billing", state="DRAFTED",
+                    url="https://github.invalid/acme/monorepo/pull/2")
+
+    async def unauthenticated(argv: Sequence[str], **_kwargs: Any) -> ProcResult:
+        """The post-crash host: `gh` is there, the credentials are not."""
+        return ProcResult(
+            argv=tuple(argv),
+            exit_code=1,
+            stdout_tail="",
+            stderr_tail="gh: To get started with GitHub CLI, please run: gh auth login",
+            duration_ms=1,
+            timed_out=False,
+        )
+
+    monkeypatch.setattr(cli, "GH_RUNNER", unauthenticated)
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--repoll-prs"])
+
+    # The forge failure is a real failure and keeps exit 1 — it is NOT the step-5 refusal.
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+    status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
+    assert (status, attempts, fence, owner) == ("PENDING", 2, 5, None), (
+        "the forge failure abandoned the purely-local §11.5 step 3"
+    )
+    assert (workspace / "migration_state.json").exists(), "step 7 was abandoned too"
+
+
+def test_dry_run_reports_the_budget_raise_as_not_applied(workspace: Path) -> None:
+    """`--dry-run --raise-budget` previews the change and says, in the payload, that it did not
+    happen.
+
+    Why: an operator recovering from a sticky exit-3 halt does the prudent thing and dry-runs
+    first. Emitting `"raise_budget": 50.0` beside `"dry_run": true` with no other key lets a CI
+    gate assert the ceiling was raised and the halt cleared while `budget_ledger.halted` is still
+    1 — the same silently-discarded-flag defect `_refuse_unbuilt_resume_flags` exists to kill.
+    """
+    db = workspace / "state" / "fleet.db"
+    _halt_ledger(db, spent=10.0, max_usd=10.0)
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "--json", "resume", "--dry-run", "--raise-budget", "50"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["raise_budget"] == 50.0
+    assert payload["raise_budget_applied"] is False
+    assert payload["budget_ledger_before"]["halted"] is True
+    assert _ledger(db) == (10.0, 1), "a --dry-run moved the ledger"
+
+
+def test_dry_run_refuses_a_budget_figure_the_real_run_would_refuse(workspace: Path) -> None:
+    """The preview is worth having only if it gives the same verdict as the real invocation.
+
+    Why: a `--dry-run --raise-budget 1` that exits 0 tells the operator their number works. They
+    then run it for real against a halted ledger and get exit 2 — having learned nothing from the
+    step whose entire purpose was to tell them in advance.
+    """
+    db = workspace / "state" / "fleet.db"
+    _halt_ledger(db, spent=10.0, max_usd=10.0)
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "resume", "--dry-run", "--raise-budget", "1"]
+    )
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert _ledger(db) == (10.0, 1)
+
+
+def test_raise_budget_refuses_to_lower_a_ceiling(workspace: Path) -> None:
+    """The flag is named `--raise-budget`, and it now refuses to do the opposite.
+
+    Why: the CAS only guarded `spent + reserved <= ceiling`, so `--raise-budget 5` typed for a
+    run with a $100 ceiling and $1 committed would match — cutting the ceiling to $5, clearing
+    the halt, and writing an audited `RunBudgetRaised` finding that records the cut as a raise.
+    The run then re-halts almost immediately, and the audit trail says the opposite of what
+    happened, which is worse than the halt it "fixed".
+    """
+    db = workspace / "state" / "fleet.db"
+    _halt_ledger(db, spent=1.0, max_usd=100.0)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--raise-budget", "5"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "LOWER" in result.output
+    assert _ledger(db) == (100.0, 1), "a refused raise still moved the ledger"
+
+    conn = sqlite3.connect(db)
+    try:
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM findings WHERE kind = 'RunBudgetRaised'"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
+
+
+def test_dry_run_says_out_loud_that_it_skipped_the_repoll(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--dry-run --repoll-prs` reports "skipped", not a `null` indistinguishable from "not asked".
+
+    Why: `--dry-run` must not reach the network (§11.5), so skipping is correct — but a payload
+    where "the flag was passed and ignored" looks exactly like "the flag was never passed" is how
+    an operator concludes the PR state was refreshed when it was not, and then reads a stale
+    `blocked_by` as gospel.
+    """
+    from fleet import cli
+
+    async def refuse(*_args: Any, **_kwargs: Any) -> ProcResult:  # pragma: no cover
+        raise AssertionError("a --dry-run resume invoked the forge")
+
+    plain = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert json.loads(plain.stdout)["repoll_prs"] == "not-requested"
+
+    monkeypatch.setattr(cli, "GH_RUNNER", refuse)
+    asked = runner.invoke(
+        app, [*base_args(workspace), "--json", "resume", "--dry-run", "--repoll-prs"]
+    )
+    assert asked.exit_code == ExitCode.SUCCESS, asked.output
+    assert json.loads(asked.stdout)["repoll_prs"] == "skipped-dry-run"
 
 
 def test_pr_ready_refuses_while_a_stub_is_unresolved(workspace: Path) -> None:
