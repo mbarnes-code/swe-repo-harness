@@ -71,5 +71,23 @@ task described: real but entirely untested at the `_prepare_repo` call site — 
 
 ## Concerns
 
-- None outstanding. No source file changes ship in this commit. The three new tests are
-  additive-only to `tests/test_cli.py`.
+- None outstanding regarding the test content itself. No source file changes ship in this
+  commit. The three new tests are additive-only to `tests/test_cli.py`.
+- **Commit-race correction (worth flagging for the orchestrator).** My first `git commit`
+  (no pathspec, `git add tests/test_cli.py task-V4-report.md` immediately before it) swept in
+  `docs/INTEGRATION_HONESTY.md` as a third file, even though it was never `git add`ed by me and
+  showed as unstaged (` M`) in the `git status` I ran right before committing. Another agent
+  editing that file concurrently in the same shared working tree almost certainly staged it
+  between my status check and my commit call — there is no other mechanism by which `git commit
+  -m ...` (no `-a`, no pathspec) would pick up a file outside the index I had just built. Fixed
+  immediately, before doing anything else: `git reset --soft HEAD~1` (non-destructive — restores
+  the prior commit's tree to the index/worktree unchanged), `git restore --staged
+  docs/INTEGRATION_HONESTY.md` to return it to its pre-commit unstaged state, then re-committed
+  with an explicit `-- tests/test_cli.py .superpowers/sdd/sdd-backlog-a/task-V4-report.md`
+  pathspec this time. Final commit `bda7afd` contains exactly those two files; confirmed via
+  `git show --stat HEAD` and `git status --porcelain` (which shows `docs/INTEGRATION_HONESTY.md`
+  back to plain ` M`, untouched, available for its owning agent to commit separately). No content
+  was lost or altered at any point — the file's working-tree bytes were identical before, during,
+  and after this sequence. **Lesson for future lanes in a shared, non-worktree-isolated
+  multi-agent run: pass explicit pathspecs to every `git commit`, never rely on `git add` run
+  moments earlier still matching the index at commit time.**
