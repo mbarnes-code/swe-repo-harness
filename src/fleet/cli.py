@@ -4169,10 +4169,12 @@ async def _transform_criterion(
     `output.rewritten` no longer holds only rule-matched unit names — it holds every landed
     `FilePatch.path`, including a repair's legitimate collateral edits to sibling files
     (`llm/schemas.py` permits up to 64 paths per repair). `rule_matches_path` returns `False` for
-    such a path (unknown suffix, or a language/glob no rule covers), so there is no `rule.engine`
-    to route the probe through — the same "no configured way to check this file" shape as
-    `EngineUnavailableError`, not a probe that ran and failed. It is therefore non-blocking like
-    the engine-unavailable arm, but it must not silently vanish either: it is reported into
+    such a path (unknown suffix, a recognised language no rule targets, or a matching rule whose
+    `applies_to` glob misses), so there is no `rule.engine` to route the probe through. That is
+    rule-absence, not engine-absence: `EngineRegistry` is keyed by `rule.engine` strings from
+    config, not by language, so a loaded engine that could technically parse this file is never
+    tried. It is non-blocking for the same reason as the engine-unavailable arm — no configured
+    way to check this file — but it must not silently vanish either: it is reported into
     `unprobed`, one line per unmatched path (unlike the engine-unavailable dedupe, each such path
     is its own distinct fact, not a repeat of the same host-wide cause).
     """
@@ -4214,10 +4216,11 @@ async def _transform_criterion(
         for unit in rewritten:
             rule = next((r for r in rules if rule_matches_path(r, unit)), None)
             if rule is None:
-                # No configured rule claims this landed path (D49 collateral, or an unknown
-                # suffix). There is no engine to probe it through, so — like a genuinely
-                # unavailable engine — this is non-blocking, but the file must still reach the
-                # operator rather than disappear: it goes into `unprobed`.
+                # No configured rule claims this landed path (D49 collateral, an unknown suffix,
+                # or a recognised language/glob no rule covers) — rule-absence, not engine
+                # absence. Non-blocking for the same reason as a genuinely unavailable engine (no
+                # configured way to check this file), but the file must still reach the operator
+                # rather than disappear: it goes into `unprobed`.
                 unprobed.append(
                     f"{repo_id}: {unit} landed but no transform rule claims it — the §3.2 "
                     "parse probe did not run"
