@@ -6700,7 +6700,7 @@ source; the `"medium"` substitution was caught in re-review of BK2 fix round 2; 
 orchestrator's decision, recorded per CLAUDE.md guardrail 1.
 ---
 
-## ADR-0075 — "`fleet resume` reconciled everything it can and cannot continue" is **exit 2, not exit 1**, and it reuses §10's existing usage code rather than minting a twelfth: retrying it unchanged produces the identical refusal, which is exactly what exit 2 already tells CI — and the cost of getting this wrong is a retry loop that spends one forge call per open PR per iteration
+## ADR-0076 — "`fleet resume` reconciled everything it can and cannot continue" is **exit 2, not exit 1**, and it reuses §10's existing usage code rather than minting a twelfth: retrying it unchanged produces the identical refusal, which is exactly what exit 2 already tells CI — and the cost of getting this wrong is a retry loop that spends one forge call per open PR per iteration
 
 **Status:** accepted, `agent/RS1`. **Supersedes nothing.** Anchored at `4a519b3` (the landing this
 corrects) on base `7a8bfbb`.

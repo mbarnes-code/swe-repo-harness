@@ -411,7 +411,7 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
     assert preview.exit_code == ExitCode.SUCCESS, preview.output
 
     # `--dry-run` previewed the clearance and wrote nothing; the real resume writes the audit
-    # BEFORE it stops on the unbuilt §11.5 step 5 (exit 2, ADR-0075 — a reconciliation that
+    # BEFORE it stops on the unbuilt §11.5 step 5 (exit 2, ADR-0076 — a reconciliation that
     # succeeded, not a crash) — the ordering that matters, since a raise recorded only on success
     # is a raise lost to the next crash.
     real = runner.invoke(app, [*base_args(workspace), "resume", "--raise-wave-budget", "50"])
@@ -1523,7 +1523,7 @@ def test_resume_reclaims_once_both_horizons_are_breached(workspace: Path) -> Non
 def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
     workspace: Path,
 ) -> None:
-    """A reconciliation that fully succeeded exits 2, never 1 (ADR-0075).
+    """A reconciliation that fully succeeded exits 2, never 1 (ADR-0076).
 
     Why CI cares, concretely: exit 1 is "unexpected error", and the reflex wrapper retries it.
     Retrying `fleet resume --repoll-prs` costs one `gh pr view` per open PR per iteration, so a

@@ -367,7 +367,7 @@ class ResumeIncompleteError(FleetCliError):
     edit a file, a flag or a stub before retrying", and it already covers refusals that are not
     mistyped commands (`fleet pr --ready` against an unresolved stub, the mirror mutex). Retrying
     this unchanged produces the identical refusal, which is exactly what exit 2 tells CI. See
-    ADR-0075 in docs/DECISIONS.md; `_refuse_unbuilt_resume_flags` refuses the same missing step
+    ADR-0076 in docs/DECISIONS.md; `_refuse_unbuilt_resume_flags` refuses the same missing step
     with the same code.
     """
 
@@ -10013,7 +10013,7 @@ def resume(
             "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
             "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
             "forge call per open PR for a refusal that cannot change until step 5 is written "
-            "(ADR-0075)."
+            "(ADR-0076)."
         )
 
 
