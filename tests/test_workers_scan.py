@@ -56,7 +56,7 @@ from fleet.orchestrator.retry import LadderState, RetryPolicy
 from fleet.workers.base import WorkerContext, assert_stateless, implements_preconditions
 from fleet.workers.classify import UNIT, ClassifyInput, ClassifyWorker
 from fleet.workers.clone import CloneInput, CloneWorker, credential_free
-from fleet.workers.interrogate import InterrogateInput, InterrogateWorker
+from fleet.workers.interrogate import InterrogateInput, InterrogateWorker, worktree_presence
 from fleet.workers.symbolindex import SymbolIndexInput, SymbolindexWorker
 
 RUN_ID = UUID("00000000-0000-4000-8000-0000000005ca")
@@ -1241,6 +1241,127 @@ def test_symbolindex_fails_loud_when_the_worktree_is_missing(tmp_path: Path) -> 
     assert result.error is not None
     assert result.error.failure_class is FailureClass.PREFLIGHT
     assert result.error.retryable is False
+
+
+# --------------------------------------------------------------------------------------
+# D40 — `worktree_presence` is the house decoder for "is the clone worktree there", and it must
+# distinguish a genuine absence (`Path.is_dir()`'s old `False`) from an indeterminate `stat`
+# failure that `Path.is_dir()` used to swallow into the identical `False`. There is no
+# `ProcResult` here — it is a syscall, not a subprocess — so the fix shape mirrors `no_verdict`
+# without reusing it.
+# --------------------------------------------------------------------------------------
+def test_worktree_presence_distinguishes_absent_from_indeterminate(tmp_path: Path) -> None:
+    """The three real answers `os.stat` can give: present, genuinely absent, and (for a path
+    under a file, not a directory) absent for a different but still SETTLED reason."""
+    present = tmp_path / "present"
+    present.mkdir()
+    assert worktree_presence(present) is True
+
+    absent = tmp_path / "absent"
+    assert worktree_presence(absent) is False
+
+    a_file = tmp_path / "a-file"
+    a_file.write_text("not a directory")
+    assert worktree_presence(a_file) is False
+
+    # NotADirectoryError: a path component is a file, not a directory — still a real "no".
+    assert worktree_presence(a_file / "child") is False
+
+
+def test_worktree_presence_reports_an_unclassifiable_oserror_rather_than_a_bare_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """EACCES on a parent, ELOOP, a stale NFS handle: none of these mean "the worktree is not
+    there", and `stat` raising something other than `FileNotFoundError`/`NotADirectoryError`
+    must come back AS the exception, not collapsed into the same `False` a genuine absence gets —
+    that collapse is exactly what D40 files against `Path.is_dir()`."""
+    root = tmp_path / "wt"
+    root.mkdir()
+
+    def raiser(self: Path, *args: Any, **kwargs: Any) -> Any:
+        raise PermissionError(f"synthetic EACCES for {self}")
+
+    monkeypatch.setattr(Path, "stat", raiser)
+
+    result = worktree_presence(root)
+
+    assert isinstance(result, OSError)
+    assert not isinstance(result, FileNotFoundError | NotADirectoryError)
+
+
+def test_symbolindex_worktree_check_that_cannot_settle_is_retryable_not_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Before the fix, `Path.is_dir()` reported an EACCES/stale-handle/ELOOP fault identically to
+    a repo that was never cloned: non-retryable `PREFLIGHT`, straight to
+    `REQUIRES_HUMAN_INTERVENTION` with no retry, for a condition the very next attempt could
+    plausibly clear. The probe that never settled must come back retryable — `TRANSIENT_INFRA`,
+    the same class `clock_failure` uses for a subprocess call that gathered no evidence — not the
+    terminal gate reserved for a worktree that is genuinely not there.
+    """
+    root = tmp_path / "wt"
+    root.mkdir()
+    real_stat = Path.stat
+
+    def flaky_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == root:
+            raise PermissionError(f"synthetic EACCES for {self}")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    result = asyncio.run(SymbolindexWorker().run(make_ctx(root), index_payload()))
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is not FailureClass.PREFLIGHT, (
+        "an indeterminate stat failure must not be reported as the repo's own shape"
+    )
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+    assert result.error.retryable is True
+
+
+def test_interrogate_fails_loud_when_the_worktree_is_missing(tmp_path: Path) -> None:
+    """The negative control paired with the test below: a GENUINE absence must still produce the
+    old, terminal behaviour unchanged — proving the fix did not turn every negative into a retry."""
+    result = asyncio.run(
+        InterrogateWorker().run(
+            make_ctx(tmp_path / "gone"), InterrogateInput(repo_id="acme-billing")
+        )
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.PREFLIGHT
+    assert result.error.retryable is False
+
+
+def test_interrogate_worktree_check_that_cannot_settle_is_retryable_not_preflight(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`interrogate.py`'s `run()` has the identical D40 shape as `symbolindex.py`'s, off the same
+    shared `worktree_presence` — pinned separately so a future divergence between the two call
+    sites is caught here, not assumed from symbolindex's coverage alone."""
+    root = tmp_path / "wt"
+    root.mkdir()
+    real_stat = Path.stat
+
+    def flaky_stat(self: Path, *args: Any, **kwargs: Any) -> Any:
+        if self == root:
+            raise PermissionError(f"synthetic EACCES for {self}")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+
+    result = asyncio.run(
+        InterrogateWorker().run(make_ctx(root), InterrogateInput(repo_id="acme-billing"))
+    )
+
+    assert result.status == "failed"
+    assert result.error is not None
+    assert result.error.failure_class is not FailureClass.PREFLIGHT
+    assert result.error.failure_class is FailureClass.TRANSIENT_INFRA
+    assert result.error.retryable is True
 
 
 # =======================================================================================

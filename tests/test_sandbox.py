@@ -36,7 +36,7 @@ from fleet.sandbox.worktree import (
 )
 from fleet.settings import VerifySection
 from fleet.util.fs import DiskFloorBreached
-from fleet.util.proc import ProcResult, run
+from fleet.util.proc import ProcResult, is_producible_shape, run
 from fleet.workers.buildverify import C_TOOLCHAIN_PROBE
 
 RUN_ID = UUID("00000000-0000-4000-8000-00000000abcd")
@@ -55,12 +55,33 @@ real host uid here would make the test's premise depend on whoever ran it."""
 # fakes
 # --------------------------------------------------------------------------------------
 class FakeRunner:
-    """Records argv instead of executing it — the `CommandRunner` seam in one class."""
+    """Records argv instead of executing it — the `CommandRunner` seam in one class.
 
-    def __init__(self, *, stdout: str = "", exit_code: int = 0) -> None:
+    `started`/`timed_out` are constructible (mirroring `tests/test_vcs.py`'s `ScriptedRunner`,
+    D45) so a `ProcResult` that never settled can be scripted for the D44 coverage below: `not
+    result.ok` is false for three different reasons — never started, killed at its deadline, or a
+    genuine non-zero exit — and a fake that can only build the last makes the first two
+    untestable.
+    """
+
+    def __init__(
+        self,
+        *,
+        stdout: str = "",
+        exit_code: int = 0,
+        started: bool = True,
+        timed_out: bool = False,
+    ) -> None:
+        if not is_producible_shape(started=started, timed_out=timed_out, exit_code=exit_code):
+            raise ValueError(
+                f"FakeRunner(started={started}, timed_out={timed_out}, exit_code={exit_code}) "
+                "is a state util.proc.run can never produce"
+            )
         self.calls: list[tuple[str, ...]] = []
         self.stdout = stdout
         self.exit_code = exit_code
+        self.started = started
+        self.timed_out = timed_out
 
     async def __call__(
         self,
@@ -79,7 +100,8 @@ class FakeRunner:
             stdout_tail=self.stdout,
             stderr_tail="",
             duration_ms=1,
-            timed_out=False,
+            timed_out=self.timed_out,
+            started=self.started,
             cwd=cwd,
         )
 
@@ -201,6 +223,77 @@ async def test_reap_spares_a_live_owner(git_repo: Path, tmp_path: Path) -> None:
     assert reaped == [dead.name]
     assert live.path.is_dir(), "a live task's worktree was reaped"
     assert not dead.path.exists()
+
+
+# --------------------------------------------------------------------------------------
+# D44 — `remove()`'s `rmtree` must be licensed by a SETTLED git refusal, never by a probe that
+# never established one. `not result.ok` is false for three different reasons — never started,
+# killed at its deadline, or a genuine non-zero exit — and only the last means "git refused this
+# path"; the other two mean the fleet's clock, not git, and must not authorise deleting a
+# still-registered worktree.
+# --------------------------------------------------------------------------------------
+async def test_remove_does_not_delete_a_worktree_when_the_probe_never_started(
+    tmp_path: Path,
+) -> None:
+    """A `git worktree remove` made after the deadline had already passed never runs at all —
+    `started=False, timed_out=True` together (§7.1's passed-deadline synthesis) — so git was
+    never consulted about the path. `remove()` must not read that silence as a refusal and
+    delete a still-registered worktree out from under it. The raised message must say "never
+    started", not "timed out", even though `timed_out` is also `True` here — `no_verdict` checks
+    `started` BEFORE `timed_out` for exactly this reason.
+    """
+    path = tmp_path / "work" / "fleet-run-acme-1"
+    path.mkdir(parents=True)
+    (path / "marker").write_text("still here")
+    runner = FakeRunner(exit_code=124, started=False, timed_out=True)
+    manager = WorktreeManager(
+        repo_dir=tmp_path / "repo", work_dir=tmp_path / "work", run_id=RUN_ID, runner=runner
+    )
+
+    with pytest.raises(WorktreeError) as caught:
+        await manager.remove(path)
+
+    assert "never started" in str(caught.value)
+    assert path.exists(), "an unsettled probe must not authorise the rmtree"
+    assert (path / "marker").exists()
+
+
+async def test_remove_does_not_delete_a_worktree_when_the_probe_is_killed_at_its_deadline(
+    tmp_path: Path,
+) -> None:
+    """The second unsettled shape: the process genuinely ran (`started=True`) but was killed at
+    its deadline before git could answer. `-15` is SIGTERM's negative signal code, not a git
+    verdict, and must not license the delete either."""
+    path = tmp_path / "work" / "fleet-run-acme-2"
+    path.mkdir(parents=True)
+    runner = FakeRunner(exit_code=-15, started=True, timed_out=True)
+    manager = WorktreeManager(
+        repo_dir=tmp_path / "repo", work_dir=tmp_path / "work", run_id=RUN_ID, runner=runner
+    )
+
+    with pytest.raises(WorktreeError) as caught:
+        await manager.remove(path)
+
+    assert "killed at its deadline" in str(caught.value)
+    assert path.exists()
+
+
+async def test_remove_still_deletes_on_a_settled_genuine_refusal(tmp_path: Path) -> None:
+    """The case that proves the fix is not a blanket raise-on-any-failure: a `git worktree
+    remove` that actually RAN and actually refused (`started=True, timed_out=False`, non-zero
+    exit) is a real answer, and the old behaviour — `rmtree` the orphaned directory — must still
+    fire unchanged."""
+    path = tmp_path / "work" / "fleet-run-acme-3"
+    path.mkdir(parents=True)
+    runner = FakeRunner(exit_code=128, started=True, timed_out=False)
+    manager = WorktreeManager(
+        repo_dir=tmp_path / "repo", work_dir=tmp_path / "work", run_id=RUN_ID, runner=runner
+    )
+
+    existed = await manager.remove(path)
+
+    assert existed is True
+    assert not path.exists(), "a settled genuine refusal must still authorise the rmtree"
 
 
 # --------------------------------------------------------------------------------------

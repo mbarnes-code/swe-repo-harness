@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import stat
 from collections.abc import Iterable, Sequence
 from functools import lru_cache
 from pathlib import Path
@@ -60,6 +61,7 @@ __all__ = [
     "paths_intact",
     "walk_files",
     "worktree_of",
+    "worktree_presence",
 ]
 
 DEFAULT_IGNORE_GLOBS: Final[tuple[str, ...]] = (
@@ -143,6 +145,35 @@ def walk_files(root: Path, ignore_globs: Sequence[str]) -> list[str]:
 def worktree_of(ctx: WorkerContext, override: str | None) -> Path:
     """The tree a scan worker reads: the payload's path, else the lease's own `ctx.workdir`."""
     return Path(override or ctx.workdir)
+
+
+def worktree_presence(root: Path) -> bool | OSError:
+    """Whether `root` exists as a directory — genuinely, not as `Path.is_dir()` reports it (D40).
+
+    `Path.is_dir()` calls `os.stat` internally and turns EVERY `OSError` into a bare `False`:
+    EACCES on a parent, ELOOP, a stale NFS handle, ENAMETOOLONG all read identically to "the
+    clone never ran". A worker that reports `PREFLIGHT, retryable=False` off that single `False`
+    cannot tell a genuinely absent worktree from a transient filesystem fault, and abandons the
+    repo instead of retrying it — exactly the shape `util.proc.no_verdict` guards against for a
+    `ProcResult`, re-derived here because there is no subprocess: `is_dir()`'s `False` is the
+    stat-syscall analogue of a `ProcResult` with no verdict.
+
+    Stats the path directly instead of going through `is_dir()`. `FileNotFoundError` and
+    `NotADirectoryError` are the two shapes `stat` raises for a path (or a path component) that
+    is genuinely not there — a SETTLED negative, worth exactly what `Path.is_dir()`'s `False`
+    used to mean. Every other `OSError` means the filesystem did not answer the question at all,
+    and is returned AS the exception (not swallowed) so the caller can tell "no" from "we don't
+    know" and fail retryable on the latter rather than terminal.
+
+    Returns `True` when `root` exists and is a directory, `False` for a genuine absence, or the
+    `OSError` itself when the check could not establish either.
+    """
+    try:
+        return stat.S_ISDIR(root.stat().st_mode)
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        return exc
 
 
 def completed_from(all_units: Sequence[str], remaining: Sequence[str] | None) -> list[str]:
@@ -259,7 +290,19 @@ class InterrogateWorker(BaseWorker[InterrogateInput, InterrogateOutput]):
         self, ctx: WorkerContext, payload: InterrogateInput
     ) -> WorkerResult[InterrogateOutput]:
         root = worktree_of(ctx, payload.worktree_path)
-        if not await asyncio.to_thread(root.is_dir):
+        presence = await asyncio.to_thread(worktree_presence, root)
+        if isinstance(presence, OSError):
+            return WorkerResult[InterrogateOutput](
+                status="failed",
+                error=WorkerError(
+                    failure_class=FailureClass.TRANSIENT_INFRA,
+                    retryable=True,
+                    stderr_tail=(
+                        f"could not determine whether worktree {root} exists: {presence}"
+                    ),
+                ),
+            )
+        if not presence:
             return WorkerResult[InterrogateOutput](
                 status="failed",
                 error=WorkerError(

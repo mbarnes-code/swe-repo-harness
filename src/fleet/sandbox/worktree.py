@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
 
-from fleet.util.proc import CommandRunner, ProcResult, run
+from fleet.util.proc import CommandRunner, ProcResult, no_verdict, run
 
 NAME_PREFIX = "fleet"
 _UNSAFE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -156,7 +156,21 @@ class WorktreeManager:
             timeout_s=timeout_s,
         )
         # git refuses a path it does not know as a worktree. If the directory is gone (or never
-        # existed) that is success; if it is still there, git's refusal is real.
+        # existed) that is success; if it is still there, git's refusal is real — but "git's
+        # refusal is real" is exactly what an unsettled `result` does NOT establish (D44): a
+        # `worktree remove --force` that never started (deadline already passed) or was killed
+        # mid-operation was never consulted, and treating that silence as a refusal would
+        # `rmtree` a still-registered worktree out from under git. `no_verdict` must be checked
+        # BEFORE `result.ok` for the same reason it is everywhere else in this family — a call
+        # made past an already-passed deadline reports both `started=False` and `timed_out=True`
+        # at once, and reading `timed_out` first would misreport a command that never ran as one
+        # that merely took too long.
+        reason = no_verdict(result)
+        if reason is not None:
+            raise WorktreeError(
+                f"git worktree remove for {path} did not settle, so its refusal cannot be "
+                f"trusted as license to delete the directory: {reason}"
+            )
         if not result.ok and path.exists():
             shutil.rmtree(path, ignore_errors=True)
             if path.exists():

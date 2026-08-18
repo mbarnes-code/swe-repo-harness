@@ -59,6 +59,7 @@ from fleet.workers.interrogate import (
     paths_intact,
     walk_files,
     worktree_of,
+    worktree_presence,
 )
 
 __all__ = [
@@ -225,7 +226,19 @@ class SymbolindexWorker(BaseWorker[SymbolIndexInput, SymbolIndexOutput]):
         self, ctx: WorkerContext, payload: SymbolIndexInput
     ) -> WorkerResult[SymbolIndexOutput]:
         root = worktree_of(ctx, payload.worktree_path)
-        if not await asyncio.to_thread(root.is_dir):
+        presence = await asyncio.to_thread(worktree_presence, root)
+        if isinstance(presence, OSError):
+            return WorkerResult[SymbolIndexOutput](
+                status="failed",
+                error=WorkerError(
+                    failure_class=FailureClass.TRANSIENT_INFRA,
+                    retryable=True,
+                    stderr_tail=(
+                        f"could not determine whether worktree {root} exists: {presence}"
+                    ),
+                ),
+            )
+        if not presence:
             return WorkerResult[SymbolIndexOutput](
                 status="failed",
                 error=WorkerError(
