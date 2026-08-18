@@ -650,6 +650,82 @@ def test_the_parse_probe_is_reported_as_not_run_when_no_engine_can_run_it(
     assert "parse probe DID NOT RUN" in human.output
 
 
+#: An engine whose probe RAN but produced no verdict — the D37 shape ADR-0067 exists for: killed
+#: at its deadline, never started, or an exit code that is neither pass nor fail.
+#: `EngineUnavailableError` cannot stand in for this: `ensure_available()` never even gets a
+#: chance to answer for a tool that IS present and DID run, which is exactly the distinction
+#: §3.2 step 4 needs.
+INDETERMINATE_ENGINE_MODULE = '''\
+"""An engine whose probe RAN but produced no verdict (ADR-0067, D37 e2e proof)."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from fleet.models.enums import TransformTier
+from fleet.models.tasks import FilePatch
+from fleet.rewrite.apply import make_unified_diff
+from fleet.rewrite.rules import ProbeIndeterminateError, RewriteRule, render_template
+
+
+class FixtureRewriter:
+    engine = "fixture"
+
+    async def apply(
+        self, rule: RewriteRule, path: str, source: str, params: dict[str, str]
+    ) -> FilePatch | None:
+        find = render_template(params["find"], params)
+        replace = render_template(params["replace"], params)
+        rewritten = source.replace(find, replace)
+        diff = make_unified_diff(path, source, rewritten)
+        if not diff:
+            return None
+        return FilePatch(
+            path=path,
+            diff=diff,
+            tier=TransformTier.DETERMINISTIC,
+            parse_probe_ok=False,
+            rule_id=rule.id,
+        )
+
+    async def parse_probe(self, path: str) -> bool:
+        raise ProbeIndeterminateError(
+            f"parse probe for {Path(path).name!r} ran but produced no verdict "
+            "(killed at its deadline)"
+        )
+
+
+REWRITER = FixtureRewriter()
+'''
+
+
+def test_an_indeterminate_probe_blocks_the_run_unlike_a_genuinely_missing_engine(
+    fleet: Path,
+) -> None:
+    """ADR-0067 (D37), the defect this ADR exists to close: a probe that RAN but produced no
+    verdict must fail the run — exit 6, `§3.2`'s success criterion does not hold — where the
+    previous test's genuinely-missing-engine case exits SUCCESS with only a warning. Collapsing
+    the two into one `EngineUnavailableError` bucket is exactly what let a corrupt rewrite ship
+    with a green exit code before this ADR.
+    """
+    (fleet / "fleet_fixture_indeterminate_engine.py").write_text(
+        INDETERMINATE_ENGINE_MODULE, encoding="utf-8"
+    )
+    config = fleet / "config" / "fleet.yaml"
+    config.write_text(
+        FLEET_YAML.format(engine_module="fleet_fixture_indeterminate_engine"), encoding="utf-8"
+    )
+    scanned(fleet)
+
+    result = transform(fleet, json_output=False)
+    assert result.exit_code == ExitCode.UNRESOLVED_FINDINGS, result.output
+    assert "produced no verdict" in result.output
+    assert "acme-app-ts" in result.output
+    # And it is NOT reported as the non-blocking "engine unavailable" warning — the two must stay
+    # visibly distinct outcomes, not the same message with a different exit code.
+    assert "no rewrite engine is installed" not in result.output
+
+
 # ---------------------------------------------------------------------------------------
 # 5. the flags
 # ---------------------------------------------------------------------------------------

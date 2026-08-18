@@ -19,7 +19,14 @@ import pytest
 
 from fleet.models.base import LOG_TAIL_BYTES
 from fleet.util import proc
-from fleet.util.proc import HEAD_BYTES, TIMEOUT_EXIT_CODE, ProcResult, is_producible_shape, run
+from fleet.util.proc import (
+    HEAD_BYTES,
+    TIMEOUT_EXIT_CODE,
+    ProcResult,
+    is_producible_shape,
+    no_verdict,
+    run,
+)
 from fleet.workers.base import WorkerError
 
 # A child that spawns its own long-lived child, records the grandchild's pid, then sleeps.
@@ -438,3 +445,74 @@ async def test_scripted_runner_cannot_construct_states_the_real_runner_cannot_pr
     # `started=True` remains unconstrained — the double must still cover every real outcome.
     for timed_out, exit_code in [(False, 0), (False, 3), (True, -15), (True, -9), (True, 0)]:
         ScriptedRunner(started=True, timed_out=timed_out, exit_code=exit_code)
+
+
+# --------------------------------------------------------------------------------------
+# no_verdict: the decoder lives with the encoder (ADR-0067 part 4)
+# --------------------------------------------------------------------------------------
+
+
+def test_no_verdict_reads_started_before_timed_out() -> None:
+    """`started` must be tested BEFORE `timed_out` — a call made past the deadline carries BOTH
+    flags at once (see `_run_locked`'s deadline-already-passed branch), so reading `timed_out`
+    first would report a command that never ran as one that ran too long. That is the exact
+    misattribution this function exists to prevent, one layer up from where it originates."""
+    never_started = ProcResult(
+        argv=("git", "rev-parse", "HEAD"),
+        exit_code=TIMEOUT_EXIT_CODE,
+        stdout_tail="",
+        stderr_tail="deadline had already passed; process was not started",
+        duration_ms=0,
+        timed_out=True,
+        started=False,
+    )
+    reason = no_verdict(never_started)
+    assert reason is not None
+    assert "never started" in reason
+    assert "killed" not in reason
+
+
+def test_no_verdict_reports_a_real_kill_distinctly_from_never_started() -> None:
+    """A process that DID run and was killed at its deadline is a different fact — `TIMEOUT` is
+    substantive on the retry ladder for this one, unlike the never-started case above — so the
+    reason string must not collapse the two."""
+    killed = ProcResult(
+        argv=("git", "fetch", "--unshallow"),
+        exit_code=-15,
+        stdout_tail="",
+        stderr_tail="",
+        duration_ms=60_000,
+        timed_out=True,
+        started=True,
+    )
+    reason = no_verdict(killed)
+    assert reason is not None
+    assert "killed at its deadline" in reason
+    assert "never started" not in reason
+
+
+def test_no_verdict_is_none_for_a_real_answer() -> None:
+    """A command that ran to completion — whatever its exit code — established SOMETHING about
+    the question it was asked, even when that something is a legitimate non-zero exit. `None`
+    means "trust this result", never "it succeeded"."""
+    ran_and_failed = ProcResult(
+        argv=("git", "show", "HEAD:.gitmodules"),
+        exit_code=128,
+        stdout_tail="",
+        stderr_tail="fatal: path '.gitmodules' does not exist",
+        duration_ms=5,
+        timed_out=False,
+        started=True,
+    )
+    assert no_verdict(ran_and_failed) is None
+
+
+async def test_no_verdict_matches_the_real_never_started_branch() -> None:
+    """Checked against a LIVE call, not only against hand-built `ProcResult`s — the same
+    discipline `test_is_producible_shape_matches_the_real_never_started_branch` applies to
+    `is_producible_shape`, so a future change to `_run_locked`'s deadline branch cannot drift out
+    of step with this decoder silently."""
+    loop = asyncio.get_running_loop()
+    real = await run([sys.executable, "-c", "print('should not run')"], deadline=loop.time() - 1)
+    reason = no_verdict(real)
+    assert reason is not None and "never started" in reason

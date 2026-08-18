@@ -43,6 +43,7 @@ from fleet.rewrite.pipeline import RewritePipeline, TextProbe
 from fleet.rewrite.rules import (
     EngineRegistry,
     EngineUnavailableError,
+    ProbeIndeterminateError,
     RewriteRule,
     load_rules,
     render_template,
@@ -579,6 +580,76 @@ async def test_astgrep_parse_probe_never_passes_a_path_that_is_not_there(tmp_pat
     assert await driver.parse_probe(str(tmp_path / "gone.py")) is False
     # A suffix with no grammar claimed still short-circuits before any of this, as it always did.
     assert await driver.parse_probe(str(tmp_path / "gone.txt")) is True
+
+
+async def test_astgrep_probe_indeterminate_is_not_engine_unavailable(tmp_path: Path) -> None:
+    """ADR-0067 (D37): a probe that RAN but produced no verdict — killed at its deadline, never
+    started, or an exit code that is neither 0 nor 1 — must raise `ProbeIndeterminateError`, and
+    that type must NOT be catchable as `EngineUnavailableError`. Subclassing would let
+    `cli._transform_criterion`'s `except EngineUnavailableError` arm keep bucketing an
+    indeterminate probe into the non-blocking "no rewrite engine is installed" warning — the same
+    defect the new type exists to end. An injected runner is used because the vendored binary
+    always produces a real verdict; these three shapes have to be forced.
+    """
+    assert not issubclass(ProbeIndeterminateError, EngineUnavailableError)
+    assert issubclass(ProbeIndeterminateError, RuntimeError)
+
+    cases: list[ProcResult] = [
+        # Killed at its deadline: SIGTERM honoured.
+        ProcResult(argv=("ast-grep",), exit_code=-15, stdout_tail="", stderr_tail="",
+                   duration_ms=60_000, timed_out=True, started=True),
+        # Killed at its deadline: SIGTERM ignored, escalated to SIGKILL.
+        ProcResult(argv=("ast-grep",), exit_code=-9, stdout_tail="", stderr_tail="",
+                   duration_ms=60_000, timed_out=True, started=True),
+        # Never started: the deadline had already passed before the call.
+        ProcResult(argv=("ast-grep",), exit_code=124, stdout_tail="", stderr_tail="",
+                   duration_ms=0, timed_out=True, started=False),
+        # Ran, but exited a code that is neither the pass (0) nor the fail (1) verdict — e.g.
+        # ast-grep's own "this rule document is unusable" code.
+        ProcResult(argv=("ast-grep",), exit_code=8, stdout_tail="", stderr_tail="",
+                   duration_ms=5, timed_out=False, started=True),
+    ]
+    for scripted in cases:
+
+        async def fake_runner(
+            argv: Sequence[str], *, _result: ProcResult = scripted, **kwargs: object
+        ) -> ProcResult:
+            return _result
+
+        driver = AstGrepRewriter(binary=sys.executable, runner=fake_runner)
+        target = _staged(tmp_path, "app.ts", "export const x = 1;\n")
+        with pytest.raises(ProbeIndeterminateError) as excinfo:
+            await driver.parse_probe(target)
+        assert "app.ts" in str(excinfo.value)
+
+        # And the existing bucket must NOT catch it — the whole point of the new type.
+        try:
+            await driver.parse_probe(target)
+        except EngineUnavailableError:
+            pytest.fail("ProbeIndeterminateError was caught as EngineUnavailableError")
+        except ProbeIndeterminateError:
+            pass
+
+
+def test_probe_indeterminate_error_is_exported_from_the_package() -> None:
+    """ADR-0067 part 1: `ProbeIndeterminateError` must be reachable as `fleet.rewrite`, exactly
+    like its sibling `EngineUnavailableError` — a caller outside `rewrite/rules.py` should never
+    need the submodule path to catch it."""
+    import fleet.rewrite as rewrite_pkg
+
+    assert rewrite_pkg.ProbeIndeterminateError is ProbeIndeterminateError
+    assert "ProbeIndeterminateError" in rewrite_pkg.__all__
+
+
+async def test_astgrep_probe_still_names_a_genuinely_missing_binary_as_engine_unavailable(
+    tmp_path: Path,
+) -> None:
+    """The other half of the split: a binary that is not on PATH at all is unaffected by this
+    change — `ensure_available()` still raises `EngineUnavailableError`, before the probe helper
+    that can raise `ProbeIndeterminateError` is ever reached."""
+    driver = AstGrepRewriter(binary="fleet-no-such-ast-grep")
+    with pytest.raises(EngineUnavailableError):
+        await driver.parse_probe(_staged(tmp_path, "app.ts", "export const x = 1;\n"))
 
 
 async def test_astgrep_probe_text_judges_the_buffer_the_pipeline_holds(tmp_path: Path) -> None:

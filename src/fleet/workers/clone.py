@@ -55,6 +55,7 @@ from fleet.orchestrator.registry import register_worker
 from fleet.sandbox.worktree import slug
 from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
 from fleet.util.proc import CommandRunner, ProcResult
+from fleet.util.proc import no_verdict as _proc_no_verdict
 from fleet.util.proc import run as proc_run
 from fleet.vcs.git import Git, GitCommandError, GitError
 from fleet.workers.base import (
@@ -199,27 +200,13 @@ def _largest_blob(stdout_path: Path) -> int:
 def _no_verdict(result: ProcResult) -> str | None:
     """Why `result` establishes NOTHING about the repo — or `None` when it is a real answer.
 
-    `ProcResult.ok` is `started and not timed_out and exit_code == 0`, and `util.proc.run`
-    synthesises a deadline that had already passed as `timed_out=True` **and** `started=False`
-    **and** `exit_code=124`, all three at once. So a bare `if not result.ok` collapses four
-    distinct causes into one branch: the command never ran, the command was killed at the
-    deadline, the command ran and exited non-zero, and — for the probes below that ask a
-    yes/no question — the command ran and the answer was legitimately *no*.
-
-    Only the last two are facts about the repository. The first two are facts about the fleet's
-    clock, and a preflight verdict derived from them is a verdict nobody established. Every
-    caller here therefore asks this first, and treats a non-`None` answer as "we did not find
-    out" rather than as an answer.
-
-    `started` is tested BEFORE `timed_out` deliberately: a call made past the deadline carries
-    both flags, so reading `timed_out` first would report a command that never ran as one that
-    ran too long — the same misattribution, one layer down.
+    A thin delegator to `util.proc.no_verdict` (ADR-0067 part 4): the classifier decodes an
+    invariant `util/proc.py` itself creates — synthesising `timed_out=True` **and**
+    `started=False` **and** `exit_code=124` together for a deadline that had already passed — so
+    it belongs with the encoder, not here. Kept as a wrapper, rather than inlined at each call
+    site, so this module's five call sites and their tests are untouched.
     """
-    if not result.started:
-        return "the command was never started: the deadline had already passed"
-    if result.timed_out:
-        return f"the command was killed at its deadline (exit {result.exit_code})"
-    return None
+    return _proc_no_verdict(result)
 
 
 def _indeterminate(result: ProcResult, reason: str, *, cwd: Path) -> GitCommandError:

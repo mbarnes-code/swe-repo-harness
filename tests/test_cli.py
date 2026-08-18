@@ -25,9 +25,11 @@ Every test here answers "why does this matter":
 from __future__ import annotations
 
 import ast
+import asyncio
 import json
 import shutil
 import sqlite3
+import subprocess
 from collections.abc import Iterator
 from dataclasses import replace
 from pathlib import Path
@@ -1159,6 +1161,254 @@ def test_a_present_but_empty_rules_dir_is_the_legitimate_zero_rules_fleet(
     settings = FleetSettings.load(tmp_path / "config")
 
     assert _transform_rules(settings) == ()
+
+
+# --------------------------------------------------------------------------------------
+# `_transform_criterion`'s fourth clause (ADR-0067, D37): indeterminate vs. unavailable
+# --------------------------------------------------------------------------------------
+
+
+def _init_repo_with_two_commits(repo: Path) -> str:
+    """A real two-commit git repo: `dest/good.ts` and `dest/bad.ts` at HEAD~1, both edited at
+    HEAD. Returns the HEAD~1 sha — `_transform_criterion` diffs against it via `git`, not a
+    fake, so the fixture has to be real git history."""
+    def git(*args: str) -> None:
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), *args],  # noqa: S607 - "git" from PATH, as every suite does
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    repo.mkdir(parents=True)
+    git("init", "--initial-branch=main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "fleet-test")
+    (repo / "dest").mkdir()
+    (repo / "dest" / "good.ts").write_text("export const good = 1;\n", encoding="utf-8")
+    (repo / "dest" / "bad.ts").write_text("export const bad = 1;\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "pre")
+    pre_sha = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],  # noqa: S607 - "git" from PATH
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / "dest" / "good.ts").write_text("export const good = 2;\n", encoding="utf-8")
+    (repo / "dest" / "bad.ts").write_text("export const bad = 2;\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "rewrite")
+    return pre_sha
+
+
+#: `bad.ts` never produces a verdict; everything else parses. `CALLS` records every path probed,
+#: so the test can tell whether the loop reached the file AFTER the indeterminate one.
+_INDETERMINATE_ENGINE_MODULE = """\
+from __future__ import annotations
+
+from fleet.rewrite.rules import ProbeIndeterminateError
+
+CALLS: list[str] = []
+
+
+class FakeRewriter:
+    engine = "fake"
+
+    async def apply(self, rule, path, source, params):
+        return None
+
+    async def parse_probe(self, path: str) -> bool:
+        CALLS.append(path)
+        if path.endswith("bad.ts"):
+            raise ProbeIndeterminateError(f"probe for {path!r} produced no verdict")
+        return True
+
+
+REWRITER = FakeRewriter()
+"""
+
+#: Every probe raises `EngineUnavailableError` — the genuinely-absent-binary shape, injected
+#: rather than relied on from the host: `tools/bin/ast-grep` is vendored and ON PATH for this
+#: suite (conftest), so a test that wanted a real missing engine would not get one.
+_UNAVAILABLE_ENGINE_MODULE = """\
+from __future__ import annotations
+
+from fleet.rewrite.rules import EngineUnavailableError
+
+CALLS: list[str] = []
+
+
+class FakeRewriter:
+    engine = "fake"
+
+    async def apply(self, rule, path, source, params):
+        return None
+
+    async def parse_probe(self, path: str) -> bool:
+        CALLS.append(path)
+        raise EngineUnavailableError("rewrite engine 'fake' is unavailable: no binary on PATH")
+
+
+REWRITER = FakeRewriter()
+"""
+
+
+def test_probe_indeterminate_blocks_and_does_not_stop_the_rest_of_the_repos_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0067 (D37) parts 2 and 3, pinned directly against `_transform_criterion`.
+
+    Why this matters, in two parts:
+    * an indeterminate probe is a **violation** (`§3.2`'s success criterion fails, exit 6),
+      unlike a genuinely missing engine, which is a non-blocking warning — so the two must not be
+      reported the same way;
+    * the `break` became `continue`: `bad.ts`'s indeterminate probe must not excuse `good.ts`
+      from being probed too — one slow or corrupt file must not vouch for the other thirty-nine.
+    """
+    from fleet.cli import TransformOutput, _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.rewrite.rules import RewriteRule
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_two_commits(repo)
+
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "fake_indeterminate_engine.py").write_text(
+        _INDETERMINATE_ENGINE_MODULE, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(engine_dir))
+    monkeypatch.delitem(__import__("sys").modules, "fake_indeterminate_engine", raising=False)
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        "fake_indeterminate_engine\n",
+    )
+    settings = FleetSettings.load(config.parent)
+
+    rule = RewriteRule(
+        id="fake-rule",
+        engine="fake",
+        languages=["typescript"],
+        applies_to=["**/*.ts"],
+        rule={"pattern": "x"},
+    )
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
+    )
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[rule],
+        )
+    )
+
+    from fake_indeterminate_engine import CALLS  # type: ignore[import-not-found]
+
+    assert any(call.endswith("good.ts") for call in CALLS), (
+        "good.ts was never probed — the indeterminate probe for bad.ts stopped the loop, so the "
+        "`break` was not turned into a `continue`"
+    )
+    assert len(violations) == 1, violations
+    assert "produced no verdict" in violations[0]
+    assert "dest/bad.ts" in violations[0]
+    assert unprobed == [], "an indeterminate probe must be a violation, not a non-blocking warning"
+
+
+def test_engine_unavailable_is_deduped_per_repo_and_engine_not_per_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The unavailable arm's own `continue` needs the `(repo_id, engine)` dedupe the ADR asks
+    for: a host with no engine installed at all must still emit ONE `parse_probe_unavailable`
+    line per repo per engine, not one per rewritten file — otherwise a 40-file repo prints the
+    same warning forty times.
+    """
+    from fleet.cli import TransformOutput, _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.rewrite.rules import RewriteRule
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_two_commits(repo)
+
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "fake_unavailable_engine.py").write_text(
+        _UNAVAILABLE_ENGINE_MODULE, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(engine_dir))
+    monkeypatch.delitem(__import__("sys").modules, "fake_unavailable_engine", raising=False)
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        "fake_unavailable_engine\n",
+    )
+    settings = FleetSettings.load(config.parent)
+
+    rule = RewriteRule(
+        id="ts-rule",
+        engine="fake",
+        languages=["typescript"],
+        applies_to=["**/*.ts"],
+        rule={"pattern": "x"},
+    )
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
+    )
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[rule],
+        )
+    )
+
+    from fake_unavailable_engine import CALLS  # type: ignore[import-not-found]
+
+    assert len(CALLS) == 2, "both rewritten files must still be probed (`continue`, not `break`)"
+    assert violations == [], "a genuinely missing engine must not block the run"
+    assert len(unprobed) == 1, f"expected one deduped warning for (repo1, fake), got {unprobed}"
 
 
 def test_each_configured_bazel_cache_is_created_and_tagged_with_the_flag_it_feeds(

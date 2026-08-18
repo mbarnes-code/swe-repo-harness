@@ -27,6 +27,7 @@ from fleet.rewrite.pipeline import (
 from fleet.rewrite.rules import (
     EngineRegistry,
     EngineUnavailableError,
+    ProbeIndeterminateError,
     Rewriter,
     RewriteRule,
     load_rules,
@@ -38,6 +39,7 @@ __all__ = [
     "EngineContractError",
     "EngineRegistry",
     "EngineUnavailableError",
+    "ProbeIndeterminateError",
     "RewriteFinding",
     "RewriteOutcome",
     "RewritePipeline",

@@ -35,6 +35,7 @@ from fleet.settings import ConfigFileError, ConfigValidationError, UnresolvedRef
 __all__ = [
     "EngineRegistry",
     "EngineUnavailableError",
+    "ProbeIndeterminateError",
     "RewriteRule",
     "Rewriter",
     "language_for_path",
@@ -86,6 +87,20 @@ class EngineUnavailableError(RuntimeError):
     Deliberately an exception and never a `None` return: `None` means "this rule matched nothing",
     and a missing tool reported that way is indistinguishable from a clean no-op — which would
     ship an unrewritten file as a success.
+    """
+
+
+class ProbeIndeterminateError(RuntimeError):
+    """The §3.2 parse probe RAN but produced no verdict (ADR-0067, D37): it was killed at its
+    deadline, it was never started (the deadline had already passed), or it exited a code that is
+    neither `0` (parses) nor `1` (does not parse).
+
+    **Deliberately NOT a subclass of `EngineUnavailableError`.** Subclassing is the natural-looking
+    move and it is self-defeating: `cli._transform_criterion`'s existing `except
+    EngineUnavailableError` arm would keep catching it, keep bucketing it into the non-blocking
+    `parse_probe_unavailable` warning, and keep letting the run exit SUCCESS — the same defect
+    wearing a more precise name. Both derive from `RuntimeError` and are siblings, so the caller
+    must catch each on its own terms: this one is a violation, a genuinely missing engine is not.
     """
 
 

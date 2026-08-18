@@ -163,6 +163,7 @@ from fleet.orchestrator.scheduler import (
 from fleet.rewrite.rules import (
     EngineRegistry,
     EngineUnavailableError,
+    ProbeIndeterminateError,
     RewriteRule,
     load_rules,
     rule_matches_path,
@@ -4128,14 +4129,20 @@ async def _transform_criterion(
     a non-empty `git diff` against the pre-transform tree, every changed path under `<dest>/`, an
     empty `TransformResult.unresolved_files`, and a parse probe of every rewritten file.
 
-    **The parse probe is the one clause that can be unavailable on a host** — it belongs to the
-    rewrite engine (`ast-grep run --pattern '$A'`), and none of the three engines ADR-0006 names
-    is installed here. `EngineUnavailableError` is therefore reported as its own list rather than
-    counted as a pass: "the probe did not run" and "the probe returned 0" are different facts,
-    and quietly collapsing them would let a corrupt rewrite ship as a verified one.
+    **The parse probe's fourth clause has two distinct failure shapes, and ADR-0067 (D37) keeps
+    them apart.** A genuinely absent engine — no rewrite engine ADR-0006 names is installed on
+    this host — raises `EngineUnavailableError` from `ensure_available()` and is reported as its
+    own non-blocking list rather than counted as a pass: "the probe did not run" and "the probe
+    returned 0" are different facts, and quietly collapsing them would let a corrupt rewrite ship
+    as a verified one. A probe that RAN but produced no verdict — killed at its deadline, never
+    started, or an exit code that is neither 0 nor 1 — raises `ProbeIndeterminateError` instead,
+    which is a **violation**: an indeterminate probe on file 1 must not excuse files 2–40, so
+    every rewritten file is still probed (`continue`, never `break`) and a host with no engine at
+    all is deduped to one `parse_probe_unavailable` line per `(repo_id, engine)`.
     """
     violations: list[str] = []
     unprobed: list[str] = []
+    unavailable_seen: set[tuple[str, str]] = set()
     registry = EngineRegistry.from_modules(dict(settings.config.transform.engines))
     for repo_id in sorted(plans):
         if statuses.get(repo_id) is not RepoStatus.SUCCEEDED:
@@ -4176,9 +4183,23 @@ async def _transform_criterion(
                 probed = await registry.require(rule.engine).parse_probe(
                     str(plan.worktree / unit)
                 )
+            except ProbeIndeterminateError as exc:
+                # Ran, no verdict: blocking. One slow or corrupt file must not excuse the other
+                # thirty-nine, so this is `continue`, never `break` (ADR-0067).
+                violations.append(
+                    f"{repo_id}: the §3.2 parse probe for {unit} produced no verdict: {exc}"
+                )
+                continue
             except EngineUnavailableError as exc:
-                unprobed.append(f"{repo_id}: {exc}")
-                break
+                # Genuinely absent engine: non-blocking, but still `continue` (for symmetry with
+                # the arm above, and so the rest of this repo's files are still checked against
+                # any OTHER clause), deduped to one line per (repo_id, engine) rather than one
+                # per rewritten file.
+                key = (repo_id, rule.engine)
+                if key not in unavailable_seen:
+                    unavailable_seen.add(key)
+                    unprobed.append(f"{repo_id}: {exc}")
+                continue
             if not probed:
                 violations.append(f"{repo_id}: the parse probe failed for {unit} (§3.2 step 4)")
     return violations, unprobed

@@ -129,6 +129,39 @@ class ProcResult:
         return " ".join(self.argv)
 
 
+def no_verdict(result: ProcResult) -> str | None:
+    """Why `result` establishes NOTHING about whatever it was asked — or `None` when it is a
+    real answer (ADR-0067 part 4).
+
+    `ProcResult.ok` is `started and not timed_out and exit_code == 0`, and `run()` above
+    synthesises a deadline that had already passed as `timed_out=True` **and** `started=False`
+    **and** `exit_code=124`, all three at once (see `is_producible_shape`). So a bare
+    `if not result.ok` collapses distinct causes into one branch: the command never ran, the
+    command was killed at the deadline, and the command ran and exited non-zero (or, for a
+    yes/no probe, ran and legitimately answered "no"). Only the last is a fact about whatever
+    was asked; the first two are facts about the fleet's clock, and a verdict derived from them
+    is a verdict nobody established. Every caller should ask this FIRST and treat a non-`None`
+    answer as "we did not find out" rather than as an answer.
+
+    **`started` is tested BEFORE `timed_out`, deliberately.** A call made past the deadline
+    carries both flags, so reading `timed_out` first would report a command that never ran as
+    one that ran too long — the same misattribution, one layer down.
+
+    This decodes the identical `(started, timed_out)` invariant `_run_locked` above creates, so
+    it lives here — with the encoder — rather than in a `workers/*` module that would have to
+    import it back out. `workers/clone.py`'s `_no_verdict` is a thin delegator to this function,
+    kept so its five call sites (and their tests) are untouched. It is NOT the same thing as
+    `workers/base.py`'s `clock_failure`: that returns a `FailureClass` for a worker's retry
+    policy, while this returns a reason string — the two decode the same flags for different
+    callers and must not be merged.
+    """
+    if not result.started:
+        return "the command was never started: the deadline had already passed"
+    if result.timed_out:
+        return f"the command was killed at its deadline (exit {result.exit_code})"
+    return None
+
+
 class CommandRunner(Protocol):
     """The seam `sandbox/container.py` and the git/bazel wrappers depend on instead of importing
     `run` directly (CLAUDE.md guardrail 3: dependency inversion at every external boundary).

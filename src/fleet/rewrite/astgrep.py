@@ -33,6 +33,7 @@ from fleet.models.tasks import FilePatch
 from fleet.rewrite.apply import make_unified_diff
 from fleet.rewrite.rules import (
     EngineUnavailableError,
+    ProbeIndeterminateError,
     RewriteRule,
     language_for_path,
     render_template,
@@ -185,12 +186,10 @@ class AstGrepRewriter:
         # A target that is not there is not a parse verdict either, and ast-grep will not say so
         # in its exit code: measured against 0.45.1, `scan … missing.ts` prints `ERROR: missing.ts:
         # No such file or directory` on stderr and exits **0**, which the reading below would take
-        # for "no ERROR nodes — it parses". `False` rather than `EngineUnavailableError`, even
-        # though that is this helper's other habit: every caller of this verdict is a gate, and for
-        # a gate the safe direction is refusal. `EngineUnavailableError` is bucketed by the real
-        # caller (`cli._transform_criterion`) into `parse_probe_unavailable`, a non-blocking
-        # "no rewrite engine is installed on this host" warning that adds no violation — so
-        # raising here would route a vanished file to a pass just as silently as exit 0 did.
+        # for "no ERROR nodes — it parses". `False` rather than raising, even though that is this
+        # helper's other habit: every caller of this verdict is a gate, and for a gate the safe
+        # direction is refusal — raising here would route a vanished file to a pass just as
+        # silently as exit 0 did.
         probe_target = target if target.is_absolute() or cwd is None else cwd / target
         if not probe_target.exists():
             return False
@@ -201,9 +200,18 @@ class AstGrepRewriter:
                 return False
             if result.exit_code == 0:
                 return True
-        raise EngineUnavailableError(
+        # The probe RAN and produced no verdict — killed at its deadline, never started, or an
+        # exit code that is neither 0 nor 1 (e.g. 8 for an unusable rule document). This is
+        # deliberately `ProbeIndeterminateError`, NOT `EngineUnavailableError` (ADR-0067, D37):
+        # `ensure_available()` in `parse_probe`/`probe_text` is the only thing in this driver that
+        # reports a missing binary, so by the time this helper runs the tool is known to be
+        # present. Reusing `EngineUnavailableError` here would let `cli._transform_criterion`'s
+        # `except EngineUnavailableError` arm bucket a corrupt-probe signal into its non-blocking
+        # "no rewrite engine is installed" warning — the exact defect this type exists to end.
+        raise ProbeIndeterminateError(
             f"parse probe for {target.name!r}: `{self.binary} scan` exited {result.exit_code} "
-            f"(timed_out={result.timed_out}): {result.stderr_tail.strip()}"
+            f"(started={result.started}, timed_out={result.timed_out}): "
+            f"{result.stderr_tail.strip()}"
         )
 
     def _rule_args(self, rule: RewriteRule, params: Mapping[str, str], language: str) -> list[str]:
