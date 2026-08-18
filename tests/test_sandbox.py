@@ -21,6 +21,8 @@ from uuid import UUID
 import pytest
 
 from fleet.sandbox.container import (
+    ContainerReapFailure,
+    ContainerReapResult,
     ContainerSandbox,
     ContainerSpec,
     Mount,
@@ -766,15 +768,24 @@ async def test_a_container_starts_normally_when_the_volume_clears_the_floor() ->
 
 
 async def test_reap_lists_by_run_prefix_and_spares_live_containers() -> None:
-    """`fleet resume` step 2, containers half: same liveness rule as worktrees."""
+    """`fleet resume` step 2, containers half: same liveness rule as worktrees.
+
+    Also the "no over-correction" negative control for the reporting-collapse fix below: a clean
+    sweep with no `docker rm` failures must still report the removed container in `reaped`,
+    `failed` empty, `complete` True — exactly what a caller of the OLD bare-`list[str]` `reap()`
+    saw, just now spelled through `ContainerReapResult` instead of an unqualified list.
+    """
     live = sandbox_name(RUN_ID, "acme-commons", 1)
     dead = sandbox_name(RUN_ID, "acme-widgets", 1)
     runner = FakeRunner(stdout=f"{live}\n{dead}\n")
     sandbox = ContainerSandbox(runner=runner)
 
-    reaped = await sandbox.reap(run_id=RUN_ID, live_names={live})
+    result = await sandbox.reap(run_id=RUN_ID, live_names={live})
 
-    assert reaped == [dead]
+    assert isinstance(result, ContainerReapResult)
+    assert result.reaped == [dead]
+    assert result.failed == []
+    assert result.complete is True
     listing = runner.calls[0]
     # The prefix is `re.escape`d before it reaches docker's `--filter` (see
     # `test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matched`), so the argv
@@ -783,6 +794,198 @@ async def test_reap_lists_by_run_prefix_and_spares_live_containers() -> None:
     assert "--all" in listing
     assert ("docker", "rm", "--force", dead) in runner.calls
     assert ("docker", "rm", "--force", live) not in runner.calls
+
+
+class _ContainerRemoveScriptRunner:
+    """`docker ps --all --filter ...` answers with a fixed, scripted listing. `docker rm --force
+    <fail_name>` is answered either with a scripted docker-level refusal (non-zero exit) or by
+    RAISING `OSError` (an environment fault — `docker` never even ran), depending on
+    `raise_os_error`. Every other call — including `rm --force` for any other name — succeeds,
+    mirroring `FakeRunner`.
+
+    This is what lets a test drive `ContainerSandbox.reap()`'s loop with exactly one scripted
+    failure among several real-looking removals, the same shape as `worktree.py`'s
+    `_FailOneRemoveRunner`.
+    """
+
+    def __init__(
+        self, *, listing: str, fail_name: str, exit_code: int = 1, raise_os_error: bool = False
+    ) -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._listing = listing
+        self._fail_name = fail_name
+        self._exit_code = exit_code
+        self._raise_os_error = raise_os_error
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if parts[1] == "ps":
+            return ProcResult(
+                argv=parts,
+                exit_code=0,
+                stdout_tail=self._listing,
+                stderr_tail="",
+                duration_ms=1,
+                timed_out=False,
+            )
+        if parts[-1] == self._fail_name:
+            if self._raise_os_error:
+                raise FileNotFoundError(2, "No such file or directory", "docker")
+            return ProcResult(
+                argv=parts,
+                exit_code=self._exit_code,
+                stdout_tail="",
+                stderr_tail="Error: cannot remove container: still running",
+                duration_ms=1,
+                timed_out=False,
+            )
+        return ProcResult(
+            argv=parts, exit_code=0, stdout_tail="", stderr_tail="", duration_ms=1, timed_out=False
+        )
+
+
+# --------------------------------------------------------------------------------------
+# `ContainerSandbox.reap()` used to append every candidate to `reaped` unconditionally,
+# ignoring `remove()`'s own bool verdict: a `docker rm` that failed was reported reaped while the
+# container still existed — a verdict the code never established (the "four-state collapse"
+# family, docs/INTEGRATION_HONESTY.md D29/D34-D45) and directly adjacent to D32, the open
+# container-leak defect: a caller told "these were reaped" had no way to know a leak remained.
+# --------------------------------------------------------------------------------------
+async def test_reap_does_not_report_a_failed_removal_as_reaped_and_continues_the_sweep() -> None:
+    """A failed `docker rm --force` mid-sweep must not land in `reaped` — that would report a
+    container as gone while `docker ps` would still show it running, the exact leak this fixes.
+    Earlier and later successes in the SAME sweep must both survive the failure in between."""
+    early = sandbox_name(RUN_ID, "acme-early", 1)
+    stuck = sandbox_name(RUN_ID, "acme-stuck", 1)
+    later = sandbox_name(RUN_ID, "acme-later", 1)
+    runner = _ContainerRemoveScriptRunner(
+        listing=f"{early}\n{stuck}\n{later}\n", fail_name=stuck, exit_code=1
+    )
+    sandbox = ContainerSandbox(runner=runner)
+
+    result = await sandbox.reap(run_id=RUN_ID, live_names=set())
+
+    assert set(result.reaped) == {early, later}, (
+        "a mid-sweep failure must not discard the successful removal on either side of it"
+    )
+    assert [f.name for f in result.failed] == [stuck]
+    assert isinstance(result.failed[0], ContainerReapFailure)
+    assert "failed (exit 1)" in result.failed[0].reason
+    assert "still running" in result.failed[0].reason
+    assert result.complete is False
+    # The sweep continued: every dead name was attempted, in spite of the failure in the middle.
+    assert ("docker", "rm", "--force", early) in runner.calls
+    assert ("docker", "rm", "--force", stuck) in runner.calls
+    assert ("docker", "rm", "--force", later) in runner.calls
+
+
+async def test_reap_distinguishes_an_environment_fault_from_a_docker_level_refusal() -> None:
+    """`_remove_with_reason`'s `OSError` guard (D38, mirroring `WorktreeManager.remove`'s
+    `ec31b0f` fix): a missing `docker` binary — `docker` never even ran — is a materially
+    different fact from `docker` looking at a container and refusing to remove it. Both must
+    leave the sweep able to continue, and the two reasons in `ContainerReapFailure.reason` must
+    stay distinguishable rather than collapsing into one "it failed" bucket."""
+    env_fault = sandbox_name(RUN_ID, "acme-envfault", 1)
+    refused = sandbox_name(RUN_ID, "acme-refused", 1)
+    survives = sandbox_name(RUN_ID, "acme-survives", 1)
+
+    class _MixedFailureRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        async def __call__(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            deadline: float | None = None,
+            timeout_s: float | None = None,
+        ) -> ProcResult:
+            parts = tuple(argv)
+            self.calls.append(parts)
+            if parts[1] == "ps":
+                return ProcResult(
+                    argv=parts,
+                    exit_code=0,
+                    stdout_tail=f"{env_fault}\n{refused}\n{survives}\n",
+                    stderr_tail="",
+                    duration_ms=1,
+                    timed_out=False,
+                )
+            if parts[-1] == env_fault:
+                raise FileNotFoundError(2, "No such file or directory", "docker")
+            if parts[-1] == refused:
+                return ProcResult(
+                    argv=parts,
+                    exit_code=1,
+                    stdout_tail="",
+                    stderr_tail="Error: cannot remove container: still running",
+                    duration_ms=1,
+                    timed_out=False,
+                )
+            return ProcResult(
+                argv=parts,
+                exit_code=0,
+                stdout_tail="",
+                stderr_tail="",
+                duration_ms=1,
+                timed_out=False,
+            )
+
+    runner = _MixedFailureRunner()
+    sandbox = ContainerSandbox(runner=runner)
+
+    result = await sandbox.reap(run_id=RUN_ID, live_names=set())
+
+    assert set(result.reaped) == {survives}
+    reasons = {f.name: f.reason for f in result.failed}
+    assert set(reasons) == {env_fault, refused}
+    assert "environment fault" in reasons[env_fault]
+    assert "not a docker-level refusal" in reasons[env_fault]
+    assert "FileNotFoundError" in reasons[env_fault]
+    assert "environment fault" not in reasons[refused]
+    assert "failed (exit 1)" in reasons[refused]
+    assert result.complete is False
+
+
+async def test_remove_does_not_raise_when_docker_is_unreachable() -> None:
+    """`remove()`'s own contract stays bool / never-raises (its docstring: "already gone is not
+    an error") even after closing the D38 `OSError` gap: `run()`'s `finally` and the
+    fire-and-forget cleanup in `rdepverify.on_cancel`/`buildverify._sweep_containers` call
+    `remove()` without expecting an exception, so the spawn guard must resolve to `False`, not
+    propagate."""
+
+    class _MissingDockerRunner:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, ...]] = []
+
+        async def __call__(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            deadline: float | None = None,
+            timeout_s: float | None = None,
+        ) -> ProcResult:
+            self.calls.append(tuple(argv))
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    sandbox = ContainerSandbox(runner=_MissingDockerRunner())
+
+    removed = await sandbox.remove("fleet-some-container")
+
+    assert removed is False
 
 
 class RegexFilterRunner:
