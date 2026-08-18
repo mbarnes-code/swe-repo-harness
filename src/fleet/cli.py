@@ -3469,18 +3469,33 @@ class _TransformEvidence:
     """
 
     by_repo: dict[str, TransformOutput] = field(default_factory=dict)
+    _resolved: dict[str, set[str]] = field(default_factory=dict)
+    """Per-repo, the raw rewrite-unit names actually landed under their OWN identity — i.e.
+    `WorkerResult.completed_units` entries namespaced `rewrite:`, prefix stripped.
 
-    def record(self, output: TransformOutput) -> None:
+    Deliberately not sourced from `output.rewritten`: since D49 that field holds every landed
+    `FilePatch.path`, which a multi-file LLM repair can populate with a SIBLING file collaterally
+    touched while resolving a different unit. `completed_units` has no such collateral entries —
+    `RewriteWorker.run` only ever appends the loop's own `unit` to it, on every path that
+    legitimately resolves that unit (the deterministic land, the idempotent `find_task_commit`
+    shortcut, and the repair-rung land) — so it is the identity check `record()` needs."""
+
+    def record(self, output: TransformOutput, completed_units: Sequence[str] = ()) -> None:
+        resolved = self._resolved.setdefault(output.repo_id, set())
+        resolved.update(
+            unit[len(REWRITE_UNIT) :]
+            for unit in completed_units
+            if unit.startswith(REWRITE_UNIT)
+        )
         prior = self.by_repo.get(output.repo_id)
         if prior is None:
             self.by_repo[output.repo_id] = output
-            return
-        prior.commits.extend(output.commits)
-        prior.skipped.extend(output.skipped)
-        prior.rewritten.extend(output.rewritten)
-        prior.unresolved = [
-            unit for unit in output.unresolved if unit not in set(prior.rewritten)
-        ]
+            prior = output
+        else:
+            prior.commits.extend(output.commits)
+            prior.skipped.extend(output.skipped)
+            prior.rewritten.extend(output.rewritten)
+        prior.unresolved = [unit for unit in output.unresolved if unit not in resolved]
 
 
 class _ScopedWaveStore:
@@ -3565,7 +3580,7 @@ class _TransformSink:
         output = result.output
         if output is None:  # pragma: no cover - the runner only calls a sink with an output
             return
-        self._evidence.record(output)
+        self._evidence.record(output, result.completed_units)
         stamp = _iso(self._clock())
         commit = output.commits[-1] if output.commits else None
         error = result.error

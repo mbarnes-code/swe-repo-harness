@@ -815,3 +815,92 @@ def test_transform_before_sequence_refuses_rather_than_inventing_a_wave(fleet: P
     assert result.exit_code == ExitCode.SUCCESS, result.output
     assert payload(result)["waves"] == []
     assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(0,)]
+
+
+# ---------------------------------------------------------------------------------------
+# 6. `_TransformEvidence.record()` — D49's third leg, and the regression it introduced
+# ---------------------------------------------------------------------------------------
+#
+# `9a7148c` (D49) correctly changed what `output.rewritten` holds: deterministic unit names
+# before, landed `FilePatch.path`s after — the latter is what `_transform_criterion`'s parse
+# probe needs, since a multi-file LLM repair can land up to 64 paths for one unit. But
+# `_TransformEvidence.record()` kept deduping `output.unresolved` against `set(prior.rewritten)`,
+# which used to be an identity check ("was this unit already resolved") and after the change is a
+# coincidental *filename* match — `rewritten` and `unresolved` no longer share a namespace.
+#
+# These two tests exercise `record()` directly, the way `tests/test_cli.py`'s
+# `_transform_criterion` tests already do, rather than driving a full multi-attempt `fleet
+# transform` run: reproducing the exact deadline-and-repair timing through the real CLI would
+# pin the scenario far less precisely than constructing the two `TransformOutput`s the worked
+# example in the task brief describes.
+
+
+def test_a_units_own_failure_survives_a_siblings_collateral_rewrite() -> None:
+    """D49 regression, pinned: a unit whose canonical name coincides with a DIFFERENT unit's
+    collaterally-landed sibling path must still be reported unresolved.
+
+    Worked scenario: unit `B`'s LLM repair also touches a legitimate sibling `dest/x.py`, so
+    attempt 1's `rewritten` records `dest/x.py` even though `B` — not `dest/x.py` — is the unit
+    that actually resolved. Unit `A`'s own canonical name IS `dest/x.py`, and `A` genuinely fails
+    on attempt 2. Keying the dedup on `prior.rewritten` (paths) drops `A`'s failure because
+    `dest/x.py` already sits there from `B`'s unrelated edit; keying it on `completed_units`
+    (unit identity) does not, because `dest/x.py` was never `A`'s own completed unit.
+
+    Confirmed to fail against `HEAD~0`'s pre-fix `record()` (dedup on `set(prior.rewritten)`) and
+    to pass after keying the dedup on `completed_units` instead.
+    """
+    from fleet.cli import TransformOutput, _TransformEvidence
+
+    evidence = _TransformEvidence()
+
+    # Attempt 1 (partial): unit B lands; its repair collaterally rewrites sibling dest/x.py.
+    evidence.record(
+        TransformOutput(repo_id="repo1", rewritten=["dest/b.py", "dest/x.py"], unresolved=[]),
+        completed_units=["rewrite:dest/b.py"],
+    )
+
+    # Attempt 2: unit A — whose own canonical name is "dest/x.py" — genuinely fails.
+    evidence.record(
+        TransformOutput(repo_id="repo1", rewritten=[], unresolved=["dest/x.py"]),
+        completed_units=[],
+    )
+
+    assert evidence.by_repo["repo1"].unresolved == ["dest/x.py"], (
+        "A's genuine failure was dropped — dest/x.py was never A's own completed unit, only "
+        "B's collateral edit landed a file at that path"
+    )
+
+
+def test_a_units_own_completion_still_clears_it_from_unresolved() -> None:
+    """The behaviour the D49 regression must not break: a unit resolved under its OWN identity
+    on a prior attempt is still correctly dropped from `unresolved`, and a genuinely still-failing
+    sibling is not swept away with it.
+
+    `completed_units` — namespaced `rewrite:<path>` at the `TransformPipelineWorker` level — is
+    populated by `RewriteWorker.run` on every path that legitimately resolves a unit: the
+    deterministic land (`rewrite.py:380`), the idempotent `find_task_commit` shortcut
+    (`rewrite.py:328`), and the repair-rung land (`rewrite.py:452`) all append the loop's own
+    `unit`, never a collateral path. That is what makes it the right identity key.
+    """
+    from fleet.cli import TransformOutput, _TransformEvidence
+
+    evidence = _TransformEvidence()
+
+    # Attempt 1: unit C resolves cleanly under its own name.
+    evidence.record(
+        TransformOutput(repo_id="repo1", rewritten=["dest/c.py"], unresolved=[]),
+        completed_units=["rewrite:dest/c.py"],
+    )
+
+    # Attempt 2: C is (spuriously) re-reported unresolved alongside a genuinely-failing D.
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1", rewritten=[], unresolved=["dest/c.py", "dest/d.py"]
+        ),
+        completed_units=[],
+    )
+
+    assert evidence.by_repo["repo1"].unresolved == ["dest/d.py"], (
+        "C's prior completion should still clear it from unresolved, and D — never completed — "
+        "must not be dropped alongside it"
+    )
