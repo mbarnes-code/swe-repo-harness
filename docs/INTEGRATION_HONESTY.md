@@ -788,7 +788,7 @@ purest form yet: not a check that was believed to be running and was not checkin
 | **`openapi-generator-cli`** | `build.openapi_generator` setting | **UNPROVEN.** Configured, never invoked by any test. | A contract-hoisting test that actually generates a client. |
 | **LLM backends (Anthropic / OpenAI-compatible)** | `llm/client.ModelClient` Protocol (ADR-0023, guardrail 3) | **FAKE, correctly.** Every model call in the suite goes through a fake `ModelClient`. Budgets, caching, role routing, retry ladders and schema validation are proven; no request has ever left the process. | A recorded-cassette or live-endpoint contract test per backend, asserting the real wire shape matches the Protocol. |
 | **SQLite / `aiosqlite`** | `state/db.py` | **REAL** — real database files, real migrations v002–v008, real WAL/pragma configuration, real concurrent-writer behaviour. | Nothing outstanding. |
-| **`util/proc.run` itself** | the base of every boundary above | **REAL** — `test_proc.py` drives real subprocesses: exit codes, timeouts and kill, tail truncation, `log_dir` streaming to disk, `started=False` for a missing binary. | Nothing outstanding. |
+| **`util/proc.run` itself** | the base of every boundary above | **REAL** — `test_proc.py` drives real subprocesses: exit codes, timeouts and kill, tail truncation, `log_dir` streaming to disk, `started=False` for a missing binary. **Corrected 2026-08-18, verified against `f592327`, and this is the most serious kind of correction this file carries: the final clause is a claim that a test exists when it does not.** `_run_locked` (`util/proc.py:359-441`) wraps `asyncio.create_subprocess_exec` (`:396`) in a `try`/`finally` (`:394` … `:439-441`) with **no `except` clause anywhere in the function** — the ONLY `started=False` `_run_locked` can ever produce is the synthetic one at `:372-382`, returned BEFORE the subprocess is attempted, for a deadline that had already passed. A genuinely missing binary makes `create_subprocess_exec` raise `FileNotFoundError` straight out of `run()`, uncaught — no `ProcResult` is ever constructed, so `started=False` cannot describe this case at all, and no test tries to produce it: a grep for "missing", "nonexistent" or "filenotfound" (case-insensitive) across `tests/test_proc.py` is empty, and the suite's one real-subprocess `started=False` case, `test_call_past_the_deadline_never_spawns` (`:306-316`), is the deadline branch, not an absent binary. **This project's own record already said so, unnoticed:** `docs/PROGRESS.md:4240` — *"`util/proc.run` has no `FileNotFoundError` handler, so the exception propagates and no `ProcResult` is ever constructed"* — and `docs/DECISIONS.md:4744-4745` — *"if the binary were absent and `ensure_available()` somehow passed, `create_subprocess_exec` raises `FileNotFoundError`, not a `ProcResult` (measured)"* — both flatly contradicted this row, and neither correction crossed over to fix it. **Why this one outranks every debt-side correction landed today:** every other stale entry in this file overstated **debt** — a defect recorded that was not real, caught by re-checking. This overstates **coverage** — it tells a reader a boundary is tested when it is not, and a reader who trusts it skips writing exactly the guard that is missing here. That is the sharper failure mode this file's own thesis warns about. **Not a code defect — a deliberate design choice, confirmed by D38's fix:** `git grep -n "except FileNotFoundError" src/fleet/` shows `vcs/filter_repo.py:214`, `vcs/gitea.py:320`, `vcs/github.py:156,201`, `settings.py:925`, `cli.py:6447,6704` — six call sites, each independently catching `FileNotFoundError` around its OWN `runner(...)` call. D38's fix (`8464dc6`) is the clearest specimen: it replaced `filter_repo.relocate`'s three-predicate guess at a missing binary from `ProcResult` fields with a direct `except FileNotFoundError` wrapped around its own call (`vcs/filter_repo.py:212-218`, whose comment names the reason: a `ProcResult` "can never actually carry that evidence"). `proc.run` deliberately does not catch spawn errors — each call site guards its own need. The fix this row needed was to its own claim, not to `util/proc.py`. | Nothing outstanding in `src/`. **Corrected 2026-08-18: the doc gap was in this row, not the code** — see the Verdict cell. |
 
 ---
 
@@ -3088,3 +3088,118 @@ folded into D49's "Not fixed here" ADR-bound decision either: D49's open questio
 model-authored writes should carry; this worker's open question is an *invariant* check on a
 deterministic write whose shape is already fully controlled, which is a different kind of fix and
 does not need the same ADR.
+
+---
+
+**D52 — CLOSED, FIXED in `2976a7e`. A one-line fix for D49 silently reopened its own §3.2 gate one
+layer up, in `cli.py`, for a single-run window.** Verified against `2976a7e` and current `HEAD`
+(`f592327`, which does not touch `cli.py`'s `_TransformEvidence`).
+
+**The mechanism.** `9a7148c` (D49 leg 3) correctly changed `RewriteWorker._record` to append every
+landed `FilePatch.path` — not the deterministic unit name — to `output.rewritten`, because the
+§3.2 parse probe needs the paths actually written, not the target it was aimed at. That commit did
+not touch `cli.py`. `cli._TransformEvidence.record()` (`cli.py:3469-3480` before the fix) dedupes a
+retry's `unresolved` list against everything already landed: `prior.unresolved = [unit for unit in
+output.unresolved if unit not in set(prior.rewritten)]`. Before `9a7148c` this was an **identity**
+check — `prior.rewritten` held unit names, so a unit only cleared `unresolved` by resolving under
+its own name. After `9a7148c`, `prior.rewritten` holds landed **paths**, including collateral
+siblings a multi-file LLM repair touched while fixing a *different* unit — so the same membership
+test became a **coincidental filename match**: a unit whose own canonical path happens to equal a
+path some other unit's repair collaterally wrote is read as resolved, even though it never landed
+and never ran the probe. **Effect: a genuinely-unresolved unit can be silently dropped from
+`unresolved`, `_transform_criterion` never sees it, and the run reports `SUCCEEDED` over a broken,
+unprobed file** — reachable within a single `fleet transform` invocation via `PhaseRunner._drive`'s
+in-process retry on a `partial` status, no resumption required, because `_TransformEvidence` lives
+for one CLI invocation (`cli.py:4252`) and `record()` is called once per attempt into the same
+instance.
+
+**Severity: Critical, and worse than the defect the fixing commit closed.** D49 leg 3 was a
+reporting gap that under-probed a file. This is the same gate accepting a **broken** file as
+`SUCCEEDED` — the exact failure mode §3.2 exists to prevent — and it was live for exactly the
+window between `9a7148c` and `2976a7e`, both landed in this same round.
+
+**Found by review, not by the implementer — worth recording, since this file's purpose is
+tracking how defects escape notice.** `9a7148c`'s own task report (`task-O1-report.md`) flagged
+`_TransformEvidence.record()`'s dedup as an out-of-lane "follow-up observation," but misdiagnosed
+its direction: it described the risk as a resolved unit being left listed as unresolved (a
+false-negative annoyance) if a repair fixed a unit by editing *only* sibling files. **The real
+defect runs the opposite way and is more severe** — a unit that is still genuinely broken gets
+dropped from `unresolved` because a sibling's collateral path happens to name-match it, producing
+a false `SUCCEEDED`, not a spurious unresolved entry. A reviewer auditing `9a7148c`'s shape for
+exactly this kind of one-layer-up fallout caught the correct mechanism and dispatched the fix
+directly rather than leaving it as a filed observation.
+
+**The fix.** `2976a7e` gives `_TransformEvidence` a per-repo `_resolved: dict[str, set[str]]`
+accumulating rewrite-unit **identities** — `WorkerResult.completed_units` entries namespaced
+`rewrite:`, prefix stripped — populated on every call site that legitimately resolves a unit under
+its own name (the deterministic land, the idempotent `find_task_commit` shortcut, and the
+repair-rung land; never on a collateral edit). `record()` now takes `completed_units:
+Sequence[str] = ()` and dedupes `unresolved` against `_resolved[repo_id]` instead of
+`set(prior.rewritten)`; `_TransformSink.__call__` threads `result.completed_units` through at the
+one production call site (`cli.py:3583`). `output.rewritten` is left holding `FilePatch.path`s,
+unchanged from `9a7148c` — the §3.2 parse probe still needs that.
+
+**Reviewed clean.** A second reviewer traced every `completed_units` write site in
+`RewriteWorker.run` and confirmed the identity set is populated exactly on legitimate resolution
+and never by a collateral edit, then confirmed the new tests fail with a signature-level
+`TypeError` against pre-fix `record()` (not merely an assertion mismatch) — the failure a plain
+revert would reproduce, which is the correct shape for a regression pin. Pinned by
+`tests/test_transform_e2e.py`'s new section 6:
+`test_a_units_own_failure_survives_a_siblings_collateral_rewrite` (the worked scenario verbatim —
+a unit's own canonical path coincides with a sibling's collaterally-landed path, and the unit's
+genuine failure still survives into `unresolved`) and
+`test_a_units_own_completion_still_clears_it_from_unresolved` (a unit resolved under its own
+identity is still correctly dropped, so the fix does not just widen `unresolved` back out).
+
+**Would a test catch it before this round? No** — zero assertions existed anywhere in the suite on
+`output.rewritten` before `9a7148c` added the first ones, and none of those exercised
+`_TransformEvidence.record()`'s dedup at all; the gap this defect lived in was untested on both
+sides of the commit that (re-)opened it.
+
+---
+
+**D53 — OPEN. `ContainerSandbox.reap()` reports a failed `docker rm` as reaped.** Verified against
+`HEAD` (`f592327`; `src/fleet/sandbox/container.py` carries no uncommitted edits this pass —
+absent from `git status`).
+
+`ContainerSandbox.remove()` (`container.py:202-208`) runs `docker rm --force` and returns
+`result.ok` — a plain `bool`, never an exception. `reap()` (`container.py:239-254`) calls
+`await self.remove(name)` at `:252` **without reading the return value**, and unconditionally
+appends `name` to `reaped` at `:253` on the very next line — regardless of whether the removal
+actually succeeded. A `docker rm` that fails (daemon busy, container already mid-teardown, a
+transient daemon error) is reported to the caller exactly like a successful reap, and the
+container it names can still exist afterward.
+
+**Reachability, honestly stated: `reap()` has zero production callers today.** `grep -rn
+"\.reap(" src/fleet/ | grep -v test` is empty — §11.5 step 2's `fleet resume` sweep is
+implemented and never invoked, the same absence D32 already recorded for this method. This defect
+is therefore latent, not live, exactly as D32's own "would a test catch it?" line already implied
+by naming `reap` as the unreached backstop.
+
+**Distinct from D32, not an amendment to it — recorded as a new entry and cross-referenced.** D32
+is a **leak**: the containerising path (`BuildverifyWorker._argv`) bypasses `ContainerSandbox.run`
+entirely, so on a timeout the client is killed and the container is never asked to be removed at
+all — no `remove()` call happens on that path. This entry is a **reporting collapse** inside
+`remove()`'s own caller: `remove()` **is** called, docker **is** asked, and the asking can fail
+without `reap()` noticing. Folding this into D32 would describe two different code paths and two
+different failure shapes (no call vs. an unchecked call) under one root cause, which they do not
+share — D32's fix is "route the containerising path through `ContainerSandbox.run`" or "wire up
+`reap()`'s call site"; this entry's fix is internal to `reap()` regardless of who calls it or how
+often. **Not the same shape as D44's fix either:** D44/the `WorktreeManager.reap()` regression
+(`4a421a3`) was an **abort-mid-sweep** bug — one entry's `remove()` *raising* propagated out of the
+whole loop, discarding already-accumulated progress and abandoning every worktree still to come.
+`ContainerSandbox.remove()` never raises — it returns `False` — so there is no abort and no
+discarded progress; the loop always completes and every name is visited. The defect here is purely
+that the boolean answer is thrown away, not that an exception derails the sweep.
+
+**Severity: low while unreached, and it inherits D32's own "medium" once `reap()` is wired up** —
+a caller that trusts `reaped` as "these are gone" (exactly what a `fleet resume` sweep would do)
+would leave a container running and believe otherwise, compounding D32's leak with a backstop that
+lies about having caught it.
+
+**Would a test catch it? No** — `tests/test_sandbox.py` has no case that scripts a failing
+`remove()` inside a `ContainerSandbox.reap()` sweep and asserts on the returned list; the method
+returns a bare `list[str]`, not the `ReapResult(reaped, failed)` shape `WorktreeManager.reap()`
+was given in `4a421a3` for the identical honesty problem — the fix here is not a new invention, it
+is threading that same already-landed pattern one file over. **Not fixed here**: `sandbox/*.py`
+is out of this docs-only lane (Rule 3).
