@@ -347,6 +347,36 @@ class _FailOneRemoveRunner:
         return await run(list(argv), cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
 
 
+class _FailOneRemoveWithEnvironmentFaultRunner:
+    """Real git for every call except `worktree remove --force <fail_path>`, which raises
+    `OSError` instead of returning a `ProcResult` at all — the shape `_run_locked`'s unguarded
+    `asyncio.create_subprocess_exec` produces for a missing `git` binary (`FileNotFoundError`), a
+    `PermissionError` on `cwd`, or resource exhaustion. Distinct from `_FailOneRemoveRunner`
+    above: that class scripts a git process that RAN and never settled (the D44 shape); this one
+    scripts the process never being spawned at all — the `remove()` call is never even consulted
+    about the path, so the failure must read as an environment fault, not a git refusal.
+    """
+
+    def __init__(self, *, fail_path: Path) -> None:
+        self._fail_path = str(fail_path)
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if "remove" in parts and self._fail_path in parts:
+            raise FileNotFoundError(2, "No such file or directory", self._fail_path)
+        return await run(list(argv), cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
 # --------------------------------------------------------------------------------------
 # `WorktreeManager.reap()` must not let ONE unsettled `remove()` (D44's shape) collapse the
 # whole sweep. Two failure modes are equally wrong: aborting mid-loop discards worktrees already
@@ -385,6 +415,45 @@ async def test_reap_continues_past_a_failed_removal_and_does_not_discard_earlier
     assert not early.path.exists()
     assert not later.path.exists()
     assert stuck.path.exists(), "an unsettled probe must not license deleting the directory"
+
+
+async def test_reap_continues_past_an_environment_fault_and_does_not_discard_earlier_work(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """A narrower trigger for the same D44-family bug: `remove()`'s subprocess spawn itself can
+    fail — a missing `git` binary, a `PermissionError` on `cwd`, or resource exhaustion —
+    `_run_locked`'s `asyncio.create_subprocess_exec` call is unguarded, so that surfaces as a raw
+    `OSError` rather than a `ProcResult` git never even settled. `reap()` must survive it exactly
+    like the D44 unsettled-probe case above: earlier removals kept (`early`), later dead entries
+    still attempted (`later`), a live owner untouched, and the failure visible in
+    `ReapResult.failed` — worded so a caller can tell "the machine could not run git" apart from
+    "git ran and refused" rather than collapsing both into one undifferentiated failure.
+    """
+    work_dir = tmp_path / "work"
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID)
+    live = await manager.create("acme-live", 1, "main")
+    early = await manager.create("acme-early-dead", 1, "main")
+    stuck = await manager.create("acme-stuck", 1, "main")
+    later = await manager.create("acme-later-dead", 1, "main")
+
+    runner = _FailOneRemoveWithEnvironmentFaultRunner(fail_path=stuck.path)
+    reaper = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID, runner=runner)
+
+    result = await reaper.reap(live_names={live.name})
+
+    assert set(result.reaped) == {early.name, later.name}, (
+        "the successful removals on either side of the environment fault must both survive"
+    )
+    assert all(isinstance(f, ReapFailure) for f in result.failed)
+    assert [f.name for f in result.failed] == [stuck.name]
+    assert "environment fault" in result.failed[0].reason
+    assert "not a git-level refusal" in result.failed[0].reason
+    assert result.complete is False
+
+    assert live.path.is_dir(), "a live owner is spared, not attempted and not failed"
+    assert not early.path.exists()
+    assert not later.path.exists()
+    assert stuck.path.exists(), "an environment fault must not license deleting the directory"
 
 
 async def test_reap_is_reported_complete_when_every_entry_succeeds(

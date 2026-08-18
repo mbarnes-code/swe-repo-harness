@@ -192,11 +192,25 @@ class WorktreeManager:
         """
         path = self._resolve(target)
         existed = path.exists()
-        result = await self._git_run(
-            ["worktree", "remove", "--force", str(path)],
-            deadline=deadline,
-            timeout_s=timeout_s,
-        )
+        try:
+            result = await self._git_run(
+                ["worktree", "remove", "--force", str(path)],
+                deadline=deadline,
+                timeout_s=timeout_s,
+            )
+        except OSError as exc:
+            # `_git_run` → `self._runner` (by default `util/proc.run`) never wraps the spawn
+            # itself: `asyncio.create_subprocess_exec` is called unguarded (`_run_locked`), so a
+            # missing `git` binary (`FileNotFoundError`), `PermissionError` on `cwd`, or resource
+            # exhaustion propagates straight out as an `OSError`. That is an environment fault —
+            # git was never even invoked — and is a materially different fact from a *settled*
+            # git-level refusal (the `no_verdict`/`result.ok` branches below): the wording here
+            # must stay distinguishable in `ReapFailure.reason` so a caller reading `reap()`'s
+            # output can tell "the machine could not run git" from "git looked and said no".
+            raise WorktreeError(
+                f"git worktree remove for {path} never ran: environment fault spawning "
+                f"{self._git!r} ({type(exc).__name__}: {exc}), not a git-level refusal"
+            ) from exc
         # git refuses a path it does not know as a worktree. If the directory is gone (or never
         # existed) that is success; if it is still there, git's refusal is real — but "git's
         # refusal is real" is exactly what an unsettled `result` does NOT establish (D44): a
@@ -221,7 +235,14 @@ class WorktreeManager:
                     f"{result.stderr_tail}"
                 )
         # Drops the administrative record left behind by a directory deleted out from under git.
-        await self._git_run(["worktree", "prune"], deadline=deadline, timeout_s=timeout_s)
+        # Same environment-fault guard as above — this is a second, independent subprocess spawn.
+        try:
+            await self._git_run(["worktree", "prune"], deadline=deadline, timeout_s=timeout_s)
+        except OSError as exc:
+            raise WorktreeError(
+                f"git worktree prune for {self.repo_dir} never ran: environment fault spawning "
+                f"{self._git!r} ({type(exc).__name__}: {exc}), not a git-level refusal"
+            ) from exc
         return existed
 
     def _resolve(self, target: Worktree | Path | str) -> Path:
