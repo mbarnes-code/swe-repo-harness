@@ -76,6 +76,7 @@ __all__ = [
     "OPEN_STATES",
     "TERMINAL_STATES",
     "AbandonReason",
+    "HeldStub",
     "InvalidStubTransition",
     "ProviderFacts",
     "ReconcileOutcome",
@@ -141,6 +142,11 @@ class StubFinding(StrEnum):
     `migration_state.json` and `fleet stubs list` render these strings to an operator."""
 
     STUB_ROT = "StubRot"
+    STUB_ABANDONED = "StubAbandoned"
+    """A human dispositioned this stub via `fleet stubs abandon`. Named for the kind the
+    committed CLI path already writes (`cli.py`'s `INSERT INTO findings ... 'StubAbandoned'`), so
+    the two encodings of that event agree. Neither string appears in SPEC.md; `UnresolvedStub`
+    does, and it is assigned there to the reconciliation sweep alone."""
     REVALIDATION_BUDGET_EXHAUSTED = RevalidationBudgetExhausted.__name__
     UNRESOLVED_STUB = "UnresolvedStub"
 
@@ -173,6 +179,9 @@ class ProviderFacts:
     status: RepoStatus
     pr_state: PrState | None = None
     """`None` = no PR has been opened yet, which is not `MERGED` and therefore not a trigger."""
+    pr_created_at: datetime | None = None
+    """`PullRequestDraft.created_at`, so `reconcile` can bound the §13 row 45 carve-out by
+    `pr.open_pr_max_age_s`. `None` = unknown, and an unknown age is never treated as fresh."""
 
     @property
     def merged(self) -> bool:
@@ -181,8 +190,16 @@ class ProviderFacts:
     @property
     def pr_open(self) -> bool:
         """§13 row 45: an un-merged, un-closed PR means a human is mid-review, not that the
-        provider failed. `reconcile` holds these rows instead of abandoning them."""
-        return self.pr_state in (PrState.DRAFTED, PrState.OPEN, PrState.HELD)
+        provider failed. `reconcile` holds these rows instead of abandoning them.
+
+        `PrState.HELD` is deliberately NOT in this set. `enums.py` defines `HELD` as entered
+        **only by `stub_reconcile`**, meaning "this run has finished without resolving its stubs
+        and will never promote it". §13 row 35 runs reconciliation again on `fleet resume`, so
+        counting `HELD` as "a human is mid-review" would feed the carve-out its own output: the
+        row would be held on every resume, forever, and its `UnresolvedStub` finding would never
+        be written. A `HELD` PR is the fleet's own verdict, not a pending human action.
+        """
+        return self.pr_state in (PrState.DRAFTED, PrState.OPEN)
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,15 +247,25 @@ class RevalidationPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class HeldStub:
+    """One `stubs` row `reconcile` left open because its provider still has an open PR."""
+
+    coord_key: str
+    consumer_repo_id: RepoId
+    provider_repo_id: RepoId
+
+
+@dataclass(frozen=True, slots=True)
 class ReconcileOutcome:
     """The result of the end-of-run `stub_reconcile` step (§3.5.1, §13 row 35).
 
     `held_for_merge` is the §13 row 45 carve-out made visible: those rows were NOT abandoned
-    because their provider still has an open PR, and the operator needs to see which.
+    because their provider still has an open PR, and the operator needs to see which. It is
+    per-**row**, not per-stub, for the same reason `decisions` is (see `_consumers_of`).
     """
 
     decisions: tuple[StubDecision, ...]
-    held_for_merge: tuple[str, ...]
+    held_for_merge: tuple[HeldStub, ...]
     degraded_consumers: tuple[RepoId, ...]
 
 
@@ -276,8 +303,14 @@ def supersede(
     *,
     policy: RevalidationPolicy = RevalidationPolicy.BATCHED,
     operator_triggered: bool = False,
-) -> StubDecision | None:
-    """T1, or `None` when the trigger is not met.
+) -> tuple[StubDecision, ...]:
+    """T1 for **every consumer of this stub**, or `()` when the trigger is not met.
+
+    One `StubRecord` is the aggregate of one `stubs` row per consumer sharing a `stub_id`
+    (`schema.sql`: "one row per (stub, consumer, round)"), and §3.5.1's T1 `UPDATE` matches every
+    row of the fixed provider. So a stub bound to three degraded dependents yields three
+    decisions, not one: taking only the first would supersede one row and leave the other two
+    `ACTIVE` against a provider that no longer has a stub target.
 
     Fires only on `RepoStatus.SUCCEEDED` **and** `PullRequestDraft.state == 'MERGED'`. A provider
     that succeeded with an unmerged PR returns `None`: the real `//` label is not on the
@@ -295,32 +328,37 @@ def supersede(
     """
     _refuse_terminal(stub, StubTransition.T1)
     if stub.state is StubState.SUPERSEDED:
-        return None  # replayed trigger; the UPDATE already happened (§3.5.1 step 4)
+        return ()  # replayed trigger; the UPDATE already happened (§3.5.1 step 4)
     if stub.provider_repo_id != provider.repo_id:
         raise InvalidStubTransition(
             f"{stub.coord_key}: provider facts are for {provider.repo_id!r}, but this stub's "
             f"provider is {stub.provider_repo_id!r}"
         )
     if not provider.merged:
-        return None  # SUCCEEDED without a MERGED PR is not a trigger (ADR-0011 stacking)
+        return ()  # SUCCEEDED without a MERGED PR is not a trigger (ADR-0011 stacking)
     if policy is RevalidationPolicy.MANUAL and not operator_triggered:
-        return None  # `manual`: `fleet stubs resolve` is the only trigger
+        return ()  # `manual`: `fleet stubs resolve` is the only trigger
 
-    return StubDecision(
-        coord_key=stub.coord_key,
-        consumer_repo_id=_consumer_of(stub),
-        provider_repo_id=stub.provider_repo_id,
-        transition=StubTransition.T1,
-        from_state=StubState.ACTIVE,
-        to_state=StubState.SUPERSEDED,
-        # The consumer is NOT promoted here: SUPERSEDED means "not yet proven" (§3.5.1). It stays
-        # DEGRADED with a held draft PR until a round passes against the real dependency.
-        consumer_status=RepoStatus.DEGRADED,
-        detail=(
-            f"provider {provider.repo_id} SUCCEEDED with a MERGED PR"
-            + (" (operator `fleet stubs resolve`)" if operator_triggered else "")
-        ),
-        round_index=stub.rounds_spent + 1,
+    detail = f"provider {provider.repo_id} SUCCEEDED with a MERGED PR" + (
+        " (operator `fleet stubs resolve`)" if operator_triggered else ""
+    )
+    return tuple(
+        StubDecision(
+            coord_key=stub.coord_key,
+            consumer_repo_id=consumer,
+            provider_repo_id=stub.provider_repo_id,
+            transition=StubTransition.T1,
+            from_state=StubState.ACTIVE,
+            to_state=StubState.SUPERSEDED,
+            # The consumer is NOT promoted here: SUPERSEDED means "not yet proven" (§3.5.1). It
+            # stays DEGRADED with a held draft PR until a round passes against the real dep.
+            consumer_status=RepoStatus.DEGRADED,
+            detail=detail,
+            # The round this decision's revalidation will be filed under. It is NOT written to
+            # `stubs.revalidation_round` (see `apply`): at T1 time no round has run yet.
+            round_index=stub.rounds_spent + 1,
+        )
+        for consumer in _consumers_of(stub)
     )
 
 
@@ -423,12 +461,15 @@ def settle_revalidation(
             f"{stub.coord_key}: a revalidation round settles a SUPERSEDED row; this row is "
             f"{stub.state}"
         )
-    if report.repo_id != _consumer_of(stub):
+    consumers = _consumers_of(stub)
+    if report.repo_id not in consumers:
         raise InvalidStubTransition(
-            f"{stub.coord_key}: report is for repo {report.repo_id!r}, but this stub's consumer "
-            f"is {_consumer_of(stub)!r}"
+            f"{stub.coord_key}: report is for repo {report.repo_id!r}, which is not one of this "
+            f"stub's consumers {list(consumers)}"
         )
-    consumer = _consumer_of(stub)
+    # A revalidation round is per consumer — one `stubs` row — so the report names which row
+    # settles. Selecting `consumers[0]` here would reject C2's legitimate report as a caller bug.
+    consumer = report.repo_id
     round_index = max(stub.rounds_spent, report.revalidation_round)
 
     if budget_breach is not None:
@@ -513,6 +554,9 @@ def settle_revalidation(
 def reconcile(
     rows: Iterable[StubRecord],
     providers: Mapping[RepoId, ProviderFacts],
+    *,
+    now: datetime | None = None,
+    open_pr_max_age_s: float | None = None,
 ) -> ReconcileOutcome:
     """`stub_reconcile` (§3.5.1, §13 row 35): the sweep that stops the fleet shipping a lie.
 
@@ -528,43 +572,63 @@ def reconcile(
     `fleet pr --sync` to resolve. The carve-out lives here and only here — a T3 from an exhausted
     round or from `STUB_DIVERGED` already ran against the merged real label and is unaffected.
 
+    The carve-out is **bounded**, per §12.38, which scopes it to a PR "still open and unmerged
+    inside" the `pr` section's merge-wait timeout. Pass `now` and `open_pr_max_age_s` — a plain
+    duration, deliberately NOT named after the config key, because this module reads no config
+    and the key stays genuinely unread until a caller passes it — and a PR older than the bound
+    is swept rather than held — otherwise a draft untouched for three weeks would be held for
+    ever, which is the same silent under-report the carve-out exists to avoid, arriving by the
+    opposite route. Omitting either argument leaves the carve-out unbounded, and a provider whose
+    `pr_created_at` is unknown is never treated as fresh.
+
+    Every decision is per **`stubs` row**, i.e. per consumer: one `StubRecord` is the aggregate of
+    one row per consumer (`schema.sql`), so a stub bound to three degraded dependents yields three
+    decisions and three `UnresolvedStub` findings. Emitting one would leave the other two rows
+    `ACTIVE` past the final checkpoint and absent from `migration_state.json#unresolved_stubs` —
+    the fleet reporting done over work verified against nothing, which is precisely §13 row 35.
+
     A provider absent from `providers` has no PR to be open, so its row is swept: a missing fact
     is not treated as a reason to keep a stub alive.
     """
     decisions: list[StubDecision] = []
-    held: list[str] = []
+    held: list[HeldStub] = []
     degraded: list[RepoId] = []
 
     for stub in rows:
         if stub.state not in OPEN_STATES:
             continue  # terminal rows are audit records; reconciliation never rewrites one
         provider = providers.get(stub.provider_repo_id)
-        if provider is not None and provider.pr_open:
-            held.append(stub.coord_key)
+        consumers = _consumers_of(stub)
+        if provider is not None and _awaiting_merge(provider, now, open_pr_max_age_s):
+            held.extend(
+                HeldStub(stub.coord_key, consumer, stub.provider_repo_id)
+                for consumer in consumers
+            )
             continue
         transition = (
             StubTransition.T4 if stub.state is StubState.ACTIVE else StubTransition.T3
         )
-        consumer = _consumer_of(stub)
-        decisions.append(
-            StubDecision(
-                coord_key=stub.coord_key,
-                consumer_repo_id=consumer,
-                provider_repo_id=stub.provider_repo_id,
-                transition=transition,
-                from_state=stub.state,
-                to_state=StubState.ABANDONED,
-                consumer_status=RepoStatus.DEGRADED,
-                detail=(
-                    f"end of run: provider {stub.provider_repo_id} never reached a MERGED PR"
-                ),
-                abandon_reason=AbandonReason.END_OF_RUN,
-                finding=StubFinding.UNRESOLVED_STUB,
-                round_index=stub.rounds_spent,
+        # One decision per consumer — one `stubs` row each. See the docstring: [0] under-reports.
+        for consumer in consumers:
+            decisions.append(
+                StubDecision(
+                    coord_key=stub.coord_key,
+                    consumer_repo_id=consumer,
+                    provider_repo_id=stub.provider_repo_id,
+                    transition=transition,
+                    from_state=stub.state,
+                    to_state=StubState.ABANDONED,
+                    consumer_status=RepoStatus.DEGRADED,
+                    detail=(
+                        f"end of run: provider {stub.provider_repo_id} never reached a MERGED PR"
+                    ),
+                    abandon_reason=AbandonReason.END_OF_RUN,
+                    finding=StubFinding.UNRESOLVED_STUB,
+                    round_index=stub.rounds_spent,
+                )
             )
-        )
-        if consumer not in degraded:
-            degraded.append(consumer)
+            if consumer not in degraded:
+                degraded.append(consumer)
 
     # §13 row 35 enforced rather than commented, and as a raise rather than an `assert` — `-O`
     # strips asserts, and "consumers are never promoted here" must not be a debug-build promise.
@@ -581,7 +645,7 @@ def reconcile(
     )
 
 
-def abandon_by_operator(stub: StubRecord, reason: str) -> StubDecision:
+def abandon_by_operator(stub: StubRecord, consumer: RepoId, reason: str) -> StubDecision:
     """`fleet stubs abandon <consumer> <coord_key> --reason TEXT` (§10).
 
     The manual T4 from `ACTIVE`, and the same abandonment as T3 from `SUPERSEDED` — one code
@@ -589,8 +653,21 @@ def abandon_by_operator(stub: StubRecord, reason: str) -> StubDecision:
     consumer is left `DEGRADED` with a held PR: `fleet stubs abandon` never promotes anything.
     `--reason` is required by the CLI and required here, because an audited abandonment with an
     empty reason is an unaudited one.
+
+    The consumer is an **argument**, not `consumer_repo_ids[0]`: the CLI abandons one named
+    `(consumer, coord_key)` row, and the stub's other consumers keep their own rows.
+
+    The finding is `StubAbandoned`, matching the committed `fleet stubs abandon` path, **not**
+    `UnresolvedStub`. §3.5.1 assigns `UnresolvedStub` to the end-of-run sweep, so tagging a
+    deliberate human disposition with it would inflate the exit-7 "humans needed" set with work a
+    human has already dispositioned.
     """
     _refuse_terminal(stub, StubTransition.T4)
+    if consumer not in _consumers_of(stub):
+        raise InvalidStubTransition(
+            f"{stub.coord_key}: {consumer!r} is not a consumer of this stub "
+            f"{list(_consumers_of(stub))}"
+        )
     if not reason.strip():
         raise InvalidStubTransition(
             f"{stub.coord_key}: `fleet stubs abandon` records a reason; it may not be empty"
@@ -598,7 +675,7 @@ def abandon_by_operator(stub: StubRecord, reason: str) -> StubDecision:
     transition = StubTransition.T4 if stub.state is StubState.ACTIVE else StubTransition.T3
     return StubDecision(
         coord_key=stub.coord_key,
-        consumer_repo_id=_consumer_of(stub),
+        consumer_repo_id=consumer,
         provider_repo_id=stub.provider_repo_id,
         transition=transition,
         from_state=stub.state,
@@ -606,7 +683,7 @@ def abandon_by_operator(stub: StubRecord, reason: str) -> StubDecision:
         consumer_status=RepoStatus.DEGRADED,
         detail=f"operator abandon: {reason.strip()}",
         abandon_reason=AbandonReason.OPERATOR,
-        finding=StubFinding.UNRESOLVED_STUB,
+        finding=StubFinding.STUB_ABANDONED,
         round_index=stub.rounds_spent,
     )
 
@@ -620,9 +697,23 @@ def apply(stub: StubRecord, decision: StubDecision, *, now: datetime) -> StubRec
     """The decision as a new `StubRecord`, validated against `ALLOWED_TRANSITIONS`.
 
     Persistence is still the caller's: this returns the row the single writer should write, so
-    the machine can be tested — and the edge set enforced — without a database. `rounds_spent`
-    advances to the decision's round, which is what keeps `stubs.revalidation_round` and the
-    model's counter from drifting.
+    the machine can be tested — and the edge set enforced — without a database.
+
+    **`rounds_spent` advances only when a round actually ran** — T2 and T3 from
+    `settle_revalidation`. It is deliberately untouched by T1 and T4: `stubs.revalidation_round`
+    is documented as "0 while ACTIVE; N when the Nth round ran", is a component of
+    `PRIMARY KEY (run_id, repo_id, stub_coord_key, revalidation_round)`, and §3.5.1's own T1
+    statement is `UPDATE stubs SET state='SUPERSEDED', resolved_at=…, resolved_by_run_id=…` — it
+    does not touch the round. Bumping it at T1 would make the writer address a row that does not
+    exist (updating nothing) or insert a duplicate at a round that never ran, and would breach
+    `CHECK (revalidation_round <= max_revalidation_rounds)` outright whenever
+    `stubs.max_revalidation_rounds` is 0 (a legal setting, `Field(default=2, ge=0)`).
+    `StubDecision.round_index` on a T1 is the round the *revalidation task* will be filed under,
+    not the row's column.
+
+    The result is re-validated rather than `model_copy`-ed blind: `model_copy` skips validators,
+    which is how an out-of-cap `rounds_spent` would otherwise reach the database as a CHECK
+    violation naming a column instead of the rule (Rule 11).
     """
     edge = ALLOWED_TRANSITIONS[decision.transition]
     if stub.state is not edge[0]:
@@ -634,13 +725,16 @@ def apply(stub: StubRecord, decision: StubDecision, *, now: datetime) -> StubRec
         raise InvalidStubTransition(
             f"{stub.coord_key}: abandon_reason is set iff the row is ABANDONED (§6 stubs CHECK)"
         )
-    return stub.model_copy(
-        update={
-            "state": edge[1],
-            "rounds_spent": max(stub.rounds_spent, decision.round_index),
-            "state_changed_at": now,
-        }
-    )
+    rounds_spent = stub.rounds_spent
+    if decision.transition in (StubTransition.T2, StubTransition.T3):
+        rounds_spent = max(rounds_spent, decision.round_index)
+    update = {"state": edge[1], "rounds_spent": rounds_spent, "state_changed_at": now}
+    try:
+        return StubRecord.model_validate(stub.model_dump() | update)
+    except ValueError as exc:  # cap breach, or any other model invariant
+        raise InvalidStubTransition(
+            f"{stub.coord_key}: {decision.transition} would produce an invalid row: {exc}"
+        ) from exc
 
 
 def next_round_record(stub: StubRecord, *, now: datetime) -> StubRecord:
@@ -680,14 +774,38 @@ def next_round_record(stub: StubRecord, *, now: datetime) -> StubRecord:
 # --------------------------------------------------------------------------------------
 
 
-def _consumer_of(stub: StubRecord) -> RepoId:
-    """`stubs.consumer_repo_id` is an explicit alias of `repo_id`, one row per consumer (§6). A
-    `StubRecord` carrying no consumer is a row that cannot be written, so say so."""
+def _consumers_of(stub: StubRecord) -> tuple[RepoId, ...]:
+    """Every consumer of this stub — i.e. every `stubs` **row** the record aggregates.
+
+    `schema.sql`: "one row per (stub, consumer, round)", with `stub_id` "SHARED by every consumer
+    row of one stub, so `consumer_repo_ids` is the aggregate of the rows, not a copy". The list
+    is the designed shape, so returning `consumer_repo_ids[0]` is a silent truncation of the
+    normal case, not a workaround for a model/schema mismatch. A record carrying no consumer is a
+    row that cannot be written, so say so (Rule 11).
+    """
     if not stub.consumer_repo_ids:
         raise InvalidStubTransition(
             f"{stub.coord_key}: a stub row names its consumer; consumer_repo_ids is empty"
         )
-    return stub.consumer_repo_ids[0]
+    return tuple(stub.consumer_repo_ids)
+
+
+def _awaiting_merge(
+    provider: ProviderFacts, now: datetime | None, open_pr_max_age_s: float | None
+) -> bool:
+    """§13 row 45, bounded by §12.38's merge-wait window on the provider's PR.
+
+    An open PR holds the stub only while the wait is still legitimate. Past the bound the row is
+    swept like any other, because "a human is mid-review" stops being true at some point and the
+    alternative is a stub held for the life of the project.
+    """
+    if not provider.pr_open:
+        return False
+    if now is None or open_pr_max_age_s is None:
+        return True  # unbounded carve-out: the caller supplied no clock and no ceiling
+    if provider.pr_created_at is None:
+        return True  # unknown age is not evidence of staleness; hold and report it
+    return (now - provider.pr_created_at).total_seconds() <= open_pr_max_age_s
 
 
 def _refuse_terminal(stub: StubRecord, transition: StubTransition) -> None:
