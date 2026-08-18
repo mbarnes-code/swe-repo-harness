@@ -4902,6 +4902,94 @@ before the offload change is justified. That measurement is not this thread's to
 
 ---
 
+## 37d. Checkpoint — 2026-08-18 · written retroactively to fill the hole its own commit message left — `9644406` ("checkpoint 37d") landed three pieces of work but no `## 37d.` section: **ADR-0070 §9**, an appended amendment making the backend's `400` handling **ordered and non-exhaustive** — §4 had assigned *any* `400` on `guided_json` to `ConstrainedDecodingUnsupported`, but §3's table carries two distinct `400` rows and §6.1 concedes matching is heuristic, so the amendment requires a **positive, specific** signal for each named cause and a mandatory fall-through to `FailureClass.UNKNOWN` for anything else — never assignment by elimination · **D49**, a ledger entry folding what had been scoped as two defects because one line closes both: `check_diff` has a single call site (`workers/rewrite.py:332`, deterministic branch) that omits `max_bytes`, so `transform.max_patch_bytes` is enforced nowhere despite `docs/SPEC.md` asserting it live in three places, one of them a named mitigation for "Memory bloat at 250 repos × 125k files"; the LLM-repair branch (`workers/rewrite.py:397-410`) calls `land_patches` with no diff check or parse probe at all; and `_record` appends the deterministic **unit name**, never the landed `edit.path`, so the transform criterion can probe a file the model never touched · **`tests/test_config_keys_are_read.py`**, a new two-way ratchet over every settings `Section` leaf — a new inert key fails, and a `KNOWN_INERT` entry that becomes read also fails, forcing its removal — landing at 26 inert keys found (not the 4 an earlier audit surfaced) and 3 corrections to where the audit had been wrong
+
+**Numbering.** This section is being written after `37e` (commit `a330e08`), not at the time of
+`9644406`. `9644406`'s commit message claims a checkpoint — "checkpoint 37d" — that was never
+written up in this file, the same missing-section shape §36 diagnosed in itself and the milder
+sibling of the `44d5550` mismatch (a commit message claiming clone-worker fixes its diff never
+touched) that `37e` found and fixed elsewhere in the ledger. `37e` deliberately took the `37e` label
+rather than `37d` to avoid compounding the problem by attaching new content to the collided name, and
+queued this backfill instead of writing it inline. This section closes that queue item: it describes
+`9644406`'s diff and message as they stood **at that commit**, not what has happened to D49 or the
+inert-key count since. Later sections carry those updates; this one does not reach forward into them.
+
+### What was completed
+
+1. **ADR-0070 §9 amendment**, appended to `docs/DECISIONS.md` (ADR-0070 itself was already committed
+   at `32365cf`, so this is a new section, not an in-place edit). It resolves a three-way
+   contradiction inside ADR-0070 itself: §4 assigned every `400` on `guided_json` to
+   `ConstrainedDecodingUnsupported`; §3's table lists two distinct `400` causes (an uncompilable
+   grammar, and input context length exceeded); §6.1 concedes matching such a body is heuristic, not
+   typed. §9 makes the rule **ordered and non-exhaustive**: match a positive, specific signal for the
+   grammar case, then a positive, specific signal for the context-overflow case, and **anything
+   else — including a `400` matching neither — falls through to `FailureClass.UNKNOWN`**, never
+   assigned by elimination or "it was probably the schema." It also writes in the acceptance
+   criterion for the eventual backend test: feeding only the two recognised bodies proves nothing;
+   the required case is a third, unrecognised `400` reaching `UNKNOWN`.
+2. **D49**, appended to `docs/INTEGRATION_HONESTY.md`, opened as a single entry folding what had been
+   scoped as two separate defects (D49+D50) because one fix — `check_diff(..., max_bytes=…)` at
+   `workers/rewrite.py:397` — closes both legs at once. Found twice independently by two read-only
+   subagents on disjoint briefs (one auditing "deterministic gate strictly before LLM judgment", one
+   auditing "blast-radius caps on writes"). The entry explicitly credits what is strong alongside the
+   defect: `llm/schemas.py`'s `ProposedFileEdit` design already prevents a model from certifying its
+   own patch (`parse_probe_ok=False` is hard-coded, and `extra="forbid"` blocks the model from
+   acquiring the field) — the gap is that nothing else certifies it on the LLM-repair path either.
+3. **`tests/test_config_keys_are_read.py`** (new file, 301 lines). A two-way ratchet over every leaf
+   field of every settings `Section`: a source scan requires each field name to appear somewhere in
+   `src/fleet/` outside `settings.py`, with two allowlists (`KNOWN_INERT`, keys confirmed inert with a
+   settings.py line cited per entry; `DECLARATIVE`, keys read only inside `settings.py` itself) that
+   are asserted disjoint. A `KNOWN_INERT` entry that stops being inert fails the suite until its line
+   is removed, so the allowlist cannot silently outlive the defect it records. Landed at 26 inert
+   keys (versus 4 an earlier audit had surfaced) and 3 corrections to places that audit was wrong;
+   commit message notes 32 tests passed, `mypy --strict` and `ruff` clean.
+
+### What was verified
+
+- **Every citation in the commit message was checked against `git show 9644406`'s actual diff**,
+  not assumed from the summary: the ADR-0070 §9 diff matches the ordered/non-exhaustive description
+  exactly (`docs/DECISIONS.md`, +40 lines); the D49 diff matches the three-legs-plus-schema-credit
+  description exactly (`docs/INTEGRATION_HONESTY.md`, +76 lines); the test file diff matches the
+  ratchet description, including the `KNOWN_INERT`/`DECLARATIVE` disjointness test and the guard-the-
+  guard test asserting the scan itself sees a real config surface (`> 100` keys walked).
+- **The commit's diff and its message agree** — unlike `44d5550`, this is not a case of a claimed
+  fix touching zero relevant files. `git show 9644406 --stat` shows exactly the three files the
+  message describes: `docs/DECISIONS.md`, `docs/INTEGRATION_HONESTY.md`,
+  `tests/test_config_keys_are_read.py`. The defect this section closes is narrower than `44d5550`'s —
+  a missing progress-file record, not a false claim about what changed.
+
+### What is still NOT proven / left open
+
+1. **The full suite was not run for this commit.** The commit message states only that the new test
+   file's 32 tests passed plus `mypy --strict`/`ruff`; nothing in the commit or this backfill
+   establishes that the rest of the suite still passed against the `docs/DECISIONS.md` and
+   `docs/INTEGRATION_HONESTY.md` changes (which carry no executable content, but the full-suite gate
+   was not exercised regardless).
+2. **D49 was recorded OPEN at this commit, with all three legs outstanding**: the missing `max_bytes`
+   on the deterministic call site, the unguarded LLM-repair `land_patches` call, and `_record`
+   appending the unit name instead of `edit.path`. This section describes that state as it stood at
+   `9644406` and does not reflect that legs 1 and 2 closed later (per `37e`, A1/J1 at `c5ab3b1` and
+   `82654e8`) — deliberately, per this task's brief, so as not to misattribute a later round's work to
+   this checkpoint.
+3. **The inert-key ledger entry was still pending at this commit.** The commit message says so
+   directly ("Ledger entry for the inert keys still pending"); D50 did not exist yet at `9644406` —
+   it landed in the `37e` round (`4846fb0`).
+4. **ADR-0070 §9's backend test does not exist yet.** The amendment writes in the acceptance
+   criterion but implementing the backend and the test that exercises the third, unrecognised-`400`
+   case remained future work at this commit.
+
+### Next subagent task, in priority order
+
+1. **None from this backfill directly** — this section documents a commit already superseded by
+   `37e`'s round. Consult `37e`'s own "Next subagent task" list for the live queue; do not re-derive
+   one from `9644406`'s now-stale open items.
+2. If auditing checkpoint/commit-message integrity continues, **treat this section as evidence for
+   the pattern it describes**: a commit message can claim a checkpoint label that the progress file
+   never receives, without the diff itself being false. That is a milder failure than `44d5550`'s, and
+   worth distinguishing in any future ledger entry about commit-message reliability.
+
+---
+
 ## 37e. Checkpoint — 2026-08-18 · a **five-agent SDD round** (three disjoint-lane workers + one research + one review, run concurrently per task) off `docs/superpowers/plans/sdd-backlog-a.md`, base `9644406`, answers exactly what §37c left open — **§36's carryover landed**: ADR-0067's four parts shipped (closing D37), and the `D34/D35/D36/D41` staleness re-audit ran · **the audit found the ledger itself wrong in four places**: D35, D36 and D41 describe defects **never reproducible in visible history** — `git diff a1178f7 HEAD -- clone.py` shows the correct shape present **verbatim in the first commit** — and D45 was **likewise already closed** and undocumented as such; both are *stale in the closed direction*, inflating apparent debt rather than hiding real debt (caveat carried forward honestly: `a1178f7` squashes unrecorded checkpoints, so pre-squash existence is not ruled out, only nothing checkable shows it) · **the root cause was found**: commit `44d5550`'s message claims clone-worker fixes its own diff never touched — `git show 44d5550 --stat` names zero files under `workers/clone.py` · **D49 stays OPEN, correctly** — two legs closed, a third (`_record` appending the unit name, not the landed `edit.path`) untouched, and the implementer's own "fully closed" claim was **refuted by its reviewer**, who was right and had already told the ledger-lane not to over-close · **D42 fixed**, its caller-safety trace showing the raise-not-`None` change **also removes the exact `checkout -B` force-reset D43 named** as a side effect · three ADRs touched (**ADR-0070 §10** appended, **ADR-0072** new) and two new ledger entries (**D50**, **D51**) · the config-key audit test **grew from 32 to 45 tests**, and every fix round surfaced MORE inert keys, not fewer — three distinct scan blind-spot classes found, two closed in this round's commits, a third (`description=` string literals surviving the docstring-only stripper) caught only on a fourth pass and still being closed as this section is written
 
 **Numbering.** `37e`, not `37d`. `37`, `37b` and `37c` are the only occupied slots in this file, so
