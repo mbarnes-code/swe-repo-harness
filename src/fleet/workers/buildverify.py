@@ -421,11 +421,14 @@ def classify_build_failure(result: ProcResult, *, unit: str) -> tuple[FailureCla
     clock = clock_failure(started=result.started, timed_out=result.timed_out)
     if clock is not None:
         # Never-started ⇒ free `TRANSIENT_INFRA`; killed-at-the-deadline ⇒ substantive `TIMEOUT`.
-        # This used to be two branches written out here, under a comment claiming `clone.py` drew
-        # the same line "for this reason; the two are meant to stay in step". They were not: clone
-        # discarded `started` on the way into its `GitCommandError` and charged a rung for a probe
-        # that never ran. The line is now drawn in exactly one place, which is the only form of
-        # "in step" a comment cannot get wrong.
+        # This used to be two branches written out here, under a comment (added by `44d5550`, the
+        # same commit that reordered them) claiming `clone.py` already drew the same line "for
+        # this reason; the two are meant to stay in step" — without `44d5550` having touched
+        # `clone.py` at all. Before that commit the two agreed (both answered `TIMEOUT`, wrong but
+        # in step); the divergence the comment denied was manufactured by its own half-applied
+        # reorder, not inherited (review-36 I4). The FailureClass decision is now drawn in exactly
+        # one place, `base.clock_failure`, which is the only form of "in step" a comment cannot
+        # get wrong.
         return clock
     if result.exit_code == _DOCKER_CANNOT_RUN:
         # `docker run` refused to start the container, so bazel never executed and this repo's

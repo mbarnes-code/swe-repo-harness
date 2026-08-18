@@ -177,12 +177,27 @@ def clock_failure(*, started: bool, timed_out: bool) -> tuple[FailureClass, bool
     unreachable through the only producer of real `ProcResult`s, and reports a command that never
     ran as one that ran too long.
 
-    **This function exists so the answer is written down once.**
-    `buildverify.classify_build_failure`
-    and `clone._error_for` used to each draw this line themselves, with a comment in one asserting
-    the two were "meant to stay in step" — and they were not: clone discarded `started` on the way
-    into its `GitCommandError` and answered `TIMEOUT` for both. A shared callee makes agreement
-    mechanical rather than aspirational, and
+    **This function exists so the `FailureClass` answer is written down once** — not so the
+    `(started, timed_out)` invariant only ever gets decoded here. `util.proc.no_verdict` (ADR-0067
+    part 4) is a separate, deliberate decoder of the identical two flags for a different need — a
+    reason STRING for `clone._no_verdict`'s five call sites, not a `FailureClass` — and the two
+    return different types for different callers and must not be merged (see `no_verdict`'s own
+    docstring). `rewrite/astgrep.py`'s parse probe still hand-orders the same two flags inline
+    (`if result.started and not result.timed_out:`) rather than calling either decoder, so today
+    the invariant is written down in three places, not one — this function is the single owner of
+    the `FailureClass` half only.
+
+    `buildverify.classify_build_failure` and `clone._error_for` are the two callers this function
+    unifies. Before `44d5550`, both answered `TIMEOUT` for the never-started shape — wrong, but in
+    step, because both read `timed_out` alone. `44d5550` reordered ONLY
+    `classify_build_failure`'s branches to check `started` first, and in the same hunk added a
+    comment claiming `clone.py` already drew the same line "for this reason" and that the two were
+    "meant to stay in step" — without touching `clone.py`, which still discarded `started` on the
+    way into its `GitCommandError` and kept answering `TIMEOUT`. The comment was false the moment
+    it was committed: the divergence it denied did not exist yet, and was then manufactured by
+    that half-applied reorder, holding only for the window between `44d5550` and this fix
+    (`68a41ff`) — no real wave ever saw it (review-36 I4). A shared callee makes the two callers'
+    `FailureClass` agreement mechanical rather than aspirational, and
     `test_workers_scan.test_the_clone_and_build_classifiers_agree_on_every_clock_failure` pins it.
     """
     if not started:
