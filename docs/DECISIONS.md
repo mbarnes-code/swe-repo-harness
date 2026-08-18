@@ -5878,3 +5878,208 @@ honest tier: no claim outruns its evidence, because no claim is made.
 - **Open ledger entries for §3's four items.** Rejected on ADR-0069 §8's rule; these are
   opportunities, and the ledger means "something here is wrong."
 - **Cite open-swe's reviewer eval as evidence for anything.** Rejected under Guardrail 6 and §5.
+
+---
+
+## ADR-0072 — D48's checkpoint drift gate **re-derives, not refuses**: `PhaseCheckpoint` grows a `config_fingerprint`, checked in `runner.py`'s `_re_entry` through the `ReEntry.REJECTED` path that already exists for tree-state mismatches, never in `_phase_preflight` — and the fingerprint closes the exact `prompt_template_version` gap ADR-0071 §3.1 found still open in open-swe's own version of this mechanism
+
+**Status: DECIDED, NOT YET IMPLEMENTED.** Verified against landed code at `4846fb0`. No `src/`
+change accompanies this entry — CLAUDE.md's Rule 10/Rule 11 discipline and Guardrail 6 both require
+the decision to be recorded before code moves, and this ADR is that record for **D48**
+(`docs/INTEGRATION_HONESTY.md`), which found the fault and deliberately declined to pick a fix.
+
+### 1. The defect this closes, restated from D48
+
+`settings.drifted_sections(baseline)` (`settings.py:1221-1236`) compares per-section config digests
+against `runs.config_digests` and is correct and well-tested. Its only call site is `_resume_impl`
+(`cli.py:9814-9868`), and `resume` itself dead-ends at `_unavailable("resume", …)`
+(`cli.py:9811`). The six verbs that actually re-enter an interrupted run — `plan`, `build`,
+`verify`, `migrate-repos`, `transform`, `pr` — share `_phase_preflight` (`cli.py:868-880`), whose
+three refusals (`_check_schema_version`, `_resolve_run`, `_refuse_concurrent_mirror_run`) never
+read `config_digests`. Editing a prompt template, a model id, or a budget and re-running an
+interrupted phase silently hands back a checkpoint produced under the old configuration —
+`_load_checkpoint` (`runner.py:987-995`) only ever rejects on `SCHEMA_VERSION_MISMATCH`,
+`MODEL_MISMATCH`, `MALFORMED_ENVELOPE`, or `INVALID_PAYLOAD` (`state/checkpoints.py:53-58`), none
+of which a config edit moves. D48 declines to fix this itself because the obvious move — call
+`drifted_sections` from `_phase_preflight` — would make every phase verb refuse on drift an
+operator already accepted on a prior verb, and the `--accept-drift`/per-section audit trail is
+keyed to a command (`resume`) that does not run.
+
+### 2. The precedent, re-verified in the main session
+
+`references/open-swe/agent/middleware/prepare_run.py` (pinned SHA per ADR-0071 §1) —
+`BasePrepareRunMiddleware.abefore_agent` (`:54-67`) computes `_prepare_fingerprint` (`:69-76`) on
+every before-agent hook and compares it to the latched `run_prepared_for` in state (`:61-64`). On a
+match it returns `None` — setup is skipped. **On a mismatch it does not refuse anything: it just
+calls `_prepare` again** (`:66-67`) and re-latches the new fingerprint. The concrete fingerprint
+(`agent/server.py:906-914`, `_prepare_config_fingerprint`) folds in `{prepare_run_id, thread_id,
+source, repo, plan_mode, draft_prs, model, effort}` alongside the latest message. Changing the
+model on a resumed thread re-prepares rather than reusing stale setup.
+
+**The mechanism is exactly the shape that resolves D48's own objection**: a fingerprint mismatch
+*invalidates and redoes*, it never *refuses and waits for an operator to accept*. Re-derive, don't
+refuse.
+
+**The recorded gap, confirmed by re-reading rather than trusted from ADR-0071 §3.1's summary**:
+`_prepare_config_fingerprint` has no field for the rendered system prompt or its template version —
+`PrepareRunState.rendered_system_prompt` (`prepare_run.py:22`) rides through unchanged whenever the
+rest of the fingerprint matches. open-swe solved the model half of this problem and left our exact
+gap — the prompt half — open. This ADR does not repeat that omission (§4).
+
+### 3. Decision — what a phase verb does on drift: re-derive, via the mechanism the checkpoint
+   layer already has
+
+On a fingerprint mismatch, the affected `(run_id, repo_id, phase)` checkpoint is **discarded and
+the phase re-runs whole from `phases.base_ref`** — no refusal, no exit code, no CLI flag, no
+operator gesture. Concretely: `_re_entry` (`runner.py:706-745`) already has exactly this verdict
+wired end to end for a different mismatch (the worker's own `preconditions_hold` finding the tree
+does not match the checkpoint) — `ReEntry.REJECTED` (`runner.py:235-239`) logs a warning
+(`checkpoint_rejected`, `runner.py:736-743`), the driver sets `checkpoint = None`
+(`runner.py:470-473`), and the phase dispatches whole rather than resuming
+`remaining_units`. **This ADR routes a config-fingerprint mismatch into that same verdict**, checked
+first — before the (filesystem-walking) call to `preconditions_hold`, so a checkpoint that is
+already known stale never pays for a tree-state check it cannot use the answer to.
+
+**Rationale.** D48's blocking objection to the obvious fix is granularity: a `_phase_preflight`
+refusal is per-*command*, so one drifted section refuses an entire `fleet build` invocation across
+however many repos it touches, including repos whose checkpoints do not reference the drifted
+section at all, and forces the operator back through `--accept-drift`/`--force-config-drift` for a
+command (`resume`) that cannot act on the acceptance anyway. The checkpoint load path is already
+per-`(repo, phase)` and already re-derives silently and safely when it decides a checkpoint is
+unusable — extending its existing predicate is strictly smaller than building a second gate at a
+coarser altitude, and it produces no new refusal for an operator to route around. Re-deriving also
+costs no more than what already happens on a `RESUME`-then-actually-different-tree case today: the
+worker re-runs from its anchor with the same ladder/budget machinery that governs every other
+attempt.
+
+### 4. What goes into the fingerprint
+
+**Decision.** `PhaseCheckpoint` (`runner.py:152-166`) gains a `config_fingerprint: str` field,
+computed as `sha256(settings.config_sha256() | prompt_digest)` where:
+
+- `settings.config_sha256()` (`settings.py:1207-1210`) is the existing whole-config digest —
+  `_digest(dict(section_digests))` over all 14 `CONFIG_SECTIONS` plus the 15th `models_profile`
+  section (`settings.py:1503-1521`), which folds in `models.roles` and
+  `models.profiles[profile]` — i.e. model id, backend, and effort per role.
+- `prompt_digest` is a new, small digest over every role's `prompt_template_version(role)`
+  (`llm/calls.py:292-294`, sourced from the hand-maintained `PROMPTS` mapping,
+  `llm/calls.py:100`) — `sha256` over `sorted((role.value, prompt_template_version(role)) for role
+  in Role)`.
+
+**Rationale.** `config_sha256()` is already the digest the §10 drift design stores per run
+(`runs.config_digests`/`config_sha256`, written in `_open_run`, `cli.py:1885-1911`, and by
+`upsert_run`, `state/repository.py:1003-1010`) — reusing it means the checkpoint fingerprint and
+the run-level drift baseline can never disagree about what "the config" was, for the same reason
+`config_sha256`'s own docstring gives for computing itself as a hash of the section digests rather
+than a second independent hash. But `config_sha256()` cannot see `prompt_template_version`: prompt
+versions are hand-maintained integers in `llm/calls.py`, not `FleetConfig` fields, so no
+config-section digest moves when a template changes. **This is precisely the disagreement D48
+documents** — `llm/cache.py:10-12,124-129`'s cache key already includes `prompt_template_version`
+and correctly misses on a template edit, while the checkpoint above it has no configuration
+component at all and hands back the stale answer. Folding the prompt digest into
+`config_fingerprint` is what makes the checkpoint layer as discriminating as the cache layer
+beneath it — the fix ADR-0071 §3.1 already named but did not itself build.
+
+Hashing **all twelve roles'** versions, rather than mapping each phase to the specific role(s) its
+workers call and scoping narrowly, is a deliberate `Agent Recommendation` for over-invalidation: a
+phase that calls no LLM role at all pays nothing extra (its checkpoint's fingerprint still matches
+unless the config half moved), and getting a narrow phase→role mapping wrong in the
+under-inclusive direction reproduces exactly the silent-stale-reuse defect this ADR exists to
+close. The cost of the wide version is bounded — at most one avoidable re-run of a phase whose only
+changed role is unrelated to it — and that bound needs no measurement to state (Guardrail 6): it is
+a worst-case property of the construction, not a claimed number.
+
+**Explicitly not folded in**: the remaining `llm_cache.cache_key` components — `role`, `tier`,
+`backend`, `effort`, `context_policy`, `rejected_approach_digest`, `prompt_sha256`,
+`response_schema_sha256`, `adapter_versions` (`llm/cache.py:10-12,124-129`). `backend`/`model_id`/
+`effort` already live inside `models_profile`'s digest; the rest are properties of one *rendered*
+call (a specific prompt render, a specific rejected-approach set, a specific response schema
+instance), not of the run's configuration, and are exactly what `llm_cache`'s own key exists to
+catch. Duplicating them at the checkpoint layer would be `llm_cache` reimplemented one layer up,
+against Rule 2.
+
+Also explicitly not folded in: `harness_version`. `llm/cache.py:26-30` already rejects it from the
+cache key for the identical reason that applies here — it changes on every patch release, and
+including it would invalidate every in-flight checkpoint fleet-wide for a change no model output
+can see.
+
+### 5. Where enforced: the checkpoint load path, not `_phase_preflight`
+
+**Decision.** The comparison lives in `runner.py`'s `_re_entry` (`runner.py:706-745`), not in
+`_phase_preflight` (`cli.py:868-880`) and not as a new refusal in `_resume_impl`.
+
+**Rationale.** `_phase_preflight` runs once per CLI invocation, before any repo is dispatched, and
+has no per-repo checkpoint in view — it is the wrong altitude for a verdict that must be independent
+per `(repo, phase)`. `_re_entry` already sits exactly where the decision has to be made: it is
+called once per dispatch, after the checkpoint is loaded (`runner.py:458`) and before
+`preconditions_hold` is asked, and its three-way return (`FRESH`/`RESUME`/`COMPLETE`, now joined by
+the existing `REJECTED`) is already threaded through `_drive` to discard the checkpoint and
+re-dispatch whole (`runner.py:469-473`). `WorkerOutput.checkpoint_is_current`
+(`workers/base.py:256-259`) — itself a **D48-documented dead method, zero callers in `src/`** — is
+the right *shape* of check (equality, not `>=`, on a persisted marker) but the wrong *axis*: it
+compares `written_schema_version`, not configuration, so this ADR does not repurpose it. The new
+comparison is a sibling check on `PhaseCheckpoint.config_fingerprint`, called from `_re_entry`
+alongside, and before, the existing `preconditions_hold` call.
+
+### 6. The accept-drift audit trail
+
+**Decision.** `_resume_impl`'s `--accept-drift`/`--force-config-drift` flow and the `ConfigDrift`
+findings it writes (`cli.py:9814-9930`, `_record_drift_findings` at `:9890-9930`) are **left
+exactly as they are**. This ADR does not touch, repurpose, or deprecate them. They remain reachable
+only through `fleet resume`, which still terminates at `_unavailable` (`cli.py:9811`) immediately
+after they run — a separate, pre-existing inconsistency (the command writes real rows via
+`_record_drift_findings`/`_raise_wave_ceiling` and then reports itself unavailable) that this ADR
+does not fix and is not in scope for it.
+
+*Agent Recommendation, not adopted as a requirement here*: when `_re_entry` returns `REJECTED` for
+a `config_fingerprint` mismatch specifically (as opposed to a `preconditions_hold` tree-state
+mismatch), it should write its own audited finding — e.g. a `ConfigDriftCheckpointInvalidated` row,
+shaped like `_record_drift_findings`'s existing `ConfigDrift` finding (`cli.py:9890-9920`) but
+fired automatically per-repo at invalidation time rather than gated behind a flag on a command
+nobody can reach. This needs its own schema field, its own migration, and its own test under Rule
+9; it is a recommendation for whoever implements this ADR, not a decision this entry makes.
+
+### 7. Explicitly out of scope
+
+- No `src/` change accompanies this ADR (CLAUDE.md constraint; Guardrail 6).
+- Whether or how `fleet resume` itself gets wired up is not decided here — it stays `_unavailable`.
+- The two documentation defects D48 records alongside the main finding — `workers/base.py:237-244`'s
+  inaccurate `checkpoints.load` docstring, and `_open_run`'s unconditional `config_digests` rewrite
+  (`cli.py:1907-1910`) racing `upsert_run`'s `ON CONFLICT DO NOTHING` on `config_sha256`
+  (`state/repository.py:1003-1010`) — are separate OPEN findings with their own fixes, not addressed
+  here.
+- The exact `checkpoints.SCHEMA_VERSION` migration needed to add `config_fingerprint` to
+  `PhaseCheckpoint` is implementation, not decision; it is not designed here beyond noting a bump is
+  required (`state/checkpoints.py:17-19`'s envelope already treats a version bump as the intended
+  invalidation lever).
+- Whether a config-fingerprint mismatch should also be checked earlier — before the phase lease is
+  acquired (`runner.py:444-457`) — as a scheduling optimization is not decided: that is a
+  performance question with no measurement behind it (Guardrail 6), not a correctness one.
+- Extending fingerprint checking to phases that never checkpoint (`clone`, `interrogate`,
+  `symbolindex` — D48's `ReEntry.FRESH`-only workers) is out of scope: a phase with no checkpoint has
+  nothing for a fingerprint to invalidate.
+
+### Alternatives rejected
+
+- **Call `settings.drifted_sections` from `_phase_preflight` (D48's own rejected default).**
+  Rejected for the reason D48 already gives: it refuses every phase verb on drift an operator
+  already accepted through a different, unreachable command, at the granularity of a whole CLI
+  invocation rather than one checkpoint.
+- **A whole-run refuse-with-`--force`, mirrored from `_resume_impl`, added independently to each
+  phase verb.** Rejected: this only relocates the refusal, it does not remove it — CLAUDE.md Rule 2
+  asks for the minimum mechanism, not a second refusal ladder standing next to the first.
+- **Warn-only: log that the config drifted and serve the stale checkpoint anyway.** Rejected: this
+  is, in substance, what happens today with no name attached to it — D48's own accounting is that
+  the failure "costs the ladder" (rung position preserved, spend charged, rejected approaches
+  carried forward under a configuration that no longer exists, `runner.py:631`). A warning nobody
+  acts on is not a different outcome from no warning.
+- **Port open-swe's per-message fingerprint model wholesale — fingerprint every model turn, not
+  every checkpoint.** Rejected: open-swe's unit of re-preparation is a conversational turn inside
+  one LangGraph thread (`_latest_message_fingerprint`, `prepare_run.py:25-38`); this harness's unit
+  is a `(run_id, repo_id, phase)` checkpoint with no analogous per-turn structure. The shape
+  transfers — invalidate-and-redo, not refuse — the granularity does not.
+- **Reuse `WorkerOutput.checkpoint_is_current` for the config check instead of adding a sibling
+  comparison.** Rejected: `checkpoint_is_current` compares `written_schema_version` against a
+  `ClassVar` bumped by hand on field renames (`workers/base.py:234-259`) — a shape-versioning axis,
+  not a configuration axis. Overloading one field to mean two different kinds of staleness is how
+  the next reader loses the ability to tell "the model changed" from "the class changed."
