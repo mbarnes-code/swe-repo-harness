@@ -441,17 +441,38 @@ def _finish_reason(
 
 
 def _usage(raw: Mapping[str, object], target: BackendTarget) -> TokenUsage:
-    """Counts as the endpoint reported them. `cost_usd` is deliberately NOT set here: pricing is
-    the target's declaration and `_stamp` applies it, so a local target's legitimate $0.00 comes
-    from `price: free` in the profile and never from a backend guessing (§11.2)."""
+    """Counts as the endpoint reported them, under the CONFIG's `model_id`.
+
+    `model_id` echoes `target.model_id` verbatim and the body's own `model` field is deliberately
+    discarded, which matters most exactly here. Local servers routinely answer under a different
+    name than they were asked for — a vLLM `--served-model-name`, an Ollama tag, a quantised
+    build, a hosted snapshot id — and two things key off this string:
+
+      * **The cache.** `CachingModelClient` builds the READ key from the config string
+        (`_key_parts`, from `route.targets[0].model_id`) and the WRITE key from
+        `usage.model_id or parts.model_id` (`_store_response`). `_stamp` prefers whatever the
+        backend put here. Passing the served name through would make write key != read key on
+        every single call: a permanent, total cache miss that nothing detects, because
+        `attempts.llm_cache_hit` stays 0 and a cache that never hits is indistinguishable from a
+        cold one (§11.6). The fleet silently re-pays for every call.
+      * **Failover attribution.** `cache._target_for` matches `(backend, model_id)` against the
+        route's configured targets to recover the answering target's `effort`, itself a key
+        component. A served name matches nothing and silently falls back to the primary's.
+
+    Preserving what the server actually served is a legitimate want, but it needs its own field
+    and a schema change; it must not be smuggled through `model_id`.
+
+    `cost_usd` is likewise NOT set here: pricing is the target's declaration and `_stamp` applies
+    it, so a local target's legitimate $0.00 comes from `price: free` and never from a backend
+    guessing (§11.2).
+    """
     usage = raw.get("usage")
     usage_map: Mapping[str, object] = usage if isinstance(usage, Mapping) else {}
     details = usage_map.get("prompt_tokens_details")
     details_map: Mapping[str, object] = details if isinstance(details, Mapping) else {}
-    reported_model = raw.get("model")
     return TokenUsage(
         backend=OpenAICompatibleBackend.name,
-        model_id=reported_model if isinstance(reported_model, str) else target.model_id,
+        model_id=target.model_id,
         input_tokens=_count(usage_map.get("prompt_tokens")),
         output_tokens=_count(usage_map.get("completion_tokens")),
         cache_read_tokens=_count(details_map.get("cached_tokens")),

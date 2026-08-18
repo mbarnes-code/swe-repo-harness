@@ -21,10 +21,12 @@ import pytest
 from pydantic import BaseModel
 
 from fleet.llm.backends import openai_compatible as oc
+from fleet.llm.cache import CachingModelClient, MemoryLlmCacheStore
 from fleet.llm.client import (
     BackendReply,
     LadderModelClient,
     Message,
+    TierRoute,
     TransportError,
     discover,
     merge_capabilities,
@@ -123,6 +125,18 @@ def invoke(
             max_output_tokens=512, timeout_s=30.0,
         ),
     )
+
+
+class _SingleTargetRouter:
+    """A `RoleRouter` over one target. `CachingModelClient` reads the SAME router the ladder does
+    — that shared route is what makes the read key and the write key comparable at all."""
+
+    def __init__(self, tgt: BackendTarget, tier: ModelTier = ModelTier.CHEAP) -> None:
+        self._tgt = tgt
+        self._tier = tier
+
+    def resolve(self, role: str, *, tier_override: ModelTier | None = None) -> TierRoute:
+        return TierRoute(tier=tier_override or self._tier, targets=(self._tgt,))
 
 
 # ---------------------------------------------------------------------------------------------
@@ -306,17 +320,53 @@ def test_missing_usage_does_not_lose_an_otherwise_good_reply() -> None:
     assert usage.cost_usd == 0.0  # pricing is the target's declaration; `_stamp` applies it
 
 
-def test_usage_records_the_model_the_server_actually_served() -> None:
-    """WHY: a local server routinely serves a different id than the profile names (a quantised
-    build, an alias). `TokenUsage.model_id` is documented as the RESOLVED id, and the ledger is
-    the only place that difference is ever visible."""
-    backend = oc.OpenAICompatibleBackend(
-        FakeTransport(body(content='{"verdict": "ok"}', model="qwen3-1.7b-q4")),
-    )
-    usage = invoke(backend).usage
+def test_usage_echoes_the_config_model_id_not_the_served_name() -> None:
+    """WHY (the cache): `CachingModelClient` builds its READ key from the config string
+    (`_key_parts`, from `route.targets[0].model_id`) and its WRITE key from `usage.model_id`
+    (`_store_response`), and `_stamp` lets the backend's value win. A local server routinely
+    answers under a different name than it was asked for — a vLLM `--served-model-name`, an
+    Ollama tag, a quantised build — so passing that through would make write key != read key on
+    EVERY call: a permanent, silent, total cache miss. `attempts.llm_cache_hit` would simply stay
+    0, which is indistinguishable from a cold cache.
 
-    assert usage.model_id == "qwen3-1.7b-q4"
+    `schema.sql` ("RESOLVED id") and `TokenUsage.model_id` ("as the backend reported it") both
+    invite the other choice; the cache is the tiebreaker.
+    """
+    backend = oc.OpenAICompatibleBackend(
+        FakeTransport(body(content='{"verdict": "ok"}', model="qwen3-1.7b-q4-served")),
+    )
+    usage = invoke(backend, tgt=target(model_id="qwen3-1.7b")).usage
+
+    assert usage.model_id == "qwen3-1.7b"  # the CONFIG string, verbatim
     assert (usage.input_tokens, usage.output_tokens) == (11, 7)
+
+
+def test_a_server_renaming_the_model_still_produces_one_cache_key() -> None:
+    """WHY (§11.6): the end-to-end form of the test above, through the real `CachingModelClient`.
+    Two identical calls against a server that reports a name the profile never mentions must be a
+    miss then a HIT. If the write key were built from the served name the second call would miss
+    too, forever, and the only visible symptom would be a bill."""
+    tgt = target(model_id="qwen3-1.7b", api_key_env=None)
+    fake = FakeTransport(body(content='{"verdict": "ok"}', model="totally-different-name"))
+    router = _SingleTargetRouter(tgt)
+    store = MemoryLlmCacheStore()
+    hits: list[object] = []
+    client = CachingModelClient(
+        LadderModelClient(router, {"openai_compatible": oc.OpenAICompatibleBackend(fake, env={})}),
+        router,
+        store,
+        on_hit=hits.append,
+    )
+
+    async def two_calls() -> tuple[str, str]:
+        first = await client.complete("repo_classify", [Message(role="user", content="q")], Answer)
+        second = await client.complete("repo_classify", [Message(role="user", content="q")], Answer)
+        return first.value.verdict, second.value.verdict
+
+    assert asyncio.run(two_calls()) == ("ok", "ok")
+    assert len(fake.requests) == 1, "the second call re-dispatched: read key != write key"
+    assert len(hits) == 1
+    assert len(store) == 1  # one key, not one per served name
 
 
 def test_tool_arguments_are_parsed_into_an_object() -> None:
@@ -509,14 +559,8 @@ def test_a_prompted_only_target_answers_a_validated_value_through_the_client() -
     backend = oc.OpenAICompatibleBackend(fake, env={})
     tgt = target(model_id="qwen3-1.7b", api_key_env=None)
 
-    class Router:
-        def resolve(self, role: str, *, tier_override: ModelTier | None = None) -> object:
-            from fleet.llm.client import TierRoute
-
-            return TierRoute(tier=ModelTier.CHEAP, targets=(tgt,))
-
     client = LadderModelClient(
-        Router(),  # type: ignore[arg-type]
+        _SingleTargetRouter(tgt),
         {"openai_compatible": backend},
     )
     response = asyncio.run(
