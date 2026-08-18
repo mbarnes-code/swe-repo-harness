@@ -166,11 +166,26 @@ class WorktreeManager:
                 "task (§11.5); reap the previous owner before re-creating it"
             )
         self.work_dir.mkdir(parents=True, exist_ok=True)
-        result = await self._git_run(
-            ["worktree", "add", "--detach", str(path), ref],
-            deadline=deadline,
-            timeout_s=timeout_s,
-        )
+        try:
+            result = await self._git_run(
+                ["worktree", "add", "--detach", str(path), ref],
+                deadline=deadline,
+                timeout_s=timeout_s,
+            )
+        except OSError as exc:
+            # Same unguarded-spawn shape `remove()` was fixed against in `ec31b0f`: `_git_run` →
+            # `self._runner` never wraps `asyncio.create_subprocess_exec` itself, so a missing
+            # `git` binary, a `PermissionError` on `cwd`, or resource exhaustion propagates
+            # straight out as `OSError` — a fact this module has nowhere else raised untyped. A
+            # caller of `create()` only ever expects `WorktreeError` (the "already exists" branch
+            # above, the exit-code branch below), so an escaping `OSError` would be an exception
+            # shape nothing here catches. Re-raised with matching wording so it stays
+            # distinguishable in the same three-way split `remove()` established: environment
+            # fault (git never ran) vs a settled git-level refusal (below) vs an unsettled probe.
+            raise WorktreeError(
+                f"git worktree add for {name} at {ref} never ran: environment fault spawning "
+                f"{self._git!r} ({type(exc).__name__}: {exc}), not a git-level refusal"
+            ) from exc
         if not result.ok:
             raise WorktreeError(
                 f"git worktree add failed (exit {result.exit_code}) for {name} at {ref}: "
@@ -255,10 +270,25 @@ class WorktreeManager:
     async def list_registered(
         self, *, deadline: float | None = None, timeout_s: float | None = 60.0
     ) -> list[Path]:
-        """Every worktree git currently records for this repo, main checkout excluded."""
-        result = await self._git_run(
-            ["worktree", "list", "--porcelain"], deadline=deadline, timeout_s=timeout_s
-        )
+        """Every worktree git currently records for this repo, main checkout excluded.
+
+        This is a read, and `reap()` (SPEC §11.5) trusts its answer as the full set of what
+        exists before deciding what to sweep. An environment fault here (the same unguarded
+        `asyncio.create_subprocess_exec` shape `create()`/`remove()` guard) must never be
+        confused with "git looked and there is nothing registered" — collapsing "could not
+        determine" into an empty list would let `reap()` believe a sweep is clean when it never
+        actually asked, which is the silent-failure shape D44's four-state-collapse discipline
+        exists to rule out. So this raises `WorktreeError`, loudly, rather than returning `[]`.
+        """
+        try:
+            result = await self._git_run(
+                ["worktree", "list", "--porcelain"], deadline=deadline, timeout_s=timeout_s
+            )
+        except OSError as exc:
+            raise WorktreeError(
+                f"git worktree list for {self.repo_dir} never ran: environment fault spawning "
+                f"{self._git!r} ({type(exc).__name__}: {exc}), not a git-level refusal"
+            ) from exc
         if not result.ok:
             raise WorktreeError(
                 f"git worktree list failed (exit {result.exit_code}): {result.stderr_tail}"

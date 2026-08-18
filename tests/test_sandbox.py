@@ -456,6 +456,166 @@ async def test_reap_continues_past_an_environment_fault_and_does_not_discard_ear
     assert stuck.path.exists(), "an environment fault must not license deleting the directory"
 
 
+class _FailCreateWithEnvironmentFaultRunner:
+    """Real git for every call except `worktree add --detach <path> <ref>` whose path contains
+    `fail_marker`, which raises `OSError` instead of returning a `ProcResult` — the identical
+    unguarded-spawn shape `_FailOneRemoveWithEnvironmentFaultRunner` scripts for `remove()`,
+    applied to `create()`'s own `git worktree add` spawn."""
+
+    def __init__(self, *, fail_marker: str) -> None:
+        self._fail_marker = fail_marker
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if "add" in parts and any(self._fail_marker in p for p in parts):
+            raise FileNotFoundError(2, "No such file or directory", self._fail_marker)
+        return await run(list(argv), cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
+class _AlwaysFailListRunner:
+    """Real git for every call except `worktree list --porcelain`, which raises `OSError` instead
+    of returning a `ProcResult` — `list_registered()`'s own unguarded git spawn, the read-path
+    analogue of `_FailOneRemoveWithEnvironmentFaultRunner`."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if "list" in parts and "--porcelain" in parts:
+            raise FileNotFoundError(2, "No such file or directory", "git")
+        return await run(list(argv), cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
+# --------------------------------------------------------------------------------------
+# `create()` and `list_registered()` have the identical unguarded-spawn shape `remove()` was
+# fixed against in `ec31b0f` — `_git_run` -> `self._runner` never wraps
+# `asyncio.create_subprocess_exec` itself. Verified real for both: neither was already guarded,
+# and both call sites genuinely spawn a subprocess that can fail to start.
+# --------------------------------------------------------------------------------------
+async def test_create_raises_worktree_error_not_a_raw_oserror_on_environment_fault(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """A missing `git` binary (or a `PermissionError` on `cwd`, or resource exhaustion) during
+    `create()`'s own `git worktree add` spawn must not escape as a raw, untyped `OSError` — every
+    other failure `create()` raises is `WorktreeError` (the "already exists" guard, the exit-code
+    branch), so a caller catching that family would not catch a bare `OSError`. Re-raised with the
+    same environment-fault wording `remove()` uses, so it stays distinguishable from a settled
+    git-level refusal rather than inventing a fourth vocabulary."""
+    work_dir = tmp_path / "work"
+    runner = _FailCreateWithEnvironmentFaultRunner(fail_marker="acme-widgets")
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID, runner=runner)
+
+    with pytest.raises(WorktreeError) as caught:
+        await manager.create("acme-widgets", 1, "main")
+
+    assert "environment fault" in str(caught.value)
+    assert "not a git-level refusal" in str(caught.value)
+    assert not (work_dir / sandbox_name(RUN_ID, "acme-widgets", 1)).exists()
+
+
+async def test_create_still_succeeds_on_the_normal_path_after_the_guard(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """The case that proves the guard above is not a blanket raise: `create()` against a runner
+    that never raises must behave exactly as it did before the fix — same success path, same
+    returned `Worktree`, no over-correction."""
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=tmp_path / "work", run_id=RUN_ID)
+
+    wt = await manager.create("acme-commons", 1, "main")
+
+    assert isinstance(wt, Worktree)
+    assert wt.path.is_dir()
+
+
+async def test_list_registered_raises_worktree_error_not_a_raw_oserror_on_environment_fault(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """`list_registered()` is a READ, and its current failure mode matters more than `create()`'s:
+    if an environment fault here silently collapsed into an empty list, `reap()` — which trusts
+    `list_registered()`'s answer as the full set of what exists (SPEC §11.5) — would believe
+    "nothing is registered" when the true fact is "I could not find out", and do nothing. Verified
+    here that this is NOT what happens today or after the fix: the `OSError` from the unguarded
+    `git worktree list --porcelain` spawn propagates (it is not swallowed into `[]`), so no silent
+    four-state collapse exists at this layer. What the guard adds is only the type: the escaping
+    exception becomes `WorktreeError` with the same environment-fault wording used everywhere else
+    in this module, rather than an untyped `OSError` a caller of `create()`/`remove()` would not
+    think to catch."""
+    manager = WorktreeManager(
+        repo_dir=git_repo,
+        work_dir=tmp_path / "work",
+        run_id=RUN_ID,
+        runner=_AlwaysFailListRunner(),
+    )
+
+    with pytest.raises(WorktreeError) as caught:
+        await manager.list_registered()
+
+    assert "environment fault" in str(caught.value)
+    assert "not a git-level refusal" in str(caught.value)
+
+
+async def test_list_registered_still_succeeds_on_the_normal_path_after_the_guard(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """Proves the guard above is not a blanket raise: against a runner that never raises,
+    `list_registered()` must still return the real registered worktrees, unchanged."""
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=tmp_path / "work", run_id=RUN_ID)
+    wt = await manager.create("acme-commons", 1, "main")
+
+    registered = await manager.list_registered()
+
+    assert wt.path in registered
+
+
+async def test_reap_raises_rather_than_reporting_a_clean_sweep_when_it_cannot_enumerate(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """The consequential case: `reap()` calls `list_registered()` once, outside any per-entry
+    try/except (that only wraps `remove()`, for the D44-family failures recorded in
+    `ReapResult.failed`). If an environment fault during enumeration produced an empty
+    `ReapResult(reaped=[], failed=[])`, a caller would read that as "swept clean, nothing to
+    reap" — the same four-state collapse D44 is named for, one layer up, and the more dangerous
+    of the two because it is silent: a reaper that believes nothing is registered does nothing.
+    Pinned here: `reap()` propagates the `WorktreeError` instead, so "confirmed nothing to reap"
+    (an empty `ReapResult`) stays a different, distinguishable fact from "could not determine
+    what is registered" (an exception) — and untouches everything, including a live owner, since
+    it never got far enough to decide anything."""
+    work_dir = tmp_path / "work"
+    live = await WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID).create(
+        "acme-live", 1, "main"
+    )
+    reaper = WorktreeManager(
+        repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID, runner=_AlwaysFailListRunner()
+    )
+
+    with pytest.raises(WorktreeError) as caught:
+        await reaper.reap(live_names={live.name})
+
+    assert "environment fault" in str(caught.value)
+    assert "not a git-level refusal" in str(caught.value)
+    assert live.path.is_dir(), "reap() must not have touched anything it never enumerated"
+
+
 async def test_reap_is_reported_complete_when_every_entry_succeeds(
     git_repo: Path, tmp_path: Path
 ) -> None:
