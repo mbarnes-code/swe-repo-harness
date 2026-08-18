@@ -2650,6 +2650,75 @@ nothing — and twelve of the twenty-six share one root cause: `RunContext.llm_p
    bare line number into a file under active, concurrent repair is stale by the time it is read,
    however carefully it was measured; only a SHA-pinned citation stays checkable.
 
+**Second correction — the four categories named explicitly; the count has NOT moved again at any
+committed SHA, despite a same-day report that it had grown to 46.** Re-verified directly against
+`tests/test_config_keys_are_read.py` as committed at `dee9886` (`git show
+dee9886:tests/test_config_keys_are_read.py`, parsing the frozenset literals with `ast` rather than
+counting by eye), not the working tree — `git status` at the time of this correction shows that
+file modified, mid-edit by a lane still in progress.
+
+1. **The four categories, named together with what each one asserts** — the opening line above
+   names only `KNOWN_INERT`, and the first correction explains the other three scattered across
+   several paragraphs; collecting them once, because the distinction is the point of this file
+   existing at all:
+   - **`KNOWN_INERT`** — verified dead: a config leaf whose name (or, for the subset below, its
+     parent-qualified name) occurs nowhere in `src/fleet/` outside `settings.py`. The entry's
+     headline defect class and the number in its own title.
+   - **`QUALIFIED_MATCH_KEYS`** — not a fifth tally, a *subset of `KNOWN_INERT`*: the leaves whose
+     bare field name collides with an unrelated same-spelled field, method, flag, or local
+     elsewhere in the tree, resolved instead by matching `parent.leaf` (e.g. `failover.enabled`,
+     not bare `enabled`). Every member is already counted inside `KNOWN_INERT`'s total; adding the
+     two together would double-count.
+   - **`UNVERIFIABLE`** — the opposite of `KNOWN_INERT`, not a second amnesty list: a leaf the scan
+     cannot decide even with qualified matching, because the qualified text itself collides with
+     unrelated real code (`transform.ladder.tier` vs. `LadderState.tier()`, a method on a
+     different object — see the module docstring's limitation 2). Carries no `KNOWN_INERT` line
+     and is not part of that count. Conflating `UNVERIFIABLE` with `KNOWN_INERT` would overstate
+     exactly the way this document exists to prevent: "the scan could not decide" is not "the scan
+     decided it was dead."
+   - **`DECLARATIVE`** — the true-positive category: a leaf genuinely read, inside `settings.py`
+     itself (invisible to the scan by the same exclusion that stops a key trivially matching its
+     own declaration), by a named accessor or startup validator with a real caller elsewhere in
+     the tree.
+2. **At `dee9886`, parsed directly, not transcribed: `KNOWN_INERT`=37, `QUALIFIED_MATCH_KEYS`=5
+   (subset), `UNVERIFIABLE`=1, `DECLARATIVE`=3, and `_config_keys()` walks 180 leaves total** — all
+   five numbers unchanged from the prior correction's `82654e8` snapshot; `git diff 82654e8 dee9886
+   -- tests/test_config_keys_are_read.py` is empty at the committed level.
+3. **A same-day report of this entry's count (46 / 11 / 1 / 6) does not reproduce at any committed
+   SHA — it is an uncommitted edit, not yet a citation.** `git status` at the time of this
+   correction shows `tests/test_config_keys_are_read.py` modified in the working tree;
+   `git diff HEAD -- tests/test_config_keys_are_read.py` shows `_strip_comments_and_docstrings`
+   rewritten to blank every `ast.Constant` string literal, not only a docstring positioned as the
+   first statement of a module/class/function body — exactly the mechanism the report described.
+   Parsing that *working-tree* file directly (not `git show`) does reproduce the reported numbers
+   exactly: `KNOWN_INERT`=46, `QUALIFIED_MATCH_KEYS`=11, `UNVERIFIABLE`=1, `DECLARATIVE`=6, so the
+   report's arithmetic and mechanism are both accurate against what exists on disk right now. But
+   per this entry's own repeated lesson two paragraphs up (and D49's/D51's citation corrections),
+   an uncommitted number is not a citation: it can still change shape, be reverted, or fail review
+   before it lands, and nothing here should assert as fact what `git show` cannot reproduce. **This
+   correction records the committed count (37/5/1/3/180) only.** When the in-progress edit
+   commits, D50 will need a third correction re-pinned to that landing SHA — flagged here so the
+   next reader does not assume 37 is current indefinitely, the same trap that made this entry's
+   second correction necessary in the first place.
+4. **One fact from the pending edit is worth recording now, independently, because it does not
+   depend on that edit landing.** Two keys the pending working-tree draft's own `DECLARATIVE`
+   comments admit an "independent sweep" nearly mis-filed as `KNOWN_INERT` — `redaction.enabled`
+   and `redaction.patterns` — are, right now, genuinely read, verified directly against committed
+   `settings.py` (unmodified by any concurrent lane; `git status` confirms): `FleetSettings.load`
+   (`settings.py:1105`) calls `_check_redaction_switch(config, environ, fleet_path)` at `:1149`,
+   which refuses to load when `config.redaction.enabled` is false and `FLEET_ALLOW_RAW != "1"`
+   (`:1314-1320`); the same `load` calls `_refuse_secret_material(path, raw,
+   config.redaction.patterns)` at `:1147`, which refuses a source file matching a configured
+   pattern (`:1299-1310`). Neither key has ever been named as inert anywhere in this ledger, at any
+   committed revision (`git log --all -p -- tests/test_config_keys_are_read.py` has no hit for
+   either name, and neither does `docs/INTEGRATION_HONESTY.md`) — so there is no existing ledger
+   claim to correct here. But had the pending draft's near-miss landed unreviewed, this entry would
+   have listed two live safety switches as dead code, the dangerous direction for this kind of
+   error to be wrong in: an operator reading `KNOWN_INERT` as license to delete a "no-op" key would
+   have disabled secret-redaction enforcement believing it inert. Recorded as a standing caveat for
+   whichever lane lands that edit next, not as a correction to anything this entry currently
+   claims.
+
 **The asymmetry the test file's docstring names is real and this entry is its second half.**
 `cli.py:3141-3147` refuses `--context-policy` at the flag layer and says exactly why: the value
 "would be parsed and then ignored by every rung" because `workers/base.context_policy_for_attempt`
