@@ -28,6 +28,8 @@ from fleet.sandbox.container import (
     spec_for_attempt,
 )
 from fleet.sandbox.worktree import (
+    ReapFailure,
+    ReapResult,
     Worktree,
     WorktreeError,
     WorktreeManager,
@@ -218,9 +220,11 @@ async def test_reap_spares_a_live_owner(git_repo: Path, tmp_path: Path) -> None:
     live = await manager.create("acme-commons", 1, "main")
     dead = await manager.create("acme-widgets", 1, "main")
 
-    reaped = await manager.reap(live_names={live.name})
+    result = await manager.reap(live_names={live.name})
 
-    assert reaped == [dead.name]
+    assert result.reaped == [dead.name]
+    assert result.failed == []
+    assert result.complete is True
     assert live.path.is_dir(), "a live task's worktree was reaped"
     assert not dead.path.exists()
 
@@ -294,6 +298,108 @@ async def test_remove_still_deletes_on_a_settled_genuine_refusal(tmp_path: Path)
 
     assert existed is True
     assert not path.exists(), "a settled genuine refusal must still authorise the rmtree"
+
+
+class _FailOneRemoveRunner:
+    """Real git for every call except `worktree remove --force <fail_path>`, which is answered
+    with a scripted, deliberately UNSETTLED `ProcResult` (the D44 shape) instead of running git.
+
+    This is what lets a test drive `WorktreeManager.reap()`'s loop against a REAL multi-worktree
+    repo (so `list_registered`/`prune` behave exactly as production sees them) while making
+    exactly one `remove()` call inside that loop raise `WorktreeError` — the scenario `reap()`
+    must survive without discarding work already done or abandoning work still to do.
+    """
+
+    def __init__(self, *, fail_path: Path, exit_code: int, started: bool, timed_out: bool) -> None:
+        if not is_producible_shape(started=started, timed_out=timed_out, exit_code=exit_code):
+            raise ValueError(
+                f"_FailOneRemoveRunner(started={started}, timed_out={timed_out}, "
+                f"exit_code={exit_code}) is a state util.proc.run can never produce"
+            )
+        self._fail_path = str(fail_path)
+        self._exit_code = exit_code
+        self._started = started
+        self._timed_out = timed_out
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if "remove" in parts and self._fail_path in parts:
+            return ProcResult(
+                argv=parts,
+                exit_code=self._exit_code,
+                stdout_tail="",
+                stderr_tail="",
+                duration_ms=1,
+                timed_out=self._timed_out,
+                started=self._started,
+                cwd=cwd,
+            )
+        return await run(list(argv), cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
+# --------------------------------------------------------------------------------------
+# `WorktreeManager.reap()` must not let ONE unsettled `remove()` (D44's shape) collapse the
+# whole sweep. Two failure modes are equally wrong: aborting mid-loop discards worktrees already
+# reaped AND abandons the ones still to come; swallowing the failure silently reports a partial
+# sweep as if it were complete. Both are the four-state-collapse family D44 belongs to, one layer
+# up (docs/INTEGRATION_HONESTY.md D44).
+# --------------------------------------------------------------------------------------
+async def test_reap_continues_past_a_failed_removal_and_does_not_discard_earlier_work(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """A `remove()` failure partway through the loop must not discard entries already reaped
+    (`early`), must not prevent later dead entries from being attempted (`later`), must not be
+    conflated with a deliberately-spared live owner (`live`), and must be visible rather than
+    silent (`stuck` lands in `ReapResult.failed`, not swallowed)."""
+    work_dir = tmp_path / "work"
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID)
+    live = await manager.create("acme-live", 1, "main")
+    early = await manager.create("acme-early-dead", 1, "main")
+    stuck = await manager.create("acme-stuck", 1, "main")
+    later = await manager.create("acme-later-dead", 1, "main")
+
+    runner = _FailOneRemoveRunner(fail_path=stuck.path, exit_code=-15, started=True, timed_out=True)
+    reaper = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID, runner=runner)
+
+    result = await reaper.reap(live_names={live.name})
+
+    assert set(result.reaped) == {early.name, later.name}, (
+        "the successful removals on either side of the failure must both survive"
+    )
+    assert all(isinstance(f, ReapFailure) for f in result.failed)
+    assert [f.name for f in result.failed] == [stuck.name]
+    assert "killed at its deadline" in result.failed[0].reason
+    assert result.complete is False
+
+    assert live.path.is_dir(), "a live owner is spared, not attempted and not failed"
+    assert not early.path.exists()
+    assert not later.path.exists()
+    assert stuck.path.exists(), "an unsettled probe must not license deleting the directory"
+
+
+async def test_reap_is_reported_complete_when_every_entry_succeeds(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """Regression guard for `ReapResult.complete`: with no failures, it must read True — the
+    inverse of the partial case above — so a caller can tell the two apart without inspecting
+    `failed` by hand."""
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=tmp_path / "work", run_id=RUN_ID)
+    dead = await manager.create("acme-dead", 1, "main")
+
+    result = await manager.reap(live_names=set())
+
+    assert result == ReapResult(reaped=[dead.name], failed=[])
+    assert result.complete is True
 
 
 # --------------------------------------------------------------------------------------
