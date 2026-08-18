@@ -2397,3 +2397,123 @@ writes bounded by size and path.** That belongs in an ADR, along with whether `_
 landed paths (changing what `output.rewritten` means, which the §3.2 criterion reads) and whether
 `SPEC.md`'s three claims are corrected or the code is brought up to them. Rule 7: surfaced, not
 averaged into an unrelated edit.
+
+---
+
+**D50 — OPEN. The 26 keys `tests/test_config_keys_are_read.py`'s `KNOWN_INERT` allowlist marks
+"ledger entry pending" are a config-surface instance of the same defect class as D47 — a thing
+that is written (here: validated, digested, echoed back by `fleet config`) and consumed by
+nothing — and twelve of the twenty-six share one root cause: `RunContext.llm_policy`
+(`orchestrator/context.py:140`) is never assigned by any of the five `RunContext(` call sites in
+`cli.py` (`:1805`, `:4059`, `:7481`, `:7553`, `:9100` — checked directly, none passes
+`llm_policy=`), so `LadderModelClient` always falls back to `CallPolicy()`'s own defaults
+(`llm/client.py:478`) no matter what `fleet.yaml`'s `llm:` block says.**
+
+**The asymmetry the test file's docstring names is real and this entry is its second half.**
+`cli.py:3141-3147` refuses `--context-policy` at the flag layer and says exactly why: the value
+"would be parsed and then ignored by every rung" because `workers/base.context_policy_for_attempt`
+"reads no config" — the same reasoning covers `--no-anchoring-guard` (`:3148-3154`) and
+`--stub-blocked` (`:3155-3160`). Nothing analogous exists for `config/fleet.yaml`. The three
+missing-machinery defects those flags are refused for each have a config-key twin below (the
+anchoring pair; the rate-limit/failover block traces to a different gap — `llm_policy`, not
+`context_policy_for_attempt` — but lands in the identical place: a value that validates, is
+echoed back, and reaches no rung). `fleet config` has no refusal path at all; it prints the
+operator's number back at them regardless.
+
+**Verified directly, not transcribed from the allowlist.** `llm_policy`: `grep -rn llm_policy
+src/` returns exactly the two lines in the thesis above — the field declaration and its one use
+inside `RunContext.__post_init__` — and no assignment anywhere. One timeout key:
+`grep -rn 'build_timeout_s\|clone_timeout_s' src/fleet/ | grep -v settings.py` is empty; both
+names (`settings.py:267-268`) exist nowhere else in the tree. One `DECLARATIVE` correction, for
+contrast: `concurrency.llm.workhorse` (`settings.py:224`) *is* genuinely read, via
+`LlmConcurrency.for_tier` (`settings.py:227-230`), which `orchestrator/budgets.py:980` calls to
+size the per-tier semaphore — a real accessor with a real caller, which is exactly what every key
+below is missing.
+
+**Group 1 — `llm.rate_limit` (9 keys) and `llm.failover` (3 keys): the sharp one.** Because
+`llm_policy` is never wired, `settings.llm.rate_limit.*` and `settings.llm.failover.*` cannot
+reach `CallPolicy` by any path — there is no second assignment, no adapter, nothing translating
+one into the other. `llm/client.py` never references `.failover` or `.rate_limit` as attributes
+at all (`grep -n '\.failover\b\|\.rate_limit\b' src/fleet/llm/client.py` is empty); the word
+`failover` appears throughout the module only in prose and event names. The confirmed behavior:
+`llm/client.py:499` slices `route.targets[: self._policy.max_targets_per_call]` and the transient
+retry is a fixed backoff — no token bucket, no `Retry-After` handling, no failure counter, no
+cooldown, no circuit open. **This is the group that actually bites, and it bites at the worst
+moment.** All twelve keys' defaults (`RateLimitEntry.rpm=0` i.e. unlimited, `honor_retry_after`
+irrelevant with no limiter, `FailoverSection.open_after_failures=3`, `cooldown_s=120`,
+`on_tier_exhausted="halt"`) describe behavior nothing implements, so a fresh `fleet.yaml` is not
+wrong — there is no limiter to under- or over-configure. The failure surfaces exactly when an
+operator, being throttled by a provider, edits `llm.rate_limit.targets.<target>.rpm` or
+`llm.failover.cooldown_s` expecting backpressure or a circuit break, and gets neither: the run
+keeps hammering the same target on the same fixed backoff it always used, `fleet config` confirms
+the edit took, and nothing in the run's output says the knob was never connected.
+
+**Group 2 — `transform.anchoring` (2 keys): latent unless the ladder loops.**
+`transform.anchoring.max_reasks_per_rung` and `.on_exhausted` (`settings.py:427-428`) name the
+same missing machinery `cli.py` cites refusing `--no-anchoring-guard`: `models/tasks.py:211`
+declares `TransformTask.reasks` and nothing increments it, `rewrite/approach.py` does not exist,
+so there is no counter for either leaf to act on. Latent under normal operation because the
+ladder's own `transform.max_attempts` already bounds total attempts per unit; it bites once an
+operator sets a *tighter* per-rung reask cap expecting the harness to stop repeating a rejected
+approach early — instead a repair loop can spend the full ladder budget on one rung.
+
+**Group 3 — `preflight.baseline_build` (1 key): not latent, always wrong.** Unlike the other
+groups, this one does not wait for an operator to touch it. `grep -rn 'baseline_build\|BaselineBuild'
+src/fleet/ | grep -v settings.py` returns one hit — a comment in `state/schema.sql:83` — and zero
+code. §3.1 and §14.1 (per the `KNOWN_INERT` comment and `settings.py:287`'s own docstring) describe
+a native build/test gate run before any transformation, gated on `enabled: bool = True` by default.
+Default-true plus zero readers means the gate the SPEC says always runs, never runs, on every
+config, not only a hand-edited one — the one entry in this ledger's 26 whose severity is
+unconditional rather than deferred to an operator's edit.
+
+**Group 4 — bare timeouts and ceilings (5 keys): confirmed inert, consequence not fully traced.**
+`budgets.build_timeout_s`, `.clone_timeout_s` (`settings.py:267-268`), `graph.max_edges`
+(`:411`), `run.reaper_interval_s` (`:215`) and `run.projection_hz` (`:217`) all have zero
+occurrences outside `settings.py` — re-verified above for the first two. What is **not** claimed:
+that a clone or build hangs forever without them. `buildverify.py` has its own hard-coded
+`C_TOOLCHAIN_PROBE_TIMEOUT_S` for a narrower probe, and no periodic `sleep(reaper_interval_s)`-style
+loop was found — `reaper` in `orchestrator/runner.py` names lease-reclaim logic triggered on
+access, not a cadence loop — so whatever ceiling or cadence these operations actually have, it is
+not sourced from these five keys. Bite condition, where determinable: `build_timeout_s` /
+`clone_timeout_s` bite if the underlying operation's real ceiling (wherever it lives) is
+materially different from the operator's tuned value; `graph.max_edges` bites only for a repo
+large enough that a cap would matter; `reaper_interval_s` / `projection_hz` are cadence knobs
+whose absence is likely cosmetic but was not traced to a concrete alternate constant.
+
+**Group 5 — single-value policy keys nothing branches on (6 keys): latent, bite only off-default.**
+`stubs.on_budget_exhausted` (`:604`), `build.fail_on_missing_adapter` (`:579`),
+`build.openapi_generator` (`:580`), `scan.unknown_ecosystem_dest` (`:364`), `pr.reviewers_from`
+(`:692`) each re-verified zero-hit outside `settings.py`. Each names a policy where the code path
+has exactly one behavior regardless of the setting, so the default value is indistinguishable from
+correct; the defect surfaces only if an operator picks the non-default option and expects a branch
+that does not exist. `llm.cache_path` (`:679`) is the gentlest of the 26: `LlmCacheStore`
+(`llm/cache.py`) never reads the name `cache_path` at all — its path comes from the caller — so
+the operator's value is not missing-and-needed, it is redundant; the cache still gets a path,
+just never this one.
+
+**Would a test catch it? Partially, and only structurally.**
+`test_every_config_key_is_read` and `test_known_inert_keys_are_still_inert` (both in this file)
+are exactly the regression guard this ledger asks for: the day any of these 26 names is wired up,
+the ratchet fails until the `KNOWN_INERT` line is deleted, and a *new* inert key fails on
+introduction rather than accumulating silently. That is real coverage, and it is why this entry
+exists rather than a 27th. What no test in the tree does is behavioral: nothing asserts that
+setting `llm.rate_limit.targets.foo.rpm` throttles a call, that `llm.failover.cooldown_s` opens a
+circuit, or that `preflight.baseline_build.enabled` runs a native build. The structural scan can
+only prove a name is absent from `src/fleet/` outside `settings.py`; for these 26 that happens to
+be equivalent to "does nothing," but the test's own docstring (limitation 2) flags where it is
+not: `llm.max_schema_repairs` (`settings.py:680`) and `llm.failover.enabled` (`:660`) /
+`.max_targets_per_call` (`:663`) share the exact spelling of unrelated `CallPolicy` fields
+(`llm/client.py:452-453`, used at `:499`, `:732`), so the name-scan marks them "read" even though
+`llm_policy` being unwired makes them exactly as inert as their twelve siblings in Group 1 — they are simply
+not falsifiable by this test and so carry no `KNOWN_INERT` line and no D-number claim here. Not
+encoded as part of this entry's 26; noted so the gap is not mistaken for absence of a defect.
+
+**Not fixed here.** Wiring `llm_policy` from `settings.llm` into every `RunContext(` call site is
+the one change that would close Group 1 in full and is not obviously more than a few lines per
+call site, but doing it as a drive-by here would touch `cli.py`, which two other agents are
+editing concurrently in this same pass, and Rule 3 confines this lane to
+`docs/INTEGRATION_HONESTY.md`. `preflight.baseline_build` (Group 3) needs an actual native
+build/test worker, not a wiring fix, and deciding what §14.1's gate should refuse on belongs in an
+ADR, not this ledger. The other four groups are individually small, but batching six unrelated
+config sections into one fix would violate Rule 2 (no speculative abstraction) for what is, in
+each case, a single-purpose branch or accessor.
