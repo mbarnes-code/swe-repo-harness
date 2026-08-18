@@ -2026,6 +2026,26 @@ authenticated?"*. A flat No to a two-part question nobody measured either half o
 catch it? No** — and `tests/test_vcs.py:804` shows the shape the fake supports: `started=False` is
 constructible, `timed_out` is not (D45).
 
+**Status — CLOSED. Both halves fixed.** The `_exec` half (the `gh`/`curl` "uninstalled" misreport
+for a passed deadline) was fixed earlier at `8464dc6`. The second half — `available()`'s flat
+`False` for both a genuinely missing `gh` and a probe that never settled — is fixed in `854189a`:
+`available()` no longer routes through `_exec` (whose `check=True` path collapses "ran and said
+no" and "never settled" into one `GhError` string with nothing left to branch on). It now calls
+the runner directly and checks `util.proc.no_verdict` BEFORE reading the exit code, the same
+pattern `d37f4ba`'s `Git._require_settled` uses for D42 (ADR-0067: raise on indeterminate, return
+the settled answer unchanged). `FileNotFoundError` and a settled non-zero exit still return
+`False` unchanged; only a probe that never started or was killed at its deadline now raises
+`GhError`. Pinned by four new tests added in the same commit in `tests/test_vcs.py`: a genuinely
+missing binary still returns `False`, a settled unauthenticated exit still returns `False`, and
+both unsettled shapes (never-started, killed-at-deadline) raise.
+
+**Scope caveat the implementer raised, recorded as-is because it changes the severity, not the
+verdict:** `available()` has no production caller anywhere in `src/fleet` — `prwriter.py` and
+`cli.py` call `create_pr`/`view`/`sync` directly and catch `ForgeError`, never `available()`. The
+only callers are tests (this file, and `test_gitea.py`'s live-forge equivalent), using it purely
+as a skip gate. This closes a real contract violation — the method's own docstring promises a
+two-outcome answer it was not giving — with zero production blast radius today.
+
 **D40 — OPEN. `symbolindex` and `interrogate` use `Path.is_dir()` as "did the clone run", and get
 `PREFLIGHT, retryable=False` wrong for every `OSError`.** Both open `run` with
 `if not await asyncio.to_thread(root.is_dir):` → `PREFLIGHT`, `retryable=False`,
@@ -2038,6 +2058,20 @@ textbook retryable. **Severity: medium**, raised by its pairing with **D36**: th
 returned `status="ok"` with no worktree lands here, and the operator is told to run the worker that
 already reported success. **Would a test catch it? No.** The distinguishing test is `root` as a
 regular file, or a directory with mode `0o000`.
+
+**Status — CLOSED, FIXED in `f1aac12`.** `workers/interrogate.py` gains `worktree_presence(root)`,
+which stats the path directly instead of going through `Path.is_dir()`: `FileNotFoundError` and
+`NotADirectoryError` are the settled negative (unchanged `PREFLIGHT`, `retryable=False` — this
+bucket now also covers this entry's own "path that exists and is a file" case, since a `stat` on a
+regular file succeeds and `stat.S_ISDIR` on the result is a determinate `False`, the same settled
+answer as genuine absence); every other `OSError` is returned as the exception itself instead of
+being swallowed. Both `interrogate.py` and `symbolindex.py`'s `run()` now branch on that: an
+`OSError` reports `TRANSIENT_INFRA, retryable=True` (the class `base.clock_failure` uses for a
+subprocess call that gathered no evidence, re-derived here without a `ProcResult` since there is
+no subprocess) instead of terminal `PREFLIGHT`. Pinned by new cases in
+`tests/test_workers_scan.py`. This also resolves the D36 pairing this entry names: a clone that
+reported `status="ok"` with no worktree material now hits a worker that retries instead of
+terminally blaming the wrong worker.
 
 **D41 — OPEN. `clone`'s three silent zeros: a probe that never ran returns a measured-looking
 answer, and one of them disarms the gate two lines below it.** All three read `result.ok` and
@@ -2133,6 +2167,31 @@ disposable by design and re-entry re-cuts them, which is why this is tier 3 and 
 is the clearest specimen in the set of the family's **documentation** signature: **a comment that
 names one cause for a condition that has four.** Grep for that phrasing; it is where these live.
 **Would a test catch it? No.**
+
+**Status — CLOSED, FIXED in `f1aac12`.** This was the data-loss member of the family — an
+unsettled probe authorising an `rmtree`. `WorktreeManager.remove` (`sandbox/worktree.py`) now
+calls `util.proc.no_verdict` on the `worktree remove --force` result BEFORE reading `result.ok`
+(the same ordering the rest of this family uses, and for the same reason: a call made past an
+already-passed deadline reports both `started=False` and `timed_out=True` at once, and reading
+`timed_out` first would misreport "never ran" as "ran too long"), and raises `WorktreeError`
+instead of deleting when the call did not settle. A settled non-zero exit — a genuine git
+refusal — still triggers the old `rmtree` behaviour unchanged. Pinned by three new cases added to
+`tests/test_sandbox.py`: never-started and killed-at-deadline probes both raise without deleting
+(with the started-before-timed_out message ordering asserted), and a settled genuine refusal still
+deletes as before.
+
+**A related classification choice, made in the same commit for the sibling D40 fix and worth
+recording here because it sets the boundary this entry's own "four causes" enumeration depends
+on:** `worktree_presence` (the D40 fix, `workers/interrogate.py`) treats *"path exists but is a
+regular file"* as the SETTLED-NEGATIVE branch — the same bucket as genuine absence — because
+`root.stat()` succeeds and `stat.S_ISDIR` on the result is a fully determinate `False`; there is no
+filesystem-level ambiguity to raise on there, unlike an `OSError` that establishes nothing. D44's
+own mechanism does not call `worktree_presence` (it reads `no_verdict` off a `ProcResult`, not a
+`stat`), but both fixes are drawing the identical three-state line — settled-false and settled-true
+are both "the filesystem answered," only a raised exception or an unsettled `ProcResult` means "it
+did not." That is a judgement call about where the boundary sits, not an incidental implementation
+detail, and it is the reason this family's fixes read as one shape applied twice rather than two
+unrelated patches.
 
 **D45 — OPEN, and it is a testability gap that explains the clustering. `tests/test_vcs.py`'s
 `ScriptedRunner` has no `timed_out` parameter.** Its `__init__` accepts `stdout`, `exit_code` and
@@ -2274,6 +2333,51 @@ the same cause can be swept for at near-zero cost, and it will be there more tha
 count for this family is now **thirteen** (D29 plus these twelve), across `workers/`, `vcs/`,
 `sandbox/`, `rewrite/` and `cli.py`, in code written by different rounds. **None of the thirteen
 would have been found by running the suite harder, and all of them have passing tests today.**
+
+**Correction — the "seven untouched" and "thirteen, all real" framing above are both superseded;
+re-derived directly against source and `git log`, not transcribed from ADR-0073's own citation of
+this paragraph.** ADR-0073 §1 (`docs/DECISIONS.md`) independently flagged this paragraph as
+carrying a stale count and handed forward a corrected sentence: *"Of the thirteen four-state-collapse
+entries (D29, D34–D45), six are fixed and tested, four were never reproducible in visible history,
+one is half-fixed, and two remain open exactly as filed — the collapse pattern itself is real and
+current (D40, D44), but 'thirteen, all real' overstates the surviving count by roughly half."* That
+sentence was itself already out of date the moment it was handed over: D39 (the "half-fixed" one)
+closed today in `854189a`, and D40/D44 (the "open exactly as filed" two) closed today in `f1aac12`
+— see the Status paragraphs after each entry above. Re-measured fresh rather than propagating
+either count:
+
+- **Fixed and tested (9):** D29 (`68a41ff`, pinned by
+  `test_a_probe_the_fleets_own_deadline_killed_is_not_reported_as_a_missing_compiler`), D34
+  (`44d5550`), D37 (`2af7dfb`, ADR-0067 — the exact `break`→`continue` and timed-out-probe
+  mechanism this entry named), D38 (`8464dc6` — `relocate` now catches `FileNotFoundError`
+  directly instead of guessing from `not result.started`/exit 127/stderr substring), D39 (`8464dc6`
+  for `_exec`, `854189a` for `available()`), D40 (`f1aac12`), D42 (`d37f4ba`), D44 (`f1aac12`).
+  **D43 is the ninth, with a caveat the count above must not erase:** it is fixed but not
+  independently pinned. `Git.resolve` (`vcs/git.py:311-326`) can no longer return `None` for a
+  timed-out or never-started `rev-parse` — `_require_settled` raises first, and the method's own
+  docstring names D42/D43 directly as the reason — so `cli.py`'s force-reset mechanism this entry
+  describes cannot occur. The protection is inherited from `Git.resolve`'s own tests, not from a
+  `cli.py`-level regression test built against this entry's own branch/anchor scenario; that test
+  is being added separately.
+- **Never reproducible in visible history (4):** D35, D36, D41, D45 — unchanged from the
+  corrections above.
+- **Open as filed (0), not two.** D40 and D44 were the two members ADR-0073's handed-forward
+  sentence correctly called "open exactly as filed" and "real and current" — and they were, right
+  up until `f1aac12` landed today. D39 closed alongside them in `854189a`. **Nothing in D29 or
+  D34–D45 remains open as filed.**
+
+9 + 4 + 0 = 13. This also retires the "seven of the twelve untouched by this pass" sentence above:
+D37, D38, D39, D40, D42, D43, D44 were untouched *by that pass*, not permanently — six of the seven
+are now independently fixed-and-tested and the seventh (D43) inherits its fix from D42's.
+
+**The thesis was never the thing that was wrong, and stating the correct count only strengthens
+it.** "Thirteen, all real" overstated how much of the family was still *open* — most of it wasn't,
+by the time it was written. But the collapse pattern itself — the same "settled vs. unsettled"
+confusion recurring across `workers/`, `vcs/`, `sandbox/`, `rewrite/` and `cli.py` — was not a
+paper tiger: D40 and D44 demonstrated it *live*, in production code, right up until today's fix.
+"The count was wrong" and "the pattern doesn't exist" are different claims; only the first one ever
+held here, and even that has now fully resolved — there is nothing left in this family for a future
+pass to find open as filed.
 
 **D47 — OPEN. `build_diagnosis` is generated on every rung-2/3 build or test failure and consumed
 by nothing.** `BuildverifyOutput.diagnosis` and `.diagnosis_failure_class`
@@ -2718,6 +2822,39 @@ file modified, mid-edit by a lane still in progress.
    have disabled secret-redaction enforcement believing it inert. Recorded as a standing caveat for
    whichever lane lands that edit next, not as a correction to anything this entry currently
    claims.
+
+**Third correction — the pending edit landed; committed at `6ad64e0`, re-derived independently,
+not transcribed from its own commit message.** Parsed directly with `ast` against `git show
+6ad64e0:tests/test_config_keys_are_read.py` (not the working tree, not counted by eye):
+`KNOWN_INERT`=**46**, `QUALIFIED_MATCH_KEYS`=**11** (subset, same relationship to `KNOWN_INERT` as
+before), `UNVERIFIABLE`=**1**, `DECLARATIVE`=**6**, and `_config_keys()` still walks **180** leaves
+total — matching the second correction's own prediction exactly, and re-confirmed unchanged at
+`HEAD` (`f1aac12`, which carries `6ad64e0`; `git diff 6ad64e0 HEAD --
+tests/test_config_keys_are_read.py` is empty). `6ad64e0`'s own commit message names the mechanism:
+`_strip_comments_and_docstrings` now blanks every `ast.Constant` string literal, not only a
+docstring positioned as the first statement of a module/class/function body — closing the last gap
+the second correction's own working-tree preview had already identified (a `Field(description=...)`
+literal at `models/state.py` that happened to name `run.stale_after_s` was passing the scan on
+prose alone). **The count grew because the scanner improved, not because the code decayed** — the
+180-leaf total this document has cited at every count so far (26, then 37, now 46) has never moved;
+only the scanner's ability to see past prose describing a key has. The revision is not
+one-directional: of the newly-resolved keys, most moved INTO `KNOWN_INERT` (`run.stale_after_s`,
+`scan.contracts.marker_scan_bytes`, `transform.anchoring` among them), but `concurrency.llm.cheap`
+moved the other way, OUT of the suspect set and into `DECLARATIVE`, because `LlmConcurrency.for_tier`'s
+`self.cheap` fallback genuinely reads it — confirming this is a re-derivation, not a ratchet that
+only ever finds more dead keys.
+
+**The two keys the prior correction warned would have been false positives did NOT land as
+`KNOWN_INERT`.** `redaction.enabled` and `redaction.patterns` — the pair flagged above as a
+near-miss that would have had this ledger declare two live safety switches dead — are, in the
+committed `6ad64e0` frozenset (checked directly, not taken from the commit message's own claim),
+members of `DECLARATIVE`: `"redaction.enabled" in KNOWN_INERT` and `"redaction.patterns" in
+KNOWN_INERT` both evaluate `False`; both evaluate `True` against `DECLARATIVE`. `6ad64e0`'s own
+message independently states the same finding ("Of nine keys an independent sweep reported inert,
+TWO DID NOT REPRODUCE: redaction.enabled and redaction.patterns... They went to DECLARATIVE."),
+which this correction treats as corroboration, having re-derived it rather than trusted it. The
+near-miss is closed, not merely a standing caveat any longer. **This correction records the
+committed count (46/11/1/6/180) as current as of `f1aac12`.**
 
 **The asymmetry the test file's docstring names is real and this entry is its second half.**
 `cli.py:3141-3147` refuses `--context-policy` at the flag layer and says exactly why: the value
