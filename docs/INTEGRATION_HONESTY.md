@@ -1911,6 +1911,16 @@ test catch it? No.** `test_the_exit_code_table_is_the_policy` (`tests/test_worke
 has rows for **1, 2, 3, 4, 8, 9, 36, 127, 137 and -9** and **no 125 row**; the missing row is the
 defect. Adding `125 → TRANSIENT_INFRA, True` closes both.
 
+**Status — CLOSED, FIXED in `44d5550`.** Re-verified at `82654e8`: `classify_build_failure`
+(`buildverify.py:412-471`) tests `result.exit_code == _DOCKER_CANNOT_RUN` at `:430` — before
+either `INFRA_EXIT_CODES` or `UNREPEATABLE_EXIT_CODES` — and returns `FailureClass.TRANSIENT_INFRA,
+True`: the missing row this entry named. Pinned by
+`test_a_docker_run_that_exits_125_is_not_reported_as_a_broken_build_file`
+(`tests/test_workers_build.py:1333`). `git show a1178f7:src/fleet/workers/buildverify.py` confirms
+the entry's premise as originally written: at the initial commit `classify_build_failure` ran only
+to its final `return`, with no 125 branch anywhere in it — the defect was real when filed and is
+absent now.
+
 **D35 — OPEN. `clone._unshallow` turns every transient failure into `REQUIRES_HUMAN_INTERVENTION`,
 on the single most transient operation the worker performs.** `_unshallow` (`clone.py:478–489`)
 runs `git fetch --unshallow` **inside `ctx.limits.git_net`** — it holds the network limiter, which
@@ -1925,6 +1935,22 @@ with `retryable=True` (`clone.py:555–580`) — but it is only reachable from t
 `git.exec(..., check=False)`, which **returns instead of raising**, so the correct handler 77 lines
 below is bypassed by construction. **Would a test catch it? No** — see D45.
 
+**Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** `git diff a1178f7 HEAD -- src/fleet/workers/clone.py`
+(re-verified at `82654e8`) shows `_unshallow` already had this entry's correct shape at the
+repository's first commit. `git show a1178f7:src/fleet/workers/clone.py:537-566` — same body,
+same line range, as `HEAD` — raises `_indeterminate(...)` for every non-`ok` fetch result whose
+`_no_verdict` reads as unsettled, which `run()`'s handler routes through `_error_for` to retryable
+`TIMEOUT`/`TRANSIENT_INFRA`; a non-retryable `PREFLIGHT` gate is returned only for the two settled
+cases the function's own docstring names as legitimate (`unshallow` disabled by config, or a fetch
+that succeeded and the mirror stayed shallow anyway). The only changes the diff shows to this
+function across the repository's entire visible history are cosmetic — a shared `clock_failure`
+helper factored out of `_error_for` later, `started` threaded alongside `timed_out` into the
+raised exception — neither touches whether the function raises or returns a gate. **Caveat, not a
+clean bill of health:** `a1178f7` is a squash of earlier unrecorded checkpoints, so this defect
+may have existed pre-squash — nothing checkable in `git log` shows that it did. The verdict is
+*never reproducible in visible history*, not *never existed*. See the note after D41 for how this
+entry came to exist despite that.
+
 **D36 — OPEN. `clone._preflight` reports `EmptyRepo` for a `rev-parse` that never ran, and returns
 `status="ok"` while doing it.** `head_sha = await git.resolve(branch)` (`clone.py:409`);
 `Git.resolve` (`vcs/git.py:265–271`) is `rev-parse --verify --quiet` returning
@@ -1937,6 +1963,18 @@ shape in this set:** the other eleven persist a wrong verdict as a **failure**, 
 reads; this one persists a wrong finding **as a success**. Downstream workers then fail on a
 **missing worktree** (D40's gate) and blame the clone that reported green. **Would a test catch it?
 No.** The catching test asserts that a timed-out `resolve` cannot produce `status="ok"` at all.
+
+**Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** This entry's own premise does not match the
+code even before checking history: `_preflight` never calls `Git.resolve` (`vcs/git.py:265-271`,
+the ambiguous-`None` method this entry blames) at all. `git show a1178f7:src/fleet/workers/clone.py:412-421`
+and `HEAD` both show `head_sha = await self._resolve_head(git, branch) if branch else None` — a
+private method, not `git.resolve` — and `_resolve_head` (`a1178f7:509-533`, unchanged in shape at
+`HEAD`) raises via `_indeterminate` whenever `_no_verdict` reports the `rev-parse` unsettled; only
+a *settled* `rev-parse --verify --quiet` that genuinely answers "no such rev" reaches the
+`EmptyRepo` finding. `_preflight` therefore cannot return `status="ok"` with a fabricated
+`EmptyRepo` for a probe that never ran — the raise happens two calls up the stack before
+`_preflight` gets a `head_sha` to act on. Never reproducible in visible history; same squash
+caveat as D35.
 
 **D37 — OPEN. A timed-out parse probe is reported as *"no rewrite engine is installed on this
 host"*, the run still exits SUCCESS, and the `break` abandons the probe for every remaining file in
@@ -2017,6 +2055,37 @@ values are persisted to `repos.*` columns (SPEC §3.1 step 1's table) as **measu
 *"we looked and there are none"*. **Would a test catch it? No.** The honest form is `int | None` /
 `bool | None` with the gate refusing on `None`.
 
+**Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** All three probes already distinguished "never
+ran" from "ran and settled" at the repository's first commit — the opposite of what this entry
+describes. `git show a1178f7:src/fleet/workers/clone.py:568-630`, unchanged in shape at `HEAD`
+(`82654e8`): `_submodule_count`, `_has_lfs`, and `_largest_blob_bytes` each call
+`_no_verdict(result)` first and raise via `_indeterminate` when it reports the probe unsettled —
+only a *settled*, genuinely-negative result (a `git show` that ran and exited non-zero because the
+path is not in the tree) falls through to the `0`/`False` default. That is exactly the honest form
+this entry itself prescribes ("the honest form is `int | None` / `bool | None` with the gate
+refusing on `None`") — implemented as a raise instead of an `Optional` return, which produces the
+identical operator-facing effect (a probe that could not run stops the wave rather than persisting
+a fabricated measurement). Never reproducible in visible history; same squash caveat as D35/D36.
+
+**How three phantom entries survived a full checkpoint.** `44d5550`'s own commit message, under
+"Also in this checkpoint (earlier agents, separately verified)", states: *"clone worker
+D35/D36/D41 -- transient failures no longer permanent, a rev-parse that never ran no longer means
+EmptyRepo reported as success, and three probes no longer publish fabricated zeros. ScriptedRunner
+gained timed_out/stderr, which is what made the family testable at all."* `git show 44d5550 --stat`
+shows exactly four files touched — `docs/DECISIONS.md`, `docs/PROGRESS.md`,
+`src/fleet/workers/buildverify.py`, `tests/test_workers_build.py` — **zero** touching
+`src/fleet/workers/clone.py`, `tests/test_vcs.py`, or `tests/test_workers_scan.py`. The claimed
+fix and the claimed test coverage both landed in **no commit that exists**: this is the same
+claimed-not-landed hazard D46's own structural-cause paragraph already flags for a different pair
+of lanes, except here the underlying code these three entries described was, per the diffs above,
+never in the defective shape the ledger claimed to begin with — a commit message asserting
+unverified work as "separately verified" is how three phantom entries acquired a ledger existence
+at all. **The asymmetry is worth naming:** this pass found four entries stale in the *closed*
+direction (D35, D36, D41, and D45 below) against one stale in the *open* direction (D34, already
+fixed but still marked OPEN before this pass) — a ledger that accumulates phantom debt misleads a
+future reader differently than one that misses a real defect, and costs exactly as much of this
+document's own credibility either way.
+
 ### Tier 3 — honest verdict, dishonest message or mechanism
 
 **D42 — OPEN. `result.ok` is used as the answer to four git *questions*, and the answers are
@@ -2075,6 +2144,24 @@ cannot express a state is a fake that guarantees the state is never asserted on,
 `started=False` **does** appear in a test (`tests/test_vcs.py:804`) and `timed_out=True` appears in
 none. **Would a test catch it? The question is inverted here** — this is why the others have no
 tests. The fix is one keyword argument, and it makes six of the eleven above cheaply testable.
+
+**Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY (mechanism); coverage gap now closed.**
+`git show a1178f7:tests/test_vcs.py` — the repository's first commit — already shows
+`ScriptedRunner.__init__` accepting a `timed_out: bool = False` constructor argument (`:173`) and
+`__call__` forwarding it verbatim into the returned `ProcResult` (`timed_out=self.timed_out`,
+`:215`), never a hard-coded `False`. Re-confirmed unchanged in shape at `32365cf`. The entry's
+mechanism claim does not reproduce at any point in visible history; the same squash caveat that
+applies to D35/D36/D41 applies here. **What the entry's "would a test catch it? No" half named
+was real, and separate from the mechanism claim:** at `32365cf`, no test in `tests/test_vcs.py`
+constructed a `timed_out=True` `ScriptedRunner` against `resolve`, `ref_exists`, `apply_check`, or
+`is_ancestor` — the fake could express the state, nothing exercised it. That gap is now closed by
+`d37f4ba` ("fix(D42): Git probe methods raise on an unsettled ProcResult, not \"No\""), whose own
+commit message states the correction plainly: *"tests/test_vcs.py already had
+ScriptedRunner(timed_out=...) wired through to ProcResult (D45's fix had already landed), so this
+only needed new coverage: parametrized tests across all four probes."* Added:
+`test_d42_probe_never_started_raises_naming_it_never_started` and
+`test_d42_probe_killed_at_deadline_raises_naming_the_kill` (`tests/test_vcs.py`), both
+parametrized across the four probe methods this entry names.
 
 **D46 — OPEN. The `TRANSIENT_INFRA` fix D34 shipped guarantees four byte-identical, deterministic
 125s before it ever charges a rung, because the retry re-issues the same `docker run --name=`.**
@@ -2166,6 +2253,17 @@ cited bodies (`_unshallow`, `_preflight`'s `EmptyRepo` return, and the three sil
 **unchanged in substance at that instant**. Another agent is editing the file; the defects were
 still present in it when last read. **The remaining nine are untouched.** Anyone closing D35/D36/D41
 should re-read rather than trust these offsets.
+
+**Resolved.** The "claimed, not verified" hedge above was accurate as written — the repair another
+lane claimed (`44d5550`'s commit message) never landed in any commit, per the note after D41 — but
+it pointed at the wrong defect. There was no repair to verify because `_unshallow`, `_preflight`,
+`_resolve_head`, `_submodule_count`, `_has_lfs`, and `_largest_blob_bytes` already had the correct
+raise-via-`_indeterminate` shape in the repository's first commit (`a1178f7`); see the
+NEVER-REPRODUCIBLE corrections after D35, D36, and D41 above. **D45 is likewise
+NEVER-REPRODUCIBLE** on its mechanism claim, with its coverage-gap half now separately closed —
+see the correction after D45. That leaves **seven of the twelve untouched by this pass**: D37,
+D38, D39, D40, D42, D43, D44. Whether those seven's line citations and code shapes still hold is
+not re-verified here — this correction addresses only the four entries named above.
 
 **The thesis takes a real amendment.** This document has argued since D1 that **only running things
 finds defects**, and D20–D33 already qualified it. **D34–D45 qualify it further and in a specific
@@ -2460,6 +2558,30 @@ is under a sixth agent's concurrent, uncommitted edit as this correction is writ
    `_record` or its call sites (`:381`, `:453`). The original entry's description of this leg is
    unchanged and still accurate.
 
+**Second correction (`82654e8`) — point 1 and point 4 above are now stale; the config path
+lands.** Re-verified against `git show 82654e8:src/fleet/cli.py`, not the working tree (`cli.py`
+is modified in `git status` again as this correction is written). `TransformInput` gained
+`max_patch_bytes` (`cli.py:3219-3224`); `_transform_payloads` reads
+`settings.config.transform.max_patch_bytes` and sets it on the built `TransformInput`
+(`cli.py:4025`, `:4057`); `TransformPipelineWorker._rewrite_input` copies it onto the
+`RewriteInput` it builds. `grep -n "max_patch_bytes" src/fleet/cli.py` at `82654e8` — the same
+command point 1 ran and got zero hits from — now returns five hits, including the two threading
+sites above. Pinned by
+`test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input`
+(`tests/test_cli.py`), which drives the real `_transform_payloads` → `_rewrite_input` →
+`check_diff` path with a configured 100-byte cap and asserts a 500-byte patch is rejected
+**citing the configured value, not the 1 MiB field default** — closing exactly the "worse than
+inert" failure mode point 3 above described. **Point 4's "irony" framing no longer holds**: the
+config key is no longer dead, so this is not an instance of D50's defect class any more; D50's
+own catalog was never built on this key in the first place (`transform.max_patch_bytes` was
+never one of its 26/37 `KNOWN_INERT` entries) and needs no correction from this. **D49's status
+is therefore: legs 1–3 (as originally numbered) all closed in code and pinned by tests; leg 5
+above (`_record`, the evidence-domain half) is the only remaining open piece** — re-confirmed at
+this same `82654e8`: `_record` (`workers/rewrite.py:568-573`) still appends `unit`, not
+`edit.path`. Not itself re-titled OPEN/CLOSED here, since the entry already carries two prior
+corrections layered on the original text per this file's convention; a future pass should read
+all three before citing this entry's status.
+
 **Two deferred minors, both against the leg-1 fix specifically.** No accept-at-boundary test
 exists: `check_diff` rejects with a strict `>` (`rewrite/apply.py:277-278`,
 `len(diff.encode("utf-8")) > max_bytes`), so a patch at *exactly* `max_bytes` is accepted, and
@@ -2481,6 +2603,52 @@ nothing — and twelve of the twenty-six share one root cause: `RunContext.llm_p
 `cli.py` (`:1805`, `:4059`, `:7481`, `:7553`, `:9100` — checked directly, none passes
 `llm_policy=`), so `LadderModelClient` always falls back to `CallPolicy()`'s own defaults
 (`llm/client.py:478`) no matter what `fleet.yaml`'s `llm:` block says.**
+
+**Correction — count and citations, both re-derived; `2a72f9f`/`82654e8`.**
+
+1. **The count was already stale when this entry was written and has grown since.**
+   `tests/test_config_keys_are_read.py`'s `KNOWN_INERT` held 26 entries at `9644406` (this entry's
+   own baseline commit) but **37** as of `2a72f9f` and unchanged since (`git diff 2a72f9f HEAD --
+   tests/test_config_keys_are_read.py` is empty at `82654e8`) — counted by parsing the
+   `KNOWN_INERT` frozenset literal directly, not by eye. `2a72f9f` ("strip prose, add
+   qualified-match + UNVERIFIABLE tier") blanks every comment and docstring out of the scanned
+   source before matching a key name against it, which revealed **11** additional entries the
+   bare-text scan had been passing on prose alone or on a same-named-field collision:
+   `budgets.max_host_rss_mb`, `llm.concurrency_overrides`, `llm.failover`,
+   `llm.failover.enabled`, `llm.failover.max_targets_per_call`, `llm.max_schema_repairs`,
+   `pr.merge_wait_timeout_s`, `redaction.entropy_min_bits`, `redaction.entropy_min_len`,
+   `transform.ladder.context_policy`, `transform.ladder.role` (`26 + 11 = 37`). The same commit
+   introduced two categories that did not exist at this entry's baseline: **`QUALIFIED_MATCH_KEYS`**
+   (5 keys — a subset of `KNOWN_INERT`, not a separate tally; the immediate-parent-qualified name a
+   plain bare-name scan cannot resolve, e.g. `llm.failover.enabled` vs. the unrelated
+   `scan.contracts.enabled`) and **`UNVERIFIABLE`** (1 key, `transform.ladder.tier` — genuinely
+   undecidable by either scan, because its qualifying parent name collides with
+   `orchestrator/retry.py`'s unrelated `LadderState.tier` method; carries no `KNOWN_INERT` line and
+   is not counted in the 37). `DECLARATIVE` — the true-positive category, keys genuinely read
+   inside `settings.py` — is unchanged at 3. Of the 11 newly-revealed `KNOWN_INERT` entries, 4
+   (`llm.failover`, `llm.failover.enabled`, `llm.failover.max_targets_per_call`,
+   `llm.max_schema_repairs`) trace to the same `llm_policy` cause this entry names, bringing that
+   cause's count to **16 of 37** (not 12 of 26); the remaining 7 are new instances of the same
+   "written and consumed by nothing" defect class from unrelated causes the test file's own
+   comments document (an unpassed `Limits.create(llm_overrides=...)` kwarg, an uncalled validator,
+   two dead-rationale comments, two hardcoded module constants standing in for config, and the
+   `transform.ladder` qualified-match pair, which is this entry's own Group 2).
+2. **The `RunContext(` citations drifted twice over.** This entry cites `:1805, :4059, :7481,
+   :7553, :9100`; a later reviewer measured `1806, 4074, 7496, 7568, 9115`. Both are stale.
+   `cli.py` is under concurrent edit by other lanes in this pass (`git status` shows it modified as
+   this correction is written), so re-measured against a frozen snapshot rather than the working
+   tree: `git show 82654e8:src/fleet/cli.py | grep -n 'RunContext('` returns `1807, 4085, 7527,
+   7599, 9146`. Neither this entry's numbers nor the reviewer's match that snapshot, and this
+   correction's own numbers will not match whatever lands next — the file has moved at least three
+   times since this entry was authored (`82654e8` itself is a `cli.py`-touching commit, from an
+   unrelated D49 fix). **The substantive claim survives all three measurements:**
+   `git show 82654e8:src/fleet/cli.py | grep -n 'llm_policy='` returns zero hits, confirming no
+   call site passes `llm_policy=` regardless of which line numbers are current. A future citation
+   of this entry should re-derive the five line numbers from a fresh `git show <sha>:src/fleet/cli.py`
+   rather than trust any number printed here, including this one — the recurring lesson across this
+   pass's corrections (see also D49's second correction and D51's citation correction) is that a
+   bare line number into a file under active, concurrent repair is stale by the time it is read,
+   however carefully it was measured; only a SHA-pinned citation stays checkable.
 
 **The asymmetry the test file's docstring names is real and this entry is its second half.**
 `cli.py:3141-3147` refuses `--context-policy` at the flag layer and says exactly why: the value
@@ -2632,6 +2800,22 @@ an LLM response. No
 rung, no `ctx.llm`, no `ProposedFileEdit` exists anywhere in this file. This is the "purely
 deterministic" case the brief asked to check for, confirmed: `grep -n "ctx.llm\|propose_repair\|escalate_repair"
 src/fleet/workers/relocate.py` is empty.
+
+**Citation correction (`82654e8`).** This entry's own text predicted the hazard it now hits: it
+was written against a `cli.py` under concurrent edit and flagged that. `82654e8` ('fix(D49):
+thread transform.max_patch_bytes...') shifted the file after this entry was authored. Re-derived
+against `git show 82654e8:src/fleet/cli.py`, not the working tree (`cli.py` is modified again per
+`git status` as this correction is written): `sources=list(payload.sources)` is now at `:3369`
+(was `:3362`), `TransformInput.sources` is unchanged at `:3213`, and `plan.sources` inside
+`_transform_payloads` is now at `:4037` (was `:4028`). `relocate.py`'s own line numbers are
+undisturbed (`82654e8` touched `cli.py`, `workers/rewrite.py`, `tests/test_cli.py` — not
+`workers/relocate.py`); re-confirmed `grep -n check_diff src/fleet/workers/relocate.py` is still
+empty at `82654e8`, so the substantive finding is unaffected — only the `cli.py` line numbers
+moved. This is the second ledger correction landing on a `cli.py` citation invalidated by the very
+commit that fixed the defect the citation was tracing (see D49's second correction, above); a
+citation into a file under concurrent, active repair is stale by the time it is read regardless of
+how carefully it was measured, which is the argument for pinning every such citation to the SHA it
+was taken from rather than trusting a bare line number.
 
 **Why D49's provenance rule does not imply the same gate — the byte cap.** D49's own severity
 paragraph already states the general form: *"a legitimate migration rewrite may touch every file
