@@ -80,6 +80,14 @@ tools/bin/*
 /bazel-swe repo harness
 bazel-*-events.json
 
+# `tests/conftest._bazel_root()` writes GiB of Bazel state here when the checkout path
+# contains no space. The primary checkout's path DOES contain one, so this branch is dead
+# there -- but a git worktree at a space-free path revives it, and nothing else in this
+# file matches. Ignored defensively so the trap cannot land untracked-but-unignored even
+# if `tools/worktree/new-worktree.sh`'s space-free refusal is bypassed. See
+# tools/worktree/README.md.
+tools/bazel-test-root/
+
 # ---- Third-party reference corpora (their own git repos) ----
 # Cited by path in docs/DECISIONS.md; re-fetch to fact-check those citations:
 #   https://github.com/All-The-Vibes/Agent-Harness.git              @ d1aab58
