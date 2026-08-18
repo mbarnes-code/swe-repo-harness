@@ -38,3 +38,51 @@ profiles:
       - { backend: anthropic, model_id: claude-haiku-4-5, effort: low,
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
+
+  # `profiles.local` is the all-local counterpart, routing every tier through
+  # `openai_compatible` — the ANY-`base_url` transport (local vLLM / Ollama / LM Studio /
+  # llama.cpp / TGI, and hosted OpenAI-compatible endpoints alike). Select it with
+  # `--profile local` or `llm.profile`; `default_profile` above is unchanged.
+  #
+  # Four things this profile is asserting on purpose:
+  #
+  #   * `base_url` on every target. It is REQUIRED here (§13 row 36): a target without one is a
+  #     startup error naming the profile, tier and target index, because this backend has no
+  #     vendor default to fall back on. `http://localhost:8000/v1` is vLLM's default port —
+  #     Ollama is `:11434/v1`, LM Studio `:1234/v1`; edit to match the server you run.
+  #   * `price: free`, the LITERAL, not `{in_per_mtok: 0, out_per_mtok: 0}`. §9 rule 5 requires a
+  #     declared price on every target, and `BackendTarget._free_is_declared_not_derived` rejects
+  #     a zero-rate `Price` outright, so a locally-served model's $0.00 is something an operator
+  #     wrote down rather than something the ledger inferred. `cost_usd = 0.0` with a non-empty
+  #     `backend` is then a legitimate free call and not a fully-cached run (§11.2, §11.6).
+  #   * No `api_key_env`. A target that names one and leaves it unset fails loud at the point of
+  #     use; a target that omits it is declaring the endpoint needs no key, and the backend sends
+  #     a placeholder so the servers that demand a non-empty dummy still answer. Add
+  #     `api_key_env: LOCAL_LLM_API_KEY` (a variable NAME, never a key) if yours checks it.
+  #   * `capabilities_override` where — and only where — the operator actually knows the server.
+  #     The backend declares the honest floor (PROMPTED only), because `base_url` may point at
+  #     anything; these overrides are the claim that THIS endpoint does better, and the gap
+  #     between claim and delivery is what `CapabilityDrift` reports (§13 row 37).
+  #
+  # `model_id` is opaque to the harness and must match whatever your server advertises at
+  # `GET /v1/models`; the ids below are placeholders for the vLLM-style served names.
+  local:
+    HEAVY:
+      - { backend: openai_compatible, model_id: qwen3-coder-30b, effort: high, price: free,
+          base_url: 'http://localhost:8000/v1',
+          capabilities_override: { supports_json_schema: true, supports_tools: true,
+                                   supports_constrained_decoding: true,
+                                   max_context: 131072, max_output_tokens: 16384,
+                                   structured_output_modes: [JSON_SCHEMA, TOOL_CALL, PROMPTED] } }
+    WORKHORSE:
+      - { backend: openai_compatible, model_id: qwen3-14b, effort: medium, price: free,
+          base_url: 'http://localhost:8000/v1',
+          capabilities_override: { supports_tools: true, supports_constrained_decoding: true,
+                                   max_context: 32768, max_output_tokens: 8192,
+                                   structured_output_modes: [TOOL_CALL, CONSTRAINED, PROMPTED] } }
+    # CHEAP is deliberately left at the backend's declared floor: no override, no structured
+    # output of any kind. `negotiate()` lands on PROMPTED, validation is still Pydantic on our
+    # side (ADR-0002), and a small model that can only be asked nicely stays a legitimate target.
+    CHEAP:
+      - { backend: openai_compatible, model_id: qwen3-1.7b, effort: low, price: free,
+          base_url: 'http://localhost:8000/v1' }
