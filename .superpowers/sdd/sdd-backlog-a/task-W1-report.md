@@ -83,7 +83,7 @@ concurrently, no `FLEET_*` exported): `14 passed in 13.24s`.
 
 ## Commit
 
-`ee5c22b` — `fix(D49): key _TransformEvidence's unresolved dedup on completed_units, not paths`
+`2976a7e` — `fix(D49): key _TransformEvidence's unresolved dedup on completed_units, not paths`
 (touches only `src/fleet/cli.py` and `tests/test_transform_e2e.py`; nothing else was staged).
 
 ## Concerns
