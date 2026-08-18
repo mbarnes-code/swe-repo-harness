@@ -1111,6 +1111,58 @@ async def test_gh_a_passed_deadline_is_not_mistaken_for_a_missing_binary() -> No
     assert "deadline had already passed" in str(exc_info.value)
 
 
+async def test_available_reports_false_for_a_genuinely_missing_binary() -> None:
+    """D39's surviving half: `available()` must still answer `False`, not raise, when `gh` is
+    genuinely not on PATH — that is a settled true negative, not an indeterminate probe. The
+    double is `RaisingRunner`, matching `_exec`'s own `FileNotFoundError` case: no shell is ever
+    involved, so a missing binary never comes back as a `ProcResult` at all."""
+    cli = GH.GitHubCli(runner=RaisingRunner(FileNotFoundError("gh")))
+    assert await cli.available() is False
+
+
+async def test_available_reports_false_for_a_settled_unauthenticated_exit() -> None:
+    """The case that proves the fix is not a blanket raise-on-any-failure (mirroring `d37f4ba`'s
+    equivalent case for the git probes): `gh auth status` that actually RAN and exited non-zero —
+    no credential, or a bad one — is a settled "no", and `available()` must still return `False`
+    rather than raise. `gh` converting an unauthenticated exit into `False` (not an exception) is
+    exactly what this module's docstring promises callers."""
+    cli = GH.GitHubCli(runner=ScriptedRunner(exit_code=1, started=True, stderr="not logged in"))
+    assert await cli.available() is False
+
+
+async def test_available_does_not_report_false_for_an_unsettled_probe() -> None:
+    """D39, the surviving half: before this fix, `available()`'s `except GhError: return False`
+    caught EVERY `GhError` — including a passed-deadline probe, because `GhUnavailableError`
+    subclasses `GhError` — so "gh is not installed" and "we could not find out" both came back as
+    the identical `False`. A probe that never started must not settle the question either way:
+    it raises instead of guessing "no"."""
+    never_ran = ScriptedRunner(
+        exit_code=124,
+        started=False,
+        timed_out=True,
+        stderr="deadline had already passed; process was not started",
+    )
+    cli = GH.GitHubCli(runner=never_ran)
+    with pytest.raises(GH.GhError) as exc_info:
+        await cli.available()
+    assert not isinstance(exc_info.value, GH.GhUnavailableError)
+
+
+async def test_available_does_not_report_false_for_a_deadline_kill() -> None:
+    """The other unsettled shape (started, then killed at the deadline, `timed_out=True` alone):
+    also not a verdict, so also not `False`. Distinct from the never-started case above per
+    `util.proc.no_verdict`'s ordering, but both must raise rather than collapse to "not
+    installed"."""
+    killed = ScriptedRunner(
+        exit_code=124, started=True, timed_out=True, stderr="killed at deadline"
+    )
+    cli = GH.GitHubCli(runner=killed)
+    with pytest.raises(GH.GhError) as exc_info:
+        await cli.available()
+    assert not isinstance(exc_info.value, GH.GhUnavailableError)
+    assert "killed at deadline" in str(exc_info.value)
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     shutil.which("gh") is None,

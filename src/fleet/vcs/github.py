@@ -36,7 +36,7 @@ from typing import Final
 
 from fleet.models.enums import PrState
 from fleet.obs.redact import redact_text
-from fleet.util.proc import CommandRunner, run
+from fleet.util.proc import CommandRunner, no_verdict, run
 from fleet.vcs.forge import (
     NON_TERMINAL_STATES,
     ForgeError,
@@ -171,12 +171,43 @@ class GitHubCli:
 
     async def available(self) -> bool:
         """Is `gh` installed AND authenticated? Both, because an unauthenticated `gh` fails at the
-        first API call with an error a poll loop would otherwise retry forever."""
+        first API call with an error a poll loop would otherwise retry forever.
+
+        Exactly two outcomes settle that question with a "no": `gh` missing from PATH
+        (`FileNotFoundError` from the spawn itself, same failure mode `_exec` above documents —
+        never a shell "command not found") and `gh auth status` running to completion and
+        reporting failure (no or wrong credential). Both are facts, so both return `False`.
+
+        This does NOT call `_exec`: `_exec`'s `check=True` path collapses "ran and said no" and
+        "never settled" into one `GhError` with only a message, and by the time that string
+        exists there is nothing left to branch on except substring-matching stderr — the thing
+        D39/§3.3 says this harness never does. So `available()` inspects the raw `ProcResult`
+        itself, the same way `vcs/git.py`'s `_require_settled` does for D42: `util.proc.no_verdict`
+        is checked BEFORE the exit code, and a probe that never started or was killed at its
+        `deadline` has answered NEITHER "installed" nor "not installed" — collapsing that into
+        `False` reads identically to "gh is not here" to every caller (D39, the surviving half:
+        `GhUnavailableError` subclasses `GhError`, so the old `except GhError: return False` could
+        not tell a missing binary from a probe that timed out). That case raises `GhError`
+        instead of guessing, matching the house idiom (ADR-0067): raise on indeterminate, return
+        the settled answer unchanged.
+        """
         try:
-            await self._exec(["auth", "status"])
-        except GhError:
+            result = await self._runner(
+                self.argv(["auth", "status"]),
+                cwd=self.cwd,
+                deadline=self.deadline,
+                timeout_s=self.timeout_s,
+            )
+        except FileNotFoundError:
             return False
-        return True
+        reason = no_verdict(result)
+        if reason is not None:
+            raise GhError(
+                f"gh auth status did not run to completion ({reason}); this does not establish "
+                "whether gh is installed and authenticated — that is a different fact from "
+                f"'not authenticated' and callers must not treat it as one: {result.stderr_tail}"
+            )
+        return result.ok
 
     async def create_pr(
         self,
