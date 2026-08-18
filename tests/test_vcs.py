@@ -35,7 +35,7 @@ from uuid import UUID
 import pytest
 
 from fleet.models.enums import PrState
-from fleet.util.proc import ProcResult, is_producible_shape, run
+from fleet.util.proc import CommandRunner, ProcResult, is_producible_shape, run
 from fleet.vcs import commits as C
 from fleet.vcs import filter_repo as FR
 from fleet.vcs import github as GH
@@ -217,6 +217,76 @@ class ScriptedRunner:
             started=self.started,
             cwd=cwd,
         )
+
+
+class DeadlineMidRollbackRunner:
+    """Real git for every call except argv shapes named in `unsettle`, which come back as an
+    unsettled `ProcResult` — the same shape `util.proc.run` synthesises for a deadline that had
+    already passed (`started=False, timed_out=True, exit_code=124`, §7.1). Models an expired
+    deadline landing between two of `discard_task`'s own git calls: the interaction D42 made
+    reachable, since `land_patches` calls `discard_task` on the SAME deadline that failed the
+    original patch.
+    """
+
+    def __init__(self, *, unsettle: Sequence[str], real: CommandRunner = run) -> None:
+        self._unsettle = tuple(unsettle)
+        self._real = real
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        if all(token in argv for token in self._unsettle):
+            return ProcResult(
+                argv=tuple(argv),
+                exit_code=124,
+                stdout_tail="",
+                stderr_tail="",
+                duration_ms=1,
+                timed_out=True,
+                started=False,
+                cwd=cwd,
+            )
+        return await self._real(argv, cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
+
+
+class RefuseOneCommandRunner:
+    """Real git for every call except argv shapes named in `refuse`, which come back as a
+    SETTLED, genuine, non-zero exit — the "git actually ran and said no" case, as opposed to
+    `DeadlineMidRollbackRunner`'s "git never got to answer" case. Used to prove the two are
+    reported distinguishably.
+    """
+
+    def __init__(self, *, refuse: Sequence[str], real: CommandRunner = run) -> None:
+        self._refuse = tuple(refuse)
+        self._real = real
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        if all(token in argv for token in self._refuse):
+            return ProcResult(
+                argv=tuple(argv),
+                exit_code=1,
+                stdout_tail="",
+                stderr_tail="fatal: refused",
+                duration_ms=1,
+                timed_out=False,
+                started=True,
+                cwd=cwd,
+            )
+        return await self._real(argv, cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s)
 
 
 class RaisingRunner:
@@ -596,6 +666,92 @@ async def test_task_rollback_refuses_an_anchor_that_would_rewrite_history(
         await C.discard_task(git, task_pre_commit_sha="0" * 40)
     with pytest.raises(C.RollbackAnchorError):
         await C.discard_task(git, task_pre_commit_sha=sideways, branch=BRANCH)
+
+
+# --------------------------------------------------------------------------------------
+# commits.py — the D42 x rollback interaction: `discard_task`'s OWN probes run on the same
+# expired deadline that (usually) triggered the rollback in the first place. A plain
+# `GitCommandError` escaping `discard_task` is caught by `workers/rewrite.py`'s
+# `except (PatchApplyError, GitCommandError)` around `land_patches` and misreported as
+# PATCH_REJECTED — spending an LLM repair rung on a tree that was never actually discarded.
+# `RollbackIndeterminateError` is a bare `GitError`, so it escapes that catch instead.
+# --------------------------------------------------------------------------------------
+async def test_discard_task_unsettled_resolve_probe_is_not_a_plain_GitCommandError(
+    git: Git,
+) -> None:
+    """`git.resolve` raises `GitCommandError` (D42) when its own probe never settles. If
+    `discard_task` let that escape unchanged, `land_patches`'s `except (PatchApplyError,
+    GitCommandError)` would swallow it exactly like the original patch failure it is trying to
+    roll back from — the interaction this task exists to close.
+    """
+    anchor = await C.record_task_anchor(git, BRANCH)
+    starved = Git(git.path, runner=DeadlineMidRollbackRunner(unsettle=("rev-parse",)), timeout_s=60)
+
+    with pytest.raises(C.RollbackIndeterminateError) as caught:
+        await C.discard_task(starved, task_pre_commit_sha=anchor, branch="HEAD")
+    assert not isinstance(caught.value, GitCommandError)
+    assert isinstance(caught.value.__cause__, GitCommandError)
+
+
+async def test_discard_task_unsettled_is_ancestor_probe_is_not_a_plain_GitCommandError(
+    git: Git, tmp_path: Path
+) -> None:
+    """The second probe, not just the first: `resolve` settles normally here, and `is_ancestor` is
+    the one starved of an answer — proving the wrapping covers both calls, not just the first."""
+    phase_anchor = await C.record_task_anchor(git, BRANCH)
+    p1 = await build_patch(git, "a.txt", "v2\n", tmp_path / "p1.patch")
+    await C.apply_and_commit(
+        git, patch=p1, subject="task 1", branch=BRANCH, pre_commit_sha=phase_anchor,
+        trailers=trailers_for(C.patch_id([Patch("a.txt", p1.read_text())]), task_id="t1"),
+    )
+    task_anchor = await C.record_task_anchor(git, BRANCH)
+
+    starved = Git(
+        git.path,
+        runner=DeadlineMidRollbackRunner(unsettle=("merge-base", "--is-ancestor")),
+        timeout_s=60,
+    )
+    with pytest.raises(C.RollbackIndeterminateError) as caught:
+        await C.discard_task(starved, task_pre_commit_sha=task_anchor, branch="HEAD")
+    assert not isinstance(caught.value, GitCommandError)
+
+
+async def test_discard_task_a_failed_reset_is_also_indeterminate_not_a_plain_GitCommandError(
+    git: Git,
+) -> None:
+    """Not just the two `check=False` probes: `reset --hard`/`clean -fdx` actually mutate the
+    tree, and a failure there (genuine refusal, kill at deadline, or anything else) leaves the
+    worktree's relationship to the anchor just as unproven as an unsettled probe would — "git
+    genuinely cannot be consulted at all" still must not read as PATCH_REJECTED.
+    """
+    anchor = await C.record_task_anchor(git, BRANCH)
+    broken = Git(
+        git.path,
+        runner=RefuseOneCommandRunner(refuse=("reset", "--hard")),
+        timeout_s=60,
+    )
+    with pytest.raises(C.RollbackIndeterminateError) as caught:
+        await C.discard_task(broken, task_pre_commit_sha=anchor, branch="HEAD")
+    assert not isinstance(caught.value, GitCommandError)
+
+
+async def test_discard_task_distinguishes_a_settled_refusal_from_an_unsettled_probe(
+    git: Git,
+) -> None:
+    """A settled "no" (`RollbackAnchorError`: the anchor is genuinely missing or not an ancestor)
+    and an unsettled probe (`RollbackIndeterminateError`: the same probe never got an answer) must
+    not collapse into one type — the four-state-collapse discipline this codebase already applies
+    elsewhere (D29, D34-D45), one layer up: a tree that could not be verified discarded is not the
+    same fact as a tree that was verified NOT discardable.
+    """
+    with pytest.raises(C.RollbackAnchorError) as settled:
+        await C.discard_task(git, task_pre_commit_sha="0" * 40)
+    assert not isinstance(settled.value, C.RollbackIndeterminateError)
+
+    starved = Git(git.path, runner=DeadlineMidRollbackRunner(unsettle=("rev-parse",)), timeout_s=60)
+    with pytest.raises(C.RollbackIndeterminateError) as unsettled:
+        await C.discard_task(starved, task_pre_commit_sha="0" * 40)
+    assert not isinstance(unsettled.value, C.RollbackAnchorError)
 
 
 async def test_whole_phase_rollback_uses_the_phase_anchor_ref(git: Git, tmp_path: Path) -> None:

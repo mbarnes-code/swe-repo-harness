@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import Final, Protocol
 from uuid import UUID
 
-from fleet.vcs.git import Git, GitError
+from fleet.vcs.git import Git, GitCommandError, GitError
 
 __all__ = [
     "PATCH_ID_TRAILER",
@@ -58,6 +58,7 @@ __all__ = [
     "PatchApplyError",
     "PatchLike",
     "RollbackAnchorError",
+    "RollbackIndeterminateError",
     "apply_and_commit",
     "commits_in_range",
     "discard_task",
@@ -100,7 +101,37 @@ class PatchApplyError(GitError):
 
 class RollbackAnchorError(GitError):
     """A rollback was asked to rewind to an anchor that is missing, or that is not an ancestor of
-    the tip it would rewind — i.e. a "rollback" that would move history sideways or forward."""
+    the tip it would rewind — i.e. a "rollback" that would move history sideways or forward.
+
+    A SETTLED fact about history: the probe that decided this actually ran and actually answered.
+    See `RollbackIndeterminateError` for the sibling case where the probe never got to answer at
+    all — the two are deliberately not the same type (four-state-collapse discipline, D29/D34-45).
+    """
+
+
+class RollbackIndeterminateError(GitError):
+    """`discard_task` could not establish whether its rollback succeeded: one of its own git calls
+    — `resolve`, `is_ancestor`, or the `reset --hard` / `clean -fdx` that actually mutate the tree
+    — never settled or failed outright, on the SAME clock that most often triggered the rollback
+    in the first place (the deadline that failed the original patch is still expired when
+    `discard_task` runs). "Could not determine" must never collapse into a settled verdict (D42's
+    own discipline, one layer up): a tree that could not be proven discarded is not a rejected
+    patch, and reporting it as one spends a repair rung on a tree in an unknown state.
+
+    Deliberately a bare `GitError`, never a `GitCommandError` or `PatchApplyError` subclass:
+    `workers/rewrite.py`'s `land_patches` calls `discard_task` from inside
+    `except (PatchApplyError, GitCommandError)`, and `RewriteWorker.run` catches the same pair
+    around `land_patches` itself. Either a plain `GitCommandError` escaping `discard_task`, or this
+    exception subclassing one, would be swallowed there and misreported as `PATCH_REJECTED` — the
+    original defect (`d37f4ba`'s D42 fix interacting with the pre-existing rollback path). Distinct
+    from `RollbackAnchorError` (a settled "no") so a caller that does distinguish them still can;
+    the underlying `GitCommandError` survives as `__cause__` for whoever wants the verbatim detail.
+
+    When git genuinely cannot be consulted at all — not merely unsettled, but every call in this
+    function fails outright, e.g. a corrupted worktree — the same exception is raised: the tree's
+    relationship to the anchor is unknown either way, and the caller's correct response ("this
+    task's outcome cannot be trusted; do not spend a repair rung on it") does not depend on which.
+    """
 
 
 def patch_id(patches: Sequence[PatchLike]) -> str:
@@ -324,19 +355,46 @@ async def discard_task(git: Git, *, task_pre_commit_sha: str, branch: str | None
             "discard_task requires tasks.pre_commit_sha; the phase anchor is NOT a substitute "
             "(§3.2 step 6.5) and there is no default that is safe"
         )
-    anchor = await git.resolve(task_pre_commit_sha)
+    try:
+        anchor = await git.resolve(task_pre_commit_sha)
+    except GitCommandError as exc:
+        # D42 made `resolve` raise instead of returning `None` for a probe that never settled —
+        # correct there, but this call runs on the SAME clock that (often) triggered this very
+        # rollback. Letting `GitCommandError` escape here is indistinguishable, to `land_patches`'
+        # `except (PatchApplyError, GitCommandError)`, from the original patch failure it is
+        # rolling back from.
+        raise RollbackIndeterminateError(
+            f"could not resolve task anchor {task_pre_commit_sha!r} in {git.path}: the probe "
+            "did not settle, so whether the anchor exists is unknown, not refused"
+        ) from exc
     if anchor is None:
         raise RollbackAnchorError(
             f"task anchor {task_pre_commit_sha!r} does not resolve in {git.path}"
         )
     tip = branch or "HEAD"
-    if not await git.is_ancestor(anchor, tip):
+    try:
+        is_ancestor = await git.is_ancestor(anchor, tip)
+    except GitCommandError as exc:
+        raise RollbackIndeterminateError(
+            f"could not verify {anchor[:12]} is an ancestor of {tip} in {git.path}: the probe "
+            "did not settle, so refusing to guess either way"
+        ) from exc
+    if not is_ancestor:
         raise RollbackAnchorError(
             f"refusing to reset {tip} to {anchor[:12]}: the anchor is not an ancestor of the "
             "current tip, so this would rewrite history rather than discard one task"
         )
-    await git.reset_hard(anchor)
-    await git.clean(directories=True, ignored=True)
+    try:
+        await git.reset_hard(anchor)
+        await git.clean(directories=True, ignored=True)
+    except GitCommandError as exc:
+        # The mutation itself, not just the probes: a `reset --hard`/`clean -fdx` that fails —
+        # whether unsettled or a genuine refusal — leaves the worktree's relationship to the
+        # anchor just as unproven as an unsettled probe would, and must be reported the same way.
+        raise RollbackIndeterminateError(
+            f"reset/clean to {anchor[:12]} did not complete in {git.path}: the worktree's state "
+            "relative to the anchor is now unknown"
+        ) from exc
 
 
 async def rollback_phase(git: Git, *, branch: str, phase_base_ref: str) -> str:
