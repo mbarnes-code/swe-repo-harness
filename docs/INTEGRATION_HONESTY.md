@@ -3203,3 +3203,25 @@ returns a bare `list[str]`, not the `ReapResult(reaped, failed)` shape `Worktree
 was given in `4a421a3` for the identical honesty problem — the fix here is not a new invention, it
 is threading that same already-landed pattern one file over. **Not fixed here**: `sandbox/*.py`
 is out of this docs-only lane (Rule 3).
+
+### `run.stale_after_s` leaves `KNOWN_INERT` — half of the defect it recorded, closed
+
+`tests/test_config_keys_are_read.py`'s ratchet fired on the RS1 landing: `fleet.yaml:run.stale_after_s`
+is now read, so its `KNOWN_INERT` line had to go. What actually changed is narrower than the
+removal implies, and the difference is worth writing down rather than letting the deleted comment
+take it with it.
+
+**Now read:** `fleet resume` §11.5 step 3 computes its staleness cutoff from
+`settings.config.run.stale_after_s` (`cli.py::_resume_impl`), so the key governs which `RUNNING`
+rows a resume reclaims. That is a real read by the run's own reconciler.
+
+**Still hardcoded, and still a defect:** nothing constructs `phases.heartbeat_ttl_seconds` from
+this key. `schema.sql`'s `DEFAULT 300` and `migrations/v007_logical_keys.py`'s literal are what a
+claimed phase actually carries, so `models/state.py`'s promise that the column is "Config-sourced
+(`orchestrator.stale_after_s`, §9), captured per phase so a config change cannot retroactively
+declare a live worker dead" remains prose. An operator who sets `run.stale_after_s: 900` moves the
+resume sweep's cutoff and does NOT move the TTL the reaper compares against
+(`SqliteStateRepository.reap_expired_phase_leases` keys on `lease_expires_at`, not on this
+column) — two liveness horizons from one key, which is exactly the drift the per-phase capture was
+supposed to prevent. **Not fixed here**: the fix belongs in `claim_phase`'s parameter list and in
+the `PhaseRecord` construction path, neither of which is in RS1's lane (Rule 3).

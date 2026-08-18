@@ -196,12 +196,11 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:redaction.entropy_min_len",             # settings.py:308
         #
         # --- revealed by blanking string literals generally, not just docstrings ----------
-        # `models/state.py:63-66`'s `heartbeat_ttl_seconds` field describes itself with a
-        # `Field(description="Config-sourced (\`orchestrator.stale_after_s\`...")` kwarg — a
-        # string literal, not a docstring, so it survived the original strip. No code anywhere
-        # constructs `PhaseRecord`/`heartbeat_ttl_seconds` from `config.run.stale_after_s`; every
-        # site (`schema.sql:377`, `migrations/v007_logical_keys.py:74`) uses the hardcoded 300.
-        "fleet.yaml:run.stale_after_s",                     # settings.py:211
+        # (`fleet.yaml:run.stale_after_s` used to sit here. It left when `fleet resume` §11.5
+        # step 3 began deriving its staleness cutoff from it. The HALF of that entry which is
+        # still true — nothing constructs `phases.heartbeat_ttl_seconds` from the key, so
+        # `schema.sql`'s hardcoded 300 is what a claimed phase carries — is recorded in
+        # docs/INTEGRATION_HONESTY.md rather than lost with the line.)
         # `workers/symbolindex.py:107`'s `MARKER_SCAN_BYTES: Final = 4096` is the same defect
         # class, same section as `entropy_min_bits`/`entropy_min_len` above, one file over: a
         # hardcoded module constant with the config key's default baked in, plus a bare

@@ -43,7 +43,7 @@ from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from enum import IntEnum, StrEnum
 from fnmatch import fnmatch
 from pathlib import Path
@@ -343,10 +343,12 @@ class SequenceRefusedError(FleetCliError):
 
 
 class CommandUnavailableError(FleetCliError):
-    """The verb's implementation is a `NotImplementedError` stub elsewhere in the package.
+    """A piece of the verb's implementation does not exist yet, and the verb says which piece.
 
-    Exit 1 with the module named, rather than a `NotImplementedError` traceback: exit 1 IS "an
-    unexpected error", and an operator who is told which file is a stub can act on it.
+    Exit 1 with the missing thing named, rather than a `NotImplementedError` traceback: exit 1 IS
+    "an unexpected error", and an operator who is told what is absent can act on it. `_unavailable`
+    raises this for a verb whose worker body is a stub; `fleet resume` raises it directly, because
+    what it is missing is not a stub module but an assembly that was never written (see there).
     """
 
     exit_code = ExitCode.UNEXPECTED_ERROR
@@ -9772,6 +9774,38 @@ def abort(
         )
 
 
+# The §11.5 crash sweep, shared by `fleet abort` (every RUNNING row, the run is stopping) and
+# `fleet resume` step 3 (only the stale ones, below). Factored rather than copied because the two
+# must agree on exactly which columns are cleared: a resume that reset `status` without clearing
+# the lease would re-admit a repo whose original container still holds `migrate/<repo>`.
+#
+# `attempts` is deliberately ABSENT from the SET list, and that omission is the point of the
+# statement. A crash — or a deliberate abort — is not an attempt the repo made, so charging one
+# would spend a rung of ADR-0014's ladder on something that never ran; three resumes would then
+# exhaust a three-rung ladder and send a healthy repo to REQUIRES_HUMAN_INTERVENTION having
+# failed nothing. §11.5 says "retaining `attempts`" for exactly this reason.
+#
+# The `lease_fence` bump is what makes the reclaim safe rather than merely optimistic: every
+# mutating statement the previous holder issues carries `AND lease_fence = ?` with the fence it
+# was granted at claim time, so after the bump its next write matches zero rows and it aborts
+# (§6, §11.5) instead of writing into a worktree that has just been handed back.
+_RESET_RUNNING_TO_PENDING_SQL: Final = (
+    "UPDATE phases SET status = 'PENDING', lease_owner = NULL, heartbeat_at = NULL, "
+    "       lease_expires_at = NULL, lease_fence = lease_fence + 1, updated_at = ? "
+    " WHERE run_id = ? AND status = 'RUNNING'"
+)
+
+#: Appended to the statement above by `fleet resume`, and to the COUNT that previews it under
+#: `--dry-run`. Abort stops the whole run so it reclaims unconditionally; a resume may be racing a
+#: worker that is still alive and heart-beating, and reclaiming that one produces the two-writer
+#: collision the lease exists to prevent. `heartbeat_at IS NOT NULL` mirrors
+#: `PhaseRecord.is_stale`, which reports a NULL heartbeat as NOT stale: a RUNNING row with no
+#: heartbeat is a row `claim_phase` is still mid-write on, not a corpse. The cutoff is computed in
+#: Python from `run.stale_after_s` (§11.5 step 3 names that key) and compared as TEXT, which is
+#: sound because every persisted instant is one fixed-width UTC rendering (`_iso`).
+_STALE_HEARTBEAT_PREDICATE: Final = " AND heartbeat_at IS NOT NULL AND heartbeat_at < ?"
+
+
 async def _abort_impl(
     opts: GlobalOptions,
     settings: FleetSettings,
@@ -9816,12 +9850,7 @@ async def _abort_impl(
             # Roll uncommitted tasks back onto `phases.base_ref`: the row returns to PENDING with
             # its `attempts` retained (§11.5 crash sweep), and the fence bump invalidates the old
             # holder's next write.
-            cursor = await db.execute(
-                "UPDATE phases SET status = 'PENDING', lease_owner = NULL, heartbeat_at = NULL, "
-                "       lease_expires_at = NULL, lease_fence = lease_fence + 1, updated_at = ? "
-                " WHERE run_id = ? AND status = 'RUNNING'",
-                (stamp, run_id),
-            )
+            cursor = await db.execute(_RESET_RUNNING_TO_PENDING_SQL, (stamp, run_id))
             await db.execute(
                 "UPDATE runs SET finished_at = ? WHERE run_id = ?", (stamp, run_id)
             )
@@ -9872,12 +9901,26 @@ def resume(
     **wave cost ceiling**, because the ledger is durable and re-entering an exhausted wave halts
     again forever without `--raise-wave-budget`; and the **schema version**, which a resume reads
     and never upgrades. Reads nothing from `migration_state.json` (§11.5).
+
+    **What is built today**, and it is not the whole verb. §11.5 steps 1 (config digests), 3
+    (stale `RUNNING` → `PENDING`, retaining `attempts`) and 7 (regenerate
+    `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`.
+    Steps 2, 4, 5, 6 and 8 do not exist, so the verb reconciles the ledger and then refuses to
+    continue with exit 1 naming what is absent. `--dry-run` is the free health check §11.5
+    promises: it makes no network call, writes nothing, and previews the step-3 sweep.
     """
     opts = _options(ctx)
     with _mapped_errors():
         settings = _load_settings(opts)
         path = _require_db(opts)
         _check_schema_version(path)
+        _refuse_unbuilt_resume_flags(
+            from_phase=from_phase,
+            repo=repo,
+            reset_attempts=reset_attempts,
+            revalidation=revalidation,
+            raise_revalidation_rounds=raise_revalidation_rounds,
+        )
         result = _run(
             _resume_impl(
                 opts,
@@ -9885,18 +9928,27 @@ def resume(
                 path,
                 accept_drift=tuple(accept_drift or ()),
                 force_config_drift=force_config_drift,
+                raise_budget=raise_budget,
                 raise_wave_budget=raise_wave_budget,
+                repoll_prs=repoll_prs,
                 dry_run=dry_run,
             )
         )
-        _ = (from_phase, repo, reset_attempts, raise_budget, revalidation)
-        _ = raise_revalidation_rounds
-        if repoll_prs:
-            _unavailable("resume --repoll-prs", "src/fleet/workers/prwriter.py (`pr --sync`)")
+        _emit(opts, result, _resume_lines(result))
         if dry_run:
-            _emit(opts, result, [f"dry-run: run {result['run_id']} is resumable"])
             return
-        _unavailable("resume", "src/fleet/workers/clone.py (the phase drivers it re-enters)")
+        raise CommandUnavailableError(
+            "`fleet resume` reconciled the ledger and stopped: §11.5 step 5 — re-check every "
+            "phase's declared preconditions and demote each repo to the earliest phase whose "
+            "precondition holds — has no implementation. All twelve workers implement "
+            "`preconditions_hold` and `PhaseRunner` already consults it (`orchestrator/runner.py`, "
+            "`_re_entry`); what is missing is the per-phase `PhaseRunner` assembly that walks "
+            "Phases 1–4 in order, which cli.py today only hand-wires per verb. Steps 2 (orphan "
+            "reap), 4 (ask Git whether the commit landed) and 6 (recompute `blocked_by`) are "
+            "absent too. The work reported above IS durable — the drift audit, any budget raise, "
+            "the PR re-poll, the stale-lease sweep and `migration_state.json` are all written "
+            "before this refusal, so re-running the verb is safe and idempotent."
+        )
 
 
 async def _resume_impl(
@@ -9906,7 +9958,9 @@ async def _resume_impl(
     *,
     accept_drift: Sequence[str],
     force_config_drift: bool,
+    raise_budget: float | None,
     raise_wave_budget: float | None,
+    repoll_prs: bool,
     dry_run: bool,
 ) -> dict[str, object]:
     # The three refusals run in §11.5's order — config, then profile, then the durable wave
@@ -9945,15 +9999,135 @@ async def _resume_impl(
         await _record_drift_findings(path, run_id, accepted, settings)
     if not dry_run and raise_wave_budget is not None and wave is not None:
         await _raise_wave_ceiling(path, run_id, wave, raise_wave_budget)
+    if not dry_run and raise_budget is not None:
+        await _raise_run_ceiling(path, run_id, raise_budget)
+
+    # §3.4: "`fleet resume` runs one synchronous sync before re-validating preconditions." This is
+    # `fleet pr --sync`'s code path invoked once — NOT a second sync — so `MERGED` still has
+    # exactly one writer. It is opt-in because §11.5 promises steps 1–7 make no network call, and
+    # that promise is what makes `--dry-run` a free health check; `--dry-run --repoll-prs`
+    # therefore skips it rather than quietly reaching the forge.
+    pr_sync: dict[str, object] | None = None
+    if repoll_prs and not dry_run:
+        pr_sync = await _pr_sync_impl(opts, settings, path, run_id=run_id)
+
+    # ---------------------------------------------------------------------------------
+    # `stub_reconcile` (§3.5.1, §13 row 45) BELONGS HERE — immediately below the re-poll and
+    # above the step-3 sweep — and nowhere earlier. It walks `ix_stubs_open` and writes one
+    # `UnresolvedStub` finding per open row, which is what makes the run exit 7. Run before the
+    # re-poll, it would report as "a human is needed" every stub whose resolving PR a human had
+    # ALREADY merged and the harness simply had not observed yet, and exit 7 would come to mean
+    # "the fleet gave up waiting" instead of "a human is needed". It does not exist on `main`
+    # yet; when it lands, it goes on the next line.
+    # ---------------------------------------------------------------------------------
+
+    # §11.5 step 3. The cutoff is `run.stale_after_s` before now, per the step's own wording.
+    cutoff = _iso(_now() - timedelta(seconds=settings.config.run.stale_after_s))
+    if dry_run:
+        stale = await _with_ro(path, lambda conn: _count_stale_running(conn, run_id, cutoff))
+        projection: str | None = None
+    else:
+        stale = await _reset_stale_running(path, run_id, cutoff)
+        # §11.5 step 7 — the projection is an OUTPUT regenerated from SQLite, never an input.
+        projection = str(
+            await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
+        )
 
     return {
         "run_id": run_id,
         "drifted_sections": list(drifted),
         "accepted_sections": list(accepted),
         "earliest_open_wave": wave,
+        "raise_budget": raise_budget,
         "raise_wave_budget": raise_wave_budget,
+        "stale_running_reset": stale,
+        "pr_sync": pr_sync,
+        "projection": projection,
         "dry_run": dry_run,
     }
+
+
+def _resume_lines(result: Mapping[str, object]) -> list[str]:
+    run_id = result["run_id"]
+    stale = result["stale_running_reset"]
+    if result["dry_run"]:
+        return [
+            f"dry-run: run {run_id} is resumable",
+            f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)",
+        ]
+    lines = [
+        f"run {run_id}: {stale} stale RUNNING row(s) reset to PENDING (attempts retained)",
+        f"  projection at {result['projection']}",
+    ]
+    sync = result["pr_sync"]
+    if isinstance(sync, Mapping):
+        lines[1:1] = _pr_sync_lines(sync)
+    return lines
+
+
+def _refuse_unbuilt_resume_flags(
+    *,
+    from_phase: int | None,
+    repo: str | None,
+    reset_attempts: bool,
+    revalidation: Revalidation | None,
+    raise_revalidation_rounds: int | None,
+) -> None:
+    """Exit 2 rather than accept a flag whose behaviour does not exist (Rule 11, "fail loud").
+
+    Every flag below narrows or re-drives §11.5 step 5, the phase re-entry that is not built. A
+    parser that accepted `--from-phase 2` and then resumed from wherever it liked is worse than
+    one that refuses: the operator believes they scoped the resume, and nothing tells them
+    otherwise. `--raise-budget`, `--raise-wave-budget`, `--accept-drift`, `--repoll-prs` and
+    `--dry-run` are NOT here — those are implemented and do what they say.
+    """
+    unbuilt = {
+        "--from-phase": from_phase is not None,
+        "--repo": repo is not None,
+        "--reset-attempts": reset_attempts,
+        "--revalidation": revalidation is not None,
+        "--raise-revalidation-rounds": raise_revalidation_rounds is not None,
+    }
+    named = sorted(flag for flag, given in unbuilt.items() if given)
+    if named:
+        raise UsageError(
+            f"{', '.join(named)} cannot be honoured: each one scopes or re-drives §11.5 step 5 "
+            "(re-check preconditions and demote to the earliest phase whose precondition holds), "
+            "which has no implementation — cli.py hand-wires a `PhaseRunner` per verb and no "
+            "assembly walks Phases 1–4 in order. Accepting the flag and ignoring it would let an "
+            "operator believe they had scoped the resume. Re-run without it to get the "
+            "reconciliation that IS built (steps 1, 3, 7, `--repoll-prs`, the budget raises)."
+        )
+
+
+async def _count_stale_running(conn: aiosqlite.Connection, run_id: str, cutoff: str) -> int:
+    """What `--dry-run` previews: the row count the sweep below would reclaim, read-only."""
+    rows = await _rows(
+        conn,
+        "SELECT COUNT(*) FROM phases WHERE run_id = ? AND status = 'RUNNING'"  # noqa: S608
+        + _STALE_HEARTBEAT_PREDICATE,
+        (run_id, cutoff),
+    )
+    return 0 if not rows else int(rows[0][0])
+
+
+async def _reset_stale_running(path: Path, run_id: str, cutoff: str) -> int:
+    """§11.5 step 3: reclaim the leases of workers that died, and NOTHING else.
+
+    Returns the number of rows reclaimed. See `_RESET_RUNNING_TO_PENDING_SQL` for why `attempts`
+    is untouched and why the fence bump is the part that makes this safe.
+    """
+    stamp = _iso(_now())
+    async with StateWriter(path, owner="fleet-resume") as writer:
+
+        async def unit(db: aiosqlite.Connection) -> int:
+            cursor = await db.execute(
+                _RESET_RUNNING_TO_PENDING_SQL + _STALE_HEARTBEAT_PREDICATE,
+                (stamp, run_id, cutoff),
+            )
+            return int(cursor.rowcount)
+
+        return await writer.submit(unit)
 
 
 def _validate_accept_drift(settings: FleetSettings, names: Sequence[str]) -> tuple[str, ...]:
@@ -10043,6 +10217,78 @@ async def _raise_wave_ceiling(path: Path, run_id: str, wave: int, ceiling: float
             )
 
         await writer.submit(unit)
+
+
+async def _raise_run_ceiling(path: Path, run_id: str, ceiling: float) -> None:
+    """§10 exit 3's only exit: raise `budget_ledger.max_usd` and clear the sticky halt, audited.
+
+    `halted = 1` is durable and deliberately sticky — the reservation CAS itself carries
+    `AND halted = 0` (§11.2), so once it is set no worker in any process can dispatch, in this
+    run or the next one. That is correct for a runaway and fatal for everything else: without a
+    writer that clears the flag, the halted ledger is unrecoverable and every later `fleet
+    resume` re-halts on a ledger nobody can reset. §10 names `--raise-budget` as the way out, so
+    this is that writer.
+
+    The new ceiling is applied as a CAS, not a read-then-write: `spent_usd + reserved_usd <=
+    :ceiling` is `budget_ledger`'s own CHECK constraint, and asserting it in the `WHERE` turns a
+    ceiling below what the run has already committed into a refusal with the real numbers instead
+    of an `IntegrityError` traceback. The audit row is written in the same transaction as the new
+    number, because a raise recorded only on success is a raise lost to the next crash.
+    """
+    stamp = _iso(_now())
+    async with StateWriter(path, owner="fleet-resume") as writer:
+
+        async def unit(db: aiosqlite.Connection) -> bool:
+            cursor = await db.execute(
+                "UPDATE budget_ledger SET max_usd = ?, halted = 0, updated_at = ? "
+                " WHERE run_id = ? AND spent_usd + reserved_usd <= ?",
+                (ceiling, stamp, run_id, ceiling),
+            )
+            if int(cursor.rowcount) != 1:
+                return False
+            await db.execute(
+                "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload,"
+                "                      created_at) "
+                "VALUES (?, NULL, 'RunBudgetRaised', 'warn', ?, ?, ?) "
+                "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+                "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+                (
+                    run_id,
+                    _fingerprint(run_id, f"{ceiling:.6f}"),
+                    json.dumps(
+                        {"new_max_usd": ceiling, "halt_cleared": True, "raised_by":
+                         "--raise-budget"},
+                        sort_keys=True,
+                    ),
+                    stamp,
+                ),
+            )
+            return True
+
+        if await writer.submit(unit):
+            return
+
+    rows = await _with_ro(
+        path,
+        lambda conn: _rows(
+            conn,
+            "SELECT spent_usd, reserved_usd, max_usd FROM budget_ledger WHERE run_id = ?",
+            (run_id,),
+        ),
+    )
+    if not rows:
+        raise UsageError(
+            f"--raise-budget: run {run_id} has no `budget_ledger` row, so there is no ceiling to "
+            "raise. The ledger is opened when the run first admits work (§11.2); a run that has "
+            "not reached that point is not budget-halted and needs no raise."
+        )
+    spent, reserved, max_usd = float(rows[0][0]), float(rows[0][1]), float(rows[0][2])
+    raise UsageError(
+        f"--raise-budget {ceiling:.2f} is below what run {run_id} has already committed: "
+        f"${spent:.2f} spent + ${reserved:.2f} still reserved against a ${max_usd:.2f} ceiling. "
+        "`budget_ledger` refuses a ceiling under `spent_usd + reserved_usd` by CHECK constraint, "
+        f"so pass a figure greater than {spent + reserved:.2f}. Nothing was written."
+    )
 
 
 # --------------------------------------------------------------------------------------
