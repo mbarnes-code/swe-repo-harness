@@ -1,9 +1,14 @@
-"""ADR-0023 backend adapters: one file per transport, each ending in `@register_backend`.
+"""Backend adapters for the §7.7 `ModelBackend` registry (ADR-0023).
 
-Deliberately empty of imports. `fleet.llm.client.discover()` walks this package with `pkgutil`
-and imports each module individually, tolerating an `ImportError` from a backend whose SDK is not
-installed. An eager re-export here would turn one missing optional SDK into a failure to import
-the package at all, and every backend would vanish together.
+`client.discover()` does a `pkgutil.iter_modules` walk of THIS package and imports every module
+it finds, so a new transport is one file plus one `@register_backend` line and nothing else
+(SPEC §7.7, §12.42).
+
+Deliberately empty of imports. The walk needs `__path__` and nothing more, and a vendor SDK
+imported here would be imported by every run — including runs whose active profile names no
+target this package can serve. Each adapter module imports its own SDK at ITS module scope, which
+is what makes `discover()`'s contract true: "a backend whose SDK is not installed fails its import
+here and is simply not registered."
 """
 
 from __future__ import annotations
