@@ -6083,3 +6083,285 @@ nobody can reach. This needs its own schema field, its own migration, and its ow
   `ClassVar` bumped by hand on field renames (`workers/base.py:234-259`) — a shape-versioning axis,
   not a configuration axis. Overloading one field to mean two different kinds of staleness is how
   the next reader loses the ability to tell "the model changed" from "the class changed."
+
+---
+
+## ADR-0073 — A status claim without the SHA it was measured against is not a claim, it is a guess with a timestamp: every ledger status, review severity, and ADR status line names the commit it was last true at, and a status *flip* is the one event that must not skip re-derivation
+
+**Status: DECIDED, NOT YET IMPLEMENTED (documentation discipline).** No `src/` change accompanies
+this entry, per the task that produced it and per Guardrail 6 — a discipline is decided here, not
+wired. Verified against `983c725` (the tree at authoring time); every citation below was re-run in
+this session rather than carried over from the round that reported it, because two of the nine
+numbers handed to this entry were themselves wrong (§1.9, §1.10) — a fact this ADR treats as
+corroborating evidence for its own thesis, not an embarrassment to smooth over.
+
+### 1. Nine records, re-derived
+
+A single round of documentation work in this project produced **nine stale citations against zero
+missed defects** — every case below was re-measured directly against `git show`/`git diff`/`git
+log -S` in this session, not transcribed from the round that reported it.
+
+**1.1 — D34, `docs/INTEGRATION_HONESTY.md:1896`.** The entry's bold lead sentence still reads
+**"D34 — OPEN."** The paragraph immediately beneath it (added by a later pass) reads **"Status —
+CLOSED, FIXED in `44d5550`."**, re-verified there against `82654e8`:
+`classify_build_failure` (`buildverify.py:412-471`) tests `result.exit_code ==
+_DOCKER_CANNOT_RUN` before either exit-code set and returns `TRANSIENT_INFRA, True` — the missing
+`125` row the entry named, closed, pinned by
+`test_a_docker_run_that_exits_125_is_not_reported_as_a_broken_build_file`
+(`tests/test_workers_build.py:1333`). **The header and the body of the same entry now disagree**,
+and a reader who stops at the bold lead — which is the entry's entire job, per this document's own
+header convention (name, then OPEN/CLOSED) — reads the wrong verdict.
+
+**1.2, 1.3, 1.4 — D35, D36, D41, `docs/INTEGRATION_HONESTY.md:1924, 1954, 2042`.** Each names a
+concrete defect in `src/fleet/workers/clone.py`. Independently re-derived in this session, not
+trusted from the ledger's own correction text: `git show a1178f7:src/fleet/workers/clone.py`
+already shows, at the repository's first commit — `_preflight` (`:410-421`) calling
+`self._resolve_head(git, branch)`, a private method, **never** `Git.resolve` (the ambiguous-`None`
+method D36 blames); `_submodule_count`, `_has_lfs`, and `_largest_blob_bytes`
+(`a1178f7:568-630`) each call `_no_verdict(result)` first and `raise _indeterminate(...)` when the
+probe is unsettled, falling to `0`/`False` only on a settled, genuinely-negative result — the exact
+honest shape D41 itself prescribes as the fix. `git diff a1178f7 HEAD --
+src/fleet/workers/clone.py` shows 136 changed lines total across the file's whole visible history,
+none of which touch whether these functions raise or return a gate. **None of the three is
+reproducible anywhere in visible history.** Caveat that must survive any future citation of this
+entry: `a1178f7` is a squash of unrecorded earlier checkpoints (per its own commit message and
+`d5a0d07`'s follow-on), so the defects may have existed pre-squash — nothing checkable in `git log`
+shows that they did. "Never reproducible in visible history" is the honest claim; "never existed"
+is not one this session can make.
+
+**1.5 — D45, `docs/INTEGRATION_HONESTY.md:2137`.** Claims `tests/test_vcs.py`'s `ScriptedRunner`
+has no `timed_out` parameter and hard-codes `timed_out=False`. Re-derived directly:
+`git show a1178f7:tests/test_vcs.py` shows `ScriptedRunner.__init__` accepting `timed_out: bool =
+False` as a real constructor argument and `__call__` forwarding it verbatim
+(`timed_out=self.timed_out`) into the returned `ProcResult` — never hard-coded. The mechanism claim
+does not reproduce at any point in visible history. What *was* real and separate: at `32365cf`, no
+test actually constructed a `timed_out=True` `ScriptedRunner` against any of the four `vcs/` probe
+methods — the fake could express the state, nothing exercised it. That coverage gap is now closed
+by `d37f4ba`, which added two parametrized tests across all four probes.
+
+**1.6, 1.7 — C1, C2, `docs/superpowers/plans/review-36.md:30, 63`.** C1 flags
+`buildverify.py`'s `_DOCKER_CANNOT_RUN_EXPLAINED` string ending "no attempt charged, no repair
+prompted" as false past `retry.py`'s four-retry cap. C2 flags the identical claim promoted into
+`clock_failure`'s canonical docstring in `base.py`. Both re-verified absent from the current file
+and confirmed via `git log -S`: `git log -S"no attempt charged, no repair prompted" --oneline --
+src/fleet/workers/buildverify.py` returns exactly `44d5550` (introduced the string) and `8464dc6`
+(removed it — `grep` against the working tree today returns no hit); `git show 8464dc6 --stat`
+confirms `src/fleet/workers/base.py` and `src/fleet/workers/buildverify.py` both changed in that
+same commit. `base.py:168` today reads *"'no attempt charged' is a bounded reprieve, not a
+standing exemption"* — the corrected sentence review-36 asked for, in the exact location review-36
+named. **Both fixed, in the single commit `8464dc6`.**
+
+**1.8 — the mechanism, `44d5550`'s commit message.** The message, under "Also in this checkpoint
+(earlier agents, separately verified)", claims: *"clone worker D35/D36/D41 — transient failures no
+longer permanent, a rev-parse that never ran no longer means EmptyRepo reported as success, and
+three probes no longer publish fabricated zeros."* `git show 44d5550 --stat` lists exactly four
+changed files — `docs/DECISIONS.md`, `docs/PROGRESS.md`, `src/fleet/workers/buildverify.py`,
+`tests/test_workers_build.py` — **zero** touching `src/fleet/workers/clone.py` or
+`tests/test_vcs.py`. Re-verified directly in this session, not carried over: the diff is exactly
+those four paths, no more, no fewer. A commit asserted work its own diff never contains, and — per
+§1.2–1.4 — the work it claimed to be reporting on had never been broken to begin with, so there was
+nothing for the claimed-but-absent commit to have fixed even if it had landed.
+
+**1.9 — D48, `docs/INTEGRATION_HONESTY.md:2371-2378`.** Cited `_open_run`'s `runs.config_digests`
+UPDATE at `cli.py:1902-1906`. Re-verified: the entry's own later correction (same paragraph)
+states the true position at the commit the caveat pins the entry to (`8464dc6`) was in fact
+`:1902-1906` — accurate *there* — and that **`32365cf` and `e605f0d`**, both landing after
+`8464dc6`, each touched `cli.py` and together shifted the same code down five lines to
+**`:1907-1910`**, the position confirmed against a frozen `git show 2a72f9f:src/fleet/cli.py`.
+Both numbers were correct at some commit; neither commit was named at the time either was written
+down, so the citation read as simply wrong rather than as "correct as of an unstated SHA, since
+moved."
+
+**1.10 — D50, `docs/INTEGRATION_HONESTY.md:2598-2599`.** Cited five `RunContext(` call sites in
+`cli.py` at `:1805, :4059, :7481, :7553, :9100`. Re-verified against a frozen `git show
+82654e8:src/fleet/cli.py | grep -n 'RunContext('`, which returns `1807, 4085, 7527, 7599, 9146` —
+**all five off**, by amounts ranging from 2 to 46 lines. The same paragraph records a second,
+independent re-measurement (`1806, 4074, 7496, 7568, 9115`) that also fails to match the frozen
+snapshot. Three attempts at five numbers, no attempt agreeing with either of the other two or with
+the pinned SHA — while the substantive claim underneath them (`llm_policy=` is passed at none of
+the five sites; `grep -rn llm_policy= src/` returns zero hits regardless of which line numbers are
+current) held at every measurement. The citation rotted; the finding did not.
+
+**Net count: zero cases, across these nine, of a record missing a real defect.** Every stale
+record overstates remaining work or misplaces true evidence; none understates it. §3 treats that
+asymmetry as a finding in its own right, not a coincidence of this particular round.
+
+### 2. Decision — the rule, and what "status claim" means
+
+**A status claim is any sentence in `docs/` asserting a fact about the current state of code or a
+prior record that a reader could falsify by looking at the tree** — an `OPEN`/`CLOSED`/`FIXED`/
+`NEVER REPRODUCIBLE` tag on a ledger entry; a Critical/Important/Minor severity assignment on a
+review finding; an ADR's own top-line `Status:` declaration (`DECIDED`, `IMPLEMENTED`, `NOT YET
+IMPLEMENTED`); and any file:line citation offered as the evidence for one of the above. A sentence
+describing what code *should* do, or what this project has decided to do, is not a status claim and
+is out of scope — only a sentence claiming what the tree currently *does* is.
+
+**Decision.** Every status claim in `docs/` names the commit SHA it was last verified true against,
+inline, adjacent to the claim — not in a separate changelog, not implied by the file's own last-
+edited date. A bare line-number citation with no SHA is not wrong on arrival, but it is
+**unverifiable the moment the cited file next changes**, and per §1.9/§1.10 above this project's own
+files move under concurrent multi-agent edits on the scale of hours, not weeks. `docs/
+INTEGRATION_HONESTY.md`'s D50 correction states the working conclusion better than this ADR could
+restate it: *"a bare line number into a file under active, concurrent repair is stale by the time
+it is read, however carefully it was measured; only a SHA-pinned citation stays checkable."* This
+ADR adopts that sentence as the rule rather than re-deriving a different one, because §1.9 and
+§1.10 are this session's own independent confirmation that it is correct, not a borrowed claim
+taken on faith.
+
+**This is not a new practice invented here — it is naming one this round already used.** Six of the
+nine corrections above (D34, D35/D36/D41, D45, D50) already carry exactly this shape in the ledger
+today: *"Re-verified at `82654e8`"*, *"Correction — count and citations, both re-derived;
+`2a72f9f`/`82654e8`"*, *"the same squash caveat that applies to D35/D36/D41 applies here."* The
+pattern emerged organically, under pressure, without being written down as a rule — which is the
+strongest evidence available that it is cheap enough to actually happen (§4), and the reason this
+ADR's decision is to *codify* a convention already load-bearing in this document rather than to
+propose an untested one.
+
+### 3. Why overstated debt is not harmless
+
+**The claim to argue against:** a stale-OPEN entry looks like the safe failure mode — worst case, an
+agent double-checks something that turned out fine, wastes a little time, and moves on. §1's own
+count (zero missed defects, nine overstated) could be read as evidence the ledger is erring on the
+side of caution. **That reading is wrong, and the reasons are specific, not general nervousness
+about "bad docs."**
+
+**First — the search cost is not small and it is not bounded.** A future agent handed D35 does not
+read one paragraph and stop; per this project's own Rule 8 ("read before writing... inspect
+existing exports"), closing a ledger entry means reading the named function, its callers, its
+tests, and usually its neighbors, before writing a fix for a bug that is not there. `44d5550`'s
+commit message (§1.8) shows the mechanism by which this compounds: a false "fixed" claim about
+code that was never broken becomes a false "still needs fixing" entry two commits later, each
+believing the other. Left uncorrected, D35/D36/D41 were three live invitations to repeat that work
+a third time.
+
+**Second — phantom entries contaminate downstream design, not just downstream time.** `D48` is cited
+in `ADR-0071`'s own headline (*"the prepare-run fingerprint (the wired drift gate D48 says we
+lack)"*) and its citation drift (§1.9) is comparatively benign — the *substance* of D48 held under
+re-measurement, only its line numbers moved. A stale-OPEN entry whose *substance* had already been
+fixed, cited the same way by a design ADR, would not be benign: it would motivate real architecture
+work — new fields, new call sites, new tests — against a gap that closed commits ago. This project's
+ADRs are not read in isolation; §3.1 of ADR-0071 leans on D48 exactly as load-bearing evidence for
+a lifted mechanism. A phantom entry cited as a premise does not just cost the reader who checks it —
+it costs everyone who trusts the ADR built on top of it and never checks.
+
+**Third, and the sharp one: overstated debt trains readers to discount the ledger, which is the
+one thing `docs/INTEGRATION_HONESTY.md` cannot survive losing.** This document's entire reason to
+exist — stated in its own header and reaffirmed at D34–D45's own section close — is that it is the
+place a reader goes to learn what is actually wrong without re-deriving it from scratch. Every
+entry that turns out to be phantom is evidence, accumulated one incident at a time, that the
+document's `OPEN` tag does not mean what it says. A reader who has twice found `OPEN` to mean
+"actually fixed two checkpoints ago" starts re-verifying `OPEN` entries before acting on them — at
+which point the ledger has stopped saving anyone time, which was its only value proposition. A
+missed defect degrades one incident; a pattern of overstated ones degrades the instrument itself.
+
+**Committing to a view: overstated debt is worse than underreported debt in this specific project,
+for a reason that is structural rather than a matter of taste.** This project's own established
+thesis — the D34–D45 section header states it directly — is *"only running things finds defects."*
+A real, underreported bug is not invisible forever: the next build, the next `pytest` run, the next
+`bazel` verdict surfaces it mechanically, because CLAUDE.md §6's build-and-test discipline does not
+depend on the ledger being complete to notice a broken build. A phantom `OPEN` entry has **no
+equivalent mechanical corrective** — nothing runs to disprove a claim that the code is broken; only
+a reader choosing to re-verify it does, and §1 shows that choice is not being made reliably. The
+asymmetry `docs/INTEGRATION_HONESTY.md`'s own D34–D45 section closes with — *"a ledger that
+accumulates phantom debt misleads a future reader differently than one that misses a real defect,
+and costs exactly as much of this document's own credibility either way"* — is half right and this
+ADR revises the other half: the *credibility* cost may be symmetric, but the *correction* cost is
+not. A missed real defect is self-correcting by the mechanism this project already runs continuously.
+A phantom entry is corrected only by the same manual, effortful re-reading that produced this ADR's
+nine cases — and nothing about this project's existing tooling makes that correction happen on its
+own.
+
+### 4. Verification cadence — cheap enough to happen, and the ADR-0071 §4 mirror
+
+**Decision.** Re-derivation is required at exactly two moments, both of which are points where an
+agent is already reading and writing the entry — never as a standing sweep:
+
+1. **On authoring** — any new status claim is written with the SHA it was checked against, using
+   the `git show <sha>:<path> | grep -n ...` / `git diff <sha> HEAD -- <path>` pattern §1 used
+   throughout, because that pattern is what stays checkable after the file moves (§2).
+2. **On status flip** — `OPEN → CLOSED`, `CLOSED → OPEN`, or any severity change, is the one
+   event that must not skip re-derivation. A flip is a claim that something changed; the only way
+   to back that claim is to have looked at both states, which means the SHA before and the SHA
+   after are both already in hand at the moment of writing the flip. This is not new overhead: §1.1
+   (D34), §1.6–1.7 (C1/C2), and §1.5 (D45's coverage half) show flips already carrying exactly this
+   evidence in the current document, because the workers who flipped them had no cheaper way to
+   justify the flip than to show the before/after diff they had already produced to convince
+   themselves.
+
+**Explicitly not decided here: a periodic re-verification sweep of entries that have not flipped.**
+Rejected in §5. Cadence is bound to the moment an entry is already being touched, not to a calendar
+or a count of elapsed commits, because the former is free (the SHA is already in the terminal
+scrollback) and the latter is a chore with no owner.
+
+**The mirror worth naming plainly, per this task's own prompt: this project already has one
+unwired control, and this rule risks becoming a second one if stated without the qualification
+above.** ADR-0071 §4 records, of a different codebase, *"code that exists, is tested, is
+documented — and is wired into nothing, while operators are told to grant real permissions on its
+basis"* and closes with a heuristic this project adopted for its own reviews: *"verify the control
+is wired, not merely present."* A documentation rule with no mechanical gate is not code, so the
+letter of §4's finding does not transfer — but the failure shape does: a rule that exists only in
+this ADR's prose, that nobody is ever forced to run, is indistinguishable from a rule that was never
+decided, the first time someone is in a hurry. This ADR's answer is **not** to invent an enforcement
+mechanism this project does not have (§5 declines exactly that move) — it is to bind the rule to
+work that is already happening for other reasons (§1's own six organic instances), on the theory
+that a rule riding on existing motion survives being ignored once in a way a rule requiring new
+motion does not. Whether that theory holds is not verifiable today; it is recorded as the
+**Agent Recommendation** it is, not as a proven mechanism.
+
+### 5. The commit-message case — a review discipline, not a mechanical fix
+
+`44d5550` (§1.8) is a different species of defect from a stale ledger entry: a commit whose message
+claims work its own diff does not contain. A stale entry rots after the fact, as code moves past
+it; `44d5550`'s message was false the instant it was written, against the very tree it was
+committed onto.
+
+**Decision: nothing mechanical closes this, and this ADR does not invent something to.** CLAUDE.md
+names `git status` and `git diff` as the tools available in this workspace; it names no CI system,
+no commit-msg hook, no pre-push gate anywhere in this project, and this task's own constraints
+forbid inventing one. A commit-message claim is, structurally, prose written by whoever is
+committing, checked by nobody but a reader of `git log` after the fact — there is no gate between
+"the message is typed" and "the commit exists" for this ADR to install itself into without adding
+infrastructure CLAUDE.md does not authorize.
+
+**What this ADR does decide: the self-check that would have caught it costs one command and zero
+new infrastructure.** `git show 44d5550 --stat` — the exact command §1.8 used to falsify the claim
+— takes as long to run before a commit as after one. The discipline this ADR asks for is that the
+same command that falsified `44d5550` two checkpoints later is run by the author, against their own
+staged diff, before the commit message is written — comparing the files the message is about to
+claim against the files `git diff --cached --stat` actually shows. This is squarely a review
+discipline under CLAUDE.md's existing terms (the "Committing changes with git" protocol already
+directs reviewing `git status` output before staging), not a new mechanism: it asks that the review
+happen in the fifteen seconds before the commit lands rather than in the multi-checkpoint audit that
+eventually found it. Whether it happens is not something this ADR can force — that is precisely
+what makes it a discipline and not a gate — and this ADR states that honestly rather than dressing
+a hope up as a control (the exact confusion §4's mirror warns against).
+
+### 6. Alternatives rejected
+
+- **A periodic full-ledger re-verification pass ("re-check everything every N checkpoints").**
+  Rejected: this project's own checkpoints (`44d5550` through `983c725`, per `git log --oneline`)
+  already run every few hours under multiple concurrent agents; a sweep with no natural trigger
+  competes with real work for the same budget CLAUDE.md Rule 6 asks to be conserved, and — per
+  §4's ADR-0071 §4 mirror — a rule with no owner and no trigger is the shape most likely to be
+  documented and never run.
+- **Require every status claim to be re-verified on every read, not only on flip or authoring.**
+  Rejected: this makes reading the ledger as expensive as writing it, defeating the ledger's own
+  purpose (§3) of letting a reader avoid re-deriving what is already known; it also has no
+  plausible enforcement given this project's tooling, making it a second unwired control rather
+  than zero.
+- **A CI check that diffs a commit's message against its `--stat` output and fails on a mismatched
+  defect ID.** Rejected under this task's explicit constraint against inventing infrastructure this
+  project does not have, and under Rule 2 (simplicity first) — this project has no CI pipeline to
+  attach it to, and building one to catch nine incidents in one round is the premature-abstraction
+  failure Rule 2 names directly.
+- **Blame-and-freeze: require sign-off from a second agent before any status claim can flip.**
+  Rejected: it doubles the cost of every legitimate flip to guard against a failure mode (§1) that
+  a one-line SHA citation already makes self-auditing without a second reader, and this project's
+  existing multi-agent rounds (per `983c725`'s own commit message, "Ten agents, disjoint lanes, one
+  serialized verification") already pay for a form of cross-checking that a sign-off gate would
+  duplicate rather than add to.
+- **Treat citation drift (D48, D50) as beneath ADR-level attention — it is "only" line numbers.**
+  Rejected: §1.9 and §1.10 show citation drift is not cosmetic — a citation is the only thing that
+  makes a claim falsifiable at all, and an un-anchored one fails silently exactly when a reader
+  most needs it, which is precisely why this ADR's rule (§2) treats a citation as part of the status
+  claim rather than as decoration on it.
