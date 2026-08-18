@@ -1411,6 +1411,91 @@ def test_engine_unavailable_is_deduped_per_repo_and_engine_not_per_file(
     assert len(unprobed) == 1, f"expected one deduped warning for (repo1, fake), got {unprobed}"
 
 
+def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
+    tmp_path: Path,
+) -> None:
+    """D49: `transform.max_patch_bytes` (`settings.py:452`) must reach `RewriteInput`, not just
+    sit at its own 1_048_576 field default.
+
+    `TransformInput.max_patch_bytes` and `RewriteInput.max_patch_bytes` both default to
+    1_048_576 purely so `check_diff` has SOME cap even before a driver threads the configured
+    value onto the field (see `RewriteInput.max_patch_bytes`'s docstring in `workers/rewrite.py`,
+    which names this exact wiring). Before `_transform_payloads`/`_rewrite_input` threaded it,
+    a smaller configured cap never reached the worker: a patch sized between the configured cap
+    and the 1 MiB field default was silently ACCEPTED instead of rejected, and the rejection
+    message — which names `transform.max_patch_bytes` — reported a value that was never the one
+    actually enforced. A test that only checked the field exists would not catch that: the field
+    already existed at its default, wired to nothing.
+    """
+    from fleet.cli import Phase, TransformPipelineWorker, _transform_payloads, _TransformPlan
+    from fleet.rewrite.apply import check_diff
+    from fleet.settings import FleetSettings
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML + "transform:\n  rules_dir: config/rules\n  max_patch_bytes: 100\n",
+    )
+    settings = FleetSettings.load(config.parent)
+    assert settings.config.transform.max_patch_bytes == 100, "fixture sanity"
+
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=tmp_path / "repo1",
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha="a" * 40,
+        base_ref="main",
+        sources=(),
+        targets=("dest/file.ts",),
+    )
+    build = _transform_payloads(settings, {"repo1": plan}, rules=[])
+    payload = asyncio.run(
+        build(repo_id="repo1", phase=Phase.TRANSFORM, attempt=1, remaining_units=None)
+    )
+    assert payload.max_patch_bytes == 100, (
+        "TransformInput.max_patch_bytes must carry the configured value, not its own "
+        "1_048_576 field default"
+    )
+
+    rewrite_input = TransformPipelineWorker()._rewrite_input(payload, owed=set())
+    assert rewrite_input.max_patch_bytes == 100, (
+        "the configured cap must reach RewriteInput — otherwise check_diff enforces the field "
+        "default (1 MiB) no matter what the operator configured"
+    )
+
+    # The value that actually reaches the worker is the one `check_diff` enforces: a patch sized
+    # between the configured 100-byte cap and the 1 MiB field default is rejected under the
+    # CONFIGURED cap, exactly as the rejection message (which names `transform.max_patch_bytes`)
+    # claims — never silently accepted under the field default. `check_diff` uses strict `>`, so
+    # this patch (500 bytes) must land on the reject side of a 100-byte cap.
+    diff = "x" * 500
+    reason = check_diff(diff, "dest", max_bytes=rewrite_input.max_patch_bytes)
+    assert reason is not None and "transform.max_patch_bytes" in reason, reason
+    assert "100" in reason, "the reason must cite the CONFIGURED cap, not the 1 MiB default"
+
+
+def test_max_patch_bytes_at_exactly_the_cap_is_accepted_not_rejected(tmp_path: Path) -> None:
+    """`check_diff` uses strict `>` (`rewrite/apply.py`): a patch sized exactly at the configured
+    cap must be ACCEPTED. Pinned separately from the threading test above because an off-by-one
+    in either the wiring or a future refactor of `check_diff` could silently flip `>` to `>=` and
+    reject legitimate patches right at the boundary — the failure mode D49 exists to prevent is a
+    cap that is either not enforced at all or enforced at the wrong value, and this catches the
+    "enforced at the wrong value" half at the boundary itself.
+    """
+    from fleet.rewrite.apply import check_diff
+
+    diff = "--- a/dest/file.txt\n+++ b/dest/file.txt\n@@ -1 +1 @@\n-old\n+new\n"
+    size = len(diff.encode("utf-8"))
+    assert check_diff(diff, "dest", max_bytes=size) is None, (
+        "a patch at exactly max_bytes must be accepted (strict `>`, not `>=`)"
+    )
+    reason = check_diff(diff, "dest", max_bytes=size - 1)
+    assert reason is not None and "transform.max_patch_bytes" in reason, (
+        "one byte over the cap must still be rejected"
+    )
+
+
 def test_each_configured_bazel_cache_is_created_and_tagged_with_the_flag_it_feeds(
     tmp_path: Path,
 ) -> None:

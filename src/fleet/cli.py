@@ -3216,6 +3216,13 @@ class TransformInput(WorkerInput):
     engines: dict[str, str] = Field(default_factory=dict)
     params: dict[str, str] = Field(default_factory=dict)
     max_passes: int = Field(default=3, ge=1)
+    max_patch_bytes: int = Field(
+        default=1_048_576,
+        gt=0,
+        description="`transform.max_patch_bytes` (`settings.py:452`); `_transform_payloads` "
+        "threads the configured value here so `_rewrite_input` can copy it onto "
+        "`RewriteInput.max_patch_bytes` — see that field's docstring in `workers/rewrite.py`.",
+    )
     remaining_units: tuple[str, ...] | None = None
 
 
@@ -3377,6 +3384,7 @@ class TransformPipelineWorker(BaseWorker[TransformInput, TransformOutput]):
             engines=dict(payload.engines),
             params=dict(payload.params),
             max_passes=payload.max_passes,
+            max_patch_bytes=payload.max_patch_bytes,
             completed_units=[
                 target
                 for target in payload.targets
@@ -4014,6 +4022,7 @@ def _transform_payloads(
     """One repo's dispatch payload, built from its plan. Injected (Guardrail 3)."""
     engines = dict(settings.config.transform.engines)
     max_passes = settings.config.transform.max_passes
+    max_patch_bytes = settings.config.transform.max_patch_bytes
 
     async def build(
         *, repo_id: str, phase: Phase, attempt: int, remaining_units: Sequence[str] | None
@@ -4045,6 +4054,7 @@ def _transform_payloads(
                 "import_specifier": plan.import_specifier,
             },
             max_passes=max_passes,
+            max_patch_bytes=max_patch_bytes,
             remaining_units=None if remaining_units is None else tuple(remaining_units),
         )
 
