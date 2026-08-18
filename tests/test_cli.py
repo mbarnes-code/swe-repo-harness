@@ -147,6 +147,11 @@ def write_config(
     (config_dir / "fleet.yaml").write_text(fleet, encoding="utf-8")
     (config_dir / "models.yaml").write_text(models, encoding="utf-8")
     (config_dir / "repos.yaml").write_text(repos, encoding="utf-8")
+    # `transform.rules_dir` (default `config/rules`) must exist: an ABSENT directory is refused
+    # (see `_transform_rules`, cli.py) since it is indistinguishable from a deleted/mistyped
+    # config. Present-and-empty is the fixture's way of saying "this fleet has no rewrite
+    # rules", exactly as `tests/test_transform_e2e.py`'s fixture already does.
+    (config_dir / "rules").mkdir(parents=True, exist_ok=True)
     return config_dir / "fleet.yaml"
 
 
@@ -1108,6 +1113,52 @@ def test_a_reachable_floor_lets_the_phase_proceed(
 
     outcome: dict[str, object] = _require_disk_headroom(settings)
     assert outcome["disk_bytes_freed"] == 0, "nothing to evict, and the floor was cleared"
+
+
+def test_a_missing_rules_dir_is_refused_not_silently_zero_rules(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deleted or mistyped `transform.rules_dir` used to `return ()` from `_transform_rules`,
+    which reads identically to "this fleet has no rewrite rules" — `_rewrite_targets` claims no
+    relocated file against an empty rule set, so every repo in a ~250-repo fleet silently
+    finished as a pure relocation with no rewrite applied and nothing in the output to say the
+    directory was even missing. §9 gives `transform.rules_dir` no "disabled" value, so the two
+    cases (absent vs. deliberately empty) are conflated unless an absent directory is refused.
+    """
+    from fleet.cli import _transform_rules
+    from fleet.settings import ConfigFileError, FleetSettings
+
+    config_dir = write_config(tmp_path).parent
+    rules_dir = config_dir / "rules"
+    rules_dir.rmdir()
+    assert not rules_dir.exists()
+    monkeypatch.chdir(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    with pytest.raises(ConfigFileError) as raised:
+        _transform_rules(settings)
+
+    assert str(rules_dir.resolve()) in str(raised.value)
+    assert "does not exist" in str(raised.value)
+
+
+def test_a_present_but_empty_rules_dir_is_the_legitimate_zero_rules_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The negative control. A fleet whose migration really is a pure relocation still has to be
+    expressible — refusing every absent directory unconditionally would make "no rewrite rules"
+    inexpressible, not just safer. It is said by leaving `config/rules` PRESENT and empty, which
+    `load_rules` already treats as zero rules with no special-casing needed in `_transform_rules`.
+    """
+    from fleet.cli import _transform_rules
+    from fleet.settings import FleetSettings
+
+    config_dir = write_config(tmp_path).parent
+    assert (config_dir / "rules").is_dir()
+    monkeypatch.chdir(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    assert _transform_rules(settings) == ()
 
 
 def test_each_configured_bazel_cache_is_created_and_tagged_with_the_flag_it_feeds(

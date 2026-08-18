@@ -170,6 +170,7 @@ from fleet.rewrite.rules import (
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
     ConfigError,
+    ConfigFileError,
     FleetConfig,
     FleetSettings,
     GraphSection,
@@ -3681,12 +3682,26 @@ async def _changed_entries(
 
 
 def _transform_rules(settings: FleetSettings) -> tuple[RewriteRule, ...]:
-    """§9 `transform.rules_dir`, loaded and validated. An absent directory is zero rules —
-    a fleet whose migration is a pure relocation is a legal fleet, and `load_rules` refuses a
-    missing directory because ITS caller usually means one."""
+    """§9 `transform.rules_dir`, loaded and validated.
+
+    A MISSING directory is refused, not treated as zero rules. `transform.rules_dir` defaults
+    to `config/rules` and §9 has no "rules disabled" value, so an absent directory and a fleet
+    that genuinely runs no rewrite rules were indistinguishable — this used to `return ()` for
+    both, and a deleted or mistyped `config/rules` silently downgraded every repo's transform
+    phase to a pure relocation, with no refusal to say why. A fleet whose migration really is
+    pure relocation is still a legal fleet, but it says so by leaving the directory PRESENT and
+    empty: `load_rules` already returns `()` for that case, no special-casing needed here."""
     rules_dir = (settings.root / settings.config.transform.rules_dir).resolve()
     if not rules_dir.is_dir():
-        return ()
+        raise ConfigFileError(
+            "does not exist. `transform.rules_dir` (§9) defaults to `config/rules` and has no "
+            "\"disabled\" setting, so a missing directory used to load silently as zero rules — "
+            "downgrading every repo in the fleet to a pure relocation with no rule applied and "
+            "no refusal to explain why. If this fleet genuinely has no rewrite rules, create the "
+            "directory empty to say so explicitly; otherwise fix `transform.rules_dir` or "
+            "restore the directory.",
+            file=rules_dir,
+        )
     return load_rules(rules_dir)
 
 
