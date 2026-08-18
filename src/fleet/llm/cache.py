@@ -120,7 +120,10 @@ class CacheKeyParts(FleetModel):
     tier: ModelTier
     backend: str = Field(min_length=1)
     model_id: str = Field(min_length=1)
-    effort: Literal["low", "medium", "high"]
+    effort: Literal["low", "medium", "high"] | None = None
+    # `None` = the target declared no effort. Keyed as "" so an unstated preference and an
+    # explicit `medium` are DIFFERENT keys — collapsing them would re-introduce the
+    # fabricated default this optionality exists to remove.
     context_policy: ContextPolicy | None = None
     rejected_approach_digest: str = Field(default=EMPTY_SHA256, pattern=r"^[0-9a-f]{64}$")
     prompt_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -141,7 +144,7 @@ class CacheKeyParts(FleetModel):
             str(self.tier),
             self.backend,
             self.model_id,
-            self.effort,
+            "" if self.effort is None else self.effort,
             "" if self.context_policy is None else str(self.context_policy),
             self.rejected_approach_digest,
             self.prompt_sha256,
@@ -296,7 +299,7 @@ class SqliteLlmCacheStore:
             record.backend,
             record.model_id,
             str(record.structured_output_mode),
-            record.effort,
+            "" if record.effort is None else record.effort,
             None if record.context_policy is None else str(record.context_policy),
             record.rejected_approach_digest,
             record.prompt_sha256,
@@ -361,16 +364,23 @@ def _row_to_cache_row(row: Sequence[object]) -> CacheRow:
     )
 
 
-def _as_effort(value: str) -> Literal["low", "medium", "high"]:
-    """Narrow a TEXT column to the literal. Written as three comparisons rather than a cast:
-    SQLite would happily hand back `effort = 'HIGH'`, and a cast would let it through."""
+def _as_effort(value: str) -> Literal["low", "medium", "high"] | None:
+    """Narrow a TEXT column to the literal, or to `None` for a target that declared no effort.
+
+    Written as comparisons rather than a cast: SQLite would happily hand back `effort = 'HIGH'`,
+    and a cast would let it through. `""` is the stored spelling of absence — the column is
+    `TEXT NOT NULL`, so absence is an empty string rather than a NULL and no migration is needed;
+    what matters for the cache key is only that it is distinct from every real level.
+    """
+    if value == "":
+        return None
     if value == "low":
         return "low"
     if value == "medium":
         return "medium"
     if value == "high":
         return "high"
-    raise ValueError(f"llm_cache.effort holds {value!r}, not one of low/medium/high")
+    raise ValueError(f"llm_cache.effort holds {value!r}, not one of low/medium/high or ''")
 
 
 @final

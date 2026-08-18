@@ -97,7 +97,13 @@ class BackendTarget(FleetModel):
     base_url: str | None = None          # required by `openai_compatible`; ignored by others
     api_key_env: str | None = None       # NAME of the env var; never the value (§11.4)
     region: str | None = None            # bedrock / vertex transport selector
-    effort: Literal["low", "medium", "high"] = "medium"
+    effort: Literal["low", "medium", "high"] | None = None
+    # OPTIONAL, and `None` means "the operator did not say" — send no effort parameter at all.
+    # It defaulted to "medium" until a shipped CHEAP target dropped its `effort: low` line to stop
+    # the parameter being sent, and the default silently sent "medium" instead: a value nobody
+    # wrote, transmitted as though it had been requested. There is no honest default for an
+    # unstated preference, so absence is now representable. A backend MUST omit the parameter when
+    # this is `None` rather than substituting one of its own.
     price: Price | Literal["free"] = Field(
         description="MANDATORY — no default, so an omitted price is a ValidationError at load "
         "rather than a fleet silently priced at $0.00 (§9 rule 5, §11.2). The loader surfaces "
@@ -516,7 +522,11 @@ class LlmCallRecord(FleetModel):
         description="Which §7.7 rung produced this response. A PROMPTED result from a tier whose "
         "profile promised JSON_SCHEMA is a capability-drift finding, not a silent success."
     )
-    effort: Literal["low", "medium", "high"]
+    effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description="None when the target declared none — recorded as absent, never as the "
+        "value a default would have invented, because this column is a cache-key component.",
+    )
     context_policy: ContextPolicy | None = Field(
         default=None, description="None only for non-ladder roles that compose no prior context"
     )

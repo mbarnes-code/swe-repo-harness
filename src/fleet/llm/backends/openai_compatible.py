@@ -24,10 +24,13 @@ Three properties this module exists to keep true:
    `finish_reason` — those are the client's, so every backend behaves identically at the boundary
    (ADR-0002, `ModelBackend.invoke`).
 
-`BackendTarget.effort` is deliberately not rendered into the request: it is a hosted
-reasoning-model knob (`reasoning_effort`), and a local llama.cpp server answers an unknown field
-with a 400. An endpoint that wants it can carry it in the profile as a capability-neutral concern
-when a future target needs it. (*Agent Recommendation*, not a directive.)
+`BackendTarget.effort` is deliberately not rendered into the request at all — not when it is
+`None`, and not when it is declared. It is a hosted reasoning-model knob (`reasoning_effort`) and
+a local llama.cpp or TGI server answers an unknown field with a 400, which this backend would
+surface as a `CONNECTION` failover against a perfectly healthy endpoint. A backend that DOES send
+it (the anthropic transport) must omit the parameter entirely when `effort is None`: `None` means
+the operator declared no preference, and substituting one is the fabricated-default failure that
+made the field optional in the first place. (*Agent Recommendation*, not a directive.)
 """
 
 from __future__ import annotations
@@ -340,7 +343,11 @@ def build_payload(
         # NO `"strict": true`. Strict mode is a SUBSET of JSON Schema — every property must appear
         # in `required` — and the schema here is whatever `response_model.model_json_schema()`
         # produced (`client.py:498`), which we do not control and which legitimately carries
-        # optional fields: 8 of the 12 §9 roles do, across all three tiers. Asserting strict over
+        # optional fields: 9 of the 12 §9 roles do — HEAVY 5/5, WORKHORSE 3/4, CHEAP 1/3.
+        # Counted over the WHOLE schema tree, `$defs` included, because strict applies to every
+        # object in it: `build_authoring`'s root is clean and its `$defs.BuildTargetProposal`
+        # leaves `deps`/`srcs`/`visibility` optional, so a root-only count reports it safe and
+        # invites someone to re-enable strict on HEAVY. Asserting strict over
         # one is a 400 from any endpoint that enforces it, and a 400 becomes a `CONNECTION`
         # failover that walks the whole tier and ends in `TierUnavailable` — a permanent outage
         # for that role, not a degraded answer. vLLM ignores the flag, so a local-only test suite

@@ -6309,7 +6309,9 @@ profiles:
       - { backend: vertex,           model_id: claude-sonnet-5,            effort: high,
           region: us-east5,               price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
     CHEAP:
-      - { backend: anthropic,        model_id: claude-haiku-4-5-20251001,  effort: low,
+      # ADR-0075: no `effort:` here. `BackendTarget.effort` is optional and defaults to None,
+      # which every backend renders as "send no effort parameter". Do not re-add `effort: low`.
+      - { backend: anthropic,        model_id: claude-haiku-4-5-20251001,
           api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 
   # ---- 2. All-local. Nothing leaves this server. Every target is one OpenAI-compatible server;

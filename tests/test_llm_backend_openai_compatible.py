@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import textwrap
+from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -23,7 +24,13 @@ import structlog.testing
 from pydantic import BaseModel
 
 from fleet.llm.backends import openai_compatible as oc
-from fleet.llm.cache import CachingModelClient, MemoryLlmCacheStore
+from fleet.llm.cache import (
+    EMPTY_SHA256,
+    CacheKeyParts,
+    CachingModelClient,
+    MemoryLlmCacheStore,
+    _as_effort,
+)
 from fleet.llm.client import (
     BackendReply,
     CallPolicy,
@@ -36,7 +43,8 @@ from fleet.llm.client import (
     negotiate,
     promised_mode,
 )
-from fleet.llm.roles import LlmRouter
+from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter
+from fleet.llm.schemas import RESPONSE_SCHEMAS
 from fleet.models.enums import ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget
 from fleet.settings import ConfigValidationError, FleetSettings
@@ -198,7 +206,8 @@ def test_prompted_rung_sends_no_structuring_field() -> None:
 
 def test_json_schema_rung_sends_the_schema_without_asserting_strict() -> None:
     """WHY: see `test_the_json_schema_rung_does_not_assert_strict_on_the_wire` — strict mode is a
-    subset of JSON Schema that 8 of the 12 §9 role schemas do not satisfy, and we do not own those
+    subset of JSON Schema that 9 of the 12 §9 role schemas do not satisfy (counted over the whole
+    tree, `$defs` included), and we do not own those
     schemas. The absent key is the honest claim; `strict` defaults to false."""
     payload = oc.build_payload(
         target(), [Message(role="user", content="hi")], SCHEMA,
@@ -658,7 +667,8 @@ def test_the_sdk_transport_puts_the_negotiated_request_on_the_wire() -> None:
 def test_the_json_schema_rung_does_not_assert_strict_on_the_wire() -> None:
     """WHY: strict mode is a SUBSET of JSON Schema — every property must be `required` — and the
     schema is whatever `response_model.model_json_schema()` produced, which we do not control.
-    8 of the 12 §9 roles declare optional fields, across all three tiers. A hosted endpoint that
+    9 of the 12 §9 roles declare optional fields somewhere in their schema TREE (HEAVY 5/5,
+    WORKHORSE 3/4, CHEAP 1/3) — strict applies to `$defs` too. A hosted endpoint that
     enforces strict answers 400, which this backend maps to `CONNECTION`, which walks the tier and
     ends in a permanent `TierUnavailable` for that role.
 
@@ -820,3 +830,91 @@ def test_every_local_tier_can_actually_retry_a_truncated_reply() -> None:
         raised = min(int(cap * policy.truncation_growth), caps.max_output_tokens)
 
         assert raised > cap, f"{tier.value} cannot raise its cap: truncation retry is unreachable"
+
+
+def test_the_strict_incompatibility_count_in_the_docs_is_still_true() -> None:
+    """WHY: the reason `strict` is omitted lives in a code comment carrying a number, and a number
+    in a comment with no test is how the previous count ("8 of 12", derived from ROOT schemas
+    only) survived a review. Strict mode applies to every object in the schema tree, `$defs`
+    included: `build_authoring`'s root is strict-clean while its `$defs.BuildTargetProposal`
+    leaves three properties optional. A root-only audit therefore reports HEAVY as 4/5 and invites
+    someone to re-enable strict on it, which is a permanent `TierUnavailable` for that role.
+
+    This test recomputes the claim from the schemas themselves so the comment cannot drift."""
+
+    def optional_somewhere(node: object, hits: list[str] | None = None) -> list[str]:
+        found = [] if hits is None else hits
+        if isinstance(node, dict):
+            if node.get("type") == "object" and isinstance(node.get("properties"), dict):
+                missing = set(node["properties"]) - set(node.get("required", []))
+                found.extend(sorted(missing))
+            for value in node.values():
+                optional_somewhere(value, found)
+        elif isinstance(node, list):
+            for value in node:
+                optional_somewhere(value, found)
+        return found
+
+    violating = {
+        str(role)
+        for role, model in RESPONSE_SCHEMAS.items()
+        if optional_somewhere(model.model_json_schema())
+    }
+    per_tier = Counter(
+        tier.value for role, tier in SPEC_ROLE_TIERS.items() if str(role) in violating
+    )
+
+    assert len(violating) == 9, f"the comment says 9 of 12; schemas say {len(violating)}"
+    assert (per_tier["HEAVY"], per_tier["WORKHORSE"], per_tier["CHEAP"]) == (5, 3, 1)
+
+    # The specific trap: root-clean, tree-dirty. If this ever flips, the tree-walk above is what
+    # keeps the count honest — not the root comparison that missed it the first time.
+    build_authoring = RESPONSE_SCHEMAS["build_authoring"].model_json_schema()
+    root_only = set(build_authoring.get("properties", {})) - set(
+        build_authoring.get("required", []),
+    )
+
+    assert root_only == set(), "build_authoring root is expected to be strict-clean"
+    assert "build_authoring" in violating, "the $defs violation must still be detected"
+
+
+@pytest.mark.parametrize("declared", [None, "low", "medium", "high"])
+def test_effort_never_reaches_the_wire_whatever_the_target_declares(declared: str | None) -> None:
+    """WHY: `effort` is a hosted reasoning-model knob. A local llama.cpp or TGI server answers an
+    unknown request field with a 400, which this backend maps to `CONNECTION` — a healthy endpoint
+    failed over for a parameter it never needed. `None` (the operator said nothing) and an
+    explicit level must both send nothing here."""
+    payload = oc.build_payload(
+        target(effort=declared), [Message(role="user", content="hi")], None,
+        StructuredOutputMode.PROMPTED, 512,
+    )
+
+    assert "effort" not in payload
+    assert "reasoning_effort" not in payload
+    assert set(payload) == {"model", "messages", "max_tokens"}
+
+
+def test_an_unstated_effort_keys_differently_from_an_explicit_medium() -> None:
+    """WHY (ADR-0075): `effort` is a cache-key component, and `None` exists precisely to mean "the
+    operator did not say". If absence hashed the same as `"medium"`, the fabricated default this
+    change removes would be back inside the cache key — one layer further from view, where the
+    config no longer shows it. `""` is the stored spelling of absence, which also keeps the
+    `llm_cache.effort` column `TEXT NOT NULL` and needs no migration.
+
+    Lives here rather than in `tests/test_llm_cache.py` only to keep this round's edit contained;
+    it is a `cache.py` invariant and belongs beside the other key-component tests eventually."""
+    def key(effort: str | None) -> str:
+        return CacheKeyParts(
+            role="repo_classify", tier=ModelTier.CHEAP, backend="anthropic", model_id="m",
+            effort=effort, prompt_sha256=EMPTY_SHA256, response_schema_sha256=EMPTY_SHA256,
+        ).compute()
+
+    assert key(None) != key("medium"), "absence and an explicit medium must not collide"
+    assert key(None) != key("low")
+    assert key(None) == key(None)  # and it is stable
+
+    # The DB spelling round-trips, and a junk value is still loud rather than silently narrowed.
+    assert _as_effort("") is None
+    assert _as_effort("low") == "low"
+    with pytest.raises(ValueError, match="not one of"):
+        _as_effort("HIGH")

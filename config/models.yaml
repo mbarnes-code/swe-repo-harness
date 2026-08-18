@@ -34,12 +34,22 @@ profiles:
       - { backend: anthropic, model_id: claude-sonnet-5, effort: high,
           api_key_env: ANTHROPIC_API_KEY,
           price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
-    # No `effort:` on this target, deliberately. The Anthropic reasoning-effort parameter's
-    # support on Haiku 4.5 is documented inconsistently upstream — one page says the parameter
-    # itself is rejected, another says only the `max` level is — and under the stricter reading
-    # every CHEAP call on this profile would 4xx. Omitting it is strictly safer and loses
-    # nothing: `BackendTarget.effort` defaults to `medium` and the anthropic backend is free to
-    # send nothing at all. (Orchestrator decision, recorded per CLAUDE.md guardrail 1.)
+    # No `effort:` on this target, deliberately — see ADR-0075 in docs/DECISIONS.md.
+    #
+    # The Anthropic reasoning-effort parameter's support on Haiku 4.5 is documented
+    # inconsistently upstream (one page says the parameter itself is rejected, another says only
+    # the `max` level is), and under the stricter reading every CHEAP call here would 4xx.
+    # Omitting the line is now sufficient: `BackendTarget.effort` is optional and defaults to
+    # `None`, which every backend MUST render as "send no effort parameter". It previously
+    # defaulted to "medium", so deleting this line used to substitute a value the operator never
+    # wrote — which did not fix the problem, it hid it.
+    #
+    # OPERATOR NOTE — expect ONE cold-cache dip on CHEAP, once, after upgrading past this change.
+    # `effort` is a cache-key component, and CHEAP's contribution moved twice on the way here
+    # (`low` -> `medium` -> absent). Existing CHEAP entries key on the old values and will not be
+    # read again; they age out normally under `fleet gc --cache-max-age`. Correctness and cost per
+    # call are unaffected — only the hit rate, and only until the cache refills. This is expected
+    # and is not a cache bug.
     CHEAP:
       - { backend: anthropic, model_id: claude-haiku-4-5,
           api_key_env: ANTHROPIC_API_KEY,

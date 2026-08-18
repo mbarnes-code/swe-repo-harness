@@ -296,7 +296,7 @@ shim, no LangChain.** Role→model assignment:
 |---|---|---|---|
 | **Heavy / semantic** | `claude-opus-5` | Cross-repo conflict resolution; genuine API-incompatibility rewrites; `BUILD.bazel` authoring for non-trivial targets; migration-plan authorship for a repo marked `REQUIRES_HUMAN_INTERVENTION`; cycle-breaking proposals | `high` |
 | **Workhorse / bulk** | `claude-sonnet-5` | Per-file transformation review and repair; build-failure diagnosis loop; ambiguous manifest/README extraction; PR body and migration-note generation | `high` |
-| **Cheap / volume** | `claude-haiku-4-5-20251001` | Repo classification (service/library/monolith); framework and ecosystem detection; internal-vs-external dependency labeling; commit-message and PR-title drafting; log-line triage | `low` |
+| **Cheap / volume** | `claude-haiku-4-5-20251001` | Repo classification (service/library/monolith); framework and ecosystem detection; internal-vs-external dependency labeling; commit-message and PR-title drafting; log-line triage | ~~`low`~~ **unset — superseded by ADR-0075** |
 
 All roles are declared in one `config/models.yaml` mapping `role -> {id, effort}`, so
 re-tiering a role is a config edit, never a code edit.
@@ -6595,3 +6595,61 @@ honestly, by what it is wired to, not by what it was hoped to cover.
   "refuse and teach" into "block and strand" — the brief for this task asked explicitly whether an
   escape hatch was needed and this ADR answers yes, scoped to a human-invoked, visibly-logged,
   non-`FLEET_*` variable rather than a standing config toggle.
+
+## ADR-0075 — `BackendTarget.effort` is optional; `None` means "send no effort parameter"
+
+**Status.** Accepted. Supersedes the `Effort` column of ADR-0009's tier table for the CHEAP tier,
+and the `effort: low` on the CHEAP target in SPEC.md §9's `config/models.yaml` example.
+
+**Context.** ADR-0009 pinned the CHEAP tier at `effort: low`. Anthropic's own documentation is
+self-contradictory about reasoning-effort support on Haiku 4.5: one page states the *parameter*
+is rejected on that model, another states only the `max` *level* is. Under the stricter reading,
+every CHEAP call on the shipped `default` profile would 4xx — i.e. three of the twelve §9 roles
+would be dead on arrival, and only in production, since nothing in the test suite sends a real
+request.
+
+**Decision (orchestrator, not an agent recommendation).** Do not adjudicate the upstream
+contradiction. Stop sending the parameter on that target, because omitting it is strictly safer
+and costs nothing.
+
+The first attempt at this deleted the `effort: low` line from `config/models.yaml` and stopped
+there. That did not work, and the way it failed is the reason this ADR exists:
+`BackendTarget.effort` was non-optional with default `"medium"`, so deleting the line did not
+remove the parameter — it silently substituted a value the operator had never written, and left a
+backend that honours `target.effort` still sending an effort on every CHEAP call. The defect was
+not fixed; it was made invisible. Verified after the fact by resolving the live config rather than
+by re-reading the YAML: all three CHEAP roles reported `effort='medium'`.
+
+So: **`effort` is now `Literal["low","medium","high"] | None`, defaulting to `None`.** There is no
+honest default for "the operator did not say", so absence is representable. Config either declares
+an effort or it does not.
+
+**Consequences.**
+
+1. **Every backend MUST omit the effort parameter entirely when `target.effort is None`**, and
+   must never substitute a level of its own. This is a contract on the adapter, not a suggestion:
+   re-introducing a default anywhere below the config layer restores exactly the defect above, one
+   layer further from view. `openai_compatible` sends no effort at all under any value (it is a
+   hosted reasoning-model knob; a local llama.cpp or TGI server answers an unknown field with a
+   400, which would surface as a `CONNECTION` failover against a healthy endpoint).
+2. `effort` is a cache-key component (§6, `CacheKeyParts`). `None` is keyed as `""`, deliberately
+   distinct from `"medium"` — collapsing them would put the fabricated default straight back into
+   the key. `LlmCallRecord.effort` and the `llm_cache.effort` column follow the same spelling:
+   absence round-trips as the empty string, so the column stays `TEXT NOT NULL` and **no database
+   migration is required**.
+3. **One-time cache orphaning on CHEAP, and only there.** CHEAP's key contribution moved twice
+   (`low` → `medium` → absent), so pre-existing CHEAP entries will not be read again and age out
+   normally under `fleet gc --cache-max-age`. Correctness and per-call cost are unaffected; only
+   the hit rate, and only until the cache refills. **This is the one operator-visible symptom: a
+   single CHEAP hit-rate dip after upgrading, which is expected and is not a cache bug.** It is
+   recorded here because a hit-rate dip with no written cause is indistinguishable from a
+   regression, and someone would have spent a day on it.
+
+**Rejected alternatives.** *Keep `"medium"` as the default and have backends skip sending it when
+it equals the default* — indistinguishable from an operator who deliberately chose `medium`, and
+silently changes meaning if the default ever moves. *Make the column nullable* — a migration, plus
+two spellings of absence (`NULL` and `""`) for a value whose only job is to hash consistently.
+
+**Provenance.** The doc contradiction was surfaced by the BK1 lane against the `claude-api` skill
+source; the `"medium"` substitution was caught in re-review of BK2 fix round 2; this entry is the
+orchestrator's decision, recorded per CLAUDE.md guardrail 1.
