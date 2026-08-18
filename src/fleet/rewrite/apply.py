@@ -13,7 +13,9 @@ Four responsibilities, all of them about *one* representation — the unified di
   produced it, instead of at `git apply` three phases later with no rule id attached.
 * **Validate** (`check_diff` / `validate_diff`): reject any hunk whose path escapes the repo's
   own subtree, *before* the mutation is journalled, so an out-of-tree write is never even
-  intended (§3.2 step 6.6).
+  intended (§3.2 step 6.6). `check_diff` also cross-checks a caller-supplied declared path (a
+  `FilePatch.path`) against the diff's own header paths, because that field and the diff can
+  originate as two independently model-supplied values with nothing else forcing them to agree.
 * **Write** (`apply_patch`): `git apply` is the ONLY writer of source files — no worker opens a
   file for writing.
 
@@ -268,11 +270,23 @@ def check_diff(
     *,
     max_bytes: int | None = None,
     allow_paths_outside_dest: bool = False,
+    declared_path: str | None = None,
 ) -> str | None:
     """`None` when the diff may be applied, else a one-line reason it may not.
 
     A reason string rather than a bare `False`: "patch rejected" with no cause is exactly the
     log line that makes a Phase-2 outage unattributable to the rule that caused it.
+
+    `declared_path`, when given, is a `FilePatch.path` (or equivalent) that must agree with the
+    diff it travels with: `declared_path in diff_paths(diff)`. `FilePatch.path` and `FilePatch.diff`
+    can originate as two independently model-supplied fields (`ProposedFileEdit`), so nothing
+    upstream of this guarantees they name the same file — `git apply` only ever looks at the
+    diff's own `---`/`+++` headers, so a mismatched `declared_path` is the file a downstream parse
+    probe checks while a *different* file is the one that was actually written. Membership, not
+    equality, because one `FilePatch` may legitimately carry a diff touching several files, and
+    for a rename `diff_paths` reports only the post-image (destination) path — the file that ends
+    up on disk — never the pre-image one, so a legitimate rename's declared destination path is
+    never rejected here.
     """
     if max_bytes is not None and len(diff.encode("utf-8")) > max_bytes:
         return f"patch is larger than transform.max_patch_bytes ({max_bytes} bytes)"
@@ -282,6 +296,11 @@ def check_diff(
         return f"not a parseable unified diff: {exc}"
     if not paths:
         return "diff names no files"
+    if declared_path is not None and declared_path not in paths:
+        return (
+            f"declared path {declared_path!r} does not match any path its own diff writes "
+            f"{list(paths)!r}"
+        )
     if allow_paths_outside_dest:
         return None
     outside = sorted(p for p in paths if _escapes(p, dest_subtree))
@@ -338,6 +357,7 @@ async def apply_patch(
         dest_subtree,
         max_bytes=max_bytes,
         allow_paths_outside_dest=allow_paths_outside_dest,
+        declared_path=patch.path,
     )
     if reason is not None:
         return ApplyResult(ok=False, path=patch.path, reason=reason)

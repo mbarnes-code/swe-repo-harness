@@ -33,6 +33,7 @@ from fleet.rewrite.apply import (
     apply_in_memory,
     apply_patch,
     check_diff,
+    diff_paths,
     make_unified_diff,
     parse_unified_diff,
     validate_diff,
@@ -1097,3 +1098,89 @@ def test_check_diff_rejects_paths_escaping_the_destination_subtree() -> None:
     inside = make_unified_diff("libs/acme/mod.py", "a\n", "b\n")
     assert check_diff(inside, "libs/acme") is None
     assert check_diff(inside, "libs/acme", max_bytes=10) is not None  # §11.3 patch ceiling
+
+
+def test_check_diff_rejects_a_declared_path_that_disagrees_with_its_own_diff() -> None:
+    """`FilePatch.path` and `FilePatch.diff` can come from two independently model-supplied
+    fields (`ProposedFileEdit.path` / `.diff`, `llm/schemas.py`) with nothing forcing them to
+    agree. `git apply` only ever looks at the diff's own `---`/`+++` headers, so a mismatch means
+    the file actually written and the file `patch.path` claims was written are different files —
+    `apply_patch`'s post-apply probe and `cli._transform_criterion`'s parse probe (fed by
+    `output.rewritten`, which is `patch.path`) would both check the wrong one.
+    """
+    diff = make_unified_diff("pkg/real.py", "a\n", "b\n")
+    reason = check_diff(diff, "pkg", declared_path="pkg/decoy.py")
+    assert reason is not None
+    assert "pkg/decoy.py" in reason and "pkg/real.py" in reason
+
+
+def test_check_diff_accepts_a_declared_path_that_matches_its_own_diff() -> None:
+    """The regression pin for the case above: a self-consistent patch — the ONLY shape every
+    deterministic call site (`pipeline._finish`, `AstGrepRewriter.apply`) actually produces,
+    since both build `patch.path` and the diff from the same local `path` variable — must not be
+    caught by the new check."""
+    diff = make_unified_diff("pkg/real.py", "a\n", "b\n")
+    assert check_diff(diff, "pkg", declared_path="pkg/real.py") is None
+
+
+def test_check_diff_accepts_a_rename_diffs_destination_as_the_declared_path() -> None:
+    """The case most likely to make a naive `path == the only diff path` check wrong: a rename
+    (or a rename-plus-edit) diff has a pre-image `---` path and a different post-image `+++`
+    path. `diff_paths` reports only the post-image path — `FileDiff.path`'s own docstring says
+    it is "what gets written" — so a legitimate rename whose declared path is the DESTINATION
+    must be accepted, and one declared as the stale SOURCE path must not be."""
+    diff = "--- a/pkg/old.py\n+++ b/pkg/new.py\n@@ -1 +1 @@\n-a\n+b\n"
+    assert diff_paths(diff) == ("pkg/new.py",)
+    assert check_diff(diff, "pkg", declared_path="pkg/new.py") is None
+    reason = check_diff(diff, "pkg", declared_path="pkg/old.py")
+    assert reason is not None and "pkg/old.py" in reason
+
+
+def test_check_diff_accepts_any_path_a_multi_file_diff_actually_writes() -> None:
+    """`declared_path in diff_paths(diff)` (membership), not equality: the schema allows one
+    `FilePatch` to carry a diff touching several files (`LlmPatchProposal.files` composes several
+    `FilePatch`es, but nothing stops a single `ProposedFileEdit.diff` from itself being a
+    multi-file unified diff). If that shape is ever legitimately produced, the declared path only
+    needs to be ONE of the files the diff writes, not the only one — equality would wrongly
+    reject it."""
+    diff = (
+        "--- a/pkg/a.py\n+++ b/pkg/a.py\n@@ -1 +1 @@\n-1\n+2\n"
+        "--- a/pkg/b.py\n+++ b/pkg/b.py\n@@ -1 +1 @@\n-3\n+4\n"
+    )
+    assert diff_paths(diff) == ("pkg/a.py", "pkg/b.py")
+    assert check_diff(diff, "pkg", declared_path="pkg/a.py") is None
+    assert check_diff(diff, "pkg", declared_path="pkg/b.py") is None
+    assert check_diff(diff, "pkg", declared_path="pkg/c.py") is not None
+
+
+async def test_apply_patch_rejects_a_filepatch_whose_declared_path_disagrees_with_its_diff(
+    tmp_path: Path,
+) -> None:
+    """End-to-end regression for the gap `_as_patches` opens (`workers/rewrite.py`): the LLM
+    repair branch lifts `FilePatch(path=edit.path, diff=edit.diff, ...)` from a model response
+    where `path` and `diff` are two separate fields the model fills in independently. A patch
+    that declares one path while its diff writes another must be rejected before `git apply` ever
+    runs — and the file the diff WOULD have written must be left untouched, proving this fires
+    before the write rather than after."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "pkg").mkdir()
+    (repo / "pkg" / "real.py").write_text("a\n", encoding="utf-8")
+    _git_init(repo)
+
+    diff = make_unified_diff("pkg/real.py", "a\n", "b\n")
+    mismatched = FilePatch(
+        path="pkg/decoy.py", diff=diff, tier=TransformTier.DETERMINISTIC, parse_probe_ok=False
+    )
+    result = await apply_patch(repo, mismatched, dest_subtree="pkg")
+    assert not result.ok
+    assert result.reason is not None
+    assert "pkg/decoy.py" in result.reason and "pkg/real.py" in result.reason
+    assert (repo / "pkg" / "real.py").read_text(encoding="utf-8") == "a\n"
+
+    matching = FilePatch(
+        path="pkg/real.py", diff=diff, tier=TransformTier.DETERMINISTIC, parse_probe_ok=False
+    )
+    landed = await apply_patch(repo, matching, dest_subtree="pkg")
+    assert landed.ok, landed.reason
+    assert (repo / "pkg" / "real.py").read_text(encoding="utf-8") == "b\n"
