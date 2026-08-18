@@ -1504,12 +1504,21 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
     assert repo_id == "repo-a"
     assert severity == "error", "the reason the run stopped must not rank beside a warning"
     assert payload["phase"] == PHASE.name
-    tried = str(payload["targets_tried"])
-    assert "WORKHORSE" in tried
-    assert "fake:fake-1" in tried and "fake:fake-2" in tried, (
+    observed = str(payload["observed"])
+    assert "WORKHORSE" in observed
+    assert "fake:fake-1" in observed and "fake:fake-2" in observed, (
         "EVERY target, not just the last: an operator deciding whether to fail a whole profile "
         "over needs to know the fallback was tried too"
     )
+    # §13 row 43. The halt string this runner raises says the targets are "DOWN"; the finding it
+    # writes must not, because a sustained 429 reaches this same line (`client.py:532` retires a
+    # target without reading `TransportError.trigger`) and `BackendHealth.DOWN` is computed
+    # nowhere in `src/`. The log line scrolls away — the finding is what a human reads later.
+    assert payload["asserts_outage"] is False
+    assert payload["failover_triggers_recorded"] is False
+    assert "down" not in json.dumps(
+        {k: v for k, v in payload.items() if k != "caveat"}
+    ).lower(), "`decision.reason`'s DOWN claim must not be copied into the row"
 
 
 async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harness) -> None:

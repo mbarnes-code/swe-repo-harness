@@ -351,8 +351,7 @@ async def test_backend_unavailable_names_the_tier_and_every_target_tried(tmp_pat
         await h.ctx.llm_findings.record_backend_unavailable(
             repo_id="repo-a",
             phase=Phase.TRANSFORM,
-            detail="tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
-            reason="every target for the tier is DOWN",
+            observed="tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
         )
 
         rows = await h.findings(BACKEND_UNAVAILABLE)
@@ -361,11 +360,58 @@ async def test_backend_unavailable_names_the_tier_and_every_target_tried(tmp_pat
         assert repo_id == "repo-a", "this one DOES know its repo — the runner holds it"
         assert severity == "error"
         assert payload["phase"] == "TRANSFORM"
-        tried = str(payload["targets_tried"])
-        assert "WORKHORSE" in tried
-        assert "fake:fake-1" in tried and "fake:fake-2" in tried, (
+        observed = str(payload["observed"])
+        assert "WORKHORSE" in observed
+        assert "fake:fake-1" in observed and "fake:fake-2" in observed, (
             "EVERY target, not just the last one: an operator deciding whether to fail over a "
             "whole profile needs to know the fallback was tried too"
+        )
+
+
+async def test_backend_unavailable_refuses_to_assert_an_outage(tmp_path: Path) -> None:
+    """§13 row 43. The finding must not diagnose what the harness did not measure.
+
+    A pure 429 reaches this emission site today: `client.py:532` catches `TransportError` without
+    inspecting `exc.trigger`, so a `RATE_LIMIT` retires a target exactly like a refused
+    connection, three of them exhaust the tier, and `classify.py:243-258` makes the result
+    non-retryable. Row 43 forbids the inference flatly — `DOWN` requires a connection-level
+    failure or a 5xx, never throttling alone — and `BackendHealth.DOWN` has no representation in
+    `src/` at all.
+
+    So the row carries three machine-readable honesty fields rather than a diagnosis. Asserted
+    mechanically, not by grepping the caveat prose: a later reader deciding whether to trust this
+    finding must not have to parse English, and a future edit that quietly starts asserting an
+    outage must fail here.
+    """
+    backend = ScriptedBackend(HONEST_CAPS)
+    async for h in _build(tmp_path, backend, make_router("fake-1", "fake-2")):
+        await h.ctx.llm_findings.record_backend_unavailable(
+            repo_id="repo-a",
+            phase=Phase.TRANSFORM,
+            observed="tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
+        )
+        _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
+
+        assert payload["asserts_outage"] is False, (
+            "a finding claiming the backend is DOWN turns a correctable throttle into a durable "
+            "false record — and `DOWN` is a state nothing in `src/` computes"
+        )
+        assert payload["failover_triggers"] is None
+        assert payload["failover_triggers_recorded"] is False, (
+            "`TierUnavailable` carries no per-target `FailoverTrigger`, and `_emit_failover` "
+            "never fires for the LAST target, so the set cannot be reconstructed — the row must "
+            "say it does not know rather than infer"
+        )
+        assert "429" in str(payload["caveat"]) or "RATE_LIMIT" in str(payload["caveat"]), (
+            "the operator-facing text has to name the alternative explanation, or the honesty "
+            "flags above are unactionable"
+        )
+        others = {k: v for k, v in payload.items() if k != "caveat"}
+        assert "down" not in json.dumps(others).lower(), (
+            "no DATA field may carry the DOWN vocabulary — `retry.py:196`'s "
+            "'every target for the tier is DOWN' must not be copied into the row, which is why "
+            "`decision.reason` is deliberately not passed. Only the caveat may say the word, and "
+            "only to forbid the inference"
         )
 
 
@@ -378,8 +424,7 @@ async def test_a_repeated_outage_for_one_repo_converges_on_one_row(tmp_path: Pat
             await h.ctx.llm_findings.record_backend_unavailable(
                 repo_id="repo-a",
                 phase=Phase.TRANSFORM,
-                detail="tier WORKHORSE exhausted after targets: fake:fake-1",
-                reason="down",
+                observed="tier WORKHORSE exhausted after targets: fake:fake-1",
             )
         assert len(await h.findings(BACKEND_UNAVAILABLE)) == 1
 

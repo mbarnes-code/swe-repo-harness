@@ -602,11 +602,23 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 # only in a log line leaves the operator reconstructing which tier died and
                 # which targets were tried from a stderr tail. `failure.stderr_tail` is
                 # `TierUnavailable`'s own message (client.py:151-155) and already names both.
+                #
+                # The finding records the OBSERVATION and refuses to assert a cause — see
+                # `LlmFindingSink.record_backend_unavailable`. `decision.reason` is deliberately
+                # NOT copied into it: `retry.py:196` (and the halt string just below) both say
+                # "every target for the tier is DOWN", and `DOWN` is a `BackendHealth` state that
+                # exists nowhere in `src/` and that §13 row 43 forbids inferring from throttling
+                # alone — which is exactly what a rate-limited account produces here, because
+                # `client.py:532` retires a target without inspecting `TransportError.trigger`.
+                # The message below is left as it stands: correcting that vocabulary spans
+                # `retry.py`, `enums.py:289` and the SPEC, and building the health state machine
+                # that would make it true is §13 row 43's own (large) ticket. A log line scrolls
+                # away; a finding is what a human reads afterwards, so only the finding is fixed
+                # here — it must not carry the claim.
                 await self.ctx.llm_findings.record_backend_unavailable(
                     repo_id=repo_id,
                     phase=self.phase,
-                    detail=self._detail(failure),
-                    reason=decision.reason,
+                    observed=self._detail(failure) or str(failure.failure_class),
                 )
                 raise RunHalted(
                     HaltReason.TIER_UNAVAILABLE,

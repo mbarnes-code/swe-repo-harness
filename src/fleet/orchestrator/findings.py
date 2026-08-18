@@ -76,6 +76,19 @@ BACKEND_UNAVAILABLE: Final = "BackendUnavailable"
 #: and recovered from, and `BackendFailover`'s own docstring (client.py:228) names it as one.
 BACKEND_FAILOVER_EVENT: Final = "backend_failover"
 
+#: Carried in every `BackendUnavailable` payload. Prose in a row is normally a smell; here it is
+#: the point — the row's own name overstates what the harness measured, and the operator reading
+#: it months later is the person who would otherwise act on the overstatement (§13 row 43).
+_CAVEAT: Final = (
+    "Tier exhaustion only. This is NOT evidence that any backend is down: llm/client.py fails a "
+    "target over without inspecting TransportError.trigger, so sustained RATE_LIMIT throttling "
+    "reaches this finding identically to a CONNECTION or SERVER_ERROR failure (SPEC 13 row 43 -- "
+    "a 429 alone can never mean DOWN). The per-target triggers are not recorded, so this row "
+    "cannot tell the two apart. If the account was being throttled, the correct action is to run "
+    "at lower concurrency, not to repair infrastructure."
+)
+
+
 _INSERT_FINDING: Final = (
     "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, created_at) "
     "VALUES (?, ?, ?, ?, ?, ?, ?) "
@@ -215,24 +228,43 @@ class LlmFindingSink:
         )
 
     async def record_backend_unavailable(
-        self,
-        *,
-        repo_id: str,
-        phase: Phase,
-        detail: str | None,
-        reason: str | None = None,
+        self, *, repo_id: str, phase: Phase, observed: str
     ) -> None:
-        """§13 row 40: every target for the tier is spent. Written BEFORE the exit-8 halt.
+        """§13 row 40: a tier was exhausted. Written BEFORE the exit-8 halt.
 
-        `detail` is the worker's own `stderr_tail` — for the path this exists to record it is
-        `TierUnavailable`'s message verbatim (client.py:151-155), which names the tier and every
-        target that was tried, in order. It is carried through unparsed on purpose: nothing in
-        this codebase branches on message text, and re-deriving the target list from the router
-        here would answer a *different* question (what the route says now) than the one the
-        finding asks (what was actually tried when it failed).
+        **This finding reports an OBSERVATION and refuses to assert a cause.** That refusal is
+        the whole design, and it is worth stating why, because the obvious wording is wrong:
 
-        This is the last thing written before `RunHalted`, because a halt whose cause was never
-        recorded is a halt an operator has to reconstruct from a log tail.
+        The name of the halt (`BACKEND_UNAVAILABLE`, `HaltReason.TIER_UNAVAILABLE`) and the prose
+        already attached to it (`retry.py:196` and `runner.py`: "every target for the tier is
+        DOWN") both assert a `BackendHealth.DOWN` state. `DOWN` **has no representation anywhere
+        in `src/`** — nothing computes it and nothing stores it — and §13 row 43 forbids the claim
+        outright: *`DOWN` requires a connection-level failure or a 5xx, never throttling alone.*
+
+        Yet a pure 429 reaches this exact call site in three hops today. `client.py:532` catches
+        `TransportError` **without inspecting `exc.trigger`**, so a `RATE_LIMIT` retires a target
+        exactly like a refused connection; three of them exhaust `max_targets_per_call`;
+        `TierUnavailable` is raised; and `classify.py:243-258` makes it non-retryable. Row 43's
+        named disaster — a long run exiting 8 when the correct action was to lower concurrency —
+        is therefore reachable at HEAD, wearing row 40's vocabulary.
+
+        A log line that says the wrong thing scrolls away. A FINDING is what a human reads
+        afterwards, so a finding that said "the backend is down" would convert a transient,
+        correctable throttle into a durable false record. This one says only what was measured.
+
+        `observed` is the worker's own `stderr_tail`, which on this path is `TierUnavailable`'s
+        message verbatim (client.py:151-155) and therefore names the tier and, in order, every
+        target the ladder spent. Carried through unparsed: nothing in this codebase branches on
+        message text, and re-deriving the target list from the router would answer a *different*
+        question (what the route says now) than the one the finding asks (what was tried then).
+
+        **What it cannot say, and says so in the row:** which `FailoverTrigger` retired each
+        target. `TierUnavailable` carries `tier` and `targets_tried` (client.py:149-155) and no
+        triggers, and `_emit_failover` never fires for the LAST target, so even the wired
+        `on_failover` stream cannot reconstruct the full set. Rather than infer one,
+        `failover_triggers` is `null` and `failover_triggers_recorded` is `false`. Plumbing the
+        triggers means changing `TierUnavailable`'s constructor and every raise site — a
+        different lane's work, and not something to fake here.
         """
         stamp = _iso(self.clock())
         params = (
@@ -240,13 +272,18 @@ class LlmFindingSink:
             repo_id,
             BACKEND_UNAVAILABLE,
             "error",  # this one stops the run; 'warn' would understate it in every report
-            sha256_text("\x00".join((repo_id, phase.name, detail or ""))),
+            sha256_text("\x00".join((repo_id, phase.name, observed))),
             _json(
                 {
                     "repo_id": repo_id,
                     "phase": phase.name,
-                    "targets_tried": detail or "",
-                    "reason": reason or "",
+                    "observed": observed,
+                    # The three honesty fields. Machine-readable on purpose: a later reader
+                    # deciding whether to trust this row must not have to parse the caveat.
+                    "asserts_outage": False,
+                    "failover_triggers": None,
+                    "failover_triggers_recorded": False,
+                    "caveat": _CAVEAT,
                 }
             ),
             stamp,
