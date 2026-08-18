@@ -26,11 +26,14 @@ The ratchet turns both ways, and the second direction is the point:
 What this test deliberately is NOT
 ----------------------------------
 It is a **name scan**, not a dataflow proof, and it is calibrated to under-report rather than to
-guess. `_sources()` blanks every comment and docstring (`_strip_comments_and_docstrings`, via
-`tokenize` for comments and `ast` for docstrings — not a regex, because "is this string literal a
-docstring" depends on its position in the tree, not its spelling) before any pattern is matched, so
-prose can no longer masquerade as a read. Two consequences remain worth knowing before trusting a
-pass:
+guess. `_sources()` blanks every comment and every string literal (`_strip_comments_and_docstrings`,
+via `tokenize` for comments and `ast` for string literals — not a regex, because telling a string
+literal from surrounding code requires parsing) before any pattern is matched, so prose can no
+longer masquerade as a read. This blanks docstrings, but also every OTHER string literal — a
+`Field(description="...")` kwarg, an f-string, a dict key — because prose hides in all of those
+just as easily; `models/state.py`'s `heartbeat_ttl_seconds` field described itself with a sentence
+naming `stale_after_s`, which is not a docstring by position but is exactly the same hazard. Two
+consequences remain worth knowing before trusting a pass:
 
 1. A leaf whose bare field name collides with something unrelated is decided with a **qualified**
    match instead — `QUALIFIED_MATCH_KEYS` names the immediate parent field, and
@@ -111,8 +114,13 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:llm.rate_limit.aimd",                  # settings.py:654 — section unreferenced
         "fleet.yaml:llm.rate_limit.aimd.shrink_factor",    # settings.py:642
         "fleet.yaml:llm.rate_limit.aimd.grow_every_s",     # settings.py:643
-        # `aimd.floor` is NOT listed: it passes only because "floor" is a common word, not
-        # because anything reads it. See limitation 2 in the module docstring.
+        # `aimd.floor` used to be left off this list on purpose, with a comment admitting the bare
+        # scan passes it only because "floor" is a common word — a disclosed-but-unenforced hole
+        # this file itself flagged and never closed. It is a real same-name-different-object
+        # collision: `util/fs.py:87-96`'s `InsufficientDiskSpaceError.__init__(*, floor: int, ...)`
+        # is the disk-space floor for `preflight.min_free_bytes`, unrelated to the AIMD backoff
+        # floor. Qualified as `aimd.floor` below.
+        "fleet.yaml:llm.rate_limit.aimd.floor",             # settings.py:644
         #
         # --- §11.8 failover: the circuit breaker's three tuning keys ----------------------
         # `llm/client.py` walks `max_targets_per_call` targets and honours `failover.enabled`,
@@ -127,11 +135,26 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # missing machinery `cli.py` cites when it refuses `--no-anchoring-guard`.
         "fleet.yaml:transform.anchoring.max_reasks_per_rung",  # settings.py:427
         "fleet.yaml:transform.anchoring.on_exhausted",         # settings.py:428
+        # The section name itself: `settings.py:465`'s `anchoring: AnchoringSection =
+        # AnchoringSection()` is the only mention of `anchoring` in `settings.py`, and nothing
+        # outside it ever writes `config.transform.anchoring` or `.anchoring.`. Every other
+        # occurrence in the tree is prose about ADR-0021 (`models/tasks.py`, `llm/cache.py`,
+        # `llm/schemas.py`, `state/schema.sql`, `cli.py`'s `--no-anchoring-guard` refusal).
+        "fleet.yaml:transform.anchoring",                       # settings.py:465
+        # `.enabled` is its own leaf, same section: the bare scan calls it read only because it
+        # collides with the genuinely-wired `scan.contracts.enabled` (`cli.py:2094`) — no
+        # `anchoring.enabled` occurs anywhere qualified. Decided via qualified match.
+        "fleet.yaml:transform.anchoring.enabled",               # settings.py:426
         #
         # --- §3.1 the native baseline build/test gate -------------------------------------
         # The `BaselineBuild` section name appears nowhere outside its declaration; its two
-        # leaves (`enabled`, `timeout_s`) pass only on unrelated matches of those words.
+        # leaves (`enabled`, `timeout_s`) pass the BARE scan only on unrelated matches of those
+        # words — a comment on this very entry said so and then never added the leaves
+        # themselves. Qualified `baseline_build.enabled` / `baseline_build.timeout_s` occur
+        # nowhere for real; both decided via qualified match.
         "fleet.yaml:preflight.baseline_build",             # settings.py:287
+        "fleet.yaml:preflight.baseline_build.enabled",     # settings.py:274
+        "fleet.yaml:preflight.baseline_build.timeout_s",   # settings.py:275
         #
         # --- timeouts and ceilings with no consumer ---------------------------------------
         "fleet.yaml:budgets.build_timeout_s",              # settings.py:267
@@ -172,6 +195,21 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:redaction.entropy_min_bits",            # settings.py:307
         "fleet.yaml:redaction.entropy_min_len",             # settings.py:308
         #
+        # --- revealed by blanking string literals generally, not just docstrings ----------
+        # `models/state.py:63-66`'s `heartbeat_ttl_seconds` field describes itself with a
+        # `Field(description="Config-sourced (\`orchestrator.stale_after_s\`...")` kwarg — a
+        # string literal, not a docstring, so it survived the original strip. No code anywhere
+        # constructs `PhaseRecord`/`heartbeat_ttl_seconds` from `config.run.stale_after_s`; every
+        # site (`schema.sql:377`, `migrations/v007_logical_keys.py:74`) uses the hardcoded 300.
+        "fleet.yaml:run.stale_after_s",                     # settings.py:211
+        # `workers/symbolindex.py:107`'s `MARKER_SCAN_BYTES: Final = 4096` is the same defect
+        # class, same section as `entropy_min_bits`/`entropy_min_len` above, one file over: a
+        # hardcoded module constant with the config key's default baked in, plus a bare
+        # `"""...marker_scan_bytes..."""` string right after it (not a docstring — it is not the
+        # first statement of the module — so it survived the original strip too) that named the
+        # key in prose and was the only thing making the old scan pass.
+        "fleet.yaml:scan.contracts.marker_scan_bytes",      # settings.py:337
+        #
         # --- generic-word / same-name-different-object collisions, decided via qualified match --
         # `transform.ladder[i].role` and `.context_policy`: `.tier` is their sibling and stays
         # genuinely undecidable (see `UNVERIFIABLE`); these two ARE decidable — `ladder.role` and
@@ -190,22 +228,39 @@ KNOWN_INERT: frozenset[str] = frozenset(
         #                                                      with the genuinely-wired
         #                                                      `scan.contracts.enabled`
         "fleet.yaml:llm.failover.max_targets_per_call",     # settings.py:663
+        # `cli.py` declares a `--stub-blocked` flag / local named `stub_blocked` at five
+        # sites (2377, 3046, 3120, 4770, 9536) — never `config.transform.stub_blocked`. The
+        # refusal block `cli.py:3156-3158`/`4772-4774` even says so: "--stub-blocked is not
+        # implemented". Qualified `transform.stub_blocked` occurs nowhere for real.
+        "fleet.yaml:transform.stub_blocked",                # settings.py:453
+        # `cli.py:413`'s `Options.cache_mode` property is derived entirely from `self.llm_cache`
+        # (`--llm-cache`, `cli.py:742-743`), never from `config.llm.cache_mode`; every call site
+        # of `opts.cache_mode` (`cli.py:558,10529,10532`) reads that property, not settings.
+        # `orchestrator/context.py:139`'s `llm_cache_mode` field is likewise never constructed
+        # from config. Qualified `llm.cache_mode` occurs nowhere for real.
+        "fleet.yaml:llm.cache_mode",                        # settings.py:678
     }
 )
 
 QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
     {
-        # These five leaves are read by the plain bare-name scan (`_readers`) for reasons that
-        # have nothing to do with the config: a common English word, or a same-named field on an
-        # unrelated class. `_inert_keys()` decides them with `_qualified_readers` instead — the
-        # immediate parent field name plus the leaf (`failover.enabled`, `llm.max_schema_repairs`)
-        # — which does not occur for real in any of the five. See the `KNOWN_INERT` comments above
-        # for the specific collision each one resolves.
+        # These leaves are read by the plain bare-name scan (`_readers`) for reasons that have
+        # nothing to do with the config: a common English word, or a same-named field/flag/local
+        # on an unrelated object. `_inert_keys()` decides them with `_qualified_readers` instead —
+        # the immediate parent field name plus the leaf (`failover.enabled`,
+        # `llm.max_schema_repairs`) — which does not occur for real in any of them. See the
+        # `KNOWN_INERT` comments above for the specific collision each one resolves.
         "fleet.yaml:transform.ladder.role",
         "fleet.yaml:transform.ladder.context_policy",
         "fleet.yaml:llm.max_schema_repairs",
         "fleet.yaml:llm.failover.enabled",
         "fleet.yaml:llm.failover.max_targets_per_call",
+        "fleet.yaml:llm.rate_limit.aimd.floor",
+        "fleet.yaml:transform.anchoring.enabled",
+        "fleet.yaml:preflight.baseline_build.enabled",
+        "fleet.yaml:preflight.baseline_build.timeout_s",
+        "fleet.yaml:transform.stub_blocked",
+        "fleet.yaml:llm.cache_mode",
     }
 )
 
@@ -239,15 +294,34 @@ DECLARATIVE: frozenset[str] = frozenset(
         # `test_declarative_keys_are_read_inside_settings` holds them to that claim.
         #
         # Read by `LlmConcurrency.for_tier` (settings.py:227-230), which
-        # `orchestrator/budgets.py:980` calls to size the per-tier semaphore. Its siblings
-        # `heavy` and `cheap` pass the scan only on unrelated matches of those words — this key
-        # is not more inert than they are, it is merely spelled less commonly.
+        # `orchestrator/budgets.py:980` calls to size the per-tier semaphore. Sibling `heavy`
+        # still passes the bare scan on an unrelated match of that word, so it needs no entry
+        # here — `workhorse` and `cheap` below do not, and are read exactly the same way.
         "fleet.yaml:concurrency.llm.workhorse",            # settings.py:224
+        # Same accessor, same call site, the `self.cheap` fallback branch of the `{...}.get(tier,
+        # self.cheap)` in `for_tier` (settings.py:229). Used to pass the bare scan only on
+        # `models/state.py:101`'s unrelated `Field(description="...cached for cheap
+        # comparison")` — a string literal, not code, blanked once the stripper stopped
+        # special-casing docstrings. Genuinely read the same way `workhorse` is.
+        "fleet.yaml:concurrency.llm.cheap",                # settings.py:225
         # Read by the §9 rule-3 startup check (settings.py:1410-1420): a tier whose first target
         # declares a smaller `max_context` is a `ConfigValidationError` at load. Enforced in
         # full; the enforcement simply lives in the settings module.
         "fleet.yaml:llm.require_capabilities",             # settings.py:684
         "fleet.yaml:llm.require_capabilities.min_context",  # settings.py:671
+        # `FleetSettings.load` (settings.py:1147) passes `config.redaction.patterns` to
+        # `_refuse_secret_material`, which is called for every §9 source file and refuses one
+        # that matches a configured pattern (settings.py:1299-1310); `RedactionSection`'s own
+        # `model_validator` (settings.py:314) also compiles every pattern to catch a bad regex
+        # at load. An independent sweep called this key inert on the strength of an unrelated
+        # `patterns:` kwarg collision in `workers/symbolindex.py:573` — that collision is real,
+        # but it is not the only reason the bare scan passes; the key is genuinely enforced too.
+        "fleet.yaml:redaction.patterns",                   # settings.py:294
+        # `_check_redaction_switch` (settings.py:1314-1320), called from `FleetSettings.load`
+        # (settings.py:1149), refuses to load if `redaction.enabled` is false and
+        # `FLEET_ALLOW_RAW` is not `"1"`. Same independent-sweep miscall as `patterns` above —
+        # the bare scan's pass is not solely the `scan.contracts.enabled` collision it named.
+        "fleet.yaml:redaction.enabled",                    # settings.py:293
     }
 )
 
@@ -325,14 +399,23 @@ def _blank_span(lines: list[str], start: tuple[int, int], end: tuple[int, int]) 
 
 
 def _strip_comments_and_docstrings(source: str) -> str:
-    """Blank every `#` comment and every module/class/function docstring, so a config key name
-    that appears only in prose can no longer be mistaken for a read.
+    """Blank every `#` comment and every string literal, so a config key name that appears only in
+    prose can no longer be mistaken for a read.
 
-    `tokenize` finds comments (a `COMMENT` token, unambiguous). `ast` finds docstrings: a string
-    literal is a docstring only by *position* — the first statement of a module, class, or
-    function body — which a regex cannot decide (it cannot tell that string apart from any other
-    string literal without parsing the surrounding structure), so this is deliberately AST-driven,
-    not pattern-matched.
+    `tokenize` finds comments (a `COMMENT` token, unambiguous). `ast` finds string literals:
+    originally this only blanked module/class/function *docstrings* (a string literal is a
+    docstring by *position* — the first statement of such a body — which a regex cannot decide),
+    but that left every OTHER string literal scannable — concretely, `models/state.py`'s
+    `Field(description="...")` kwarg for `heartbeat_ttl_seconds` names `stale_after_s` in prose and
+    was passing the scan on that alone. Blanking every `ast.Constant` holding a `str`, regardless
+    of position, closes that hole without a regex (a regex cannot tell a string literal from
+    surrounding code without parsing).
+
+    This also blanks a string a key is genuinely read *through* — `getattr(cfg, "key")`, a dict
+    lookup by string key — which would wrongly mark such a key inert. No config-model field this
+    test walks is read that way anywhere in `src/fleet/` today (checked by hand: every
+    `getattr(...)`/`.get(...)` call with a string literal in the tree targets something other than
+    a settings-model attribute), so the blanket blank is safe in practice, not just in theory.
     """
     lines = source.splitlines(keepends=True)
 
@@ -342,23 +425,12 @@ def _strip_comments_and_docstrings(source: str) -> str:
 
     tree = ast.parse(source)
     for node in ast.walk(tree):
-        if not isinstance(node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef):
-            continue
-        body = node.body
-        if not body:
-            continue
-        first = body[0]
-        if (
-            isinstance(first, ast.Expr)
-            and isinstance(first.value, ast.Constant)
-            and isinstance(first.value.value, str)
-        ):
-            value = first.value
-            assert value.end_lineno is not None and value.end_col_offset is not None
+        if isinstance(node, ast.Constant) and isinstance(node.value, str):
+            assert node.end_lineno is not None and node.end_col_offset is not None
             _blank_span(
                 lines,
-                (value.lineno, value.col_offset),
-                (value.end_lineno, value.end_col_offset),
+                (node.lineno, node.col_offset),
+                (node.end_lineno, node.end_col_offset),
             )
 
     return "".join(lines)
