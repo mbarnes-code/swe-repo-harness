@@ -4899,3 +4899,160 @@ before the offload change is justified. That measurement is not this thread's to
    `buildverify.py`/`base.py`, ADR-0067's four parts in `cli.py`, and the `D34/D35/D36/D41` staleness
    re-audit that needs a suite run. Documentation has outpaced code for three rounds; the next round
    should not be a fourth.
+
+---
+
+## 37e. Checkpoint — 2026-08-18 · a **five-agent SDD round** (three disjoint-lane workers + one research + one review, run concurrently per task) off `docs/superpowers/plans/sdd-backlog-a.md`, base `9644406`, answers exactly what §37c left open — **§36's carryover landed**: ADR-0067's four parts shipped (closing D37), and the `D34/D35/D36/D41` staleness re-audit ran · **the audit found the ledger itself wrong in four places**: D35, D36 and D41 describe defects **never reproducible in visible history** — `git diff a1178f7 HEAD -- clone.py` shows the correct shape present **verbatim in the first commit** — and D45 was **likewise already closed** and undocumented as such; both are *stale in the closed direction*, inflating apparent debt rather than hiding real debt (caveat carried forward honestly: `a1178f7` squashes unrecorded checkpoints, so pre-squash existence is not ruled out, only nothing checkable shows it) · **the root cause was found**: commit `44d5550`'s message claims clone-worker fixes its own diff never touched — `git show 44d5550 --stat` names zero files under `workers/clone.py` · **D49 stays OPEN, correctly** — two legs closed, a third (`_record` appending the unit name, not the landed `edit.path`) untouched, and the implementer's own "fully closed" claim was **refuted by its reviewer**, who was right and had already told the ledger-lane not to over-close · **D42 fixed**, its caller-safety trace showing the raise-not-`None` change **also removes the exact `checkout -B` force-reset D43 named** as a side effect · three ADRs touched (**ADR-0070 §10** appended, **ADR-0072** new) and two new ledger entries (**D50**, **D51**) · the config-key audit test **grew from 32 to 45 tests**, and every fix round surfaced MORE inert keys, not fewer — three distinct scan blind-spot classes found, two closed in this round's commits, a third (`description=` string literals surviving the docstring-only stripper) caught only on a fourth pass and still being closed as this section is written
+
+**Numbering.** `37e`, not `37d`. `37`, `37b` and `37c` are the only occupied slots in this file, so
+`37d` reads free by that count alone — but the base commit for this round, `9644406`, already
+carries the commit message **"checkpoint 37d"** for its own prior work (ADR-0070 §9, D49/D50
+folded into one line, the inert-key ratchet), and `git show 9644406 --stat` confirms that commit
+never touched `docs/PROGRESS.md`. That checkpoint was never written up in this file — the same
+missing-section shape §36 diagnosed in itself. Writing `37d` here would misattribute this round's
+content to a commit-message label that already points at different, undocumented work. `37e` avoids
+the collision; `9644406`'s own checkpoint remains unwritten and is queued below, not backfilled here
+(out of this task's lane and this ledger's evidence — this task has no briefs or reports for whatever
+produced `9644406`).
+
+### What was completed
+
+1. **B1 — `cli.py` rules_dir fail-open, DONE** (`e605f0d`). A missing/mistyped `config/rules/` no
+   longer silently downgrades every migration to rename-only; `_transform_rules`'s `return ()` guard,
+   which existed only to swallow `load_rules`'s own absent-path raise, is removed. Review clean, one
+   Minor. **Sibling flagged and REFUTED, not queued**: `settings.py`'s `_iter_rule_engines` has the
+   identical shape but a genuinely lesser consequence — an absent dir masks nothing extra there,
+   producing a deferred loud failure rather than a silent downgrade.
+2. **D1 — ADR-0070 §10, DONE** (`084bf5f`). Measures §5's previously hand-waved exhaustiveness cost:
+   0 hard-break sites, 0 DB CHECK constraints, but **4 silent-fallback sites in 3 files**, and **0 of
+   175 (later 141, then 136) `FailureClass` test references iterate the member set** — an omitted
+   member is invisible to the suite. Re-verified by V2 independently.
+3. **C1 — D50, DONE** (`4846fb0`). Ledger entry for all 26 `KNOWN_INERT` config keys, grouped by root
+   cause with severity; the sharpest group (`llm.rate_limit`/`llm.failover`, 12 keys) and the only
+   non-latent one (`preflight.baseline_build`, whose default-true gate never runs regardless of
+   config) both called out. Flagged a third scan blind spot (name collision with a real, differently-
+   scoped `CallPolicy` field) for E1 rather than silently absorbing it into the same 26.
+4. **A1 — D49 legs 1 & 2, DONE_WITH_CONCERNS** (`c5ab3b1`), **wiring landed, J1** (`82654e8`). A1 made
+   the deterministic `check_diff` call pass `max_bytes` and gated the LLM repair branch with the same
+   check before `land_patches`, but the cap was enforced only at its field default — `cli.py` had no
+   read of `transform.max_patch_bytes`. J1 (blocked on G1 releasing `cli.py`) closed that gap:
+   `TransformInput.max_patch_bytes` threads from settings through `_transform_payloads` and
+   `_rewrite_input`, proven with a configured 100-byte cap rejecting a 500-byte patch by name, not the
+   1 MiB field default. **J1's reviewer refuted J1's own "fully closed" claim**: leg 3 (`_record`)
+   is unchanged and still appends `unit`, not `edit.path` — D49 stays open by design.
+5. **F1 — ADR-0072, DONE** (`c10526d`, committed by the orchestrator after the agent left it
+   uncommitted). D48's checkpoint drift gate **re-derives, not refuses**: a new
+   `PhaseCheckpoint.config_fingerprint` over `settings.config_sha256()` plus every role's
+   `prompt_template_version`, checked through the *existing* `ReEntry.REJECTED` path, never in
+   `_phase_preflight`. Closes the prompt-template gap ADR-0071 §3.1 recorded as open in open-swe's
+   own version of the mechanism.
+6. **E1 — config-key test fix round 1/5, DONE, re-review V3 clean** (`2a72f9f`). AST+tokenize
+   stripping (no regex) revealed 6 more genuinely-dead keys passing on prose alone; a new
+   `QUALIFIED_MATCH_KEYS` mechanism resolved the generic-word and same-named-symbol collisions; the
+   180-key tripwire became an exact count with per-section coverage. 45 tests, up from 32. V3
+   independently re-derived all six new keys against their call sites rather than trusting the fix.
+7. **G1 — ADR-0067's four parts, DONE, review clean** (`2af7dfb`). `ProbeIndeterminateError` carries
+   no `EngineUnavailableError` base; the indeterminate CLI arm precedes and stays distinguishable from
+   the unavailable arm (reviewer traced the exit code: `TransformCriterionError` → `ExitCode 6`,
+   with "no rewrite engine is installed" absent from that output); the dedupe key and
+   `no_verdict`-checks-`started`-before-`timed_out` ordering both verified. Closes D37. One Minor
+   (dedupe coverage for two same-engine repos) deferred, logic correct but untested.
+8. **H1 — ledger corrections, DONE** (`fef661f`), **plus D51, DONE**. D49 and D48 corrected in place.
+   D51's verdict is the round's most useful refusal: `relocate.py` needs **no** size/subtree cap
+   (H1 explicitly declined the brief's implied symmetry with D49) — the real gap is a missing runtime
+   containment assertion on `new_path`. Flagged for a second reviewer; not yet reviewed as this
+   section is written.
+9. **I1 — D42, DONE, review clean** (`d37f4ba`). `Git._require_settled` now raises
+   `GitCommandError` for a probe that never started or was killed at its deadline, instead of the
+   silent `None`/`False` that made an unsettled probe indistinguishable from a genuine "no". Also
+   found **D45 already closed** (`ScriptedRunner` already forwarded real `timed_out` since `32365cf`;
+   only test coverage was missing) — the ledger's fourth wrong entry today, routed to K1.
+10. **R1/R2/R3/R4/R5 — research, all RETURNED**. R1 scoped ADR-0070 §5 (see D1, above) and confirmed
+    `base.py:740-742` dead code, no ledger entry warranted. R2 audited every pinned runtime dependency
+    (pydantic, pydantic-settings, aiosqlite, typer, structlog, networkx, pyyaml) against `.venv/`
+    source and found **zero doc/implementation divergence** on all three named risks — a genuine null
+    result, the project's first such audit, with one side finding (`env_prefix`/`env_nested_delimiter`
+    are dead config; the live env-parsing path is the hand-rolled `_MappingSource`, not
+    pydantic-settings' built-in source). R3 is the ledger audit above. R4 scoped D42 (blast radius,
+    the D42↔D43 linkage, the fix shape) ahead of I1. R5 swept the config-key scan from a **detached
+    worktree pinned to `2a72f9f`**, clean of six agents' concurrent edits, and found **9 more inert
+    keys** plus a **third stripper blind spot**: `Field(description="...")` string literals survive
+    the docstring-only AST blank. Routed to E2.
+11. **V1/V2/V3 — reviews, all RETURNED/CLEAN**. V1's two IMPORTANTs (the docstring-match and
+    common-word-collision blind spots) both became E1's fix round. V2 re-derived every number in
+    ADR-0070 §10, ADR-0072 and D50 rather than accepting them — all held except D50's five
+    `RunContext(` line citations, stale by a handful of lines (substance unaffected). V3 confirmed
+    E1's fix closed all three V1 findings with no new ones, and separately confirmed the new
+    qualification mechanism produces **zero** false negatives on a real wired key (`scan.contracts.
+    enabled`) it could have wrongly swept up.
+
+### What was verified
+
+- **The caller-safety trace for D42's fix is complete, not assumed.** I1's reviewer traced all ~9
+  real call sites across all four `Git` probe methods: the `cli.py:3787/3805` sites (D43's own
+  citations) are already caught by an existing `except (..., GitError, ...)` clause one level up —
+  meaning the fix **delivers D43's benefit as a side effect**, converting a force-reset of committed
+  history into an aborted rung. `clone.py:289` and the `commits.py` rollback paths were confirmed
+  already wrapped or reclassified. One Minor found (`apply_patch` has no try/except around its probe
+  calls) with **zero current blast radius** — `grep -rn "apply_patch(" src/fleet` has no production
+  call sites, only tests.
+- **`mypy --strict src/fleet` stayed clean at 107 files across every commit in this round**, checked
+  in isolated worktrees at multiple SHAs rather than via `git stash` (to avoid concurrent-agent
+  interference), by both G1's and I1's and J1's reviewers independently.
+- **The config-key ratchet was proven in both directions**, not just forward: E1 ran three local
+  probes (each reverted before commit) confirming the new stripper both catches keys the old one
+  missed and does not start rejecting keys it previously accepted.
+- **Every citation in three of the round's docs (ADR-0070 §10, ADR-0072, D50) was re-derived by V2**
+  against source, not transcribed from the implementer's report — this is what caught D50's stale
+  line numbers and confirmed everything else held.
+
+### What is still NOT proven / left open
+
+1. **The full suite (~9 min) was never run this round.** Every agent ran only the test files covering
+   its own lane, per the plan's explicit constraint. No cross-lane regression check has happened.
+2. **D49 leg 3 remains open**: `_record` (`workers/rewrite.py:567-573`) still appends `unit`, never
+   `edit.path`, so the §3.2 criterion can still probe a filename the model never touched.
+3. **Two tasks are still in flight, uncommitted, as this section is written**:
+   - **K1** — landing the queued ledger corrections (D34 re-confirm, D35/D36/D41 never-reproducible
+     status, D42 mechanism correction, D45 correction, D49's second correction, D50's line-number fix,
+     D51's citation drift) into `docs/INTEGRATION_HONESTY.md`. `git diff` shows 127 uncommitted
+     insertion lines matching this description.
+   - **E2** — closing R5's third blind spot in `tests/test_config_keys_are_read.py`: the stripper now
+     blanks every `ast.Constant` string, not just docstrings, closing the `description=` kwarg hole
+     that let `run.stale_after_s` pass on prose alone. `git diff` shows this change uncommitted.
+   Neither commit SHA exists yet; this section cites their content from the working tree, per this
+   round's own established practice of pinning citations to a SHA where one exists and disclosing
+   where one does not.
+4. **`src/fleet/workers/base.py` and `src/fleet/workers/buildverify.py` are also concurrently
+   modified** (`git status` shows both dirty), but that work traces to `research-38.md`/`review-38.md`
+   — a different worker's round, out of `sdd-backlog-a`'s lanes and this section's evidence. Naming it
+   here is only to avoid a future reader misattributing those diffs to this round.
+5. **D51 is a judgment call awaiting its second reviewer.** H1 flagged its own containment-assertion
+   verdict as wanting independent review; none has run yet.
+6. **`9644406`'s own "checkpoint 37d" was never written up in this file** (see Numbering, above) —
+   a gap this round found but did not close, since this task has no briefs or reports for that
+   commit's round.
+7. **The ledger went stale while being corrected, and the sequencing is instructive, not just
+   unlucky**: H1 corrected D49's status to "wiring still missing" at `fef661f`; J1 landed that wiring
+   ~40 minutes later. H1 had already predicted this in its own report. The lesson carried into K1's
+   brief: every ledger status claim should cite the SHA it was measured against, because a citation
+   into a file under concurrent, active repair is stale by the time it is read regardless of care.
+
+### Next subagent task, in priority order
+
+1. **Land K1 and E2**, both uncommitted and both blocking a clean git status — K1's ledger
+   corrections and E2's config-scan blind-spot fix.
+2. **Second review for D51** (H1's relocate.py containment-assertion verdict) — flagged as wanting one,
+   not yet dispatched.
+3. **Close D49 leg 3** — `_record` should append `edit.path`, not `unit`; the last piece of a defect
+   three separate commits have now touched.
+4. **Run the full suite** (~9 min, background) — never run this round; the only check that would catch
+   a cross-lane regression among ten-plus commits touching `cli.py`, `rewrite.py`, `vcs/git.py`,
+   `tests/test_config_keys_are_read.py` and three docs files.
+5. **Account for `9644406`'s unwritten "checkpoint 37d"** — either write it up from whatever produced
+   that commit, or explicitly fold its content into a future section and say so, so the commit-message
+   label and the file's section numbers stop disagreeing.
+6. **Reconcile with round 38** once `research-38.md`/`review-38.md` lands — `workers/base.py` and
+   `workers/buildverify.py` are mid-edit under that separate thread now; this round's D34/D35/D36/D41
+   ledger corrections and round 38's own audit (`68a41ff..f12a954`) both touch clone/build-worker
+   history and should be read together, not independently, once both are committed.
