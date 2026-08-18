@@ -5599,6 +5599,87 @@ deployment, which is the expensive direction.
 unrecognised `400` body must reach `UNKNOWN`, and a test must fail if a future matcher widens to
 swallow it.
 
+### 10. Amendment — §5's cost was an unmeasured number, and Guardrail 6 says that is worse than none
+
+Appended rather than edited into §5, because ADR-0070 is committed (`32365cf`) and this file's header
+rule keeps entries intact. §5's decision to add `FailureClass.CONTEXT_OVERFLOW` stands; this section
+replaces its cost sentence.
+
+**The defect in §5 as written.** §5 says: *"`FailureClass` is consumed widely and adding a member
+touches its exhaustiveness sites. That cost is accepted because…"* Nobody had counted the
+exhaustiveness sites, or checked whether any exist. Guardrail 6 is explicit: *"Never pass an
+unmeasured number into an ADR or spec brief… a false claim carrying a 'measured' label is worse than
+no claim."* "Touches its exhaustiveness sites" is exactly such a claim — it asserts a shape, and it
+turns out to be **wrong in both directions**: there is less compiler-enforced cost than implied, and
+more silent risk than implied.
+
+**Measured, against `e605f0d`.** Replacement sentence: **4 silent-fallback sites in 3 files; 0
+hard-break sites; 0 DB migrations; 0/134 existing tests would catch an omission.**
+
+**No exhaustiveness to touch.** `FailureClass` (`src/fleet/models/enums.py:272-299`) has **17
+members**, not fewer — recounted directly off the source rather than carried over from an earlier
+estimate. There is no `Literal` mirror, and `grep -rn assert_never src/` returns **nothing**: zero
+compiler-enforced exhaustiveness exists anywhere in this codebase for this type.
+`src/fleet/state/schema.sql:367,637` declare `failure_class TEXT` with **no `CHECK (… IN (…))`** —
+unlike `status` (`:347`, seven-way `CHECK`) and `state`/`stub_fidelity` (`:306,308`), which do
+enumerate their domains. **Adding a member requires no migration.** `src/fleet/llm/schemas.py:336`
+and `src/fleet/llm/client.py:498` both derive their JSON-schema enum from
+`model.model_json_schema(...)` at call time, so a new member is picked up automatically, not hand-
+maintained. §5's cost sentence describes a mechanism that is not there.
+
+**The real risk is silent, not loud — four fallback sites in three files:**
+
+1. `src/fleet/workers/base.py:130-141` — `NON_RETRYABLE: frozenset[FailureClass]`, consumed by
+   `is_retryable()` (`:148-152`). Membership is a set literal; an omitted member does not error, it
+   **silently defaults to retryable**.
+2. `src/fleet/orchestrator/retry.py:148-244` — `RetryPolicy.decide()` branches explicitly only for
+   `DISK_EXHAUSTED` (`:170`), `BACKEND_UNAVAILABLE` (`:187`), and `TRANSIENT_INFRA` (`:200`);
+   everything else — `CONTEXT_OVERFLOW` included, once added — falls to the generic charge-an-
+   attempt tail (`:221-244`). **This is exactly where §5's "retryable only via a context-reducing
+   rung change, never a same-rung repeat" needs its own branch, and nothing in `decide()` forces one
+   to exist.**
+3. `src/fleet/workers/base.py:500-519` — `classify_exception()`, an if/elif chain ending
+   `return FailureClass.UNKNOWN` (`:519`).
+4. `src/fleet/workers/classify.py:238-258` — `_error_for()`, `else: failure_class =
+   FailureClass.UNKNOWN` (`:253-254`). This exact site is already cited **inside ADR-0070 itself**
+   (§3) as one of the `UNKNOWN` catch-alls this ADR exists to shrink — the author cited it without
+   counting it as a cost of §5's own decision.
+
+**Test-side.** `grep -rc FailureClass tests/` totals **134** references across **12** test files
+(`test_workers_build.py` 38, `test_workers_scan.py` 22, `test_runner.py` 20, `test_workers_base.py`
+15, `test_retry.py` 14, `test_state_models.py` 9, `test_graph_sequence.py` 6,
+`test_workers_transform.py` 5, `test_db.py` 2, `test_llm_client.py`/`test_cli.py`/`test_bazel.py` 1
+each). `grep -rnE "for .* in FailureClass|list\(FailureClass\)|len\(FailureClass\)" tests/` returns
+**nothing**: zero tests iterate the member set, and none pins `NON_RETRYABLE`'s membership (the one
+other hit on that name, `test_runner.py:1435`, is prose in a docstring, not an assertion). **All 134
+references pass unchanged after adding a member — 0/134 would catch an omission.**
+
+**The consequence that matters.** The cost of adding `CONTEXT_OVERFLOW` is not the edit — §2's
+"one file" framing and this section's own migration/exhaustiveness count both confirm there is
+almost nothing to touch. **The cost is that nothing fails if you forget to touch it.** A new member
+left out of `NON_RETRYABLE`, or out of `RetryPolicy.decide()`'s explicit branches, degrades silently
+to a default (retryable-by-omission, generic-attempt-charge-by-omission) rather than raising or
+failing a test. §5 therefore obliges a new test that does not exist today: one that iterates
+`FailureClass` and asserts every member is classified somewhere load-bearing (at minimum, that every
+member has a deliberate `NON_RETRYABLE` verdict and a deliberate `RetryPolicy.decide()` outcome, not
+an inherited default). Shipping the member without that test reproduces, inside this ADR's own
+change, the exact failure-mode class (D29, D34–D46) §5 invokes to justify making the change at all.
+
+**Checked and found genuinely inert, recorded without a ledger number.**
+`src/fleet/workers/base.py:740-742` defaults a missing `result.error` to
+`WorkerError(failure_class=FailureClass.UNKNOWN, retryable=False)` — inconsistent with the four
+sibling sites that choose `retryable=True` for an unclassified or timeout-shaped failure
+(`base.py:531` via `is_retryable()`, since `UNKNOWN` is not in `NON_RETRYABLE`; `base.py:852`
+`_refusal`; `base.py:922` `_abandoned`; `classify.py:255-258` `_error_for`, which excludes only
+`BUDGET_EXHAUSTED`/`BACKEND_UNAVAILABLE` from `retryable=True`). Reachability was checked, not
+assumed: the `_status_matches_its_evidence` validator (`base.py:391-407`) raises on construction if
+`status` is `"failed"` or `"timeout"` and `error is None`, and `grep -rn model_construct src/` finds
+**no** bypass of that validator anywhere in this codebase. Every path that reaches `base.py:740`
+with `status` in `{"failed", "timeout"}` therefore already carries a non-`None` `result.error`, so
+the `or WorkerError(...)` fallback can never execute. It is a real inconsistency in the code's stated
+defaults, but an unreachable one — not a defect with a live consequence, so it does not get a D-
+number.
+
 ---
 
 ## ADR-0071 — `open-swe` is **`deepagents` plus an application**, and four of its parts are worth **lifting as code**: the **prepare-run fingerprint** (the wired drift gate D48 says we lack), **capture-at-source offload** (measured thresholds at last), **model-proposes/host-adjudicates** (the semantic-verification shape ADR-0069 §5 said we had no answer for), and **`shlex`-parse-don't-regex** — against a fifth finding that is a **review heuristic, not a mechanism**: safety code that is built, tested, documented, and **wired nowhere**, while operators are told to grant real permissions on its basis
