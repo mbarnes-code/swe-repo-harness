@@ -3094,8 +3094,8 @@ def transform(
                 *(
                     [
                         "warning: the §3.2 parse probe DID NOT RUN for "
-                        f"{len(unprobed)} repo(s) — no rewrite engine is installed on this "
-                        f"host: {unprobed[0]}"
+                        f"{len(unprobed)} item(s) — no rewrite engine is installed, or no "
+                        f"transform rule claims the file: {unprobed[0]}"
                     ]
                     if unprobed
                     else []
@@ -4164,6 +4164,17 @@ async def _transform_criterion(
     which is a **violation**: an indeterminate probe on file 1 must not excuse files 2–40, so
     every rewritten file is still probed (`continue`, never `break`) and a host with no engine at
     all is deduped to one `parse_probe_unavailable` line per `(repo_id, engine)`.
+
+    **A third shape, since D49 (`9a7148c`): a rewritten path that no rule claims at all.**
+    `output.rewritten` no longer holds only rule-matched unit names — it holds every landed
+    `FilePatch.path`, including a repair's legitimate collateral edits to sibling files
+    (`llm/schemas.py` permits up to 64 paths per repair). `rule_matches_path` returns `False` for
+    such a path (unknown suffix, or a language/glob no rule covers), so there is no `rule.engine`
+    to route the probe through — the same "no configured way to check this file" shape as
+    `EngineUnavailableError`, not a probe that ran and failed. It is therefore non-blocking like
+    the engine-unavailable arm, but it must not silently vanish either: it is reported into
+    `unprobed`, one line per unmatched path (unlike the engine-unavailable dedupe, each such path
+    is its own distinct fact, not a repeat of the same host-wide cause).
     """
     violations: list[str] = []
     unprobed: list[str] = []
@@ -4202,7 +4213,15 @@ async def _transform_criterion(
         rewritten = () if output is None else tuple(dict.fromkeys(output.rewritten))
         for unit in rewritten:
             rule = next((r for r in rules if rule_matches_path(r, unit)), None)
-            if rule is None:  # pragma: no cover - a rewritten file was claimed by some rule
+            if rule is None:
+                # No configured rule claims this landed path (D49 collateral, or an unknown
+                # suffix). There is no engine to probe it through, so — like a genuinely
+                # unavailable engine — this is non-blocking, but the file must still reach the
+                # operator rather than disappear: it goes into `unprobed`.
+                unprobed.append(
+                    f"{repo_id}: {unit} landed but no transform rule claims it — the §3.2 "
+                    "parse probe did not run"
+                )
                 continue
             try:
                 probed = await registry.require(rule.engine).parse_probe(

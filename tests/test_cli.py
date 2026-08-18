@@ -1425,6 +1425,190 @@ def test_engine_unavailable_is_deduped_per_repo_and_engine_not_per_file(
     assert len(unprobed) == 1, f"expected one deduped warning for (repo1, fake), got {unprobed}"
 
 
+def test_rewritten_path_no_rule_claims_reaches_unprobed_not_silently_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Since D49 (`9a7148c`), `output.rewritten` holds every landed `FilePatch.path`, not just
+    rule-matched unit names — a repair rung's collateral edits (e.g. a `package.json` touched
+    while resolving a `.ts` unit) land here too, and no rule covers `.json` at all.
+
+    Before this fix, `rule is None` hit a bare `continue` under a
+    `# pragma: no cover - a rewritten file was claimed by some rule` — an invariant D49 broke.
+    The file was neither probed nor reported: SUCCESS with an unparsed, unmentioned file. This
+    pins that it now reaches the operator via `unprobed` instead of vanishing, while a
+    rule-matched file in the SAME repo still probes exactly as before (no over-correction: the
+    fix must not treat matched files as unmatched, or vice versa) — and that an indeterminate
+    probe on ANOTHER file stays a `violations` entry, not folded into `unprobed`, so ADR-0067's
+    split (indeterminate blocks, "no way to check it" warns) still holds now that "no way to
+    check it" has two distinct causes (missing engine, and — new here — no matching rule).
+    """
+    from fleet.cli import TransformOutput, _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.rewrite.rules import RewriteRule
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_two_commits(repo)
+    (repo / "dest" / "collateral.json").write_text("{}\n", encoding="utf-8")
+
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "fake_indeterminate_engine.py").write_text(
+        _INDETERMINATE_ENGINE_MODULE, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(engine_dir))
+    monkeypatch.delitem(__import__("sys").modules, "fake_indeterminate_engine", raising=False)
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        "fake_indeterminate_engine\n",
+    )
+    settings = FleetSettings.load(config.parent)
+
+    rule = RewriteRule(
+        id="ts-rule",
+        engine="fake",
+        languages=["typescript"],
+        applies_to=["**/*.ts"],
+        rule={"pattern": "x"},
+    )
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1",
+            rewritten=["dest/bad.ts", "dest/good.ts", "dest/collateral.json"],
+            unresolved=[],
+        )
+    )
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[rule],
+        )
+    )
+
+    from fake_indeterminate_engine import CALLS  # type: ignore[import-not-found]
+
+    assert any(call.endswith("good.ts") for call in CALLS), (
+        "the rule-matched, cleanly-parsing file must still be probed exactly as before"
+    )
+    assert any(call.endswith("bad.ts") for call in CALLS), (
+        "the rule-matched, indeterminate file must still be probed exactly as before"
+    )
+    assert not any(call.endswith("collateral.json") for call in CALLS), (
+        "a path no rule claims has no engine to route it through — it must not be probed at all"
+    )
+
+    assert len(violations) == 1 and "dest/bad.ts" in violations[0], (
+        "the indeterminate probe on a rule-matched file is still a violation, unaffected by the "
+        f"unmatched file: {violations}"
+    )
+
+    assert len(unprobed) == 1, f"expected exactly one unprobed entry: {unprobed}"
+    assert "dest/collateral.json" in unprobed[0], unprobed
+    assert "repo1" in unprobed[0], unprobed
+
+
+def test_no_rule_match_and_missing_engine_are_separate_unprobed_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A genuinely missing engine (`EngineUnavailableError`, deduped per `(repo_id, engine)`) and
+    a path no rule claims at all are both "no configured way to check this" facts, and both land
+    in the same non-blocking `unprobed` list — but they are DIFFERENT facts about different
+    files, so the engine-unavailable dedupe key must not accidentally swallow the no-rule entry
+    (or vice versa): this pins that a repo with one of each produces exactly two lines, not one.
+    """
+    from fleet.cli import TransformOutput, _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.rewrite.rules import RewriteRule
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_two_commits(repo)
+    (repo / "dest" / "collateral.json").write_text("{}\n", encoding="utf-8")
+
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "fake_unavailable_engine.py").write_text(
+        _UNAVAILABLE_ENGINE_MODULE, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(engine_dir))
+    monkeypatch.delitem(__import__("sys").modules, "fake_unavailable_engine", raising=False)
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        "fake_unavailable_engine\n",
+    )
+    settings = FleetSettings.load(config.parent)
+
+    rule = RewriteRule(
+        id="ts-rule",
+        engine="fake",
+        languages=["typescript"],
+        applies_to=["**/*.ts"],
+        rule={"pattern": "x"},
+    )
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1",
+            rewritten=["dest/good.ts", "dest/collateral.json"],
+            unresolved=[],
+        )
+    )
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[rule],
+        )
+    )
+
+    from fake_unavailable_engine import CALLS  # type: ignore[import-not-found]
+
+    assert violations == [], "neither cause blocks the run"
+    assert [str(repo / "dest" / "good.ts")] == CALLS, (
+        "collateral.json has no rule and therefore no engine to attempt — it must never reach "
+        f"the (unavailable) engine at all: {CALLS}"
+    )
+    assert len(unprobed) == 2, f"expected one line per distinct cause, got {unprobed}"
+    assert any("unavailable" in line.lower() for line in unprobed), unprobed
+    assert any("dest/collateral.json" in line for line in unprobed), unprobed
+
+
 def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
     tmp_path: Path,
 ) -> None:
