@@ -158,6 +158,16 @@ plugins = ["pydantic.mypy"]
 module = ["tests.*"]
 disallow_untyped_defs = false
 
+# ADR-0023 failover transports. `boto3` and `google-auth` are the `bedrock` / `vertex` EXTRAS
+# (`[project.optional-dependencies]`), so on a host that installs neither — which is every host
+# that does not route a tier through them — mypy cannot find them. Neither ships type stubs even
+# when installed, so this override is unconditional rather than environment-dependent. It widens
+# nothing else: `llm/backends/bedrock.py` and `llm/backends/vertex.py` are the only modules that
+# may import them (§7.7, §12.40), and both re-read every response defensively.
+[[tool.mypy.overrides]]
+module = ["boto3.*", "boto3", "botocore.*", "google", "google.*"]
+ignore_missing_imports = true
+
 [tool.pydantic-mypy]
 init_forbid_extra = true
 init_typed = true
