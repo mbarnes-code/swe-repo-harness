@@ -2063,7 +2063,7 @@ RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
 }  # The second audited door (ADR-0077): §11.5 step 5's demotion, which is by definition a write
 # of PENDING over a SUCCEEDED phase row. Reachable only via `resume=True`, so the crash sweep,
 # the reaper and `_on_breach` still cannot resurrect settled work. SUCCEEDED is the only key —
-# RHI stays operator-only (§13 row 46 (ii)), SKIPPED is a config exclusion, and DEGRADED leaves
+# RHI stays operator-only (§12 item 46 (ii)), SKIPPED is a config exclusion, and DEGRADED leaves
 # the machine only through a budgeted revalidation round (§3.5.1).
 
 
@@ -2081,6 +2081,30 @@ def transition(
     if resume and new in RESUME_DEMOTE.get(old, frozenset()):
         return new
     raise ValueError(f"illegal status transition {old.value} -> {new.value}")
+
+
+PHASE_DEMOTED_KIND: Final[str] = "PhaseDemoted"   # `findings.kind`; free text by schema design
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseDemotion:                              # the audit record one demoted row owes
+    repo_id: str
+    phase: Phase
+    from_status: RepoStatus
+    reason: str
+    to_status: RepoStatus = RepoStatus.PENDING
+
+    def payload(self) -> dict[str, object]: ...   # shaped for `cli._note_finding`
+
+
+def demote(
+    old: RepoStatus, *, repo_id: str, phase: Phase, reason: str
+) -> tuple[RepoStatus, PhaseDemotion]:
+    """§11.5 step 5's demotion path: the status AND its audit record, as one value. Accepts a
+    RESUME_DEMOTE key only — STRICTER than transition(), which already routes RUNNING -> PENDING
+    (crash sweep) and BLOCKED -> PENDING (unblocked dep) and would let both mint a finding
+    claiming green work was discarded when none ran. Calling transition(..., resume=True)
+    directly demotes SILENTLY; nothing enforces that it is not done (ADR-0077 §4)."""
 
 
 class StubState(StrEnum):
@@ -6837,11 +6861,15 @@ ascending reading is unimplementable and wrong in both directions: ten of the fi
 `preconditions_hold` implementations return `False` precisely when there is nothing to resume, so
 a fresh repo has no earliest holding phase at all, while `rdepverify.preconditions_hold` returns
 `True` when the BUILD row is missing — which would **promote** a never-cloned repo to Phase 4
-(ADR-0077 §6). Every demoted `SUCCEEDED` row is rewritten to `PENDING` through
-`transition(..., resume=True)` — the `RESUME_DEMOTE` door of §5.1, the only one that opens it —
-retaining `attempts`, dropping the phase's `checkpoints` row, and writing a `PhaseDemoted`
-finding in the same `StateWriter` unit, because a demotion discards landed, green work and must
-be at least as loud as a `checkpoint_rejected`; (6) recompute `blocked_by` from `phases` + `edges`
+(ADR-0077 §6). Every demoted `SUCCEEDED` row is rewritten to `PENDING` by calling
+**`models.enums.demote()`** — never `transition(..., resume=True)` directly, which returns the
+status ALONE and would demote silently. `demote()` returns the new status together with the
+`PhaseDemotion` the row owes; the caller writes it as a `PhaseDemoted` finding in the same
+`StateWriter` unit as the status change, retaining `attempts` and dropping the phase's
+`checkpoints` row. The finding is not optional: a demotion discards landed, green work and must
+be at least as loud as a `checkpoint_rejected`. `demote()` accepts a `RESUME_DEMOTE` key and
+nothing else — a `RUNNING`, `BLOCKED` or already-`PENDING` row is refused, because none of them
+has landed work to discard (ADR-0077 §4); (6) recompute `blocked_by` from `phases` + `edges`
 so a since-fixed dependency unblocks its subtree; (7) regenerate `migration_state.json` from
 SQLite; (8) continue. Steps 1–7 make no network call and invoke no model, so a resume is free
 and can be run as a dry-run health check (`fleet resume --dry-run`).

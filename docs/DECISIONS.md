@@ -6888,7 +6888,7 @@ under Guardrail 4. It creates a second source of truth for "which phase is this 
 `phases.status`, and would have to be threaded through `WaveScheduler.admit`, `_gated_members` and
 `state/projection.py` — a shadow scheduler state, for a question `phases.status` already answers.
 
-### 4. The audit obligation is mechanical, not a convention
+### 4. The audit obligation is a convention, deliberately reinforced — and NOT a mechanism
 
 A demotion throws away landed, green work. `orchestrator/runner.py` already argues, for the strictly
 *smaller* event of a rejected checkpoint, that "a rejection means landed work was thrown away and
@@ -6896,19 +6896,52 @@ that must be visible to whoever reads the wave". A demotion must be at least as 
 `findings` row of kind `PhaseDemoted` (`findings.kind` is free text by schema design —
 `state/schema.sql:253` — so this needs no migration).
 
-"The writer must remember to emit it" is a convention, and this file's whole argument is that
-conventions are worse than mechanisms. So the finding is **not obtainable separately from the status
-change**:
+`demote()` binds the two together, returning them as one value:
 
 ```python
 def demote(old, *, repo_id, phase, reason) -> tuple[RepoStatus, PhaseDemotion]
 ```
 
-There is no call that yields the demoted status without also yielding the record it owes. `demote()`
-is the same gate — it delegates to `transition(..., resume=True)`, so an RHI or DEGRADED row is
-refused identically here — plus two extra refusals of its own: an already-`PENDING` row raises,
-because `transition()` would accept it as an idempotent no-op (§11.7) and a `PhaseDemoted` finding
-for it would report thrown-away work that never existed.
+**An earlier draft of this ADR claimed "there is no call that yields the demoted status without the
+record it owes". That claim was FALSE and is retracted here.** `transition()` is public and
+exported, and `transition(SUCCEEDED, PENDING, resume=True)` returns `PENDING` on its own — no
+finding, no error. Python affords no way to close that door: a module-private alias, a leading
+underscore or a sentinel token are all conventions wearing a mechanism's clothes, and inventing one
+would restate the overstatement in code instead of retracting it.
+
+This matters concretely rather than academically. `state/repository.py` is subtask 6's file and
+calls `transition()` at zero sites today, so its author starts from the SPEC — and if the SPEC named
+`transition(..., resume=True)` as the demotion path, they would call it, emit no finding, and
+demotions would go silent while a test named "cannot be taken without the finding" kept passing.
+That is exactly the failure this gate exists to prevent, arriving through the door the gate left
+open. So the reinforcement is placed where that author will actually meet it:
+
+1. **`docs/SPEC.md` §11.5 step 5 names `demote()`** and says explicitly that
+   `transition(..., resume=True)` "returns the status ALONE and would demote silently".
+2. **`transition()`'s own docstring says `DO NOT pass resume=True here`**, and names `demote()`.
+3. **`PhaseDemotion`'s docstring carries an `HONEST LIMIT` paragraph** stating the gap in the one
+   place a reader of the type is guaranteed to look.
+4. **A test pins the gap** (`test_transition_can_still_demote_silently_and_that_is_a_known_gap`) so
+   it is visible in the suite rather than contradicted by it. If anyone ever does close the door,
+   that test fails and is deleted deliberately — which is the correct way to find out.
+
+An admitted convention is strictly better than an overstated guarantee, because the next author
+trusts the guarantee. What `demote()` genuinely buys is not enforcement but **strictness**: it
+refuses inputs `transition()` accepts (§4.1), and it makes the audit record impossible to *forget*
+for anyone who takes the path the SPEC names.
+
+#### 4.1 `demote()` is deliberately stricter than `transition()`
+
+`demote()` accepts a `RESUME_DEMOTE` key and nothing else. Delegating the guard to `transition()`
+would have been wrong, and not only for the terminal statuses: `ALLOWED_TRANSITIONS` already routes
+`RUNNING -> PENDING` (`enums.py:35`, the crash sweep) and `BLOCKED -> PENDING` (`enums.py:39`, an
+unblocked dependency) to `PENDING`, and **both are matched before the resume branch is ever
+consulted**. A `PhaseDemotion` minted for either would claim landed, green work was discarded when
+none ran. The `BLOCKED` case is not hypothetical: step 5 runs **before** step 6's `blocked_by`
+recompute, so a still-`BLOCKED` Phase-2 row is a state subtask 6 will genuinely encounter.
+An already-`PENDING` row is refused for the same reason — `transition()` takes it as an idempotent
+no-op (§11.7) and there is nothing to demote. A caller that wants those transitions wants
+`transition()`, and wants no finding.
 
 **One hazard handed forward to subtask 6, recorded here so it is not rediscovered as a bug.**
 `cli._note_finding` fingerprints on `(run_id, repo_id, kind)` alone and `ON CONFLICT … DO UPDATE`s.
@@ -6920,7 +6953,7 @@ repo's demotions into a single finding or fingerprint per phase.
 
 `RESUME_DEMOTE` has exactly one key. Each omission is a decision, not an oversight:
 
-- **`REQUIRES_HUMAN_INTERVENTION`.** §13 row 46 (ii) requires a test that drives "every automatic
+- **`REQUIRES_HUMAN_INTERVENTION`.** §12 item 46 (ii) requires a test that drives "every automatic
   sweep — the reaper, **`fleet resume`**, `stub_reconcile`, `blocked_by` recomputation" and finds
   none of them able to move a repo out of it. `fleet resume` is named there **by name**, so the flag
   that makes step 5 writable must not also make resume an operator. Un-abandoning stays `operator=True`.
@@ -6966,25 +6999,41 @@ next reader would re-derive the broken algorithm. `evidence_holds` itself is sub
 
 ### 7. What this ADR does not do
 
+- **It does not close the `transition(..., resume=True)` door** — see §4, which retracts the
+  earlier claim that it did.
 - **It ships no caller.** `resume=True` and `demote()` are reachable from no code in `src/` today.
   That is the intended end state of subtask 1: the gate is verified in isolation, and a
   wrongly-shaped gate is cheaper to fix before four subtasks are written against it. (`operator=True`
   is in the same position — `fleet retry`'s documented escape is itself still unwired — so this is a
   known and accepted shape in this file, not a new one.)
-- **It does not decide `attempts` on demotion.** Design ambiguity 2 is subtask 6's, and the SPEC's
-  §11.5 step 5 text amended here says `attempts` is retained, by analogy with steps 3 and 4 which
-  say so explicitly.
+- **It decides that `attempts` is RETAINED on demotion, but enforces nothing.** Design ambiguity 2
+  is resolved — by analogy with §11.5 steps 3 and 4, which say so explicitly — and the §11.5 step 5
+  text amended in this task states it. Nothing in this ADR's code can check it: `PhaseDemotion`
+  carries no `attempts` field and `demote()` touches no row. Subtask 6 owns the enforcement, and
+  its success criterion already requires asserting on the column.
 - **It does not decide where a demoted repo re-enters the schedule** (ambiguity 3, subtask 8) or
   **`--from-phase` semantics** (ambiguity 4, subtask 9).
 
 ### 8. Verification
 
 At `agent/DEM1`: `mypy --strict src/fleet` → `Success: no issues found in 107 source files`;
-`pytest tests/test_state_models.py` → 119 passed; `pytest tests/test_schema_sql.py` → 16 passed —
+`pytest tests/test_state_models.py` → 120 passed; `pytest tests/test_schema_sql.py` → 16 passed —
 the last of these because `test_schema_sql.py:342` derives the `phases.status` CHECK domain from
 `{s.value for s in RepoStatus}`, and this ADR adds **no** `RepoStatus` member, so the DDL is
-untouched and unmigrated. Three tests carry the reasoning: a demotion without `resume=True` is
-refused (including with `operator=True`, which is not a resume key); `RESUME_DEMOTE.keys() ==
-{SUCCEEDED}` with RHI, DEGRADED and SKIPPED each proven still refused *under* `resume=True`; and
-`demote()` proven to return the `PhaseDemotion` inseparably from the status, with its payload
-asserted field-by-field.
+untouched and unmigrated. Four tests carry the reasoning:
+
+1. A demotion without `resume=True` is refused — including with `operator=True`, which is not a
+   resume key.
+2. `RESUME_DEMOTE.keys() == {SUCCEEDED}`, with RHI, DEGRADED and SKIPPED each proven still refused
+   *under* `resume=True`, and SUCCEEDED proven to open onto `PENDING` and nothing else.
+3. `demote()` returns the `PhaseDemotion` alongside the status, payload asserted field-by-field,
+   and refuses all six non-`RESUME_DEMOTE` statuses — `RUNNING`, `BLOCKED` and `PENDING` included
+   (§4.1) — while `transition()` is asserted to still accept `RUNNING`/`BLOCKED -> PENDING`, so
+   the strictness is demonstrably `demote()`'s own rather than inherited.
+4. The open door is **pinned rather than claimed shut** (§4): `transition(SUCCEEDED, PENDING,
+   resume=True)` is asserted to succeed silently.
+
+Tests 1 and 3 were **mutation-tested** rather than merely observed to pass: reintroducing rejected
+alternative A (`ALLOWED_TRANSITIONS[SUCCEEDED] = {PENDING}`) fails test 1, and removing `demote()`'s
+guard fails test 3. Both mutations were reverted from a backup copy and the file re-diffed clean
+before commit.
