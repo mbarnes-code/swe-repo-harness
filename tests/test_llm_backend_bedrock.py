@@ -20,9 +20,10 @@ import subprocess
 import sys
 import types
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar, Literal
 
 import pytest
+from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------------------------
 # SDK stub — installed BEFORE the adapter is imported, and only when the real SDK is absent.
@@ -79,13 +80,30 @@ def _install_boto3_stub() -> None:
     exceptions_mod.ClientError = _StubClientError  # type: ignore[attr-defined]
     exceptions_mod.BotoCoreError = _StubBotoCoreError  # type: ignore[attr-defined]
 
-    sys.modules.setdefault("boto3", boto3_mod)
-    sys.modules.setdefault("botocore", botocore)
-    sys.modules.setdefault("botocore.config", config_mod)
-    sys.modules.setdefault("botocore.exceptions", exceptions_mod)
+    # `_absent` (find_spec), never `setdefault` (which is a `sys.modules` probe by another name).
+    # `botocore` can be installed without `boto3`, and shadowing the real one session-wide because
+    # nothing had imported it yet is the same wrong-probe class as guarding on `sys.modules`.
+    for name, module in (
+        ("boto3", boto3_mod),
+        ("botocore", botocore),
+        ("botocore.config", config_mod),
+        ("botocore.exceptions", exceptions_mod),
+    ):
+        if _absent(name):
+            sys.modules[name] = module
 
 
-SDK_INSTALLED = importlib.util.find_spec("boto3") is not None
+def _absent(name: str) -> bool:
+    """Is `name` genuinely not INSTALLED? See the twin in `test_llm_backend_vertex.py`:
+    `find_spec` reports what is installed, `name in sys.modules` only what has been imported so
+    far — and a stub guarded on the latter shadows a real package session-wide."""
+    try:
+        return importlib.util.find_spec(name) is None
+    except (ModuleNotFoundError, ValueError):
+        return True
+
+
+SDK_INSTALLED = not _absent("boto3")
 if not SDK_INSTALLED:
     _install_boto3_stub()
 
@@ -100,7 +118,12 @@ from fleet.llm.backends.bedrock import (  # noqa: E402
     parse_reply,
 )
 from fleet.llm.cache import CacheKeyParts  # noqa: E402
-from fleet.llm.client import Message, ModelBackend, TransportError  # noqa: E402
+from fleet.llm.client import (  # noqa: E402
+    Message,
+    ModelBackend,
+    TierUnavailable,
+    TransportError,
+)
 from fleet.models.enums import ModelTier, StructuredOutputMode  # noqa: E402
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price  # noqa: E402
 
@@ -390,20 +413,70 @@ def test_effort_is_omitted_when_the_target_declares_none(
     assert "additionalModelRequestFields" not in request
 
 
-def test_effort_is_not_sent_at_all_while_the_field_is_non_optional() -> None:
-    """**No `output_config` reaches the wire today, even for `effort: high`.**
+# The two shapes of `BackendTarget.effort`, reconstructed locally. They are what makes every test
+# below world-INDEPENDENT: asserting against whichever shape happens to be on disk would go red the
+# moment the sibling lane lands, with no merge conflict to explain it — the worst shape a post-land
+# failure can take.
+
+
+class LegacyEffortShape(BaseModel):
+    """`BackendTarget.effort` as it is at this commit: non-optional, defaulted."""
+
+    effort: Literal["low", "medium", "high"] = "medium"
+
+
+class Adr0075EffortShape(BaseModel):
+    """`BackendTarget.effort` after the sibling lane's ADR-0075 change, transcribed from
+    `agent/BK2:src/fleet/models/tasks.py:91`. `None` means "the operator did not say"."""
+
+    effort: Literal["low", "medium", "high"] | None = None
+
+
+def test_the_gate_is_a_predicate_over_the_model_not_a_hard_coded_flag() -> None:
+    """**Asserts the MECHANISM, not the answer.**
+
+    The previous version of this test asserted only that the gate is shut today — which a
+    hard-coded `return False`, the exact thing the name denies, satisfied just as well. Putting
+    both shapes in front of the predicate is the only assertion that can tell the two apart: a
+    constant cannot return `False` for one and `True` for the other.
+
+    This is also what makes the claim "self-removes with no land-time edit" testable rather than
+    merely stated — the ADR-0075 shape below is the real one, transcribed from the sibling branch.
+    """
+    assert bedrock_module._effort_is_expressible_as_absent(LegacyEffortShape) is False
+    assert bedrock_module._effort_is_expressible_as_absent(Adr0075EffortShape) is True
+
+
+def test_the_request_agrees_with_the_gate_whatever_the_model_declares() -> None:
+    """World-independent, and the one test that ties the predicate to the request builder.
+
+    It asserts a RELATION rather than a value: whatever `BackendTarget` currently declares, an
+    `effort: high` target sends `output_config` if and only if the gate is open. Green before the
+    sibling lands (gate shut, nothing sent) and green after (gate open, sent), while still failing
+    if `build_request` ever stops consulting the gate.
+    """
+    gate_open = bedrock_module._effort_is_expressible_as_absent()
+    request = build_request(target(effort="high"), TURNS, None, StructuredOutputMode.PROMPTED, 512)
+    assert ("output_config" in repr(request)) is gate_open
+    assert ("additionalModelRequestFields" in request) is gate_open
+
+
+def test_no_effort_reaches_the_wire_while_the_gate_is_shut(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**No `output_config` at all today, even for an explicit `effort: high`.**
 
     Two reasons converge. (1) With `"medium"` defaulted in, a target the operator never gave an
     effort is indistinguishable from one they did, so sending it asserts a routing parameter nobody
     wrote. (2) `additionalModelRequestFields` is an opaque pass-through the PROVIDER validates, the
     shape has never been live-verified, and `_from_client_error` correctly classifies a
-    non-throttle 4xx as our request being wrong — a bare `LlmError`, not a failover trigger. So an
+    non-throttle 4xx as our request being wrong — a bare `LlmError`, not a failover trigger — so an
     unverified field on EVERY call would fail every task on that target outright.
 
-    Making that rejection fail over instead was considered and rejected: every target in the tier
-    would reproduce the identical bad request, walk the whole ladder and end in `TierUnavailable`,
-    while disguising a wire-shape bug as an endpoint outage.
+    The gate is patched SHUT rather than left to the model, so this keeps testing the shut branch
+    after the sibling lands instead of silently becoming a no-op.
     """
+    monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda *_: False)
     for effort in ("low", "medium", "high"):
         request = build_request(
             target(effort=effort), TURNS, None, StructuredOutputMode.PROMPTED, 512,
@@ -412,28 +485,40 @@ def test_effort_is_not_sent_at_all_while_the_field_is_non_optional() -> None:
         assert "output_config" not in repr(request)
 
 
-def test_the_gate_is_a_predicate_over_the_model_so_it_self_removes() -> None:
-    """`BackendTarget.effort` is a non-optional `Literal` at this commit, so the gate is shut.
-    ADR-0075 makes it `str | None = None`, after which the predicate is permanently `True` and the
-    gate stops doing anything — no edit at land time, which is the whole point of expressing it as
-    a question about the model rather than as a hard-coded flag."""
-    assert bedrock_module._effort_is_expressible_as_absent() is False
-    assert type(None) not in __import__("typing").get_args(
-        BackendTarget.model_fields["effort"].annotation,
-    )
-
-
-def test_effort_rides_in_additional_model_request_fields_once_it_is_optional(
+def test_effort_is_honoured_and_omitted_correctly_once_it_is_optional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The post-ADR-0075 world, simulated. `effort` is part of the `llm_cache` key
-    (`CacheKeyParts.effort`), so once an operator can express "no effort" the value they DID write
-    must be honoured — a cached row claims the call was made at the declared effort. The `Converse`
-    request schema is model-agnostic and rejects a provider knob at top level, so it rides in the
-    documented `additionalModelRequestFields` pass-through."""
-    monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda: True)
-    request = build_request(target(effort="high"), TURNS, None, StructuredOutputMode.PROMPTED, 512)
-    assert request["additionalModelRequestFields"] == {"output_config": {"effort": "high"}}
+    """The post-ADR-0075 world, both branches, in one test so the monkeypatch is load-bearing.
+
+    The positive control is the point: a previous version asserted only the omit branch, which
+    passes trivially while the gate is shut — deleting the monkeypatch the docstring called
+    load-bearing left the test green. Asserting that `effort: high` IS sent under the same patch
+    means removing it now fails.
+
+    Once an operator can express "no effort", the value they DID write must be honoured: `effort`
+    is a `CacheKeyParts` component, so a cached row claims the call was made at the declared
+    effort. The `Converse` request schema is model-agnostic and rejects a provider knob at top
+    level, so it rides in the documented `additionalModelRequestFields` pass-through.
+    """
+    monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda *_: True)
+
+    sent = build_request(target(effort="high"), TURNS, None, StructuredOutputMode.PROMPTED, 512)
+    assert sent["additionalModelRequestFields"] == {"output_config": {"effort": "high"}}
+
+    class NoEffortTarget:
+        backend = "bedrock"
+        model_id = MODEL_ID
+        region = REGION
+        effort = None
+
+    omitted = build_request(
+        NoEffortTarget(),  # type: ignore[arg-type]
+        TURNS,
+        None,
+        StructuredOutputMode.PROMPTED,
+        512,
+    )
+    assert "additionalModelRequestFields" not in omitted
 
 
 def test_a_conversation_with_no_user_turn_is_refused() -> None:
@@ -499,15 +584,75 @@ def test_a_body_with_no_output_message_fails_over(monkeypatch: pytest.MonkeyPatc
     assert caught.value.trigger == "SERVER_ERROR"
 
 
-def test_an_unmapped_finish_reason_is_neither_repairable_nor_a_failover_trigger() -> None:
-    """Encodes WHY the dedicated type exists. `MalformedReply` promises a repair `client.py` only
-    performs around `_validate`, which an exception from `invoke` never reaches; `TransportError`
-    would have every target in the tier reproduce the same unreadable answer and then report an
-    outage, when the real defect is that this adapter is out of date."""
-    from fleet.llm.client import MalformedReply
+class _Answer(BaseModel):
+    verdict: str
 
-    assert not issubclass(UnmappedFinishReason, MalformedReply)
-    assert not issubclass(UnmappedFinishReason, TransportError)
+
+class _RaisingBackend:
+    """A `ModelBackend` whose `invoke` raises, so the CLIENT's handling is what gets measured."""
+
+    name: ClassVar[str] = "bedrock"
+    version: ClassVar[int] = 1
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+        del target
+        return ModelCapabilities()
+
+    async def invoke(self, *args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        raise self._exc
+
+
+class _TwoTargetRouter:
+    def __init__(self, targets: Sequence[BackendTarget]) -> None:
+        self._route = client_module.TierRoute(tier=ModelTier.HEAVY, targets=tuple(targets))
+
+    def resolve(self, role: str, *, tier_override: object = None) -> object:
+        del role, tier_override
+        return self._route
+
+
+def _complete_with(exc: Exception) -> None:
+    backend = _RaisingBackend(exc)
+    client = client_module.LadderModelClient(
+        _TwoTargetRouter([target(), target()]),  # type: ignore[arg-type]
+        {_RaisingBackend.name: backend},  # type: ignore[dict-item]
+    )
+    asyncio.run(
+        client.complete("transform_repair", [Message(role="user", content="x")], _Answer),
+    )
+
+
+def test_an_unmapped_finish_reason_propagates_out_of_the_client_untouched() -> None:
+    """**Asserts `client.py`'s real handling, not a subclass relation.**
+
+    The previous version asserted `UnmappedFinishReason` is a subclass of neither
+    `MalformedReply` nor `TransportError` — true, but it would stay green if `client.py`'s repair
+    catch ever widened to `except LlmError`, which is the change that would actually break the
+    contract the name claims. So the real `LadderModelClient` is driven with a backend that raises
+    it, and the exception is asserted to arrive at the caller AS ITSELF: not repaired (the repair
+    catch only wraps `_validate`, which an exception from `invoke` never reaches), and not failed
+    over (`complete`'s failover catch is `(SchemaUnsatisfied, TransportError)` only).
+
+    Two targets are configured deliberately — if the client treated this as a failover trigger it
+    would try the second and raise `TierUnavailable`, so a green result here means the very first
+    failure reached the caller.
+    """
+    with pytest.raises(UnmappedFinishReason):
+        _complete_with(UnmappedFinishReason("stop reason this adapter does not know"))
+
+
+def test_the_control_a_real_failover_trigger_does_walk_the_tier() -> None:
+    """The positive control that makes the test above meaningful. Without it, "the exception
+    propagated" could equally mean the client never got as far as its failover logic. A
+    `TransportError` over the same two targets is caught, walks both, and ends in
+    `TierUnavailable` — so the harness demonstrably WOULD have intercepted a trigger-shaped
+    failure, and did not intercept the one above."""
+    with pytest.raises(TierUnavailable):
+        _complete_with(TransportError("endpoint sick", trigger="SERVER_ERROR"))
 
 
 # ---------------------------------------------------------------------------------------------

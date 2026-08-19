@@ -15,27 +15,51 @@ and `tests/test_llm_client.py`.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import importlib.util
 import pathlib
 import subprocess
 import sys
 import types
 from collections.abc import Mapping, Sequence
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
+from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------------------------
 # SDK stub — installed BEFORE the adapter is imported, and only when the real SDK is absent.
 # ---------------------------------------------------------------------------------------------
 
 
+def _absent(name: str) -> bool:
+    """Is `name` genuinely not INSTALLED?
+
+    `find_spec`, never `name in sys.modules`. The two answer different questions: `sys.modules`
+    reports what has been imported SO FAR, so a stub guarded on it shadows a real package that is
+    installed but simply not imported yet — session-wide, for every later test. That is the same
+    wrong-probe shape as a stub whose arity matches the docs instead of the shipped class, and as
+    reading `pyproject.toml` instead of the venv.
+
+    `find_spec` raises rather than returning `None` when a PARENT package is absent, and `google`
+    is a namespace package that may be absent entirely, so the probe is guarded.
+    """
+    try:
+        return importlib.util.find_spec(name) is None
+    except (ModuleNotFoundError, ValueError):
+        return True
+
+
 def _install_google_auth_stub() -> None:
-    google_mod = sys.modules.get("google")
-    if google_mod is None:
+    if _absent("google"):
         google_mod = types.ModuleType("google")
         google_mod.__path__ = []  # type: ignore[attr-defined]
         sys.modules["google"] = google_mod
+    else:
+        # A REAL `google` namespace package is installed (several unrelated libraries publish into
+        # it). Import it rather than replacing it, so only the missing `auth` subpackage is stubbed
+        # and nothing else under `google` is shadowed.
+        google_mod = importlib.import_module("google")
 
     auth_mod = types.ModuleType("google.auth")
     auth_mod.__path__ = []  # type: ignore[attr-defined]
@@ -61,7 +85,7 @@ def _install_google_auth_stub() -> None:
     # `requests` is a hard dependency of `google.auth.transport.requests`, so it is present
     # exactly when that import succeeds. The adapter imports its exception BASE to keep the
     # transport catch from swallowing its own bugs, so the stub must supply a real class.
-    if "requests" not in sys.modules:
+    if _absent("requests"):
         requests_pkg = types.ModuleType("requests")
         requests_pkg.__path__ = []  # type: ignore[attr-defined]
         exceptions_mod = types.ModuleType("requests.exceptions")
@@ -82,16 +106,7 @@ def _install_google_auth_stub() -> None:
     sys.modules.setdefault("google.auth.transport.requests", requests_mod)
 
 
-def _sdk_installed() -> bool:
-    """`find_spec` raises rather than returning None when a PARENT package is absent, and `google`
-    is a namespace package that may be absent entirely — so the probe is guarded."""
-    try:
-        return importlib.util.find_spec("google.auth") is not None
-    except ModuleNotFoundError:
-        return False
-
-
-SDK_INSTALLED = _sdk_installed()
+SDK_INSTALLED = not _absent("google.auth")
 if not SDK_INSTALLED:
     _install_google_auth_stub()
 
@@ -107,7 +122,12 @@ from fleet.llm.backends.vertex import (  # noqa: E402
     parse_reply,
 )
 from fleet.llm.cache import CacheKeyParts  # noqa: E402
-from fleet.llm.client import Message, ModelBackend, TransportError  # noqa: E402
+from fleet.llm.client import (  # noqa: E402
+    Message,
+    ModelBackend,
+    TierUnavailable,
+    TransportError,
+)
 from fleet.models.enums import ModelTier, StructuredOutputMode  # noqa: E402
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price  # noqa: E402
 
@@ -493,15 +513,75 @@ def test_an_unmapped_stop_reason_is_raised_never_guessed() -> None:
         parse_reply(raw_predict_body(stop_reason="not-a-real-stop-reason"), target())
 
 
-def test_an_unmapped_finish_reason_is_neither_repairable_nor_a_failover_trigger() -> None:
-    """Encodes WHY the dedicated type exists. `MalformedReply` promises a repair `client.py` only
-    performs around `_validate`, which an exception from `invoke` never reaches; `TransportError`
-    would have every target in the tier reproduce the same unreadable answer and then report an
-    outage, when the real defect is that this adapter is out of date."""
-    from fleet.llm.client import MalformedReply
+class _Answer(BaseModel):
+    verdict: str
 
-    assert not issubclass(UnmappedFinishReason, MalformedReply)
-    assert not issubclass(UnmappedFinishReason, TransportError)
+
+class _RaisingBackend:
+    """A `ModelBackend` whose `invoke` raises, so the CLIENT's handling is what gets measured."""
+
+    name: ClassVar[str] = "vertex"
+    version: ClassVar[int] = 1
+
+    def __init__(self, exc: Exception) -> None:
+        self._exc = exc
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+        del target
+        return ModelCapabilities()
+
+    async def invoke(self, *args: object, **kwargs: object) -> Any:
+        del args, kwargs
+        raise self._exc
+
+
+class _TwoTargetRouter:
+    def __init__(self, targets: Sequence[BackendTarget]) -> None:
+        self._route = client_module.TierRoute(tier=ModelTier.HEAVY, targets=tuple(targets))
+
+    def resolve(self, role: str, *, tier_override: object = None) -> object:
+        del role, tier_override
+        return self._route
+
+
+def _complete_with(exc: Exception) -> None:
+    backend = _RaisingBackend(exc)
+    client = client_module.LadderModelClient(
+        _TwoTargetRouter([target(), target()]),  # type: ignore[arg-type]
+        {_RaisingBackend.name: backend},  # type: ignore[dict-item]
+    )
+    asyncio.run(
+        client.complete("transform_repair", [Message(role="user", content="x")], _Answer),
+    )
+
+
+def test_an_unmapped_finish_reason_propagates_out_of_the_client_untouched() -> None:
+    """**Asserts `client.py`'s real handling, not a subclass relation.**
+
+    The previous version asserted `UnmappedFinishReason` is a subclass of neither
+    `MalformedReply` nor `TransportError` — true, but it would stay green if `client.py`'s repair
+    catch ever widened to `except LlmError`, which is the change that would actually break the
+    contract the name claims. So the real `LadderModelClient` is driven with a backend that raises
+    it, and the exception is asserted to arrive at the caller AS ITSELF: not repaired (the repair
+    catch only wraps `_validate`, which an exception from `invoke` never reaches), and not failed
+    over (`complete`'s failover catch is `(SchemaUnsatisfied, TransportError)` only).
+
+    Two targets are configured deliberately — if the client treated this as a failover trigger it
+    would try the second and raise `TierUnavailable`, so a green result here means the very first
+    failure reached the caller.
+    """
+    with pytest.raises(UnmappedFinishReason):
+        _complete_with(UnmappedFinishReason("stop reason this adapter does not know"))
+
+
+def test_the_control_a_real_failover_trigger_does_walk_the_tier() -> None:
+    """The positive control that makes the test above meaningful. Without it, "the exception
+    propagated" could equally mean the client never got as far as its failover logic. A
+    `TransportError` over the same two targets is caught, walks both, and ends in
+    `TierUnavailable` — so the harness demonstrably WOULD have intercepted a trigger-shaped
+    failure, and did not intercept the one above."""
+    with pytest.raises(TierUnavailable):
+        _complete_with(TransportError("endpoint sick", trigger="SERVER_ERROR"))
 
 
 # ---------------------------------------------------------------------------------------------

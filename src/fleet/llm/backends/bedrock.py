@@ -46,6 +46,7 @@ from typing import Any, ClassVar, Final, Protocol, cast, get_args
 import boto3
 from botocore.config import Config as BotoConfig
 from botocore.exceptions import BotoCoreError, ClientError
+from pydantic import BaseModel
 
 from fleet.llm.client import (
     BackendReply,
@@ -447,16 +448,23 @@ def build_request(
     )
 
 
-def _effort_is_expressible_as_absent() -> bool:
-    """Can `BackendTarget.effort` represent "the operator wrote no effort"?
+def _effort_is_expressible_as_absent(model: type[BaseModel] = BackendTarget) -> bool:
+    """Can `model`'s `effort` field represent "the operator wrote no effort"?
 
     Today it cannot: the field is a non-optional `Literal["low","medium","high"]` defaulting to
     `"medium"`, so EVERY target carries a value and this returns `False`. ADR-0075 (a sibling lane)
-    makes it `str | None = None`, after which it returns `True` permanently and this gate stops
-    doing anything. It is written as a predicate over the model rather than a hard-coded flag
-    precisely so it self-removes rather than needing an edit at land time.
+    makes it `Literal["low","medium","high"] | None = None`, after which it returns `True`
+    permanently and this gate stops doing anything. It is written as a predicate over the model
+    rather than a hard-coded flag precisely so it self-removes rather than needing an edit at land
+    time.
+
+    `model` is a parameter, defaulting to the real `BackendTarget`, ONLY so a test can put both
+    shapes in front of it. A test that asserted the answer for whichever shape happens to be on
+    disk would prove nothing about the mechanism — a hard-coded `return False` would satisfy it
+    today and then fail silently after the sibling lands, which is the one failure mode this
+    predicate exists to prevent.
     """
-    field = BackendTarget.model_fields.get("effort")
+    field = model.model_fields.get("effort")
     if field is None:
         return False
     return type(None) in get_args(field.annotation)
