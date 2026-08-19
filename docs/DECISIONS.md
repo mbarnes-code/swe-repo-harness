@@ -288,8 +288,18 @@ LLM review of every file (cost scales with LOC instead of with ambiguity).
 **Decision.** Provider: Anthropic. Client: the official `anthropic` package
 (`anthropic>=0.69`), `AsyncAnthropic` only, one module-level lazily-constructed singleton,
 SDK-native retries left on (`max_retries=4`) and never re-implemented. Adaptive thinking
-(`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role *where one is declared* — ADR-0075 made `effort` optional and a `None` effort means the parameter is omitted entirely, so this is no longer per-role-unconditional;
-streaming for any call with large `max_tokens`. **No other provider, no OpenAI-compatible
+(`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role;
+streaming for any call with large `max_tokens`.
+
+> **NOT IMPLEMENTED, and deliberately so — do not reconcile code to this paragraph.** As shipped,
+> `llm/backends/anthropic.py` constructs **no `thinking` key at all** (nor any `temperature`,
+> `seed` or `top_p`), and does **not** stream: `ModelClient.stream` exists but no phase consumes
+> it. It sends `output_config.effort` **only** when the target declares one, gating on
+> `target.effort is not None` and consulting no capabilities — `ModelCapabilities` has no effort
+> field and must not grow one (ADR-0075; a `supports_effort` gate would suppress an explicitly
+> declared `effort: high` and re-key the cache). Determinism comes from the `llm_cache`, not from
+> a sampler setting. This paragraph is retained as the original decision record; §7.7's shipped-
+> backends table describes actual behaviour. **No other provider, no OpenAI-compatible
 shim, no LangChain.** Role→model assignment:
 
 | Tier | Model ID | Harness roles | Effort |
@@ -298,7 +308,7 @@ shim, no LangChain.** Role→model assignment:
 | **Workhorse / bulk** | `claude-sonnet-5` | Per-file transformation review and repair; build-failure diagnosis loop; ambiguous manifest/README extraction; PR body and migration-note generation | `high` |
 | **Cheap / volume** | `claude-haiku-4-5-20251001` | Repo classification (service/library/monolith); framework and ecosystem detection; internal-vs-external dependency labeling; commit-message and PR-title drafting; log-line triage | ~~`low`~~ **unset — superseded by ADR-0075** |
 
-All roles are declared in one `config/models.yaml` mapping `role -> {id, effort}`, so
+All roles are declared in one `config/models.yaml` mapping `role -> {id, effort?}` (`effort` optional per ADR-0075 — the shape, not just the word, is what a reconciliation reads as required), so
 re-tiering a role is a config edit, never a code edit.
 
 **Rationale.** Concentrating on one provider with one SDK removes an entire abstraction

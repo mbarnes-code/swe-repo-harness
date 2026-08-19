@@ -1,7 +1,7 @@
 """The content-addressed `llm_cache` (SPEC §6, §11.6, ADR-0021/0023).
 
 The LLM tier cannot be made deterministic by sampling parameters and the spec does not pretend
-otherwise: adaptive thinking forbids pinning temperature, and the same role may be answered by a
+otherwise: the harness pins no sampling controls, and the same role may be answered by a
 different transport on the next call. **Determinism comes from caching, not sampling** — which
 makes this module, not a `temperature=0`, the thing that lets a run be re-run and reviewed.
 

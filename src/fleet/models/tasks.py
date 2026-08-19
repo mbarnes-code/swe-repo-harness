@@ -490,7 +490,7 @@ class PullRequestDraft(FleetModel):
 
 class LlmCallRecord(FleetModel):
     """One content-addressed LLM interaction. Persisted to `llm_cache`; the cache is what makes
-    a re-run reproducible, since adaptive thinking forbids temperature pinning (§11.6)."""
+    a re-run reproducible, since the harness pins no sampling controls (§11.6)."""
 
     cache_key: str = Field(
         pattern=r"^[0-9a-f]{64}$",
