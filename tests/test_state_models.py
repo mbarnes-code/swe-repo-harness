@@ -585,7 +585,7 @@ def test_a_resume_demotion_is_impossible_without_the_resume_flag() -> None:
 def test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else() -> None:
     """`resume=True` is not a master key: it demotes settled work and re-opens nothing.
 
-    Why it matters: §13 row 46 (ii) requires that a test driving every automatic sweep — the
+    Why it matters: §12 item 46 (ii) requires that a test driving every automatic sweep — the
     reaper, **`fleet resume`**, `stub_reconcile`, `blocked_by` recomputation — finds none of them
     able to move a repo out of `REQUIRES_HUMAN_INTERVENTION`. `fleet resume` is named there by
     name, so the flag that makes step 5 writable must not also make it an operator. DEGRADED is
@@ -609,14 +609,19 @@ def test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else() ->
             transition(RepoStatus.SUCCEEDED, elsewhere, resume=True)
 
 
-def test_a_demotion_cannot_be_taken_without_the_finding_it_owes() -> None:
-    """`demote()` returns the new status AND the `PhaseDemoted` finding, as one value.
+def test_demote_pairs_the_finding_and_is_stricter_than_transition() -> None:
+    """`demote()` returns the new status AND the `PhaseDemoted` finding as one value, and refuses
+    every status `RESUME_DEMOTE` does not open.
 
     Why it matters: a demotion throws away landed, green work — strictly more than a
     `checkpoint_rejected`, which `runner.py` already argues must be visible to whoever reads the
-    wave. Emitting the finding cannot be left to the writer's good intentions, so the audit record
-    is not *available* separately from the status change: there is no call that yields one without
-    the other. The payload carries `phase` because `_note_finding` fingerprints on
+    wave — so the record travels with the status rather than depending on the writer remembering
+    it. This does NOT make the finding unavoidable; `transition(..., resume=True)` still demotes
+    silently, which the following test pins deliberately (ADR-0077 §4). What it does make
+    unavoidable is the *strictness*: `RUNNING` and `BLOCKED` both reach `PENDING` through
+    `ALLOWED_TRANSITIONS` before the resume branch is consulted, so a `demote()` that delegated
+    its guard to `transition()` would mint a finding claiming green work was discarded when none
+    ran. The payload carries `phase` because `_note_finding` fingerprints on
     `(run_id, repo_id, kind)` and would otherwise UPSERT three demoted phases into one row.
     """
     status, finding = demote(
@@ -636,20 +641,45 @@ def test_a_demotion_cannot_be_taken_without_the_finding_it_owes() -> None:
         "reason": "BUILD.bazel absent on the integration ref",
     }
 
-    # A row `RESUME_DEMOTE` does not open is refused HERE too, so no caller can reach a demotion
-    # by preferring `demote()` over `transition()`.
-    with pytest.raises(ValueError, match="illegal status transition"):
-        demote(
-            RepoStatus.REQUIRES_HUMAN_INTERVENTION,
-            repo_id="acme/billing",
-            phase=Phase.BUILD,
-            reason="triaged by a human",
-        )
+    # `demote()` accepts a RESUME_DEMOTE key and NOTHING else — deliberately stricter than
+    # `transition()`, which is not a sufficient guard here.
+    for refused in (
+        # These three reach PENDING through ALLOWED_TRANSITIONS, matched BEFORE the resume
+        # branch is consulted, so delegating the guard to `transition()` would let all three
+        # through and mint a finding claiming green work was discarded when none ran.
+        RepoStatus.RUNNING,    # the crash sweep's own edge (§11.5)
+        RepoStatus.BLOCKED,    # step 5 runs BEFORE step 6's `blocked_by` recompute, so subtask
+                               #   6 will genuinely meet a still-BLOCKED Phase-2 row
+        RepoStatus.PENDING,    # an idempotent no-op (§11.7); nothing to discard
+        # ...and these are illegal at `transition()` too, but must fail with the same message,
+        # so the reason a caller is refused does not depend on which guard caught it.
+        RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+        RepoStatus.DEGRADED,
+        RepoStatus.SKIPPED,
+    ):
+        with pytest.raises(ValueError, match="is not a demotion"):
+            demote(refused, repo_id="acme/billing", phase=Phase.BUILD, reason="not a demotion")
 
-    # An already-PENDING row is not a demotion: `transition()` would allow it as an idempotent
-    # no-op (§11.7), which would mint a finding claiming work was thrown away when none was.
-    with pytest.raises(ValueError, match="not a demotion"):
-        demote(RepoStatus.PENDING, repo_id="acme/billing", phase=Phase.BUILD, reason="noop")
+    # The refusals are `demote()`'s own, not inherited: RUNNING and BLOCKED remain perfectly
+    # legal at the gate, and a caller that wants them wants no finding.
+    assert transition(RepoStatus.RUNNING, RepoStatus.PENDING) is RepoStatus.PENDING
+    assert transition(RepoStatus.BLOCKED, RepoStatus.PENDING) is RepoStatus.PENDING
+
+
+def test_transition_can_still_demote_silently_and_that_is_a_known_gap() -> None:
+    """The audit obligation is a CONVENTION, not a mechanism — pinned here so it is not mistaken
+    for one (ADR-0077 §4).
+
+    Why it matters: `transition()` is public and exported, and `resume=True` returns the demoted
+    status on its own, with no finding and no error. Python affords no way to close that door.
+    An earlier draft of this module claimed "no call yields the demoted status without the
+    record"; that claim was false, and a false guarantee is worse than an admitted convention
+    because the demotion writer (subtask 6) would have trusted it. This test exists so the gap is
+    visible in the suite rather than contradicted by it: if someone later DOES close the door,
+    this test fails and is deleted deliberately, which is the correct way to find out.
+    """
+    assert transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, resume=True) is RepoStatus.PENDING
+    # No finding was produced, and nothing complained. `demote()` is the path §11.5 step 5 names.
 
 
 def test_the_third_failed_attempt_is_terminal() -> None:

@@ -66,7 +66,7 @@ RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
 # `transition(..., resume=True)`, so the mechanical terminality of SUCCEEDED against the crash
 # sweep, the reaper and `_on_breach` is untouched — those paths pass no flag and still cannot
 # resurrect settled work. SUCCEEDED is the ONLY key, deliberately:
-#   - RHI is absent because §13 row 46 (ii) names `fleet resume` among the automatic sweeps that
+#   - RHI is absent because §12 item 46 (ii) names `fleet resume` among the automatic sweeps that
 #     must be unable to move a repo out of it. Only an operator re-opens an abandoned repo.
 #   - SKIPPED is absent because it is a config exclusion, not work a resume may un-decide.
 #   - DEGRADED is absent because it leaves the machine only via a budgeted revalidation round
@@ -81,10 +81,16 @@ visible to whoever reads the wave" — so it is audited rather than silent (ADR-
 
 @dataclass(frozen=True, slots=True)
 class PhaseDemotion:
-    """The audit record for one demoted `phases` row. Obtainable only from `demote()`, which
-    returns it *alongside* the new status: a caller cannot take the demotion without also holding
-    the finding it owes, which is what makes the audit obligation mechanical rather than a
-    convention a later writer can forget."""
+    """The audit record for one demoted `phases` row, returned by `demote()` *alongside* the new
+    status so a caller that goes through `demote()` cannot end up holding the demotion without
+    the finding it owes.
+
+    HONEST LIMIT (ADR-0077 §4): this is a convention, not a mechanism. `transition()` is public
+    and `transition(SUCCEEDED, PENDING, resume=True)` returns `PENDING` on its own, with no
+    finding and no error — Python affords no way to close that door. What makes `demote()` the
+    real path is that §11.5 step 5 names it, this docstring names it, and `demote()` is the only
+    place the two are bound together. A future demotion writer that calls `transition()` directly
+    WILL demote silently, and no test here can catch it."""
 
     repo_id: str
     phase: Phase
@@ -116,8 +122,11 @@ def transition(
 
     `operator=True` opens `OPERATOR_REOPEN` (a human at `fleet retry`); `resume=True` opens
     `RESUME_DEMOTE` (§11.5 step 5). Both default to False, so no existing caller — and no
-    automatic sweep — gains a single new edge. Prefer `demote()` over `resume=True` directly:
-    it is the same gate plus the `PhaseDemotion` finding the demotion owes."""
+    automatic sweep — gains a single new edge.
+
+    DO NOT pass `resume=True` here. Call `demote()` instead: this function returns the status
+    alone, so a demotion made through it emits NO `PhaseDemoted` finding and is invisible to
+    whoever reads the run. Nothing enforces that — it is a convention (ADR-0077 §4)."""
     if new is old:
         return new
     if new in ALLOWED_TRANSITIONS[old]:
@@ -132,14 +141,23 @@ def transition(
 def demote(
     old: RepoStatus, *, repo_id: str, phase: Phase, reason: str
 ) -> tuple[RepoStatus, PhaseDemotion]:
-    """THE way to demote one `phases` row for §11.5 step 5 — the status AND its audit record.
+    """The demotion path for §11.5 step 5 — the status AND its audit record, as one value.
 
-    Raises `ValueError` for a status `RESUME_DEMOTE` does not open (so an RHI or DEGRADED row is
-    refused here exactly as it is at `transition`), and for a row that is already `PENDING`:
-    re-writing PENDING over PENDING is a no-op, not a demotion, and manufacturing a `PhaseDemoted`
-    finding for it would report thrown-away work that never existed."""
-    if old is RepoStatus.PENDING:
-        raise ValueError("a PENDING phase row is not a demotion; nothing was thrown away")
+    Accepts a `RESUME_DEMOTE` key and nothing else. That is deliberately STRICTER than
+    `transition()`, which is not a sufficient guard here: `ALLOWED_TRANSITIONS` already routes
+    `RUNNING -> PENDING` (the crash sweep) and `BLOCKED -> PENDING` (an unblocked dependency) to
+    `PENDING`, and both are matched *before* the resume branch is ever consulted. A `PhaseDemoted`
+    finding minted for one of those would claim landed, green work was discarded when none ran —
+    which matters because step 5 runs BEFORE step 6's `blocked_by` recompute, so a still-`BLOCKED`
+    Phase-2 row is a case subtask 6 will genuinely encounter. `PENDING` is refused for the same
+    reason: `transition()` would take it as an idempotent no-op (§11.7) and there is nothing to
+    demote. Callers wanting those transitions want `transition()`, and they want no finding."""
+    if old not in RESUME_DEMOTE:
+        raise ValueError(
+            f"{old.value} is not a demotion: only "
+            f"{'/'.join(sorted(k.value for k in RESUME_DEMOTE))} may be demoted, and a "
+            f"{old.value} row has no landed work to discard"
+        )
     new = transition(old, RepoStatus.PENDING, resume=True)
     return new, PhaseDemotion(repo_id=repo_id, phase=phase, from_status=old, reason=reason)
 
