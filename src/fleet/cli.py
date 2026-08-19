@@ -9188,6 +9188,35 @@ async def _pr_impl(
     }
 
 
+async def _drain_llm_findings(ctx: RunContext) -> None:
+    """Persist what `ctx`'s LLM client buffered, before the `StateWriter` closes.
+
+    **Every `RunContext` gets an `LlmFindingSink` wired into its client** (`context.py`), because
+    `on_drift` / `on_failover` are synchronous callbacks that can only buffer. `PhaseRunner`
+    drains its own after each dispatch — but a command that drives a worker WITHOUT a
+    `PhaseRunner` has no drain at all, and `fleet pr` is exactly that shape: it builds a full
+    `RunContext` and calls `PrwriterWorker.run` directly. A local endpoint serving `pr_body` at
+    PROMPTED while `models.yaml` promises JSON_SCHEMA would emit a `CapabilityDrift` for every PR
+    in the fleet, and all of them would be discarded when the writer closed — "computed, then
+    discarded", the defect this sink exists to close, in a shipped command.
+
+    Swallowed and surfaced, for the same reason and in the same shape as
+    `PhaseRunner._drain_llm_findings` and `obs/events.py`: this is telemetry, and a failed
+    diagnostics write must not turn a fleet of successfully-opened PRs into a failed command.
+    `flush()` re-buffers what did not land, so nothing is lost that a later drain could save.
+    """
+    try:
+        await ctx.llm_findings.flush()
+    except Exception as exc:
+        ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback in a durable record
+            "llm_findings_flush_failed",
+            run_id=str(ctx.run_id),
+            pending=ctx.llm_findings.pending,
+            exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+            error=str(exc),
+        )
+
+
 async def _emit_prs(
     settings: FleetSettings,
     path: Path,
@@ -9261,6 +9290,7 @@ async def _emit_prs(
                     opened[candidate.repo_id] = outcome.pr.url or ""
                     if outcome.draft:
                         drafted.append(candidate.repo_id)
+                await _drain_llm_findings(ctx)
             finally:
                 await read_conn.close()
     finally:

@@ -55,7 +55,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from fleet.llm.client import BackendFailover, CapabilityDrift
-    from fleet.models.enums import Phase
+    from fleet.models.enums import ModelTier, Phase
     from fleet.state.db import StateWriter
     from fleet.state.repository import StateRepository
 
@@ -83,10 +83,12 @@ _CAVEAT: Final = (
     "Tier exhaustion only. This is NOT evidence that any backend is down: llm/client.py fails a "
     "target over without inspecting TransportError.trigger, so sustained RATE_LIMIT throttling "
     "reaches this finding identically to a CONNECTION or SERVER_ERROR failure (SPEC 13 row 43 -- "
-    "a 429 alone can never mean DOWN). Check failover_triggers and throttling_observed below, "
-    "and the backend_failover events for this run_id: they carry the trigger for every target "
-    "EXCEPT the one that exhausted the tier, which never reports its own. If throttling is what "
-    "you see, the correct action is to run at lower concurrency, not to repair infrastructure."
+    "a 429 alone can never mean DOWN). Read failover_triggers together with "
+    "failover_triggers_scope: when the scope is 'run' the map spans EVERY tier this run touched, "
+    "not only the exhausted one named in `observed`, so match the tier key yourself before "
+    "concluding anything. Within a tier the map still omits the target that exhausted it, which "
+    "never reports its own trigger. If the triggers for the exhausted tier are throttling, the "
+    "correct action is to run at lower concurrency, not to repair infrastructure."
 )
 
 
@@ -123,8 +125,22 @@ class LlmFindingSink:
     repository: StateRepository
     clock: Callable[[], datetime] = utcnow
     _drifts: list[CapabilityDrift] = field(default_factory=list, init=False, repr=False)
-    _failovers: list[BackendFailover] = field(default_factory=list, init=False, repr=False)
-    _triggers: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+    _failovers: list[tuple[BackendFailover, str]] = field(
+        default_factory=list, init=False, repr=False
+    )
+    """`(event, event_uid)`. The uid is minted ONCE, when the record is buffered — never per
+    write attempt. `StateWriter.submit` queues the unit and then awaits its future, so a
+    `CancelledError` delivered at that await leaves the unit queued and it still commits; a
+    re-buffered record re-written under a FRESH uid would slip past
+    `ON CONFLICT (run_id, event_uid) DO NOTHING` and double-count. A stable uid makes the retry
+    idempotent, which is the same property `_INSERT_FINDING`'s fingerprint gives the drift side."""
+
+    _triggers: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
+    """`{tier: {"<backend>:<model_id>": trigger}}`. **Keyed by TIER first, and that is the whole
+    point.** `SPEC_ROLE_TIERS` (`llm/roles.py:65-77`) routes the twelve roles across HEAVY,
+    WORKHORSE and CHEAP, so one run drives all three tiers through one client and one sink. A
+    flat target-keyed map let a CHEAP-tier 429 set `throttling_observed: true` on a HEAVY-tier
+    outage row — telling the operator to lower concurrency while a HEAVY endpoint stayed dead."""
 
     # -- the two callbacks `LadderModelClient` calls ------------------------------------------
 
@@ -138,31 +154,44 @@ class LlmFindingSink:
     def on_failover(self, event: BackendFailover) -> None:
         """`LadderModelClient(on_failover=...)`. Same contract, same reason.
 
-        Also records WHY the source target was retired, keyed by target. That map is what stops
-        `BackendUnavailable` from claiming it knows nothing about the triggers — see
+        Also records WHY the source target was retired, **under that target's tier**. That map is
+        what stops `BackendUnavailable` from claiming it knows nothing about the triggers — see
         `record_backend_unavailable`. In-memory and per-run, the same lifetime SPEC §11.8 gives
         `BackendHealth`: a resumed run must re-observe rather than inherit a stale verdict.
+
+        Last write wins per (tier, target). A target retired by `RATE_LIMIT` in wave 3 and by
+        `CONNECTION` in wave 7 reports only the later one. Known and deliberate at this size — the
+        map is a *current* observation, not a history, and a history belongs in the
+        `backend_failover` events, which keep every hop.
         """
-        self._failovers.append(event)
-        self._triggers[f"{event.from_backend}:{event.from_model_id}"] = event.trigger
+        self._failovers.append((event, str(uuid.uuid4())))
+        self._triggers.setdefault(str(event.tier), {})[
+            f"{event.from_backend}:{event.from_model_id}"
+        ] = event.trigger
 
     @property
     def pending(self) -> int:
         """How much is buffered. Diagnostics and tests; never a control-flow input."""
         return len(self._drifts) + len(self._failovers)
 
-    @property
-    def observed_triggers(self) -> dict[str, str]:
-        """`{"<backend>:<model_id>": "<FailoverTrigger>"}` for every target retired so far.
+    def observed_triggers(self, tier: ModelTier | None = None) -> dict[str, dict[str, str]]:
+        """`{tier: {"<backend>:<model_id>": "<FailoverTrigger>"}}`, optionally narrowed to one tier.
 
-        A COPY, so a caller cannot mutate the sink's state. Run-scoped and keyed by target rather
-        than by call, which is the right grain for the same reason `CapabilityDrift` carries no
-        `repo_id`: a trigger is a fact about an endpoint, not about whichever repo happened to be
-        holding it. Necessarily PARTIAL — `client.py:539-541` guards `_emit_failover` with
-        `index + 1 < len(targets)`, so the target that exhausts a tier never reports its trigger,
-        and a single-target tier reports none at all.
+        A deep COPY, so a caller cannot mutate the sink's state. Keyed by target within a tier for
+        the same reason `CapabilityDrift` carries no `repo_id`: a trigger is a fact about an
+        endpoint, not about whichever repo happened to be holding it. Necessarily PARTIAL —
+        `client.py:539-541` guards `_emit_failover` with `index + 1 < len(targets)`, so the target
+        that exhausts a tier never reports its trigger, and a single-target tier reports none.
+
+        The shape is the SAME whether or not `tier` narrows it: one field name, one shape, so a
+        consumer never has to branch on which caller wrote the row.
         """
-        return dict(self._triggers)
+        wanted = None if tier is None else str(tier)
+        return {
+            name: dict(targets)
+            for name, targets in self._triggers.items()
+            if wanted is None or name == wanted
+        }
 
     # -- persistence -------------------------------------------------------------------------
 
@@ -188,7 +217,8 @@ class LlmFindingSink:
                 written += await self._write_drifts(drifts)
                 drifts = []
             while unsent < len(failovers):
-                await self._write_failover(failovers[unsent])
+                event, event_uid = failovers[unsent]
+                await self._write_failover(event, event_uid)
                 unsent += 1
                 written += 1
         except BaseException:
@@ -238,8 +268,13 @@ class LlmFindingSink:
         await self.writer.submit(unit)
         return len(params)
 
-    async def _write_failover(self, event: BackendFailover) -> None:
-        """One `events` row. `seq` is allocated in-statement by the repository, never here (§6)."""
+    async def _write_failover(self, event: BackendFailover, event_uid: str) -> None:
+        """One `events` row. `seq` is allocated in-statement by the repository, never here (§6).
+
+        `event_uid` is passed IN rather than minted here: see `_failovers`. A retry must reuse the
+        uid the record was buffered with, or `ON CONFLICT (run_id, event_uid) DO NOTHING` cannot
+        recognise a row that already landed.
+        """
         await self.repository.append_event(
             EventRow(
                 run_id=self.run_id,
@@ -249,7 +284,7 @@ class LlmFindingSink:
                 phase=None,
                 level="warn",
                 event=BACKEND_FAILOVER_EVENT,
-                event_uid=str(uuid.uuid4()),
+                event_uid=event_uid,
                 payload=_json(
                     {
                         "role": event.role,
@@ -265,7 +300,7 @@ class LlmFindingSink:
         )
 
     async def record_backend_unavailable(
-        self, *, repo_id: str, phase: Phase, observed: str
+        self, *, repo_id: str, phase: Phase, observed: str, tier: ModelTier | None = None
     ) -> None:
         """§13 row 40: a tier was exhausted. Written BEFORE the exit-8 halt.
 
@@ -304,20 +339,43 @@ class LlmFindingSink:
         The set this run actually holds, however, is **not empty**, and saying so would have been
         a second false statement in the opposite direction. For an N-target tier the first N-1
         triggers are emitted, `on_failover` is now wired, and this same sink both persists them as
-        `backend_failover` events and keeps them in `observed_triggers`. An operator who read
-        "triggers: none recorded" and concluded the throttle-vs-outage question was unanswerable
-        would be repairing infrastructure while N-1 `RATE_LIMIT` rows sat in `events` for the same
-        run. So `failover_triggers` carries what is known and `failover_triggers_recorded` is a
+        `backend_failover` events and keeps them. An operator who read "triggers: none recorded"
+        and concluded the throttle-vs-outage question was unanswerable would be repairing
+        infrastructure while N-1 `RATE_LIMIT` rows sat in `events` for the same run. So
+        `failover_triggers` carries what is known and `failover_triggers_recorded` is a
         three-valued STRING — `"none"` or `"partial"`, never `"complete"`, because completeness
         is structurally unreachable until `TierUnavailable` itself carries the triggers.
 
+        **`tier` is what keeps that map at the right GRAIN, and omitting it costs a field.** One
+        run drives HEAVY, WORKHORSE and CHEAP through one client and one sink
+        (`SPEC_ROLE_TIERS`, `llm/roles.py:65-77`). An unfiltered map let a CHEAP-tier 429 two
+        hours earlier set `throttling_observed: true` on a HEAVY-tier outage row, sending the
+        operator to lower concurrency while a dead HEAVY endpoint went unrepaired — the same
+        false-statement class this row exists to avoid, pointed the other way.
+
+        * `tier` given → the map is narrowed to it, `failover_triggers_scope` is `"tier"`, and
+          `throttling_observed` is a real boolean about *that* tier.
+        * `tier` omitted → the map is the whole run, **keyed by tier so every entry is still
+          self-describing**, `failover_triggers_scope` is `"run"`, and `throttling_observed` is
+          `null`. Not `false`: we hold triggers, we simply cannot say whether any belongs to the
+          tier that died, and a `false` there would be the mirror-image lie.
+
+        The runner's call site omits it, because `TierUnavailable.tier` is lost at the
+        exception→`WorkerError` boundary and `observed` — the only carrier left — must not be
+        parsed. The operator cross-references it by eye: `observed` names the tier and the map's
+        keys are tier names. Carrying it structurally means changing `WorkerError`; another lane.
+
         `throttling_observed` is the derived answer to the only question that changes the
-        operator's next action. It is a fact about what was measured, not an inference: it is true
-        iff some target on this run was retired by a `RATE_LIMIT`. It is deliberately NOT the
-        negation of `asserts_outage` — both may be false, which means "we do not know".
+        operator's next action. It is deliberately NOT the negation of `asserts_outage` — both
+        may be false, which means "we do not know".
         """
         stamp = _iso(self.clock())
-        triggers = self.observed_triggers
+        triggers = self.observed_triggers(tier)
+        throttled: bool | None = None
+        if tier is not None:
+            throttled = any(
+                t == "RATE_LIMIT" for targets in triggers.values() for t in targets.values()
+            )
         params = (
             self.run_id,
             repo_id,
@@ -336,7 +394,8 @@ class LlmFindingSink:
                     "asserts_outage": False,
                     "failover_triggers": triggers,
                     "failover_triggers_recorded": "partial" if triggers else "none",
-                    "throttling_observed": any(t == "RATE_LIMIT" for t in triggers.values()),
+                    "failover_triggers_scope": "run" if tier is None else "tier",
+                    "throttling_observed": throttled,
                     "caveat": _CAVEAT,
                 }
             ),

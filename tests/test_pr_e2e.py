@@ -45,6 +45,8 @@ from typer.testing import CliRunner
 
 from fleet import cli
 from fleet.cli import ExitCode, app
+from fleet.llm import client as client_module
+from fleet.llm.client import StructuredOutputMode, TransportError
 from fleet.models.enums import BreakStrategy, PrState
 from fleet.state.db import connect_ro
 from fleet.state.projection import build_state
@@ -922,3 +924,89 @@ def test_a_forge_failure_names_the_configured_forge_and_not_gh(
     assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
     assert "gitea" in result.output, result.output
     assert "`gh` failed" not in result.output, result.output
+
+
+# ---------------------------------------------------------------------------------------
+# The LLM findings sink is drained by `fleet pr` (§13 row 37)
+# ---------------------------------------------------------------------------------------
+
+
+class DriftingBackend:
+    """A registered backend that promises the top structured-output rung and honours none of it.
+
+    The shape of a local server that advertises guided JSON in `models.yaml` and silently ignores
+    the parameter. What it *returns* is irrelevant to this test: `_emit_drift` fires once per
+    TARGET before the call, whether or not the call then succeeds (§13 row 37), so the reply here
+    is deliberately unusable and `prwriter` falls back to its non-prose body exactly as it does
+    today with an empty registry.
+    """
+
+    name = "anthropic"
+    version = 1
+
+    def declared_capabilities(self, target: Any) -> Any:
+        from fleet.models.tasks import ModelCapabilities
+
+        return ModelCapabilities(
+            supports_json_schema=False,
+            supports_tools=False,
+            supports_constrained_decoding=False,
+            max_output_tokens=4096,
+            structured_output_modes=(
+                StructuredOutputMode.JSON_SCHEMA,
+                StructuredOutputMode.PROMPTED,
+            ),
+        )
+
+    async def invoke(
+        self, target: Any, messages: Any, schema: Any, mode: Any, **kwargs: Any
+    ) -> Any:
+        raise TransportError("the fixture endpoint answers nothing", trigger="CONNECTION")
+
+
+def test_fleet_pr_persists_the_llm_findings_its_own_run_computed(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    forge: FakeForge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`fleet pr` builds a full `RunContext` and drives `PrwriterWorker` **directly**, with no
+    `PhaseRunner` anywhere in `_emit_prs`. Every `RunContext` gets an `LlmFindingSink` wired into
+    its client, and `PhaseRunner` is what drains one — so before this fix the command computed
+    `CapabilityDrift` records for every PR in the fleet and discarded all of them when the
+    `StateWriter` closed.
+
+    That is this lane's own defect — "computed, then discarded" — living in a shipped command, and
+    it survived the first review because `grep model_client src/fleet/cli.py` is empty: the PR
+    path reaches the client through `WorkerContext.llm`, not through that name. Importer identity
+    is not call path.
+
+    The assertion is a row in `findings`, read out of the database after the process finished the
+    command — the same standard as the rest of the lane. `pr_title` routes to CHEAP and `pr_body`
+    to WORKHORSE (`config/models.yaml`), so a drained run leaves one row per tier, which is also
+    what shows the drift is attributed to the target rather than to the repo.
+    """
+    verified(fleet)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": DriftingBackend()})
+
+    result = run_pr(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert sorted(payload(result)["opened"]) == list(LIBRARIES), (
+        "the PRs must still open — a model that cannot answer is a degraded body, not a failure"
+    )
+
+    rows = query(fleet, "SELECT repo_id, severity, payload FROM findings WHERE kind = ?",
+                 ("CapabilityDrift",))
+    assert rows, (
+        "`fleet pr` computed the drift and threw it away: no PhaseRunner, therefore no drain"
+    )
+    assert {r[0] for r in rows} == {None}, (
+        "a drift is a property of a TARGET, not of the repo whose PR happened to trigger it"
+    )
+    payloads = [json.loads(r[2]) for r in rows]
+    assert {p["actual"] for p in payloads} == {"PROMPTED"}
+    assert {p["promised"] for p in payloads} == {"JSON_SCHEMA"}
+    assert {p["tier"] for p in payloads} == {"CHEAP", "WORKHORSE"}, (
+        "`pr_title` is CHEAP and `pr_body` is WORKHORSE — both tiers drifted and both were kept"
+    )

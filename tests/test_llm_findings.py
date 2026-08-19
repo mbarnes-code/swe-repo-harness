@@ -403,7 +403,12 @@ async def test_backend_unavailable_refuses_to_assert_an_outage(tmp_path: Path) -
         assert payload["failover_triggers_recorded"] == "none", (
             "no failover was observed on this run, so there is genuinely nothing to report"
         )
-        assert payload["throttling_observed"] is False
+        assert payload["throttling_observed"] is None, (
+            "the runner cannot say WHICH tier died (`TierUnavailable.tier` is lost at the "
+            "exception -> WorkerError boundary), so a boolean here would be a claim about a tier "
+            "this row cannot identify"
+        )
+        assert payload["failover_triggers_scope"] == "run"
         assert "429" in str(payload["caveat"]) or "RATE_LIMIT" in str(payload["caveat"]), (
             "the operator-facing text has to name the alternative explanation, or the honesty "
             "flags above are unactionable"
@@ -490,14 +495,19 @@ async def test_the_finding_reports_the_partial_trigger_set_it_actually_holds(
             repo_id="repo-a",
             phase=Phase.TRANSFORM,
             observed="tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
+            tier=ModelTier.WORKHORSE,
         )
         _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
 
-        assert payload["failover_triggers"] == {"fake:fake-1": "RATE_LIMIT"}
+        assert payload["failover_triggers"] == {"WORKHORSE": {"fake:fake-1": "RATE_LIMIT"}}, (
+            "keyed by TIER first, so every entry is self-describing even when the row cannot "
+            "name the tier that died"
+        )
         assert payload["failover_triggers_recorded"] == "partial", (
             "'partial' is the only true value: N-1 triggers are held, the Nth is unknowable"
         )
         assert payload["failover_triggers_recorded"] != "complete"
+        assert payload["failover_triggers_scope"] == "tier"
         assert payload["throttling_observed"] is True, (
             "THE field that changes the operator's next action — run slower, do not repair"
         )
@@ -525,11 +535,14 @@ async def test_throttling_observed_is_not_the_negation_of_asserts_outage(tmp_pat
     async for h in _build(tmp_path, backend, make_router("fake-1", "fake-2")):
         await h.ctx.model_client.complete(ROLE, [Message(role="user", content="x")], Verdict)
         await h.ctx.llm_findings.record_backend_unavailable(
-            repo_id="repo-a", phase=Phase.TRANSFORM, observed="tier WORKHORSE exhausted"
+            repo_id="repo-a",
+            phase=Phase.TRANSFORM,
+            observed="tier WORKHORSE exhausted",
+            tier=ModelTier.WORKHORSE,
         )
         _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
 
-        assert payload["failover_triggers"] == {"fake:fake-1": "CONNECTION"}
+        assert payload["failover_triggers"] == {"WORKHORSE": {"fake:fake-1": "CONNECTION"}}
         assert payload["throttling_observed"] is False
         assert payload["asserts_outage"] is False
 
@@ -677,3 +690,143 @@ async def test_the_buffer_survives_cancellation() -> None:
         await sink.flush()
 
     assert sink.pending == 1
+
+
+async def test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_row(
+    tmp_path: Path,
+) -> None:
+    """N1. The trigger map is run-scoped and one run drives all three tiers through one client
+    and one sink (`SPEC_ROLE_TIERS`, `llm/roles.py:65-77`), so an unfiltered map is a cross-tier
+    contamination channel.
+
+    The scenario is the reviewer's, made executable: early in a long run a CHEAP role fails a
+    target over on a 429; hours later HEAVY exhausts on genuine `CONNECTION` failures. With a flat
+    target-keyed map the HEAVY row came out carrying `throttling_observed: true` and a target that
+    was never in the HEAVY tier — telling the operator to lower concurrency while a dead HEAVY
+    endpoint went unrepaired. That is the same false-statement class the row exists to avoid,
+    pointed the other way.
+    """
+    sink = _sink(BrokenWriter(), BrokenRepository())
+    sink.on_failover(
+        BackendFailover(
+            role="repo_classify",
+            tier=ModelTier.CHEAP,
+            from_backend="fake",
+            from_model_id="cheap-1",
+            to_backend="fake",
+            to_model_id="cheap-2",
+            trigger="RATE_LIMIT",
+        )
+    )
+    sink.on_failover(
+        BackendFailover(
+            role="build_author",
+            tier=ModelTier.HEAVY,
+            from_backend="fake",
+            from_model_id="heavy-1",
+            to_backend="fake",
+            to_model_id="heavy-2",
+            trigger="CONNECTION",
+        )
+    )
+
+    heavy = sink.observed_triggers(ModelTier.HEAVY)
+    assert heavy == {"HEAVY": {"fake:heavy-1": "CONNECTION"}}, (
+        "the CHEAP 429 must not appear in a HEAVY view — it is a fact about a different tier"
+    )
+    assert sink.observed_triggers(ModelTier.CHEAP) == {"CHEAP": {"fake:cheap-1": "RATE_LIMIT"}}
+    assert set(sink.observed_triggers()) == {"CHEAP", "HEAVY"}, (
+        "the unnarrowed view still holds both, keyed so each entry says which tier it is about"
+    )
+
+
+async def test_a_heavy_outage_row_scoped_to_its_tier_reports_no_throttling(tmp_path: Path) -> None:
+    """The persisted half of the same scenario, read back out of SQLite.
+
+    `throttling_observed` must answer for the tier that DIED, not for the run. A row that said
+    `true` here would send an operator to lower concurrency for an outage that had nothing to do
+    with rate limits.
+    """
+    backend = ScriptedBackend(HONEST_CAPS)
+    async for h in _build(tmp_path, backend, make_router()):
+        sink = h.ctx.llm_findings
+        sink.on_failover(
+            BackendFailover(
+                role="repo_classify",
+                tier=ModelTier.CHEAP,
+                from_backend="fake",
+                from_model_id="cheap-1",
+                to_backend="fake",
+                to_model_id="cheap-2",
+                trigger="RATE_LIMIT",
+            )
+        )
+        sink.on_failover(
+            BackendFailover(
+                role="build_author",
+                tier=ModelTier.HEAVY,
+                from_backend="fake",
+                from_model_id="heavy-1",
+                to_backend="fake",
+                to_model_id="heavy-2",
+                trigger="CONNECTION",
+            )
+        )
+        await sink.record_backend_unavailable(
+            repo_id="repo-a",
+            phase=Phase.BUILD,
+            observed="tier HEAVY exhausted after targets: fake:heavy-1, fake:heavy-2",
+            tier=ModelTier.HEAVY,
+        )
+        _, _, _, payload = (await h.findings(BACKEND_UNAVAILABLE))[0]
+
+        assert payload["failover_triggers"] == {"HEAVY": {"fake:heavy-1": "CONNECTION"}}
+        assert payload["failover_triggers_scope"] == "tier"
+        assert payload["throttling_observed"] is False, (
+            "the only RATE_LIMIT in this run belongs to CHEAP, which is not the tier that died"
+        )
+        assert payload["asserts_outage"] is False, (
+            "a CONNECTION trigger is real evidence of unreachability and STILL does not license "
+            "the DOWN claim — the exhausting target's own trigger is never emitted"
+        )
+
+
+async def test_a_retried_failover_does_not_duplicate_its_events_row() -> None:
+    """N3. `StateWriter.submit` queues the unit and then awaits its future, so a `CancelledError`
+    at that await leaves the unit queued — it still commits — while `flush()` re-buffers the
+    record. If the retry minted a FRESH `event_uid`, `ON CONFLICT (run_id, event_uid) DO NOTHING`
+    could not recognise the row that already landed and the hop would be counted twice.
+
+    Modelled by a repository that commits the row and then raises, which is exactly the
+    committed-but-not-acknowledged shape. The uid is asserted stable across the retry, because
+    that — not the row count of this fake — is what makes the real `ON CONFLICT` fire.
+    """
+
+    class CommitsThenRaises:
+        def __init__(self) -> None:
+            self.uids: list[str] = []
+            self.explode = True
+
+        async def append_event(self, row: Any) -> int:
+            self.uids.append(str(row.event_uid))
+            if self.explode:
+                raise asyncio.CancelledError
+            return len(self.uids)
+
+    writer, repository = BrokenWriter(), CommitsThenRaises()
+    writer.broken = False
+    sink = _sink(writer, repository)
+    sink.on_failover(_failover())
+
+    with pytest.raises(asyncio.CancelledError):
+        await sink.flush()
+    assert sink.pending == 1
+
+    repository.explode = False
+    assert await sink.flush() == 1
+
+    assert len(repository.uids) == 2, "the fake saw both the cancelled attempt and the retry"
+    assert repository.uids[0] == repository.uids[1], (
+        "a fresh uuid4 on the retry would slip past ON CONFLICT (run_id, event_uid) and "
+        "double-count the hop — the uid must be minted once, when the record is buffered"
+    )

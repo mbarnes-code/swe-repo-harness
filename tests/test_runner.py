@@ -384,32 +384,6 @@ def make_router() -> LlmRouter:
     )
 
 
-class ExplodingSink:
-    """A findings sink whose every write refuses, as a closed `StateWriter` or an exhausted
-    SQLITE_BUSY budget would. Counts attempts so a test can tell "isolated" from "never called",
-    and keeps `pending` non-zero because the real sink re-buffers what did not land."""
-
-    def __init__(self) -> None:
-        self.attempts = 0
-        self.pending = 1
-
-    def on_drift(self, drift: object) -> None:
-        return None
-
-    def on_failover(self, event: object) -> None:
-        return None
-
-    async def flush(self) -> int:
-        self.attempts += 1
-        raise RuntimeError("findings writer is closed")
-
-    async def record_backend_unavailable(
-        self, *, repo_id: str, phase: Phase, observed: str
-    ) -> None:
-        self.attempts += 1
-        raise RuntimeError("findings writer is closed")
-
-
 @dataclass(slots=True)
 class Harness:
     repo: SqliteStateRepository
@@ -491,6 +465,22 @@ class Harness:
                 " WHERE run_id = ? AND repo_id = ? AND phase = ?",
                 (attempts, RUN, repo_id, int(PHASE)),
             )
+
+        await self.writer.submit(unit)
+
+    async def break_findings_writes(self) -> None:
+        """Make every `findings` INSERT fail, and nothing else.
+
+        A real failure through the real `StateWriter`, not a stubbed sink: swapping
+        `ctx.llm_findings` after construction cannot work, because `__post_init__` has already
+        handed the ORIGINAL sink's bound callbacks to the client — the swap would silence the
+        emission path and leave the assertion measuring the stub instead of the code. Dropping
+        the table makes the live sink's own write raise while phase, lease and attempt writes
+        keep working, which is exactly the blast radius under test.
+        """
+
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute("DROP TABLE findings")
 
         await self.writer.submit(unit)
 
@@ -1610,8 +1600,21 @@ async def test_a_failing_findings_sink_cannot_rewrite_a_successful_repos_verdict
     """
     await _seed(harness, "repo-a")
     await harness.plan(("repo-a",))
-    BEHAVIOURS["repo-a"] = [ok("landed")]
-    object.__setattr__(harness.ctx, "llm_findings", ExplodingSink())
+    # A real drift, produced by the real client through the real `RunContext` wiring: the endpoint
+    # promises JSON_SCHEMA and can honour none of it. Without this the sink would have nothing to
+    # buffer and `pending` below would prove nothing.
+    harness.backend.caps = ModelCapabilities(
+        supports_json_schema=False,
+        supports_tools=False,
+        supports_constrained_decoding=False,
+        max_output_tokens=8192,
+        structured_output_modes=(
+            StructuredOutputMode.JSON_SCHEMA,
+            StructuredOutputMode.PROMPTED,
+        ),
+    )
+    BEHAVIOURS["repo-a"] = [asks_the_model()]
+    await harness.break_findings_writes()
 
     report = await harness.runner().run_wave(0)
 
@@ -1621,9 +1624,11 @@ async def test_a_failing_findings_sink_cannot_rewrite_a_successful_repos_verdict
         "the repo did its work; a diagnostics writer failing is not its failure"
     )
     assert failure_class is None
-    sink = cast(ExplodingSink, harness.ctx.llm_findings)
-    assert sink.attempts >= 1, "the drain was still attempted"
-    assert sink.pending == 1, "isolated must mean deferred, not dropped"
+    assert harness.ctx.llm_findings.pending == 1, (
+        "isolated must mean DEFERRED, not dropped — the drift the client really computed is "
+        "still held for the next drain. Swallowing the failure AND the record would trade one "
+        "instance of this lane's bug class for another"
+    )
 
 
 async def test_a_failing_findings_sink_cannot_swallow_the_exit_8_halt(harness: Harness) -> None:
@@ -1634,7 +1639,7 @@ async def test_a_failing_findings_sink_cannot_swallow_the_exit_8_halt(harness: H
     await _seed(harness, "repo-a")
     await harness.plan(("repo-a",))
     BEHAVIOURS["repo-a"] = [fails(FailureClass.BACKEND_UNAVAILABLE)]
-    object.__setattr__(harness.ctx, "llm_findings", ExplodingSink())
+    await harness.break_findings_writes()
 
     report = await harness.runner().run_wave(0)
 
