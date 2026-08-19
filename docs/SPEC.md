@@ -471,8 +471,8 @@ paths).
    (hoist attempted and rolled back, §3.1 6c-H).
 
 6. **DAG build & SCC detection** (`graph/cycles.py`). `networkx.DiGraph` built from `edges` on
-   demand, never persisted (ADR-0004). `strongly_connected_components` → any component of size
-   > 1 becomes a `CycleFinding` with a proposed break edge chosen deterministically: lowest
+   demand, never persisted (ADR-0004). `strongly_connected_components` → any component of size > 1
+   becomes a `CycleFinding` with a proposed break edge chosen deterministically: lowest
    `confidence`, tie-broken by fewest transitive dependents, tie-broken by `edge_id`. The
    condensation graph is what gets sorted.
 
@@ -2842,7 +2842,16 @@ class TokenUsage(FleetModel):
     role: str = ""
     tier: ModelTier | None = None      # ADR-0023: which tier the role resolved to
     backend: str = ""                  # ADR-0023: registered backend name that actually answered
-    model_id: str = ""                 # the RESOLVED model id, as the backend reported it
+    model_id: str = ""                 # MUST echo `target.model_id` verbatim — see below
+    # `model_id` is the CONFIGURED id from config/models.yaml, NOT the id the transport resolved
+    # or served the call as. A backend adapter that sets it from the server's reported name (an
+    # API response's `model` field, say) breaks the LLM cache outright: the READ key is built from
+    # the config string (`cache._key_parts`) and the WRITE key from `usage.model_id`
+    # (`cache._store_response`), so the two disagree on EVERY call — a permanent, silent 100% miss
+    # that is indistinguishable from a cold cache, because `attempts.llm_cache_hit` simply stays 0.
+    # (`_target_for` likewise matches on (backend, model_id) and stops finding the answering
+    # target, so `effort` falls back to the primary's.) Reporting the served id is a legitimate
+    # want — it just needs a SEPARATE field or a log line, never this one.
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)
@@ -4161,7 +4170,18 @@ CREATE TABLE IF NOT EXISTS llm_cache (            -- content-addressed LLM resul
     role        TEXT NOT NULL,
     tier        TEXT NOT NULL DEFAULT 'WORKHORSE',  -- ADR-0023; ModelTier
     backend     TEXT NOT NULL DEFAULT 'anthropic',  -- ADR-0023; registered backend name
-    model_id    TEXT NOT NULL,                    -- RESOLVED id. (tier, backend, model_id) are
+    model_id    TEXT NOT NULL,                    -- The CONFIGURED id — `target.model_id` out of
+                                                  --   config/models.yaml, verbatim — NOT the id
+                                                  --   the transport resolved or served it as.
+                                                  --   It is a cache-KEY component: the READ key
+                                                  --   is built from the config string and the
+                                                  --   WRITE key from `usage.model_id`, so a
+                                                  --   backend reporting its own served name makes
+                                                  --   them disagree on EVERY call — a permanent,
+                                                  --   silent 100% miss that looks exactly like a
+                                                  --   cold cache. Surfacing the served id needs a
+                                                  --   SEPARATE field, never this one.
+                                                  --   (tier, backend, model_id) are
                                                   --   key components, not decoration: the cache
                                                   --   is run-unscoped, so without them a failover
                                                   --   to a weaker model poisons every later run

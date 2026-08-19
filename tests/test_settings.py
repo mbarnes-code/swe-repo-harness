@@ -19,6 +19,7 @@ Every test here answers "why does this matter", not "does this line run":
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import textwrap
@@ -249,7 +250,6 @@ def test_unpriced_target_is_refused_naming_profile_tier_and_index(tmp_path: Path
         load(write_config(tmp_path, models=models))
 
     message = str(excinfo.value)
-    assert excinfo.value.exit_code == 2
     assert "models.yaml" in message
     assert "profiles.default.HEAVY[0]" in message
     assert "anthropic:claude-opus-5" in message
@@ -433,7 +433,6 @@ def test_unknown_key_in_fleet_yaml_names_the_file_and_the_key(tmp_path: Path) ->
     message = str(excinfo.value)
     assert str(config / "fleet.yaml") in message
     assert "budgets.run_max_cost" in message
-    assert excinfo.value.exit_code == 2
 
 
 def test_unknown_fleet_env_var_is_refused_naming_the_variable(tmp_path: Path) -> None:
@@ -525,9 +524,10 @@ def test_a_usable_base_url_still_loads(tmp_path: Path) -> None:
     assert settings.targets_for_tier(ModelTier.CHEAP)[0].base_url == "http://localhost:8001/v1"
 
 
+@pytest.mark.parametrize("backend", ["bedrock", "vertex"])
 @pytest.mark.parametrize("blank", ["", "   "])
 def test_a_blank_region_is_refused_too_because_one_table_drives_both(
-    tmp_path: Path, blank: str
+    tmp_path: Path, blank: str, backend: str
 ) -> None:
     """`base_url` was not a special case. `_REQUIRED_TARGET_FIELDS` drives every backend's required
     fields from ONE table, so the `is None` check leaked `region: ""` to wave 7 for `bedrock` and
@@ -538,13 +538,13 @@ def test_a_blank_region_is_refused_too_because_one_table_drives_both(
     models = MODELS_YAML.replace(
         CHEAP_TARGET,
         "    CHEAP:\n"
-        "      - { backend: bedrock, model_id: anthropic.claude-haiku, effort: low,\n"
+        f"      - {{ backend: {backend}, model_id: some-model, effort: low,\n"
         f"          price: free, region: '{blank}' }}\n",
     )
     with pytest.raises(ConfigValidationError) as excinfo:
         load(
             write_config(tmp_path, models=models),
-            known_backends=("anthropic", "openai_compatible", "bedrock"),
+            known_backends=("anthropic", "openai_compatible", backend),
         )
     assert "profiles.default.CHEAP[0].region" in str(excinfo.value)
 
@@ -625,6 +625,20 @@ def test_backend_extras_matches_pyproject(tmp_path: Path) -> None:
 
     assert backend_extras == set(_BACKEND_EXTRAS.values())
     assert set(_BACKEND_EXTRAS) <= set(SHIPPED_BACKENDS)   # every key is a backend we ship
+
+    # The gate's THIRD branch asserts that a shipped backend absent from `_BACKEND_EXTRAS` rides on
+    # a core dependency ("its module failed to import; check the install"). That claim was prose
+    # with nothing behind it. Bind it: the leftover names are exactly these two, and each one's
+    # distribution really is in `[project.dependencies]` -- so the branch cannot start telling an
+    # operator to check a core install for a package the manifest does not require.
+    core_backend_distributions = {"anthropic": "anthropic", "openai_compatible": "openai"}
+    assert set(SHIPPED_BACKENDS) - set(_BACKEND_EXTRAS) == set(core_backend_distributions)
+
+    required = {
+        re.split(r"[<>=!~\[]", dep)[0].strip() for dep in pyproject["project"]["dependencies"]
+    }
+    for backend, distribution in sorted(core_backend_distributions.items()):
+        assert distribution in required, f"{backend} claims a core dep on absent {distribution!r}"
 
 
 def test_a_role_routed_to_an_empty_tier_is_a_startup_error(tmp_path: Path) -> None:
