@@ -106,9 +106,11 @@ MODELS_SECTION: Final = "models_profile"
 #: a typo'd `backend` on a host with no SDKs installed.
 SHIPPED_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai_compatible", "bedrock", "vertex")
 
-#: Backends that ship behind a `[project.optional-dependencies]` extra (pyproject.toml). Such a
-#: backend failing to register is an uninstalled SDK, NOT a typo — the rule 2 gate names the extra
-#: so the operator does not go hunting a spelling mistake that is not there.
+#: Backends that ship behind a `[project.optional-dependencies]` extra (pyproject.toml), mapped to
+#: the extra's name. Such a backend failing to register is an uninstalled SDK, NOT a typo — the
+#: rule 2 gate names the extra so the operator does not hunt a spelling mistake that is not there.
+#: A `SHIPPED_BACKENDS` name ABSENT here is a core dependency, which the gate reports differently
+#: again. Kept in step with pyproject by `test_backend_extras_matches_pyproject`; edit both.
 _BACKEND_EXTRAS: Final[Mapping[str, str]] = {"bedrock": "bedrock", "vertex": "vertex"}
 
 #: §9 rule 2 / §13 row 36: each backend validates its own target fields.
@@ -1396,13 +1398,22 @@ def _check_routing(
         for index, target in enumerate(targets):
             where = f"profiles.{profile}.{tier.value}[{index}]"
             if target.backend not in known_backends:
+                # Three distinguishable causes, and the operator's next action differs for each.
+                # Collapsing them into "install the extra" sends the two non-extra cases hunting a
+                # `fleet[...]` extra that does not exist.
                 extra = _BACKEND_EXTRAS.get(target.backend)
-                remedy = (
-                    f"it ships as an optional extra whose SDK is not installed on this host — "
-                    f"`pip install 'fleet[{extra}]'`"
-                    if extra is not None
-                    else "if it ships as an extra, install it"
-                )
+                if extra is not None:                       # shipped behind an optional extra
+                    remedy = (
+                        f"it ships as an optional extra whose SDK is not installed on this "
+                        f"host — `pip install 'fleet[{extra}]'`"
+                    )
+                elif target.backend in SHIPPED_BACKENDS:    # core dependency; import must be broken
+                    remedy = (
+                        "it ships as a CORE dependency, so this is not a missing extra — its "
+                        "module failed to import on this host; check the install"
+                    )
+                else:                                       # not a name we ship: a typo
+                    remedy = "if it ships as an extra, install it"
                 raise UnresolvedReferenceError(
                     f"backend {target.backend!r} is not in the §7.7 registry "
                     f"(have {sorted(known_backends)}); {remedy}",

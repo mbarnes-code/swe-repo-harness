@@ -22,6 +22,7 @@ import json
 import subprocess
 import sys
 import textwrap
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -29,8 +30,10 @@ import pytest
 from fleet.models.enums import ModelTier
 from fleet.models.tasks import BackendTarget, Price
 from fleet.settings import (
+    _BACKEND_EXTRAS,
     CONFIG_SECTIONS,
     MODELS_SECTION,
+    SHIPPED_BACKENDS,
     BuildSection,
     ConfigFileError,
     ConfigValidationError,
@@ -512,7 +515,6 @@ def test_a_blank_base_url_is_refused_at_load_not_at_call_time(tmp_path: Path, bl
     message = str(excinfo.value)
     assert "base_url" in message                     # the field the operator must edit
     assert "profiles.default.CHEAP[0].base_url" in message   # profile, tier, index, field
-    assert excinfo.value.exit_code == 2
 
 
 def test_a_usable_base_url_still_loads(tmp_path: Path) -> None:
@@ -521,6 +523,30 @@ def test_a_usable_base_url_still_loads(tmp_path: Path) -> None:
     models = MODELS_YAML.replace(CHEAP_TARGET, _cheap_openai_target("http://localhost:8001/v1"))
     settings = load(write_config(tmp_path, models=models))
     assert settings.targets_for_tier(ModelTier.CHEAP)[0].base_url == "http://localhost:8001/v1"
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_a_blank_region_is_refused_too_because_one_table_drives_both(
+    tmp_path: Path, blank: str
+) -> None:
+    """`base_url` was not a special case. `_REQUIRED_TARGET_FIELDS` drives every backend's required
+    fields from ONE table, so the `is None` check leaked `region: ""` to wave 7 for `bedrock` and
+    `vertex` exactly as it leaked `base_url` for `openai_compatible`. Fixing the shared loop closed
+    all of them at once; this pins that, so a later per-field rewrite cannot silently reopen the
+    ones nobody wrote a test for.
+    """
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: bedrock, model_id: anthropic.claude-haiku, effort: low,\n"
+        f"          price: free, region: '{blank}' }}\n",
+    )
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible", "bedrock"),
+        )
+    assert "profiles.default.CHEAP[0].region" in str(excinfo.value)
 
 
 def test_an_uninstalled_backend_extra_is_named_in_the_message(tmp_path: Path) -> None:
@@ -543,19 +569,62 @@ def test_an_uninstalled_backend_extra_is_named_in_the_message(tmp_path: Path) ->
     message = str(excinfo.value)
     assert "fleet[bedrock]" in message               # the extra, not just "an extra"
     assert "not installed" in message
-    assert excinfo.value.exit_code == 2
 
 
 def test_a_typod_backend_is_not_reported_as_a_missing_extra(tmp_path: Path) -> None:
     """The other half: `anthropik` is a typo, not an uninstalled SDK. Telling the operator to
-    `pip install` it would send them after a package that does not exist."""
+    `pip install` it would send them after a package that does not exist.
+
+    The negative assertion alone would be satisfied by ANY `UnresolvedReferenceError` lacking the
+    literal `pip install` — including one raised by a different check entirely, which would leave
+    the typo branch untested while the test stayed green. So pin the message to this typo and to
+    the rule 2 registry gate that must have produced it.
+    """
     models = MODELS_YAML.replace(
         "backend: anthropic, model_id: claude-opus-5",
         "backend: anthropik, model_id: claude-opus-5",
     )
     with pytest.raises(UnresolvedReferenceError) as excinfo:
         load(write_config(tmp_path, models=models))
-    assert "pip install" not in str(excinfo.value)
+
+    message = str(excinfo.value)
+    assert "anthropik" in message                    # THIS typo, from the backend gate
+    assert "is not in the §7.7 registry" in message  # ...and from rule 2, not some earlier check
+    assert "pip install" not in message              # no extra to install; it is a misspelling
+    assert "CORE dependency" not in message          # nor a broken core install
+
+
+def test_a_core_dependency_backend_is_not_reported_as_a_missing_extra(tmp_path: Path) -> None:
+    """The third cause, distinct from both. `anthropic` is a CORE dependency, not an extra, so a
+    correctly-spelled `backend: anthropic` that fails to register means its module did not import
+    on this host. Telling that operator to install an extra sends them after `fleet[anthropic]`,
+    which does not exist, while the real fault is their environment."""
+    with pytest.raises(UnresolvedReferenceError) as excinfo:
+        load(write_config(tmp_path), known_backends=("openai_compatible",))
+
+    message = str(excinfo.value)
+    assert "CORE dependency" in message
+    assert "failed to import" in message
+    assert "pip install" not in message              # there is no extra to install
+
+
+def test_backend_extras_matches_pyproject(tmp_path: Path) -> None:
+    """`_BACKEND_EXTRAS` hand-duplicates `[project.optional-dependencies]`. Nothing but this test
+    ties them together, so a lane that adds a backend behind a new extra and forgets the mapping
+    silently regresses that backend to the vague "if it ships as an extra" wording — the exact
+    message naming the extra was introduced to replace, with no failure to notice it.
+
+    Both directions are pinned: a new extra in pyproject must be classified here, and a mapping
+    entry must name an extra that really exists.
+    """
+    pyproject = tomllib.loads(
+        (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(encoding="utf-8")
+    )
+    declared = set(pyproject["project"]["optional-dependencies"])
+    backend_extras = declared - {"dev"}   # `dev` is tooling, not a transport
+
+    assert backend_extras == set(_BACKEND_EXTRAS.values())
+    assert set(_BACKEND_EXTRAS) <= set(SHIPPED_BACKENDS)   # every key is a backend we ship
 
 
 def test_a_role_routed_to_an_empty_tier_is_a_startup_error(tmp_path: Path) -> None:

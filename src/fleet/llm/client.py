@@ -856,12 +856,30 @@ def _validate[T: BaseModel](
 
 def _stamp(usage: TokenUsage, role: str, tier: ModelTier, target: BackendTarget) -> TokenUsage:
     """Attribute the usage to the target that actually answered, and price it — §11.2 writes this
-    row in four places, so it must not be the caller's job to reconstruct who was called."""
+    row in four places, so it must not be the caller's job to reconstruct who was called.
+
+    **`model_id` is NOT part of "what the backend reported".** It is the CONFIGURED id from
+    config/models.yaml, and an adapter MUST leave `usage.model_id` either empty or equal to
+    `target.model_id` verbatim. It is a cache-KEY component whose two sides are built from
+    different objects: the READ key from the config string (`llm/cache.py` `_key_parts`) and the
+    WRITE key from `usage.model_id` (`_store_response`). An adapter that fills it from the API
+    response's served/resolved name — a snapshot id like `...-20250219` — makes the two disagree
+    on EVERY call: a permanent, silent 100% cache miss that is indistinguishable from a cold
+    cache, because `attempts.llm_cache_hit` simply stays 0. (`_target_for` also matches on
+    (backend, model_id), so it stops finding the answering target and `effort` degrades to the
+    primary's.) Three adapters made exactly this mistake in one round.
+
+    The `or` below is a DEFAULT for adapters that leave the field empty, not an invitation to
+    supply something else. Surfacing the served id is a legitimate want — it needs a SEPARATE
+    field or a log line, never this one.
+    """
     return usage.model_copy(
         update={
             "role": role,
             "tier": tier,
             "backend": target.backend,
+            # See the docstring: `or` is a default for an unset field. Never assign the
+            # transport's resolved/served id here — it is a cache-key component.
             "model_id": usage.model_id or target.model_id,
             "cost_usd": estimate_cost_usd(target, usage.input_tokens, usage.output_tokens),
         },
