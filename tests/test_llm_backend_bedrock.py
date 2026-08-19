@@ -464,7 +464,15 @@ def test_the_request_agrees_with_the_gate_whatever_the_model_declares() -> None:
 def test_no_effort_reaches_the_wire_while_the_gate_is_shut(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """**No `output_config` at all today, even for an explicit `effort: high`.**
+    """**With the gate shut, no `output_config` at all — even for an explicit `effort: high`.**
+
+    Deliberately NOT "today": the gate is patched shut below, so this asserts the shut BRANCH and
+    says nothing about what the real `BackendTarget` currently declares. (Hard-coding the predicate
+    to `return True` leaves this test green — the mechanism is covered by
+    `test_the_gate_is_a_predicate_over_the_model_not_a_hard_coded_flag`, and the real model's
+    answer by `test_the_request_agrees_with_the_gate_whatever_the_model_declares`.) Patching rather
+    than relying on the model is what keeps this branch tested after the sibling lane lands, but it
+    is also why the claim here has to be scoped to the branch.
 
     Two reasons converge. (1) With `"medium"` defaulted in, a target the operator never gave an
     effort is indistinguishable from one they did, so sending it asserts a routing parameter nobody
@@ -472,9 +480,6 @@ def test_no_effort_reaches_the_wire_while_the_gate_is_shut(
     shape has never been live-verified, and `_from_client_error` correctly classifies a
     non-throttle 4xx as our request being wrong — a bare `LlmError`, not a failover trigger — so an
     unverified field on EVERY call would fail every task on that target outright.
-
-    The gate is patched SHUT rather than left to the model, so this keeps testing the shut branch
-    after the sibling lands instead of silently becoming a no-op.
     """
     monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda *_: False)
     for effort in ("low", "medium", "high"):
