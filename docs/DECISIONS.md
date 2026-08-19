@@ -289,18 +289,26 @@ LLM review of every file (cost scales with LOC instead of with ambiguity).
 (`anthropic>=0.69`), `AsyncAnthropic` only, one module-level lazily-constructed singleton,
 SDK-native retries left on (`max_retries=4`) and never re-implemented. Adaptive thinking
 (`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role;
-streaming for any call with large `max_tokens`.
+streaming for any call with large `max_tokens`. **No other provider, no OpenAI-compatible
+shim, no LangChain.**
 
-> **NOT IMPLEMENTED, and deliberately so — do not reconcile code to this paragraph.** As shipped,
-> `llm/backends/anthropic.py` constructs **no `thinking` key at all** (nor any `temperature`,
-> `seed` or `top_p`), and does **not** stream: `ModelClient.stream` exists but no phase consumes
-> it. It sends `output_config.effort` **only** when the target declares one, gating on
-> `target.effort is not None` and consulting no capabilities — `ModelCapabilities` has no effort
-> field and must not grow one (ADR-0075; a `supports_effort` gate would suppress an explicitly
-> declared `effort: high` and re-key the cache). Determinism comes from the `llm_cache`, not from
-> a sampler setting. This paragraph is retained as the original decision record; §7.7's shipped-
-> backends table describes actual behaviour. **No other provider, no OpenAI-compatible
-shim, no LangChain.** Role→model assignment:
+> **NOT IMPLEMENTED, and deliberately so — do not reconcile code to the *paragraph immediately
+> above*.** This marker scopes to that paragraph's claims about thinking and streaming ONLY. The
+> **tier table below is authoritative and current** — its `effort: high` values are live config
+> (`config/models.yaml`), must not be deleted, and deleting them would re-key the CHEAP and
+> non-CHEAP caches exactly as ADR-0075 warns.
+>
+> As shipped, `llm/backends/anthropic.py` constructs **no `thinking` key at all** (nor any
+> `temperature`, `seed` or `top_p` on the LLM call path), and does **not** stream:
+> `ModelClient.stream` exists but no phase consumes it. It sends `output_config.effort` **only**
+> when the target declares one, gating on `target.effort is not None` and consulting no
+> capabilities — `ModelCapabilities` has no effort field and must not grow one (ADR-0075; a
+> `supports_effort` gate would suppress an explicitly declared `effort: high` and re-key the
+> cache). Determinism comes from the `llm_cache`, not from a sampler setting. This paragraph is
+> retained as the original decision record; §7.7's shipped-backends table describes actual
+> behaviour.
+
+Role→model assignment:
 
 | Tier | Model ID | Harness roles | Effort |
 |---|---|---|---|
@@ -327,13 +335,20 @@ rewrite); local/self-hosted models (insufficient for tier-1 semantic work); any
 non-Anthropic provider (out of scope by directive).
 
 **Superseded by ADR-0023** (provider-agnostic `ModelClient` + backend registry). The original text
-above stands unedited as the record of what was decided and why it was wrong. Three of its claims
-do not survive: the "out of scope by directive" rejection cited a directive that **does not exist**
+above is preserved as the record of what was decided and why it was wrong. It is preserved, not
+untouched: two inline annotations were added later — the NOT-IMPLEMENTED blockquote scoping the
+thinking/streaming claims, and the struck CHEAP `effort` cell superseded by ADR-0075 — because a
+record that reads as current is a record that gets reconciled INTO the code. Six of its claims do
+not survive. Three were identified when ADR-0023 superseded it: the "out of scope by directive"
+rejection cited a directive that **does not exist**
 in `CLAUDE.md` or anywhere in `references/`; the claim that the reference harness "carries all
 three" of LangChain/LiteLLM/DeepAgents is **factually false** for LiteLLM, which appears nowhere in
 `references/`; and the structured-output rationale describes a capability that is not
-provider-specific. What survives verbatim: the **three-tier cost split**, the rule that role→model
-assignment is config and never code, and the rejection of heavyweight orchestration frameworks.
+provider-specific. Three more were found later and are marked inline above: **adaptive thinking**
+and **streaming for large `max_tokens`** are implemented nowhere in `src/`, and the CHEAP tier's
+**`effort: low`** is superseded by ADR-0075. What survives verbatim: the **three-tier cost split**,
+the rule that role→model assignment is config and never code, and the rejection of heavyweight
+orchestration frameworks.
 What changes: `anthropic` becomes one backend among several behind a `ModelClient` protocol, the
 tiers are named `HEAVY`/`WORKHORSE`/`CHEAP` and carry no vendor string, and the model IDs above
 become the *default profile* in `config/models.yaml` rather than a structural commitment.

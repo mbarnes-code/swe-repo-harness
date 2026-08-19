@@ -6827,9 +6827,11 @@ the orchestrator and every pool child, and no iteration over an unordered `set`/
 persisted ordering (enforced by review and by the property test in §12.8).
 
 **The LLM tier cannot be made deterministic by sampling parameters, and the spec does not pretend
-otherwise.** The harness constructs **no** sampling or thinking parameters at all: no
-`temperature`, `seed`, `top_p` or `thinking` key is built anywhere in `src/`, and none should be
-added to make code match this section. Where a backend exposes them the harness still does not
+otherwise.** The harness constructs **no** sampling or thinking parameters on the LLM call path:
+no `temperature`, `seed`, `top_p` or `thinking` key is built anywhere under `src/fleet/llm/`, and
+none should be added to make code match this section. (Scoped deliberately — `bazel/query.py`'s
+`sample_seed_for` is a *different* seed, the deterministic rdeps-sampling seed of §11.6, and must
+not be deleted in the name of this paragraph.) Where a backend exposes them the harness still does not
 rely on them, because the same role may be answered by a different backend on the next call
 (ADR-0023) and a determinism story that only holds for one transport is not a determinism story.
 Determinism therefore comes from **caching, not sampling**:
