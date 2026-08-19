@@ -6778,6 +6778,9 @@ Rejected alternatives, each for a specific reason:
   code, and the message and the `--json` payload distinguish them for anyone reading.
 - The payload is emitted on stdout **before** the refusal is raised, so `--json` consumers get the
   full reconciliation report on the exit-2 path. That ordering is load-bearing and is asserted by
-  `tests/test_cli.py`.
+  `tests/test_cli.py::test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal`, which
+  is deliberately the only `--json` resume test that does NOT pass `--dry-run`: every other one
+  exercises the exit-0 path and would keep passing if the ordering were reversed. Moving `_emit`
+  below the `raise` makes it fail on empty stdout — checked by mutation, not assumed.
 - **This ADR is temporary by construction.** When §11.5 step 5 lands, `ResumeIncompleteError`
   should be deleted, not repurposed. If it is still here after step 5 exists, that is a defect.

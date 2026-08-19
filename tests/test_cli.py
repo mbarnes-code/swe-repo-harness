@@ -1538,6 +1538,35 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
     assert "step 5" in result.output
 
 
+def test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal(
+    workspace: Path,
+) -> None:
+    """`--json resume` (no `--dry-run`) prints the full report on stdout, THEN exits 2.
+
+    Why the ordering is the assertion and not the exit code: the exit-2 path is the normal
+    outcome of a real resume today, so it is the path on which an operator's tooling has to learn
+    what was reconciled. If `_emit` ran after the refusal instead of before it, stdout would be
+    empty and the only trace of a committed stale-lease sweep and a rewritten
+    `migration_state.json` would be an error line on stderr — a machine-readable verb that emits
+    nothing machine-readable exactly when it has something to say.
+
+    ADR-0076 states this ordering as a property; this is the test it cites. Every other `--json`
+    resume test passes `--dry-run` and therefore exercises the exit-0 path, which would keep
+    passing if the ordering were reversed.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    payload = json.loads(result.stdout)  # empty stdout => the raise beat the emit
+    assert payload["dry_run"] is False
+    assert payload["stale_running_reset"] == 1
+    assert payload["projection"], "the payload does not name the projection step 7 wrote"
+    assert (workspace / "migration_state.json").exists()
+
+
 def test_a_forge_failure_under_repoll_prs_still_reconciles_and_then_reports(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
