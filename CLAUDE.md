@@ -71,7 +71,7 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 - `tools/bin/` — pinned toolchain wrappers (`bazel` `ast-grep` `gazelle` `go` `cargo` `rustc` `gh`). Use these; never the system binary.
 
 ## 6. Build & Test Operations
-- Full suite ≈9 min — run it in the background. Green = `xfail: 0` **and** a clean `bazel disk` line.
+- Full suite ≈15 min — run it in the background. Green = `xfail: 0` **and** a clean `bazel disk` line.
 - **Never run two pytest sessions concurrently.** `pytest_sessionfinish` deletes every `BAZEL_ROOT` child except `repos/`; parallel sessions reap each other's output bases.
 - **Never export `FLEET_*`** in a shell that runs the harness or tests. `settings.py` pairs `env_prefix="FLEET_"` with `extra="forbid"`, so one stray var makes every settings load exit 2.
 - A command-line `--repository_cache` **overrides** a `.bazelrc` `common` line. A real-bazel test that omits it re-downloads ~206 MB / 9,241 files (179 s vs 17 s).
