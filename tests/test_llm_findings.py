@@ -400,15 +400,16 @@ async def test_backend_unavailable_refuses_to_assert_an_outage(tmp_path: Path) -
             "false record — and `DOWN` is a state nothing in `src/` computes"
         )
         assert payload["failover_triggers"] == {}
-        assert payload["failover_triggers_recorded"] == "none", (
-            "no failover was observed on this run, so there is genuinely nothing to report"
+        assert payload["failover_triggers_scope"] == "run"
+        assert payload["failover_triggers_recorded"] == "unknown", (
+            "at run scope even 'none' is a claim about the exhausted tier, and the row cannot "
+            "identify that tier — the honest answer is that it does not know"
         )
         assert payload["throttling_observed"] is None, (
             "the runner cannot say WHICH tier died (`TierUnavailable.tier` is lost at the "
             "exception -> WorkerError boundary), so a boolean here would be a claim about a tier "
             "this row cannot identify"
         )
-        assert payload["failover_triggers_scope"] == "run"
         assert "429" in str(payload["caveat"]) or "RATE_LIMIT" in str(payload["caveat"]), (
             "the operator-facing text has to name the alternative explanation, or the honesty "
             "flags above are unactionable"
@@ -692,19 +693,14 @@ async def test_the_buffer_survives_cancellation() -> None:
     assert sink.pending == 1
 
 
-async def test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_row(
-    tmp_path: Path,
-) -> None:
-    """N1. The trigger map is run-scoped and one run drives all three tiers through one client
-    and one sink (`SPEC_ROLE_TIERS`, `llm/roles.py:65-77`), so an unfiltered map is a cross-tier
-    contamination channel.
+async def test_the_trigger_map_narrows_to_one_tier_and_keys_every_entry_by_tier() -> None:
+    """The ACCESSOR only — no row is written here, and the name says so.
 
-    The scenario is the reviewer's, made executable: early in a long run a CHEAP role fails a
-    target over on a 429; hours later HEAVY exhausts on genuine `CONNECTION` failures. With a flat
-    target-keyed map the HEAVY row came out carrying `throttling_observed: true` and a target that
-    was never in the HEAVY tier — telling the operator to lower concurrency while a dead HEAVY
-    endpoint went unrepaired. That is the same false-statement class the row exists to avoid,
-    pointed the other way.
+    `observed_triggers` is what the cross-tier contamination fix rests on, so it is pinned
+    directly: narrowing must exclude other tiers, and the unnarrowed view must stay keyed by tier
+    so every entry is self-describing. The *row* built on top of this is asserted, against SQLite,
+    in `test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_row` below — this test
+    deliberately does not claim to prove anything about a finding.
     """
     sink = _sink(BrokenWriter(), BrokenRepository())
     sink.on_failover(
@@ -740,12 +736,19 @@ async def test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_ro
     )
 
 
-async def test_a_heavy_outage_row_scoped_to_its_tier_reports_no_throttling(tmp_path: Path) -> None:
-    """The persisted half of the same scenario, read back out of SQLite.
+async def test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_row(
+    tmp_path: Path,
+) -> None:
+    """N1, as a persisted ROW read back out of SQLite — the scenario, not the accessor.
 
-    `throttling_observed` must answer for the tier that DIED, not for the run. A row that said
-    `true` here would send an operator to lower concurrency for an outage that had nothing to do
-    with rate limits.
+    The reviewer's scenario, made executable: early in a long run a CHEAP role fails a target over
+    on a 429; hours later HEAVY exhausts on genuine `CONNECTION` failures. With a flat
+    target-keyed map the HEAVY row came out carrying `throttling_observed: true` and a target that
+    was never in the HEAVY tier — telling the operator to lower concurrency while a dead HEAVY
+    endpoint went unrepaired. That is the false-statement class this row exists to avoid, pointed
+    the other way.
+
+    `throttling_observed` must therefore answer for the tier that DIED, not for the run.
     """
     backend = ScriptedBackend(HONEST_CAPS)
     async for h in _build(tmp_path, backend, make_router()):
@@ -791,42 +794,59 @@ async def test_a_heavy_outage_row_scoped_to_its_tier_reports_no_throttling(tmp_p
         )
 
 
-async def test_a_retried_failover_does_not_duplicate_its_events_row() -> None:
-    """N3. `StateWriter.submit` queues the unit and then awaits its future, so a `CancelledError`
-    at that await leaves the unit queued — it still commits — while `flush()` re-buffers the
-    record. If the retry minted a FRESH `event_uid`, `ON CONFLICT (run_id, event_uid) DO NOTHING`
-    could not recognise the row that already landed and the hop would be counted twice.
+async def test_a_retried_failover_does_not_duplicate_its_events_row(tmp_path: Path) -> None:
+    """N3, against a REAL `events` table, so the `ON CONFLICT` that does the deduping executes.
 
-    Modelled by a repository that commits the row and then raises, which is exactly the
-    committed-but-not-acknowledged shape. The uid is asserted stable across the retry, because
-    that — not the row count of this fake — is what makes the real `ON CONFLICT` fire.
+    `StateWriter.submit` queues the unit and then awaits its future, so a `CancelledError` at that
+    await leaves the unit queued — it still commits — while `flush()` re-buffers the record. If
+    the retry minted a FRESH `event_uid`, `ON CONFLICT (run_id, event_uid) DO NOTHING`
+    (`repository.py:1803`) could not recognise the row that already landed and the hop would be
+    counted twice.
+
+    The repository proxy commits through the real `SqliteStateRepository` and *then* raises, which
+    is exactly the committed-but-not-acknowledged shape. The load-bearing assertion is the ROW
+    COUNT afterwards — a uid-equality assertion against a fake (which is what this test used to
+    be) never runs the conflict clause it is named for.
     """
 
-    class CommitsThenRaises:
-        def __init__(self) -> None:
-            self.uids: list[str] = []
+    class CommitsThenCancels:
+        """Delegates to the real repository, then raises — the row lands, the caller never hears."""
+
+        def __init__(self, inner: Any) -> None:
+            self._inner = inner
             self.explode = True
+            self.uids: list[str] = []
 
         async def append_event(self, row: Any) -> int:
             self.uids.append(str(row.event_uid))
+            seq = int(await self._inner.append_event(row))
             if self.explode:
                 raise asyncio.CancelledError
-            return len(self.uids)
+            return seq
 
-    writer, repository = BrokenWriter(), CommitsThenRaises()
-    writer.broken = False
-    sink = _sink(writer, repository)
-    sink.on_failover(_failover())
+    backend = ScriptedBackend(HONEST_CAPS)
+    async for h in _build(tmp_path, backend, make_router()):
+        proxy = CommitsThenCancels(h.ctx.repository)
+        sink = LlmFindingSink(
+            run_id=RUN,
+            writer=h.ctx.writer,
+            repository=cast(Any, proxy),
+            clock=lambda: NOW,
+        )
+        sink.on_failover(_failover())
 
-    with pytest.raises(asyncio.CancelledError):
-        await sink.flush()
-    assert sink.pending == 1
+        with pytest.raises(asyncio.CancelledError):
+            await sink.flush()
+        assert sink.pending == 1, "the record must survive the cancellation to be retried at all"
+        assert len(await h.events(BACKEND_FAILOVER_EVENT)) == 1, (
+            "precondition: the cancelled attempt really did commit its row"
+        )
 
-    repository.explode = False
-    assert await sink.flush() == 1
+        proxy.explode = False
+        assert await sink.flush() == 1
 
-    assert len(repository.uids) == 2, "the fake saw both the cancelled attempt and the retry"
-    assert repository.uids[0] == repository.uids[1], (
-        "a fresh uuid4 on the retry would slip past ON CONFLICT (run_id, event_uid) and "
-        "double-count the hop — the uid must be minted once, when the record is buffered"
-    )
+        assert proxy.uids[0] == proxy.uids[1], "the uid must be minted once, at buffer time"
+        assert len(await h.events(BACKEND_FAILOVER_EVENT)) == 1, (
+            "the retry inserted a SECOND backend_failover row: a fresh uuid4 on retry slips past "
+            "ON CONFLICT (run_id, event_uid) and double-counts the hop"
+        )

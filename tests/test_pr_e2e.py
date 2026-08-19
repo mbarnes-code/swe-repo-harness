@@ -1010,3 +1010,39 @@ def test_fleet_pr_persists_the_llm_findings_its_own_run_computed(
     assert {p["tier"] for p in payloads} == {"CHEAP", "WORKHORSE"}, (
         "`pr_title` is CHEAP and `pr_body` is WORKHORSE — both tiers drifted and both were kept"
     )
+
+
+def test_fleet_pr_persists_its_llm_findings_even_when_the_command_fails_partway(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    forge: FakeForge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N7. A drain placed *after* the candidate loop is discarded by the runs that need it most.
+
+    `_emit_one_pr` and `_write_pr_record` can both raise; on those runs the loop never reaches its
+    end, and a post-loop drain would throw away every finding the run had computed — a narrower
+    copy of the very defect the drain was added to fix. The drain therefore lives in a `finally`,
+    while the `StateWriter` is still open.
+
+    The failure is injected at `_write_pr_record`, i.e. after the worker has already driven the
+    model and buffered its drift, which is precisely the window that was unprotected.
+    """
+    verified(fleet)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": DriftingBackend()})
+
+    async def explode(*_args: Any, **_kwargs: Any) -> None:
+        raise RuntimeError("the state writer fell over mid-loop")
+
+    monkeypatch.setattr(cli, "_write_pr_record", explode)
+
+    result = runner.invoke(app, [*base_args(fleet), "--json", "pr"], catch_exceptions=True)
+    assert result.exit_code != ExitCode.SUCCESS, "the injected failure must not be swallowed"
+
+    rows = query(fleet, "SELECT payload FROM findings WHERE kind = ?", ("CapabilityDrift",))
+    assert rows, (
+        "the run computed drift and then crashed, and the drain ran only after the loop — so "
+        "every finding went out with the failure"
+    )
+    assert {json.loads(r[0])["actual"] for r in rows} == {"PROMPTED"}

@@ -41,6 +41,7 @@ from pydantic import BaseModel, Field
 
 from fleet.graph.sequence import WavePlan
 from fleet.llm.client import (
+    BackendFailover,
     BackendReply,
     BudgetExhausted,
     CallBudget,
@@ -1531,10 +1532,11 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
     # target without reading `TransportError.trigger`) and `BackendHealth.DOWN` is computed
     # nowhere in `src/`. The log line scrolls away — the finding is what a human reads later.
     assert payload["asserts_outage"] is False
-    assert payload["failover_triggers_recorded"] == "none", (
-        "no failover fired in this wave, so 'none' is the true value — but see "
-        "`test_the_finding_reports_the_partial_trigger_set_it_actually_holds`: when triggers ARE "
-        "held the row must say 'partial', never a flat false that reads as 'nothing known'"
+    assert payload["failover_triggers_recorded"] == "unknown", (
+        "this is the SHIPPED arm: `WorkerError` carries no tier, so the row cannot say whether "
+        "the triggers it holds (here, none) belong to the tier that died. See "
+        "`test_the_finding_reports_the_partial_trigger_set_it_actually_holds` for the narrowed "
+        "arm, which is reachable only when a caller can supply `tier=`"
     )
     assert "down" not in json.dumps(
         {k: v for k, v in payload.items() if k != "caveat"}
@@ -1583,6 +1585,60 @@ async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harne
     assert payload["promised"] == str(StructuredOutputMode.JSON_SCHEMA)
     assert payload["actual"] == str(StructuredOutputMode.PROMPTED)
     assert payload["model_id"] == "fake-1"
+
+
+async def test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_exist(
+    harness: Harness,
+) -> None:
+    """The arm that ACTUALLY SHIPS, with a contaminated map — the case N9 said was untested.
+
+    Nothing in `src/` passes `tier=`: `PhaseRunner`'s halt path is the only production caller and
+    `WorkerError` (`workers/base.py:359-374`) carries no tier, so every row this harness writes
+    today is `scope: "run"`. That arm must refuse BOTH derived fields, and the refusal only means
+    anything when the map is non-empty — an empty map would make `"unknown"` indistinguishable
+    from `"none"` and hide a regression that answered from run-wide data.
+
+    So a CHEAP-tier 429 is planted before the wave, exactly as one would arrive hours earlier in a
+    real run, and then a HEAVY-ish outage halts it. The row must hand over the raw map keyed by
+    tier and decline to summarise it.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    harness.ctx.llm_findings.on_failover(
+        BackendFailover(
+            role="repo_classify",
+            tier=ModelTier.CHEAP,
+            from_backend="fake",
+            from_model_id="cheap-1",
+            to_backend="fake",
+            to_model_id="cheap-2",
+            trigger="RATE_LIMIT",
+        )
+    )
+    BEHAVIOURS["repo-a"] = [
+        fails_with(
+            FailureClass.BACKEND_UNAVAILABLE,
+            "tier HEAVY exhausted after targets: fake:heavy-1, fake:heavy-2",
+        )
+    ]
+
+    report = await harness.runner().run_wave(0)
+    assert report.halt is not None and report.halt.exit_code == 8
+
+    _, _, payload = (await harness.findings(BACKEND_UNAVAILABLE))[0]
+    assert payload["failover_triggers_scope"] == "run"
+    assert payload["failover_triggers"] == {"CHEAP": {"fake:cheap-1": "RATE_LIMIT"}}, (
+        "the raw map is still handed over, keyed by tier so the operator can match it against "
+        "`observed` — which names HEAVY, not CHEAP"
+    )
+    assert payload["failover_triggers_recorded"] == "unknown", (
+        "'none' would claim we hold no trigger for the exhausted tier; 'partial' would claim we "
+        "do. This row cannot identify the tier, so it must claim neither"
+    )
+    assert payload["throttling_observed"] is None, (
+        "the only 429 in this run belongs to CHEAP and the outage names HEAVY — answering `true` "
+        "here is the cross-tier contamination, and `false` is its mirror image"
+    )
 
 
 async def test_a_failing_findings_sink_cannot_rewrite_a_successful_repos_verdict(

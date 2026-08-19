@@ -84,11 +84,13 @@ _CAVEAT: Final = (
     "target over without inspecting TransportError.trigger, so sustained RATE_LIMIT throttling "
     "reaches this finding identically to a CONNECTION or SERVER_ERROR failure (SPEC 13 row 43 -- "
     "a 429 alone can never mean DOWN). Read failover_triggers together with "
-    "failover_triggers_scope: when the scope is 'run' the map spans EVERY tier this run touched, "
-    "not only the exhausted one named in `observed`, so match the tier key yourself before "
-    "concluding anything. Within a tier the map still omits the target that exhausted it, which "
-    "never reports its own trigger. If the triggers for the exhausted tier are throttling, the "
-    "correct action is to run at lower concurrency, not to repair infrastructure."
+    "failover_triggers_scope. Every row this harness writes today has scope 'run', which means "
+    "the map spans EVERY tier the run touched -- not only the exhausted one named in `observed` "
+    "-- and that failover_triggers_recorded and throttling_observed are unanswered on purpose. "
+    "Match the tier key against `observed` yourself before concluding anything. Within a tier "
+    "the map still omits the target that exhausted it, which never reports its own trigger. If "
+    "the triggers for the EXHAUSTED tier are throttling, the correct action is to run at lower "
+    "concurrency, not to repair infrastructure."
 )
 
 
@@ -183,8 +185,12 @@ class LlmFindingSink:
         `client.py:539-541` guards `_emit_failover` with `index + 1 < len(targets)`, so the target
         that exhausts a tier never reports its trigger, and a single-target tier reports none.
 
-        The shape is the SAME whether or not `tier` narrows it: one field name, one shape, so a
-        consumer never has to branch on which caller wrote the row.
+        The MAP's shape is the same whether or not `tier` narrows it — always
+        `{tier: {target: trigger}}`, so no consumer has to branch to *read* it. That is the only
+        thing the shape guarantees: the row's derived fields around it deliberately DO differ, and
+        `failover_triggers_scope` exists precisely so a consumer can branch on which arm wrote it
+        (`throttling_observed` is `bool` under `"tier"` and `null` under `"run"`). See
+        `record_backend_unavailable`.
         """
         wanted = None if tier is None else str(tier)
         return {
@@ -353,17 +359,30 @@ class LlmFindingSink:
         operator to lower concurrency while a dead HEAVY endpoint went unrepaired — the same
         false-statement class this row exists to avoid, pointed the other way.
 
-        * `tier` given → the map is narrowed to it, `failover_triggers_scope` is `"tier"`, and
-          `throttling_observed` is a real boolean about *that* tier.
+        * `tier` given → the map is narrowed to it, `failover_triggers_scope` is `"tier"`,
+          `failover_triggers_recorded` is `"none"`/`"partial"` **about that tier**, and
+          `throttling_observed` is a real boolean about that tier.
         * `tier` omitted → the map is the whole run, **keyed by tier so every entry is still
-          self-describing**, `failover_triggers_scope` is `"run"`, and `throttling_observed` is
-          `null`. Not `false`: we hold triggers, we simply cannot say whether any belongs to the
-          tier that died, and a `false` there would be the mirror-image lie.
+          self-describing**, `failover_triggers_scope` is `"run"`, and BOTH derived fields refuse
+          to answer: `failover_triggers_recorded` is `"unknown"` and `throttling_observed` is
+          `null`. Neither is `false`/`"none"` — we hold triggers, we simply cannot say whether any
+          of them belongs to the tier that died, and answering would be the mirror-image of the
+          cross-tier contamination this parameter exists to prevent.
 
-        The runner's call site omits it, because `TierUnavailable.tier` is lost at the
-        exception→`WorkerError` boundary and `observed` — the only carrier left — must not be
-        parsed. The operator cross-references it by eye: `observed` names the tier and the map's
-        keys are tier names. Carrying it structurally means changing `WorkerError`; another lane.
+        **NOT REACHED IN PRODUCTION TODAY — read this before treating the narrowed arm as live.**
+        Nothing in `src/` passes `tier=`. The one production caller is `PhaseRunner`'s halt path,
+        and it *cannot*: `TierUnavailable.tier` is lost at the exception→`WorkerError` boundary
+        (`WorkerError`, `workers/base.py:359-374`, carries `failure_class`, `retryable`,
+        `exit_code`, `stderr_tail`, `artifact_ref`, `exception_type` — no tier), and `observed`,
+        the only carrier left, must not be parsed. **So every row this harness ships today is
+        `scope: "run"` / `"unknown"` / `null`,** and the narrowed arm is exercised only by tests.
+        It is built rather than deferred because it is what makes the run-scoped arm's refusals
+        legible as refusals rather than as absent features — but it goes live only when
+        `WorkerError` (or `TierUnavailable`'s raise sites) carries the tier, which is another
+        lane's change and is tracked as such in the FD1 report.
+
+        The operator cross-references by eye in the meantime: `observed` names the exhausted tier
+        and the map's keys are tier names.
 
         `throttling_observed` is the derived answer to the only question that changes the
         operator's next action. It is deliberately NOT the negation of `asserts_outage` — both
@@ -371,11 +390,16 @@ class LlmFindingSink:
         """
         stamp = _iso(self.clock())
         triggers = self.observed_triggers(tier)
+        # Both derived fields answer ONLY when the row knows which tier it is about. At run scope
+        # `"none"` would be as contaminated as `false` — it would claim we hold no trigger for the
+        # exhausted tier when what we actually hold is a map we cannot attribute.
         throttled: bool | None = None
+        recorded = "unknown"
         if tier is not None:
             throttled = any(
                 t == "RATE_LIMIT" for targets in triggers.values() for t in targets.values()
             )
+            recorded = "partial" if triggers else "none"
         params = (
             self.run_id,
             repo_id,
@@ -393,7 +417,7 @@ class LlmFindingSink:
                     # future edit starts asserting a cause. The human-facing channel is `caveat`.
                     "asserts_outage": False,
                     "failover_triggers": triggers,
-                    "failover_triggers_recorded": "partial" if triggers else "none",
+                    "failover_triggers_recorded": recorded,
                     "failover_triggers_scope": "run" if tier is None else "tier",
                     "throttling_observed": throttled,
                     "caveat": _CAVEAT,

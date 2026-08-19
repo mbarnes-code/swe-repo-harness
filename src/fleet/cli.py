@@ -9266,31 +9266,39 @@ async def _emit_prs(
                     harness_version=HARNESS_VERSION,
                 )
                 worker = PrwriterWorker(runner=GH_RUNNER)
-                for candidate in candidates:
-                    outcome = await _emit_one_pr(
-                        ctx,
-                        worker,
-                        settings,
-                        candidate,
-                        records=records,
-                        monorepo_path=monorepo_path,
-                        pr_root=pr_root,
-                        ready=ready,
-                    )
-                    if isinstance(outcome, str):
-                        failed[candidate.repo_id] = outcome
-                        continue
-                    if outcome.held:
-                        held[candidate.repo_id] = list(outcome.unmerged_dependencies)
-                        continue
-                    if outcome.pr is None:  # pragma: no cover - `ok` implies a draft record
-                        failed[candidate.repo_id] = "the worker returned ok with no PR record"
-                        continue
-                    await _write_pr_record(writer, run_id, outcome.pr, now=_now())
-                    opened[candidate.repo_id] = outcome.pr.url or ""
-                    if outcome.draft:
-                        drafted.append(candidate.repo_id)
-                await _drain_llm_findings(ctx)
+                try:
+                    for candidate in candidates:
+                        outcome = await _emit_one_pr(
+                            ctx,
+                            worker,
+                            settings,
+                            candidate,
+                            records=records,
+                            monorepo_path=monorepo_path,
+                            pr_root=pr_root,
+                            ready=ready,
+                        )
+                        if isinstance(outcome, str):
+                            failed[candidate.repo_id] = outcome
+                            continue
+                        if outcome.held:
+                            held[candidate.repo_id] = list(outcome.unmerged_dependencies)
+                            continue
+                        if outcome.pr is None:  # pragma: no cover - `ok` implies a draft record
+                            failed[candidate.repo_id] = "the worker returned ok with no PR record"
+                            continue
+                        await _write_pr_record(writer, run_id, outcome.pr, now=_now())
+                        opened[candidate.repo_id] = outcome.pr.url or ""
+                        if outcome.draft:
+                            drafted.append(candidate.repo_id)
+                finally:
+                    # `finally`, not "after the loop": `_write_pr_record` and `_emit_one_pr` can
+                    # both raise, and a drain placed after the loop would discard the buffer on
+                    # exactly the runs that failed partway — a narrower copy of the defect this
+                    # drain was added to fix. The writer is still open here (it closes with the
+                    # `async with` two frames out), so this is the last point at which the
+                    # buffered findings can still be persisted.
+                    await _drain_llm_findings(ctx)
             finally:
                 await read_conn.close()
     finally:
