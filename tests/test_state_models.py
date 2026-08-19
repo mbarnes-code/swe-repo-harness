@@ -692,11 +692,14 @@ TRANSITION_GLOBALS: frozenset[str] = frozenset(
 """Every global and attribute name `transition()`'s body is allowed to reference.
 
 This is a WHITELIST, not a list of forbidden things, and that inversion is the point: a side
-effect has to name something to reach it, so anything a future edit adds — `warnings`, `print`,
+effect has to name something to reach it, so a NEW name a future edit adds — `warnings`, `print`,
 an imported module, an attribute sink, a `.append` — enlarges `co_names` and trips the assertion
-without anyone having predicted that particular form. Editing `transition()` legitimately will
-also trip it; updating this set is then a deliberate act with a reviewer's eyes on it, which is
-what a tripwire is for.
+without anyone having predicted that particular form. It does NOT catch a side effect routed
+through a name already listed here; ADR-0077 §4.2 records that boundary and why it is not closed.
+
+Editing `transition()` legitimately will also trip it. **Widening this set to go green is the
+wrong response** unless the new name is genuinely incapable of recording anything — see the
+assertion's own failure message.
 """
 
 
@@ -744,14 +747,21 @@ def test_transition_demotes_without_writing_a_record_or_reaching_a_sink(
 
     # The whitelist: `transition()` may reference these names and no others. A sink of any kind —
     # module, attribute, builtin, deferred import — must be named to be reached.
-    assert set(transition.__code__.co_names) == TRANSITION_GLOBALS
+    assert set(transition.__code__.co_names) == TRANSITION_GLOBALS, (
+        "transition() references a name TRANSITION_GLOBALS does not list. If you added an audit "
+        "side-effect — a log call, a findings write, an import, an attribute sink — you have "
+        "CLOSED the documented gap in ADR-0077 §4, which is a real design change: update §4, "
+        "delete this test deliberately, and give demote() a reason to exist. Do NOT simply add "
+        "the name to TRANSITION_GLOBALS to go green; that closes the door silently, which is the "
+        "exact failure this gate exists to prevent."
+    )
     # ...no state smuggled in as a default argument, and none captured from an enclosing scope,
     assert transition.__kwdefaults__ == {"operator": False, "resume": False}
     assert transition.__defaults__ is None
     assert transition.__code__.co_freevars == ()
     # ...no function-attribute sink hung off `transition` itself,
     assert vars(transition) == {}
-    # ...nothing accumulated in any module-level container,
+    # ...nothing accumulated in any module-level dict/list/set/frozenset,
     assert _enums_mutable_module_state() == before
     # ...and nothing was logged.
     assert caplog.records == []

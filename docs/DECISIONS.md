@@ -6927,8 +6927,10 @@ open. So the reinforcement is placed where that author will actually meet it:
    precisely:** `transition()`'s body may reference only the names in `TRANSITION_GLOBALS`, holds
    no mutable default and no closure cell, carries no function attribute, returns a bare
    `RepoStatus` rather than a `(status, record)` pair, accumulates nothing in any module-level
-   container, logs nothing, and `enums.py` contains no `fleet` import at any indentation. **What
-   it does not pin is stated in §4.2 — the enumeration is deliberately not claimed exhaustive.**
+   `dict`/`list`/`set`/`frozenset` (the four types the snapshot helper filters to — a sink of any
+   other type is not covered), logs nothing through `logging`, and `enums.py` contains no `fleet`
+   import at any indentation. **What it does not pin is stated in §4.2 — the enumeration is
+   deliberately not claimed exhaustive.**
 
 An admitted convention is strictly better than an overstated guarantee, because the next author
 trusts the guarantee. What `demote()` genuinely buys is not enforcement but **strictness**: it
@@ -6965,18 +6967,31 @@ has to think of one.
   caught.
 
 **And it is still not a proof, which this ADR states rather than discovers later.** A side effect
-routed entirely through names *already on* the whitelist passes it. This is verified, not
-hypothesised: binding `RESUME_DEMOTE` to a `dict` subclass whose `get()` appends to an **instance
-attribute** records every demotion while the whole test passes — `transition()`'s body is
-byte-identical, so `co_names` is unchanged, and `dict.__repr__` shows only mapping contents, so the
-module-state snapshot cannot see the sink either.
+routed entirely through names *already on* the whitelist passes it. Verified, not hypothesised:
+binding `RESUME_DEMOTE` to a `dict` subclass whose `get()` appends to an **instance attribute**
+records every demotion while the whole test passes — `transition()`'s body is byte-identical, so
+`co_names` is unchanged, and `dict.__repr__` shows only mapping contents, so the module-state
+snapshot cannot see the sink either. Review found six more, all adversarial: `ALLOWED_TRANSITIONS`
+as a side-effecting subclass; `RESUME_DEMOTE[SUCCEEDED]` as a **`frozenset` subclass** with a
+recording `__contains__` (a value *inside* a whitelisted global, its identity untouched); a side
+effect on `RepoStatus.__hash__`, an **argument type** `transition()` never names; a `sys.setprofile`
+hook installed at import; an audited wrapper over the **package re-export** in `models/__init__.py`,
+since the test pins `enums.transition` and not the exported name; and a sink reached through an
+attribute name already in the body.
 
-So the honest statement of the guarantee is: **the tripwire catches a side effect added to
-`transition()`'s own body, and does not catch one hidden inside an object `transition()` already
-names.** Closing that too would mean freezing the identity and type of every whitelisted global —
-achievable, and deliberately not done, because at that point the test is asserting the absence of an
-adversary rather than a property, and this ADR's whole subject is not making claims larger than the
-checks behind them.
+So the honest statement is narrower than "its own body": **the tripwire catches a side effect that
+introduces a NEW name into `transition()`'s body, and catches nothing that works through names,
+values, argument types, interpreter hooks, or re-exports already in play.**
+
+**Freezing the identity of every whitelisted global — the obvious next patch — would not close
+this.** Four of the seven escapes never touch a whitelisted global's identity: the `frozenset`
+subclass hides inside a value, `RepoStatus.__hash__` is an argument type, `sys.setprofile` is
+outside the module, and the re-export wrapper is outside the function. The patch would buy the
+*appearance* of closure while leaving the majority of the known escapes open — which is this ADR's
+own §4 failure mode, one level up. So the boundary is documented and not patched: past this point
+the test would be asserting the absence of an adversary rather than a property, and every one of
+these escapes requires an author deliberately building a recording sink and then hiding it. The
+convention is what stops honest mistakes; nothing here is claimed to stop a determined author.
 
 #### 4.1 `demote()` is deliberately stricter than `transition()`
 
@@ -7080,9 +7095,10 @@ untouched and unmigrated. Four tests carry the reasoning:
    the strictness is demonstrably `demote()`'s own rather than inherited.
 4. The open door is **pinned rather than claimed shut** (§4): `transition(SUCCEEDED, PENDING,
    resume=True)` is asserted to demote *and* to leave no record reachable from `transition()`'s
-   own body — `co_names` whitelisted, no mutable default, no closure cell, no function attribute,
-   a bare status returned, module state unchanged, `caplog` empty, and no `fleet` import at any
-   indentation. Bounded, not exhaustive: §4.2 names the escape that remains open, verified.
+   own body under a NEW name — `co_names` whitelisted, no mutable default, no closure cell, no
+   function attribute, a bare status returned, module-level `dict`/`list`/`set`/`frozenset`
+   unchanged, `caplog` empty, and no `fleet` import at any indentation. Bounded, not exhaustive:
+   §4.2 names the escapes that remain open, verified.
 
 Test 2's loop over illegal targets is **derived from `RepoStatus`** rather than listed. An earlier
 cut named three of the five reachable targets, so widening `RESUME_DEMOTE` to admit
