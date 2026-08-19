@@ -1,6 +1,8 @@
 """Closed vocabularies and the status state machine (SPEC §5.1)."""
 
+from dataclasses import dataclass
 from enum import IntEnum, StrEnum
+from typing import Final
 
 
 class Phase(IntEnum):
@@ -56,16 +58,90 @@ OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
 # the difference between "the operator un-abandoned it" and "the reaper lost track of it".
 
 
-def transition(old: RepoStatus, new: RepoStatus, *, operator: bool = False) -> RepoStatus:
+RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
+    RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
+}  # The second such door (ADR-0077), same construction and same reason as OPERATOR_REOPEN above:
+# §11.5 step 5 demotes a repo to the earliest phase whose EVIDENCE still holds, and a demotion is
+# by definition a write of PENDING over a SUCCEEDED phase row. Reachable only through
+# `transition(..., resume=True)`, so the mechanical terminality of SUCCEEDED against the crash
+# sweep, the reaper and `_on_breach` is untouched — those paths pass no flag and still cannot
+# resurrect settled work. SUCCEEDED is the ONLY key, deliberately:
+#   - RHI is absent because §13 row 46 (ii) names `fleet resume` among the automatic sweeps that
+#     must be unable to move a repo out of it. Only an operator re-opens an abandoned repo.
+#   - SKIPPED is absent because it is a config exclusion, not work a resume may un-decide.
+#   - DEGRADED is absent because it leaves the machine only via a budgeted revalidation round
+#     (§3.5.1); demoting it to PENDING would spend that budget by the back door (ADR-0077 §5).
+
+
+PHASE_DEMOTED_KIND: Final[str] = "PhaseDemoted"
+"""The `findings.kind` every §11.5 step-5 demotion writes. A demotion throws away landed, green
+work — strictly more than a `checkpoint_rejected`, which `runner.py` already argues "must be
+visible to whoever reads the wave" — so it is audited rather than silent (ADR-0077 §4)."""
+
+
+@dataclass(frozen=True, slots=True)
+class PhaseDemotion:
+    """The audit record for one demoted `phases` row. Obtainable only from `demote()`, which
+    returns it *alongside* the new status: a caller cannot take the demotion without also holding
+    the finding it owes, which is what makes the audit obligation mechanical rather than a
+    convention a later writer can forget."""
+
+    repo_id: str
+    phase: Phase
+    from_status: RepoStatus
+    reason: str          # why the evidence for `phase` no longer holds; free text, from the caller
+    to_status: RepoStatus = RepoStatus.PENDING
+
+    def payload(self) -> dict[str, object]:
+        """The `findings.payload` body, shaped for `cli._note_finding(kind=PHASE_DEMOTED_KIND)`.
+
+        NOTE for the writer: `_note_finding` fingerprints on `(run_id, repo_id, kind)` alone and
+        UPSERTs, so demoting phases 2, 3 and 4 of one repo through three naive calls collapses to
+        ONE row and loses two of them. `phase` is in the payload for that reason — the writer must
+        either fold a repo's demotions into a single finding or fingerprint per phase."""
+        return {
+            "repo_id": self.repo_id,
+            "phase": int(self.phase),
+            "from_status": self.from_status.value,
+            "to_status": self.to_status.value,
+            "reason": self.reason,
+        }
+
+
+def transition(
+    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
+) -> RepoStatus:
     """THE single gate for every status write (§6, §11.5). A no-op re-write of the same status
-    is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises."""
+    is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises.
+
+    `operator=True` opens `OPERATOR_REOPEN` (a human at `fleet retry`); `resume=True` opens
+    `RESUME_DEMOTE` (§11.5 step 5). Both default to False, so no existing caller — and no
+    automatic sweep — gains a single new edge. Prefer `demote()` over `resume=True` directly:
+    it is the same gate plus the `PhaseDemotion` finding the demotion owes."""
     if new is old:
         return new
     if new in ALLOWED_TRANSITIONS[old]:
         return new
     if operator and new in OPERATOR_REOPEN.get(old, frozenset()):
         return new
+    if resume and new in RESUME_DEMOTE.get(old, frozenset()):
+        return new
     raise ValueError(f"illegal status transition {old.value} -> {new.value}")
+
+
+def demote(
+    old: RepoStatus, *, repo_id: str, phase: Phase, reason: str
+) -> tuple[RepoStatus, PhaseDemotion]:
+    """THE way to demote one `phases` row for §11.5 step 5 — the status AND its audit record.
+
+    Raises `ValueError` for a status `RESUME_DEMOTE` does not open (so an RHI or DEGRADED row is
+    refused here exactly as it is at `transition`), and for a row that is already `PENDING`:
+    re-writing PENDING over PENDING is a no-op, not a demotion, and manufacturing a `PhaseDemoted`
+    finding for it would report thrown-away work that never existed."""
+    if old is RepoStatus.PENDING:
+        raise ValueError("a PENDING phase row is not a demotion; nothing was thrown away")
+    new = transition(old, RepoStatus.PENDING, resume=True)
+    return new, PhaseDemotion(repo_id=repo_id, phase=phase, from_status=old, reason=reason)
 
 
 class StubState(StrEnum):

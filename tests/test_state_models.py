@@ -49,6 +49,8 @@ from fleet.models.enums import (
     ALLOWED_TRANSITIONS,
     EQUIVALENCE_RANK,
     OPERATOR_REOPEN,
+    PHASE_DEMOTED_KIND,
+    RESUME_DEMOTE,
     TERMINAL_STATUSES,
     BreakStrategy,
     ContextPolicy,
@@ -61,6 +63,7 @@ from fleet.models.enums import (
     ModelTier,
     NodeKind,
     Phase,
+    PhaseDemotion,
     PrState,
     RepoStatus,
     StructuredOutputMode,
@@ -69,6 +72,7 @@ from fleet.models.enums import (
     SymbolKind,
     TaskKind,
     TransformTier,
+    demote,
     transition,
 )
 from fleet.models.graph import (
@@ -558,6 +562,94 @@ def test_abandoned_is_reachable_only_through_the_audited_operator_door() -> None
     assert OPERATOR_REOPEN.keys() == {rhi}
     with pytest.raises(ValueError, match="illegal status transition"):
         transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, operator=True)
+
+
+def test_a_resume_demotion_is_impossible_without_the_resume_flag() -> None:
+    """`SUCCEEDED -> PENDING` is refused on every path that does not say `resume=True` (ADR-0077).
+
+    Why it matters: this is the property the empty `ALLOWED_TRANSITIONS[SUCCEEDED]` set exists to
+    defend, and §11.5 step 5 is the ONLY caller allowed to spend it. If the default path could
+    demote, then the crash sweep, the worktree reaper and every `_on_breach` handler could
+    silently un-finish landed, green work — and "SUCCEEDED is terminal" would go back to being
+    prose. The flag is what keeps the guarantee mechanical for everyone else.
+    """
+    with pytest.raises(ValueError, match="illegal status transition"):
+        transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING)
+    # ...including the OTHER audited door: `fleet retry`'s operator key is not a resume key.
+    with pytest.raises(ValueError, match="illegal status transition"):
+        transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, operator=True)
+
+    assert transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, resume=True) is RepoStatus.PENDING
+
+
+def test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else() -> None:
+    """`resume=True` is not a master key: it demotes settled work and re-opens nothing.
+
+    Why it matters: §13 row 46 (ii) requires that a test driving every automatic sweep — the
+    reaper, **`fleet resume`**, `stub_reconcile`, `blocked_by` recomputation — finds none of them
+    able to move a repo out of `REQUIRES_HUMAN_INTERVENTION`. `fleet resume` is named there by
+    name, so the flag that makes step 5 writable must not also make it an operator. DEGRADED is
+    excluded for the same shape of reason: it leaves the machine only through a budgeted
+    revalidation round (§3.5.1), and a demotion to PENDING would spend that budget by the back
+    door with no round recorded.
+    """
+    assert RESUME_DEMOTE.keys() == {RepoStatus.SUCCEEDED}
+
+    for held in (
+        RepoStatus.REQUIRES_HUMAN_INTERVENTION,  # only an operator un-abandons (§12.14)
+        RepoStatus.DEGRADED,                     # only a budgeted revalidation round (§3.5.1)
+        RepoStatus.SKIPPED,                      # a config exclusion, not a resume's to un-decide
+    ):
+        with pytest.raises(ValueError, match="illegal status transition"):
+            transition(held, RepoStatus.PENDING, resume=True)
+
+    # And the one open key leads to PENDING only — never straight back into RUNNING.
+    for elsewhere in (RepoStatus.RUNNING, RepoStatus.BLOCKED, RepoStatus.DEGRADED):
+        with pytest.raises(ValueError, match="illegal status transition"):
+            transition(RepoStatus.SUCCEEDED, elsewhere, resume=True)
+
+
+def test_a_demotion_cannot_be_taken_without_the_finding_it_owes() -> None:
+    """`demote()` returns the new status AND the `PhaseDemoted` finding, as one value.
+
+    Why it matters: a demotion throws away landed, green work — strictly more than a
+    `checkpoint_rejected`, which `runner.py` already argues must be visible to whoever reads the
+    wave. Emitting the finding cannot be left to the writer's good intentions, so the audit record
+    is not *available* separately from the status change: there is no call that yields one without
+    the other. The payload carries `phase` because `_note_finding` fingerprints on
+    `(run_id, repo_id, kind)` and would otherwise UPSERT three demoted phases into one row.
+    """
+    status, finding = demote(
+        RepoStatus.SUCCEEDED,
+        repo_id="acme/billing",
+        phase=Phase.BUILD,
+        reason="BUILD.bazel absent on the integration ref",
+    )
+    assert status is RepoStatus.PENDING
+    assert isinstance(finding, PhaseDemotion)
+    assert PHASE_DEMOTED_KIND == "PhaseDemoted"
+    assert finding.payload() == {
+        "repo_id": "acme/billing",
+        "phase": int(Phase.BUILD),
+        "from_status": "SUCCEEDED",
+        "to_status": "PENDING",
+        "reason": "BUILD.bazel absent on the integration ref",
+    }
+
+    # A row `RESUME_DEMOTE` does not open is refused HERE too, so no caller can reach a demotion
+    # by preferring `demote()` over `transition()`.
+    with pytest.raises(ValueError, match="illegal status transition"):
+        demote(
+            RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+            repo_id="acme/billing",
+            phase=Phase.BUILD,
+            reason="triaged by a human",
+        )
+
+    # An already-PENDING row is not a demotion: `transition()` would allow it as an idempotent
+    # no-op (§11.7), which would mint a finding claiming work was thrown away when none was.
+    with pytest.raises(ValueError, match="not a demotion"):
+        demote(RepoStatus.PENDING, repo_id="acme/billing", phase=Phase.BUILD, reason="noop")
 
 
 def test_the_third_failed_attempt_is_terminal() -> None:
