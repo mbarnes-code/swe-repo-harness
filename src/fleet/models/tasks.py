@@ -44,7 +44,16 @@ class TokenUsage(FleetModel):
     role: str = ""
     tier: ModelTier | None = None      # ADR-0023: which tier the role resolved to
     backend: str = ""                  # ADR-0023: registered backend name that actually answered
-    model_id: str = ""                 # the RESOLVED model id, as the backend reported it
+    model_id: str = ""                 # MUST echo `target.model_id` verbatim — see below
+    # `model_id` is the CONFIGURED id from config/models.yaml, NOT the id the transport resolved
+    # or served the call as. A backend adapter that sets it from the server's reported name (an
+    # API response's `model` field, say) breaks the LLM cache outright: the READ key is built from
+    # the config string (`cache._key_parts`) and the WRITE key from `usage.model_id`
+    # (`cache._store_response`), so the two disagree on EVERY call — a permanent, silent 100% miss
+    # that is indistinguishable from a cold cache, because `attempts.llm_cache_hit` simply stays 0.
+    # (`_target_for` likewise matches on (backend, model_id) and stops finding the answering
+    # target, so `effort` falls back to the primary's.) Reporting the served id is a legitimate
+    # want — it just needs a SEPARATE field or a log line, never this one.
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     cache_read_tokens: int = Field(default=0, ge=0)

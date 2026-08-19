@@ -431,7 +431,22 @@ CREATE TABLE IF NOT EXISTS llm_cache (            -- content-addressed LLM resul
     role        TEXT NOT NULL,
     tier        TEXT NOT NULL DEFAULT 'WORKHORSE',  -- ADR-0023; ModelTier
     backend     TEXT NOT NULL DEFAULT 'anthropic',  -- ADR-0023; registered backend name
-    model_id    TEXT NOT NULL,                    -- RESOLVED id. (tier, backend, model_id) are key
+    model_id    TEXT NOT NULL,                    -- The CONFIGURED id — `target.model_id` out of
+                                                  --   config/models.yaml, verbatim — NOT the id
+                                                  --   the transport resolved or served it as.
+                                                  --   This is a cache-KEY component, and the two
+                                                  --   sides are built from different objects: the
+                                                  --   READ key from the config string, the WRITE
+                                                  --   key from `usage.model_id`. A backend that
+                                                  --   reports its own served name makes them
+                                                  --   disagree on EVERY call — a permanent, silent
+                                                  --   100% miss indistinguishable from a cold
+                                                  --   cache, because `attempts.llm_cache_hit`
+                                                  --   simply stays 0. So `usage.model_id` MUST
+                                                  --   echo `target.model_id`. Surfacing the served
+                                                  --   id is a legitimate want, but it needs a
+                                                  --   SEPARATE field (or a log line) — never this
+                                                  --   one. (tier, backend, model_id) are key
                                                   --   components, not decoration: the cache is
                                                   --   run-unscoped, so without them a failover to
                                                   --   a weaker model poisons every later run
