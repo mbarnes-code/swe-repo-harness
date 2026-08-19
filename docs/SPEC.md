@@ -696,7 +696,7 @@ paths).
    authority for both the reservation and why it is a finding rather than a row.
 
 **Where the LLM is invoked.** Three narrow slots, all ADR-0008 class (1) or (2):
-- `classify` (haiku, low effort) — `service | library | monolith | tool`, framework family, and an
+- `classify` (haiku; no effort declared — ADR-0075) — `service | library | monolith | tool`, framework family, and an
   ownership guess per repo. Advisory metadata on `repos`; **never** an input to edge inference.
 - `extract` (sonnet) — only for manifests an adapter flagged `low_confidence` (Groovy
   `build.gradle` with conditional logic, hand-rolled shell build scripts, README-only
@@ -2895,7 +2895,13 @@ class BackendTarget(FleetModel):
     base_url: str | None = None          # required by `openai_compatible`; ignored by others
     api_key_env: str | None = None       # NAME of the env var; never the value (§11.4)
     region: str | None = None            # bedrock / vertex transport selector
-    effort: Literal["low", "medium", "high"] = "medium"
+    effort: Literal["low", "medium", "high"] | None = None
+    # ADR-0075: OPTIONAL, and `None` means "the operator did not say" — send no effort parameter
+    # at all. Do NOT restore the `= "medium"` default: a shipped CHEAP target dropped its
+    # `effort: low` line precisely to stop the parameter being sent, and the default silently
+    # substituted "medium" — a value nobody wrote, transmitted as though requested. A backend MUST
+    # omit the parameter when this is `None` rather than picking one of its own. `effort` is a
+    # cache-key component, so re-adding the default also re-keys the CHEAP cache.
     price: Price | Literal["free"] = Field(
         description="MANDATORY — no default, so an omitted price is a ValidationError at load "
         "rather than a fleet silently priced at $0.00 (§9 rule 5, §11.2). The loader surfaces "
@@ -3300,7 +3306,12 @@ class LlmCallRecord(FleetModel):
         description="Which §7.7 rung produced this response. A PROMPTED result from a tier whose "
         "profile promised JSON_SCHEMA is a capability-drift finding, not a silent success."
     )
-    effort: Literal["low", "medium", "high"]
+    effort: Literal["low", "medium", "high"] | None = Field(
+        default=None,
+        description="None when the target declared none — recorded as absent, never as the "
+        "value a default would have invented, because this column is a cache-key component "
+        "(ADR-0075). Do not restore a non-optional declaration here.",
+    )
     context_policy: ContextPolicy | None = Field(
         default=None, description="None only for non-ladder roles that compose no prior context"
     )
@@ -4187,7 +4198,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (            -- content-addressed LLM resul
                                                   --   to a weaker model poisons every later run
                                                   --   (§13 row 39).
     structured_output_mode TEXT NOT NULL DEFAULT 'JSON_SCHEMA',  -- ADR-0023; §7.7 rung used
-    effort      TEXT NOT NULL,
+    effort      TEXT NOT NULL,             -- ADR-0075: '' = target declared none. NOT NULL
+                                          --   and no CHECK, so absence needs no migration.
     context_policy TEXT,                          -- ADR-0021; NULL for non-ladder roles
     rejected_approach_digest TEXT NOT NULL        -- sha256 over the signatures RENDERED in the prompt
         DEFAULT 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',  -- sha256(b'')
@@ -5606,7 +5618,7 @@ def discover() -> dict[str, ModelBackend]:
 
 | `backend` | Transport | Covers | Notes |
 |---|---|---|---|
-| `anthropic` | native Messages API via `anthropic` SDK | hosted Anthropic | SDK-native retries left on (`max_retries=4`, §11.8); adaptive thinking + `effort` where the target's declared capabilities carry it |
+| `anthropic` | native Messages API via `anthropic` SDK | hosted Anthropic | SDK-native retries left on (`max_retries=4`, §11.8); adaptive thinking + `effort` where the target's declared capabilities carry it, and the effort parameter **omitted entirely** when `target.effort is None` — never replaced by a default of the backend's own (ADR-0075) |
 | `openai_compatible` | Chat Completions over any `base_url` | **local vLLM, Ollama, LM Studio, llama.cpp `llama-server`, TGI**, and hosted OpenAI-compatible endpoints | **The workhorse for local development on this server.** `base_url` is required; `api_key_env` may name a var holding a dummy value, which is what local servers expect. Constrained decoding is offered only when `capabilities_override` or the declared table says the server supports it — see below |
 | `bedrock` | AWS Bedrock runtime | same models, different transport | Exists for failover, not for variety: a tier can list `anthropic` then `bedrock` and survive one endpoint's outage without changing which model answers |
 | `vertex` | Google Vertex AI | same models, different transport | As above |

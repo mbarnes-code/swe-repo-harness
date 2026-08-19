@@ -288,7 +288,7 @@ LLM review of every file (cost scales with LOC instead of with ambiguity).
 **Decision.** Provider: Anthropic. Client: the official `anthropic` package
 (`anthropic>=0.69`), `AsyncAnthropic` only, one module-level lazily-constructed singleton,
 SDK-native retries left on (`max_retries=4`) and never re-implemented. Adaptive thinking
-(`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role;
+(`thinking={"type": "adaptive"}`) with an explicit `output_config.effort` per role *where one is declared* — ADR-0075 made `effort` optional and a `None` effort means the parameter is omitted entirely, so this is no longer per-role-unconditional;
 streaming for any call with large `max_tokens`. **No other provider, no OpenAI-compatible
 shim, no LangChain.** Role→model assignment:
 
@@ -1022,7 +1022,7 @@ Ollama, LM Studio, llama.cpp `llama-server`, TGI, and hosted OpenAI-compatible e
 **`bedrock`**, and **`vertex`**. A new backend is one file under `src/fleet/llm/backends/` plus one
 `@register_backend` line; nothing else in the harness may import a vendor SDK. `config/models.yaml`
 becomes a set of named **profiles**, each mapping `role -> tier` and `tier -> [ordered backend
-targets]`, where a target is `{backend, model_id, base_url?, effort, capabilities_override?}`.
+targets]`, where a target is `{backend, model_id, base_url?, effort?, capabilities_override?}` (`effort?` optional per ADR-0075 — the `?` is load-bearing here, since this line is the shape a reconciliation reads).
 The three tiers are renamed to capability names carrying no vendor string — **`HEAVY`**,
 **`WORKHORSE`**, **`CHEAP`** — and the ADR-0009 model IDs survive unchanged as the shipped
 `default` profile. **No model string may appear in Python** (§12.40), so swapping the entire fleet
