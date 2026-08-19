@@ -293,20 +293,29 @@ streaming for any call with large `max_tokens`. **No other provider, no OpenAI-c
 shim, no LangChain.**
 
 > **NOT IMPLEMENTED, and deliberately so — do not reconcile code to the *paragraph immediately
-> above*.** This marker scopes to that paragraph's claims about thinking and streaming ONLY. The
-> **tier table below is authoritative and current** — its `effort: high` values are live config
-> (`config/models.yaml`), must not be deleted, and deleting them would re-key the CHEAP and
-> non-CHEAP caches exactly as ADR-0075 warns.
+> above*.** The marker covers **every claim in that paragraph, without exception** — the thinking
+> mode, the streaming, the "`output_config.effort` per role", and "no OpenAI-compatible shim".
+> Not one of them describes what ships, and none of them is outside this marker's scope. Treat the
+> whole paragraph as historical.
 >
-> As shipped, `llm/backends/anthropic.py` constructs **no `thinking` key at all** (nor any
-> `temperature`, `seed` or `top_p` on the LLM call path), and does **not** stream:
-> `ModelClient.stream` exists but no phase consumes it. It sends `output_config.effort` **only**
-> when the target declares one, gating on `target.effort is not None` and consulting no
-> capabilities — `ModelCapabilities` has no effort field and must not grow one (ADR-0075; a
-> `supports_effort` gate would suppress an explicitly declared `effort: high` and re-key the
-> cache). Determinism comes from the `llm_cache`, not from a sampler setting. This paragraph is
-> retained as the original decision record; §7.7's shipped-backends table describes actual
-> behaviour.
+> The **tier table below is a different matter: authoritative and current.** Its `effort: high`
+> values are live config (`config/models.yaml`), must not be deleted, and deleting them would
+> re-key the CHEAP and non-CHEAP caches exactly as ADR-0075 warns.
+>
+> As shipped: `llm/backends/anthropic.py` constructs **no `thinking` key at all** (nor any
+> `temperature`, `seed` or `top_p` on the LLM call path). **Effort is per TARGET and conditional,
+> not per role and unconditional** — it is sent **only** when the target declares one, gating on
+> `target.effort is not None` and consulting no capabilities; `ModelCapabilities` has no effort
+> field and must not grow one (ADR-0075; a `supports_effort` gate would suppress an explicitly
+> declared `effort: high` and re-key the cache). **An OpenAI-compatible backend does ship** —
+> `llm/backends/openai_compatible.py`, ADR-0023 — so "no OpenAI-compatible shim" is false as
+> written. On streaming, be precise: the *protocol* exists and is implemented
+> (`ModelClient.stream` at `llm/client.py:274`, `LadderModelClient.stream` at `:544`,
+> `CachingModelClient.stream` at `llm/cache.py:504`, and `ModelCapabilities.supports_streaming` at
+> `models/tasks.py:66`); what is false is that the anthropic backend streams — it does not — and
+> **no phase consumes `ModelClient.stream`**. Determinism comes from the `llm_cache`, not from a
+> sampler setting. This paragraph is retained as the original decision record; §7.7's
+> shipped-backends table describes actual behaviour.
 
 Role→model assignment:
 
@@ -336,17 +345,25 @@ non-Anthropic provider (out of scope by directive).
 
 **Superseded by ADR-0023** (provider-agnostic `ModelClient` + backend registry). The original text
 above is preserved as the record of what was decided and why it was wrong. It is preserved, not
-untouched: two inline annotations were added later — the NOT-IMPLEMENTED blockquote scoping the
-thinking/streaming claims, and the struck CHEAP `effort` cell superseded by ADR-0075 — because a
-record that reads as current is a record that gets reconciled INTO the code. Six of its claims do
-not survive. Three were identified when ADR-0023 superseded it: the "out of scope by directive"
-rejection cited a directive that **does not exist**
+untouched: **three** inline annotations were added later — the NOT-IMPLEMENTED blockquote
+covering every claim in the Decision paragraph, the struck CHEAP `effort` cell, and the
+`role -> {id, effort?}` shape qualification below the table, the last two both per ADR-0075 —
+because a record that reads as current is a record that gets reconciled INTO the code. **Seven**
+of its claims do not survive. Three were identified when ADR-0023 superseded it: the "out of scope
+by directive" rejection cited a directive that **does not exist**
 in `CLAUDE.md` or anywhere in `references/`; the claim that the reference harness "carries all
 three" of LangChain/LiteLLM/DeepAgents is **factually false** for LiteLLM, which appears nowhere in
 `references/`; and the structured-output rationale describes a capability that is not
-provider-specific. Three more were found later and are marked inline above: **adaptive thinking**
-and **streaming for large `max_tokens`** are implemented nowhere in `src/`, and the CHEAP tier's
-**`effort: low`** is superseded by ADR-0075. What survives verbatim: the **three-tier cost split**,
+provider-specific. Four more were found later and are marked inline above. (4) **Adaptive
+thinking** — no `thinking` key is constructed anywhere in `src/`. (5) **Streaming for large
+`max_tokens`** — stated carefully, because the loose version of this is itself false: the
+`ModelClient.stream` protocol *is* implemented (`llm/client.py:274`/`:544`, `llm/cache.py:504`,
+`ModelCapabilities.supports_streaming`), but the anthropic backend does not stream and **no phase
+consumes it**. (6) **"No other provider, no OpenAI-compatible shim"** — `openai_compatible` ships
+as a backend (ADR-0023), so this is false as written. (7) The **`effort` claims, both of them** —
+the unconditional "`output_config.effort` per role" phrasing and the CHEAP tier's `effort: low` —
+superseded by ADR-0075, under which effort is per target, optional, and omitted entirely when
+undeclared. What survives verbatim: the **three-tier cost split**,
 the rule that role→model assignment is config and never code, and the rejection of heavyweight
 orchestration frameworks.
 What changes: `anthropic` becomes one backend among several behind a `ModelClient` protocol, the
