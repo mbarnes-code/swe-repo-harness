@@ -6784,3 +6784,207 @@ Rejected alternatives, each for a specific reason:
   below the `raise` makes it fail on empty stdout — checked by mutation, not assumed.
 - **This ADR is temporary by construction.** When §11.5 step 5 lands, `ResumeIncompleteError`
   should be deleted, not repurposed. If it is still here after step 5 exists, that is a defect.
+---
+
+## ADR-0077 — `SUCCEEDED` stays terminal for every automatic path and becomes demotable for exactly one: `RESUME_DEMOTE` gated on a keyword-only `resume=True`, mirroring `OPERATOR_REOPEN`, with a `PhaseDemoted` finding the caller cannot decline to take
+
+**Status: DECIDED AND IMPLEMENTED**, at `agent/DEM1` branched from `7a8bfbb`. The gate has **no
+caller**, deliberately: it is subtask 1 of the ten-part §11.5 step-5 decomposition and every other
+subtask is downstream of the answer, so it lands alone and is verified alone. `orchestrator/reentry.py`,
+`phase_floor`, `evidence_holds`, the demotion writer and the `_resume_impl` wiring are subtasks 2, 5, 6
+and 7 and are **not** in this ADR's implementation.
+
+**Provenance (CLAUDE.md Guardrail 1).** The `RESUME_DEMOTE` + `resume=True` shape is an **Agent
+Recommendation** — it originated in a design pass (`.superpowers/sdd/sdd-backlog-b/design-resume-step5.md`
+§6, option B) and was accepted by the orchestrator. `docs/SPEC.md` requires the *demotion*; it does
+not name this mechanism, and nothing below should be cited as a SPEC requirement. What the SPEC does
+require is quoted verbatim in §1.
+
+### 1. The contradiction, both sides quoted
+
+`docs/SPEC.md:180-182`, Constraint 7, as it read at `7a8bfbb`:
+
+> **Resume validates preconditions, never blind-replays** (Constraint 7): before re-entering a
+> phase, `runner.py` re-checks the phase's declared preconditions (below) against SQLite; a
+> failed precondition demotes the repo to the earliest phase whose precondition holds.
+
+`docs/SPEC.md:6777-6778`, §11.5 step 5, same commit:
+
+> (5) re-check each phase's declared preconditions and demote to the earliest
+> phase whose precondition holds (Constraint 7)
+
+`src/fleet/models/enums.py:45,48-49`, same commit:
+
+> ```python
+> RepoStatus.SUCCEEDED: frozenset(),
+> ```
+> ```
+> }  # Terminal statuses map to the EMPTY set, which is what makes them terminal mechanically
+> # rather than by prose: no crash sweep can resurrect an abandoned repo into RUNNING.
+> ```
+
+and `transition()` (`enums.py:59-68`), documented as "**THE single gate for every status write**
+(§6, §11.5)", ends `raise ValueError(f"illegal status transition {old.value} -> {new.value}")` for
+anything unlisted.
+
+A demotion is, by definition, a write of `PENDING` over a `SUCCEEDED` `phases` row. The SPEC says in
+the imperative that resume must perform it; the type system says in the imperative that it cannot.
+**Demotion was literally unwritable**, and every one of the nine remaining step-5 subtasks assumes a
+legal demotion write. This ADR is the reconciliation.
+
+### 2. The decision
+
+Two names and one parameter in `src/fleet/models/enums.py`:
+
+```python
+RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
+    RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
+}
+
+def transition(
+    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
+) -> RepoStatus:
+    ...
+    if resume and new in RESUME_DEMOTE.get(old, frozenset()):
+        return new
+    raise ValueError(...)
+```
+
+plus `PHASE_DEMOTED_KIND = "PhaseDemoted"`, a frozen `PhaseDemotion` record, and `demote()` — see §4.
+
+**This is the second instance of an existing pattern, not a new mechanism.** `OPERATOR_REOPEN`
+(`enums.py:52-56`) is the same construction for the same class of problem — a legitimate path that
+must escape a mechanically-terminal state — and its own comment states the general principle:
+
+> Explicit, audited to `findings`, and unreachable from any automatic path — which is precisely
+> the difference between "the operator un-abandoned it" and "the reaper lost track of it".
+
+The precedent was **verified rather than assumed** before building on it: `OPERATOR_REOPEN` exists at
+`enums.py:52`, is a `dict[RepoStatus, frozenset[RepoStatus]]` keyed on `REQUIRES_HUMAN_INTERVENTION`
+alone, and is consulted only behind the keyword-only `operator: bool = False` at `enums.py:59,66`.
+`RESUME_DEMOTE` copies that shape exactly, so a reader who understands one understands both.
+
+### 3. Why this over the alternatives
+
+**A — open `SUCCEEDED → PENDING` in `ALLOWED_TRANSITIONS` unconditionally.** Rejected. It is one
+line, and it destroys the exact property the comment at `enums.py:48-49` defends: every crash sweep,
+every worktree/container reaper and every `_on_breach` handler would gain the ability to silently
+un-finish landed, green work, and the terminality of `SUCCEEDED` would revert from mechanical to
+prose. The invariant worth keeping is not "nothing ever writes over `SUCCEEDED`" — it is "**no
+automatic path** can", and a default-`False` keyword-only flag preserves that precisely, because a
+caller that does not name it gains no new edge at all.
+
+**C — do not demote `SUCCEEDED`; restrict step 5 to non-settled rows.** Rejected, and this is the
+more dangerous of the two. It needs no enum change and no SPEC edit, which is exactly what makes it
+attractive and exactly why it is wrong: it turns step 5 into a **no-op in the scenario Constraint 7
+was written for**. A Phase-3 repo whose `BUILD.bazel` was reaped is `SUCCEEDED` at Phase 2 and
+`SUCCEEDED` at Phase 3, so nothing is demotable, and the repo re-enters Phase 4 to verify a package
+that no longer builds. Converting a documented contradiction into a silent correctness hole is
+Rule 11's named failure mode: a resume that quietly skips settled rows is quietly incomplete, which
+is the failure this subsystem exists to prevent.
+
+**D — model demotion as data: leave `phases.status` alone, add a `resume_floor` column.** Rejected
+under Guardrail 4. It creates a second source of truth for "which phase is this repo at" beside
+`phases.status`, and would have to be threaded through `WaveScheduler.admit`, `_gated_members` and
+`state/projection.py` — a shadow scheduler state, for a question `phases.status` already answers.
+
+### 4. The audit obligation is mechanical, not a convention
+
+A demotion throws away landed, green work. `orchestrator/runner.py` already argues, for the strictly
+*smaller* event of a rejected checkpoint, that "a rejection means landed work was thrown away and
+that must be visible to whoever reads the wave". A demotion must be at least as loud, so it writes a
+`findings` row of kind `PhaseDemoted` (`findings.kind` is free text by schema design —
+`state/schema.sql:253` — so this needs no migration).
+
+"The writer must remember to emit it" is a convention, and this file's whole argument is that
+conventions are worse than mechanisms. So the finding is **not obtainable separately from the status
+change**:
+
+```python
+def demote(old, *, repo_id, phase, reason) -> tuple[RepoStatus, PhaseDemotion]
+```
+
+There is no call that yields the demoted status without also yielding the record it owes. `demote()`
+is the same gate — it delegates to `transition(..., resume=True)`, so an RHI or DEGRADED row is
+refused identically here — plus two extra refusals of its own: an already-`PENDING` row raises,
+because `transition()` would accept it as an idempotent no-op (§11.7) and a `PhaseDemoted` finding
+for it would report thrown-away work that never existed.
+
+**One hazard handed forward to subtask 6, recorded here so it is not rediscovered as a bug.**
+`cli._note_finding` fingerprints on `(run_id, repo_id, kind)` alone and `ON CONFLICT … DO UPDATE`s.
+Three naive per-phase calls for one repo therefore collapse into **one row**, silently losing two
+demotions. `PhaseDemotion.payload()` carries `phase` for that reason; the writer must either fold a
+repo's demotions into a single finding or fingerprint per phase.
+
+### 5. `DEGRADED`, `SKIPPED` and `REQUIRES_HUMAN_INTERVENTION` are deliberately not keys
+
+`RESUME_DEMOTE` has exactly one key. Each omission is a decision, not an oversight:
+
+- **`REQUIRES_HUMAN_INTERVENTION`.** §13 row 46 (ii) requires a test that drives "every automatic
+  sweep — the reaper, **`fleet resume`**, `stub_reconcile`, `blocked_by` recomputation" and finds
+  none of them able to move a repo out of it. `fleet resume` is named there **by name**, so the flag
+  that makes step 5 writable must not also make resume an operator. Un-abandoning stays `operator=True`.
+- **`SKIPPED`.** A config exclusion. Resume does not re-decide the operator's config.
+- **`DEGRADED`.** This is design ambiguity 5, resolved here because §11.5 step 5 contains no
+  carve-out. `DEGRADED` is deliberately non-terminal (`enums.py:25-27`) but leaves the machine
+  **only** through a budgeted revalidation round (§3.5.1). Demoting it to `PENDING` would spend that
+  budget by the back door with no round recorded — so `DEGRADED` is treated as **settled for
+  demotion purposes**: step 5 neither demotes it nor searches past it. `transition(DEGRADED,
+  PENDING, resume=True)` raises, and subtask 2's `phase_floor` must classify it accordingly.
+
+### 6. The second contradiction, resolved by naming two predicates instead of one
+
+Constraint 7 said "re-checks the phase's **declared preconditions**", and `runner.py`'s only
+precondition mechanism is `BaseWorker.preconditions_hold` — whose own contract (`runner.py:214-218`)
+says:
+
+> `True` means "the checkpoint describes the tree in front of me, re-enter for `remaining_units`
+> alone", and `False` means "it does not — run the phase whole from its anchor". **Neither verdict
+> ever means "skip the work".**
+
+A verdict that never means "skip" cannot select a phase to skip *to*, and reading it as one is
+actively harmful in both directions:
+
+- Ten of the fifteen implementations — including **all four** phase composites, the only things a
+  per-phase walker can call — return `False` precisely when there is nothing to resume. For a fresh
+  repo the ascending walk yields `False, False, False, False`: "the earliest phase whose precondition
+  holds" is the empty set, and the SPEC defines no behaviour for it.
+- `rdepverify.preconditions_hold` returns `True` when the BUILD row is **missing**, deliberately
+  ("No BUILD row at all is a first admission by the runner, not evidence of a failure"). An ascending
+  scan therefore answers "Phase 4 holds, Phase 1 does not" for a never-cloned repo — it **promotes to
+  Phase 4** the repos that have not been cloned. That is the default state of every repo at the start
+  of a run, not a corner case.
+
+The resolution: two named predicates rather than one overloaded name. `preconditions_hold` stays at
+its single documented call site (`PhaseRunner._re_entry`, "the only point where both the typed
+payload and the `WorkerContext` the worker would receive exist"). Step 5 searches a separate,
+resume-owned `evidence_holds` — durable state only, `phases` + Git, no payload and no
+`WorkerContext` — **downward from the settled frontier**, so monotonicity is a property of the
+traversal rather than an assumption about the predicates. `docs/SPEC.md` §11.5 step 5 and the
+Constraint 7 bullet were rewritten in this task to say so; leaving them as written guaranteed the
+next reader would re-derive the broken algorithm. `evidence_holds` itself is subtask 5.
+
+### 7. What this ADR does not do
+
+- **It ships no caller.** `resume=True` and `demote()` are reachable from no code in `src/` today.
+  That is the intended end state of subtask 1: the gate is verified in isolation, and a
+  wrongly-shaped gate is cheaper to fix before four subtasks are written against it. (`operator=True`
+  is in the same position — `fleet retry`'s documented escape is itself still unwired — so this is a
+  known and accepted shape in this file, not a new one.)
+- **It does not decide `attempts` on demotion.** Design ambiguity 2 is subtask 6's, and the SPEC's
+  §11.5 step 5 text amended here says `attempts` is retained, by analogy with steps 3 and 4 which
+  say so explicitly.
+- **It does not decide where a demoted repo re-enters the schedule** (ambiguity 3, subtask 8) or
+  **`--from-phase` semantics** (ambiguity 4, subtask 9).
+
+### 8. Verification
+
+At `agent/DEM1`: `mypy --strict src/fleet` → `Success: no issues found in 107 source files`;
+`pytest tests/test_state_models.py` → 119 passed; `pytest tests/test_schema_sql.py` → 16 passed —
+the last of these because `test_schema_sql.py:342` derives the `phases.status` CHECK domain from
+`{s.value for s in RepoStatus}`, and this ADR adds **no** `RepoStatus` member, so the DDL is
+untouched and unmigrated. Three tests carry the reasoning: a demotion without `resume=True` is
+refused (including with `operator=True`, which is not a resume key); `RESUME_DEMOTE.keys() ==
+{SUCCEEDED}` with RHI, DEGRADED and SKIPPED each proven still refused *under* `resume=True`; and
+`demote()` proven to return the `PhaseDemotion` inseparably from the status, with its payload
+asserted field-by-field.

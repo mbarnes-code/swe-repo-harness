@@ -177,9 +177,14 @@ Common contract for all four:
 - **Idempotency:** a phase runner first reads the `phases` row. `SUCCEEDED` → skip.
   `REQUIRES_HUMAN_INTERVENTION` → skip permanently. `RUNNING` with a stale `heartbeat_at`
   (> `stale_after_s`, default 900) → treated as crashed, reset to `PENDING`, `attempts` retained.
-- **Resume validates preconditions, never blind-replays** (Constraint 7): before re-entering a
-  phase, `runner.py` re-checks the phase's declared preconditions (below) against SQLite; a
-  failed precondition demotes the repo to the earliest phase whose precondition holds.
+- **Resume validates evidence, never blind-replays** (Constraint 7): before re-entering a phase,
+  `fleet resume` re-checks each phase's durable evidence against SQLite + Git and demotes the
+  repo to the earliest phase whose evidence still holds (§11.5 step 5). **Two distinct
+  predicates, not one** (ADR-0077 §6): the durable, payload-free `evidence_holds` is what step 5
+  searches over, while `BaseWorker.preconditions_hold` stays at its single call site inside
+  `PhaseRunner._re_entry`, where a typed payload and a `WorkerContext` exist — and where neither
+  of its verdicts ever means "skip the work". The demotion write itself goes through
+  `transition(..., resume=True)` (`RESUME_DEMOTE`, §5.1) and emits a `PhaseDemoted` finding.
 - **Attempts:** `attempts` increments once per *substantive* attempt, never for transient
   infrastructure errors (ADR-0014), and never for a **backend failover** (ADR-0023). Ladder:
   attempt 1 deterministic, attempt 2 the `transform_repair` role (`WORKHORSE` tier) on a fresh
@@ -2053,7 +2058,18 @@ OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
 # the difference between "the operator un-abandoned it" and "the reaper lost track of it".
 
 
-def transition(old: RepoStatus, new: RepoStatus, *, operator: bool = False) -> RepoStatus:
+RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
+    RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
+}  # The second audited door (ADR-0077): §11.5 step 5's demotion, which is by definition a write
+# of PENDING over a SUCCEEDED phase row. Reachable only via `resume=True`, so the crash sweep,
+# the reaper and `_on_breach` still cannot resurrect settled work. SUCCEEDED is the only key —
+# RHI stays operator-only (§13 row 46 (ii)), SKIPPED is a config exclusion, and DEGRADED leaves
+# the machine only through a budgeted revalidation round (§3.5.1).
+
+
+def transition(
+    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
+) -> RepoStatus:
     """THE single gate for every status write (§6, §11.5). A no-op re-write of the same status
     is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises."""
     if new is old:
@@ -2061,6 +2077,8 @@ def transition(old: RepoStatus, new: RepoStatus, *, operator: bool = False) -> R
     if new in ALLOWED_TRANSITIONS[old]:
         return new
     if operator and new in OPERATOR_REOPEN.get(old, frozenset()):
+        return new
+    if resume and new in RESUME_DEMOTE.get(old, frozenset()):
         return new
     raise ValueError(f"illegal status transition {old.value} -> {new.value}")
 
@@ -6809,8 +6827,21 @@ to discard whatever a killed `git apply` left in the worktree, set the task `PEN
 re-run — again without incrementing `attempts` (`FailureClass.TRANSIENT_INFRA`). The anchor ref
 itself is re-created from `phases.base_ref` if it is missing. There is no third branch and no
 tree-SHA comparison, because a commit is either on the branch or it is not (§3.2 step 6);
-(5) re-check each phase's declared preconditions and demote to the earliest
-phase whose precondition holds (Constraint 7); (6) recompute `blocked_by` from `phases` + `edges`
+(5) demote each repo to the earliest phase whose durable evidence still holds
+(Constraint 7). This is a search **downward from the settled frontier**, never an ascending scan:
+locate the lowest phase that is not `SUCCEEDED`/`SKIPPED` (a repo with a
+`REQUIRES_HUMAN_INTERVENTION` row is skipped entirely), then walk *backwards* asking
+`evidence_holds(repo, p)` — reading `phases` + Git, with no payload and no `WorkerContext` — and
+stop at the first phase whose evidence holds, because the phases below it are covered by it. The
+ascending reading is unimplementable and wrong in both directions: ten of the fifteen
+`preconditions_hold` implementations return `False` precisely when there is nothing to resume, so
+a fresh repo has no earliest holding phase at all, while `rdepverify.preconditions_hold` returns
+`True` when the BUILD row is missing — which would **promote** a never-cloned repo to Phase 4
+(ADR-0077 §6). Every demoted `SUCCEEDED` row is rewritten to `PENDING` through
+`transition(..., resume=True)` — the `RESUME_DEMOTE` door of §5.1, the only one that opens it —
+retaining `attempts`, dropping the phase's `checkpoints` row, and writing a `PhaseDemoted`
+finding in the same `StateWriter` unit, because a demotion discards landed, green work and must
+be at least as loud as a `checkpoint_rejected`; (6) recompute `blocked_by` from `phases` + `edges`
 so a since-fixed dependency unblocks its subtree; (7) regenerate `migration_state.json` from
 SQLite; (8) continue. Steps 1–7 make no network call and invoke no model, so a resume is free
 and can be run as a dry-run health check (`fleet resume --dry-run`).
