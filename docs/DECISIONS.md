@@ -6921,14 +6921,40 @@ open. So the reinforcement is placed where that author will actually meet it:
 2. **`transition()`'s own docstring says `DO NOT pass resume=True here`**, and names `demote()`.
 3. **`PhaseDemotion`'s docstring carries an `HONEST LIMIT` paragraph** stating the gap in the one
    place a reader of the type is guaranteed to look.
-4. **A test pins the gap** (`test_transition_can_still_demote_silently_and_that_is_a_known_gap`) so
-   it is visible in the suite rather than contradicted by it. If anyone ever does close the door,
-   that test fails and is deleted deliberately — which is the correct way to find out.
+4. **A test pins the gap** (`test_transition_demotes_without_recording_anything_and_that_gap_is_known`)
+   so it is visible in the suite rather than contradicted by it. If anyone ever does close the
+   door, that test fails and is deleted deliberately — which is the correct way to find out.
+   The tripwire asserts the *silence* and not merely the return value: no module-level state
+   accumulates, `caplog` stays empty, the result is a bare `RepoStatus` rather than a
+   `(status, record)` pair, and `enums.py` is asserted to import nothing from `fleet` — so
+   `transition()` can reach no `StateWriter` and no findings sink to record through. See §4.2 for
+   why that list is what it is.
 
 An admitted convention is strictly better than an overstated guarantee, because the next author
 trusts the guarantee. What `demote()` genuinely buys is not enforcement but **strictness**: it
 refuses inputs `transition()` accepts (§4.1), and it makes the audit record impossible to *forget*
 for anyone who takes the path the SPEC names.
+
+#### 4.2 The tripwire had to assert the silence, not a proxy for it
+
+The first cut of bullet 4's test was named `..._can_still_demote_silently` and asserted only what
+`transition()` returned. A reviewer falsified it by construction: they **closed the door** — binding
+an audit side-effect into `transition()` — while leaving the return value untouched. **The test still
+passed, and its own name became false.** The bullet above was therefore partly false too: it promised
+a tripwire for the door closing, and pinned only the return value.
+
+This is worth recording because it is a general defect and not a slip. A mutation test confirms that
+a test catches the mutations you thought to introduce; it cannot tell you the test's *name* asserts
+something the body never checks. Reviewing a test's implementation and reviewing the truth of its
+title are different acts, and only the second catches this class.
+
+The fix asserts `silently` directly. `enums.py` imports **stdlib only**, so `transition()` can reach
+no database, no `StateWriter` and no findings sink; an audit side-effect added to it has exactly two
+places to go, and the test covers both — a module-level collection (snapshot every mutable container
+bound in the module, before and after) and the logging system (`caplog` must stay empty) — plus the
+shape of the return (a bare `RepoStatus`, never a `(status, record)` pair) and the absence of any
+`fleet` import that would open a third route. Both closure forms were run as mutations and both now
+fail the test.
 
 #### 4.1 `demote()` is deliberately stricter than `transition()`
 
@@ -7031,9 +7057,25 @@ untouched and unmigrated. Four tests carry the reasoning:
    (§4.1) — while `transition()` is asserted to still accept `RUNNING`/`BLOCKED -> PENDING`, so
    the strictness is demonstrably `demote()`'s own rather than inherited.
 4. The open door is **pinned rather than claimed shut** (§4): `transition(SUCCEEDED, PENDING,
-   resume=True)` is asserted to succeed silently.
+   resume=True)` is asserted to demote *and* to record nothing — module state unchanged, `caplog`
+   empty, a bare status returned, and no `fleet` import through which a sink could be reached
+   (§4.2).
 
-Tests 1 and 3 were **mutation-tested** rather than merely observed to pass: reintroducing rejected
-alternative A (`ALLOWED_TRANSITIONS[SUCCEEDED] = {PENDING}`) fails test 1, and removing `demote()`'s
-guard fails test 3. Both mutations were reverted from a backup copy and the file re-diffed clean
-before commit.
+Test 2's loop over illegal targets is **derived from `RepoStatus`** rather than listed. An earlier
+cut named three of the five reachable targets, so widening `RESUME_DEMOTE` to admit
+`SUCCEEDED -> SKIPPED` passed both it and the `.keys()` assertion above it: the keys were airtight
+and the values were not. Deriving the loop makes a new `RepoStatus` member enlarge it automatically.
+
+**Every test here was mutation-tested rather than merely observed to pass**, and the mutations are
+the rejected designs and the reviewed defects, not arbitrary edits:
+
+| Mutation | Fails |
+|---|---|
+| Rejected alternative A — `ALLOWED_TRANSITIONS[SUCCEEDED] = {PENDING}` | test 1 |
+| `demote()` guard reverted to `PENDING`-only (the I-1 defect) | test 3 |
+| `ALLOWED_TRANSITIONS[RUNNING]` tightened instead of `demote()` | test 3's positive assertions |
+| `RESUME_DEMOTE` widened to `{PENDING, SKIPPED}` (the N-2 defect) | test 2 |
+| Door closed via a module-level audit registry (the N-1 falsification) | test 4 |
+| Door closed via a `logging` call | test 4 |
+
+Each was reverted from a backup copy and the file re-diffed clean before commit.

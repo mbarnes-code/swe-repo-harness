@@ -24,7 +24,9 @@ What is load-bearing:
 
 from __future__ import annotations
 
+import inspect
 import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -34,6 +36,7 @@ import pytest
 from pydantic import ValidationError
 
 import fleet.models as models_pkg
+from fleet.models import enums as enums_mod
 from fleet.models.base import LOG_TAIL_BYTES, FleetModel
 from fleet.models.build import (
     BuildPlan,
@@ -603,10 +606,17 @@ def test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else() ->
         with pytest.raises(ValueError, match="illegal status transition"):
             transition(held, RepoStatus.PENDING, resume=True)
 
-    # And the one open key leads to PENDING only — never straight back into RUNNING.
-    for elsewhere in (RepoStatus.RUNNING, RepoStatus.BLOCKED, RepoStatus.DEGRADED):
+    # And the one open key leads to PENDING only. The loop is DERIVED from `RepoStatus` rather
+    # than listed, because a hand-written list is airtight on keys and leaky on values: an earlier
+    # cut named three of the five reachable targets, so widening RESUME_DEMOTE to admit
+    # SUCCEEDED -> SKIPPED passed this test and the key assertion above. Every status except
+    # PENDING (the one legal target) and SUCCEEDED itself (an idempotent no-op, §11.7) must raise,
+    # and adding a RepoStatus member enlarges this loop automatically.
+    elsewhere = [s for s in RepoStatus if s not in (RepoStatus.PENDING, RepoStatus.SUCCEEDED)]
+    assert len(elsewhere) == 5, "every non-PENDING target must be covered, not a chosen subset"
+    for target in elsewhere:
         with pytest.raises(ValueError, match="illegal status transition"):
-            transition(RepoStatus.SUCCEEDED, elsewhere, resume=True)
+            transition(RepoStatus.SUCCEEDED, target, resume=True)
 
 
 def test_demote_pairs_the_finding_and_is_stricter_than_transition() -> None:
@@ -666,20 +676,62 @@ def test_demote_pairs_the_finding_and_is_stricter_than_transition() -> None:
     assert transition(RepoStatus.BLOCKED, RepoStatus.PENDING) is RepoStatus.PENDING
 
 
-def test_transition_can_still_demote_silently_and_that_is_a_known_gap() -> None:
-    """The audit obligation is a CONVENTION, not a mechanism — pinned here so it is not mistaken
-    for one (ADR-0077 §4).
+def _enums_mutable_module_state() -> dict[str, str]:
+    """Every mutable container bound at `enums` module level, by `repr`.
 
-    Why it matters: `transition()` is public and exported, and `resume=True` returns the demoted
-    status on its own, with no finding and no error. Python affords no way to close that door.
-    An earlier draft of this module claimed "no call yields the demoted status without the
-    record"; that claim was false, and a false guarantee is worse than an admitted convention
-    because the demotion writer (subtask 6) would have trusted it. This test exists so the gap is
-    visible in the suite rather than contradicted by it: if someone later DOES close the door,
-    this test fails and is deleted deliberately, which is the correct way to find out.
+    `enums.py` imports nothing from `fleet` (asserted below), so it can reach no database, no
+    `StateWriter` and no findings sink. An audit side-effect added to `transition()` therefore has
+    only two places to go: a module-level collection, or the logging system. This snapshots the
+    first; `caplog` covers the second.
     """
-    assert transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, resume=True) is RepoStatus.PENDING
-    # No finding was produced, and nothing complained. `demote()` is the path §11.5 step 5 names.
+    return {
+        name: repr(value)
+        for name, value in vars(enums_mod).items()
+        if isinstance(value, dict | list | set | frozenset)
+    }
+
+
+def test_transition_demotes_without_recording_anything_and_that_gap_is_known(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`transition(SUCCEEDED, PENDING, resume=True)` demotes AND records nothing (ADR-0077 §4).
+
+    Why it matters, twice over.
+
+    First: the audit obligation is a CONVENTION, not a mechanism. `transition()` is public and
+    exported, and `resume=True` demotes with no finding and no error. An earlier draft of this
+    module claimed "no call yields the demoted status without the record"; that was false, and a
+    false guarantee is worse than an admitted convention because subtask 6 would have trusted it.
+    This test keeps the gap visible in the suite rather than contradicted by it — if anyone ever
+    closes the door, it fails and is deleted deliberately, which is the correct way to find out.
+
+    Second, and this is why the body asserts more than a return value: an earlier cut of THIS test
+    was named `..._can_still_demote_silently` but asserted only what `transition()` returned. A
+    reviewer closed the door by binding an audit side-effect into `transition()` while leaving the
+    return value untouched — and the test still passed, while its own name became false. A test
+    whose name states a guarantee must assert that guarantee, not a proxy for it. So `silently` is
+    now checked directly: no module-level state accumulates, nothing is logged, no record comes
+    back with the status, and the module has no route to a sink to write one through.
+    """
+    before = _enums_mutable_module_state()
+    with caplog.at_level(logging.DEBUG):
+        result = transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, resume=True)
+
+    assert result is RepoStatus.PENDING
+    # ...a bare status, never a `(status, PhaseDemotion)` pair the caller could audit with.
+    assert isinstance(result, RepoStatus) and not isinstance(result, tuple)
+    # ...nothing accumulated anywhere in the module,
+    assert _enums_mutable_module_state() == before
+    # ...nothing was logged,
+    assert caplog.records == []
+    # ...and there is no route to a findings sink to write through in the first place: `enums.py`
+    # imports stdlib only, so closing this door would take a new import a reader would notice.
+    source = inspect.getsource(enums_mod)
+    assert not [
+        line
+        for line in source.splitlines()
+        if line.startswith(("import ", "from ")) and "fleet" in line
+    ], "enums.py gained a fleet import — re-check whether transition() can now reach a sink"
 
 
 def test_the_third_failed_attempt_is_terminal() -> None:

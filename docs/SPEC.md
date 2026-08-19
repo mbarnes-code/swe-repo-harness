@@ -2067,22 +2067,6 @@ RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
 # the machine only through a budgeted revalidation round (§3.5.1).
 
 
-def transition(
-    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
-) -> RepoStatus:
-    """THE single gate for every status write (§6, §11.5). A no-op re-write of the same status
-    is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises."""
-    if new is old:
-        return new
-    if new in ALLOWED_TRANSITIONS[old]:
-        return new
-    if operator and new in OPERATOR_REOPEN.get(old, frozenset()):
-        return new
-    if resume and new in RESUME_DEMOTE.get(old, frozenset()):
-        return new
-    raise ValueError(f"illegal status transition {old.value} -> {new.value}")
-
-
 PHASE_DEMOTED_KIND: Final[str] = "PhaseDemoted"   # `findings.kind`; free text by schema design
 
 
@@ -2095,6 +2079,30 @@ class PhaseDemotion:                              # the audit record one demoted
     to_status: RepoStatus = RepoStatus.PENDING
 
     def payload(self) -> dict[str, object]: ...   # shaped for `cli._note_finding`
+
+
+def transition(
+    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
+) -> RepoStatus:
+    """THE single gate for every status write (§6, §11.5). A no-op re-write of the same status
+    is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises.
+
+    `operator=True` opens `OPERATOR_REOPEN` (a human at `fleet retry`); `resume=True` opens
+    `RESUME_DEMOTE` (§11.5 step 5). Both default to False, so no existing caller — and no
+    automatic sweep — gains a single new edge.
+
+    DO NOT pass `resume=True` here. Call `demote()` instead: this function returns the status
+    alone, so a demotion made through it emits NO `PhaseDemoted` finding and is invisible to
+    whoever reads the run. Nothing enforces that — it is a convention (ADR-0077 §4)."""
+    if new is old:
+        return new
+    if new in ALLOWED_TRANSITIONS[old]:
+        return new
+    if operator and new in OPERATOR_REOPEN.get(old, frozenset()):
+        return new
+    if resume and new in RESUME_DEMOTE.get(old, frozenset()):
+        return new
+    raise ValueError(f"illegal status transition {old.value} -> {new.value}")
 
 
 def demote(
