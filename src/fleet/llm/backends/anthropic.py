@@ -163,18 +163,17 @@ class AnthropicBackend:
         """Return the raw turn plus usage AND `finish_reason`. Decides nothing (see the module
         docstring): the reason is reported as the transport gave it and `client.py` acts on it.
 
-        `target.effort` is sent as `output_config.effort` on EVERY request. `BackendTarget.effort`
-        is a `Literal["low", "medium", "high"]` with a default, so it is never absent — and it is
-        already part of the `llm_cache` key (`CacheKeyParts.effort`), which means a cached row
-        already claims the call was made at that effort. Reading the field is therefore the only
-        honest option: discarding an operator's declared routing parameter while the cache records
-        it as honoured is a silent degradation of exactly the kind Rule 11 forbids, and a loud 4xx
-        from a target that rejects the parameter is strictly better than a run that quietly bills
-        at the wrong tier.
+        `target.effort` is forwarded as `output_config.effort` **only when the operator declared
+        one** (ADR-0075). `effort` is part of the `llm_cache` key (`CacheKeyParts.effort`), so a
+        cached row asserts the call was made at that effort: discarding a declared value while the
+        cache records it as honoured is the silent degradation Rule 11 forbids, and inventing one
+        where none was declared is the same defect in the other direction — a level nobody wrote,
+        sent to the transport and keyed into the cache as though it had been chosen. Absent means
+        absent: no key in the payload, not `null`, not a default.
 
         The parameter NAME and nesting are not from memory: `output_config: {effort: ...}`, inside
         `output_config` rather than top-level. Not every model this transport can reach accepts it
-        — see the fix-round report for the citation and for the one shipped target whose declared
+        — see the fix-round reports for the citation and for the shipped target whose declared
         value the vendor documentation says will be refused. That is a `config/models.yaml`
         question, and this adapter is deliberately not the place it gets papered over."""
         _validate_target(target)
@@ -185,18 +184,33 @@ class AnthropicBackend:
             "model": target.model_id,
             "max_tokens": max_output_tokens,
             "messages": turns,
-            "output_config": {"effort": target.effort},
         }
         if system is not None:
             request["system"] = system
+
+        # ADR-0075: `effort` is OPTIONAL, and `None` means "the operator declared no preference".
+        # It is not a cue to pick one. Substituting a default here would restore the exact defect
+        # ADR-0075 removes — a value nobody wrote, sent to the transport and recorded in the cache
+        # key as though it had been chosen — only one layer further from view. So the key is
+        # OMITTED ENTIRELY rather than sent as `null`.
+        output_config: dict[str, Any] = {}
+        declared_effort: str | None = target.effort
+        if declared_effort is not None:
+            output_config["effort"] = declared_effort
+
         for key, value in _rung(target, schema, mode).items():
             # `output_config` is MERGED, never replaced: `effort` and the JSON_SCHEMA rung's
             # `format` are siblings under it, and overwriting the key would silently drop the
             # operator's declared effort on exactly the rung that carries a schema.
             if key == "output_config":
-                request["output_config"].update(value)
+                output_config.update(value)
             else:
                 request[key] = value
+
+        # Still omitted when it would be empty: an `output_config: {}` on a target that declared
+        # no effort at a rung that needs no `format` is a parameter the operator never asked for.
+        if output_config:
+            request["output_config"] = output_config
 
         async with anthropic.AsyncAnthropic(
             api_key=api_key,

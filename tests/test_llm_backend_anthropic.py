@@ -658,3 +658,65 @@ def test_the_startup_gate_checks_the_live_registry_not_the_shipped_name_tuple(
 
 class _Stop(Exception):
     """Stops `_load_settings` once the spy has recorded what it was called with."""
+
+
+# ---------------------------------------------------------------------------------------------
+# FIX ROUND 2 — ADR-0075: `effort` is optional, and absent means absent
+# ---------------------------------------------------------------------------------------------
+
+
+def target_without_effort() -> BackendTarget:
+    """A target whose `effort` is `None` — the post-ADR-0075 shape.
+
+    `model_copy(update=...)` rather than the validating constructor because on a base where
+    `BackendTarget.effort` is still `Literal["low","medium","high"] = "medium"`,
+    `BackendTarget(effort=None)` raises `ValidationError`. `model_copy` does not re-validate, so
+    this produces the exact object shape ADR-0075 introduces, today. Once `effort: str | None`
+    lands the validating constructor accepts `None` directly and this helper keeps returning an
+    identical object — the tests below do not change.
+    """
+    return make_target().model_copy(update={"effort": None})
+
+
+def test_an_undeclared_effort_sends_no_effort_key_at_all(transport: Any) -> None:
+    """ADR-0075's whole point, at this layer.
+
+    `None` means the operator declared no preference. It is NOT a cue for this adapter to pick a
+    level of its own: doing so would restore the exact defect ADR-0075 removes — a value nobody
+    wrote, transmitted to the transport and recorded in `CacheKeyParts.effort` as though it had
+    been chosen — one layer further from view than the config default it replaced.
+
+    The assertion is deliberately three-part, because "no effort" has three wrong spellings and
+    only one right one: not `effort: None` (a null the API would have to interpret), not
+    `effort: "medium"` (an invented default), not an empty `output_config` shell.
+    """
+    recorder = transport(sdk_message())
+    reply = asyncio.run(_invoke(target_without_effort()))
+
+    assert "output_config" not in recorder, recorder.get("output_config")
+    assert "effort" not in recorder
+    assert reply.finish_reason == "tool_call"  # the call still went through
+
+
+def test_an_undeclared_effort_still_carries_the_json_schema_format(transport: Any) -> None:
+    """The omission must be surgical. `effort` and `format` are siblings under `output_config`, so
+    a naive "skip output_config when there is no effort" would silently drop the schema and
+    downgrade the JSON_SCHEMA rung to an unconstrained call that `LlmCallRecord` still labels
+    JSON_SCHEMA."""
+    recorder = transport(sdk_message(
+        stop_reason="end_turn", content=[{"type": "text", "text": "{}"}],
+    ))
+    schema: dict[str, object] = {"type": "object", "properties": {}}
+    asyncio.run(_invoke(
+        target_without_effort(), mode=StructuredOutputMode.JSON_SCHEMA, schema=schema,
+    ))
+    assert recorder["output_config"] == {"format": {"type": "json_schema", "schema": schema}}
+    assert "effort" not in recorder["output_config"]
+
+
+def test_a_declared_effort_is_still_forwarded_verbatim(transport: Any) -> None:
+    """The other half of ADR-0075: optional does not mean ignored. A declared level must reach the
+    transport unchanged, or the cache key records an effort the call never used."""
+    recorder = transport(sdk_message())
+    asyncio.run(_invoke(make_target(effort="low")))
+    assert recorder["output_config"] == {"effort": "low"}

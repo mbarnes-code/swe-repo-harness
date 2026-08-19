@@ -10590,7 +10590,10 @@ def models_list(
         for row in rows:
             _echo(
                 f"  {row['role']:<20} {row['tier']:<10} {row['backend']:<20} "
-                f"{row['model_id']:<32} effort={row['effort']}"
+                # `or "-"`: ADR-0075 made `effort` optional, and an undeclared one must not
+                # reach an operator as the Python literal `None`. The JSON branch above keeps
+                # the real value — `null` is the correct machine answer; `-` is the human one.
+                f"{row['model_id']:<32} effort={row['effort'] or '-'}"
             )
 
 

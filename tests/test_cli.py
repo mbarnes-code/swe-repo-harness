@@ -919,6 +919,54 @@ def test_status_digest_is_the_run_equivalence_proof(workspace: Path) -> None:
     assert len(payload["digest"]) == 64
 
 
+def test_models_list_renders_an_undeclared_effort_as_a_dash(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0075 made `effort` optional, so a target can now resolve with `effort is None`. The
+    human table must not hand that to an operator as the Python literal `None` — `fleet models
+    list` is the "what will this run actually call" pre-flight, and `effort=None` reads as a
+    value that was set rather than one that was never declared.
+
+    The router is monkeypatched rather than the YAML edited because on a base where
+    `BackendTarget.effort` is still `Literal[...] = "medium"` there is no way to express the
+    post-ADR-0075 shape in `config/models.yaml` at all — omitting the key substitutes the
+    default, which is the very defect ADR-0075 removes. This drives the real `models_list`
+    rendering path over a real `LlmRouter`; only the target's `effort` is forced.
+    """
+    from fleet import cli as cli_module
+    from fleet.llm.roles import LlmRouter
+
+    resolve = cli_module.llm_router
+
+    def undeclared(settings: Any) -> LlmRouter:
+        router = resolve(settings)
+        return LlmRouter(
+            {name: route.tier for name, route in router.routes()},
+            {
+                route.tier: tuple(
+                    target.model_copy(update={"effort": None}) for target in route.targets
+                )
+                for _, route in router.routes()
+            },
+            profile=settings.profile,
+            required_roles=(),
+        )
+
+    monkeypatch.setattr(cli_module, "llm_router", undeclared)
+
+    table = runner.invoke(app, [*base_args(workspace), "models", "list"])
+    assert table.exit_code == ExitCode.SUCCESS, table.output
+    assert "effort=-" in table.output
+    assert "effort=None" not in table.output
+
+    # The machine path is deliberately NOT dashed: `null` is the correct JSON answer for a value
+    # the operator never declared, and a consumer must be able to tell it from a literal "-".
+    payload = json.loads(
+        runner.invoke(app, [*base_args(workspace), "--json", "models", "list"]).stdout
+    )
+    assert {row["effort"] for row in payload["routes"]} == {None}
+
+
 def test_models_list_resolves_the_active_profile_offline(workspace: Path) -> None:
     """`fleet models list` is the "what will this run actually call" pre-flight — no network.
 
