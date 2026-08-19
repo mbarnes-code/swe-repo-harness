@@ -58,6 +58,22 @@ def _install_google_auth_stub() -> None:
 
     requests_mod.AuthorizedSession = _AuthorizedSession  # type: ignore[attr-defined]
 
+    # `requests` is a hard dependency of `google.auth.transport.requests`, so it is present
+    # exactly when that import succeeds. The adapter imports its exception BASE to keep the
+    # transport catch from swallowing its own bugs, so the stub must supply a real class.
+    if "requests" not in sys.modules:
+        requests_pkg = types.ModuleType("requests")
+        requests_pkg.__path__ = []  # type: ignore[attr-defined]
+        exceptions_mod = types.ModuleType("requests.exceptions")
+
+        class _RequestException(OSError):
+            """Mirrors `requests.exceptions.RequestException` (which subclasses `IOError`)."""
+
+        exceptions_mod.RequestException = _RequestException  # type: ignore[attr-defined]
+        requests_pkg.exceptions = exceptions_mod  # type: ignore[attr-defined]
+        sys.modules["requests"] = requests_pkg
+        sys.modules["requests.exceptions"] = exceptions_mod
+
     google_mod.auth = auth_mod  # type: ignore[attr-defined]
     auth_mod.transport = transport_mod  # type: ignore[attr-defined]
     transport_mod.requests = requests_mod  # type: ignore[attr-defined]
@@ -83,6 +99,7 @@ from fleet.llm import client as client_module  # noqa: E402
 from fleet.llm.backends import vertex as vertex_module  # noqa: E402
 from fleet.llm.backends.vertex import (  # noqa: E402
     MissingRegion,
+    UnmappedFinishReason,
     VertexBackend,
     VertexTargetMisconfigured,
     build_body,
@@ -90,7 +107,7 @@ from fleet.llm.backends.vertex import (  # noqa: E402
     parse_reply,
 )
 from fleet.llm.cache import CacheKeyParts  # noqa: E402
-from fleet.llm.client import MalformedReply, Message, ModelBackend, TransportError  # noqa: E402
+from fleet.llm.client import Message, ModelBackend, TransportError  # noqa: E402
 from fleet.models.enums import ModelTier, StructuredOutputMode  # noqa: E402
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price  # noqa: E402
 
@@ -467,13 +484,24 @@ def test_pause_turn_is_not_silently_mapped() -> None:
     """`pause_turn` means a server-side tool loop paused mid-turn. This adapter declares no
     server-side tools, so seeing it means the request was not the one we built — raised, never
     given a rung-visible reason it did not earn."""
-    with pytest.raises(MalformedReply):
+    with pytest.raises(UnmappedFinishReason):
         parse_reply(raw_predict_body(stop_reason="pause_turn"), target())
 
 
 def test_an_unmapped_stop_reason_is_raised_never_guessed() -> None:
-    with pytest.raises(MalformedReply):
+    with pytest.raises(UnmappedFinishReason):
         parse_reply(raw_predict_body(stop_reason="not-a-real-stop-reason"), target())
+
+
+def test_an_unmapped_finish_reason_is_neither_repairable_nor_a_failover_trigger() -> None:
+    """Encodes WHY the dedicated type exists. `MalformedReply` promises a repair `client.py` only
+    performs around `_validate`, which an exception from `invoke` never reaches; `TransportError`
+    would have every target in the tier reproduce the same unreadable answer and then report an
+    outage, when the real defect is that this adapter is out of date."""
+    from fleet.llm.client import MalformedReply
+
+    assert not issubclass(UnmappedFinishReason, MalformedReply)
+    assert not issubclass(UnmappedFinishReason, TransportError)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -583,6 +611,59 @@ def test_a_bad_request_fails_the_task_instead_of_walking_the_tier(status: int) -
     error = vertex_module._from_status(REGION, status, "detail")
     assert not isinstance(error, TransportError)
     assert str(status) in str(error)
+
+
+# ---------------------------------------------------------------------------------------------
+# The session catch is narrow (a bug must not masquerade as an outage)
+# ---------------------------------------------------------------------------------------------
+
+
+class _FakeSession:
+    def __init__(self, outcome: object) -> None:
+        self._outcome = outcome
+
+    def post(self, url: str, **kwargs: object) -> object:
+        del url, kwargs
+        if isinstance(self._outcome, Exception):
+            raise self._outcome
+        return self._outcome
+
+
+def _transport(outcome: object) -> Any:
+    return vertex_module._AuthorizedSessionTransport(
+        session=_FakeSession(outcome),
+        project="some-project",
+    )
+
+
+def test_a_requests_transport_fault_becomes_a_connection_failover() -> None:
+    """§11.8 trigger 1. `RequestException` is the common base of connection-refused, read-timeout,
+    SSL and chunked-encoding faults — the next target may be a different region entirely."""
+    from requests.exceptions import RequestException
+
+    with pytest.raises(TransportError) as caught:
+        asyncio.run(
+            _transport(RequestException("connection refused"))(
+                region=REGION, model_id=MODEL_ID, body={}, timeout_s=1.0,
+            ),
+        )
+    assert caught.value.trigger == "CONNECTION"
+
+
+@pytest.mark.parametrize("boom", [TypeError("bad body"), AttributeError("renamed member")])
+def test_an_adapter_bug_is_not_relabelled_as_a_transport_failure(boom: Exception) -> None:
+    """**The reason the catch is `RequestException` and not `Exception`.**
+
+    A `TypeError` in the body this adapter just built, or an `AttributeError` on a renamed SDK
+    member, is a bug in THIS module. Catching it as a `CONNECTION` trigger would have §11.8 walk
+    the entire tier reproducing it and then report an outage that never happened — a fault no
+    endpoint has, contaminating the §13 rows 40/43 health signals. It must surface as itself
+    (Rule 11).
+    """
+    with pytest.raises(type(boom)):
+        asyncio.run(
+            _transport(boom)(region=REGION, model_id=MODEL_ID, body={}, timeout_s=1.0),
+        )
 
 
 # ---------------------------------------------------------------------------------------------

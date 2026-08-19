@@ -160,12 +160,22 @@ disallow_untyped_defs = false
 
 # ADR-0023 failover transports. `boto3` and `google-auth` are the `bedrock` / `vertex` EXTRAS
 # (`[project.optional-dependencies]`), so on a host that installs neither — which is every host
-# that does not route a tier through them — mypy cannot find them. Neither ships type stubs even
-# when installed, so this override is unconditional rather than environment-dependent. It widens
-# nothing else: `llm/backends/bedrock.py` and `llm/backends/vertex.py` are the only modules that
-# may import them (§7.7, §12.40), and both re-read every response defensively.
+# that does not route a tier through them — mypy cannot find them. None ships type stubs even when
+# installed, so this override is unconditional rather than environment-dependent. It widens nothing
+# else: `llm/backends/bedrock.py` and `llm/backends/vertex.py` are the only modules that may import
+# them (§7.7, §12.40), and both re-read every response defensively.
+#
+# Enumerated to the exact subpackages imported rather than a blanket `google.*`: `google` is a
+# namespace package several unrelated libraries publish into, and a wildcard over it would silence
+# a genuinely missing import in some future first-party dependency. `requests` is here because it
+# is a hard dependency of `google.auth.transport.requests` and `vertex.py` imports its exception
+# base — it travels with the extra and is never a separate install.
 [[tool.mypy.overrides]]
-module = ["boto3.*", "boto3", "botocore.*", "google", "google.*"]
+module = [
+  "boto3", "boto3.*", "botocore", "botocore.*",
+  "google", "google.auth", "google.auth.*",
+  "requests", "requests.*",
+]
 ignore_missing_imports = true
 
 [tool.pydantic-mypy]

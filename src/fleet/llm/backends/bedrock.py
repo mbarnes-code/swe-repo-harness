@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping, Sequence
-from typing import Any, ClassVar, Final, Protocol, cast
+from typing import Any, ClassVar, Final, Protocol, cast, get_args
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -52,7 +52,6 @@ from fleet.llm.client import (
     FailoverTrigger,
     FinishReason,
     LlmError,
-    MalformedReply,
     Message,
     ModelBackend,
     TransportError,
@@ -204,6 +203,20 @@ class MissingRegion(BedrockTargetMisconfigured):
             "it, and this transport has no vendor default to fall back on",
         )
 
+
+class UnmappedFinishReason(LlmError):
+    """The transport reported a stop reason this adapter version does not know.
+
+    A dedicated type, NOT `MalformedReply`. `MalformedReply` documents itself as "repairable
+    exactly like a `ValidationError`", and `client.py` earns that by catching it around `_validate`
+    — but an exception raised from `invoke` never reaches that catch. Raising it here would promise
+    a repair that structurally cannot happen, so a reader tracing the failure would look for a
+    repair budget that was never consulted.
+
+    Not a `TransportError` either: failing over would have every target in the tier reproduce the
+    same unreadable answer before reporting an outage, when the real defect is that this adapter is
+    out of date. Loud, typed, terminal — and greppable when the vocabulary next changes (Rule 11).
+    """
 
 # ---------------------------------------------------------------------------------------------
 # Transport seam
@@ -399,14 +412,7 @@ def build_request(
     if system:
         request["system"] = [{"text": system}]
 
-    # `effort` is OMITTED when it is `None`. `None` means "the operator wrote no effort for this
-    # target", and transmitting a value nobody wrote is exactly the silent degradation Rule 11
-    # forbids — the more so here, because `effort` is already a component of the `llm_cache` key
-    # (`CacheKeyParts.effort`), so a cached row would claim the call was made at an effort the
-    # profile never declared. Written against `str | None` on purpose: `BackendTarget.effort` is
-    # still a non-optional `Literal` with a `"medium"` default at this commit, and a sibling lane
-    # is making it optional. The narrowing below is correct under both.
-    effort: str | None = target.effort
+    effort = _effort_to_send(target)
     if effort is not None:
         # Bedrock passes `additionalModelRequestFields` through to the model provider's native
         # request body unchanged, which is the only place a provider-specific knob may ride: the
@@ -439,6 +445,56 @@ def build_request(
         f"was dispatched at the {mode} rung, which the Bedrock Converse API does not offer; "
         f"this transport's only structured surface is toolConfig (the TOOL_CALL rung)",
     )
+
+
+def _effort_is_expressible_as_absent() -> bool:
+    """Can `BackendTarget.effort` represent "the operator wrote no effort"?
+
+    Today it cannot: the field is a non-optional `Literal["low","medium","high"]` defaulting to
+    `"medium"`, so EVERY target carries a value and this returns `False`. ADR-0075 (a sibling lane)
+    makes it `str | None = None`, after which it returns `True` permanently and this gate stops
+    doing anything. It is written as a predicate over the model rather than a hard-coded flag
+    precisely so it self-removes rather than needing an edit at land time.
+    """
+    field = BackendTarget.model_fields.get("effort")
+    if field is None:
+        return False
+    return type(None) in get_args(field.annotation)
+
+
+def _effort_to_send(target: BackendTarget) -> str | None:
+    """The `effort` this request should carry, or `None` to omit the parameter entirely.
+
+    Two independent reasons converge on sending NOTHING while `effort` is non-optional:
+
+    1. **We cannot tell a declaration from a default.** With `"medium"` defaulted in, a target the
+       operator never gave an effort is indistinguishable from one they did. Transmitting the
+       default asserts a routing parameter nobody wrote — and `effort` is already a component of
+       the `llm_cache` key (`CacheKeyParts.effort`), so a cached row would claim the call was made
+       at an effort the profile never declared.
+    2. **The wire shape has never been live-verified, and a rejection here is unusually
+       expensive.** `additionalModelRequestFields` is an opaque pass-through: Bedrock does not
+       validate its contents, the model provider does, and a provider that rejects
+       `output_config` answers 400. `_from_client_error` correctly classifies a non-throttle 4xx as
+       OUR request being wrong and raises a bare `LlmError` rather than a failover trigger — so an
+       unverified field attached to EVERY call would fail every task on that target outright.
+
+    The alternative considered and rejected was making that rejection a `TransportError` so it
+    fails over. It is the wrong fix: every target in the tier would reproduce the identical bad
+    request, walk the whole ladder and end in `TierUnavailable` (exit 8) — exactly the waste
+    `_from_client_error`'s docstring exists to prevent — and it would additionally disguise a
+    wire-shape bug as an endpoint outage, contaminating the §13 rows 40/43 health signals with a
+    fault no endpoint has.
+
+    Once ADR-0075 lands, `None` is the default and only an operator who explicitly wrote `effort:`
+    gets the parameter — at which point a 400 IS their config error and failing loudly is right.
+    Note the asymmetry with `vertex`: there the body IS the Messages API body BK1 already ships
+    against, so this gate would put a failover pair out of step for no gain.
+    """
+    if not _effort_is_expressible_as_absent():
+        return None
+    effort: str | None = target.effort
+    return effort
 
 
 def _render(target: BackendTarget, messages: Sequence[Message]) -> tuple[str, list[dict[str, Any]]]:
@@ -539,7 +595,7 @@ def _finish_reason(raw: Mapping[str, object], target: BackendTarget) -> FinishRe
     reported = raw.get("stopReason")
     mapped = _FINISH_REASONS.get(reported) if isinstance(reported, str) else None
     if mapped is None:
-        raise MalformedReply(
+        raise UnmappedFinishReason(
             f"{target.backend}:{target.model_id} returned stopReason {reported!r}, which this "
             f"adapter does not map to a FinishReason",
         )

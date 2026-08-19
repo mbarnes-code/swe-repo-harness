@@ -38,6 +38,12 @@ everything imported below and no new dependency is added — but the mismatch be
 and the module actually imported is real, and is flagged rather than papered over (Rule 7).
 *Agent Recommendation*: if the extra is ever narrowed, `google-auth` is the honest name for it.
 
+`requests` is imported for its exception base ONLY, and needs no separate declaration: it is a hard
+dependency of `google.auth.transport.requests`, so it is present exactly when the import above
+succeeds and absent exactly when that import raises `ImportError` — which is the behaviour
+`discover()` already relies on. Naming the real base is what keeps the transport catch from
+swallowing a bug in this adapter as a failover trigger.
+
 `AuthorizedSession` is synchronous, so every call crosses into a worker thread via
 `asyncio.to_thread`; it is used rather than a hand-rolled bearer header because it owns token
 refresh, and an access token that silently expires mid-run is a 401 forty minutes in.
@@ -51,12 +57,12 @@ from typing import Any, ClassVar, Final, Protocol, cast
 
 import google.auth
 from google.auth.transport.requests import AuthorizedSession
+from requests.exceptions import RequestException
 
 from fleet.llm.client import (
     BackendReply,
     FinishReason,
     LlmError,
-    MalformedReply,
     Message,
     ModelBackend,
     TransportError,
@@ -202,6 +208,20 @@ class MissingRegion(VertexTargetMisconfigured):
         )
 
 
+class UnmappedFinishReason(LlmError):
+    """The transport reported a stop reason this adapter version does not know.
+
+    A dedicated type, NOT `MalformedReply`. `MalformedReply` documents itself as "repairable
+    exactly like a `ValidationError`", and `client.py` earns that by catching it around `_validate`
+    — but an exception raised from `invoke` never reaches that catch. Raising it here would promise
+    a repair that structurally cannot happen, so a reader tracing the failure would look for a
+    repair budget that was never consulted.
+
+    Not a `TransportError` either: failing over would have every target in the tier reproduce the
+    same unreadable answer before reporting an outage, when the real defect is that this adapter is
+    out of date. Loud, typed, terminal — and greppable when the vocabulary next changes (Rule 11).
+    """
+
 # ---------------------------------------------------------------------------------------------
 # Transport seam
 # ---------------------------------------------------------------------------------------------
@@ -299,11 +319,17 @@ class _AuthorizedSessionTransport:
         url = endpoint_url(region, project, model_id)
         try:
             response: Any = session.post(url, json=body, timeout=timeout_s)
-        except Exception as exc:
-            # `requests` raises a family of transport exceptions (connection, read timeout, SSL,
-            # chunked encoding) that share no base the harness may name without importing it.
-            # They are all CONNECTION-class: the next target may be a different region or a
-            # different transport entirely, so §11.8 gets its chance (§11.8 trigger 1).
+        except RequestException as exc:
+            # `RequestException` is the common base of the transport family `requests` raises —
+            # connection refused, read timeout, SSL, chunked-encoding. All CONNECTION-class: the
+            # next target may be a different region or a different transport entirely, so §11.8
+            # gets its chance (trigger 1).
+            #
+            # Deliberately NOT `except Exception`. A bare catch here would relabel a bug in this
+            # adapter — a `TypeError` in the body we just built, an `AttributeError` on a renamed
+            # SDK member — as a transport fault, and §11.8 would then walk the whole tier
+            # reproducing it before reporting an outage that never happened. A programming error
+            # must surface as itself (Rule 11).
             raise TransportError(
                 f"vertex/{region}: {type(exc).__name__}: {exc}",
                 trigger="CONNECTION",
@@ -543,7 +569,7 @@ def _finish_reason(raw: Mapping[str, object], target: BackendTarget) -> FinishRe
     reported = raw.get("stop_reason")
     mapped = _FINISH_REASONS.get(reported) if isinstance(reported, str) else None
     if mapped is None:
-        raise MalformedReply(
+        raise UnmappedFinishReason(
             f"{target.backend}:{target.model_id} returned stop_reason {reported!r}, which this "
             f"adapter does not map to a FinishReason",
         )

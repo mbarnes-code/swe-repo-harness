@@ -30,12 +30,28 @@ import pytest
 
 
 class _StubClientError(Exception):
-    """Mirrors `botocore.exceptions.ClientError`: the response dict is the whole contract the
-    adapter reads (`Error.Code`, `ResponseMetadata.HTTPStatusCode`)."""
+    """Mirrors `botocore.exceptions.ClientError` — **including its two-argument signature**.
 
-    def __init__(self, response: Mapping[str, object]) -> None:
-        super().__init__(str(response))
-        self.response = response
+    The arity is not cosmetic. This stub is installed only when `boto3` is ABSENT, so a stub that
+    took one argument would pass here and then break the moment someone installed
+    `fleet[bedrock]`: the real class would be used, every `ClientError(...)` construction below
+    would raise `TypeError`, and the file would fail on the ONLY host that can actually exercise
+    Bedrock. A fake that is easier to construct than the real thing tests the fake.
+
+    `error_response` (`Error.Code`, `ResponseMetadata.HTTPStatusCode`) is the whole contract the
+    adapter reads; botocore exposes it as `.response` and renders `operation_name` into `str()`.
+    """
+
+    def __init__(self, error_response: Mapping[str, object], operation_name: str) -> None:
+        code = ""
+        error = error_response.get("Error")
+        if isinstance(error, Mapping):
+            code = str(error.get("Code", ""))
+        super().__init__(
+            f"An error occurred ({code}) when calling the {operation_name} operation: stubbed",
+        )
+        self.response = error_response
+        self.operation_name = operation_name
 
 
 class _StubBotoCoreError(Exception):
@@ -79,11 +95,12 @@ from fleet.llm.backends.bedrock import (  # noqa: E402
     BedrockBackend,
     BedrockTargetMisconfigured,
     MissingRegion,
+    UnmappedFinishReason,
     build_request,
     parse_reply,
 )
 from fleet.llm.cache import CacheKeyParts  # noqa: E402
-from fleet.llm.client import MalformedReply, Message, ModelBackend, TransportError  # noqa: E402
+from fleet.llm.client import Message, ModelBackend, TransportError  # noqa: E402
 from fleet.models.enums import ModelTier, StructuredOutputMode  # noqa: E402
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price  # noqa: E402
 
@@ -346,12 +363,16 @@ def test_an_undeclared_rung_is_refused_loudly() -> None:
         assert caught.value.field == "capabilities_override"
 
 
-def test_effort_is_omitted_when_the_target_declares_none() -> None:
-    """A sibling lane is making `BackendTarget.effort` optional (`str | None`), where `None` means
-    "do not send the parameter" — the current non-optional `"medium"` default transmits a value the
-    operator never wrote. The omit-on-`None` branch is implemented and asserted here NOW so it is
-    correct the moment that lands; today's `BackendTarget` cannot hold `None`, so the builder is
-    driven with a stand-in target object rather than by weakening the model."""
+def test_effort_is_omitted_when_the_target_declares_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of the post-ADR-0075 world: with the gate OPEN, a target that declares no
+    effort still sends no parameter. `None` means "do not send it", and the gate must not be
+    mistaken for the omit logic — this drives the omit branch specifically, which is why the gate
+    is patched open rather than left shut. Today's `BackendTarget` cannot hold `None`, so the
+    builder is driven with a stand-in target rather than by weakening the model (`models/tasks.py`
+    is another lane's file)."""
+    monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda: True)
 
     class NoEffortTarget:
         backend = "bedrock"
@@ -369,11 +390,48 @@ def test_effort_is_omitted_when_the_target_declares_none() -> None:
     assert "additionalModelRequestFields" not in request
 
 
-def test_effort_rides_in_additional_model_request_fields_when_declared() -> None:
-    """The `Converse` request schema is model-agnostic and rejects a provider knob at top level;
-    `additionalModelRequestFields` is the documented pass-through. `effort` is already part of the
-    `llm_cache` key (`CacheKeyParts.effort`), so a cached row claims the call was made at the
-    declared effort — discarding it would make that claim false."""
+def test_effort_is_not_sent_at_all_while_the_field_is_non_optional() -> None:
+    """**No `output_config` reaches the wire today, even for `effort: high`.**
+
+    Two reasons converge. (1) With `"medium"` defaulted in, a target the operator never gave an
+    effort is indistinguishable from one they did, so sending it asserts a routing parameter nobody
+    wrote. (2) `additionalModelRequestFields` is an opaque pass-through the PROVIDER validates, the
+    shape has never been live-verified, and `_from_client_error` correctly classifies a
+    non-throttle 4xx as our request being wrong — a bare `LlmError`, not a failover trigger. So an
+    unverified field on EVERY call would fail every task on that target outright.
+
+    Making that rejection fail over instead was considered and rejected: every target in the tier
+    would reproduce the identical bad request, walk the whole ladder and end in `TierUnavailable`,
+    while disguising a wire-shape bug as an endpoint outage.
+    """
+    for effort in ("low", "medium", "high"):
+        request = build_request(
+            target(effort=effort), TURNS, None, StructuredOutputMode.PROMPTED, 512,
+        )
+        assert "additionalModelRequestFields" not in request
+        assert "output_config" not in repr(request)
+
+
+def test_the_gate_is_a_predicate_over_the_model_so_it_self_removes() -> None:
+    """`BackendTarget.effort` is a non-optional `Literal` at this commit, so the gate is shut.
+    ADR-0075 makes it `str | None = None`, after which the predicate is permanently `True` and the
+    gate stops doing anything — no edit at land time, which is the whole point of expressing it as
+    a question about the model rather than as a hard-coded flag."""
+    assert bedrock_module._effort_is_expressible_as_absent() is False
+    assert type(None) not in __import__("typing").get_args(
+        BackendTarget.model_fields["effort"].annotation,
+    )
+
+
+def test_effort_rides_in_additional_model_request_fields_once_it_is_optional(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The post-ADR-0075 world, simulated. `effort` is part of the `llm_cache` key
+    (`CacheKeyParts.effort`), so once an operator can express "no effort" the value they DID write
+    must be honoured — a cached row claims the call was made at the declared effort. The `Converse`
+    request schema is model-agnostic and rejects a provider knob at top level, so it rides in the
+    documented `additionalModelRequestFields` pass-through."""
+    monkeypatch.setattr(bedrock_module, "_effort_is_expressible_as_absent", lambda: True)
     request = build_request(target(effort="high"), TURNS, None, StructuredOutputMode.PROMPTED, 512)
     assert request["additionalModelRequestFields"] == {"output_config": {"effort": "high"}}
 
@@ -428,7 +486,7 @@ def test_truncation_is_length_and_length_is_not_a_failover_trigger() -> None:
 def test_an_unmapped_stop_reason_is_raised_never_guessed() -> None:
     """Guessing `stop` would hand `client.py` a reply it would validate; guessing `length` would
     have it re-ask an identical oversized request until the truncation budget was spent."""
-    with pytest.raises(MalformedReply):
+    with pytest.raises(UnmappedFinishReason):
         parse_reply(converse_body(stop_reason="not-a-real-stop-reason"), target())
 
 
@@ -439,6 +497,17 @@ def test_a_body_with_no_output_message_fails_over(monkeypatch: pytest.MonkeyPatc
     with pytest.raises(TransportError) as caught:
         parse_reply({"stopReason": "end_turn"}, target())
     assert caught.value.trigger == "SERVER_ERROR"
+
+
+def test_an_unmapped_finish_reason_is_neither_repairable_nor_a_failover_trigger() -> None:
+    """Encodes WHY the dedicated type exists. `MalformedReply` promises a repair `client.py` only
+    performs around `_validate`, which an exception from `invoke` never reaches; `TransportError`
+    would have every target in the tier reproduce the same unreadable answer and then report an
+    outage, when the real defect is that this adapter is out of date."""
+    from fleet.llm.client import MalformedReply
+
+    assert not issubclass(UnmappedFinishReason, MalformedReply)
+    assert not issubclass(UnmappedFinishReason, TransportError)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -536,6 +605,7 @@ def test_transient_faults_become_failover_triggers(code: str, status: int, trigg
     being readable as an outage, which only holds if the two arrive under different triggers."""
     exc = bedrock_module.ClientError(
         {"Error": {"Code": code}, "ResponseMetadata": {"HTTPStatusCode": status}},
+        "Converse",
     )
     error = bedrock_module._from_client_error(REGION, exc)
     assert isinstance(error, TransportError)
@@ -547,6 +617,7 @@ def test_a_bad_request_fails_the_task_instead_of_walking_the_tier() -> None:
     exactly, so failing loudly beats spending the tier's whole ladder (Rule 11, §11.8)."""
     exc = bedrock_module.ClientError(
         {"Error": {"Code": "ValidationException"}, "ResponseMetadata": {"HTTPStatusCode": 400}},
+        "Converse",
     )
     error = bedrock_module._from_client_error(REGION, exc)
     assert not isinstance(error, TransportError)
