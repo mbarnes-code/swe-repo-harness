@@ -6921,40 +6921,62 @@ open. So the reinforcement is placed where that author will actually meet it:
 2. **`transition()`'s own docstring says `DO NOT pass resume=True here`**, and names `demote()`.
 3. **`PhaseDemotion`'s docstring carries an `HONEST LIMIT` paragraph** stating the gap in the one
    place a reader of the type is guaranteed to look.
-4. **A test pins the gap** (`test_transition_demotes_without_recording_anything_and_that_gap_is_known`)
-   so it is visible in the suite rather than contradicted by it. If anyone ever does close the
-   door, that test fails and is deleted deliberately — which is the correct way to find out.
-   The tripwire asserts the *silence* and not merely the return value: no module-level state
-   accumulates, `caplog` stays empty, the result is a bare `RepoStatus` rather than a
-   `(status, record)` pair, and `enums.py` is asserted to import nothing from `fleet` — so
-   `transition()` can reach no `StateWriter` and no findings sink to record through. See §4.2 for
-   why that list is what it is.
+4. **A test pins the gap** (`test_transition_demotes_without_writing_a_record_or_reaching_a_sink`)
+   so it is visible in the suite rather than contradicted by it. If anyone closes the door, that
+   test fails and is deleted deliberately — which is the correct way to find out. **What it pins,
+   precisely:** `transition()`'s body may reference only the names in `TRANSITION_GLOBALS`, holds
+   no mutable default and no closure cell, carries no function attribute, returns a bare
+   `RepoStatus` rather than a `(status, record)` pair, accumulates nothing in any module-level
+   container, logs nothing, and `enums.py` contains no `fleet` import at any indentation. **What
+   it does not pin is stated in §4.2 — the enumeration is deliberately not claimed exhaustive.**
 
 An admitted convention is strictly better than an overstated guarantee, because the next author
 trusts the guarantee. What `demote()` genuinely buys is not enforcement but **strictness**: it
 refuses inputs `transition()` accepts (§4.1), and it makes the audit record impossible to *forget*
 for anyone who takes the path the SPEC names.
 
-#### 4.2 The tripwire had to assert the silence, not a proxy for it
+#### 4.2 Enumerating exits is the wrong shape of check — and the whitelist is still not a proof
 
-The first cut of bullet 4's test was named `..._can_still_demote_silently` and asserted only what
-`transition()` returned. A reviewer falsified it by construction: they **closed the door** — binding
-an audit side-effect into `transition()` — while leaving the return value untouched. **The test still
-passed, and its own name became false.** The bullet above was therefore partly false too: it promised
-a tripwire for the door closing, and pinned only the return value.
+Bullet 4's tripwire took three cuts, and the first two failed the same way this ADR's §4 failed:
+**the claim outran the check.**
 
-This is worth recording because it is a general defect and not a slip. A mutation test confirms that
-a test catches the mutations you thought to introduce; it cannot tell you the test's *name* asserts
-something the body never checks. Reviewing a test's implementation and reviewing the truth of its
-title are different acts, and only the second catches this class.
+- **Cut 1** was named `..._can_still_demote_silently` and asserted only the return value. A reviewer
+  falsified it by binding an audit side-effect into `transition()` with the return untouched. The
+  test still passed while its own name became false.
+- **Cut 2** added a module-state snapshot and `caplog`, and this ADR then asserted as fact that a
+  side-effect "has exactly two places to go". A reviewer defeated it **six** ways: a function
+  attribute (`transition.audit`), a mutable default argument (`__kwdefaults__`), a **function-local**
+  `from fleet...` import, `warnings.warn`, a `ClassVar` on `PhaseDemotion`, and `print()`. The third
+  is the one that mattered: a deferred, function-local import is the *only* way subtask 6 could hand
+  `enums.py` a `StateWriter` without a module-scope import cycle — precisely the route the source
+  scan existed to catch, and precisely the route it missed, because it matched `startswith` at line
+  start and the import was indented.
 
-The fix asserts `silently` directly. `enums.py` imports **stdlib only**, so `transition()` can reach
-no database, no `StateWriter` and no findings sink; an audit side-effect added to it has exactly two
-places to go, and the test covers both — a module-level collection (snapshot every mutable container
-bound in the module, before and after) and the logging system (`caplog` must stay empty) — plus the
-shape of the return (a bare `RepoStatus`, never a `(status, record)` pair) and the absence of any
-`fleet` import that would open a third route. Both closure forms were run as mutations and both now
-fail the test.
+Each enumeration was defeated by a route not enumerated. That is not bad luck; **enumerating exits
+is the wrong shape of check**, because the enumerator has to think of every form and the defeater
+has to think of one.
+
+- **Cut 3** inverts it into a **whitelist**: `TRANSITION_GLOBALS` is the complete set of global and
+  attribute names `transition()`'s body may reference, asserted against `co_names`. A side effect
+  must *name* something to reach it, so every one of the six forms enlarges `co_names` and trips the
+  assertion — including forms nobody predicted. All six were re-run as mutations and **all six now
+  fail**. `__kwdefaults__`, `__defaults__`, `co_freevars` and `vars(transition)` are pinned
+  alongside it, and the source scan now uses `.strip().startswith(...)` so an indented import is
+  caught.
+
+**And it is still not a proof, which this ADR states rather than discovers later.** A side effect
+routed entirely through names *already on* the whitelist passes it. This is verified, not
+hypothesised: binding `RESUME_DEMOTE` to a `dict` subclass whose `get()` appends to an **instance
+attribute** records every demotion while the whole test passes — `transition()`'s body is
+byte-identical, so `co_names` is unchanged, and `dict.__repr__` shows only mapping contents, so the
+module-state snapshot cannot see the sink either.
+
+So the honest statement of the guarantee is: **the tripwire catches a side effect added to
+`transition()`'s own body, and does not catch one hidden inside an object `transition()` already
+names.** Closing that too would mean freezing the identity and type of every whitelisted global —
+achievable, and deliberately not done, because at that point the test is asserting the absence of an
+adversary rather than a property, and this ADR's whole subject is not making claims larger than the
+checks behind them.
 
 #### 4.1 `demote()` is deliberately stricter than `transition()`
 
@@ -7057,9 +7079,10 @@ untouched and unmigrated. Four tests carry the reasoning:
    (§4.1) — while `transition()` is asserted to still accept `RUNNING`/`BLOCKED -> PENDING`, so
    the strictness is demonstrably `demote()`'s own rather than inherited.
 4. The open door is **pinned rather than claimed shut** (§4): `transition(SUCCEEDED, PENDING,
-   resume=True)` is asserted to demote *and* to record nothing — module state unchanged, `caplog`
-   empty, a bare status returned, and no `fleet` import through which a sink could be reached
-   (§4.2).
+   resume=True)` is asserted to demote *and* to leave no record reachable from `transition()`'s
+   own body — `co_names` whitelisted, no mutable default, no closure cell, no function attribute,
+   a bare status returned, module state unchanged, `caplog` empty, and no `fleet` import at any
+   indentation. Bounded, not exhaustive: §4.2 names the escape that remains open, verified.
 
 Test 2's loop over illegal targets is **derived from `RepoStatus`** rather than listed. An earlier
 cut named three of the five reachable targets, so widening `RESUME_DEMOTE` to admit
@@ -7077,5 +7100,16 @@ the rejected designs and the reviewed defects, not arbitrary edits:
 | `RESUME_DEMOTE` widened to `{PENDING, SKIPPED}` (the N-2 defect) | test 2 |
 | Door closed via a module-level audit registry (the N-1 falsification) | test 4 |
 | Door closed via a `logging` call | test 4 |
+| Door closed via a function attribute `transition.audit` | test 4 |
+| Door closed via a mutable default argument `_audit=[]` | test 4 |
+| Door closed via a **function-local** `from fleet.models import base` | test 4 |
+| Door closed via `warnings.warn` | test 4 |
+| Door closed via a `ClassVar` list on `PhaseDemotion` | test 4 |
+| Door closed via `print()` | test 4 |
 
-Each was reverted from a backup copy and the file re-diffed clean before commit.
+The last six are the forms a reviewer used to defeat cut 2 of test 4; all six kill cut 3 (§4.2).
+One further form was run and **passes** — `RESUME_DEMOTE` bound to a `dict` subclass recording into
+an instance attribute — and is documented in §4.2 as the boundary of the guarantee rather than
+patched, because the point of §4 is that the claim matches the check.
+
+Each mutation was reverted from a backup copy and the file re-diffed clean before commit.

@@ -677,13 +677,7 @@ def test_demote_pairs_the_finding_and_is_stricter_than_transition() -> None:
 
 
 def _enums_mutable_module_state() -> dict[str, str]:
-    """Every mutable container bound at `enums` module level, by `repr`.
-
-    `enums.py` imports nothing from `fleet` (asserted below), so it can reach no database, no
-    `StateWriter` and no findings sink. An audit side-effect added to `transition()` therefore has
-    only two places to go: a module-level collection, or the logging system. This snapshots the
-    first; `caplog` covers the second.
-    """
+    """Every mutable container bound at `enums` module level, by `repr`."""
     return {
         name: repr(value)
         for name, value in vars(enums_mod).items()
@@ -691,27 +685,54 @@ def _enums_mutable_module_state() -> dict[str, str]:
     }
 
 
-def test_transition_demotes_without_recording_anything_and_that_gap_is_known(
+TRANSITION_GLOBALS: frozenset[str] = frozenset(
+    {"ALLOWED_TRANSITIONS", "OPERATOR_REOPEN", "RESUME_DEMOTE",
+     "get", "frozenset", "ValueError", "value"}
+)
+"""Every global and attribute name `transition()`'s body is allowed to reference.
+
+This is a WHITELIST, not a list of forbidden things, and that inversion is the point: a side
+effect has to name something to reach it, so anything a future edit adds — `warnings`, `print`,
+an imported module, an attribute sink, a `.append` — enlarges `co_names` and trips the assertion
+without anyone having predicted that particular form. Editing `transition()` legitimately will
+also trip it; updating this set is then a deliberate act with a reviewer's eyes on it, which is
+what a tripwire is for.
+"""
+
+
+def test_transition_demotes_without_writing_a_record_or_reaching_a_sink(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """`transition(SUCCEEDED, PENDING, resume=True)` demotes AND records nothing (ADR-0077 §4).
+    """`transition(SUCCEEDED, PENDING, resume=True)` demotes, and does not record it (ADR-0077 §4).
 
-    Why it matters, twice over.
+    Why it matters: the audit obligation is a CONVENTION, not a mechanism. `transition()` is
+    public and exported, and `resume=True` demotes with no finding and no error. An earlier draft
+    claimed "no call yields the demoted status without the record"; that was false, and a false
+    guarantee is worse than an admitted convention because subtask 6 would have trusted it. This
+    test keeps the gap visible in the suite rather than contradicted by it — if anyone closes the
+    door, it fails and is deleted deliberately, which is the correct way to find out.
 
-    First: the audit obligation is a CONVENTION, not a mechanism. `transition()` is public and
-    exported, and `resume=True` demotes with no finding and no error. An earlier draft of this
-    module claimed "no call yields the demoted status without the record"; that was false, and a
-    false guarantee is worse than an admitted convention because subtask 6 would have trusted it.
-    This test keeps the gap visible in the suite rather than contradicted by it — if anyone ever
-    closes the door, it fails and is deleted deliberately, which is the correct way to find out.
+    Why the body looks like this: two earlier cuts of this test were named for a guarantee they
+    did not check. The first asserted only the return value; a reviewer defeated it by binding a
+    side effect into `transition()` with the return untouched. The second added a module-state
+    snapshot and `caplog`, and a reviewer defeated THAT six ways — a function attribute, a mutable
+    default argument, a **function-local** `from fleet...` import (invisible to a line-start
+    source scan), `warnings.warn`, a `ClassVar` on `PhaseDemotion`, and `print()`. Each new
+    enumeration of routes was defeated by a route not enumerated, because enumerating exits is the
+    wrong shape of check.
 
-    Second, and this is why the body asserts more than a return value: an earlier cut of THIS test
-    was named `..._can_still_demote_silently` but asserted only what `transition()` returned. A
-    reviewer closed the door by binding an audit side-effect into `transition()` while leaving the
-    return value untouched — and the test still passed, while its own name became false. A test
-    whose name states a guarantee must assert that guarantee, not a proxy for it. So `silently` is
-    now checked directly: no module-level state accumulates, nothing is logged, no record comes
-    back with the status, and the module has no route to a sink to write one through.
+    So the load-bearing assertion is now a WHITELIST of what `transition()` may name at all
+    (`TRANSITION_GLOBALS`), which catches side effects by construction rather than by anticipating
+    their form. All six forms above now fail it.
+
+    It is strong and it is NOT a proof, which is recorded here rather than discovered later: a side
+    effect routed entirely through names already on the whitelist passes every assertion below.
+    Verified, not hypothesised — binding `RESUME_DEMOTE` to a `dict` subclass whose `get()` appends
+    to an INSTANCE attribute records every demotion while this test stays green, because the body
+    is byte-identical (so `co_names` is unchanged) and `dict.__repr__` shows only mapping contents
+    (so the module-state snapshot cannot see it either). What this pins: a side effect added to
+    `transition()`'s own body. What it does not: one hidden inside an object it already names.
+    ADR-0077 §4.2 says why that boundary is where it is.
     """
     before = _enums_mutable_module_state()
     with caplog.at_level(logging.DEBUG):
@@ -720,17 +741,30 @@ def test_transition_demotes_without_recording_anything_and_that_gap_is_known(
     assert result is RepoStatus.PENDING
     # ...a bare status, never a `(status, PhaseDemotion)` pair the caller could audit with.
     assert isinstance(result, RepoStatus) and not isinstance(result, tuple)
-    # ...nothing accumulated anywhere in the module,
+
+    # The whitelist: `transition()` may reference these names and no others. A sink of any kind —
+    # module, attribute, builtin, deferred import — must be named to be reached.
+    assert set(transition.__code__.co_names) == TRANSITION_GLOBALS
+    # ...no state smuggled in as a default argument, and none captured from an enclosing scope,
+    assert transition.__kwdefaults__ == {"operator": False, "resume": False}
+    assert transition.__defaults__ is None
+    assert transition.__code__.co_freevars == ()
+    # ...no function-attribute sink hung off `transition` itself,
+    assert vars(transition) == {}
+    # ...nothing accumulated in any module-level container,
     assert _enums_mutable_module_state() == before
-    # ...nothing was logged,
+    # ...and nothing was logged.
     assert caplog.records == []
-    # ...and there is no route to a findings sink to write through in the first place: `enums.py`
-    # imports stdlib only, so closing this door would take a new import a reader would notice.
+
+    # Belt and braces on the one route subtask 6 would realistically take: a deferred, function-
+    # local `from fleet...` import is the ONLY way to hand `enums.py` a `StateWriter` without a
+    # module-scope cycle. `.strip()` matters — an earlier cut scanned with a line-start
+    # `startswith`, so an INDENTED import was invisible to exactly the check written to catch it.
     source = inspect.getsource(enums_mod)
     assert not [
         line
         for line in source.splitlines()
-        if line.startswith(("import ", "from ")) and "fleet" in line
+        if line.strip().startswith(("import ", "from ")) and "fleet" in line
     ], "enums.py gained a fleet import — re-check whether transition() can now reach a sink"
 
 
