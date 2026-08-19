@@ -409,7 +409,13 @@ def test_the_prompted_floor_sends_no_tools_and_no_schema(transport: Any) -> None
     ))
     reply = asyncio.run(_invoke(make_target(), mode=StructuredOutputMode.PROMPTED, schema=None))
     assert "tools" not in recorder
-    assert "format" not in recorder["output_config"]  # effort still rides here; the schema must not
+    # `.get(..., {})`, not a subscript: `output_config` is CONDITIONAL. It exists today only
+    # because `make_target()` inherits the non-optional `effort` default; once ADR-0075 lands and
+    # that default is `None`, this rung sends no `output_config` at all and a subscript would
+    # raise KeyError -- reddening CI on main from a file the config lane never touched, and
+    # pointing the bisect at the wrong commit. The assertion's intent is "no schema was sent",
+    # which is true whether the key is absent or merely `format`-free.
+    assert "format" not in recorder.get("output_config", {})
     assert reply.text == '{"verdict": "ok"}'
 
 
