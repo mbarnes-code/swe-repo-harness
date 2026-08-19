@@ -850,3 +850,49 @@ async def test_a_retried_failover_does_not_duplicate_its_events_row(tmp_path: Pa
             "the retry inserted a SECOND backend_failover row: a fresh uuid4 on retry slips past "
             "ON CONFLICT (run_id, event_uid) and double-counts the hop"
         )
+
+
+async def test_the_caveat_never_contradicts_the_scope_field_of_its_own_row(
+    tmp_path: Path,
+) -> None:
+    """O1. The caveat is prose an operator acts on, sitting in the same row as the `scope` field it
+    describes; if the two disagree, the row is self-refuting and the more persuasive half wins.
+
+    The single unconditional caveat asserted "every row this harness writes today has scope 'run'".
+    That was true of every row that could then be produced and false of the row the `tier=` arm
+    produces — latent only because nothing passes `tier=` yet, and live the moment the sibling lane
+    wires it, which is precisely the future the N8 disclosure is written for. An overclaim inside
+    the fix for an overclaim.
+
+    Both arms are asserted here, and the unreachable one deliberately so: it is the arm that goes
+    live without anyone revisiting this file.
+    """
+    backend = ScriptedBackend(HONEST_CAPS)
+    async for h in _build(tmp_path, backend, make_router()):
+        await h.ctx.llm_findings.record_backend_unavailable(
+            repo_id="repo-a", phase=Phase.TRANSFORM, observed="tier WORKHORSE exhausted"
+        )
+        _, _, _, run_row = (await h.findings(BACKEND_UNAVAILABLE))[0]
+        assert run_row["failover_triggers_scope"] == "run"
+        assert "scope 'run'" in str(run_row["caveat"])
+        assert "scope 'tier'" not in str(run_row["caveat"])
+
+        await h.ctx.llm_findings.record_backend_unavailable(
+            repo_id="repo-a",
+            phase=Phase.BUILD,
+            observed="tier HEAVY exhausted",
+            tier=ModelTier.HEAVY,
+        )
+        rows = {r[3]["phase"]: r[3] for r in await h.findings(BACKEND_UNAVAILABLE)}
+        tier_row = rows["BUILD"]
+        assert tier_row["failover_triggers_scope"] == "tier"
+        assert "scope 'tier'" in str(tier_row["caveat"]), (
+            "a tier-scoped row shipping the run-scoped caveat denies its own `scope` field"
+        )
+        assert "scope 'run'" not in str(tier_row["caveat"])
+
+        for row in (run_row, tier_row):
+            assert "a 429 alone can never mean DOWN" in str(row["caveat"]), (
+                "the row-43 refusal is the load-bearing half and belongs in BOTH arms"
+            )
+            assert "lower concurrency" in str(row["caveat"])

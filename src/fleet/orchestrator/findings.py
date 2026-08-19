@@ -79,19 +79,48 @@ BACKEND_FAILOVER_EVENT: Final = "backend_failover"
 #: Carried in every `BackendUnavailable` payload. Prose in a row is normally a smell; here it is
 #: the point — the row's own name overstates what the harness measured, and the operator reading
 #: it months later is the person who would otherwise act on the overstatement (§13 row 43).
-_CAVEAT: Final = (
+_CAVEAT_HEAD: Final = (
     "Tier exhaustion only. This is NOT evidence that any backend is down: llm/client.py fails a "
     "target over without inspecting TransportError.trigger, so sustained RATE_LIMIT throttling "
     "reaches this finding identically to a CONNECTION or SERVER_ERROR failure (SPEC 13 row 43 -- "
     "a 429 alone can never mean DOWN). Read failover_triggers together with "
-    "failover_triggers_scope. Every row this harness writes today has scope 'run', which means "
-    "the map spans EVERY tier the run touched -- not only the exhausted one named in `observed` "
-    "-- and that failover_triggers_recorded and throttling_observed are unanswered on purpose. "
-    "Match the tier key against `observed` yourself before concluding anything. Within a tier "
-    "the map still omits the target that exhausted it, which never reports its own trigger. If "
-    "the triggers for the EXHAUSTED tier are throttling, the correct action is to run at lower "
-    "concurrency, not to repair infrastructure."
+    "failover_triggers_scope. "
 )
+
+#: Appended when the row could NOT be told which tier died — every row this harness writes today.
+_CAVEAT_RUN: Final = (
+    "This row has scope 'run': the map spans EVERY tier the run touched, not only the exhausted "
+    "one named in `observed`, and failover_triggers_recorded and throttling_observed are "
+    "unanswered on purpose. Match the tier key against `observed` yourself before concluding "
+    "anything. "
+)
+
+#: Appended when a caller supplied the tier. Unreachable in production until `WorkerError` carries
+#: a tier -- but it MUST already be correct, because the row that gets it is the row whose `scope`
+#: field would otherwise be denied by its own caveat.
+_CAVEAT_TIER: Final = (
+    "This row has scope 'tier': the map, failover_triggers_recorded and throttling_observed all "
+    "describe ONLY the exhausted tier named in `observed`. "
+)
+
+_CAVEAT_TAIL: Final = (
+    "Within a tier the map still omits the target that exhausted it, which never reports its own "
+    "trigger. If the triggers for the EXHAUSTED tier are throttling, the correct action is to run "
+    "at lower concurrency, not to repair infrastructure."
+)
+
+
+def _caveat(tier_known: bool) -> str:
+    """The operator-facing text, branched on scope.
+
+    A single unconditional caveat asserted "every row has scope 'run'" while `scope` was a live
+    field — so a tier-scoped row would have shipped carrying prose that denied its own data. That
+    is latent today (nothing passes `tier=`) and goes live the moment a caller can, which is
+    exactly the future the `record_backend_unavailable` disclosure is written for. A caveat that
+    contradicts the row it annotates is worse than no caveat: it is the overclaim this whole field
+    block exists to prevent, wearing the costume of the fix.
+    """
+    return _CAVEAT_HEAD + (_CAVEAT_TIER if tier_known else _CAVEAT_RUN) + _CAVEAT_TAIL
 
 
 _INSERT_FINDING: Final = (
@@ -420,7 +449,7 @@ class LlmFindingSink:
                     "failover_triggers_recorded": recorded,
                     "failover_triggers_scope": "run" if tier is None else "tier",
                     "throttling_observed": throttled,
-                    "caveat": _CAVEAT,
+                    "caveat": _caveat(tier is not None),
                 }
             ),
             stamp,

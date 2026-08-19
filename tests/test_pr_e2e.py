@@ -1027,18 +1027,32 @@ def test_fleet_pr_persists_its_llm_findings_even_when_the_command_fails_partway(
     while the `StateWriter` is still open.
 
     The failure is injected at `_write_pr_record`, i.e. after the worker has already driven the
-    model and buffered its drift, which is precisely the window that was unprotected.
+    model and buffered its drift, which is precisely the window that was unprotected — and on the
+    SECOND candidate, so the loop really is interrupted partway rather than on entry. Wave 0 has
+    two libraries, so the first PR's record lands and the second raises: the buffer at that moment
+    holds drift from both repos, which is the state a post-loop drain discarded.
     """
     verified(fleet)
     monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": DriftingBackend()})
 
-    async def explode(*_args: Any, **_kwargs: Any) -> None:
+    real_write = cli._write_pr_record
+    calls: list[int] = []
+
+    async def explode_on_the_second(*args: Any, **kwargs: Any) -> None:
+        calls.append(1)
+        if len(calls) < 2:
+            await real_write(*args, **kwargs)
+            return
         raise RuntimeError("the state writer fell over mid-loop")
 
-    monkeypatch.setattr(cli, "_write_pr_record", explode)
+    monkeypatch.setattr(cli, "_write_pr_record", explode_on_the_second)
 
     result = runner.invoke(app, [*base_args(fleet), "--json", "pr"], catch_exceptions=True)
     assert result.exit_code != ExitCode.SUCCESS, "the injected failure must not be swallowed"
+    assert len(calls) == 2, "the loop must have got PAST the first candidate to be 'partway'"
+    assert query(fleet, "SELECT repo_id FROM phases WHERE phase = 4 AND pr_url IS NOT NULL"), (
+        "the first candidate's record really landed before the second one blew up"
+    )
 
     rows = query(fleet, "SELECT payload FROM findings WHERE kind = ?", ("CapabilityDrift",))
     assert rows, (
