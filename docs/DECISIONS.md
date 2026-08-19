@@ -295,8 +295,11 @@ shim, no LangChain.**
 > **NOT IMPLEMENTED, and deliberately so — do not reconcile code to the *paragraph immediately
 > above*.** The marker covers **every claim in that paragraph, without exception** — the thinking
 > mode, the streaming, the "`output_config.effort` per role", and "no OpenAI-compatible shim".
-> Not one of them describes what ships, and none of them is outside this marker's scope. Treat the
-> whole paragraph as historical.
+> Not one of those four describes what ships, and none of them is outside this marker's scope.
+> **Historical means those four claims, not the whole paragraph** — the rest of it is true as
+> shipped and must be kept: `anthropic>=0.69` (`pyproject.toml:33`), `AsyncAnthropic`
+> (`llm/backends/anthropic.py:215`), and SDK-native retries at `max_retries=4` (`:100`, applied at
+> `:218`). Do not delete those in the name of this marker.
 >
 > The **tier table below is a different matter: authoritative and current.** Its `effort: high`
 > values are live config (`config/models.yaml`), must not be deleted, and deleting them would
