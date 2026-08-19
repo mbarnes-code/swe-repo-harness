@@ -361,9 +361,11 @@ def _reply_from(target: BackendTarget, message: anthropic.types.Message) -> Back
 
     **`usage.model_id` echoes `target.model_id` VERBATIM, and must never carry the dated snapshot
     id this transport returns in `message.model`.** It is the single highest-consequence line in
-    this file, and both `TokenUsage.model_id`'s own comment ("the RESOLVED model id, as the backend
-    reported it") and `schema.sql`'s ("RESOLVED id") actively invite the other choice. Here is why
-    they must not be followed:
+    this file. The language of "resolution" that surrounds this field — in its own declaration, in
+    the `llm_cache.model_id` column, and in `_stamp` itself — reads as an instruction to report
+    whatever the transport called the model. Three lanes independently followed it into the same
+    bug. Whatever those neighbouring comments say by the time you read this, the mechanism below
+    is what decides correctness, so check it against the code rather than against prose:
 
     `_stamp` (§7.7) resolves `usage.model_id or target.model_id` — backend-reported WINS. The
     `llm_cache` READ key is built from the config string (`_key_parts` takes `target.model_id`),

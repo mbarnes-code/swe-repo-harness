@@ -514,9 +514,9 @@ def test_usage_model_id_echoes_the_config_string_not_the_resolved_snapshot(
     (`_store_response`). This transport returns a DATED snapshot id in `message.model`, so
     reporting it would make read key != write key on every call: a permanent 100% cache miss
     across the whole fleet, silent, indistinguishable from a cold cache because
-    `attempts.llm_cache_hit` merely stays 0. `TokenUsage.model_id`'s own comment ("as the backend
-    reported it") and `schema.sql`'s ("RESOLVED id") both invite the wrong choice, so this is
-    pinned here rather than left to convention."""
+    `attempts.llm_cache_hit` merely stays 0. The "resolution" language around this field invited
+    exactly that reading in three independent lanes, so the invariant is pinned by this test
+    rather than left to the neighbouring prose."""
     transport(sdk_message(model="resolved-snapshot-20260101"))
     target = make_target(model_id="config-string")
     reply = asyncio.run(_invoke(target))
