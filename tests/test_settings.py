@@ -489,6 +489,75 @@ def test_openai_compatible_target_without_base_url_is_refused(tmp_path: Path) ->
     assert "base_url" in str(excinfo.value)
 
 
+def _cheap_openai_target(base_url: str) -> str:
+    return (
+        "    CHEAP:\n"
+        "      - { backend: openai_compatible, model_id: local-cheap, effort: low,\n"
+        f"          price: free, base_url: '{base_url}' }}\n"
+    )
+
+
+@pytest.mark.parametrize("blank", ["", "   ", "\t"])
+def test_a_blank_base_url_is_refused_at_load_not_at_call_time(tmp_path: Path, blank: str) -> None:
+    """§13 row 36 wants a target with no usable `base_url` to fail at STARTUP, naming profile,
+    tier, target index and field. An `is None` check satisfied the schema and nothing else: an
+    empty or whitespace-only string is not an endpoint, so the run cleared config validation,
+    cloned repos, and only then failed on the first call — the exact deferral row 36 exists to
+    prevent. The whitespace case matters because YAML quoting makes it easy to write by accident.
+    """
+    models = MODELS_YAML.replace(CHEAP_TARGET, _cheap_openai_target(blank))
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, models=models))
+
+    message = str(excinfo.value)
+    assert "base_url" in message                     # the field the operator must edit
+    assert "profiles.default.CHEAP[0].base_url" in message   # profile, tier, index, field
+    assert excinfo.value.exit_code == 2
+
+
+def test_a_usable_base_url_still_loads(tmp_path: Path) -> None:
+    """The other half of the blank-`base_url` guard: the check must reject empty strings without
+    rejecting real ones, or every local profile stops booting."""
+    models = MODELS_YAML.replace(CHEAP_TARGET, _cheap_openai_target("http://localhost:8001/v1"))
+    settings = load(write_config(tmp_path, models=models))
+    assert settings.targets_for_tier(ModelTier.CHEAP)[0].base_url == "http://localhost:8001/v1"
+
+
+def test_an_uninstalled_backend_extra_is_named_in_the_message(tmp_path: Path) -> None:
+    """The rule 2 gate validates `backend` against the LIVE registry, so on a host without the
+    optional SDKs a config naming `bedrock` correctly exits 2. But "not in the registry" reads as
+    a typo, and the operator hunts a spelling mistake that is not there. The message must say the
+    backend exists and its extra is not installed, and name the extra to install."""
+    models = MODELS_YAML.replace(
+        CHEAP_TARGET,
+        "    CHEAP:\n"
+        "      - { backend: bedrock, model_id: anthropic.claude-haiku, effort: low,\n"
+        "          region: us-east-1, price: free }\n",
+    )
+    with pytest.raises(UnresolvedReferenceError) as excinfo:
+        load(
+            write_config(tmp_path, models=models),
+            known_backends=("anthropic", "openai_compatible"),
+        )
+
+    message = str(excinfo.value)
+    assert "fleet[bedrock]" in message               # the extra, not just "an extra"
+    assert "not installed" in message
+    assert excinfo.value.exit_code == 2
+
+
+def test_a_typod_backend_is_not_reported_as_a_missing_extra(tmp_path: Path) -> None:
+    """The other half: `anthropik` is a typo, not an uninstalled SDK. Telling the operator to
+    `pip install` it would send them after a package that does not exist."""
+    models = MODELS_YAML.replace(
+        "backend: anthropic, model_id: claude-opus-5",
+        "backend: anthropik, model_id: claude-opus-5",
+    )
+    with pytest.raises(UnresolvedReferenceError) as excinfo:
+        load(write_config(tmp_path, models=models))
+    assert "pip install" not in str(excinfo.value)
+
+
 def test_a_role_routed_to_an_empty_tier_is_a_startup_error(tmp_path: Path) -> None:
     """§9 rule 1, verbatim: "A role routed to an empty tier is a startup error, never a runtime
     `KeyError` in wave 7"."""

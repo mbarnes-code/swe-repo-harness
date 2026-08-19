@@ -106,6 +106,11 @@ MODELS_SECTION: Final = "models_profile"
 #: a typo'd `backend` on a host with no SDKs installed.
 SHIPPED_BACKENDS: Final[tuple[str, ...]] = ("anthropic", "openai_compatible", "bedrock", "vertex")
 
+#: Backends that ship behind a `[project.optional-dependencies]` extra (pyproject.toml). Such a
+#: backend failing to register is an uninstalled SDK, NOT a typo — the rule 2 gate names the extra
+#: so the operator does not go hunting a spelling mistake that is not there.
+_BACKEND_EXTRAS: Final[Mapping[str, str]] = {"bedrock": "bedrock", "vertex": "vertex"}
+
 #: §9 rule 2 / §13 row 36: each backend validates its own target fields.
 _REQUIRED_TARGET_FIELDS: Final[Mapping[str, tuple[str, ...]]] = {
     "openai_compatible": ("base_url",),
@@ -1391,14 +1396,25 @@ def _check_routing(
         for index, target in enumerate(targets):
             where = f"profiles.{profile}.{tier.value}[{index}]"
             if target.backend not in known_backends:
+                extra = _BACKEND_EXTRAS.get(target.backend)
+                remedy = (
+                    f"it ships as an optional extra whose SDK is not installed on this host — "
+                    f"`pip install 'fleet[{extra}]'`"
+                    if extra is not None
+                    else "if it ships as an extra, install it"
+                )
                 raise UnresolvedReferenceError(
                     f"backend {target.backend!r} is not in the §7.7 registry "
-                    f"(have {sorted(known_backends)}); if it ships as an extra, install it",
+                    f"(have {sorted(known_backends)}); {remedy}",
                     file=path,
                     key=where,
                 )
             for required in _REQUIRED_TARGET_FIELDS.get(target.backend, ()):
-                if getattr(target, required) is None:
+                value = getattr(target, required)
+                # `base_url: ''` is not a base_url. An `is None` test here let an empty or
+                # whitespace-only string through startup and deferred the failure to the first
+                # call, which §13 row 36 exists to prevent: it must fail HERE, naming the field.
+                if value is None or (isinstance(value, str) and not value.strip()):
                     raise ConfigValidationError(
                         f"backend {target.backend!r} requires `{required}` (§13 row 36)",
                         file=path,
