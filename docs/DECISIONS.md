@@ -6709,8 +6709,9 @@ corrects) on base `7a8bfbb`.
 
 `fleet resume`, having completed every §11.5 step that exists — the config-drift audit, any budget
 raise, the `--repoll-prs` re-poll, the step-3 stale-lease sweep and the step-7 projection — and
-stopping only because step 5 (re-check each phase's durable **evidence** and demote the repo to the
-earliest phase whose evidence still holds, searching *downward* from the settled frontier;
+stopping only because step 5 (re-check each phase's durable **evidence** and demote the repo to its
+re-entry floor — the phase above the **highest** phase below the settled frontier whose evidence
+still holds, never that phase itself — searching *downward* from the settled frontier;
 Constraint 7) has no implementation, exits **2**, via a dedicated
 `ResumeIncompleteError(FleetCliError)` whose `exit_code` is `ExitCode.USAGE`.
 
@@ -7297,7 +7298,8 @@ and `8c00971` (`src/fleet/orchestrator/reentry.py`). **Supersedes nothing. Exten
 which decided all three non-demotable statuses for the *status* write and said nothing about the
 `checkpoints` row. Recorded late, on a number allocated by the orchestrator: the implementer of
 `demote_to_floor` raised the reconciliation as its first concern and deliberately took no number
-(`.superpowers/sdd/design-resume-step5/task-6-report.md` §3 and §6 item 1).
+(`docs/superpowers/plans/design-resume-step5-task6-demotion-writer-report.md`
+§3 and §6 item 1).
 
 **Provenance (CLAUDE.md Guardrail 1).** Nothing here is a SPEC requirement that pre-existed it.
 `docs/SPEC.md:6907-6909` **as of `8c00971`, before this change** stated the *demoted-rows-only*
@@ -7463,4 +7465,4 @@ before it was written, against `8c00971` rather than against the implementer's r
 
 The behaviour itself is bound by mutations M10 (unconditional sweep → the no-op test fails) and M11
 (narrowed to the demoted rows → the frontier-checkpoint test fails), recorded in
-`.superpowers/sdd/design-resume-step5/task-6-report.md` §5.
+`docs/superpowers/plans/design-resume-step5-task6-demotion-writer-report.md` §5.

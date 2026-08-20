@@ -3856,8 +3856,9 @@ whose determinism argument the fix corrected. The five-site enumeration was comp
 > with a whitespace-normalized whole-file scan (offset-to-line map, not line-oriented `grep`, per
 > three prior line-break-spanning misses this round) over `src/` and `tests/`: `grep -ni thinking
 > src/ tests/` returns **one** hit, not zero, and that one hit **is** this corrected line — a
-> negative assertion necessarily names the word it denies. A later report (`.superpowers/sdd/
-> design-resume-step5/task-item17-report.md`, untracked) claimed the sweep left **zero** hits; that
+> negative assertion necessarily names the word it denies. A later report
+> (`docs/superpowers/plans/task-item17-report.md`, promoted out of `.superpowers/` scratch at
+> `5be5064`) claimed the sweep left **zero** hits; that
 > claim was itself false the moment it was written, for the same reason. One hit, correctly present,
 > is the sweep's finished state, not its outstanding state.
 
