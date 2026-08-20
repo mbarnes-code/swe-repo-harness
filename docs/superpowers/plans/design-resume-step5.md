@@ -211,9 +211,9 @@ The correction is structural: **demotion is a search *downward* from the settled
 upward scan, and it does not call `preconditions_hold` at all.**
 
 ```
-settled(row)  :=  row.status in {SUCCEEDED, SKIPPED}
-terminal(row) :=  row.status is REQUIRES_HUMAN_INTERVENTION
-held(row)     :=  row.status is DEGRADED          # see ambiguity 5
+settled(row)   :=  row.status in {SUCCEEDED, SKIPPED, DEGRADED}   # ADR-0077 §5
+terminal(row)  :=  row.status is REQUIRES_HUMAN_INTERVENTION
+hard_stop(row) :=  row.status in {DEGRADED, SKIPPED}              # ADR-0077 §5 (ambiguity 5)
 
 for each repo r in the run:
     rows := {p: phases(r, p) for p in 1..4}       # a MISSING row is PENDING (schema default)
@@ -225,13 +225,16 @@ for each repo r in the run:
     # 2. demote by looking BACKWARDS from the frontier only
     floor := frontier
     for p from frontier-1 down to 1:
+        if hard_stop(rows[p]):        break       # never demoted, and never searched PAST
         if not evidence_holds(r, p):  floor := p
         else:                         break       # earlier phases are covered by this one
 
-    # 3. write
-    for q in floor .. 4:
-        if rows[q].status is SUCCEEDED:  demote q to PENDING, attempts RETAINED
-        drop checkpoints row (r, q)                # a checkpoint above the floor is a lie
+    # 3. write (one transaction)
+    demoted := [ q in floor .. 4 : rows[q].status is SUCCEEDED ]
+    for q in demoted:  demote q to PENDING, attempts RETAINED, one PhaseDemoted finding each
+    if demoted:                                   # a no-op resume must not sweep checkpoints
+        for q in floor .. 4 where rows[q].status is not DEGRADED:
+            drop checkpoints row (r, q)           # a checkpoint above a demoted phase is a lie
 
     # 4. preconditions_hold is NOT consulted here.
     #    It is consulted by PhaseRunner._re_entry when `floor` is next dispatched — the only
@@ -240,6 +243,21 @@ for each repo r in the run:
 
 Because phase `p` is only *asked* when `p+1 … 4` were `SUCCEEDED`, case (c) never arises:
 monotonicity is a property of the traversal, not an assumption about the predicates.
+
+`hard_stop` is design ambiguity 5, resolved in **ADR-0077 §5** (`docs/DECISIONS.md`) and not in
+this document. `DEGRADED` leaves the machine only through a budgeted revalidation round and
+`SKIPPED` is a config exclusion resume does not re-decide, so for both the rule is two-sided: the
+floor may not land *on* such a phase, and the walk may not continue *below* one. The second half is
+what an earlier draft of this block dropped — and dropping it demotes every repo with an excluded
+or degraded middle phase all the way to phase 1 on every resume, because such a phase can never
+produce holding evidence. `src/fleet/orchestrator/reentry.py::phase_floor` implements both stops
+and `tests/test_reentry_floor.py` binds each of them separately.
+
+Step 3 is stated as `demote_to_floor` landed it (`src/fleet/state/repository.py`): the sweep is
+span-wide but conditional on something actually having been demoted, and it leaves `DEGRADED` rows'
+checkpoints alone. **Open, and deliberately not decided here:** that exclusion names `DEGRADED`
+only, so a `SKIPPED` row above the floor still loses its `checkpoints` row. Subtask 6 owns that
+question; ADR-0077 §5 speaks to the status, not to the checkpoint.
 
 ### `evidence_holds` — a new, resume-owned predicate
 
