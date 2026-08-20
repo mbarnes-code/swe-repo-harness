@@ -7284,3 +7284,162 @@ Not asserted here, and deliberately: `BackendReply.usage.model_id` echoing `targ
 verbatim (`c36160e`, `llm/backends/anthropic.py::_reply_from`). It is the other high-consequence
 line BK1 touched, it is already bound by a round-trip test through the real `CachingModelClient`,
 and no code path in this ADR reaches it.
+
+---
+
+## ADR-0082 — A demotion's `checkpoints` sweep is **span-wide and conditional on a demotion having actually happened**, and it spares `DEGRADED` alone: the backward walk's hard stops and the sweep's carve-out answer two different questions, so `SKIPPED` stops the walk and still loses its checkpoint — and the residual `DEGRADED` stale-anchor hazard is a **stated boundary**, unreachable only by an induction spread across three modules that nothing binds to this method's signature
+
+**Status:** accepted, describing behaviour already landed on `main`. Anchored at `8c00971` (`main`);
+every file:line below is that ref unless another is named. The behaviour is `16879fe`, `5488157`,
+`38107e9` and `9e5c093` (`src/fleet/state/repository.py`, `src/fleet/state/checkpoints.py`,
+`tests/test_repository.py`); the `SKIPPED` half of the walk this reconciles against is `4a1a184`
+and `8c00971` (`src/fleet/orchestrator/reentry.py`). **Supersedes nothing. Extends ADR-0077 §5**,
+which decided all three non-demotable statuses for the *status* write and said nothing about the
+`checkpoints` row. Recorded late, on a number allocated by the orchestrator: the implementer of
+`demote_to_floor` raised the reconciliation as its first concern and deliberately took no number
+(`.superpowers/sdd/design-resume-step5/task-6-report.md` §3 and §6 item 1).
+
+**Provenance (CLAUDE.md Guardrail 1).** Nothing here is a SPEC requirement that pre-existed it.
+`docs/SPEC.md:6907-6909` **as of `8c00971`, before this change** stated the *demoted-rows-only*
+reading, and `docs/superpowers/plans/design-resume-step5.md:234` at `b7fc5ec` stated the
+*unconditional span* reading; the two could not both be implemented, so §2 below is an **Agent
+Recommendation** adjudicating them, and that SPEC sentence is corrected to match in this same commit (Guardrail 7 — the SPEC sentence
+that contradicts the code regenerates the defect on the next reconciliation, and it regenerates it
+as mutation M11, which the suite pins as failing). The **status** half — that `DEGRADED`, `SKIPPED`
+and `REQUIRES_HUMAN_INTERVENTION` are not demotable — is ADR-0077 §5 and is *not* re-decided here.
+
+### 1. The two readings, and why neither is safe alone
+
+`docs/superpowers/plans/design-resume-step5.md:234` **at `b7fc5ec`** dropped the `checkpoints` row for
+**every** phase in `floor..4` unconditionally (that lane has since folded this decision back into its
+pseudocode at `8c00971:…:235-237`). `docs/SPEC.md` §11.5 step 5 tied the drop to **the
+demoted row**. Verified against the code, each alone fails in the opposite direction:
+
+- ***Demoted rows only.*** The span's top phase is frequently not demoted — `phase_floor` selects
+  the frontier as the first phase *not* settled (`src/fleet/orchestrator/reentry.py:88-91`), so on
+  the ordinary interrupted resume the frontier is `PENDING` or `RUNNING`, i.e. not `SUCCEEDED`, i.e.
+  not demoted (`src/fleet/state/repository.py:1424`). Its partial payload therefore survives while
+  every phase beneath it is rewritten, and `checkpoints.load()` hands that payload back reporting it
+  usable — a VERIFY that resumes against a BUILD output the same transaction discarded.
+- ***Unconditional.*** `phase_floor` legitimately returns the frontier itself with nothing below it
+  to demote: the backward walk breaks on the first phase whose evidence holds
+  (`src/fleet/orchestrator/reentry.py:100-101`), which is what a healthy interrupted run looks like.
+  Sweeping there deletes the in-progress checkpoint on **every** `fleet resume`, with nothing
+  invalidated to justify it.
+
+### 2. The decision
+
+The sweep is **span-wide, conditional on at least one phase actually having been demoted, and
+excludes `DEGRADED` rows**. In code: `src/fleet/state/repository.py:1435-1441` — the `if demotions:`
+guard is the conditionality, `span` (built at `:1410` as every `Phase >= floor`) is the width, and
+the list comprehension's `is not RepoStatus.DEGRADED` filter is the carve-out. The deletion runs
+through `checkpoints.delete_in_unit`, which takes a **connection** rather than a `StateWriter`
+precisely so the status write and the checkpoint drop cannot become two transactions
+(`src/fleet/state/checkpoints.py:138-164`).
+
+A demotion invalidates everything above it; a no-op stays a no-op. The rest of the unit is
+unchanged by this ADR and was verified against the code rather than the report:
+`attempts` is absent from the demotion `UPDATE`'s SET list (`src/fleet/state/repository.py:822-825`),
+the `REQUIRES_HUMAN_INTERVENTION` refusal is re-read inside the transaction (`:1413-1418`), and the
+`PhaseDemoted` finding is fingerprinted per **phase**, not per repo (`:840-842`, `:832-837`).
+
+### 3. `SKIPPED` stops the walk and still loses its checkpoint, and the asymmetry is the point
+
+`4a1a184` made `SKIPPED` a hard stop beside `DEGRADED` in the backward walk
+(`src/fleet/orchestrator/reentry.py:54`), on the two-sided reading of ADR-0077 §5. That lane's
+reasoning is confirmed by reading the loop rather than inherited: an excluded phase never ran, so
+`evidence.get(phase, False)` is `False` for it, so without the stop the walk falls through
+`:100-102` and sets the floor one phase lower every iteration — every repo with an excluded middle
+phase demoted to phase 1 on every resume.
+
+The sweep's carve-out names `DEGRADED` only, and that is **correct, not an oversight the walk
+outgrew**. The two mechanisms answer different questions:
+
+- The walk's hard stop protects a **decision**: a budget nobody granted (`DEGRADED`) or an
+  operator's config exclusion resume does not re-decide (`SKIPPED`). Both statuses need it.
+- The sweep's carve-out protects a **payload a future round will legitimately resume from**. Only
+  `DEGRADED` has such a round. `DEGRADED` is deliberately outside `TERMINAL_STATUSES` and keeps a
+  live edge to `RUNNING` for the §3.5.1 revalidation round (`src/fleet/models/enums.py:25-29`,
+  `:42-46`). `SKIPPED` is inside `TERMINAL_STATUSES` and maps to the **empty** transition set
+  (`src/fleet/models/enums.py:25-26`, `:49`), which is what makes it terminal mechanically: no round
+  in this run ever re-enters a `SKIPPED` phase, so no round can resume from its checkpoint.
+
+Sparing a `SKIPPED` phase's checkpoint would therefore buy nothing and cost one durable stale
+payload. Dropping it with the rest of the span is the safe direction, and **`repository.py` needs no
+change on this point.** The open question `docs/superpowers/plans/design-resume-step5.md:258-260`
+handed to subtask 6 is answered here: same hard stop, different checkpoint treatment, for the reason
+above.
+
+### 4. The residual `DEGRADED` stale-anchor hazard — a stated boundary, with its premises named
+
+**The hazard.** A `DEGRADED` phase inside the span keeps a checkpoint built on output the demotion
+below it regenerates, so the revalidation round that eventually re-runs it resumes from a stale
+anchor. ADR-0077 §5 forecloses the obvious fix (dropping that checkpoint forces the budgeted round
+to start from nothing, which is the cost the budget was sized against), so this is a real tension
+that is recorded rather than resolved. It is stated in the method docstring at
+`src/fleet/state/repository.py:1392-1401`.
+
+**Ruling under CLAUDE.md Rule 12's stop rule: adversarial-only — a stated boundary, deliberately not
+patched.** The state the hazard needs is a `DEGRADED` row *strictly above the frontier*, and that is
+not a state the machine produces:
+
+1. A `DEGRADED` row at phase `p` implies `p` ran, which implies every phase below `p` was
+   `SUCCEEDED` at that moment (the phase ladder is ordered).
+2. `ALLOWED_TRANSITIONS[SUCCEEDED]` is the **empty set** (`src/fleet/models/enums.py:47`); ADR-0077's
+   `RESUME_DEMOTE` is the only door out of it, i.e. `demote_to_floor` itself.
+3. So for a phase below `p` to be unsettled — which is what puts the frontier below `p` and `p` in
+   the span — a prior `demote_to_floor` must already have run on this repo in a state that itself
+   required a `DEGRADED` row above its own frontier. The induction has no base case.
+
+A `DEGRADED` row *below* the frontier is common and harmless: the backward walk breaks on it without
+moving the floor onto it (`src/fleet/orchestrator/reentry.py:98-99`), so it lands below the floor and
+outside the span entirely. The same induction disposes of `SKIPPED`, which today is written only to
+phase 1 (`src/fleet/cli.py:1993-1994`, `:2022-2023` and `:9764-9767` at `8c00971` — cite the ref, a
+sibling lane has uncommitted edits to that file) and whose only entry edges are from `PENDING` and
+`BLOCKED`, never from a completed phase (`src/fleet/models/enums.py:33-34` and `:41`, and the driver's own gate
+records the same at `src/fleet/cli.py:2007-2010` at `8c00971`).
+
+**And here is the disclosure that keeps this an honest boundary rather than a convention in a
+mechanism's clothes.** That induction is spread across three modules — the ladder's ordering in
+`orchestrator/runner.py`, `ALLOWED_TRANSITIONS` in `models/enums.py`, and the hard stop in
+`orchestrator/reentry.py` — and **nothing binds any of it to `demote_to_floor`'s signature**, which
+accepts any `Phase` as `floor` from any caller (`src/fleet/state/repository.py:453-461`). The
+carve-out list is computed from the rows as read, not from a validated floor. The coupling
+"`floor` is what `phase_floor` computed" is a **docstring sentence** (`:1351-1352`), not a check.
+`demote_to_floor` has no production caller yet — subtask 7 is the first — and the tests that exercise
+the carve-out hand in floors directly (`tests/test_repository.py:1384-1386` builds a `BUILD`-DEGRADED
+repo and passes `floor=Phase.TRANSFORM`, a floor `phase_floor` would never return for those rows,
+which is why the carve-out is testable at all).
+
+So: a normal author writing subtask 7 against `phase_floor` cannot reach the hazard, which is the
+Rule 12 test and why it is not patched. An author who computes a floor some other way can, and the
+only thing that would tell them not to is prose. That is stated, not closed.
+
+### 5. What this ADR does not do
+
+- It does not re-decide ADR-0077 §5's status rules, and it adds no `RESUME_DEMOTE` key.
+- It does not patch the §4 hazard, and it does **not** claim the docstring coupling in §4 is
+  enforcement. If subtask 7's floor ever comes from anywhere but `phase_floor`, §4's premises must be
+  re-derived, not re-read.
+- It allocates no D-number. The §4 boundary is a disclosure, not a ledger defect, and central number
+  allocation belongs to the orchestrator (CLAUDE.md §3).
+
+### 6. Verification
+
+No new behaviour is introduced by this ADR, so there is no mutation to run for it. What was checked
+before it was written, against `8c00971` rather than against the implementer's report:
+
+| Claim | Checked at |
+|---|---|
+| sweep is conditional on a demotion | `src/fleet/state/repository.py:1435` (`if demotions:`) |
+| sweep is span-wide, not demoted-rows | `:1440` iterates `span`, not `demotions` |
+| carve-out names `DEGRADED` only | `:1440` — `SKIPPED` is absent from the filter |
+| `attempts` retained on every path | `:822-825`; `complete_phase` is the only other writer |
+| `SKIPPED` is mechanically terminal | `src/fleet/models/enums.py:25-26`, `:49` (empty set) |
+| `DEGRADED` is not terminal and reaches `RUNNING` | `src/fleet/models/enums.py:25-29`, `:42-46` |
+| walk stops on both, floor never lands on either | `src/fleet/orchestrator/reentry.py:54`, `:98-99` |
+| `demote_to_floor` has no production caller | `grep -rn demote_to_floor src/` → the definition and the Protocol only |
+
+The behaviour itself is bound by mutations M10 (unconditional sweep → the no-op test fails) and M11
+(narrowed to the demoted rows → the frontier-checkpoint test fails), recorded in
+`.superpowers/sdd/design-resume-step5/task-6-report.md` §5.

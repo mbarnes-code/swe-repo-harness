@@ -6905,8 +6905,11 @@ a fresh repo has no earliest holding phase at all, while `rdepverify.preconditio
 **`models.enums.demote()`** — never `transition(..., resume=True)` directly, which returns the
 status ALONE and would demote silently. `demote()` returns the new status together with the
 `PhaseDemotion` the row owes; the caller writes it as a `PhaseDemoted` finding in the same
-`StateWriter` unit as the status change, retaining `attempts` and dropping the phase's
-`checkpoints` row. The finding is not optional: a demotion discards landed, green work and must
+`StateWriter` unit as the status change, retaining `attempts`. The `checkpoints` rows dropped
+alongside are **not** just the demoted phases': iff at least one phase was demoted, the rows for
+the whole `floor..4` span go, `DEGRADED` excepted (ADR-0082). Narrowing that back to the demoted
+rows leaves the frontier's partial payload anchored to output the same transaction discarded, and
+the suite pins it. The finding is not optional: a demotion discards landed, green work and must
 be at least as loud as a `checkpoint_rejected`. `demote()` accepts a `RESUME_DEMOTE` key and
 nothing else — a `RUNNING`, `BLOCKED` or already-`PENDING` row is refused, because none of them
 has landed work to discard (ADR-0077 §4). **`DEGRADED` is settled for demotion purposes without
