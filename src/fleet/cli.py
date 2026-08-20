@@ -10074,12 +10074,15 @@ def resume(
                 "and re-run; the re-poll is the only part that did not happen."
             )
         raise ResumeIncompleteError(
-            "`fleet resume` reconciled the ledger and stopped: §11.5 step 5 — re-check every "
-            "phase's declared preconditions and demote each repo to the earliest phase whose "
-            "precondition holds — has no implementation. All twelve workers implement "
-            "`preconditions_hold` and `PhaseRunner` already consults it (`orchestrator/runner.py`, "
-            "`_re_entry`); what is missing is the per-phase `PhaseRunner` assembly that walks "
-            "Phases 1–4 in order, which cli.py today only hand-wires per verb. Steps 2 (orphan "
+            "`fleet resume` reconciled the ledger and stopped: §11.5 step 5 — re-check each "
+            "phase's durable evidence and demote each repo to its re-entry floor, the phase "
+            "ABOVE the HIGHEST phase below the settled frontier whose evidence still holds or "
+            "which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN if there "
+            "is no such phase — has no implementation. `orchestrator/reentry.phase_floor` "
+            "already computes that floor and `state/repository.demote_to_floor` already writes "
+            "it; what is missing is the resume-time evidence check that feeds them and the "
+            "per-phase `PhaseRunner` assembly that walks Phases 1–4 in order, which cli.py "
+            "today only hand-wires per verb. Steps 2 (orphan "
             "reap), 4 (ask Git whether the commit landed) and 6 (recompute `blocked_by`) are "
             "absent too. The work reported above IS durable — the drift audit, any budget raise, "
             "the PR re-poll, the stale-lease sweep and `migration_state.json` are all written "
@@ -10387,7 +10390,10 @@ def _refuse_unbuilt_resume_flags(
     if named:
         raise UsageError(
             f"{', '.join(named)} cannot be honoured: each one scopes or re-drives §11.5 step 5 "
-            "(re-check preconditions and demote to the earliest phase whose precondition holds), "
+            "(re-check each phase's durable evidence and demote to the re-entry floor — the "
+            "phase ABOVE the HIGHEST phase below the settled frontier whose evidence still "
+            "holds or which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN "
+            "if there is no such phase), "
             "which has no implementation — cli.py hand-wires a `PhaseRunner` per verb and no "
             "assembly walks Phases 1–4 in order. Accepting the flag and ignoring it would let an "
             "operator believe they had scoped the resume. Re-run without it to get the "
@@ -10586,8 +10592,10 @@ async def _reap_orphan_containers(
     filters — the run prefix, then `claims()` — to a listing of its own. It imports `claims`
     rather than restating the rule, so the preview cannot drift from what the real sweep does.
 
-    **The preview reads `list_with_verdict`, not the lenient `list_by_prefix`**
-    (docs/INTEGRATION_HONESTY.md D73, whose second residual this branch was). The non-preview
+    **The preview reads `list_with_verdict`, which carries a failed `docker ps` in its own
+    `error` field rather than returning `[]` for it** (docs/INTEGRATION_HONESTY.md D73, whose
+    second residual this branch was; the lenient `list_by_prefix` wrapper this used to call was
+    deleted in `f10a863` once its last caller moved off it). The non-preview
     branch below has kept a failed `docker ps` apart from an empty one since `cfd89c7` — `reap()`
     returns a `failed` entry naming the prefix — while the preview collapsed them and printed
     `no orphan containers` during a docker outage. That is worse here than on the sweep path, not
@@ -10626,7 +10634,7 @@ async def _reap_orphan_containers(
             }
         result = await sandbox.reap(run_id=run_id, live_names=live)
     except OSError as exc:
-        # Neither `list_by_prefix` nor `reap` guards the spawn itself, so a host with no `docker`
+        # Neither `list_with_verdict` nor `reap` guards the spawn itself, so a host with no `docker`
         # on PATH raises here. That is "docker was never asked", not "the run has no containers",
         # and the two must not print the same line.
         return {
