@@ -6892,8 +6892,9 @@ itself is re-created from `phases.base_ref` if it is missing. There is no third 
 tree-SHA comparison, because a commit is either on the branch or it is not (§3.2 step 6);
 (5) demote each repo to the earliest phase whose durable evidence still holds
 (Constraint 7). This is a search **downward from the settled frontier**, never an ascending scan:
-locate the lowest phase that is not `SUCCEEDED`/`SKIPPED` (a repo with a
-`REQUIRES_HUMAN_INTERVENTION` row is skipped entirely), then walk *backwards* asking
+locate the lowest phase that is not **settled for demotion** — `SUCCEEDED`, `SKIPPED` **or
+`DEGRADED`** (`orchestrator/reentry._SETTLED_FOR_DEMOTION`; a repo with a
+`REQUIRES_HUMAN_INTERVENTION` row is skipped entirely) — then walk *backwards* asking
 `evidence_holds(repo, p)` — reading `phases` + Git, with no payload and no `WorkerContext` — and
 stop at the first phase whose evidence holds, because the phases below it are covered by it. The
 ascending reading is unimplementable and wrong in both directions: ten of the fifteen
@@ -6908,7 +6909,13 @@ status ALONE and would demote silently. `demote()` returns the new status togeth
 `checkpoints` row. The finding is not optional: a demotion discards landed, green work and must
 be at least as loud as a `checkpoint_rejected`. `demote()` accepts a `RESUME_DEMOTE` key and
 nothing else — a `RUNNING`, `BLOCKED` or already-`PENDING` row is refused, because none of them
-has landed work to discard (ADR-0077 §4); (6) recompute `blocked_by` from `phases` + `edges`
+has landed work to discard (ADR-0077 §4). **`DEGRADED` is settled for demotion purposes without
+being terminal**, and the distinction is load-bearing: `enums.TERMINAL_STATUSES` deliberately
+excludes it because it is resolvable, but it leaves the machine **only** through a budgeted
+revalidation round (§3.5.1), so demoting it to `PENDING` would spend that budget by the side door
+with no round recorded. Step 5 therefore neither demotes a `DEGRADED` row nor searches past one:
+it is excluded from the frontier search itself, and it is not a `RESUME_DEMOTE` key, so `demote()`
+refuses it outright (ADR-0077 §5); (6) recompute `blocked_by` from `phases` + `edges`
 so a since-fixed dependency unblocks its subtree; (7) regenerate `migration_state.json` from
 SQLite; (8) continue. Steps 1–7 make no network call and invoke no model, so a resume is free
 and can be run as a dry-run health check (`fleet resume --dry-run`).

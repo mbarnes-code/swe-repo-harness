@@ -6709,9 +6709,18 @@ corrects) on base `7a8bfbb`.
 
 `fleet resume`, having completed every §11.5 step that exists — the config-drift audit, any budget
 raise, the `--repoll-prs` re-poll, the step-3 stale-lease sweep and the step-7 projection — and
-stopping only because step 5 (re-check preconditions and demote to the earliest phase whose
-precondition holds) has no implementation, exits **2**, via a dedicated
+stopping only because step 5 (re-check each phase's durable **evidence** and demote the repo to the
+earliest phase whose evidence still holds, searching *downward* from the settled frontier;
+Constraint 7) has no implementation, exits **2**, via a dedicated
 `ResumeIncompleteError(FleetCliError)` whose `exit_code` is `ExitCode.USAGE`.
+
+**Wording corrected after this ADR was accepted.** §1 originally described step 5 as "re-check
+preconditions and demote to the earliest phase whose **precondition** holds" — the algorithm D67
+recorded as a design defect and ADR-0077 §6 replaced with two named predicates. That phrasing
+promotes a never-cloned repo to Phase 4, because `rdepverify.preconditions_hold` returns `True`
+when the BUILD row is missing. The decision this ADR records (exit 2, `ResumeIncompleteError`) is
+unchanged; only the description of the step that is missing. `src/fleet/cli.py` still ships the
+old phrasing in two operator-facing messages and is owned by another lane — reported, not edited.
 
 Exit **1** is retained for the case where something actually failed: a `PrEmissionError` out of
 `--repoll-prs` (the forge was unreachable, unauthenticated or rate-limited) still exits 1, and it
