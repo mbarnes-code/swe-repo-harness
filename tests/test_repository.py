@@ -1426,3 +1426,82 @@ async def test_the_checkpoint_assertion_is_silent_on_a_clean_repo_and_fires_on_a
         "fires on a synthetic checkpoint injected into the clean fixture"
     )
     assert await _checkpoint_phases(read_conn, REPO) == {1, 3}
+
+
+async def _frontier_at_verify(store: SqliteStateRepository, writer: StateWriter) -> None:
+    """The realistic step-5 shape: phases 1-3 SUCCEEDED, phase 4 the unsettled frontier.
+
+    A checkpoint sits on phase 1 (below any floor these tests use) and on phase 4 (the partial
+    payload an interrupted VERIFY left behind). Those two are what separate the span-wide sweep
+    from the conditional one.
+    """
+    for phase in (Phase.SCAN, Phase.TRANSFORM, Phase.BUILD):
+        await _settle_phase(
+            store, REPO, phase, status=RepoStatus.SUCCEEDED, attempts=int(phase)
+        )
+    await store.upsert_phase(RUN, REPO, Phase.VERIFY, now=NOW, max_attempts=8)
+    await _plant_checkpoint(writer, REPO, Phase.SCAN)
+    await _plant_checkpoint(writer, REPO, Phase.VERIFY)
+
+
+async def test_a_demotion_below_the_frontier_also_drops_the_frontiers_own_checkpoint(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """Floor 2 against a frontier at 4: phases 2 and 3 are demoted, and phase 4's *partial*
+    checkpoint is deleted even though phase 4 was never `SUCCEEDED` and never demoted.
+
+    Why the sweep is wider than the set of demoted rows: phase 4's payload was written against
+    the phase-3 output this call has just discarded. Left in place, `checkpoints.load()` reports
+    it `usable` on the next resume and VERIFY re-enters against a tree that no longer exists —
+    a green verdict for a build nobody performed. A demotion invalidates everything above it, not
+    only the rows whose status it happened to rewrite.
+    """
+    store, writer = demotion_bed
+    await _frontier_at_verify(store, writer)
+
+    demotions = await store.demote_to_floor(
+        RUN, REPO, floor=Phase.TRANSFORM, reason="phase-2 evidence gone", now=NOW
+    )
+
+    assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.BUILD]
+    state = await _phase_state(read_conn, REPO)
+    assert {phase: state[phase][0] for phase in (1, 2, 3, 4)} == {
+        1: "SUCCEEDED",
+        2: "PENDING",
+        3: "PENDING",
+        4: "PENDING",
+    }
+    assert {phase: state[phase][1] for phase in (1, 2, 3, 4)} == {1: 1, 2: 2, 3: 3, 4: 0}, (
+        "every attempts value is retained, including the frontier's untouched 0"
+    )
+    assert await _checkpoint_phases(read_conn, REPO) == {1}, (
+        "the frontier's partial checkpoint goes with the demotion below it; phase 1's stays"
+    )
+
+
+async def test_a_resume_that_demotes_nothing_leaves_the_frontiers_checkpoint_alone(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """Floor == frontier, nothing demotable: the call is a true no-op, checkpoint included.
+
+    Why this is not a missing sweep. `phase_floor` returns the frontier itself whenever the
+    backward walk finds the evidence below it intact — the ordinary case of resuming a run that
+    was simply interrupted. Nothing below phase 4 was rewritten, so nothing above it was
+    invalidated, and deleting the payload would cost the run a whole VERIFY phase on every
+    `fleet resume` for no correctness gain. §8's checkpoints exist precisely to survive this.
+
+    The identical fixture one test above, with a floor that *does* demote, loses that same
+    checkpoint — which is what makes this a rule and not an omission.
+    """
+    store, writer = demotion_bed
+    await _frontier_at_verify(store, writer)
+    before = await _phase_state(read_conn, REPO)
+
+    demotions = await store.demote_to_floor(
+        RUN, REPO, floor=Phase.VERIFY, reason="evidence holds all the way up", now=NOW
+    )
+
+    assert demotions == ()
+    assert await _phase_state(read_conn, REPO) == before
+    assert await _checkpoint_phases(read_conn, REPO) == {1, 4}
+    assert await _demotion_findings(read_conn, REPO) == []

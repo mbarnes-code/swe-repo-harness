@@ -1362,13 +1362,24 @@ class SqliteStateRepository:
           the other way until `f02d124` — it named `transition(..., resume=True)` as the demotion
           path, which would have made every demotion in the fleet silent while every status
           assertion still passed. The test below asserts on the finding row for that reason.)
-        * the `checkpoints` row for the phase is deleted, because a checkpoint for a phase that
-          is about to be re-run is a lie about work the run no longer claims;
         * a non-`SUCCEEDED` row in the span is left as it is. `PENDING`, `RUNNING` and `BLOCKED`
           have no landed work to discard, and `demote()` refuses all three precisely so a
           `PhaseDemoted` cannot be minted for them.
+        * **iff at least one phase was demoted**, the `checkpoints` rows for the whole span go
+          too — not only for the demoted phases.
 
         Returns the demotions applied, in phase order — empty when nothing was demotable.
+
+        **Why the checkpoint sweep is span-wide but conditional on a demotion having happened.**
+        The two halves answer two different failure modes and neither reading alone is safe.
+        *Span-wide*, because a phase above a demoted one had its inputs regenerated underneath
+        it: a partial VERIFY payload written against a BUILD output this call just discarded is a
+        lie, and `checkpoints.load()` would hand it back reporting `usable`, so the phase would
+        "resume" against a tree that no longer exists. *Conditional*, because `phase_floor` may
+        legitimately return the frontier itself with nothing below it to demote — an ordinary
+        resume of an interrupted run — and sweeping then would delete the in-progress checkpoint
+        that §8 exists to preserve, on every `fleet resume`, for no correctness gain at all. So a
+        demotion invalidates everything above it, and a no-op stays a no-op.
 
         **`REQUIRES_HUMAN_INTERVENTION` short-circuits the whole repo, and the check is re-read
         here rather than trusted from the floor computation.** `phase_floor` already returns
@@ -1421,12 +1432,13 @@ class SqliteStateRepository:
                 )
                 demotions.append(record)
 
-            await checkpoints.delete_in_unit(
-                conn,
-                run_id=run_id,
-                repo_id=repo_id,
-                phases=[p for p in span if rows.get(p) is not RepoStatus.DEGRADED],
-            )
+            if demotions:
+                await checkpoints.delete_in_unit(
+                    conn,
+                    run_id=run_id,
+                    repo_id=repo_id,
+                    phases=[p for p in span if rows.get(p) is not RepoStatus.DEGRADED],
+                )
 
             for record in demotions:
                 await conn.execute(
