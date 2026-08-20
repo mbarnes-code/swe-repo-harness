@@ -5737,6 +5737,16 @@ is a duplicate and now says so.
     claim survives unamended on `main` at `tests/test_llm_cache.py:4`, which no lane touched. Both
     re-verified today. Neither is a red suite; both are the round failing to fully land a correction
     it claims.
+
+    > **Editorial correction (2026-08-20).** This item is stale — true when written (`5feb1e7b`),
+    > false now. `c7f72c6` closed both halves: `src/fleet/state/schema.sql:504` (line moved; the
+    > annotation lives beside the column now, `SPEC.md`'s copy is `:4297`) carries the ADR-0075
+    > comment verbatim, bound by
+    > `test_no_declared_effort_persists_as_empty_string_in_a_not_null_check_free_column`; and
+    > `tests/test_llm_cache.py:4` now states the retraction itself rather than the false premise.
+    > Re-measured this session, whitespace-normalized whole-file scan (offset-to-line map): `grep -ni
+    > thinking src/ tests/` returns **one** hit — the corrected line itself, not an unfixed one. See
+    > `docs/INTEGRATION_HONESTY.md` (D66)'s matching correction.
 15. **The eight round-B lane worktrees are gone; the one that remains is evidence and must not be
     pruned.** This item first read *"ten `agent/*` worktrees are still present"* — true when written,
     false now: `git worktree list` at `b754aac` returns **two** entries, the primary checkout on
@@ -5826,14 +5836,16 @@ but they are not tasks, and counting them as open debt overstates it.
 8. **Prove one backend adapter against a real endpoint** (open item 1) — in a throwaway venv with
    the extras installed, never the working one. Until then "the harness can call a model" is a claim
    backed only by mocks.
-9. **Housekeeping, batched:** reword the three false `_unavailable` strings; mirror the ADR-0075
+9. **Housekeeping, batched:** reword the three false `_unavailable` strings; ~~mirror the ADR-0075
    `effort` annotation into `schema.sql:474` and bind the two with a test; amend
-   `tests/test_llm_cache.py:4`; write `heartbeat_ttl_seconds`' missing writer; and decide whether the
-   `ruff format` failure on `cli.py` (now 60 hunks) is fixed or ratcheted. **The worktree clause of
-   this batch is done and is struck:** the eight round-B lane worktrees have been torn down, and the
-   one that remains, `agent/WT1-example`, **must not be pruned** — `docs/DECISIONS.md:6458-6566`
+   `tests/test_llm_cache.py:4`~~; write `heartbeat_ttl_seconds`' missing writer; and decide whether
+   the `ruff format` failure on `cli.py` (now 60 hunks) is fixed or ratcheted. **The worktree clause
+   of this batch is done and is struck:** the eight round-B lane worktrees have been torn down, and
+   the one that remains, `agent/WT1-example`, **must not be pruned** — `docs/DECISIONS.md:6458-6566`
    quotes that worktree's own `git rev-parse --absolute-git-dir` output as ADR-0074's live evidence.
-   See open item 15, which carries the full citation; the two must not drift apart.
+   See open item 15, which carries the full citation; the two must not drift apart. **The effort/
+   `schema.sql`/`test_llm_cache.py` clause, struck 2026-08-20:** also done — `c7f72c6` landed both
+   halves; see open item 14's correction.
 10. **Reconcile with round 38** (open item 17), unchanged from §37f — and note that it *is* §37f
     item 6, not a new one; if it is not going to be done it should be closed explicitly rather than
     listed a third time.

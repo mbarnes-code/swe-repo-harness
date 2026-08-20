@@ -7393,11 +7393,32 @@ not a state the machine produces:
 
 A `DEGRADED` row *below* the frontier is common and harmless: the backward walk breaks on it without
 moving the floor onto it (`src/fleet/orchestrator/reentry.py:98-99`), so it lands below the floor and
-outside the span entirely. The same induction disposes of `SKIPPED`, which today is written only to
-phase 1 (`src/fleet/cli.py:1993-1994`, `:2022-2023` and `:9764-9767` at `8c00971` — cite the ref, a
-sibling lane has uncommitted edits to that file) and whose only entry edges are from `PENDING` and
-`BLOCKED`, never from a completed phase (`src/fleet/models/enums.py:33-34` and `:41`, and the driver's own gate
-records the same at `src/fleet/cli.py:2007-2010` at `8c00971`).
+outside the span entirely. The same induction disposes of `SKIPPED`: its only entry edges are from
+`PENDING` and `BLOCKED`, never from a completed phase (`src/fleet/models/enums.py:33-34` and `:41`,
+and the driver's own gate records the same at `src/fleet/cli.py:2007-2010` at `8ea1881` — cite the
+ref, a sibling lane has uncommitted edits to that file), so a phase marked `SKIPPED` never ran and
+never wrote a checkpoint to sweep. `SKIPPED` is written to phase 1 by the manifest `skip: true` gate
+and the empty-repo gate (`src/fleet/cli.py:1993-1994` and `:2022-2023` at `8ea1881`), but **not only**
+to phase 1: `fleet quarantine` writes `SKIPPED` to every non-terminal phase of the target repo, not
+just phase 1 — it selects all non-terminal phase rows and runs the same `transition` gate over each
+(`src/fleet/cli.py:9710-9716` at `8ea1881`), then writes `SKIPPED` to all of them in one statement
+(`:9754-9759`); the phase-1 `INSERT` (`:9763-9769`) is a fallback used only when the repo has no
+phase rows yet.
+
+> **Editorial correction (2026-08-20).** This paragraph originally said `SKIPPED` "is written only to
+> phase 1," citing `src/fleet/cli.py:9764-9767` at `8c00971` — but that citation was only the
+> phase-1 fallback branch of `fleet quarantine`'s write; it missed the `executemany` immediately
+> above it (`:9754-9759` at `8c00971`, unmoved at `8ea1881`) which writes `SKIPPED` to *every*
+> non-terminal phase `transition()` clears, not just phase 1. Verified at `8ea1881` (`main`) via
+> `git show main:src/fleet/cli.py`, since a sibling lane has this file dirty in the working copy.
+> **The paragraph's conclusion is unaffected.** The induction it draws never rested on "phase 1
+> only" — it rests on `SKIPPED`'s entry edges being `PENDING`/`BLOCKED`-only, which remains true
+> and unamended, and on §2's carve-out excluding only `DEGRADED` from the sweep (a `SKIPPED` row is
+> swept regardless of which phase it sits at). Since a phase that transitions to `SKIPPED` was never
+> `RUNNING`, it never held a checkpoint to begin with, at phase 1 or any other phase — so the
+> corrected premise supports the same disposal it was cited for. §4's actual subject, the residual
+> `DEGRADED` stale-anchor hazard, does not depend on this `SKIPPED` aside at all; that conclusion
+> survives unchanged.
 
 **And here is the disclosure that keeps this an honest boundary rather than a convention in a
 mechanism's clothes.** That induction is spread across three modules — the ladder's ordering in

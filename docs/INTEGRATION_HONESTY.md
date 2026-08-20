@@ -3849,6 +3849,18 @@ asserting that "adaptive thinking forbids pinning a temperature" in the docstrin
 whose determinism argument the fix corrected. The five-site enumeration was complete for `docs/` and
 `src/`; it was never a claim about `tests/`.
 
+> **Editorial correction (2026-08-20).** The sixth carrier above is no longer on `main`, unamended.
+> `c7f72c6` rewrote `tests/test_llm_cache.py:4`'s docstring to state the retraction itself — "the
+> harness pins no sampling controls — no `temperature`, `seed`, `top_p` or `thinking` key is built
+> anywhere under `src/fleet/llm/`" — rather than the false premise. **Re-measured this session**
+> with a whitespace-normalized whole-file scan (offset-to-line map, not line-oriented `grep`, per
+> three prior line-break-spanning misses this round) over `src/` and `tests/`: `grep -ni thinking
+> src/ tests/` returns **one** hit, not zero, and that one hit **is** this corrected line — a
+> negative assertion necessarily names the word it denies. A later report (`.superpowers/sdd/
+> design-resume-step5/task-item17-report.md`, untracked) claimed the sweep left **zero** hits; that
+> claim was itself false the moment it was written, for the same reason. One hit, correctly present,
+> is the sweep's finished state, not its outstanding state.
+
 ---
 
 **D67 — DESIGN DEFECT IN THE SPEC, CORRECTED AND LANDED (`d0b1150`); the replacement predicate is
