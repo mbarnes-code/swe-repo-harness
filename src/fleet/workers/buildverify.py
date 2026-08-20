@@ -341,9 +341,9 @@ def files_present(*paths: Path) -> bool:
 def _container_prefix(ctx: WorkerContext) -> str:
     """The name-glob every `docker run` this worker issues for ONE rung shares.
 
-    `on_cancel` sweeps it with `ContainerSandbox.list_by_prefix`, and `_invocation_name` builds
+    `on_cancel` sweeps it with `ContainerSandbox.list_with_verdict`, and `_invocation_name` builds
     every real container name from it plus a fresh token (see that function for why the token
-    exists at all). The trailing `-t` is load-bearing, not decorative: `list_by_prefix`'s `docker
+    exists at all). The trailing `-t` is load-bearing, not decorative: that listing's `docker
     ps --filter name=^<prefix>` is a REGEX anchored only at the start, so a bare `...-1` would
     also match `...-10-t...` — attempt 10's containers. Attempts are always digits and `-t` is
     not, so attempt 1's prefix can never be a prefix of attempt 10's name.
@@ -1013,10 +1013,11 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
         remove: the probe and the build/test step each get a fresh per-call token so a retry can
         never collide with whatever a dead daemon left behind (see that function's docstring).
         The one name still derivable from the context alone is the shared `_container_prefix`, so
-        this lists every container under it — `ContainerSandbox.list_by_prefix`'s first caller in
-        `src/` (D32 recorded it implemented with zero call sites) — and removes them all. A
-        prefix with nothing under it is the expected case on the un-containerised path, or on a
-        rung that never started a container, and is deliberately not an error.
+        this lists every container under it — via `ContainerSandbox.list_with_verdict`; the
+        lenient `list_by_prefix` this used to call is what D73's residual was — and removes them
+        all. A prefix with nothing under it is the expected case on the un-containerised path, or
+        on a rung that never started a container, and is deliberately not an error; a prefix
+        docker could not be asked about is a different answer and `_sweep_containers` says so.
 
         **`_run_one` (`base.py:887`) is a real caller, not a hypothetical one**: it fires when
         `ctx.cancel` is set and `run()` does not settle within `cancel_grace_s` — in production
@@ -1046,11 +1047,59 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
         this via `_run_one`'s outer watchdog; `run()` reaches it directly, at the point it reads
         `result.timed_out and result.started`, because THAT deadline resolves inside `run()` and
         never reaches `on_cancel` at all (see `on_cancel`'s docstring).
+
+        **A listing that failed is REPORTED here; it is not read as "there was nothing to sweep"**
+        (docs/INTEGRATION_HONESTY.md D73, whose residual this call site was). The lenient
+        `list_by_prefix` returns `[]` for a stopped daemon, a permission error on the socket and a
+        rung that genuinely started no container alike, so this sweep used to run, fire at nothing
+        and say nothing — a cleanup that cannot work, reporting success (Rule 11).
+        `list_with_verdict` keeps the two apart, and `ContainerListing.error` carries docker's own
+        words because the operator's next action differs between them.
+
+        **Reported, deliberately not raised, and the distinction is the point.** Every one of the
+        three call sites is cleanup after something else has already gone wrong — a cancellation,
+        or a `docker run` child killed at its own deadline — so an exception raised from here
+        would replace the failure being cleaned up with the failure of the cleanup, and would
+        escape `on_cancel`. Nor is there another honest surface: `ctx.db` is a
+        `ReadOnlyRepository` (ADR-0016), so a worker cannot record a finding, and the
+        `WorkerError` both `run()` call sites are in the middle of building is a verdict about the
+        BUILD — folding a docker-inventory fault into its `stderr_tail` would attribute the
+        outage to the repo under test. `ctx.log` is what the rest of the fleet already uses for
+        trouble a component must report and cannot act on (`orchestrator/runner.py`,
+        `workers/clone.py`), so that is the surface used, at `warning`.
+
+        **The spawn fault is logged rather than silently suppressed, for the same reason.** A host
+        with no `docker` on `PATH` raises `OSError` out of the unguarded
+        `asyncio.create_subprocess_exec` in `util.proc.run` — `list_with_verdict` leaves that to
+        its callers on purpose (D38), and "docker was never invoked" is a third state, not an
+        empty inventory. It still does not propagate; it becomes the same warning with a
+        different reason.
+
+        **A narrower residual is left open and stated rather than quietly closed:** `remove()`
+        returns a bare bool that this method does not inspect (its docstring records that all its
+        cleanup callers are fire-and-forget), so a `docker rm --force` docker REFUSES is still
+        invisible from here. That is a failure of a removal that was attempted, not of an
+        inventory that was never obtained — D44's shape, not D73's — and closing it means
+        deciding what a cancellation path should do with a container it could not remove.
         """
         sandbox = ContainerSandbox(runner=self._runner or run)
         prefix = _container_prefix(ctx)
+        try:
+            listing = await sandbox.list_with_verdict(prefix)
+        except (OSError, ValueError) as exc:
+            ctx.log.warning(
+                "container_sweep_listing_failed",
+                prefix=prefix,
+                reason=f"docker was never invoked ({type(exc).__name__}: {exc})",
+            )
+            return
+        if listing.error is not None:
+            ctx.log.warning(
+                "container_sweep_listing_failed", prefix=prefix, reason=listing.error
+            )
+            return
         with contextlib.suppress(OSError, ValueError):
-            for name in await sandbox.list_by_prefix(prefix):
+            for name in listing.names:
                 await sandbox.remove(name)
 
     # ------------------------------------------------------------------ internals

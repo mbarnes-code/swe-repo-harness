@@ -10585,16 +10585,35 @@ async def _reap_orphan_containers(
     `--dry-run` must not call `reap()` (it removes), so the preview re-applies `reap()`'s own two
     filters — the run prefix, then `claims()` — to a listing of its own. It imports `claims`
     rather than restating the rule, so the preview cannot drift from what the real sweep does.
+
+    **The preview reads `list_with_verdict`, not the lenient `list_by_prefix`**
+    (docs/INTEGRATION_HONESTY.md D73, whose second residual this branch was). The non-preview
+    branch below has kept a failed `docker ps` apart from an empty one since `cfd89c7` — `reap()`
+    returns a `failed` entry naming the prefix — while the preview collapsed them and printed
+    `no orphan containers` during a docker outage. That is worse here than on the sweep path, not
+    milder: `--dry-run` exists to be believed, and the one answer a health check must never
+    fabricate is "there is nothing wrong". The failure is carried in `error`, the SAME key the
+    worktree half already uses when `list_registered()` raises, so `_reap_lines` prints
+    `the container sweep did not run — …` and the clean headline is not reachable. `error` is not
+    `failed`: nothing was attempted, so there is no entry to name.
     """
     sandbox = _reap_container_sandbox()
     prefix = run_prefix(run_id)
     scope = f"docker containers named {prefix}*"
     try:
         if dry_run:
-            present = await sandbox.list_by_prefix(prefix)
+            listing = await sandbox.list_with_verdict(prefix)
+            if listing.error is not None:
+                return {
+                    "reaped": [],
+                    "failed": [],
+                    "error": listing.error,
+                    "skipped": None,
+                    "namespace": scope,
+                }
             names = [
                 name
-                for name in present
+                for name in listing.names
                 if name.startswith(prefix)
                 and not any(claims(live_name, name) for live_name in live)
             ]
