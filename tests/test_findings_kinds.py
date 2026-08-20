@@ -20,19 +20,44 @@ Three properties, in the order a drift is most likely to appear:
    An extractor that silently fails to see a new emitter reports "no drift" forever, which is the
    failure mode that produced the 19-kind gap in the first place. So an `INSERT INTO findings`
    whose `kind` this module cannot resolve to a literal is a hard failure naming the site, unless
-   the site is declared in `_INDIRECT_SITES` below with the channel that supplies it.
+   the site is declared in `_INDIRECT_SITES` below with the channel that supplies it. That gate is
+   only as good as the step in front of it: a site the AST walk never *recognises* is never handed
+   to it and vanishes without a sound. So recognition is not trusted on its own. `_recognition_gap`
+   re-derives the sites from the source **text** of every module — the parse is used only to
+   subtract prose (docstrings, comments), never to find a site — and fails naming file and line
+   when the two instruments disagree in either direction: a text site the walk never saw, or a
+   walk site the text scan cannot find.
 
-What this does NOT catch, stated rather than implied: a site that keeps its SQL text but starts
-computing `kind` through a form the resolver happens to accept *and* mis-resolves. The resolver is
-conservative — every form it does not understand returns "unresolved" and trips property 3 — so
-the realistic residual is narrow, but it is not zero. A `FindingKind` enum every writer had to go
-through would remove it; that is a change to `cli.py`'s sixteen call sites, not to this test.
+What this does NOT catch, stated rather than implied, worst first:
+
+* **SQL whose source text never spells the phrase**, because both instruments read source text and
+  are therefore blind to the same forms: `f"INSERT INTO {table}"`, a table name split across
+  concatenated fragments (`"...fin" "dings..."`), a query builder, or a statement loaded from a
+  file. The text cross-check is an independent *derivation*, not an independent *language*, so it
+  narrows the recognition residual without eliminating it. A `FindingKind` enum every writer had
+  to go through is what would remove it — a change to the **16** findings-INSERT call sites in
+  `src/fleet` (**13** of them in `cli.py`, 2 in `orchestrator/findings.py`, 1 in
+  `state/repository.py`; the "16" is the whole-`src/` count, not `cli.py`'s), not to this test.
+* **A recognised site whose `kind` goes through a form the resolver accepts and mis-resolves.**
+  Every form the resolver does not understand returns "unresolved" and trips property 3, and a
+  name assigned more than once now resolves to the union of its assignments rather than to
+  whichever one `ast.walk` reached first (and a params *tuple* reached through such a name is
+  treated as not understood, which is louder still) — so this is narrow, but it is not zero.
+* **`_recognition_gap` matches text hits to recognised literals by line, not by column.** Two
+  distinct findings INSERTs beginning on one physical line, only one of them recognised, would
+  read as agreement. No such line exists or can exist under the 100-column limit these statements
+  already exceed, but the imprecision is real and is stated rather than assumed away.
+* **The worker channel is a narrower instrument than this one**: `_worker_findings` sees only
+  `findings.append(<literal>)` on a bare name, and nothing cross-checks it. It feeds the single
+  `_INDIRECT_SITES` exemption; see its own docstring for the scope.
 """
 
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from pathlib import Path
 from typing import Final
 
@@ -101,8 +126,23 @@ def _listing(text: str, path: Path) -> tuple[frozenset[str], frozenset[str] | No
 # the emitters
 # ----------------------------------------------------------------------------------------
 
+#: The findings table as a *statement* may name itself. `INSERT OR REPLACE`, a schema qualifier
+#: and a quoted identifier are all the same write, and an unnormalised `"INSERT INTO findings" in
+#: sql` test saw none of them — which is how a real site was made to vanish by reformatting alone.
+_TABLE: Final = r"[\"'`\[]?(?:\w+\s*\.\s*)?findings\b"
+_FINDINGS_INSERT: Final = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+" + _TABLE, re.IGNORECASE)
 _INSERT_RE: Final = re.compile(
-    r"INSERT\s+INTO\s+findings\s*\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)", re.IGNORECASE
+    r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+" + _TABLE + r"[\"'`\]]?\s*"
+    r"\(([^)]*)\)\s*VALUES\s*\(([^)]*)\)",
+    re.IGNORECASE,
+)
+
+#: The same statement as it appears in *source text*, where a Python literal may interrupt it
+#: anywhere: implicit concatenation, a line continuation, wrapping parentheses, an explicit `+`.
+#: Deliberately looser than `_FINDINGS_INSERT` — it is the instrument that must not miss what the
+#: AST walk misses, and `_recognition_gap` fails loudly if it ever becomes the narrower of the two.
+_TEXT_INSERT: Final = re.compile(
+    r"INSERT\s+(?:OR\s+\w+\s+)?INTO[\s'\"()+\\]*(?:\w+\s*\.\s*)?findings\b", re.IGNORECASE
 )
 _FuncDef = (ast.FunctionDef, ast.AsyncFunctionDef)
 
@@ -115,26 +155,48 @@ class _Src:
         for path in sorted(SRC.rglob("*.py")):
             self.trees[path] = ast.parse(path.read_text(encoding="utf-8"), str(path))
         self.constants: dict[str, set[str]] = {}
+        #: Where each of those constants is written, so a site reached through one is attributed
+        #: to the file and lines that hold its text rather than to the file that executes it.
+        self.constant_defs: dict[str, list[tuple[Path, int, int]]] = {}
         self.calls: dict[str, list[ast.Call]] = {}
-        for tree in self.trees.values():
+        for path, tree in self.trees.items():
             for node in tree.body:
                 target, value = _assignment(node)
                 constant = isinstance(value, ast.Constant) and isinstance(value.value, str)
                 if target is not None and constant:
                     self.constants.setdefault(target, set()).add(value.value)  # type: ignore[union-attr]
+                    self.constant_defs.setdefault(target, []).append((path, *_span(value)))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
                     self.calls.setdefault(node.func.id, []).append(node)
 
-    def sql_of(self, expr: ast.expr) -> str | None:
-        """The SQL text of an `execute`'s first argument: a literal, or a module constant."""
+    def sql_of(
+        self, expr: ast.expr, path: Path, scope: tuple[ast.AST, ...]
+    ) -> tuple[str, Path, int, int] | None:
+        """`(SQL text, and the file and line span of the literal it came from)`, or `None`.
+
+        Three forms: an inline literal, a module-level single-valued constant, and a local the
+        enclosing function assigns exactly once. The third is here because hoisting a long
+        statement into a local to fit a line budget is an ordinary reformat, and a recognition
+        step that drops a site on a reformat is the hole this module was defeated through. The
+        span is what `_recognition_gap` matches its text-level hits against.
+        """
         if isinstance(expr, ast.Constant) and isinstance(expr.value, str):
-            return expr.value
+            return expr.value, path, *_span(expr)
         if isinstance(expr, ast.Name):
+            local = _bindings(expr.id, scope)
+            if len(local) == 1:
+                return self.sql_of(local[0], path, ())
             values = self.constants.get(expr.id, set())
-            if len(values) == 1:
-                return next(iter(values))
+            defs = self.constant_defs.get(expr.id, [])
+            if len(values) == 1 and len(defs) == 1:
+                return next(iter(values)), *defs[0]
         return None
+
+
+def _span(node: ast.AST) -> tuple[int, int]:
+    """`(first line, last line)` of a node's source text, inclusive."""
+    return node.lineno, node.end_lineno or node.lineno  # type: ignore[attr-defined]
 
 
 def _assignment(node: ast.stmt) -> tuple[str | None, ast.expr | None]:
@@ -187,20 +249,31 @@ def _params_elements(
     if isinstance(expr, (ast.ListComp, ast.GeneratorExp)):
         return _params_elements(expr.elt, src, scope)
     if isinstance(expr, ast.Name):
-        bound = _binding(expr.id, scope)
-        if bound is not None:
-            return _params_elements(bound, src, scope)
+        bound = _bindings(expr.id, scope)
+        if len(bound) == 1:
+            return _params_elements(bound[0], src, scope)
     return None
 
 
-def _binding(name: str, scope: tuple[ast.AST, ...]) -> ast.expr | None:
-    """The value assigned to `name` in the innermost enclosing function that assigns it."""
+def _bindings(name: str, scope: tuple[ast.AST, ...]) -> list[ast.expr]:
+    """*Every* value assigned to `name` in the innermost enclosing function that assigns it.
+
+    All of them, not the first one `ast.walk` reaches. A `kind` reassigned under an `if` is the
+    ordinary alternative to the `if`-expression `_resolve` already handles, and returning one of
+    its two literals is a silent under-report — the exact failure mode this module exists to
+    remove. Callers that can union the results do; callers that cannot treat more than one
+    binding as "not understood", which routes the site to the loud gate.
+    """
     for func in reversed(scope):
-        for node in ast.walk(func):
-            target, value = _assignment(node)
-            if target == name and value is not None:
-                return value
-    return None
+        found = [
+            value
+            for node in ast.walk(func)
+            for target, value in [_assignment(node)]
+            if target == name and value is not None
+        ]
+        if found:
+            return found
+    return []
 
 
 def _parameter_values(name: str, src: _Src, scope: tuple[ast.AST, ...]) -> set[str] | None:
@@ -261,9 +334,15 @@ def _resolve(expr: ast.expr, src: _Src, scope: tuple[ast.AST, ...]) -> set[str] 
         right = _resolve(expr.orelse, src, scope)
         return None if left is None or right is None else left | right
     if isinstance(expr, ast.Name):
-        bound = _binding(expr.id, scope)
-        if bound is not None:
-            return _resolve(bound, src, scope)
+        bound = _bindings(expr.id, scope)
+        if bound:
+            out: set[str] = set()
+            for assigned in bound:
+                resolved = _resolve(assigned, src, scope)
+                if resolved is None:
+                    return None
+                out |= resolved
+            return out
         from_parameter = _parameter_values(expr.id, src, scope)
         if from_parameter is not None:
             return from_parameter
@@ -276,6 +355,9 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
     src = _Src()
     kinds: set[str] = set()
     unresolved: list[str] = []
+    #: `(file, first line, last line)` of every SQL literal the walk below recognised. This is
+    #: what `_recognition_gap` cross-checks; without it, recognition is a silent pre-filter.
+    recognised: set[tuple[Path, int, int]] = set()
     worker_channel_needed = False
     for path, tree in src.trees.items():
         scopes = _scopes(tree)
@@ -284,9 +366,13 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
                 continue
             if node.func.attr not in {"execute", "executemany"} or not node.args:
                 continue
-            sql = src.sql_of(node.args[0])
-            if sql is None or "INSERT INTO findings" not in sql:
+            found = src.sql_of(node.args[0], path, scopes[id(node)])
+            if found is None:
                 continue
+            sql, sql_path, first, last = found
+            if _FINDINGS_INSERT.search(" ".join(sql.split())) is None:
+                continue
+            recognised.add((sql_path, first, last))
             slot = _kind_slot(sql)
             site = (path.name, " ".join(sql.split()).split(" ON CONFLICT")[0].strip())
             if slot is None:
@@ -311,9 +397,77 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
                 unresolved.append(f"{path.name}: unresolved `kind` at {site[1]}")
                 continue
             kinds |= {_normalise(k) for k in resolved}
+    unresolved.extend(_recognition_gap(src, recognised))
     if worker_channel_needed:
         kinds |= _worker_findings(src)
     return frozenset(kinds), tuple(sorted(unresolved))
+
+
+def _text_insert_sites(text: str, tree: ast.Module) -> list[tuple[int, str]]:
+    """`(line, that line stripped)` for every findings INSERT in one module's *source text*.
+
+    Prose is excluded, and only prose: a bare string statement (module, class, function and
+    attribute docstrings alike — `orchestrator/stubs.py` describes a `cli.py` INSERT inside one)
+    and anything from a `#` onwards. Neither can execute, so neither is a writer; everything else
+    that spells the statement must be a site the AST walk named.
+    """
+    prose: set[int] = set()
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant)):
+            continue
+        if not isinstance(node.value.value, str):
+            continue
+        first, last = _span(node)
+        prose.update(range(first, last + 1))
+    comment_at: dict[int, int] = {}
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type == tokenize.COMMENT:
+            row, col = token.start
+            comment_at[row] = min(col, comment_at.get(row, col))
+    lines = text.splitlines()
+    out: list[tuple[int, str]] = []
+    for match in _TEXT_INSERT.finditer(text):
+        line = text.count("\n", 0, match.start()) + 1
+        column = match.start() - (text.rfind("\n", 0, match.start()) + 1)
+        if line in prose or column >= comment_at.get(line, len(text)):
+            continue
+        out.append((line, lines[line - 1].strip()))
+    return out
+
+
+def _recognition_gap(src: _Src, recognised: set[tuple[Path, int, int]]) -> list[str]:
+    """The two instruments compared, in both directions. Disagreement is a failure, not a note.
+
+    The AST walk decides what a findings writer *is*; the text scan only asks where the statement
+    is spelled. They are derived differently and can only agree by both being right, so:
+
+    * a text site no recognised literal covers is a writer the walk lost — the C-1 defect, where
+      reformatting one real `cli.py` INSERT into a triple-quoted block took it out of the walk's
+      view with every test still green;
+    * a recognised literal no text site falls inside means the *cross-check* has gone blind, and
+      a silently blind instrument is what this whole module exists to prevent. Failing on it is
+      the calibration: neither instrument is allowed to become the narrower one unnoticed.
+    """
+    covered: dict[Path, set[int]] = {}
+    for path, first, last in recognised:
+        covered.setdefault(path, set()).update(range(first, last + 1))
+    seen: dict[Path, set[int]] = {}
+    out: list[str] = []
+    for path, tree in src.trees.items():
+        for line, snippet in _text_insert_sites(path.read_text(encoding="utf-8"), tree):
+            seen.setdefault(path, set()).add(line)
+            if line not in covered.get(path, set()):
+                out.append(
+                    f"{path.name}:{line}: a findings INSERT the AST walk never recognised, so its "
+                    f"`kind` was never checked against the listings: {snippet}"
+                )
+    for path, first, last in recognised:
+        if not seen.get(path, set()) & set(range(first, last + 1)):
+            out.append(
+                f"{path.name}:{first}: the AST walk recognised a findings INSERT that the text "
+                f"cross-check cannot see — the two instruments have drifted apart"
+            )
+    return out
 
 
 def _worker_findings(src: _Src) -> set[str]:
@@ -356,7 +510,7 @@ def listings() -> dict[str, tuple[frozenset[str], frozenset[str] | None]]:
 @pytest.fixture(scope="module")
 def emitted() -> frozenset[str]:
     kinds, unresolved = _emitters()
-    assert not unresolved
+    assert not unresolved, "\n".join(unresolved)
     return kinds
 
 
@@ -401,6 +555,12 @@ def test_every_findings_writer_in_src_is_one_this_module_resolved() -> None:
     how a listing accumulated a 19-kind gap while a review reported one. So an `INSERT INTO
     findings` whose `kind` cannot be resolved to string literals is a failure naming the site,
     and the only way to exempt one is to declare its channel in `_INDIRECT_SITES`.
+
+    That gate only ever saw the sites recognition handed it, and recognition was an unnormalised
+    substring test: reformatting one real `cli.py` INSERT into a triple-quoted block removed it
+    from the count with all four tests still passing. So this asserts the *recognition* step too,
+    against a text-level derivation of the same sites (`_recognition_gap`) that no reformat of a
+    Python string literal can move.
     """
     _, unresolved = _emitters()
     assert unresolved == (), "\n".join(unresolved)
