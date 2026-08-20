@@ -280,8 +280,21 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   all ('WeakEdge' and the four Contract/Hoist
                                                   --   kinds). The two annotated above each have a
                                                   --   live INSERT behind them, in
-                                                  --   orchestrator/findings.py; every other name
-                                                  --   in the DECLARED list is emitted from cli.py.
+                                                  --   orchestrator/findings.py. FOUR more are
+                                                  --   built only as in-process dataclasses that
+                                                  --   no writer ever sees, so nothing emits
+                                                  --   them: 'UnmergedDependency' (no literal
+                                                  --   anywhere in src/), 'VersionConflict'
+                                                  --   (bazel/generators.py:414), 'CoarseTarget'
+                                                  --   (graph/cycles.py:923) and 'RuleOscillation'
+                                                  --   (rewrite/pipeline.py:263) — GraphFinding
+                                                  --   and RewriteFinding are imported by no
+                                                  --   module that holds an INSERT INTO findings.
+                                                  --   The REST of the DECLARED list is emitted
+                                                  --   from cli.py, several through a VARIABLE
+                                                  --   `kind` column ('OversizeBlob',
+                                                  --   'SymbolBudgetExceeded'), so a literal grep
+                                                  --   of cli.py under-reports it.
                                                   -- EMITTED BUT NEVER DECLARED — the direction the
                                                   --   CAVEAT above did not contemplate. Each of
                                                   --   these has a live writer in src/ and was

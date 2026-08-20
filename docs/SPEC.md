@@ -179,8 +179,9 @@ Common contract for all four:
   (> `stale_after_s`, default 900) → treated as crashed, reset to `PENDING`, `attempts` retained.
 - **Resume validates evidence, never blind-replays** (Constraint 7): before re-entering a phase,
   `fleet resume` re-checks each phase's durable evidence against SQLite + Git and demotes the
-  repo to its re-entry floor — the phase **above** the earliest one whose evidence still holds,
-  never that phase itself (§11.5 step 5). **Two distinct
+  repo to its re-entry floor — the phase **above** the **highest** phase below the settled frontier
+  whose evidence still holds, never that phase itself, and `SCAN` if no phase below the frontier
+  holds (§11.5 step 5). **Two distinct
   predicates, not one** (ADR-0077 §6): the durable, payload-free `evidence_holds` is what step 5
   searches over, while `BaseWorker.preconditions_hold` stays at its single call site inside
   `PhaseRunner._re_entry`, where a typed payload and a `WorkerContext` exist — and where neither
@@ -4075,8 +4076,21 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   have no Python at all ('WeakEdge' and the
                                                   --   four Contract/Hoist kinds). The two
                                                   --   annotated above each have a live INSERT in
-                                                  --   orchestrator/findings.py; every other name
-                                                  --   in the DECLARED list is emitted from cli.py.
+                                                  --   orchestrator/findings.py. FOUR more are
+                                                  --   built only as in-process dataclasses that
+                                                  --   no writer ever sees, so nothing emits
+                                                  --   them: 'UnmergedDependency' (no literal
+                                                  --   anywhere in src/), 'VersionConflict'
+                                                  --   (bazel/generators.py:414), 'CoarseTarget'
+                                                  --   (graph/cycles.py:923) and 'RuleOscillation'
+                                                  --   (rewrite/pipeline.py:263) — GraphFinding
+                                                  --   and RewriteFinding are imported by no
+                                                  --   module that holds an INSERT INTO findings.
+                                                  --   The REST of the DECLARED list is emitted
+                                                  --   from cli.py, several through a VARIABLE
+                                                  --   `kind` column ('OversizeBlob',
+                                                  --   'SymbolBudgetExceeded'), so a literal grep
+                                                  --   of cli.py under-reports it.
                                                   -- EMITTED BUT NEVER DECLARED — the direction the
                                                   --   CAVEAT above did not contemplate. Each of
                                                   --   these has a live writer in src/ and was
@@ -6933,9 +6947,16 @@ to discard whatever a killed `git apply` left in the worktree, set the task `PEN
 re-run — again without incrementing `attempts` (`FailureClass.TRANSIENT_INFRA`). The anchor ref
 itself is re-created from `phases.base_ref` if it is missing. There is no third branch and no
 tree-SHA comparison, because a commit is either on the branch or it is not (§3.2 step 6);
-(5) demote each repo to its **re-entry floor** — which is *not* the earliest phase whose durable
-evidence still holds: that phase is precisely where the backward search below **stops**, and the
-floor is the phase above it (Constraint 7). This is a search **downward from the settled
+(5) demote each repo to its **re-entry floor** — the phase **above** the **highest** phase below
+the settled frontier whose durable evidence still holds, never that phase itself, and `SCAN` if no
+phase below the frontier holds (Constraint 7). That phase is precisely where the backward search
+below **stops**: it is the *first* holder the walk meets going down, hence the highest, never the
+*earliest*. Whenever two or more phases below the frontier hold, the walk stops above the highest
+and never reaches the earliest, so naming the earliest picks a rung this function never returns and
+re-runs every phase between the two. Nor is the floor "the lowest phase whose evidence does not
+hold": under a sparse or non-monotone `evidence` mapping those differ, and
+`tests/test_reentry_floor.py`'s `…_absent_key_one_rung_above_it_does_not` case pins the difference.
+This is a search **downward from the settled
 frontier**, never an ascending scan:
 locate the lowest phase that is not **settled for demotion** — `SUCCEEDED`, `SKIPPED` **or
 `DEGRADED`** (`orchestrator/reentry._SETTLED_FOR_DEMOTION`; a repo with a
