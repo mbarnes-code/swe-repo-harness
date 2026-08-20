@@ -1632,7 +1632,7 @@ async def test_the_c_compiler_probe_asks_the_one_question_bazel_asks(tmp_path) -
     assert name != build_name, "the probe would race the build container it precedes"
     assert build_name.startswith(f"--name={prefix}"), (
         "the probe and the build step share ONE prefix — this is what makes a single "
-        "`list_by_prefix` sweep in `on_cancel` catch both, however each happened to be named"
+        "`list_with_verdict` sweep in `on_cancel` catch both, however each happened to be named"
     )
     assert "--network=none" in probe, "the probe is a local filesystem question; it needs no net"
 
@@ -1643,9 +1643,9 @@ async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_pr
     """`on_cancel` can no longer remove ONE exact name: `_invocation_name` gives the probe and
     the build/test step their own fresh per-call token (see its docstring), so there is no single
     name left to compute from the context alone. What IS still derivable is the shared prefix, so
-    this lists everything docker still has registered under it
-    (`ContainerSandbox.list_by_prefix` — this worker's first real caller of that method; D32
-    recorded it implemented with zero call sites in `src/`) and removes each one.
+    this lists everything docker still has registered under it (`ContainerSandbox.list_with_verdict`
+    — this worker was the first real caller of the prefix-listing method, `list_by_prefix` at the
+    time; D32 recorded it implemented with zero call sites in `src/`) and removes each one.
 
     Two fake leftovers are seeded under THIS rung's prefix — shaped like a leaked probe and a
     leaked build step, the two containers `_c_toolchain_gate` and `_argv` can start — and the
@@ -1679,7 +1679,7 @@ async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_pr
     assert ps_call is not None
     filter_arg = ps_call[-3]
     # Deliberately the ESCAPED form, not the raw `prefix` — do not "simplify" this back.
-    # `list_by_prefix` (`sandbox/container.py`) runs `re.escape` on the prefix before
+    # `list_with_verdict` (`sandbox/container.py`) runs `re.escape` on the prefix before
     # interpolating it into Docker's `name` filter, which is a REGEX: an unescaped `.` in a repo
     # id (`slug` preserves it, e.g. `my.repo.js`) would otherwise act as a wildcard and let the
     # filter cross-match a SIBLING repo's live container (research-36 Q1.5(1); regression-tested
@@ -1698,7 +1698,7 @@ async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_pr
     removed = [call[-1] for call in runner.calls if call[1:3] == ("rm", "--force")]
     assert set(removed) == {leaked_probe, leaked_build}, (
         "a cancellation that only removed one exact name would leave the other container leaked "
-        "forever — the defect `list_by_prefix` sweeping exists to close"
+        "forever — the defect prefix-based sweeping exists to close"
     )
 
 
