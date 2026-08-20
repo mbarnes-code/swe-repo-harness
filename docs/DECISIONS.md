@@ -7295,6 +7295,39 @@ and no code path in this ADR reaches it.
 
 ---
 
+## ADR-0079 — RESERVED, not yet written
+
+Allocated to §11.5 step-5 subtask 9, "Un-refuse the step-5 flags"
+(`docs/superpowers/plans/design-resume-step5.md` row 9): the `--from-phase` / `--repo` /
+`--reset-attempts` semantics in `src/fleet/cli.py`'s `_refuse_unbuilt_resume_flags`. Subtask 9 has
+not started — it depends on subtasks 7 and 8, neither of which has landed. This number is reserved
+and not available for reuse; its absence from this file is not a deletion.
+
+---
+
+## ADR-0080 — RESERVED, not yet written
+
+Allocated to §11.5 step-5 subtask 10, "Step 8 — 'continue': delegate to the three composition roots
+in phase order" (`docs/superpowers/plans/design-resume-step5.md` row 10): `fleet resume` without
+`--dry-run` running `_transform_impl` → `_build_impl` → `_verify_impl` for the phases the floors
+demand. Subtask 10 has not started — it depends on subtask 9, not landed. This number is reserved
+and not available for reuse; its absence from this file is not a deletion.
+
+---
+
+## ADR-0081 — RESERVED, not yet written
+
+Allocated to the in-flight §11.5 step-2 orphan-reap lane (subtask 3, worktree/container reap wired
+into `_resume_impl`), for its decision to run the reap **after** `_reset_stale_running` rather than
+at the position §11.5's own step numbering puts it: reaping before the crash sweep is a no-op on
+exactly the crashed runs the reap exists for, because a crashed run's worktree is still claimed by
+a `RUNNING` `phases` row until the sweep resets it. That lane has not committed, and this ADR is
+its own to land — a draft exists at `.superpowers/sdd/design-resume-step5/adr-0081-draft.md` and
+is deliberately left unlanded here. This number is reserved and not available for reuse; its
+absence from this file is not a deletion.
+
+---
+
 ## ADR-0082 — A demotion's `checkpoints` sweep is **span-wide and conditional on a demotion having actually happened**, and it spares `DEGRADED` alone: the backward walk's hard stops and the sweep's carve-out answer two different questions, so `SKIPPED` stops the walk and still loses its checkpoint — and the residual `DEGRADED` stale-anchor hazard is a **stated boundary**, unreachable only by an induction spread across three modules that nothing binds to this method's signature
 
 **Status:** accepted, describing behaviour already landed on `main`. Anchored at `8c00971` (`main`);
@@ -7476,3 +7509,141 @@ before it was written, against `8c00971` rather than against the implementer's r
 The behaviour itself is bound by mutations M10 (unconditional sweep → the no-op test fails) and M11
 (narrowed to the demoted rows → the frontier-checkpoint test fails), recorded in
 `docs/superpowers/plans/design-resume-step5-task6-demotion-writer-report.md` §5.
+
+---
+
+## ADR-0083 — The LLM tier ceiling gets a hand-rolled, counting `ResizableLimiter` in `budgets.py`, not `anyio.CapacityLimiter`: the borrowed primitive is per-borrower and undeclared, and this commit is a runtime no-op until a later subtask calls `resize()`
+
+**Status:** accepted, describing behaviour already landed on `main`. Anchored at `27cb03b` (`main`);
+every file:line below is that ref. The behaviour is `a3ff0ae` and `431b02f`
+(`src/fleet/orchestrator/budgets.py`, `tests/test_budgets.py`). **Supersedes nothing.** Recorded
+late, on a number allocated by the orchestrator: the implementing lane (R1 of the §5 rate-limiting
+decomposition) raised the need for an ADR as its first concern and deliberately took no number
+(`.superpowers/sdd/design-resume-step5/task-rl1-report.md` §4 item 1).
+
+**Provenance (CLAUDE.md Guardrail 1).** The *requirement* is SPEC, not an agent's invention:
+`docs/SPEC.md:7164-7169` already states that rate limiting is backpressure and that the owning
+tier's LLM semaphore is AIMD-adjusted — halved on a 429 or a `retry-after`, one slot returned per
+clean minute, bounded by `aimd.floor` and `concurrency.llm.*`. What is an **Agent Recommendation**
+is everything below this line: the choice of primitive (hand-rolled vs. `anyio.CapacityLimiter`),
+its shape, and the decision not to declare `anyio` as a dependency. It originates in
+`docs/superpowers/plans/rate-limiting-scope-research.md` §4 (Q3, "the resize problem") and was
+accepted by the orchestrator via the implementing lane's brief. Nothing here should be cited as a
+SPEC requirement.
+
+### 1. The decision
+
+`ResizableLimiter` (`src/fleet/orchestrator/budgets.py:952-1075`) is a counting concurrency
+primitive over an `int` capacity, an `int` borrowed count, and a `deque[asyncio.Future[None]]` of
+waiters, with `acquire` / `release` / `resize` / `locked` / `capacity` / `borrowed` /
+`__aenter__` / `__aexit__`. `Limits.llm` is retyped `Mapping[ModelTier, ResizableLimiter]` and
+`Limits.for_tier` returns one (`:1089`, `:1120-1122`); `Limits.create` builds a `ResizableLimiter`
+per tier where it previously built an `asyncio.Semaphore` (`:1105-1109`). The per-tier arithmetic —
+`max(1, min(configured, override))` — is untouched. No wiring, no controller, no config read: the
+class reads no signal and decides no policy, exactly as the research document's Q3 recommendation
+scoped it.
+
+Because the class is **counting, not per-borrower**, `workers/classify.py`'s `async with
+ctx.limits.for_tier(tier)` needed no change — the drop-in property the research document names as
+Option C's third reason (rate-limiting-scope-research.md §4.3 item 3).
+
+### 2. The rejected alternative: `anyio.CapacityLimiter`
+
+Measured under `.venv/bin/python` (the interpreter that runs the harness), `find_spec` question:
+`anyio` **is installed** (4.14.2), and its `CapacityLimiter.total_tokens` is a settable property
+that supports exactly the resize-while-held semantics §11.8 wants — shrinking below the current
+borrowed count is legal and safe, draining to the new ceiling rather than raising.
+
+Two measured properties disqualify it for this codebase rather than merely make it less convenient:
+
+- **Undeclared.** `pyproject.toml`'s `project.dependencies` (`:27-40`) lists `anthropic>=0.69` and
+  `openai>=1.60`, each with a per-line justification comment naming the file that needs it; `anyio`
+  is not there — it arrives transitively through `anthropic`/`openai`/`httpx`. It also has zero
+  existing imports anywhere in `src/` or `tests/` (verified: `grep -rn anyio src/ tests/
+  pyproject.toml` → no hits). Adopting it for this one class means declaring a new runtime
+  dependency and importing a second concurrency vocabulary into a tree that is otherwise uniformly
+  bare-`asyncio`.
+- **Per-borrower, not counting.** A task that acquires an `anyio.CapacityLimiter` it already holds
+  raises `RuntimeError`; `asyncio.Semaphore` (and `ResizableLimiter`) permit it and simply consume
+  two slots. §5's R4 (widening acquisition to a single choke point in `LadderModelClient`) is a
+  separate, later subtask from R1; a per-borrower primitive would force R1 and R4 to land as one
+  atomic change, because `workers/classify.py`'s existing acquisition would raise the moment a
+  second acquisition site opened above it. A counting primitive lets the two changes be reviewed
+  separately.
+
+Under CLAUDE.md Rule 2 (simplicity first, no dependency for what a few dozen deterministic lines of
+code can do) and Rule 5 (code, not judgment, for deterministic mechanics), a hand-rolled limiter in
+the module that already owns `Limits` and its ceilings (`budgets.py`'s own header names it
+"semaphores and the reserve-then-spend cost policy") was preferred over a new, undeclared,
+semantically-mismatched dependency. Two further options the research document measured and rejected
+before reaching this one: rebuilding/swapping the semaphore object on every resize (loses the
+ceiling for the duration of any call already holding the old object, since `for_tier` hands out the
+live reference); and declining to make the semaphore resizable at all, which would require rewriting
+SPEC §11.8's AIMD sentence rather than implementing it. Neither is what landed.
+
+### 3. Two things stated honestly rather than left implicit
+
+**R1 is a runtime no-op today, by design and only by design.** No call site anywhere in `src/`
+invokes `resize()` — the research document scoped R1 to the primitive alone, with the controller
+(R5) and the widened acquisition point (R4) left to later subtasks. Behaviour today is therefore
+identical to the `asyncio.Semaphore` it replaced. **The implementing lane's own recommendation,
+repeated here because it is a real operational risk and not merely a caveat:** if the orchestrator
+takes the shorter R2+R3-only path — closing §13 row 43's actual disaster (a throttled account
+misread as `DOWN`) without ever building the AIMD controller — this commit buys nothing, and per
+Option D of the research document (§4.2), the correct response is to **revert `a3ff0ae` and
+`431b02f`**, not leave `ResizableLimiter` in the tree as dead code with SPEC §11.8's AIMD sentence
+rewritten around it. A primitive with no caller and no plan to gain one is exactly the shape of
+cruft CLAUDE.md's Rule 2 exists to prevent.
+
+**Open assumption: the ceiling defaults to the starting capacity, and `Limits.create` passes no
+explicit `ceiling=`.** `ResizableLimiter.__init__` (`:988-1006`) takes `floor: int = 1` and
+`ceiling: int | None = None`, defaulting the ceiling to the constructor's `capacity` argument when
+omitted (`:999`); `Limits.create`'s dict comprehension (`:1105-1109`) constructs
+`ResizableLimiter(max(1, min(concurrency.llm.for_tier(tier), overrides.get(tier, 1 << 30))))` with
+no `ceiling=` argument at all. The practical effect: whenever `llm.concurrency_overrides` has
+**lowered** a tier below its configured `concurrency.llm.*` value, that lowered figure becomes the
+ceiling, and no later `resize()` call can grow the tier back past it — a `resize()` targeting the
+unoverridden configured value simply clamps at the override. This differs from what the research
+document's R5 row states literally: it describes the controller clamping to
+`[aimd.floor, concurrency.llm.for_tier(tier)]`, which would let a controller grow a throttled-then-
+recovered tier back past an operator's override, undoing "run this slower". The assumption made
+here — an override is a ceiling, not merely a starting point, because §11.8 itself names "run this
+slower" as the intended response to throttling — was not imposed on R5's text; `Limits.create`
+(a file this ADR's implementer owns) was left as the load-bearing choice, and `ceiling=` exists as
+a constructor argument precisely so the R5 implementer can pass an explicit value if they disagree.
+
+### 4. What this ADR does not do
+
+- It does not decide R4's, R5's, R6's or R7's design (widened acquisition, the AIMD controller, the
+  per-target token bucket, or the `DOWN`-vocabulary fix); each is a separate §5 subtask.
+- It does not adjudicate the research document's §6.3 sizing recommendation (dispatch R2+R3 before
+  R1+R4) — that is the orchestrator's call, not this ADR's.
+- It does not sweep the stale `for_tier` docstring claim ("the limiter every `ModelClient.complete`
+  on this tier must hold" — true of one of the tree's five callers) or the `workers/classify.py`
+  acquisition site; both are R4's, deliberately, so a narrowing now would be un-narrowed one
+  subtask later.
+
+### 5. Verification
+
+`tests/test_budgets.py`: 29 passed (28 before this change, 9 added, the one pre-existing
+`for_tier`-keyed-by-tier test untouched and still green). Seven discriminating mutations, each
+applied to the committed tree, confirmed to change the file (`git diff --numstat`), and reverted
+byte-for-byte:
+
+| Property mutated | Target test that fails under it |
+|---|---|
+| admission bound (`locked()` short-circuited to always-false) | `…never_admits_more_than_capacity_under_contention` |
+| `resize` clamps upward only | `…shrinking_while_slots_are_held_bars_entrants_and_harms_no_holder` |
+| `resize`'s wake loop dropped | `…growing_admits_parked_waiters_without_waiting_for_a_release` |
+| no clamp / no zero-refusal | `…resize_clamps_to_floor_and_ceiling_and_refuses_zero` |
+| waiters admitted LIFO | `…waiters_are_admitted_in_arrival_order` |
+| cancellation recovery dropped | `…a_waiter_cancelled_after_being_woken_hands_its_slot_on` |
+| slot charged at resume, not at wake | `…a_freed_slot_is_charged_at_wake_not_when_the_waiter_resumes` |
+
+The last is the one worth naming: on first run it did not discriminate, because the woken tasks are
+normally scheduled ahead of any later arrival and the over-admission race rarely opens; `431b02f`
+adds a test that steps an arrival's `acquire()` coroutine by hand (`send(None)`) to force the two-
+slots-freed-back-to-back window open without awaiting past it, and only then does the mutation fail
+the target test. `mypy --strict` and `ruff check` clean on both files. Scoped run (not the full
+suite): `tests/test_budgets.py tests/test_workers_scan.py tests/test_runner.py
+tests/test_scan_e2e.py` — 116 passed, `0` skipped.
