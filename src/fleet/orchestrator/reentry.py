@@ -18,11 +18,17 @@ whose precondition is unmet" walk:
    straight to the last phase. So this function reads only status rows and the caller-supplied
    `evidence` mapping: it locates the frontier — the earliest phase that has not yet settled — and
    then walks backward from there, asking only whether `evidence` holds at each earlier phase.
-2. **`DEGRADED` is a hard stop, never a phase to demote or to search past (ADR-0077 §5).** A
-   `DEGRADED` phase leaves the machine only through a budgeted stub-revalidation round; routing it
-   back to `PENDING` here would spend that budget through a side door, with no round recorded. So
-   a `DEGRADED` row counts as settled when locating the frontier, and if the backward walk reaches
-   one, it stops there without moving the floor onto it.
+2. **`DEGRADED` and `SKIPPED` are hard stops: never a phase to demote, never a phase to search
+   past (ADR-0077 §5).** A `DEGRADED` phase leaves the machine only through a budgeted
+   stub-revalidation round; routing it back to `PENDING` here would spend that budget through a
+   side door, with no round recorded. A `SKIPPED` phase is a config exclusion, and resume "does
+   not re-decide the operator's config" — which this function must honour in both directions: the
+   floor may not land *on* a `SKIPPED` phase (that re-runs work the operator excluded), and the
+   walk may not continue *below* one. The second half is not a nicety: an excluded phase can never
+   produce holding evidence, so a walk that passed over it would demote every repo with an excluded
+   middle phase all the way to `SCAN`, on every resume. So both statuses count as settled when
+   locating the frontier, and if the backward walk reaches either, it stops there without moving
+   the floor onto it.
 
 Terminal rows (`REQUIRES_HUMAN_INTERVENTION`) and repos with nothing left unsettled both mean
 "nothing for this function to compute": `None`.
@@ -31,9 +37,12 @@ Terminal rows (`REQUIRES_HUMAN_INTERVENTION`) and repos with nothing left unsett
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 from fleet.models.enums import Phase, RepoStatus
-from fleet.state.repository import PhaseRow
+
+if TYPE_CHECKING:  # `PhaseRow` is used only in annotations, which `from __future__` defers.
+    from fleet.state.repository import PhaseRow
 
 _SETTLED_FOR_DEMOTION: frozenset[RepoStatus] = frozenset(
     {RepoStatus.SUCCEEDED, RepoStatus.SKIPPED, RepoStatus.DEGRADED}
@@ -41,6 +50,12 @@ _SETTLED_FOR_DEMOTION: frozenset[RepoStatus] = frozenset(
 # `DEGRADED` is included here per ADR-0077 §5 — not because it is settled in the ordinary sense
 # (`enums.TERMINAL_STATUSES` deliberately excludes it, since it is resolvable via revalidation),
 # but because this function must never pick it as the frontier to re-enter or as a phase to demote.
+
+_HARD_STOPS: frozenset[RepoStatus] = frozenset({RepoStatus.DEGRADED, RepoStatus.SKIPPED})
+# The two statuses ADR-0077 §5 declares non-demotable for a reason of its own (a budgeted
+# revalidation round; the operator's config). The backward walk stops at either without moving the
+# floor onto it. `SUCCEEDED` is deliberately absent: it is the one status §5 makes demotable, and
+# demoting a span of it is what the walk exists to do.
 
 
 def _status_of(row: PhaseRow | None) -> RepoStatus:
@@ -62,7 +77,8 @@ def phase_floor(
     `REQUIRES_HUMAN_INTERVENTION` (mechanically terminal — resume never touches it), or every
     phase has already settled (nothing left to re-enter). Otherwise returns the `Phase` re-entry
     should start at, which may equal the frontier itself (no backward demotion needed) or an
-    earlier phase (the backward search found unmet evidence).
+    earlier phase (the backward search found unmet evidence). The backward search stops at a
+    `DEGRADED` or `SKIPPED` row without ever moving the floor onto it (ADR-0077 §5).
     """
     for phase in Phase:
         if _status_of(rows.get(phase)) is RepoStatus.REQUIRES_HUMAN_INTERVENTION:
@@ -79,7 +95,7 @@ def phase_floor(
     floor = frontier
     for value in range(int(frontier) - 1, 0, -1):
         phase = Phase(value)
-        if _status_of(rows.get(phase)) is RepoStatus.DEGRADED:
+        if _status_of(rows.get(phase)) in _HARD_STOPS:
             break  # ADR-0077 §5: never demoted, and the search stops rather than passing it
         if evidence.get(phase, False):
             break  # evidence holds here -- everything earlier is covered by this phase

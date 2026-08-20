@@ -17,8 +17,15 @@ last phase. The downward-from-frontier algorithm answers `SCAN`, because the fro
 all-missing repo is `SCAN` regardless of what `evidence` says about later phases nobody has
 reached yet.
 
-**`DEGRADED` is a hard stop (ADR-0077 §5).** It is never chosen as the floor and the backward walk
-never searches past it, even when an earlier phase's evidence does not hold.
+**`DEGRADED` and `SKIPPED` are hard stops (ADR-0077 §5).** Neither is ever chosen as the floor and
+the backward walk never searches past either, even when an earlier phase's evidence does not hold.
+The two are separate rules with separate reasons -- a budgeted revalidation round for `DEGRADED`, an
+operator config exclusion for `SKIPPED` -- so each has its own cases; the 28-case table cannot reach
+either, because it runs with `evidence` uniformly `True` and so never enters the backward walk.
+
+**A phase absent from `evidence` does not hold.** The caller's documented convention supplies
+`evidence_holds` for phases below the frontier only, so a sparse mapping is the norm rather than an
+edge case; the last two cases in this file are the only ones that take the default branch.
 """
 
 from __future__ import annotations
@@ -219,3 +226,93 @@ def test_fresh_repo_floor_is_scan_not_verify_under_naive_ascending_evidence() ->
         Phase.VERIFY: True,  # mirrors rdepverify's True-on-missing-BUILD-row default
     }
     assert phase_floor(rows, evidence) == Phase.SCAN
+
+
+def test_skipped_phase_is_never_the_floor_the_walk_stops_at_it_exactly_as_for_degraded() -> None:
+    """TRANSFORM is SKIPPED and the frontier sits directly above it. ADR-0077 §5 makes `SKIPPED`
+    non-demotable for its own reason -- "a config exclusion. Resume does not re-decide the
+    operator's config" -- so the floor must stay at BUILD. Demoting onto TRANSFORM would re-run,
+    on every resume, the phase the operator's config excluded."""
+    rows = _rows_with(
+        {
+            Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+            Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SKIPPED),
+            Phase.BUILD: _row(Phase.BUILD, RepoStatus.PENDING),
+            # Phase.VERIFY missing -> PENDING
+        }
+    )
+    evidence = {Phase.SCAN: True, Phase.TRANSFORM: False, Phase.BUILD: False, Phase.VERIFY: False}
+    assert phase_floor(rows, evidence) == Phase.BUILD
+
+
+def test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds() -> None:
+    """CR2 F1's first repro. Frontier is VERIFY; BUILD's evidence fails so the floor moves to
+    BUILD; the next step down is the SKIPPED TRANSFORM, which stops the walk. The floor is BUILD --
+    not TRANSFORM, which is what a walk that treats `SKIPPED` as an ordinary settled row returns."""
+    rows = _rows_with(
+        {
+            Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+            Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SKIPPED),
+            Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+            Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+        }
+    )
+    evidence = {Phase.SCAN: True, Phase.TRANSFORM: False, Phase.BUILD: False, Phase.VERIFY: True}
+    assert phase_floor(rows, evidence) == Phase.BUILD
+
+
+def test_search_does_not_pass_a_skipped_phase_even_when_nothing_earlier_holds() -> None:
+    """CR2 F1's second repro, and the reason the stop matters in practice: an excluded phase can
+    never produce holding evidence, so a walk that passes over `SKIPPED` reaches SCAN for *any*
+    repo with an excluded middle phase -- a resume that re-runs everything, every time. The floor
+    is still BUILD; SCAN's failing evidence is behind a phase the walk may not cross."""
+    rows = _rows_with(
+        {
+            Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+            Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SKIPPED),
+            Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+            Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+        }
+    )
+    evidence = {Phase.SCAN: False, Phase.TRANSFORM: False, Phase.BUILD: False, Phase.VERIFY: True}
+    assert phase_floor(rows, evidence) == Phase.BUILD
+
+
+# ---------------------------------------------------------------------------------------
+# The `evidence` mapping is sparse by contract: the docstring asks the caller for
+# `evidence_holds(repo, phase)` "for phases below the frontier" only, and says an absent phase is
+# "treated as not holding (the conservative default: search further back rather than stop early)".
+# Every fixture above builds a total mapping, so these two cases are the only ones that reach the
+# default branch at all.
+# ---------------------------------------------------------------------------------------
+
+
+def test_a_phase_absent_from_evidence_does_not_hold_and_so_does_not_stop_the_walk() -> None:
+    """An `evidence` mapping that answers for no phase below the frontier -- legal under the
+    documented convention -- must demote all the way to SCAN, not stop at the frontier. The
+    opposite default would leave a repo whose scan artefacts are gone re-entering at VERIFY against
+    a tree that no longer supports it: the conservative direction is to search further back."""
+    rows = _rows_with(
+        {
+            Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+            Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SUCCEEDED),
+            Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+            Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+        }
+    )
+    assert phase_floor(rows, {Phase.VERIFY: True}) == Phase.SCAN
+
+
+def test_a_present_true_stops_the_walk_but_an_absent_key_one_rung_above_it_does_not() -> None:
+    """The discriminating pair: TRANSFORM is present and True (stops the walk), BUILD is absent
+    (does not). The floor is BUILD -- the phase whose evidence is missing -- which is exactly what
+    a `True` default would skip past, and exactly what an "absent means stop" reading would too."""
+    rows = _rows_with(
+        {
+            Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+            Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SUCCEEDED),
+            Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+            Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+        }
+    )
+    assert phase_floor(rows, {Phase.TRANSFORM: True}) == Phase.BUILD
