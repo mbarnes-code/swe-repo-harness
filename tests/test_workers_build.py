@@ -183,6 +183,34 @@ def ok(stdout: str = "") -> object:
     )
 
 
+class RecordingLog:
+    """`ctx.log` narrowed to "what did the worker say" — the same shape `test_workers_scan.py`
+    uses, kept local rather than imported so neither file's fake constrains the other.
+
+    It exists because a `structlog` warning is the ONLY surface `_sweep_containers` has for a
+    `docker ps` it could not run: a worker's `ctx.db` is read-only, so it cannot record a finding,
+    and the `WorkerError` its two `run()` call sites are building is a verdict about the build.
+    A test that cannot read this cannot observe the difference between a sweep that found nothing
+    and a sweep that was never told anything.
+    """
+
+    def __init__(self) -> None:
+        self.lines: list[tuple[str, dict[str, Any]]] = []
+
+    def info(self, event: str, **kwargs: Any) -> None:
+        self.lines.append((event, kwargs))
+
+    warning = info
+    error = info
+    debug = info
+
+    def events(self) -> list[str]:
+        return [event for event, _ in self.lines]
+
+    def reasons_for(self, event: str) -> list[str]:
+        return [str(kwargs.get("reason")) for name, kwargs in self.lines if name == event]
+
+
 class FakeModelClient:
     """A `ModelClient` whose answers are scripted per role. Never touches a network."""
 
@@ -266,6 +294,7 @@ def make_ctx(
     context_policy: ContextPolicy | None = None,
     seconds_left: float = 600.0,
     model: object | None = None,
+    log: object | None = None,
 ) -> WorkerContext:
     """A context with a REAL deadline on the loop's clock and inert collaborators.
 
@@ -274,6 +303,11 @@ def make_ctx(
 
     `model` is §7.1's ONE call surface. It is a context field rather than a worker constructor
     argument, so a test cannot wire a client the production registry could never supply.
+
+    `log` defaults to the inert sentinel every existing test here relies on — these workers say
+    nothing on the happy path, and a test that does not pass a recorder is asserting exactly that
+    by construction: the sentinel has no `.warning`, so a worker that started logging where these
+    tests expect silence raises rather than passing quietly.
     """
     deadline = monotonic() + seconds_left
     sentinel: object = object()
@@ -291,7 +325,7 @@ def make_ctx(
         llm=UnavailableModelClient() if model is None else model,  # type: ignore[arg-type]
         router=sentinel,  # type: ignore[arg-type]
         limits=sentinel,  # type: ignore[arg-type]
-        log=sentinel,  # type: ignore[arg-type]
+        log=sentinel if log is None else log,  # type: ignore[arg-type]
         context_policy=context_policy,
     )
 
@@ -1665,6 +1699,129 @@ async def test_on_cancel_sweeps_every_container_a_dead_run_could_have_left_by_pr
     assert set(removed) == {leaked_probe, leaked_build}, (
         "a cancellation that only removed one exact name would leave the other container leaked "
         "forever — the defect `list_by_prefix` sweeping exists to close"
+    )
+
+
+def _ps_fails(stderr: str, exit_code: int = 1) -> object:
+    """A `docker ps` that answers with a non-zero exit — a stopped daemon, or a socket the user
+    cannot open. The inventory is EMPTY, exactly as it is when the rung really left nothing
+    behind, which is what makes the two indistinguishable to a caller that counts."""
+    return lambda parts: ProcResult(
+        argv=parts,
+        exit_code=exit_code,
+        stdout_tail="",
+        stderr_tail=stderr,
+        duration_ms=5,
+        timed_out=False,
+    )
+
+
+async def test_the_sweep_reports_a_docker_ps_it_could_not_run_rather_than_sweeping_in_silence(
+    tmp_path,
+) -> None:
+    """D73's residual on `_sweep_containers`, which is the path that runs on EVERY containerised
+    build: `on_cancel` and both deadline-kill sites in `run()` reach it.
+
+    `list_by_prefix` returned `[]` for a docker that could not be reached and for a rung that
+    genuinely started no container, so a cancellation during a docker outage removed nothing,
+    reported nothing, and left the leaked container running — a cleanup that cannot fire, looking
+    exactly like one with nothing to do (CLAUDE.md Rule 11).
+
+    **What this test measures, and why it is not the obvious quantity.** A test that counted
+    removals — `runner.calls`, or the `docker rm --force` argv — CANNOT see this defect: a failed
+    listing produces zero removals before the fix and zero after it, so the number reads `0` in
+    both worlds. That blindness has now been hit repeatedly on this exact code path
+    (docs/INTEGRATION_HONESTY.md D73). The two removal assertions below are therefore kept as
+    labelled CONTROLS, both of which pass under the defect, and the discriminating assertion is
+    on the VERDICT the worker emitted: `ctx.log` is the only surface `_sweep_containers` has (see
+    `RecordingLog`), so "did it say anything, and did it say docker's own words" is the only
+    quantity that moves.
+
+    Not raising is part of the property, not an omission: `on_cancel` must still return normally,
+    because an exception here would replace the cancellation being cleaned up with the failure of
+    the cleanup — that is why the previous lane left this site alone, and the fix keeps it true.
+    """
+    log = RecordingLog()
+    ctx = make_ctx(tmp_path, attempt=1, log=log)
+    prefix = f"{sandbox_name(RUN_ID, REPO, 1)}-t"
+    runner = RecordingRunner(
+        [
+            (
+                lambda p: p[1:3] == ("ps", "--all"),
+                _ps_fails("Cannot connect to the Docker daemon at unix:///var/run/docker.sock."),
+            ),
+            (lambda p: True, ok("")),
+        ]
+    )
+
+    # Returns normally: the cancellation path may not be turned into a raising one.
+    await BuildverifyWorker(runner=runner).on_cancel(ctx)
+
+    # The CONTROLS. Neither moves under the defect; a test built on them is blind to it.
+    assert [c for c in runner.calls if c[1:3] == ("rm", "--force")] == [], (
+        "nothing may be force-removed on the strength of an inventory docker never provided"
+    )
+    assert len([c for c in runner.calls if c[1:3] == ("ps", "--all")]) == 1
+
+    # The DISCRIMINATING assertions.
+    assert "container_sweep_listing_failed" in log.events(), (
+        "a sweep that could not read the inventory said nothing at all — indistinguishable from "
+        "a rung that left no container, which is the whole defect"
+    )
+    reason = log.reasons_for("container_sweep_listing_failed")[0]
+    assert "Cannot connect to the Docker daemon" in reason, (
+        "docker's own words are what tell the operator to start the daemon and re-run"
+    )
+    assert log.lines[0][1]["prefix"] == prefix, (
+        "the namespace that could not be enumerated is named, because that is what an operator "
+        "pastes after `docker ps` to check it themselves"
+    )
+
+
+async def test_the_sweep_stays_silent_when_the_rung_really_left_no_container(tmp_path) -> None:
+    """The no-over-correction control, and the reason the fix is not "warn whenever nothing was
+    removed": a `docker ps` that exits 0 with no output is a real answer — this rung started no
+    container, the ordinary case on the un-containerised path — and must stay silent.
+
+    `ctx.log` here is `make_ctx`'s inert sentinel, which has no `.warning` at all, so a worker
+    that warned on an honestly empty inventory would raise `AttributeError` rather than pass.
+    This test is green both before and after the fix, which is precisely why it cannot be the
+    test that pins it.
+    """
+    ctx = make_ctx(tmp_path, attempt=1)
+    runner = RecordingRunner([(lambda p: True, ok(""))])
+
+    await BuildverifyWorker(runner=runner).on_cancel(ctx)
+
+    assert [c for c in runner.calls if c[1:3] == ("rm", "--force")] == []
+    assert len([c for c in runner.calls if c[1:3] == ("ps", "--all")]) == 1
+
+
+async def test_the_sweep_reports_a_docker_that_was_never_invoked_as_its_own_third_state(
+    tmp_path,
+) -> None:
+    """A host with no `docker` on `PATH`: `util.proc.run` leaves the spawn unguarded (D38), so
+    `OSError` reaches this call site. It used to be swallowed whole by `contextlib.suppress`,
+    which is the same silence in a different costume — "docker was never asked" is a third state,
+    not an empty inventory, and the operator's next action (install docker) is different again.
+
+    Same instrument as above and for the same reason: the removal count is `0` in every one of
+    the three worlds, so the verdict is the only thing that can tell them apart.
+    """
+    log = RecordingLog()
+    ctx = make_ctx(tmp_path, attempt=1, log=log)
+
+    class NoDocker:
+        async def __call__(self, argv, **_kw):
+            raise FileNotFoundError(2, "No such file or directory", "docker")
+
+    await BuildverifyWorker(runner=NoDocker()).on_cancel(ctx)  # type: ignore[arg-type]
+
+    reasons = log.reasons_for("container_sweep_listing_failed")
+    assert reasons, "an OSError out of the spawn left the sweep silent"
+    assert "never invoked" in reasons[0], reasons[0]
+    assert "FileNotFoundError" in reasons[0], (
+        "the exception type is what separates a missing binary from a permission error on cwd"
     )
 
 
