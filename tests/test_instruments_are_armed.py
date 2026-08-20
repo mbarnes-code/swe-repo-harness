@@ -24,6 +24,11 @@ method nobody calls. So this file asserts the one property that would have caugh
 
     every method defined on a test-local subclass overrides a name its base really has.
 
+"Defined on" is not obvious and was, for one round, narrower than this sentence: it meant "a `def`
+directly in the class body", and a review defeated the file with two ordinary rewrites that satisfy
+the sentence while the body never saw them. `_defined_methods` is the answer to what it means now —
+three shapes, each measured, each with its own reproduced defeat.
+
 A test fake may legitimately carry a method its base does not have — a recorder's `reset()`
 classmethod, say. Those are named in `NOT_OVERRIDES` with a reason, and the allowlist is a
 ratchet in both directions: `test_the_allowlist_has_not_gone_stale` fails the day one of those
@@ -41,6 +46,37 @@ that keeps `_drain` defined but stops calling it disarms an override just as com
 here — as does a base that grows an unrelated method colliding with a fake's helper name. It sees
 overrides only: an instrument that hooks by any other means is outside it. It is one shape, gated;
 the honest scope is written down here rather than implied by the file's name.
+
+**Where "defined on the class" stops.** The walk reads a class *body*, statically. Every binding
+below was tried against this file after the three shapes above were bound, and every one of them
+is green while the override is dead — measured, not supposed:
+
+* `Fake.method = _f` **after** the class statement, and any `setattr(Fake, ...)` or `type(...)`
+  construction. The body is where this looks; nothing outside it is a class-body statement.
+* a class-body assignment whose value is not syntactically a function: `functools.partial(_f)`,
+  an attribute (`_f.__get__`), a factory call. Only a `lambda`, a name this module binds with
+  `def`/`lambda`, and those wrapped in `staticmethod`/`classmethod` are read as methods — the
+  narrow rule exists because counting every class-body assignment reports 49 of this suite's 64 as
+  orphans, and a detector that fires on correct code is worse than the gap it closes.
+* a `def` under a `match`/`case` in a class body. `_COMPOUND` covers `if`/`try`/`with`/`for`/
+  `while`, the shapes a version or import guard actually uses; `match` was left out deliberately
+  rather than missed, and is recorded here instead. Nobody writes it; if someone does, this file
+  goes quiet about that method and says so here first.
+
+**And where the `setattr` gate stops.** It now refuses the builtin `setattr(...)` outright (it
+never raises, so it is exactly the silent kind this module excludes) and accepts only a literal
+`raising=True`, because the previous `== "False"` string test passed `raising=bool(0)` and
+`raising=RAISING`. Both are inverted enumerations, per CLAUDE.md Rule 12. What is still invisible:
+`monkeypatch.setattr("module.attr", value)` in the *string* form, and any patch reached through an
+alias this file's `ast.unparse` does not spell as ending in `setattr`.
+
+**Duplicate class names.** Two classes of one name in one file used to mean the last one `ast.walk`
+reached answered for both — so a sibling fake's method set could vouch for a real orphan, and one
+`NOT_OVERRIDES` line could exempt two different classes. Both are now loud rather than latent, and
+the shape is not hypothetical: `test_budgets.py:696`/`:1272` and
+`test_llm_backend_bedrock.py:400`/`:513` already carry one each. They stay silent today only
+because neither is used as a base and neither is exempted; the guard is what keeps that from being
+load-bearing.
 """
 
 from __future__ import annotations
@@ -60,6 +96,98 @@ NOT_OVERRIDES: dict[str, str] = {
         "no reset and is not expected to grow one"
     ),
 }
+
+
+_DEF = (ast.FunctionDef, ast.AsyncFunctionDef)
+#: Class-body statements that can hide a `def` from a shallow `node.body` scan. A method defined
+#: under one of these is a method: Python executes the class body, so the name lands on the class
+#: exactly as a top-level `def` would, and a rename of its base counterpart disarms it identically.
+_COMPOUND = (ast.If, ast.Try, ast.With, ast.AsyncWith, ast.For, ast.AsyncFor, ast.While)
+
+
+def _local_classes(tree: ast.Module) -> dict[str, ast.ClassDef | None]:
+    """Name -> the class of that name in this module, or `None` when there is more than one.
+
+    `{n.name: n for n in ast.walk(tree)}` kept whichever definition `ast.walk` reached last, and
+    two duplicate names already exist in this suite (`test_budgets.py`'s two `_NullExecutor`s at
+    `:696`/`:1272`, `test_llm_backend_bedrock.py`'s two `NoEffortTarget`s at `:400`/`:513`), latent
+    only because neither is currently used as a base. The moment one is, a *sibling* fake's method
+    set vouches for the other's orphan and this file goes green over a disarmed instrument. Marking
+    the name ambiguous routes it to the `unresolved` list, which is a hard failure, not a skip.
+    """
+    out: dict[str, ast.ClassDef | None] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ClassDef):
+            out[node.name] = None if node.name in out else node
+    return out
+
+
+def _function_names(tree: ast.Module) -> set[str]:
+    """Every name this module binds to a function: a `def`, or a name assigned a `lambda`."""
+    names = {node.name for node in ast.walk(tree) if isinstance(node, _DEF)}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Lambda):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+    return names
+
+
+def _defined_methods(node: ast.ClassDef, functions: set[str]) -> list[str]:
+    """Every method name a class body binds, in any of the three shapes a class body can use.
+
+    A shallow `for s in node.body if isinstance(s, FunctionDef)` saw only the first, and the other
+    two are green-while-false shapes that were reproduced before this was widened:
+
+    * **`def` under an `if`/`try`** — `if sys.version_info >= (3, 12):` around an override, an
+      ordinary non-adversarial edit. Measured: wrapping `UnitWorker.on_cancel` that way and then
+      renaming `BaseWorker.on_cancel` away left all three cases green, where the unwrapped form
+      fails. Nothing in the suite uses this shape today (measured: 0), so binding it costs nothing.
+    * **assignment-bound override** — `on_cancel = _scripted_on_cancel` in the class body. Same
+      measurement, same silence. Only a value that is a *function* counts: a bare name bound by a
+      `def` or `lambda` in the same module, a literal `lambda`, or one of those wrapped in
+      `staticmethod`/`classmethod`. Counting every class-body assignment instead would report 49
+      of this suite's 64 as orphans — `input_model = Units`, `phase = PHASE` and the rest of the
+      ClassVar register — which is a detector firing on correct code, worse than the gap
+      (CLAUDE.md Rule 12's stop rule). The narrow rule reports **0** today and catches the defeat.
+    """
+    names: list[str] = []
+
+    def collect(statements: list[ast.stmt]) -> None:
+        for statement in statements:
+            if isinstance(statement, _DEF):
+                names.append(statement.name)
+            elif isinstance(statement, _COMPOUND):
+                collect(statement.body)
+                collect(getattr(statement, "orelse", []))
+                collect(getattr(statement, "finalbody", []))
+                for handler in getattr(statement, "handlers", []):
+                    collect(handler.body)
+            else:
+                names.extend(_assigned_method(statement, functions))
+
+    collect(node.body)
+    return [name for name in names if not (name.startswith("__") and name.endswith("__"))]
+
+
+def _assigned_method(statement: ast.stmt, functions: set[str]) -> list[str]:
+    """Targets of a class-body assignment whose value is a function. See `_defined_methods`."""
+    if isinstance(statement, ast.Assign):
+        targets = [t.id for t in statement.targets if isinstance(t, ast.Name)]
+    elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+        targets = [statement.target.id]
+    else:
+        return []
+    value = statement.value
+    if (
+        isinstance(value, ast.Call)
+        and ast.unparse(value.func) in {"staticmethod", "classmethod"}
+        and value.args
+    ):
+        value = value.args[0]
+    if isinstance(value, ast.Lambda):
+        return targets
+    if isinstance(value, ast.Name) and value.id in functions:
+        return targets
+    return []
 
 
 def _test_sources() -> Iterator[tuple[Path, ast.Module]]:
@@ -110,7 +238,7 @@ def _resolve(expr: str, table: dict[str, tuple[str, str | None]]) -> object | No
 def _attribute_names(
     expr: str,
     table: dict[str, tuple[str, str | None]],
-    local: dict[str, ast.ClassDef],
+    local: dict[str, ast.ClassDef | None],
     depth: int = 0,
 ) -> set[str] | None:
     """Names carried by the base `expr`, or None if the base could not be resolved at all."""
@@ -123,6 +251,8 @@ def _attribute_names(
         return names
     if expr in local:
         node = local[expr]
+        if node is None:
+            return None  # more than one class of this name here; see `_local_classes`
         names = set()
         for statement in node.body:
             if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -147,16 +277,12 @@ def test_no_test_subclass_defines_a_method_its_base_no_longer_has() -> None:
 
     for path, tree in _test_sources():
         table = _import_table(tree)
-        local = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+        local = _local_classes(tree)
+        functions = _function_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef) or not node.bases:
                 continue
-            methods = [
-                s.name
-                for s in node.body
-                if isinstance(s, (ast.FunctionDef, ast.AsyncFunctionDef))
-                and not (s.name.startswith("__") and s.name.endswith("__"))
-            ]
+            methods = _defined_methods(node, functions)
             if not methods:
                 continue
             inherited: set[str] = set()
@@ -199,11 +325,19 @@ def test_no_setattr_in_the_suite_opts_out_of_pytest_s_existence_check() -> None:
             if not isinstance(node, ast.Call):
                 continue
             func = ast.unparse(node.func)
+            if func == "setattr":
+                offenders.append(
+                    f"{path.name}:{node.lineno} the builtin setattr(...), which never raises"
+                )
+                continue
             if not func.endswith(("setattr", "patch.object")):
                 continue
             for keyword in node.keywords:
-                if keyword.arg == "raising" and ast.unparse(keyword.value) == "False":
-                    offenders.append(f"{path.name}:{node.lineno} {func}(..., raising=False)")
+                if keyword.arg == "raising" and ast.unparse(keyword.value) != "True":
+                    offenders.append(
+                        f"{path.name}:{node.lineno} {func}(..., raising="
+                        f"{ast.unparse(keyword.value)})"
+                    )
 
     assert not offenders, (
         "these patches bind a name without checking it exists, so a rename disarms them "
@@ -221,19 +355,18 @@ def test_the_allowlist_has_not_gone_stale() -> None:
     still_absent: list[str] = []
     for path, tree in _test_sources():
         table = _import_table(tree)
-        local = {n.name: n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)}
+        local = _local_classes(tree)
+        functions = _function_names(tree)
         for node in ast.walk(tree):
             if not isinstance(node, ast.ClassDef) or not node.bases:
                 continue
-            for statement in node.body:
-                if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                    continue
-                key = f"{path.name}:{node.name}.{statement.name}"
+            for method in _defined_methods(node, functions):
+                key = f"{path.name}:{node.name}.{method}"
                 if key not in NOT_OVERRIDES:
                     continue
                 for base in node.bases:
                     names = _attribute_names(ast.unparse(_unsubscript(base)), table, local)
-                    if names and statement.name in names:
+                    if names and method in names:
                         still_absent.append(
                             f"{key} is now a real override of "
                             f"{ast.unparse(_unsubscript(base))}; delete its NOT_OVERRIDES line"
@@ -242,14 +375,30 @@ def test_the_allowlist_has_not_gone_stale() -> None:
     assert not still_absent, "\n  ".join(["stale exemptions:", *still_absent])
 
     seen = {
-        f"{path.name}:{node.name}.{statement.name}"
+        f"{path.name}:{node.name}.{method}"
         for path, tree in _test_sources()
+        for functions in [_function_names(tree)]
         for node in ast.walk(tree)
         if isinstance(node, ast.ClassDef) and node.bases
-        for statement in node.body
-        if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef))
+        for method in _defined_methods(node, functions)
     }
     assert not (set(NOT_OVERRIDES) - seen), (
         "these exemptions name methods that no longer exist; delete them: "
         f"{sorted(set(NOT_OVERRIDES) - seen)}"
+    )
+
+    # An exemption is keyed `file:Class.method`, so if a file defines that class name twice the
+    # one line exempts BOTH of them — the second silently inheriting a reason written about the
+    # first. Loud rather than latent: two duplicate class names already exist in this suite.
+    ambiguous = [
+        key
+        for path, tree in _test_sources()
+        for name, node in _local_classes(tree).items()
+        if node is None
+        for key in NOT_OVERRIDES
+        if key.startswith(f"{path.name}:{name}.")
+    ]
+    assert not ambiguous, (
+        "these exemptions name a class this file defines more than once, so one reason exempts "
+        f"every class of that name: {sorted(ambiguous)}. Rename one of the classes."
     )
