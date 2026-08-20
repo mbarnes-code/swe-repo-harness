@@ -10220,6 +10220,12 @@ async def _resume_impl(
     # `status = 'RUNNING'`, and it shares this function's single `now`: step 2 and step 3 must
     # agree about which rows are alive, and two `_now()` calls cannot be made to agree by
     # inspection.
+    #
+    # Sitting below `project_once` as well is immaterial and deliberate rather than overlooked:
+    # this sweep touches the filesystem and the docker daemon and writes no `phases` row, so the
+    # projection §11.5 step 7 regenerates from SQLite cannot differ either side of it. Splitting
+    # the branch above to interleave them would buy a numbering that matches §11.5 and nothing
+    # else.
     live_names = await _with_ro(path, lambda conn: _live_sandbox_names(conn, run_id, horizons))
     reaped_worktrees = await _reap_orphan_worktrees(settings, run_id, live_names, dry_run=dry_run)
     reaped_containers = await _reap_orphan_containers(run_id, live_names, dry_run=dry_run)
