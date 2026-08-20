@@ -7369,9 +7369,23 @@ not-stale is a row this calls live.
 **The consequence for a future editor, stated so the reconciliation does not undo it:** in the
 non-dry path the negation is dead weight, and a reader who checks only that path will find it
 provably redundant and delete it. It is load-bearing under `--dry-run` alone. The comment at
-`src/fleet/cli.py:9919-9924` says so at the definition, and
-`test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none`
-(`tests/test_cli.py:1745`) fails if it goes.
+`src/fleet/cli.py:9919-9924` says so at the definition.
+
+The negation is pinned by
+**`test_resume_dry_run_does_not_read_a_dead_workers_row_as_a_claim_on_its_sandbox`**
+(`tests/test_cli.py`), which builds the state the predicate is about — one `RUNNING` `phases`
+row stale by both horizons at `attempts = 2` — and asserts under `--dry-run` that
+`live_sandbox_names` is empty and that the rung-3 worktree is previewed as reapable. Both
+`NOT (1 …)` → `NOT (0 …)` and the realistic delete-the-negation-and-drop-the-params refactor
+fail it, with the rest of `tests/test_cli.py` green.
+
+**`test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none` does NOT pin it, and an
+earlier revision of this section wrongly said it did.** That test builds no `phases` rows at all,
+so its live set is empty whatever the predicate says and both mutations above passed it. The
+claim stood from `ead96e6`, the commit that landed this ADR, until the commit that replaced this
+paragraph; it was worse than naming no test, because it stopped the next author looking. Cite the
+symbol, never a line number — the retracted sentence cited `tests/test_cli.py:1745` and that test
+had already moved to `:1774` by the time this correction was written.
 
 `lease_owner IS NOT NULL` was considered as a third conjunct — "still holds a lease" spelled
 mechanically, since the sweep NULLs that column when it hands a lease back — and **rejected**. It
