@@ -7647,3 +7647,189 @@ slots-freed-back-to-back window open without awaiting past it, and only then doe
 the target test. `mypy --strict` and `ruff check` clean on both files. Scoped run (not the full
 suite): `tests/test_budgets.py tests/test_workers_scan.py tests/test_runner.py
 tests/test_scan_e2e.py` — 116 passed, `0` skipped.
+
+---
+
+## ADR-0084 — `ResizableLimiter`'s ceiling check moves **inside** the admission gate: the charge/check split had already cost one over-admission, and the AIMD subtask adds callers who would each owe the same forgotten precondition
+
+**Status:** accepted; the behaviour is `99862a9` (`src/fleet/orchestrator/budgets.py`,
+`tests/test_budgets.py`). Every file:line below is that ref unless another is named.
+**Supersedes nothing.** ADR-0083 chose the primitive and described its surface; this ADR changes
+one private detail of that primitive's interior and leaves its public surface — `acquire` /
+`release` / `resize` / `locked` / `capacity` / `borrowed` / `__aenter__` / `__aexit__` — exactly as
+ADR-0083 records it. ADR-0083's citations are anchored at `27cb03b` and are unaffected by the line
+movement here.
+
+**Provenance (CLAUDE.md Guardrail 1).** The defect is fact: `d44b94f`. The *shape* concern is an
+**Agent Recommendation**, raised as the first concern of the lane that fixed the defect
+(`.superpowers/sdd/design-resume-step5/task-limfix-report.md` §7 item 1), which deliberately did
+not act on it and asked for an explicit ruling before R5 lands. Nothing below is a SPEC
+requirement; SPEC §11.8 requires an AIMD-adjustable ceiling and says nothing about how the
+primitive is factored internally.
+
+### 1. The shape, and why it was a defect generator rather than one defect
+
+Before this change the class had two charge sites. `acquire`'s fast path charged inline, one line
+under its own `locked()` test, so the check could not drift away from the charge. `_wake_next`
+charged **unconditionally** and left the ceiling check to whoever called it — a contract carried
+in prose, owed by three call sites, and enforced by nothing.
+
+Two of the three paid it. `release` tested `_borrowed < _capacity` before calling; `resize` folded
+the same test into a `while … and _wake_next()` loop. `acquire`'s cancellation recovery did not,
+and a `resize` down landing between a waiter's wake and its resume left `_borrowed` above
+`_capacity` while the recovery handed the slot on anyway — two calls in flight against a ceiling of
+one, i.e. a cancellation silently undoing the throttle that a 429 had just imposed.
+`d44b94f` fixed that caller by adding the missing test.
+
+**The fix was correct and the shape was not.** A guard added to one caller leaves the next caller
+owing the same unenforced debt, and the debt is about to be taken on: R5 (the AIMD controller) is
+the subtask that will call `resize()` on a live limiter for the first time, and the research
+decomposition assigns it new paths that create headroom
+(`docs/superpowers/plans/rate-limiting-scope-research.md:433-436`). Under CLAUDE.md Rule 12's stop
+rule the question is whether a *normal* author trips the escape, not an adversarial one. Here the
+answer is that a normal author already did, on the first three tries, in code reviewed by two
+lanes — which puts this on the accidentally-reachable side of the rule, not the stated-boundary
+side.
+
+### 2. The decision
+
+`_wake_next` is replaced by `_drain` (`:1074-1095`), which performs the ceiling test itself and
+charges only inside it:
+
+- The charge at `:1091` is reachable only under the `while self._borrowed < self._capacity` test at
+  `:1088`. Calling `_drain` from a state with no headroom — `_borrowed` sitting above `_capacity`
+  after a shrink — admits nobody and charges nothing, rather than being undefined behaviour the
+  caller was supposed to have prevented.
+- All three call sites become a bare `self._drain()`: the cancellation recovery at `:1052`,
+  `release` at `:1060`, `resize` at `:1072`. None of them tests the ceiling, because none of them
+  can usefully have an opinion about it.
+
+The gain is that a caller now states an **intent** — "admit whoever fits now" — where it used to
+state a **precondition**. A precondition can be stated wrongly; an intent cannot. Note this closes
+the hazard in both directions, which the old shape did not: the old contract could be underpaid
+(the defect) *and* overpaid (a caller writing one `_wake_next()` where the headroom it created was
+two slots would silently under-admit and leave a waiter parked against real headroom). The loop
+lives inside the gate now, so neither is expressible.
+
+### 3. Why this is not a behaviour change at any of the three sites
+
+The brief for this change required all three to keep their current behaviour, so this was checked
+rather than assumed.
+
+- **`resize` (`:1072`).** Exactly equal. The old line was
+  `while self._borrowed < self._capacity and self._wake_next(): pass` — the same test around the
+  same charge, in the same order. `_drain`'s loop is that loop with the test moved one frame down.
+- **`release` (`:1060`) and the cancellation recovery (`:1052`).** Both previously woke *at most
+  one* waiter under an `if`; `_drain` loops. The loop still transfers exactly one, because both
+  paths free exactly one slot: whenever live waiters exist, `_borrowed` was at or above `_capacity`
+  before the decrement, so the first charge restores `_borrowed == _capacity` and the loop's test
+  fails on its second pass. For the loop to wake a second waiter, the limiter would have to be
+  holding parked waiters while two or more slots of headroom existed — a state no path produces,
+  since every path that creates headroom drains synchronously before returning. Should such a state
+  ever arise, waking into it is the correction, not a regression: it is the invariant being
+  restored, not a ceiling being exceeded.
+
+Neither of the two properties a reviewer previously established is disturbed:
+
+- **FIFO is intact.** `_drain` still scans `_waiters` from the head and still skips `done()`
+  futures (`:1089-1090`), so a waiter already chosen is never chosen twice; the removal from the
+  deque still happens in the waiter's own `finally` (`:1043`), which still runs before the `except`
+  (`:1044`), so a recovering waiter cannot re-select its own future.
+- **No `await` was introduced between creating headroom and charging it.** `_drain` is a plain
+  `def` containing no `await`, and each caller adjusts `_borrowed` or `_capacity` on the statement
+  immediately above its `_drain()` call. The fast path therefore still cannot barge headroom that
+  a drain is in the middle of handing out.
+
+Rule 2 was the live alternative here — the honest option was to record "the shape cannot be
+improved for less complexity than it saves" and stop. It was not taken because the change *removes*
+code rather than adding it: three caller-side ceiling tests collapse into one, no new method,
+no new state, no new argument, and the `bool` return value that only `resize`'s loop consumed is
+gone with it.
+
+### 4. What a future caller may now rely on
+
+Stated as a contract, because R5's author is the next reader:
+
+1. `_drain()` is safe to call from **any** state of the limiter, including one where `_borrowed`
+   exceeds `_capacity`. It never charges a slot the current ceiling has no room for.
+2. One call drains as far as the ceiling allows. A caller that creates several slots of headroom
+   at once — a `resize` up by three — needs one `_drain()`, not three.
+3. Withholding a slot strands nothing. If a drain declines to admit, the next `release` or
+   `resize` re-drains once the headroom is real.
+4. **A caller must not charge `_borrowed` itself.** This is the one obligation that survives, and
+   it is the only one, so it is enforced mechanically rather than by this sentence — see §5.
+
+### 5. Verification
+
+Scoped run, `tests/test_budgets.py`: **33 passed** (31 before, 2 added). `mypy --strict` — the
+configured gate, `packages = ["fleet"]` — **no issues found in 115 source files**, identical before
+and after. `ruff check` on both files leaves one `E501` at `tests/test_budgets.py:1051`, which is
+**pre-existing**: the same line is flagged at `HEAD` before this change (verified by piping
+`git show HEAD:tests/test_budgets.py` through `ruff --stdin-filename`, so the repo's own config
+resolves). `tests/test_budgets.py` is outside the strict gate; checked directly it carries 4 errors
+against 6 on the same file at `HEAD`, the two removed being those of the deleted instrument.
+
+**The instrument, and the near-miss that justifies its shape.** The fuzz's previous instrument
+subclassed the limiter and overrode `_wake_next`. When that method was folded into `_drain`, the
+override stopped being called — and the fuzz went on **passing**, recording nothing, on a run where
+the whole class had just been rewritten under it. A detector that cannot fire is indistinguishable
+from a clean result, which is why CLAUDE.md Guardrail 6 asks for the known-bad state before the
+clean one. It is replaced by `_watch_admissions` (`tests/test_budgets.py:753-803`), which hooks the
+loop's `create_future` so that each waiter's future records `(borrowed, capacity)` at the instant
+its slot is charged and the future settled.
+
+*What that quantity is, and whether it can see this defect class.* It is the **admission event**:
+the ceiling in force at the moment a parked waiter is handed a slot. It is deliberately **not**
+`borrowed`, which is blind here — a cancelled waiter hands on a slot that was already charged, so
+the count reads 2 either side of a breach against a ceiling of 1. It is also not measured at the
+waiter's *resume*, which would report a false breach whenever a legitimate wake is followed by a
+shrink before the waiter runs. Settling the waiter's future is the one step any shape of this class
+must take, so the instrument survives both the refactor and a mutation that reverses it — which is
+what lets one instrument judge both states. A second, independent instrument covers the obligation
+in §4 item 4: `test_only_the_fast_path_and_the_drain_may_charge_a_slot` (`:1121-1185`) parses the
+class's AST and asserts that an increment of `_borrowed` appears in exactly `{acquire, _drain}` and
+a rebinding in exactly `{__init__}`. That is the whitelist form CLAUDE.md Rule 12 asks for in place
+of a blacklist of forbidden sinks: a new charge site trips it whether or not its author invented a
+form nobody predicted.
+
+Validated on four states before any clean result was trusted. Each mutation was applied by script
+to the committed tree, asserted to have changed the file (byte deltas below, `assert text != before`
+before the write), and restored from a byte-for-byte backup verified with `git diff --stat`:
+
+| State | Mutation | Result |
+|---|---|---|
+| **M1 — the shape alone** | `_drain` charges one slot unconditionally; `release` and `resize` guard their own calls, i.e. `d44b94f`'s *behaviour* with the check back outside (+83 bytes) | **32 passed, 1 failed.** Only `test_a_drain_from_a_full_ceiling_admits_nobody_so_no_caller_needs_a_guard` fails: `the gate charged a slot it had no room for: [(3, 1)]` |
+| **M2 — literally pre-`d44b94f`** | M1 with the cancellation recovery left unguarded (+27 bytes) | 3 failed: the new guarantee, `d44b94f`'s deterministic test, and the fuzz — which fires **71 events across 68 of 400 seeds** |
+| **M3 — synthetic fault, fresh** | an extra unguarded charge added to `release` on the *fixed* class (+160 bytes) | fuzz fires **3,531 events, 400/400 seeds**; the AST whitelist also fires |
+| **M4 — the whitelist's own escape** | `self._borrowed = self._borrowed + 1` in `release`, dodging the `AugAssign` test (+44 bytes) | the whitelist's second assertion fires: `_borrowed` is rebound outside the constructor |
+
+**M1 is the discriminating one, and it is the Rule 12 shape.** It is behaviourally identical to the
+code that shipped at `d44b94f`, so every pre-existing test passes under it — including both tests
+`d44b94f` itself added, which walk the exact path the defect took. What fails is only the new
+assertion, on the only thing that actually changed: whether the gate refuses on its own account or
+trusts its caller to have checked. M2 is not discriminating and is not offered as such; it is there
+to put the new instrument against the original known-bad state.
+
+**The instrument's numbers reproduce the predecessor's exactly.** M2 gives 71 events over 68 of 400
+seeds and M3 gives 3,531 events over 400 of 400 — the same figures the previous lane measured with
+a completely different hook (`task-limfix-report.md` §4.2). Two independent instruments agreeing to
+the event on the same seeded states is a stronger result than either alone, and it is the reason
+the 0/400 clean reading on the shipped code is offered as evidence rather than as an absence.
+
+One further honest note on that clean reading: with the check inside the gate, the fuzz's
+`borrowed > capacity` condition cannot fire through `_drain` **by construction**. Its value is
+therefore not that it re-proves the ceiling arithmetic, but that it would catch a charge reaching a
+waiter by any route that bypasses the gate — which is exactly the residue §4 item 4 and the AST
+whitelist exist to cover.
+
+### 6. What this ADR does not do
+
+- It does not change `ResizableLimiter`'s public surface, its constructor arguments, or the
+  `floor` / `ceiling` clamping semantics ADR-0083 §3 records; `Limits.create` is untouched.
+- It does not decide R5's design. It only removes one way for R5 to be written wrongly.
+- It does not re-open ADR-0083's open assumption about the ceiling defaulting to the starting
+  capacity. That is still R5's to accept or override with an explicit `ceiling=`.
+- It allocates no D-number. This is a shape hardened before it produced a second defect, not a
+  ledger entry; the defect it descends from was fixed at `d44b94f` and needs no new record.
+- It leaves the pre-existing `E501` at `tests/test_budgets.py:1051` alone (CLAUDE.md Rule 3 — it is
+  not this change's mess), and reports it here rather than editing a correct line into scope.
