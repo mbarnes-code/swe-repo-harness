@@ -26,6 +26,7 @@ infrastructure failure, not a stale plan.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Final
@@ -42,6 +43,7 @@ from fleet.state.db import StateWriter
 __all__ = [
     "CheckpointRejection",
     "LoadedCheckpoint",
+    "delete_in_unit",
     "load",
     "save",
 ]
@@ -86,6 +88,8 @@ SELECT model_name, payload FROM checkpoints
  WHERE run_id = ? AND repo_id = ? AND phase = ?
 """
 
+_DELETE: Final = "DELETE FROM checkpoints WHERE run_id = ? AND repo_id = ? AND phase = ?"
+
 
 def _model_name(model: type[BaseModel]) -> str:
     """Fully qualified, so two same-named models in different modules cannot be confused."""
@@ -129,6 +133,35 @@ async def save(
         await conn.execute(_UPSERT, row)
 
     await writer.submit(unit)
+
+
+async def delete_in_unit(
+    conn: aiosqlite.Connection,
+    *,
+    run_id: str | UUID,
+    repo_id: str,
+    phases: Iterable[Phase],
+) -> int:
+    """Delete the checkpoints for `phases`, INSIDE a write unit the caller already owns.
+
+    This is the one function here that takes a **connection** rather than a `StateWriter`, and
+    that asymmetry is the whole point. §11.5 step 5 demotes a repo's `phases` rows to `PENDING`
+    and drops the checkpoints above the re-entry floor together: a checkpoint for a phase that is
+    about to be re-run is a lie about work the run no longer claims. If the two writes were two
+    units they would be two `BEGIN IMMEDIATE` transactions, and a crash between them would make
+    that lie *durable* — a `PENDING` phase carrying the previous run's finished payload, which
+    `load()` would hand back as usable on the next resume. So the caller submits one unit and
+    calls this inside it; there is no `StateWriter` overload, because offering one would offer
+    the split.
+
+    Returns the number of rows actually deleted (phases with no checkpoint contribute 0), so a
+    caller can report what it discarded rather than what it attempted.
+    """
+    deleted = 0
+    for phase in phases:
+        cursor = await conn.execute(_DELETE, (str(run_id), repo_id, int(phase)))
+        deleted += int(cursor.rowcount)
+    return deleted
 
 
 async def load[M: BaseModel](

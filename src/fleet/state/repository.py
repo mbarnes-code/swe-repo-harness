@@ -60,6 +60,7 @@ fields are returned as stored (`str`).
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -67,8 +68,18 @@ from typing import Final, Protocol, runtime_checkable
 
 import aiosqlite
 
-from fleet.models.enums import Phase, RepoStatus, TaskKind
+from fleet.models.enums import (
+    PHASE_DEMOTED_KIND,
+    Phase,
+    PhaseDemotion,
+    RepoStatus,
+    TaskKind,
+    demote,
+)
+from fleet.obs.redact import redact_text
+from fleet.state import checkpoints
 from fleet.state.db import StateWriter
+from fleet.util.hashing import sha256_text
 
 __all__ = [
     "READ_ARRAYSIZE",
@@ -439,6 +450,16 @@ class StateRepository(ReadOnlyRepository, Protocol):
 
     async def reap_expired_phase_leases(self, run_id: str, *, now: datetime) -> int: ...
 
+    async def demote_to_floor(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        floor: Phase,
+        reason: str,
+        now: datetime,
+    ) -> tuple[PhaseDemotion, ...]: ...
+
     # -- primitive 4: the ledger CAS ---------------------------------------------------
     async def open_budget_ledger(self, run_id: str, *, max_usd: float, now: datetime) -> None: ...
 
@@ -782,6 +803,43 @@ def _repo_settle_refused(
         f"${reserved_usd:.4f} reserved into ${actual_usd:.4f} spent — no such reservation, or the "
         f"result would breach the repo ceiling (§3.5). ledger={ledger}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 5 — the demotion write (ADR-0077)
+# --------------------------------------------------------------------------------------
+
+#: Every `phases` row for one repo, status only. Read *inside* the demotion's own transaction:
+#: the floor was computed from a read-only handle outside it, and the `REQUIRES_HUMAN_INTERVENTION`
+#: refusal below must be decided against the rows the UPDATE will actually hit.
+_DEMOTE_SELECT_SQL: Final = "SELECT phase, status FROM phases WHERE run_id = ? AND repo_id = ?"
+
+#: The demotion itself. `attempts` is ABSENT from the SET list and that absence is the feature:
+#: `complete_phase` is the only writer of `phases.attempts` anywhere in `src/`, so a demotion that
+#: does not call it cannot spend a rung of the ladder. `AND status = 'SUCCEEDED'` keeps the
+#: statement true on its own terms — a row that changed under us matches zero rows instead of
+#: silently overwriting a status `demote()` never adjudicated.
+_DEMOTE_PHASE_SQL: Final = (
+    "UPDATE phases SET status = ?, updated_at = ? "
+    " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status = 'SUCCEEDED'"
+)
+
+#: One `findings` row per demoted phase. Per PHASE, not per repo: `PhaseDemotion.payload()`'s own
+#: docstring records the hazard — `cli._note_finding` fingerprints on `(run_id, repo_id, kind)`
+#: alone, so three demoted phases of one repo would UPSERT into ONE row and two demotions would
+#: vanish. The fingerprint below carries the phase, so §11.7 idempotency still holds (a second
+#: resume demoting the same phase converges on the same row) without collapsing distinct phases.
+_DEMOTE_FINDING_SQL: Final = (
+    "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, created_at) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?) "
+    "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+    "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at"
+)
+
+
+def _demotion_fingerprint(run_id: str, repo_id: str, phase: Phase) -> str:
+    """Semantic identity of one demotion: this repo, this phase, in this run."""
+    return sha256_text("\x00".join((run_id, repo_id, PHASE_DEMOTED_KIND, str(int(phase)))))
 
 
 # --------------------------------------------------------------------------------------
@@ -1278,6 +1336,112 @@ class SqliteStateRepository:
         if written is None:
             raise LeaseStolenError(_stolen(run_id, repo_id, phase, fence, "complete"))
         return RepoStatus(written)
+
+    async def demote_to_floor(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        floor: Phase,
+        reason: str,
+        now: datetime,
+    ) -> tuple[PhaseDemotion, ...]:
+        """Apply the §11.5 step-5 demotion for one repo, in ONE transaction (ADR-0077).
+
+        `floor` is what `orchestrator/reentry.phase_floor` computed; this method does not
+        recompute it and never consults `preconditions_hold`. Everything from `floor` up to
+        `Phase.VERIFY` is re-entry territory, so for each phase in that span it does two things
+        and one thing conditionally:
+
+        * every `SUCCEEDED` row in the span goes to `PENDING` through **`demote()`** — never
+          through `transition(..., resume=True)`. `transition()` returns a bare status and emits
+          nothing, so a demotion made through it is invisible to whoever reads the run;
+          `demote()` returns the status *and* the `PhaseDemotion` the caller owes, and this
+          method discharges that obligation by writing one `PhaseDemoted` finding per demoted
+          phase in the same transaction as the status change. (`docs/SPEC.md` Constraint 7 says
+          otherwise; it is wrong, and `enums.transition`'s own docstring says so.)
+        * the `checkpoints` row for the phase is deleted, because a checkpoint for a phase that
+          is about to be re-run is a lie about work the run no longer claims;
+        * a non-`SUCCEEDED` row in the span is left as it is. `PENDING`, `RUNNING` and `BLOCKED`
+          have no landed work to discard, and `demote()` refuses all three precisely so a
+          `PhaseDemoted` cannot be minted for them.
+
+        Returns the demotions applied, in phase order — empty when nothing was demotable.
+
+        **`REQUIRES_HUMAN_INTERVENTION` short-circuits the whole repo, and the check is re-read
+        here rather than trusted from the floor computation.** `phase_floor` already returns
+        `None` for such a repo, but it read through the `mode=ro` handle outside this
+        transaction; §12 item 46 (ii) requires that no automatic sweep — `fleet resume` named
+        among them — can move a repo out of that state, and a refusal that lives only in the
+        caller is a refusal the next caller can forget. One `SELECT` inside `BEGIN IMMEDIATE`
+        makes it a property of the write.
+
+        **`DEGRADED` rows in the span are left completely alone — status *and* checkpoint.**
+        ADR-0077 §5: `DEGRADED` leaves the machine only through a budgeted revalidation round
+        (§3.5.1), so demoting it to `PENDING` would spend that budget by the back door with no
+        round recorded. Deleting its checkpoint is the same trespass one level down — it forces
+        the revalidation round to start from nothing, which is the cost the budget was sized
+        against — so the deletion skips it too. THE HAZARD THIS LEAVES, stated rather than
+        hidden: a `DEGRADED` phase above the floor keeps a checkpoint built on output the
+        demotion is about to re-generate, so the round that eventually revalidates it resumes
+        from a stale anchor. ADR-0077 §5 forbids the alternative; nothing here is claimed to
+        resolve the tension.
+
+        `attempts` is retained for every phase, on every path: the SET list does not name the
+        column and this method does not call `complete_phase`, which is the only writer of
+        `phases.attempts` in `src/`. No lease fence is carried, deliberately — resume holds no
+        lease, and step 3 has already reclaimed every stale one and bumped its fence, so a fence
+        nobody granted would be a fence in name only.
+        """
+        stamp = _iso(now)
+        span = tuple(phase for phase in Phase if phase >= floor)
+
+        async def unit(conn: aiosqlite.Connection) -> tuple[PhaseDemotion, ...]:
+            async with conn.execute(_DEMOTE_SELECT_SQL, (run_id, repo_id)) as cursor:
+                rows = {
+                    Phase(int(row[0])): RepoStatus(str(row[1])) for row in await cursor.fetchall()
+                }
+            if RepoStatus.REQUIRES_HUMAN_INTERVENTION in rows.values():
+                return ()
+
+            demotions: list[PhaseDemotion] = []
+            for phase in span:
+                # A missing row is the schema default, PENDING — nothing landed, nothing to
+                # discard. `demote()` would refuse it, so it is filtered here rather than caught.
+                if rows.get(phase) is not RepoStatus.SUCCEEDED:
+                    continue
+                new_status, record = demote(
+                    RepoStatus.SUCCEEDED, repo_id=repo_id, phase=phase, reason=reason
+                )
+                await conn.execute(
+                    _DEMOTE_PHASE_SQL,
+                    (str(new_status), stamp, run_id, repo_id, int(phase)),
+                )
+                demotions.append(record)
+
+            await checkpoints.delete_in_unit(
+                conn,
+                run_id=run_id,
+                repo_id=repo_id,
+                phases=[p for p in span if rows.get(p) is not RepoStatus.DEGRADED],
+            )
+
+            for record in demotions:
+                await conn.execute(
+                    _DEMOTE_FINDING_SQL,
+                    (
+                        run_id,
+                        repo_id,
+                        PHASE_DEMOTED_KIND,
+                        "warn",
+                        _demotion_fingerprint(run_id, repo_id, record.phase),
+                        redact_text(json.dumps(record.payload(), sort_keys=True)),
+                        stamp,
+                    ),
+                )
+            return tuple(demotions)
+
+        return await self._writer.submit(unit)
 
     async def reap_expired_phase_leases(self, run_id: str, *, now: datetime) -> int:
         """The §6 REAPER — leases AND budget reservations, in ONE transaction (v8).
