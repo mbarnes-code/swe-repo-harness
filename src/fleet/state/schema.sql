@@ -471,7 +471,8 @@ CREATE TABLE IF NOT EXISTS llm_cache (            -- content-addressed LLM resul
                                                   --   a weaker model poisons every later run
                                                   --   (§13 row 39).
     structured_output_mode TEXT NOT NULL DEFAULT 'JSON_SCHEMA',  -- ADR-0023; §7.7 rung used
-    effort      TEXT NOT NULL,
+    effort      TEXT NOT NULL,                    -- ADR-0075: '' = target declared none. NOT NULL
+                                                  --   and no CHECK, so absence needs no migration.
     context_policy TEXT,                          -- ADR-0021; NULL for non-ladder roles
     rejected_approach_digest TEXT NOT NULL        -- sha256 over the signatures RENDERED in prompt
         DEFAULT 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',  -- sha256(b'')

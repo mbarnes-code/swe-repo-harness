@@ -1,10 +1,13 @@
 """SPEC §6 / §11.6 / ADR-0021 / ADR-0023 — the content-addressed `llm_cache`.
 
-The cache is not an optimisation here: it is the harness's entire determinism story, because
-adaptive thinking forbids pinning a temperature and the same role may be answered by a different
-transport on the next call. So each test pins a property whose absence is *silent* — a hit that
-still charges, a key that changes on a patch release, a stale answer served after the prompt
-changed, an LRU clock that never advances so `fleet gc` evicts entries at random.
+The cache is not an optimisation here: it is the harness's entire determinism story, because the
+harness pins no sampling controls — no `temperature`, `seed`, `top_p` or `thinking` key is built
+anywhere under `src/fleet/llm/` (§11.6) — and the same role may be answered by a different
+transport on the next call. (The premise this docstring used to give instead, that the model's
+own reasoning mode forbids pinning a temperature, was retracted as false: D66.) So each test pins
+a property whose absence is *silent* — a hit that still charges, a key that changes on a patch
+release, a stale answer served after the prompt changed, an LRU clock that never advances so
+`fleet gc` evicts entries at random.
 
 The inner client is a fake that counts calls and never touches a socket. "The backend was not
 called" is the assertion that matters: a cache that returns the right value by calling the model
@@ -14,10 +17,12 @@ again is not a cache.
 from __future__ import annotations
 
 import asyncio
+import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import aiosqlite
 import pytest
 from pydantic import BaseModel
 
@@ -539,6 +544,85 @@ def test_the_sqlite_store_round_trips_through_the_single_writer(tmp_path: Path) 
                 assert row.record.usage.input_tokens == 1_000
                 assert await store.evict_older_than(T0 + timedelta(days=1)) == 1
                 assert await store.get(_parts().compute()) is None
+            finally:
+                await read.close()
+
+    try:
+        asyncio.run(drive())
+    finally:
+        release_write_slot()
+
+
+@pytest.mark.integration
+def test_no_declared_effort_persists_as_empty_string_in_a_not_null_check_free_column(
+    tmp_path: Path,
+) -> None:
+    """ADR-0075 consequence 2 — the semantic the `effort` column annotation states, exercised.
+
+    ADR-0075 made `BackendTarget.effort` optional and chose to spell absence as `''` in this
+    column precisely so the column could stay `TEXT NOT NULL` with **no** `CHECK` and need no
+    migration. `schema.sql` and §6's listing of it both carry that as a comment; a comment is not
+    enforcement, and the drift that prompted this test was one of the two carrying it and the
+    other not.
+
+    Bound by exercising the semantic against the real schema rather than by string-comparing the
+    two listings: a reflow of either comment would fail a text comparison while changing nothing,
+    and — the direction that matters — a `CHECK (effort IN ('low','medium','high'))` added to
+    `schema.sql` would sail through a text comparison of the *comment* while making a
+    no-effort target unstorable. Each clause of the annotation gets its own assertion, because
+    each fails differently: `''` not written (a fabricated default is back), `''` not accepted
+    (a CHECK arrived), `NULL` accepted (a second spelling of absence arrived, which is the
+    migration the ADR declined).
+    """
+
+    async def drive() -> None:
+        db = tmp_path / "state" / "fleet.db"
+        await initialize_database(db)
+        async with StateWriter(db, owner="llm-cache-effort-test") as writer:
+            read = await connect_ro(db)
+            try:
+                store = SqliteLlmCacheStore(writer=writer, read_conn=read)
+                key = _parts(effort=None).compute()
+                await store.put(
+                    CacheRow(
+                        record=LlmCallRecord(
+                            cache_key=key,
+                            role=ROLE,
+                            tier=ModelTier.CHEAP,
+                            backend=PRIMARY.backend,
+                            model_id=PRIMARY.model_id,
+                            structured_output_mode=StructuredOutputMode.JSON_SCHEMA,
+                            effort=None,
+                            prompt_sha256=prompt_sha256(MESSAGES),
+                            response_schema_sha256=response_schema_sha256(RepoClassification),
+                            response_json=ANSWER.model_dump_json(),
+                            created_at=T0,
+                        ),
+                        last_hit_at=T0,
+                    )
+                )
+
+                sql = "SELECT effort, typeof(effort) FROM llm_cache WHERE cache_key = ?"
+                async with read.execute(sql, (key,)) as cursor:
+                    stored = await cursor.fetchone()
+                assert stored is not None, "the row the CHECK-free column was supposed to accept"
+                assert stored[0] == "", (
+                    "absence must persist as '' — a level substituted here is the fabricated "
+                    "default ADR-0075 exists to remove, and it re-keys the cache"
+                )
+                assert stored[1] == "text", "'' is the empty TEXT value, not NULL and not a blob"
+
+                back = await store.get(key)
+                assert back is not None
+                assert back.record.effort is None, "'' must read back as 'declared none'"
+
+                async def blank_it(conn: aiosqlite.Connection) -> None:
+                    await conn.execute(
+                        "UPDATE llm_cache SET effort = NULL WHERE cache_key = ?", (key,)
+                    )
+
+                with pytest.raises(sqlite3.IntegrityError):
+                    await writer.submit(blank_it)
             finally:
                 await read.close()
 
