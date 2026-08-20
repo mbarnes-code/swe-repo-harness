@@ -4140,6 +4140,23 @@ is the one this whole class has: a reconciler follows the prose.
 
 ---
 
+### D71 — UNUSED. Allocated in error and never written; the number is free for allocation
+
+Not a defect record: no code, no test, and no failed run is filed under D71. The number is
+mentioned four times above (`:3267`, `:4008`, `:4052`, `:4139`), every time as "the next free
+number," never as a heading that opens an entry — this document's convention for a real record is
+a line beginning `**D<n> —` or `### D<n> —`, and no such line for D71 exists anywhere in this
+file (`grep -n '^\*\*D71\b\|^### D71\b'` returns nothing). The gap exists because D72 and D73 (the
+section immediately following) were allocated centrally under the mistaken belief that D70 was not
+the highest pre-existing number; those two numbers are committed and cited elsewhere, so
+renumbering them down to close this gap would break live citations to fix an appearance, and is
+not done. This entry exists instead — the same choice made for three unwritten ADR numbers earlier
+today: a short, clearly-marked placeholder rather than a silent renumber (`docs/DECISIONS.md`
+ADR-0079–0081, `f76da41`). It marks the distinction a reader cannot otherwise make from a bare gap:
+**free is not deleted.** D71 remains open for the next lane that needs a number.
+
+---
+
 ## D72–D73 — §11.5 step 2's two halves: one sweeping an empty namespace, one that could not report its own failure
 
 Both numbers were allocated centrally at dispatch (CLAUDE.md §3). **D71 was never allocated and
@@ -4259,3 +4276,48 @@ hazard belongs to the code under test, not to the tests that remember to opt out
 because "a test suite that reaches a real daemon" is a hazard that outlives the defect that
 exposed it, and because the seam functions (`_reap_container_sandbox`, `_reap_worktree_manager`)
 exist for exactly this and a future sweep added outside them re-opens it silently.
+
+---
+
+## D74 — OPEN, recorded only. Phase 3/4 worktree paths are computed twice, independently, and nothing enforces the two stay equal
+
+Found by the lane designing the worktree-namespace fix for D72
+(`docs/superpowers/plans/design-worktree-namespace.md`, its "Leg 4"). Verified here directly
+against `HEAD` (`87ed419`), not inherited from that document.
+
+**Leg A — unlike D72's worktrees, these are already registered where the reaper looks.**
+`_plan_build` and `_plan_verify` (`src/fleet/cli.py:7321`, `:7416`) each cut a worktree with `git
+worktree add --detach --force` through the `Git` bound to the *monorepo* checkout, at `build_root
+/ repo_id` and `verify_root / repo_id`. `WorktreeManager` interrogates that same monorepo checkout
+(`repo_dir = settings.root / run.monorepo_path`, `cli.py:10464-10471`, feeding `_git_run` at
+`sandbox/worktree.py:134-141`). D72's Phase 1/2 worktrees fail on both name *and* registry — cut
+through a per-repo mirror `WorktreeManager` never looks at (`workers/clone.py:397-407`). These fail
+on name only: a directory already sits in the registry the reaper reads, so renaming it to carry
+`run_prefix(run_id)` would make it reapable with no change to `WorktreeManager` itself. Holds, on
+direct read.
+
+**Leg B — the path is computed twice, independently, and nothing ties the two together.**
+`cli.py:7321` computes `build_root / repo_id` for the `git worktree add` call. Separately,
+`cli.py:7625` passes `work_dir=build_root` into `OrchestratorContext`, whose `worktree()` method
+(`src/fleet/orchestrator/context.py:206-208`) computes `self.work_dir / repo_id` again to hand
+every worker its `workdir`. Verify repeats the pattern: `cli.py:7416` vs. `cli.py:7695` /
+`context.py:208`. Both computations read the same two inputs and, today, agree — but they are two
+separate lines in two separate modules, with no shared function, constant, or assertion binding
+them. Holds, on direct read: nothing between these four sites ties them together.
+
+**Latent, not broken.** Nothing fails today; the two computations happen to agree because both
+reduce to `<root-var> / repo_id`. The hazard is silent divergence later: if one of the two lines
+changes — for instance, when D72's eventual fix adds a `run_prefix`/attempt suffix to one of them —
+and the other is missed, a Phase-3 or Phase-4 worker is handed a `workdir` that does not exist,
+and because each half is a one-line join in a different file, no single listing would surface the
+mismatch.
+
+**Relationship to D72.** Same subsystem (worktree naming and registration across §3.3's build and
+verify phases), a different cause (an unenforced duplicate computation, not a naming/registry
+mismatch). D72's fix is expected to touch these same sites (`cli.py:7321`, `:7416`, `:7625`,
+`:7695`, `context.py:206-208`) when it adds the missing `run_prefix`, which is exactly what would
+put this defect's two legs at risk of disagreeing.
+
+**Deliberately not fixed here.** The fix belongs to the worktree-namespace design that raised it,
+which has its own plan and reserved ADR numbers. Recorded so that design's lane inherits the
+evidence rather than rediscovering it.
