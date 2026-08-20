@@ -3348,7 +3348,8 @@ and nothing else.
 **D55 — OPEN. A pure 429 walks a tier and reaches a halt that tells the operator every backend
 target is `DOWN` — a state with no representation anywhere in `src/`.** Verified against `7a8bfbb`;
 **re-verified OPEN on `main` at `6a41840`**, where the halt string is `orchestrator/runner.py:640`,
-the two comment carriers are `models/enums.py:383` and `orchestrator/retry.py:196`, and
+the two comment carriers are `models/enums.py` (`FailureClass.BACKEND_UNAVAILABLE`'s trailing
+comment — `:383` at that anchor, `:390` at `f9cb3f9`) and `orchestrator/retry.py:196` (unmoved), and
 `llm/client.py` is byte-for-byte the base file — no lane modified it.
 
 Three hops, each verified at source:
@@ -3367,7 +3368,8 @@ Three hops, each verified at source:
 
 **`DOWN` is vocabulary the harness does not own.** It is `BackendHealth`'s state name from SPEC
 §11.8, and `BackendHealth` is not built. On `main` the string `DOWN` appears in `src/` only inside
-that halt message, two comments (`models/enums.py:383`, `orchestrator/retry.py:196`), FD1's own
+that halt message, two comments (`FailureClass.BACKEND_UNAVAILABLE` in `models/enums.py`,
+`orchestrator/retry.py:196`), FD1's own
 docstrings explaining why the finding refuses the word, and two unrelated `--max-cost-usd`
 "DOWNWARD" strings in `cli.py`. So the message asserts a diagnosis from a subsystem that does not
 exist, on evidence that does not distinguish throttling from an outage.
@@ -3378,6 +3380,13 @@ telling the operator its provider is down, when the correct action was to lower 
 is no rate limiter — R2 measured the shape of that gap: the 429 signal is in `llm/`, the semaphore is
 `orchestrator/budgets.py:962`, and its **only** acquisition is `workers/classify.py:162`, i.e. 1 of
 12 workers; `asyncio.Semaphore` has no resize API.
+*(Anchor repair, lane CITE 2026-08-20, not an adjudication of this entry.* `budgets.py:962` was
+measured at `6a41840` and is a blank line at `f9cb3f9`: the LLM tier limiter is now
+`Limits.for_tier` returning ADR-0083's `ResizableLimiter`. The acquisition site is unmoved —
+`workers/classify.py:162`, `async with ctx.limits.for_tier(tier)`, still 1 of 12 — but the
+"no resize API" clause is overtaken by ADR-0083/ADR-0084 and needs re-derivation by this entry's
+owner. **Nothing here changes D55's OPEN status**, which rests on the halt message, not the
+limiter.*)
 
 **Found by** R2 (research), scoping §13 rows 40 and 43 for build size and reading the halt path on
 the way. Recorded in the round ledger as "the highest-risk finding of the round".
@@ -3388,7 +3397,8 @@ misdiagnosis. Its `BackendUnavailable` finding row now reports what was *observe
 target tried, in order) with machine-readable `asserts_outage: false`, a three-valued
 `failover_triggers_recorded` that is **never** "complete", and a caveat naming throttling. But the
 halt itself is untouched on `main`: `runner.py:640` still raises the `is DOWN` message,
-`enums.py:383` still carries the word, `llm/client.py` is unmodified across the whole round, and
+`FailureClass.BACKEND_UNAVAILABLE`'s comment in `enums.py` still carries the word, `llm/client.py`
+is unmodified across the whole round, and
 `classify.py` was never in FD1's diff. **The operator-facing halt still asserts a cause nothing
 determined.**
 
@@ -3662,7 +3672,8 @@ round saw both.
 `llm_backend`, `input_tokens`, `output_tokens` and `llm_cache_hit` are dead in shipped code.**
 Verified against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**.
 
-`state/repository.py:1671` is `record_attempt`; its SQL at `:1677-1690` names 24 columns
+`SqliteStateRepository.record_attempt` in `state/repository.py` (`:1671` at that anchor, `:1861` at
+`f9cb3f9`); its `INSERT INTO attempts` SQL (`:1677-1690` then, `:1867-1880` now) names 24 columns
 (`attempt_id … finished_at`) and none of the five — re-read on `main`, unchanged. `git grep` for any
 of the five names in `repository.py` returns nothing. The columns are declared and carry CHECK-free
 defaults in `state/schema.sql` — `llm_cache_hit` is `INTEGER NOT NULL DEFAULT 0`, commented *"1 =>
@@ -3694,7 +3705,8 @@ deferred for `tier=`. Writing the other four is smaller and unowned.
 
 **D63 — OPEN. `_unavailable`'s message text is false for every module it names: it tells the operator
 each "still raises `NotImplementedError`" when none of them does.** Verified against `7a8bfbb`; **the
-false string survives on `main` at `6a41840`, at `cli.py:905`.**
+false string survives on `main` at `6a41840`, in `cli.py`'s `_unavailable` helper (`:905` at that
+anchor; `def _unavailable` is `:910` and the string `:912` at `f9cb3f9`).**
 
     def _unavailable(verb: str, module: str) -> NoReturn:
         raise CommandUnavailableError(
@@ -3723,8 +3735,12 @@ compares the message's factual claim against `src/`.
 `fleet resume`'s steps 3 and 7, so `resume` and `resume --repoll-prs` now refuse through a
 `CommandUnavailableError` that names the genuinely missing piece (the per-phase `PhaseRunner`
 assembly), not through `_unavailable`. **Re-measured on `main` at `6a41840`: three call sites remain —
-`cli.py:2408`, `:2520` (both `workers/relocate.py`) and `:10958` (`workers/buildverify.py`), i.e. two
-distinct modules — and the false sentence at `cli.py:905` is unchanged from `7a8bfbb`.** RS1 reported
+`cli.py:2408`, `:2520` (both `workers/relocate.py`, in `plan` and `migrate`) and `:10958`
+(`workers/buildverify.py`, in `stubs resolve`), i.e. two
+distinct modules — and the false sentence in `_unavailable` is unchanged from `7a8bfbb`.**
+Re-anchored at `f9cb3f9` (lane CITE, citations only — all three call sites are still there and D63
+stays OPEN): `git show HEAD:src/fleet/cli.py | grep -n '_unavailable('` returns four lines — the
+definition at `:910` and the three surviving calls at `:2415`, `:2527` and `:11293`. RS1 reported
 this rather than rewording it — correctly, since the rewording is a `cli.py` edit three lanes were
 contending for. **It needs an owner.**
 
@@ -3951,7 +3967,8 @@ that exists in no enum and in no SPEC section.** Verified against `7a8bfbb`; **r
 `6a41840`**.
 
 `git grep "StubAbandoned" 7a8bfbb` returned **exactly one hit in the entire repository**:
-`src/fleet/cli.py:10502`, a bare string literal inside a raw-SQL `INSERT INTO findings … VALUES (?, ?,
+`src/fleet/cli.py:10502` — inside `stubs_abandon()`, `:11350` at `f9cb3f9` — a bare string literal
+inside a raw-SQL `INSERT INTO findings … VALUES (?, ?,
 'StubAbandoned', 'warn', ?, ?, ?)`. There was no enum member, no model, and **no mention in
 `docs/SPEC.md`**. The surrounding block also encoded the ABANDONED state transition in raw SQL, a
 second encoding of a rule that belongs to the stub state machine.
@@ -3972,10 +3989,18 @@ the claim held.
 **Half addressed, landed (`5c52ee5`).** `stubs.py:145` adds `STUB_ABANDONED = "StubAbandoned"` to
 `StubFinding` and the abandon path emits it, so the new state machine matches `cli.py`'s committed
 kind rather than inventing a rival — verified on `main`, where the string now appears in both files.
-**Still open, and re-verified on `main`:** `docs/SPEC.md` does not name the kind, and `cli.py:11015`'s
-raw-SQL transition remains a second encoding of a rule `stubs.py` now owns — which nothing yet calls
+**Still open, and re-verified on `main`:** `docs/SPEC.md` does not name the kind, and the raw-SQL
+abandon block in `cli.stubs_abandon()` remains a second encoding of a rule `stubs.py` now owns —
+which nothing yet calls
 (`git grep -l "orchestrator.stubs" -- src/` returns only the module itself). Neither is in that lane's
 scope.
+
+*(Anchor repair, lane CITE 2026-08-20, citations only — D69 stays OPEN.* The abandon block was
+cited as `cli.py:11015`; at `6a41840` that line is the finding write
+(`"VALUES (?, ?, 'StubAbandoned', 'warn', ?, ?, ?) "`), **not** the state transition, which is
+`"UPDATE stubs SET state = 'ABANDONED', …"` nine lines above at `:11006` — so the original number
+named the wrong half of the block it meant. At `f9cb3f9` the two are `:11345` and `:11350`, both
+inside `stubs_abandon()`, which is the durable anchor and is what this entry now uses.*)
 
 ---
 
@@ -4130,9 +4155,13 @@ is the one this whole class has: a reconciler follows the prose.
 >
 > **What is still open, verified here rather than inherited from ADR-0076's assertion of it.**
 > `git show HEAD:src/fleet/cli.py | grep -n` finds the pre-`d0b1150` phrasing alive in two
-> operator-facing messages — `:10043` *"demote each repo to the earliest phase whose …"* and
-> `:10274` *"(re-check preconditions and demote to the earliest phase whose precondition holds)"* —
-> so both carry the retracted **predicate** and the wrong **quantifier**. That file is owned by
+> operator-facing messages — the `ResumeIncompleteError` raised by `resume()` (*"demote each repo to
+> the earliest phase whose …"*) and the `UsageError` raised by `_refuse_unbuilt_resume_flags()`
+> (*"(re-check preconditions and demote to the earliest phase whose precondition holds)"*) — so both
+> carry the retracted **predicate** and the wrong **quantifier**. Both were cited by line as
+> `:10043` and `:10274`; **re-verified STILL PRESENT and STILL OPEN at `f9cb3f9`** by lane CITE with
+> `git show HEAD:src/fleet/cli.py | grep -n "earliest phase whose"`, which now returns `:10078` and
+> `:10390`. The symbols above are the durable anchor; the numbers will move again. That file is owned by
 > another lane and had uncommitted edits in the tree while this was written, so it is reported and
 > not touched. It is deliberately outside the new test's `_EXPECTED_SITES`: the census anchor keys
 > on the corrected wording, so a fifth carrier phrased the old way is not detected by it. That is a
@@ -4198,8 +4227,8 @@ or the prefix" is documented on that dataclass, because `name` is what an operat
 | Caller | Before | Now |
 |---|---|---|
 | `ContainerSandbox.reap` (`sandbox/container.py`) | read `[]`, returned an empty `ContainerReapResult` that reads as a clean sweep | reads `list_with_verdict`; a failed listing becomes one `failed` entry named `fleet-<run_id>-*`, `complete` is `False` |
-| `BuildverifyWorker._sweep_containers` (`workers/buildverify.py:1053`) | iterated `[]`, swept nothing, said nothing | **unchanged — residual, see below** |
-| `cli._reap_orphan_containers`, `--dry-run` branch (`cli.py:10594`) | previewed an empty list as "nothing to reap" | **unchanged — residual, see below** |
+| `BuildverifyWorker._sweep_containers` (`workers/buildverify.py`) | iterated `[]`, swept nothing, said nothing | **unchanged — residual, see below** |
+| `cli._reap_orphan_containers`, `--dry-run` branch (`cli.py:10594` at `87ed419`, the `list_by_prefix` call under `if dry_run:`; the same branch's call is `:10605` at `f9cb3f9`) | previewed an empty list as "nothing to reap" | **unchanged — residual, see below** |
 
 **The residual, stated rather than closed.** `list_by_prefix` is kept with its signature
 unchanged and is now documented as the *lenient* view. The two call sites above live in modules
@@ -4211,6 +4240,19 @@ Closing this means moving those two sites to `list_with_verdict` **in the module
 not changing the method under them. `test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one`
 pins both halves on the same failure so the residual cannot be closed in the wrong direction by
 accident.
+
+*(Anchor repair, lane CITE 2026-08-20 — a status flag, not an adjudication.* The table's two
+**"unchanged — residual"** verdicts were measured at `87ed419`. At `f9cb3f9`,
+`git log --oneline -S'list_with_verdict' -- src/fleet/cli.py` returns `5ed4e47`
+*"buildverify/cli: close D73's two residual call sites on list\_by\_prefix"*, and both sites read
+`list_with_verdict` on `main`: `cli._reap_orphan_containers`'s `if dry_run:` branch calls
+`sandbox.list_with_verdict(prefix)`, and `BuildverifyWorker._sweep_containers` awaits
+`sandbox.list_with_verdict(prefix)` in its body (line deliberately not cited: see the last sentence
+of this note). This
+lane repaired the anchors only and did
+**not** re-derive the verdicts; `workers/buildverify.py` is being edited by another lane as this is
+written. D73's owner should re-measure per ADR-0073 and flip the two cells if the re-derivation
+holds.*)
 
 **What the test measures, and the blindness it was written to avoid.** A test that measured
 *removals* — `result.reaped`, or the `docker rm --force` argv the fake runner recorded — **cannot
