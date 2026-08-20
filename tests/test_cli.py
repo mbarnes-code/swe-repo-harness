@@ -1248,11 +1248,32 @@ def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path
     Why: every flag refused here scopes or re-drives §11.5 step 5, which has no implementation.
     A parser that accepted `--from-phase 2` and then resumed from wherever it liked leaves the
     operator believing they scoped the resume — and nothing anywhere tells them otherwise.
+
+    The last two assertions pin the RULE the refusal states, not just that it refuses. Both
+    operator-facing step-5 messages described the missing work as "demote to the earliest phase
+    whose precondition holds", and both halves of that are retracted: `preconditions_hold` is not
+    the resume predicate (`rdepverify` answers `True` for a repo with no BUILD row, so a walk over
+    it promotes never-built repos — the reason `orchestrator/reentry.phase_floor` reads evidence
+    instead), and the floor is the phase ABOVE the HIGHEST holder below the settled frontier,
+    never the earliest. The correction reached `docs/SPEC.md`, `docs/DECISIONS.md`,
+    `models/enums.py` and the plan; this string is the surface it had not reached, and the surface
+    an operator actually reads.
     """
     result = runner.invoke(app, [*base_args(workspace), "resume", "--from-phase", "2"])
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "--from-phase" in result.output
     assert "step 5" in result.output
+    assert "precondition" not in result.output, (
+        "the refusal names a predicate step 5 does not use, and cannot use"
+    )
+    assert "HIGHEST phase below the settled frontier" in result.output, (
+        "the refusal states the floor without its quantifier, which is the half two earlier "
+        "fixes in this class left behind"
+    )
+    assert "DEGRADED/SKIPPED hard stop" in result.output, (
+        "the refusal drops `_HARD_STOPS`, which is the OTHER half a fix in this class already "
+        "omitted once: a floor stated without it reads as evidence-only and re-runs excluded work"
+    )
 
 
 # ---- --repoll-prs -------------------------------------------------------------------
@@ -1768,6 +1789,95 @@ def test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none(
     assert orphan.exists(), "a --dry-run reaped a worktree"
 
 
+def test_resume_dry_run_does_not_read_a_dead_workers_row_as_a_claim_on_its_sandbox(
+    workspace: Path,
+) -> None:
+    """`_LIVE_SANDBOX_PREDICATE`'s negation, on the ONE path where it is load-bearing.
+
+    Step 2 runs after step 3's sweep, so in a real resume every stale `RUNNING` row has already
+    become `PENDING` and `status = 'RUNNING'` alone would give the same answer — which is exactly
+    why the negation reads as deletable dead code. `--dry-run` does NOT run the sweep: it only
+    counts what the sweep would reclaim, so step 2 sees the unswept rows, and without the
+    negation a crashed run's own corpse claims its own orphans and the preview reports nothing to
+    reap.
+
+    **What this measures, and why the defect can move it (CLAUDE.md guardrail 6, the fourth
+    question).** The state built is the one the predicate is *about*: a `phases` row, `RUNNING`,
+    with a heartbeat older than both horizons, at `attempts = 2` — so a predicate that called it
+    live would spare rungs 2 and 3, and the worktree cut here is rung 3. The two discriminating
+    assertions therefore read empty/non-empty in opposite directions under
+    `NOT (1 …)` → `NOT (0 …)`.
+    `test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none`
+    above builds **no `phases` rows at all**, so its live set is empty either way and no change to
+    the liveness predicate can move its outcome; ADR-0081 §2 credited it with this job for four
+    commits before that was measured.
+    """
+    repo = _reap_workspace(workspace)
+    db = workspace / "state" / "fleet.db"
+    _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2)
+
+    orphan = _cut(repo, workspace, _sandbox("acme-commons", 3))
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+
+    # The CONTROLS. Both hold under the neutered negation too: the row is stale by both clocks
+    # whatever step 2 concludes, and a preview removes nothing by definition.
+    assert payload["stale_running_reset"] == 1, "the row was not stale by step 3's own reckoning"
+    assert orphan.exists(), "a --dry-run reaped a worktree"
+    # The DISCRIMINATING assertions.
+    assert payload["live_sandbox_names"] == [], (
+        "a dead worker's RUNNING row was read as a live claim on its sandbox — the negation in "
+        "`_LIVE_SANDBOX_PREDICATE` is gone, and only `--dry-run` can see it go"
+    )
+    assert payload["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 3)], (
+        "the preview told an operator with a crashed run and an orphan on disk that there was "
+        "nothing to reap"
+    )
+
+
+def test_resume_dry_run_preview_cannot_name_a_worktree_outside_the_run_namespace(
+    workspace: Path,
+) -> None:
+    """The preview's OWN prefix filter, which the non-dry namespace test above cannot reach.
+
+    `test_resume_reap_cannot_reach_a_worktree_outside_the_run_namespace` runs the non-dry path,
+    so it exercises `WorktreeManager.reap`'s filter and never the copy `--dry-run` applies to its
+    own `list_registered()` listing. The docstring on `_reap_orphan_worktrees` asserts containment
+    "in EITHER branch"; this is the second branch.
+
+    **What this measures, and why the defect can move it.** Two neighbours are *registered in the
+    same git repository* the preview interrogates — another run's sandbox, and a worktree with no
+    `fleet-` prefix at all — so the prefix filter has a non-empty input to reject, which is the
+    thing the single pre-existing `--dry-run` case (one registered worktree) never gave it. Drop
+    `p.name.startswith(prefix)` and the previewed list grows to include them.
+
+    Why the non-`fleet-` neighbour is named `wt-WT1-example` and not something abstract: that is a
+    real worktree of this repository, quoted in ADR-0074 as live evidence. `--dry-run` removes
+    nothing itself — **the operator is the removal path** — so a preview that named it would have
+    a human run `git worktree remove` on another lane's evidence.
+    """
+    repo = _reap_workspace(workspace)
+    other_run = _cut(repo, workspace, "fleet-99999999-9999-4999-8999-999999999999-acme-1")
+    unrelated = _cut(repo, workspace, "wt-WT1-example")
+    orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+
+    # The CONTROLS. A preview removes nothing whatever its filter says, so all three survive
+    # before and after the defect; what the operator would then act on is the list below.
+    assert other_run.exists() and unrelated.exists() and orphan.exists(), (
+        "a --dry-run reaped a worktree"
+    )
+    # The DISCRIMINATING assertion — equality, not membership: a widened filter ADDS names.
+    assert payload["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 1)], (
+        "the preview offered an operator a worktree outside `fleet-<run_id>-*` to remove"
+    )
+
+
 def test_resume_reports_every_worktree_the_sweep_could_not_remove(workspace: Path) -> None:
     """D44, one layer up: `ReapResult.failed` reaches the operator by NAME and with its reason,
     and the clean headline is not printed above it.
@@ -1910,12 +2020,63 @@ def test_resume_reports_every_container_docker_would_not_confirm_removed(
     assert "no orphan containers" not in result.output
 
 
+def test_resume_dry_run_preview_spares_the_container_a_live_row_claims(
+    workspace: Path,
+) -> None:
+    """The preview's own `claims()` filter, which no test put an input in front of.
+
+    The container preview must not call `reap()` (it removes), so it re-applies `reap()`'s two
+    filters — the run prefix, then `claims()` — to a listing of its own. The prefix half is
+    enforced upstream by `docker ps --filter name=`, so `claims()` is the only part of that copy
+    with anything left to do.
+
+    **What this measures, and why the defect can move it.** The fixture puts a live row and a
+    LIVE CONTAINER in front of the preview: a `RUNNING` row heart-beating now at `attempts = 2`,
+    and a container named `<sandbox>-t<token>` on rung 3 — the rung `_live_sandbox_names` derives
+    from `attempts + 1`. The single pre-existing `--dry-run` case ran under the autouse docker
+    fake with an EMPTY inventory, so its `claims()` had no input and the filter could be deleted
+    without moving anything it watched. Drop `and not any(claims(...))` here and the previewed
+    list gains `live_container` — a running build offered to an operator as reapable, and the
+    operator is the removal path.
+
+    The `-t` tokens differ so no assertion on this path can be satisfied by string equality.
+    """
+    _reap_workspace(workspace)
+    db = workspace / "state" / "fleet.db"
+    fresh = datetime.now(UTC).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=2)
+
+    live_container = f"{_sandbox('acme-commons', 3)}-t0badcafe"
+    orphan_container = f"{_sandbox('acme-commons', 1)}-tdeadbeef"
+    docker = _ScriptedDocker(present=[live_container, orphan_container])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
+        result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+
+    # The CONTROLS. Neither moves under the defect: a preview issues no `docker rm`, and the live
+    # set is computed before the preview and is what the deleted filter would have CONSULTED.
+    assert docker.removed == [], "a --dry-run removed a container"
+    assert payload["live_sandbox_names"] == [
+        _sandbox("acme-commons", 2), _sandbox("acme-commons", 3),
+    ], "the filter under test was handed an empty live set, so it had no input to reject"
+    # The DISCRIMINATING assertion.
+    assert payload["reaped_containers"]["reaped"] == [orphan_container], (
+        "the preview offered an operator a container a live row claims — `docker rm --force` on "
+        "a running build, executed by the human the preview is written for"
+    )
+
+
 def test_resume_dry_run_reports_a_docker_ps_it_could_not_run_instead_of_no_orphans(
     workspace: Path,
 ) -> None:
-    """D73's second residual: the `--dry-run` preview read the LENIENT `list_by_prefix`, which
-    returns `[]` for a stopped daemon and for a run with no containers alike, so a health check
-    run during a docker outage printed `no orphan containers`.
+    """D73's second residual: the `--dry-run` preview read a LENIENT listing that returned `[]`
+    for a stopped daemon and for a run with no containers alike, so a health check run during a
+    docker outage printed `no orphan containers`. (That wrapper, `ContainerSandbox.list_by_prefix`,
+    was deleted in `f10a863` once the move to `list_with_verdict` left it with no callers.)
 
     That is the one answer a preview must never fabricate. `--dry-run` exists to be believed —
     an operator runs it precisely when they suspect debris — and "there is nothing wrong" is the
@@ -1971,11 +2132,28 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
     which point the re-poll starts failing and the operator is debugging a rate limit instead of
     reading "step 5 is not implemented". Exit 2 is §10's "the operator must edit a file, a flag
     or a stub before retrying", which is exactly true here and is the signal not to loop.
+
+    The last two assertions pin what the refusal SAYS step 5 is, for the reason given at
+    `test_resume_refuses_the_flags_whose_behaviour_does_not_exist`: this message and that one were
+    the last two places still describing the re-entry floor as "the earliest phase whose
+    precondition holds", a predicate step 5 does not use and a quantifier that names a rung
+    `reentry.phase_floor` never returns.
     """
     result = runner.invoke(app, [*base_args(workspace), "resume"])
     assert result.exit_code != ExitCode.UNEXPECTED_ERROR, result.output
     assert result.exit_code == ExitCode.USAGE
     assert "step 5" in result.output
+    assert "precondition" not in result.output, (
+        "the refusal names a predicate step 5 does not use, and cannot use"
+    )
+    assert "HIGHEST phase below the settled frontier" in result.output, (
+        "the refusal states the floor without its quantifier, which is the half two earlier "
+        "fixes in this class left behind"
+    )
+    assert "DEGRADED/SKIPPED hard stop" in result.output, (
+        "the refusal drops `_HARD_STOPS`, which is the OTHER half a fix in this class already "
+        "omitted once: a floor stated without it reads as evidence-only and re-runs excluded work"
+    )
 
 
 def test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal(
