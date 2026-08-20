@@ -3999,3 +3999,47 @@ lesson arriving a second time, on the same file, at the whole-round scale.
 that does not run a check the project's own toolchain provides is exactly the "we have not tested
 this" → "we have tested this" conversion this document exists to refuse, and because the next person
 to add `ruff format` to CI will find 60 hunks in the most-contended file in the repo.
+
+---
+
+**A stale disclosure, CLOSED by `6e0a5fa`. This entry claims no D-number** — it retires a limit
+another lane disclosed rather than recording a new defect, so the precedent set above (an entry
+contributed with no number, left un-numbered because renumbering a landed entry is a separate edit)
+applies. **D71 remains the next free number.**
+
+`docs/superpowers/plans/task-item17-report.md` §2 and §5 item 1 disclose, honestly and at length,
+that the binding `c7f72c6` added for ADR-0075's `effort` annotation "does **not** detect the literal
+defect this item reported" — its mutation M1 deletes the two annotation lines from `schema.sql`
+again and the file stays green — and conclude that "the next drift of the comment alone will still
+be silent". §5 item 1 argues the only honest mechanism would be a whole-fence extractor, which the
+same report measures as firing on **22** pre-existing intentional condensations between the SPEC
+listing and the real schema, and therefore rejects as a project of its own.
+
+**That is no longer true.** `6e0a5fa` added
+`test_the_effort_column_carries_its_adr_0075_annotation_in_both_copies` to
+`tests/test_llm_cache.py`. It normalises `--` markers and whitespace away and compares **only the
+`effort` column's own comment region** in the two files — a region the report's own measurement puts
+outside all 22 condensations — asserting that both cite ADR-0075 and that the two regions carry the
+same words. The report's stated dichotomy (whole fence, or nothing) had a third term.
+
+**Measured this session, not inherited**, with the detector-validation rule this document exists to
+enforce — three checks, not one, each proven to have really changed its file (`git diff --numstat`)
+before its result was read:
+
+| probe | file changed | outcome |
+|---|---|---|
+| baseline, clean tree | n/a | **1 passed** |
+| known-bad: the report's own M1, annotation deleted from `schema.sql` | `1 2` | **1 failed** |
+| synthetic fault in an otherwise-untouched file: `docs/SPEC.md` copy reworded only (`needs` → `requires`) | `1 1` | **1 failed** |
+| pure reflow of the SPEC copy across three lines, same words | `3 2` | **1 passed** |
+
+The third row is the one that matters: it perturbs the file the fix did not target, so a detector
+silently broken on the mirror copy could not have passed it. The fourth confirms the instrument is
+not merely a checksum.
+
+**What is still not caught, stated so this closure does not become the next stale disclosure.** The
+marker binds only the `effort` column. Every other comment in the two listings — including the
+`findings.kind` CAVEAT corrected in `60d400b`, which exists in both files and drifted for exactly
+this reason — has no binding at all, and the 22-condensation measurement is why a general one is
+still unbuilt. The semantic assertions `c7f72c6` added are untouched and still bind what the marker
+cannot: a `CHECK` arriving without the comment changing.
