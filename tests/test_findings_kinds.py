@@ -138,7 +138,22 @@ _INSERT_RE: Final = re.compile(
 )
 
 #: The same statement as it appears in *source text*, where a Python literal may interrupt it
-#: anywhere: implicit concatenation, a line continuation, wrapping parentheses, an explicit `+`.
+#: anywhere: implicit concatenation, a line continuation, wrapping parentheses, an explicit `+`
+#: **between adjacent literals**.
+#:
+#: That last qualifier is narrower than it sounds, and it is measured rather than assumed.
+#: `await conn.execute("INSERT INTO " + _TAIL, params)` with a NAMED constant as the second
+#: operand is invisible to BOTH instruments: a live writer emitting an unlisted kind through it
+#: left all four tests passing (`SynthPlusNameV1`), while the same statement written with two
+#: adjacent literals fires. Adjudicated a stated boundary rather than patched (Rule 12's stop
+#: rule): the silence needs the split to land on exactly the `findings` token, and the nearby
+#: refactors all keep the phrase and trip the walk-lost branch loudly.
+#:
+#: The interposable class is literally `[\s'"()+\\]`, so a `#` comment or a `[`-quoted table
+#: identifier BETWEEN the fragments is NOT in it. Neither goes silent — both fail loudly through
+#: `_recognition_gap`'s reverse branch; the scope note on
+#: `test_every_findings_writer_in_src_is_one_this_module_resolved` records exactly which reformats
+#: do and do not move a site.
 #: Deliberately looser than `_FINDINGS_INSERT` — it is the instrument that must not miss what the
 #: AST walk misses, and `_recognition_gap` fails loudly if it ever becomes the narrower of the two.
 _TEXT_INSERT: Final = re.compile(
@@ -559,8 +574,20 @@ def test_every_findings_writer_in_src_is_one_this_module_resolved() -> None:
     That gate only ever saw the sites recognition handed it, and recognition was an unnormalised
     substring test: reformatting one real `cli.py` INSERT into a triple-quoted block removed it
     from the count with all four tests still passing. So this asserts the *recognition* step too,
-    against a text-level derivation of the same sites (`_recognition_gap`) that no reformat of a
-    Python string literal can move.
+    against a text-level derivation of the same sites (`_recognition_gap`).
+
+    **Scope of "no reformat can move it", narrowed to what was measured.** A reformat that only
+    re-breaks, re-indents or re-splits the string literals does not move a site: measured on
+    `orchestrator/findings.py:126`, both a `VALUES` re-break and a re-split of the phrase itself
+    across two adjacent literals leave all four tests passing. A reformat that interposes a token
+    outside `_TEXT_INSERT`'s interposable class *between* the fragments does move it: a `#`
+    comment between `"INSERT INTO "` and `"findings ..."`, and `INSERT INTO [findings]`, each fail
+    `_recognition_gap`'s reverse branch naming `findings.py:127`. Both are fail-**loud** and
+    fail-**safe** — the kind stays counted and nothing goes silent — but the message reports
+    instrument drift where what changed was layout, so the claim is scoped here rather than the
+    detector widened: widening `_TEXT_INSERT` to swallow `#` and `[` trades a loud failure that is
+    accurate in direction for a wider silent surface, and the brief for this narrowing was
+    explicit that the detector must not be weakened.
     """
     _, unresolved = _emitters()
     assert unresolved == (), "\n".join(unresolved)

@@ -4060,9 +4060,9 @@ if no phase below the frontier holds."*
 **The fallback clause is false whenever a phase below the frontier is `DEGRADED` or `SKIPPED`.**
 `phase_floor` (`src/fleet/orchestrator/reentry.py:96-103`) breaks on `_HARD_STOPS` —
 `{DEGRADED, SKIPPED}` — *before* it consults `evidence`, so the walk stops above such a row and the
-floor never descends past it, however little evidence holds. The function's own docstring says so
-("the backward search stops at a `DEGRADED` or `SKIPPED` row without ever moving the floor onto it",
-ADR-0077 §5); the new prose does not.
+floor never descends past it, however little evidence holds. `phase_floor`'s own docstring states
+that rule outright, on ADR-0077 §5 (`src/fleet/orchestrator/reentry.py:80-82` — cited, not quoted;
+see editorial point 4 below); the new prose does not.
 
 **Measured, not reasoned** — `phase_floor` called directly under `.venv/bin/python` with the test
 module's own `_row` builder, `evidence = {}` (nothing holds) in every case:
@@ -4117,6 +4117,16 @@ is the one this whole class has: a reconciler follows the prose.
 > this paragraph as if it counted floor-rule sites. The true count is **four statements** — three
 > prose (`docs/SPEC.md` ×2, `docs/DECISIONS.md` ×1) and one code paraphrase
 > (`src/fleet/models/enums.py`), which is exactly the set the new test binds.
+>
+> **4. The `reentry.py` reference two paragraphs above was a verbatim quotation until 2026-08-20
+> (lane FIX7); it is now a file:line citation.** The change is CLAUDE.md §3 hygiene — never quote
+> another module's text, because nothing enforces the copy and one reword leaves the quotation
+> pointing at a string no longer in the tree. It is **not** a correction of a false quotation, and
+> is recorded because `review-7` §3.3 reported the quoted sentence as absent from `reentry.py`.
+> Measured at `431b02f`, whitespace-normalised: it occurs at `reentry.py:80-82`, in the
+> `phase_floor` docstring this entry named, differing from the quotation only in its leading
+> capital. The review measured the **module** docstring (`:30-33`), which states the same rule in
+> different words — the same paraphrase axis this entry's own class keeps being missed on.
 >
 > **What is still open, verified here rather than inherited from ADR-0076's assertion of it.**
 > `git show HEAD:src/fleet/cli.py | grep -n` finds the pre-`d0b1150` phrasing alive in two

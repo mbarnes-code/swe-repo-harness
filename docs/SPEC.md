@@ -4082,7 +4082,8 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   built only as in-process dataclasses that
                                                   --   no writer ever sees, so nothing emits
                                                   --   them: 'UnmergedDependency' (no literal
-                                                  --   anywhere in src/), 'VersionConflict'
+                                                  --   in src/**/*.py outside the
+                                                  --   settings.py:704 docstring), 'VersionConflict'
                                                   --   (bazel/generators.py:414), 'CoarseTarget'
                                                   --   (graph/cycles.py:923) and 'RuleOscillation'
                                                   --   (rewrite/pipeline.py:263) — GraphFinding
