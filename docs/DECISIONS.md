@@ -6415,7 +6415,7 @@ a hope up as a control (the exact confusion §4's mirror warns against).
 
 **Status: DECIDED AND IMPLEMENTED.** Verified against landed code and by direct execution in this
 session (commands and output below, and in
-`.superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md`). This closes the round CLAUDE.md's own brief
+`docs/superpowers/plans/task-HOOK1-report.md`). This closes the round CLAUDE.md's own brief
 for this task opens with: five concurrent subagents sharing one primary checkout, told by prompt
 alone to keep to their lanes, produced **four separate incidents of one agent's staged work landing
 in another agent's commit** and one case of hand-built `git apply --cached` surgery to undo it.
@@ -6559,7 +6559,7 @@ explicit pathspecs (never `-A`) to avoid touching the other lane's concurrently 
 while that work was in progress, not a clean sandbox. Refused cases create no commit and need no
 cleanup; the two allowed cases were undone with `git revert --no-edit`, not history rewriting, to
 stay safe under concurrent commits from the sibling lane. Full transcript:
-`.superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md`.
+`docs/superpowers/plans/task-HOOK1-report.md`.
 
 | # | Location | Branch | Expected | Result |
 |---|----------|--------|----------|--------|
@@ -6795,7 +6795,7 @@ subtask is downstream of the answer, so it lands alone and is verified alone. `o
 and 7 and are **not** in this ADR's implementation.
 
 **Provenance (CLAUDE.md Guardrail 1).** The `RESUME_DEMOTE` + `resume=True` shape is an **Agent
-Recommendation** — it originated in a design pass (`.superpowers/sdd/sdd-backlog-b/design-resume-step5.md`
+Recommendation** — it originated in a design pass (`docs/superpowers/plans/design-resume-step5.md`
 §6, option B) and was accepted by the orchestrator. `docs/SPEC.md` requires the *demotion*; it does
 not name this mechanism, and nothing below should be cited as a SPEC requirement. What the SPEC does
 require is quoted verbatim in §1.

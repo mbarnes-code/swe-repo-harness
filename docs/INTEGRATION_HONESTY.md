@@ -3241,7 +3241,7 @@ property that makes it safe to leave in place until then.
 round itself had just written. Every entry below was **already on `main`** before Round B started
 and is verified against `7a8bfbb` — the round's lanes found them while building *beside* them.
 Defects a lane introduced and then fixed inside the round are deliberately **excluded**; they are
-churn, and the round's own ledger (`.superpowers/sdd/sdd-backlog-b/progress.md`) is where they
+churn, and the round's own ledger (`docs/superpowers/plans/ledger-sdd-backlog-b.md`) is where they
 belong. Excluded on that rule, though the ledger records them at length: the `"strict": True` schema
 violation (9 of 12 roles), the `effort` default fabrication (ADR-0075), every `LlmFindingSink`
 error-path defect, `stubs.py`'s `_consumers_of` Critical, and the ADR-0075/0076 number collision.
@@ -3876,7 +3876,7 @@ and demotes the repo to the earliest phase whose **evidence** still holds"*, nam
 predicates, not one** (ADR-0077 §6): a durable, payload-free `evidence_holds` for step 5's search,
 with `BaseWorker.preconditions_hold` left at its single existing call site. **`evidence_holds` does
 not exist on `main`** — it is subtask 5 of a ten-subtask decomposition
-(`.superpowers/sdd/sdd-backlog-b/design-resume-step5.md` §5). The SPEC no longer instructs the wrong
+(`docs/superpowers/plans/design-resume-step5.md` §5). The SPEC no longer instructs the wrong
 algorithm; the right one is unbuilt.
 
 ---
