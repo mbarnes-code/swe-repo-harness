@@ -971,10 +971,12 @@ class ResizableLimiter:
       `_borrowed` itself and hands the waiter a settled future. If instead the resumed waiter
       charged itself, every task scheduled between the wake and the resume would see stale
       headroom and barge in over the ceiling.
-    * **A cancelled waiter must not swallow a wake.** A task cancelled *after* `_wake_next` chose
-      it still owns a slot nobody will release, so `acquire()` gives it back and wakes the next
-      waiter in the same breath. Without that, one cancellation permanently shrinks the effective
-      ceiling by one.
+    * **A cancelled waiter must not swallow a wake, nor spend one it cannot afford.** A task
+      cancelled *after* `_wake_next` chose it still owns a slot nobody will release, so
+      `acquire()` gives it back and — when the current ceiling still admits one — wakes the next
+      waiter in the same breath. Without the hand-off, one cancellation permanently shrinks the
+      effective ceiling by one; without the ceiling check, a cancellation inside a shrink window
+      admits a waiter over the ceiling the shrink just set.
 
     Fairness is FIFO, and it falls out of transferring at wake time rather than needing a guard
     in `acquire`: every path that creates headroom — `release`, `resize`, the cancellation
@@ -1033,9 +1035,15 @@ class ResizableLimiter:
                 self._waiters.remove(fut)
         except asyncio.CancelledError:
             if not fut.cancelled():
-                # Woken, then cancelled: we own a slot we will never use. Hand it straight on.
+                # Woken, then cancelled: we own a slot we will never use. Hand it straight on,
+                # but only if the ceiling still admits it — a `resize` down between the wake and
+                # the cancellation leaves `_borrowed` above `_capacity`, and an unguarded
+                # hand-off would charge the slot to the next waiter and admit it over the
+                # shrunken ceiling. Dropping it strands nothing: `release` and `resize` both
+                # re-drain the queue as soon as there is real headroom.
                 self._borrowed -= 1
-                self._wake_next()
+                if self._borrowed < self._capacity:
+                    self._wake_next()
             raise
 
     def release(self) -> None:

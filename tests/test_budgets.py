@@ -17,6 +17,7 @@ the defect the CAS exists to prevent.
 from __future__ import annotations
 
 import asyncio
+import random
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from dataclasses import replace
@@ -944,6 +945,136 @@ async def test_a_waiter_cancelled_after_being_woken_hands_its_slot_on() -> None:
     with pytest.raises(asyncio.CancelledError):
         await first
     await second
+
+
+async def test_a_cancelled_waiter_hands_no_slot_over_a_ceiling_that_shrank_under_it() -> None:
+    """The same race as above, but with a `resize` down inside the window — R5's actual trigger.
+
+    §11.8's "halved on a 429" fires while calls are in flight, so a shrink can land between the
+    wake and the resume of a task that is also being cancelled. The recovery must still hand the
+    cancelled task's slot on, but it has to re-read the ceiling first: handing it on unguarded
+    admits a waiter over the ceiling the shrink just set, so the cancellation silently undoes the
+    throttle it arrived with. Asserted on tasks that actually got inside the limiter and on the
+    ceiling in force at that instant — `borrowed` alone cannot see this, because the count is
+    decremented either way and it is the *admission* that leaks.
+    """
+    limiter = ResizableLimiter(2, floor=1)
+    await limiter.acquire()
+    await limiter.acquire()  # the test itself holds both slots, so no holder task can race us
+
+    inflight = 2
+    breaches: list[tuple[str, int, int]] = []
+    ran: list[str] = []
+
+    async def waiter(name: str) -> None:
+        nonlocal inflight
+        await limiter.acquire()
+        ran.append(name)
+        inflight += 1
+        if inflight > limiter.capacity:
+            breaches.append((name, inflight, limiter.capacity))
+        inflight -= 1
+        limiter.release()
+
+    first = asyncio.create_task(waiter("first"))
+    second = asyncio.create_task(waiter("second"))
+    await _settle()
+    assert ran == [], "both slots are held; the queue is two deep"
+
+    limiter.release()  # charges the freed slot to `first`, which has not resumed yet
+    inflight -= 1
+    limiter.resize(1)  # the 429 lands inside that wake window
+    first.cancel()
+    await _settle()
+
+    assert breaches == [], f"a cancelled waiter admitted someone over the shrunk ceiling: {breaches}"
+    assert ran == [], "one slot is still held against a ceiling of 1 — nobody may be admitted"
+
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    limiter.release()  # the last held slot drains: now the shrunken ceiling really has headroom
+    inflight -= 1
+    await _settle()
+
+    assert ran == ["second"], "the slot was withheld, not swallowed — it went out on the drain"
+    assert breaches == []
+    await second
+    assert limiter.borrowed == 0
+
+
+async def test_random_resize_and_cancel_interleavings_never_admit_over_the_ceiling() -> None:
+    """A seeded fuzz over the whole class, watching the **admission event**, not a counter.
+
+    Both halves of this were got wrong first and are worth keeping written down.
+
+    *The instrument.* A cancelled waiter handing its slot on transfers a slot that was **already
+    charged**, so `borrowed` does not rise when it over-admits — measured on the deterministic
+    case above, where `borrowed` reads 2 both before and after the over-admitting cancellation,
+    against a ceiling of 1. A rise in `borrowed` is therefore the wrong thing to watch. The charge
+    itself is the right thing: a wake taken while `borrowed >= capacity`. The class has exactly
+    two charge sites — `acquire`'s fast path, guarded inline by `locked()`, and `_wake_next` — so
+    wrapping `_wake_next` sees every transfer.
+
+    *The driver.* A woken-but-not-resumed waiter exists only between a charge and the next turn
+    of the loop, so a driver that awaits after every operation can never cancel one, and never
+    reaches this path at all: an earlier cut of this fuzz, with a correct instrument but one
+    operation per turn, reported 0/800 seeds against the **unfixed** class. The bursts below
+    issue several operations in a single turn, which is what reaches the window.
+
+    Validated per CLAUDE.md Guardrail 6 before its clean result was trusted: it fires on the
+    known-bad state (the ceiling check in `acquire`'s cancellation recovery removed — 68/400
+    seeds, 71 events, e.g. seed 13 charging a 3rd slot against a ceiling of 2), stays silent on
+    the swept class (0/400), and fires on a fresh fault injected into the swept class (an
+    unguarded second `_wake_next` in `release` — 400/400 seeds, 3,531 events).
+    """
+
+    class Watched(ResizableLimiter):
+        """Records every wake taken while the ceiling had no room for it."""
+
+        __slots__ = ("breaches",)
+
+        def __init__(self, capacity: int, *, floor: int = 1, ceiling: int | None = None) -> None:
+            super().__init__(capacity, floor=floor, ceiling=ceiling)
+            self.breaches: list[tuple[int, int, int]] = []
+
+        def _wake_next(self) -> bool:
+            before, cap = self._borrowed, self._capacity
+            woke = super()._wake_next()
+            if woke and before >= cap:
+                self.breaches.append((seed, before + 1, cap))
+            return woke
+
+    breaches: list[tuple[int, int, int]] = []
+    for seed in range(400):
+        rng = random.Random(seed)
+        limiter = Watched(rng.randint(1, 4), floor=1, ceiling=4)
+
+        async def body(limiter: Watched = limiter, rng: random.Random = rng) -> None:
+            async with limiter:
+                for _ in range(rng.randint(0, 3)):
+                    await asyncio.sleep(0)
+
+        tasks = [asyncio.create_task(body()) for _ in range(20)]
+        for _ in range(60):
+            for _ in range(rng.randint(1, 4)):  # one turn, several operations
+                roll = rng.random()
+                if roll < 0.40:
+                    limiter.resize(rng.randint(1, 4))
+                elif roll < 0.80:
+                    alive = [t for t in tasks if not t.done()]
+                    if alive:
+                        rng.choice(alive).cancel()
+            await asyncio.sleep(0)
+
+        limiter.resize(4)
+        await _settle(64)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        breaches.extend(limiter.breaches)
+
+    assert breaches == [], f"(seed, in flight, ceiling) admitted over the ceiling: {breaches[:5]}"
 
 
 async def test_release_without_acquire_fails_loud() -> None:
