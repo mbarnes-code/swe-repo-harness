@@ -165,21 +165,54 @@ def claims(live_name: str, container_name: str) -> bool:
     name by a `-`-delimited segment, never by bare characters. `fleet-<run>-repo-1` must not
     claim `fleet-<run>-repo-10-t<token>`: attempt 1 and attempt 10 are different rungs, and a
     bare `startswith(live_name)` would let a live attempt 1 spare attempt 10's orphans forever.
-    Requiring `-` rules that out by construction, because attempts are digits and a digit is not
-    `-`. This is the same reasoning `_container_prefix` records for its trailing `-t`, one layer
+    Requiring `-` rules THAT out by construction, because attempts are digits and a digit is not
+    `-` — but read no further than the attempt segment; see the paragraph after this one. This is
+    the same reasoning `_container_prefix` records for its trailing `-t`, one layer
     down and without borrowing that function's private convention: the sandbox layer knows only
     that `sandbox_name` is `-`-delimited, not that some worker spells its per-call token `t<hex>`.
     Matching `-t<hex>` here would be tighter, and would also mean that the first worker to name
     its containers any other way gets them force-removed mid-build — the loud, destructive
     direction of the two errors available.
 
+    **The `-` requirement does NOT bound the repo segment, and "by construction" must not be read
+    that far.** `slug` (`sandbox/worktree.py`) maps `/` to `-`, so a repo id that is another id
+    plus a trailing path segment produces a sandbox name that IS a `-`-delimited extension of the
+    other. MEASURED, not reasoned: live `fleet-<run>-acme-commons-1` (repo `acme/commons`,
+    attempt 1) claims `fleet-<run>-acme-commons-1-2-t<token>` (repo `acme/commons/1`, attempt 2)
+    — a different repo AND a different attempt, spared for as long as `acme/commons` attempt 1 is
+    live. Recorded as a STATED BOUNDARY rather than fixed: the only tightening available is to
+    match `-t<hex>`, which the paragraph above refuses on purpose and which errs in the
+    destructive direction, so patching this would trade a bounded over-spare for the one error
+    no later sweep can undo. `test_claims_spares_a_slug_colliding_repo_as_a_stated_boundary`
+    (`tests/test_sandbox.py`) pins it so it cannot be closed by accident in that direction.
+
     **Which way this errs.** Toward sparing. Two same-rung containers — a crashed invocation's
     orphan and the live retry's — are INDISTINGUISHABLE from a `phases` row, so this spares both.
     That leaks one container's disk until the rung stops being live, at which point the next
-    sweep (idempotent, self-healing) takes it; `run()`'s `finally` and `on_cancel`'s prefix sweep
-    are two further paths that already reach it. The other direction destroys a running build and
-    is not recoverable by any later sweep. A silent leak with three backstops is the cheaper
-    error, and it is the direction chosen deliberately.
+    sweep (idempotent, self-healing) takes it. The other direction destroys a running build and is
+    not recoverable by any later sweep, so the leak is the cheaper error and is the direction
+    chosen deliberately.
+
+    **What actually backstops that leak: one general path and two conditional ones.** Enumerated
+    against `src/` rather than from memory, because the version of this list that stood here until
+    `HEAD` named `ContainerSandbox.run()`'s `finally` (`:330-331`) — a path that CANNOT fire for
+    these containers. That method has zero callers in `src/`, and `BuildverifyWorker`, which
+    starts every container this predicate spares, does not go through it: it builds the argv
+    itself with `docker_run_argv` (`workers/buildverify.py:792`, `:1133`) and runs it on its own
+    `CommandRunner`, using the `ContainerSandbox` it constructs (`:1050`) only for
+    `list_by_prefix`/`remove`. The paths that do reach one of these containers are:
+
+    * **General** — the next idempotent `reap()`, once the rung stops being live. Real since
+      `cli._reap_orphan_containers` gained the call (`cli.py:10608`); before that it was a
+      mechanism with no caller.
+    * **Conditional, deadline kill only** — `BuildverifyWorker.run()`'s two `_sweep_containers`
+      calls (`workers/buildverify.py:829`, `:958`), both guarded by `result.timed_out and
+      result.started`.
+    * **Conditional, explicit cancellation only** — `on_cancel`'s prefix sweep
+      (`workers/buildverify.py:1038`), reached from `_run_one`'s watchdog.
+
+    `--rm` (`docker_run_argv`, `:133`) is why a cleanly-exiting invocation leaves nothing at all,
+    but it is not a backstop for an orphan whose client was killed.
     """
     return container_name == live_name or container_name.startswith(f"{live_name}-")
 

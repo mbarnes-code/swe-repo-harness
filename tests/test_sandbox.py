@@ -26,6 +26,7 @@ from fleet.sandbox.container import (
     ContainerSandbox,
     ContainerSpec,
     Mount,
+    claims,
     docker_run_argv,
     spec_for_attempt,
 )
@@ -1255,6 +1256,38 @@ async def test_reap_spares_a_live_container_whose_name_carries_a_per_call_token(
     assert set(result.reaped) == {other_repo_orphan, attempt_10_orphan}
     assert result.failed == []
     assert result.complete is True
+
+
+async def test_claims_spares_a_slug_colliding_repo_as_a_stated_boundary() -> None:
+    """The repo segment is NOT bounded by the `-` requirement, and this pins that as a boundary.
+
+    `slug` maps `/` to `-`, so `acme/commons` and `acme/commons/1` produce sandbox names where the
+    first is a `-`-delimited prefix of the second. A live `acme/commons` attempt 1 therefore
+    spares every container of repo `acme/commons/1` attempt 2 — a different repo AND a different
+    attempt — for as long as that rung is live.
+
+    This asserts the CURRENT, spare-too-much behaviour on purpose. It is not a wish: the only
+    tightening available is to match buildverify's `-t<hex>` token, which `claims()` refuses so
+    that the first worker naming its containers any other way is not force-removed mid-build.
+    Trading a bounded over-spare (a leak the next idempotent `reap()` clears once the rung ends)
+    for the one error no later sweep can undo is the wrong trade, so the boundary is documented
+    in `claims()` and executable here. A future author who "fixes" this flips the assertion and
+    has to read why first.
+    """
+    live = sandbox_name(RUN_ID, "acme/commons", 1)
+    nested_repo_orphan = f"{sandbox_name(RUN_ID, 'acme/commons/1', 2)}-t{'d' * 8}"
+
+    assert live == f"{run_prefix(RUN_ID)}acme-commons-1"
+    assert nested_repo_orphan == f"{run_prefix(RUN_ID)}acme-commons-1-2-t{'d' * 8}", (
+        "the collision is in `slug`, not in `claims`: both repo ids flatten to the same "
+        "`-`-delimited stem, and that is what makes one name extend the other"
+    )
+    assert claims(live, nested_repo_orphan) is True, (
+        "stated boundary, not an aspiration — see `claims()`'s docstring before changing this"
+    )
+    # And the property the `-` requirement DOES buy, asserted alongside so the boundary above is
+    # read as a scope limit rather than as the predicate being useless.
+    assert claims(live, f"{sandbox_name(RUN_ID, 'acme/commons', 10)}-t{'e' * 8}") is False
 
 
 async def test_reap_never_removes_a_container_outside_the_runs_own_namespace() -> None:
