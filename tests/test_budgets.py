@@ -995,3 +995,43 @@ async def test_limits_hands_each_tier_a_resizable_limiter(harness: Harness) -> N
 
     heavy.resize(99)
     assert heavy.capacity == 2, "the ceiling stays the configured `concurrency.llm.heavy`"
+
+
+async def test_a_freed_slot_is_charged_at_wake_not_when_the_waiter_resumes() -> None:
+    """The window between choosing a waiter and that waiter running must show no headroom.
+
+    Charging the slot inside the resumed waiter instead of inside `_wake_next` passes the
+    contention test — the woken tasks are scheduled ahead of any later arrival, so the race
+    usually does not open. It opens when two slots are freed back to back with no await between
+    them: both waiters are chosen, neither has resumed, and `borrowed` still reads 0. An arrival
+    in that window is admitted over the ceiling.
+    """
+    limiter = ResizableLimiter(2)
+    await limiter.acquire()
+    await limiter.acquire()
+
+    async def waiter() -> None:
+        async with limiter:
+            await _settle()
+
+    parked = [asyncio.create_task(waiter()) for _ in range(2)]
+    await _settle()
+    assert limiter.borrowed == 2
+
+    limiter.release()
+    limiter.release()  # both waiters are now chosen; neither has run a single line
+
+    assert limiter.borrowed == 2, "the two freed slots went to the two waiters, not to nobody"
+
+    # And the admission decision itself: step an arrival's `acquire()` by hand, because awaiting
+    # it would hand control to the woken waiters and close the window we are testing.
+    arrival = limiter.acquire()
+    try:
+        arrival.send(None)
+    except StopIteration:  # pragma: no cover - the failure this test exists to catch
+        pytest.fail("an arrival in the wake window was admitted over the ceiling")
+    finally:
+        arrival.close()
+
+    await asyncio.gather(*parked)
+    assert limiter.borrowed == 0
