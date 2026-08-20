@@ -3234,3 +3234,734 @@ radius of the disagreement wherever RS1's code reads it; it does not remove the 
 construction path, neither of which is in RS1's lane (Rule 3). When it lands, the conjunction in
 `_STALE_HEARTBEAT_PREDICATE` becomes a redundant no-op rather than a wrong answer, which is the
 property that makes it safe to leave in place until then.
+
+## D54–D70 — pre-existing defects surfaced by Round B (the unbuilt-subsystems round), none of which the suite fails on
+
+**What makes this batch different from D26–D33 and D34–D45.** Those recorded defects in code the
+round itself had just written. Every entry below was **already on `main`** before Round B started
+and is verified against `7a8bfbb` — the round's lanes found them while building *beside* them.
+Defects a lane introduced and then fixed inside the round are deliberately **excluded**; they are
+churn, and the round's own ledger (`.superpowers/sdd/sdd-backlog-b/progress.md`) is where they
+belong. Excluded on that rule, though the ledger records them at length: the `"strict": True` schema
+violation (9 of 12 roles), the `effort` default fabrication (ADR-0075), every `LlmFindingSink`
+error-path defect, `stubs.py`'s `_consumers_of` Critical, and the ADR-0075/0076 number collision.
+
+**Numbering.** The highest number previously assigned in this document is **D53**. The entry
+immediately above this block — `run.stale_after_s` leaves `KNOWN_INERT`, contributed by the RS1 lane
+and landed with its branch — **claims no D-number**, so it neither collides with nor duplicates
+anything here (its subject, `phases.heartbeat_ttl_seconds` having no writer in `claim_phase`, appears
+in no entry below). It is left un-numbered: renumbering a landed entry is a separate edit, not a
+side effect of appending. **D71 is the next free number.**
+
+**The measurement that frames the whole batch, restated after landing.** The full suite was run on
+unmodified `main` at `7a8bfbb` as the mandatory pre-land baseline — **1305 passed, 0 failed, 0
+skipped**, `0 tests skipped this session`, `bazel disk: peak 4.22 GiB (ceiling 6 GiB) · residual
+output bases 0 bytes`. Round B has since landed in full and the suite was re-run on `main` at
+`6a41840` — **1575 passed in 1077.73s, 0 failed, 0 skipped**, same clean disk line, cache kept
+1645 MiB. Green by CLAUDE.md §6 on both conditions, on both trees. It follows directly that **no
+test in the suite fails on account of any entry below, before or after the fixes landed**. Read that
+for exactly what it says and no more: it does not mean every entry is untested — several are
+*asserted* by a passing test, or *documented* by one (D58's is documented verbatim in
+`tests/test_config_keys_are_read.py`), which is worse than untested and is noted per entry. Where an
+entry says "would a test catch it? No", that is a claim about the suite's content, checked
+separately.
+
+**Status vocabulary, used strictly — read it before citing any entry.**
+
+| Status | Means |
+| --- | --- |
+| **OPEN** | Present on `main` at `6a41840`, after Round B landed in full. Nothing fixes it. Every OPEN entry below was re-verified against that SHA when this block was appended, per ADR-0073. |
+| **FIXED, LANDED (`<sha>`)** | The fix is on `main`. `<sha>` is the landed (post-rebase) commit, not the `agent/*` branch SHA the lane and the pre-land audit cite — the branches were rebased, so those SHAs no longer resolve to these commits. |
+| **PARTLY ADDRESSED** | Some legs landed, others still open; the entry says which, and which SHA carries the landed half. |
+
+Landed ranges on `main`, for citation: ST1 `8968319..5c52ee5` · CLEAN1 `712fd5f..a9afe9d` · BK2
+`92cfc94..eabfcdb` · BK1 `21f5797..6d5a4a8` · BK3 `87b51f8..36984cb` · RS1 `c45db53..74dc7bc` ·
+DEM1 `791b428..ebd1624` · FD1 `d1ed2be..6a41840`.
+
+**Three corrections to the candidate list as it was briefed**, made because the code did not support
+the wording, and recorded here rather than silently dropped:
+
+- "`client.py:532` never inspects `exc.trigger`" — it **does** read it, to label the emitted failover
+  event. It never *branches* on it. D55 states the accurate form; the stronger claim is false as
+  written.
+- "the comment existed in **five** places" — **four** are pre-existing (D61). The fifth is two
+  verbatim quotations inside code BK1 wrote this round, i.e. churn by this block's own exclusion
+  rule. When a summary count and its own enumeration disagree, the enumeration is the evidence.
+- "`_unavailable` … all five modules it names" — **five call sites, four distinct modules** at
+  `7a8bfbb`, and **three call sites, two distinct modules** on `main` after RS1 landed (D63).
+
+---
+
+**D54 — FIXED, LANDED (`c45db53`). Nothing in the harness could clear the sticky budget halt, so
+§10's documented exit-3 recovery was a permanent no-op and a budget-halted run was unrecoverable
+without hand-editing SQLite.** Verified against `7a8bfbb`; fix verified on `main` at `6a41840`.
+
+`git grep halted 7a8bfbb -- src/` finds exactly **one** writer of the column:
+`state/repository.py:1410`, `"UPDATE budget_ledger SET halted = 1, updated_at = ? WHERE run_id = ?"`.
+Its own docstring states the property as a design virtue — *"Sticky by construction: there is no
+argument that writes `0`"* — and then names the way out it does not provide: *"§11.2 allows exactly
+one way out — an audited `fleet resume --raise-budget` — and it does not come through here."* No
+other code path wrote `halted = 0`. The reservation CAS at `:562` carries `AND halted = 0` in its
+`WHERE`, so once the flag was set every reservation in every later process returned `rowcount == 0`
+and refused.
+
+**Consequence.** `docs/SPEC.md:6594` states *"`halted = 1` — clearing it requires `fleet resume
+--raise-budget <usd>`, which writes an audited finding"*; `:6466` and `:7013` say the same from the
+CI and fixture sides. That recovery did not exist. A run that crossed its ceiling was terminal, and
+the only recovery was an operator editing `budget_ledger` by hand — outside the audited path the
+SPEC requires, and outside `findings` entirely. (A briefing error worth recording: the exit-3
+recovery was first cited at `SPEC.md:6445-6450`, which is the `--raise-wave-budget` paragraph and
+mentions `--raise-budget` only by analogy. `:6594` is the real anchor.)
+
+**Found by** the RS1 reviewer, checking a claim rather than accepting it: RS1 reported the gap as a
+latent defect found while building `fleet resume`'s unrelated step 3, and the reviewer verified
+**both halves independently** — the single-writer grep and the CAS predicate — before it was
+recorded. The round ledger calls it "the round's most valuable single find".
+
+**Would a test catch it? No**, and the shape is the reason: the sticky write is well tested, the CAS
+predicate is well tested, and *the absence of a second writer* is not a thing a test asserts. The
+suite was green on `main` with the defect present, at 1305 passed.
+
+**Fix, and its exact reach.** `c45db53` puts `"UPDATE budget_ledger SET max_usd = ?, halted = 0,
+updated_at = ? WHERE run_id = ? AND spent_usd + reserved_usd <= ? AND max_usd <= ?"` and the
+`RunBudgetRaised` audit `INSERT` in **one** `StateWriter` unit, and `state/db.py` wraps every unit in
+`BEGIN IMMEDIATE`→`COMMIT`, so the raise and its audit row are atomic. `repository.py:1410` is
+**unchanged** and is still the only `halted` writer in `state/`; the clear lives in the CLI's resume
+path, which is where §10 puts it. `git log -S"halted = 0" 7a8bfbb..main -- src/` returns `c45db53`
+and nothing else.
+
+---
+
+**D55 — OPEN. A pure 429 walks a tier and reaches a halt that tells the operator every backend
+target is `DOWN` — a state with no representation anywhere in `src/`.** Verified against `7a8bfbb`;
+**re-verified OPEN on `main` at `6a41840`**, where the halt string is `orchestrator/runner.py:640`,
+the two comment carriers are `models/enums.py:383` and `orchestrator/retry.py:196`, and
+`llm/client.py` is byte-for-byte the base file — no lane modified it.
+
+Three hops, each verified at source:
+
+1. `llm/client.py:532` catches `(SchemaUnsatisfied, TransportError)` as *"The ONLY two failover
+   paths"* and fails the target over. It computes `trigger` at `:536-538` — and here the round's own
+   shorthand needs correcting: the arm **does** read `exc.trigger`, but only to *label* the emitted
+   failover event. **Nothing branches on it.** A `TransportError` carrying `RATE_LIMIT` and one
+   carrying a refused connection take byte-identical paths. When the target list runs out, `:542`
+   raises `TierUnavailable(route.tier, tried)`.
+2. `workers/classify.py:247-248` maps `TierUnavailable` → `FailureClass.BACKEND_UNAVAILABLE`, and
+   `:255-258` makes that class **non-retryable** (`retryable = failure_class not in
+   (BUDGET_EXHAUSTED, BACKEND_UNAVAILABLE)`).
+3. `orchestrator/runner.py:640` turns that class into `raise RunHalted(HaltReason.TIER_UNAVAILABLE,
+   f"every backend target for {repo_id}'s tier is DOWN: …")`.
+
+**`DOWN` is vocabulary the harness does not own.** It is `BackendHealth`'s state name from SPEC
+§11.8, and `BackendHealth` is not built. On `main` the string `DOWN` appears in `src/` only inside
+that halt message, two comments (`models/enums.py:383`, `orchestrator/retry.py:196`), FD1's own
+docstrings explaining why the finding refuses the word, and two unrelated `--max-cost-usd`
+"DOWNWARD" strings in `cli.py`. So the message asserts a diagnosis from a subsystem that does not
+exist, on evidence that does not distinguish throttling from an outage.
+
+**Consequence — SPEC §13 row 43's named disaster, live in shipped code.** Row 43 exists to prevent
+"sustained throttling mistaken for an outage": a fleet that is being rate-limited halts at exit 8
+telling the operator its provider is down, when the correct action was to lower concurrency. There
+is no rate limiter — R2 measured the shape of that gap: the 429 signal is in `llm/`, the semaphore is
+`orchestrator/budgets.py:962`, and its **only** acquisition is `workers/classify.py:162`, i.e. 1 of
+12 workers; `asyncio.Semaphore` has no resize API.
+
+**Found by** R2 (research), scoping §13 rows 40 and 43 for build size and reading the halt path on
+the way. Recorded in the round ledger as "the highest-risk finding of the round".
+
+**Partly addressed, landed (`c5e28ce`, `31e6776`) — the *reporting*, not the defect.** FD1 was
+explicitly told not to fix the misclassification (LARGE, out of scope) and not to codify the
+misdiagnosis. Its `BackendUnavailable` finding row now reports what was *observed* (tier and every
+target tried, in order) with machine-readable `asserts_outage: false`, a three-valued
+`failover_triggers_recorded` that is **never** "complete", and a caveat naming throttling. But the
+halt itself is untouched on `main`: `runner.py:640` still raises the `is DOWN` message,
+`enums.py:383` still carries the word, `llm/client.py` is unmodified across the whole round, and
+`classify.py` was never in FD1's diff. **The operator-facing halt still asserts a cause nothing
+determined.**
+
+**Would a test catch it? No.** A test would have to drive a rate-limited transport through a full
+tier and assert on the halt's *claim*, and the round found none. The suite is green on `main` at
+1575 passed.
+
+---
+
+**D56 — FIXED, LANDED (`c36160e`). `llm.client.discover()` had zero call sites in `src/`, so the
+backend registry could never be populated; and `settings.py` validated `backend:` against a
+hard-coded tuple rather than the registry, so the "checked at construction" guarantee was vacuous
+against an empty one.** Verified against `7a8bfbb`; fix verified on `main` at `6a41840`.
+
+`llm/client.py:355` defines `discover()`. `git grep "discover()" 7a8bfbb -- src/` returned only
+`ecosystems.discover()` sites — **the LLM one was never called**. `_BACKENDS` was therefore populated
+by import side effect alone, via `register_backend`, and nothing in `src/` imported a backend module.
+At `7a8bfbb` `src/fleet/llm/backends/` **did not exist as a directory**: `git ls-tree -r 7a8bfbb --
+src/fleet/llm/` lists `__init__.py`, `cache.py`, `calls.py`, `client.py`, `roles.py`, `schemas.py`
+and nothing else.
+
+**The second half is what made it silent.** `settings.py:1163` read `backends = tuple(known_backends)
+if known_backends is not None else SHIPPED_BACKENDS`, and `SHIPPED_BACKENDS` was the literal
+`("anthropic", "openai_compatible", "bedrock", "vertex")`. The `known_backends=` parameter **already
+existed**, is documented as the thing that "injects the live §7.7 registry (Guardrail 3)" — and
+neither of `cli.py`'s two `FleetSettings.load(` sites supplied it. So the §9 gate validated a config
+against a list of four names none of which corresponded to a registered backend. A profile naming
+`anthropic` passed startup cleanly on a tree where no backend could answer.
+
+**Consequence, and why it would have surfaced late.** A backend module lands, its own test imports it
+directly (so `register_backend` runs, and the test is green), it ships — and the first real run
+raises `UnknownBackend` at dispatch, i.e. at wave 7 of a long run, not at startup. The round routed
+this to a single lane precisely because two lanes writing backends would each have shipped green.
+
+**Found by** R1 (research) and CR1 (review) **independently converging on it** in wave 1, from
+different directions — R1 from the call-graph, CR1 from the settings gate. Corroboration by two
+agents that could not see each other is the reason it was trusted enough to route immediately.
+
+**Would a test catch it? No** — the pre-fix suite had no test that asserted the registry's state in a
+fresh interpreter; a backend's own test file populates the registry as a side effect of importing
+itself, which is exactly the observation that hides the defect.
+
+**Fix, and what landing proved that a branch could not.** `c36160e` calls `discover()` from
+`cli._load_settings` and threads its keys into both `FleetSettings.load(` sites, which closes all
+three readers of `_BACKENDS` at once: §9 rule 2's gate, `fleet models check`'s `registry()`, and
+`RunContext(backends=None)`'s fallback. Guarded by a fresh-interpreter test that imports only
+`fleet.cli`, asserts the registry is empty, then drives real startup; removing `discover()` fails 2
+tests. **Demonstrated on `main`, not reasoned:** the post-land integration check prints `before: []`
+then `after: ['anthropic', 'openai_compatible']` — the empty first line is the part that matters,
+because it proves the registry is filled by `discover()`'s `pkgutil` walk and not by an accidental
+eager import. A second check AST-parses `src/fleet/llm/backends/__init__.py` and finds **exactly one
+non-docstring statement**, `from __future__ import annotations`, so `client.py:363-365`'s
+silent-empty-registry path is unreachable. **Note the knock-on, which is not a defect but is a
+behaviour change that landed with it:** the gate switched from four hard-coded names to the live
+registry, so a config naming `bedrock` or `vertex` on a host without those extras now exits 2 —
+correct by design per SPEC, with CLEAN1's remedy message (landed first, deliberately) naming the
+missing extra. On this host `discover()` registers `anthropic` and `openai_compatible` only, because
+`importlib.util.find_spec` returns `None` for `boto3` and for `google`; that is the designed
+`client.py:366-369` path, **not** a regression, and `config/models.yaml` ships zero `bedrock`/`vertex`
+targets.
+
+---
+
+**D57 — OPEN. The identical shape one parameter over, and nobody fixed this one:
+`FleetSettings.load(capabilities=...)` is never supplied, so §9 rule 3 cannot consult a target's
+declared capabilities at all.** Verified against `7a8bfbb`; **re-verified OPEN on `main` at
+`6a41840`**.
+
+`settings.py` declares `capabilities: Callable[[BackendTarget], ModelCapabilities] | None = None`,
+documented as the thing that *"injects declared capabilities for the §9 rule 3 gate"*, and forwards
+it to `_check_routing`. Rule 3's body is:
+
+    declared = capabilities(first).max_context if capabilities is not None else None
+    override = first.capabilities_override.get("max_context")
+
+Neither `FleetSettings.load(` site in `cli.py` passes `capabilities=`. `declared` is therefore
+**always `None`**, and rule 3 — the gate that is supposed to refuse a profile whose tier cannot meet
+`llm.require_capabilities` — fires only when an operator has hand-written a
+`capabilities_override.max_context` into `models.yaml`. On the config the harness ships, it cannot
+fire.
+
+**Why this is its own entry and not a footnote to D56.** It is the same defect *class* — a
+dependency-injection parameter that exists, is documented, and is never supplied — but D56's fix does
+not touch it. BK1 rewrote both `FleetSettings.load(` calls to multi-line form to add
+`known_backends=`; `git grep "capabilities=" -- src/fleet/cli.py` is **empty on `main`**. The lane
+that was in exactly the right function to fix this fixed the sibling parameter and left this one.
+Recording it separately is what stops "BK1 wired the injection" from being read as covering both.
+
+**Found by** the CR1 pre-flight review, then sharpened by R2, which corrected CR1's own framing: the
+original claim was "§9 rule 3 never fires", and the accurate statement is narrower — it fires, but
+only on an operator override, never on declared capabilities.
+
+**Would a test catch it? No.** A test that exercises rule 3 by writing a `capabilities_override`
+passes and proves the rule's arithmetic; nothing asserts that the *declared* leg is reachable. The
+suite is green on `main`.
+
+---
+
+**D58 — OPEN. `RunContext.llm_policy` is never assigned, so no `llm.failover.*` config key reaches
+the model client — and the repo's own test suite already documented this in a comment.** Verified
+against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**, where `orchestrator/context.py:141`
+declares it and `:172` consumes it.
+
+`context.py:141` declares `llm_policy: CallPolicy | None = None` and `:172` consumes it
+(`LadderModelClient(self.llm, self.backends, policy=self.llm_policy)`). `client.py:478` then reads
+`self._policy = policy or CallPolicy()`. `git grep "llm_policy=" -- src/` is **empty** on `7a8bfbb`
+and still empty on `main`: no `RunContext(` site supplies it, so `policy` is always `None` and
+`CallPolicy()` is always built with **all defaults**. `llm.failover.enabled`,
+`llm.failover.max_targets_per_call` and `llm.max_schema_repairs` are read out of `fleet.yaml` into
+`FleetSettings` and go nowhere.
+
+**The suite documents the defect rather than catching it**, which is this document's whole thesis
+happening again. `tests/test_config_keys_are_read.py` lists those three keys in `KNOWN_INERT` with
+the mechanism spelled out in a comment: *"`CallPolicy()` is constructed with no override at its one
+call site: `RunContext.llm_policy` is declared and consumed but never assigned by any of the five
+`RunContext(` sites in `cli.py`. The bare names pass the plain scan on
+`self._policy.max_schema_repairs` / `.max_targets_per_call` — real code, wrong object."* That comment
+is accurate, it has been accurate for as long as it has existed, and the ratchet it lives in is
+designed to keep the suite green while it stays true.
+
+**Found by** R2, which corrected a too-generous earlier claim of its own lineage: research-B1 had
+recorded "only `max_targets_per_call` is read", and R2's re-check established the stronger and
+correct statement — **no** `llm.failover.*` field reaches the client; `client.py:499` reads a
+`CallPolicy` field that merely shares a *name* with the config leaf.
+
+**Not fixed, and the round says why.** FD1 reported it as its concern 3 and declined: closing it
+needs a `CallPolicy.from_config` builder, edits to `cli.py` (off-limits to that lane), an invented
+semantics for `failover.enabled` that no ADR decides, and three `KNOWN_INERT` deletions. That is a
+decision for an ADR, not a drive-by. **This is a config-surface sibling of D50** — a live code
+consumer correctly gated but never wired to the key that should drive it — and the same relationship
+D49's second correction describes from the opposite end.
+
+---
+
+**D59 — FIXED, LANDED (`d1ed2be`, with fix rounds through `6a41840`). Every `CapabilityDrift` and
+every `BackendFailover` the client computed was discarded, for the whole life of the design.**
+Verified against `7a8bfbb`; fix verified on `main` at `6a41840`.
+
+`llm/client.py:472-473` accepts `on_drift` and `on_failover` callbacks; `:479-480` stores them;
+`_emit_drift` and `_emit_failover` guard on `is None` and return. `orchestrator/context.py` is the
+one place a client is assembled for a run, and it passed **neither**. So the drift computation (a
+target's declared capabilities disagreeing with what the backend actually did) and the failover
+records (which target handed off to which, and why) were computed on every call and dropped on the
+floor. Nothing reached `findings`, nothing reached `events`, nothing reached an operator.
+
+**The fixing commit states it more bluntly than this entry needs to.** The new `context.py`
+docstring: *"for the whole life of that design **nobody supplied either callback** — every drift and
+every failover the fleet computed was discarded at the `is None` guards in `_emit_drift` and
+`_emit_failover`."*
+
+**Found by** R1 and CR1 in wave 1 (routed as "trap T3"), from the same read that produced D56.
+
+**Would a test catch it? No** — a callback nobody passes has no observable effect to assert on, and
+the pre-fix suite contained no assertion on a persisted drift or failover row. The suite was green on
+`main` with the defect present.
+
+**Fix, and its scope stated honestly.** `orchestrator/findings.py::LlmFindingSink` buffers on the
+sync hot path and drains through the run's single writer; `context.py` wires both callbacks;
+`runner.py` flushes per dispatch and per wave. `llm/client.py` is **not modified** — the fix supplies
+the callbacks the client already offered. 11 tests, every one asserting a **persisted SQLite row**
+rather than a mock call. **One live gap the fix itself uncovered and closed:** `cli.py`'s `fleet pr`
+verb builds a `RunContext` and runs `PrwriterWorker` directly with **no `PhaseRunner`**, so on the
+first cut of the fix that shipped command buffered findings and never flushed them — the same
+discard one layer up. Closed in fix round 3 (`337e1cf`) with the drain in a `finally` inside the
+still-open writer. Two related items are **disclosed, not closed**, in code an operator reads:
+`attempts.llm_failovers` is still unwritten (see D62), and `tier=` has no production caller on `main`
+— `findings.py:337` declares `tier: ModelTier | None = None` and the single call site at
+`runner.py:625-628` passes none — so **every shipped row is `scope: "run"`**.
+
+---
+
+**D60 — OPEN. `_emit_failover` never fires for the target that exhausts the tier, so the trigger set
+behind a `TierUnavailable` is structurally unreconstructable — and a single-target tier emits nothing
+at all.** Verified against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**, at
+`llm/client.py:540-542`.
+
+    if index + 1 < len(targets):
+        self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
+    raise TierUnavailable(route.tier, tried) from last
+
+The guard is correct on its own terms — a failover event names a *hand-off*, and the last target
+hands off to nobody — but its consequence is that the trigger for the failure that actually ends the
+tier is never emitted. For a tier with N targets, N−1 triggers are recorded; for N == 1, zero.
+
+**Consequence.** `TierUnavailable` carries the tier and `targets_tried` but no per-target
+`FailoverTrigger`, so a consumer trying to answer "was this throttling or an outage?" — D55's exact
+question — cannot recover the full picture from `events` either. This is the structural reason FD1's
+row is right to refuse a diagnosis, and the reason its `failover_triggers_recorded` field can be
+`"none"` or `"partial"` but **never** `"complete"`.
+
+**Found by** FD1 while building D59's sink, and it is worth recording *how* the claim settled,
+because the first form of it was wrong in the safe direction. FD1 originally reported that no
+triggers were recoverable at all. The reviewer adjudicated: **true for the full set, false for the
+partial set** — `exc.trigger` distinguishes `RATE_LIMIT` cleanly and 1..N−1 triggers *are* emitted
+and now persisted, so a row claiming "none recorded" was itself inaccurate. The three-valued field is
+the outcome of that correction.
+
+**Would a test catch it? No**, and note the asymmetry: a test asserting that failovers are emitted
+passes, because N−1 of them are. Only a test that counts triggers against targets on an *exhausting*
+tier sees the gap.
+
+**Not fixed anywhere.** **No lane modified `llm/client.py` this round** — verified across all eight
+landed ranges.
+
+---
+
+**D61 — FIXED, LANDED (`712fd5f`, `a9afe9d`, `6d5a4a8`). A comment that inverted a cache invariant,
+copied into four places, caused the same cache-poisoning bug in three independent lanes in a single
+round.** Verified against `7a8bfbb`; fix verified on `main` at `6a41840`.
+
+**The mechanism, at source.** `llm/cache.py` builds the **read** key from the *configured* primary
+target, whose `model_id` is `target.model_id` out of `config/models.yaml`. It builds the **write** key
+from the response: `"model_id": usage.model_id or parts.model_id`. And `client.py`'s `_stamp` lets a
+backend-reported value win — `"model_id": usage.model_id or target.model_id`. So an adapter that
+populates `TokenUsage.model_id` from what the server *reported* (an API body's `model` field, a
+Bedrock inference-profile ARN, a Vertex snapshot id) makes the two keys disagree on **every** call: a
+permanent, silent, 100% cache miss.
+
+**Why it is invisible, and this is the sharpest part.** The miss is indistinguishable from a cold
+cache — the rows are written, they just are never read. The one signal the codebase names is
+`attempts.llm_cache_hit`, which `models/tasks.py` calls *"the only cache signal (§11.2, §11.6)"* —
+and that column is `INTEGER NOT NULL DEFAULT 0` which `record_attempt` **never writes** (D62). The
+detector for this defect is a column nothing sets. **Second consequence, verified and correctly
+scoped:** `cache._target_for` matches `(backend, model_id)` against the route's targets to recover
+the answering target's `effort`, itself a key component — so a served name also loses that match and
+`effort` falls back to the primary's. The round's first framing of this called it an independent
+defect; the reviewer corrected it to what it is — **second-order**, mis-attributing only on failover
+to a standby whose `effort` differs. **That second-order leg is still OPEN on `main`**:
+`llm/cache.py:621-628` still matches on `(backend, model_id)`, documented by CLEAN1's rewritten
+docstring and not fixed.
+
+**The documentation defect, with a measured cost.** Four pre-existing sites described the field as
+the backend-reported id, i.e. the exact opposite of the invariant:
+
+- `src/fleet/models/tasks.py:47` — `model_id: str = ""  # the RESOLVED model id, as the backend reported it`
+- `src/fleet/state/schema.sql:434` — `model_id TEXT NOT NULL,  -- RESOLVED id. …`
+- `docs/SPEC.md:2845` — byte-identical to `tasks.py:47`
+- `docs/SPEC.md:4164` — the `llm_cache` DDL listing, carrying `schema.sql:434`'s wording
+
+**Cost:** two of the round's three backend lanes implemented the bug (BK1 with `model_id=message.model`,
+BK2 in `openai_compatible.py`); the third avoided it **only because it was warned explicitly**. The
+round ledger's verdict — *"BK2 was not careless"* — is the correct reading: the comments actively
+invited the choice.
+
+**Found by** the orchestrator, by direct `grep` against a lane's commit rather than by trusting a
+reviewer's report — then by each successive lane that touched the text, each finding one more copy.
+BK1 found `SPEC.md:2845`; CLEAN1 found the unflagged `SPEC.md:4164`. **Record the count precisely:**
+the round says "five places". Four of those are pre-existing (above); the fifth was two verbatim
+quotations of the comment inside code BK1 wrote *this round* — round churn, closed at `6d5a4a8`, and
+the second of the two was wrapped across lines so it escaped a single-line grep. The durable lesson
+is the one the round drew: **a wrong comment propagates by copy, so fixing "the" site is almost always
+fixing one of N.**
+
+**Would a test catch it? No.** There is nothing to fail: the cache still stores, still reads, still
+returns correct answers — just never a hit. The round's regression tests for it assert
+`len(fake.requests) == 1` on a two-call round trip through a real `CachingModelClient`; a
+`len(store) == 1` assertion, the obvious one, **would have passed with the bug present**.
+
+**Fix.** CLEAN1 rewrote all four sites to state the invariant *and the reason* — including the one an
+adapter author actually reads, `client.py`'s assignment, where the `or` had read as an invitation.
+`_stamp`'s **behaviour is deliberately unchanged** (several lanes depend on it); the fix is
+comment-only plus BK1's two quotations, and the pre-land audit measured CLEAN1's `client.py` diff at
++28/−1, **all docstring or comment**. A correct-as-written sibling wording elsewhere in `SPEC.md` /
+`tasks.py` (where "resolved" means the id the *role routed to*) was **reported and deliberately not
+edited** — editing a correct sentence because it matches a grep is the mirror-image error, and this
+round saw both.
+
+---
+
+**D62 — OPEN. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
+`llm_backend`, `input_tokens`, `output_tokens` and `llm_cache_hit` are dead in shipped code.**
+Verified against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**.
+
+`state/repository.py:1671` is `record_attempt`; its SQL at `:1677-1690` names 24 columns
+(`attempt_id … finished_at`) and none of the five — re-read on `main`, unchanged. `git grep` for any
+of the five names in `repository.py` returns nothing. The columns are declared and carry CHECK-free
+defaults in `state/schema.sql` — `llm_cache_hit` is `INTEGER NOT NULL DEFAULT 0`, commented *"1 =>
+served from llm_cache, cost_usd = 0"*; `llm_backend` and `llm_failovers` are ADR-0023's, the latter
+*"backend hops spent inside THIS attempt"*. Every attempts row the harness has ever written carries
+the defaults.
+
+**Consequences, and they compound with other entries.** `llm_cache_hit` is the detector D61's defect
+needed and did not have. `llm_failovers` is the per-attempt attribution D55 and D60 would want.
+`input_tokens`/`output_tokens` make per-attempt token accounting unavailable even though `TokenUsage`
+computes both. **SPEC §12.24's fixture assertion** requires that a `--profile local` run end with
+*"every row carrying a non-empty `backend` and `llm_cache_hit = 0`"* — half of which passes for the
+wrong reason (the column is 0 because nothing writes it) and half of which cannot hold at all
+(`llm_backend` is `NULL`, never non-empty). Round B landed the `local` profile that assertion is
+written against, so the gap is now reachable by a shipped configuration.
+
+**Found by** R2, which also corrected the round's own earlier framing: the first report named
+`llm_failovers` alone; re-reading the statement gave **five**.
+
+**Would a test catch it? No** — and this is the "silent-zero" failure §12.24 was written to catch,
+arriving through the writer rather than the pricing. The suite is green on `main` at 1575 passed.
+
+**Not fixed, and the reason is structural rather than effort.** FD1 reported `attempts.llm_failovers`
+as its concern 2 and declined: attribution is impossible from a wave-shared client without changing
+`WorkerError` (which carries no tier) or `TierUnavailable`'s raise sites — the same cross-lane change
+deferred for `tier=`. Writing the other four is smaller and unowned.
+
+---
+
+**D63 — OPEN. `_unavailable`'s message text is false for every module it names: it tells the operator
+each "still raises `NotImplementedError`" when none of them does.** Verified against `7a8bfbb`; **the
+false string survives on `main` at `6a41840`, at `cli.py:905`.**
+
+    def _unavailable(verb: str, module: str) -> NoReturn:
+        raise CommandUnavailableError(
+            f"`fleet {verb}` cannot run: {module} still raises NotImplementedError. …"
+        )
+
+At `7a8bfbb` it had **five call sites** naming **four distinct modules** (`workers/relocate.py` ×2,
+`workers/prwriter.py`, `workers/clone.py`, `workers/buildverify.py`). `git grep NotImplementedError
+7a8bfbb -- src/` returned **four raises** — `manifests/base.py`, `rewrite/libcst_py.py`,
+`rewrite/tsmorph.py` ×2 — **none in `workers/`**. All twelve workers are implemented and all of them
+implement `preconditions_hold`. The same grep on `main` returns the same four raises, in the same
+four non-`workers/` files.
+
+**Consequence.** The message points a maintainer at a file to go implement, and the file is already
+implemented; the real reason each verb refuses is elsewhere (missing driver assembly, not a missing
+worker body). It also invites the reader to trust the string as evidence about `src/` — which the
+round did, in its own briefs, until it was checked.
+
+**Found by** R1, and it produced one of the round's durable rules: **never trust an `_unavailable`
+string as evidence.** It is prose, and prose in a codebase ages.
+
+**Would a test catch it? No.** Tests assert the exit code and the refusal, which are correct; no test
+compares the message's factual claim against `src/`.
+
+**Partly addressed, landed (`c45db53`) — two sites removed, three left, all still false.** RS1 built
+`fleet resume`'s steps 3 and 7, so `resume` and `resume --repoll-prs` now refuse through a
+`CommandUnavailableError` that names the genuinely missing piece (the per-phase `PhaseRunner`
+assembly), not through `_unavailable`. **Re-measured on `main` at `6a41840`: three call sites remain —
+`cli.py:2408`, `:2520` (both `workers/relocate.py`) and `:10958` (`workers/buildverify.py`), i.e. two
+distinct modules — and the false sentence at `cli.py:905` is unchanged from `7a8bfbb`.** RS1 reported
+this rather than rewording it — correctly, since the rewording is a `cli.py` edit three lanes were
+contending for. **It needs an owner.**
+
+---
+
+**D64 — FIXED, LANDED (`433dd55`). The required-target-field gate tested `is None`, so `base_url: ''`,
+a whitespace-only `base_url`, and `region: ''` all passed startup — violating §13 row 36's "fail at
+startup naming profile/tier/index/field".** Verified against `7a8bfbb`; fix verified on `main` at
+`6a41840`.
+
+At `7a8bfbb`: `for required in _REQUIRED_TARGET_FIELDS.get(target.backend, ()): if getattr(target,
+required) is None: raise ConfigValidationError(...)`. An empty string is not `None`, so it satisfied
+the gate. The blank value then travelled to wave 7, where a transport builds a client against an
+empty base URL — the exact "fail late instead of at startup" outcome row 36 exists to prevent.
+`_REQUIRED_TARGET_FIELDS` drives **both** `base_url` and `region` from one table, so the same hole
+covered `region` for the (then unbuilt) `bedrock`/`vertex` transports — which Round B then built.
+
+**Found by** the CR1/BK2 pre-flight review as a minor, deferred because `settings.py` was under
+contention, then routed to CLEAN1 — and **reproduced before being fixed**: `''`, `'   '` and a valid
+URL all loaded clean against pre-fix `settings.py`. The `region` half was handed over by BK3 from the
+other side, and CLEAN1 **verified rather than assumed** that round 1's shared-loop edit had already
+closed it: against `7a8bfbb` both blanks load clean; at the fixed tip both refuse.
+
+**Would a test catch it? No** — `tests/test_settings.py` had no blank-string case for either field;
+the round added them, and confirmed the four behaviour-changing assertions **fail against pre-fix
+`settings.py`** rather than inferring it.
+
+**Fix.** `if value is None or (isinstance(value, str) and not value.strip())`, reusing the existing
+message and `key` shape verbatim so the error's §13-row-36 form is unchanged. `git log -S"isinstance(value, str)" 7a8bfbb..main -- src/`
+returns `433dd55` and nothing else.
+
+---
+
+**D65 — FIXED, LANDED (`a9afe9d`). A markdown blockquote inverted a normative SPEC rule, and had
+since commit `a1178f7`.** Verified against `7a8bfbb` and reproduced in `a1178f7`'s own tree; fix
+verified on `main` at `6a41840`.
+
+At `7a8bfbb`, `docs/SPEC.md:474-477`, inside numbered step 6 of the plan phase:
+
+    demand, never persisted (ADR-0004). `strongly_connected_components` → any component of size
+    > 1 becomes a `CycleFinding` with a proposed break edge chosen deterministically: lowest
+    `confidence`, tie-broken by fewest transitive dependents, tie-broken by `edge_id`. The
+    condensation graph is what gets sorted.
+
+The `>` at line-start of `:475` (line-initial within the list item's content block) opened a
+**blockquote**, and lazy continuation absorbed `:476` and `:477` into it.
+
+**Consequence — the rule was inverted, not merely mis-rendered.** The `> 1` threshold was consumed as
+blockquote syntax, so `:474` ended bare at *"any component of size"* and the orphaned text read
+**"size 1 becomes a `CycleFinding`"** — i.e. every single-node component, which is every node. The
+tie-break ordering, a normative determinism requirement, rendered as a quotation, i.e. as something
+non-authoritative.
+
+**Found by** BK2 while sweeping `DECISIONS.md` for a defect of its own, and confirmed independently
+by that lane's re-reviewer: an independent parser sweep found `SPEC.md` had 4 blockquotes and **2
+absorptions** — which also corrected BK2's own summary sentence claiming it had swept both docs to
+zero.
+
+**Would a test catch it? No.** Nothing in the suite renders the SPEC. The defect is invisible in the
+source, which is why the round's instruction was **verify by rendering, not by reading** — and why
+every lane touching it was required to validate its parser against the known-bad state first.
+
+**Fix, and the constraint on it.** CLEAN1 rewrapped the line so `>` is not line-initial — **identical
+words, identical order**, proven by `old.split() == new.split()` → `True`. That property is what a
+normative rule requires: a silent reword there would have changed the rule while appearing to fix
+formatting. Render checked pre- and post-fix (`size 1` → `size > 1`), and all 26 `docs/*.md` sweep to
+0 absorptions. **On `main`, `docs/SPEC.md:479` now carries "any component of size > 1" on a single
+line.**
+
+---
+
+**D66 — FIXED, LANDED (`87884d7`, with the marker rounds `7ecc898`, `2c6e89f`, `eabfcdb`). A false
+claim about model behaviour was the stated premise for a different subsystem's determinism argument,
+in the SPEC and in two `src/` comments.** Verified against `7a8bfbb`; fix verified on `main` at
+`6a41840`.
+
+Five pre-existing sites asserted that the harness relies on "adaptive thinking", and two of them used
+it as a *premise*:
+
+- `docs/SPEC.md:3268` and its `src/` mirror `models/tasks.py:478` — *"…a re-run reproducible, since
+  adaptive thinking forbids temperature pinning (§11.6)"*
+- `src/fleet/llm/cache.py:4` — the same clause, at the top of the cache module
+- `docs/SPEC.md:5589` — the `anthropic` backend row: *"adaptive thinking + `effort` where the
+  target's declared capabilities carry it"*
+- plus `SPEC.md:6810`, `:7073` and `DECISIONS.md:290` (ADR-0009, the root the SPEC row derived from)
+
+**Neither behaviour exists.** No `thinking` key is constructed anywhere; `git grep -i thinking`
+against the backend lane hits only prose — and that still holds on `main` now that all four adapters
+are landed. And `ModelCapabilities` has **no `effort` field**, so "where the target's declared
+capabilities carry it" described a consultation the type system makes impossible.
+
+**Consequence, and it is the reason this is a defect rather than a stale sentence.** The claim was
+**load-bearing for the LLM cache's determinism rationale** — the argument for why a cached reply is
+safe to replay rested on a model behaviour that does not exist. Separately, `SPEC.md:5589`'s
+capabilities clause was a live trap: a maintainer reconciling code to spec adds `supports_effort` to
+`ModelCapabilities`, which then **suppresses an explicitly declared `effort: high`** and re-keys the
+cache.
+
+**Found by** BK1 in its round-1 report — it flagged that §7.7's table describes a capability lookup
+the model cannot express — and then **the round's own handling is the instructive part, recorded here
+because it is a ledger-worthy lesson**: the orchestrator adjudicated the *implementation* question
+and never corrected the *SPEC sentence that raised it*, so the false claim stood for the whole round
+until a re-reviewer found it again from the other end. **When a worker reports "the SPEC says X but
+the code cannot do X", deciding the code is half the adjudication; the sentence regenerates the
+defect otherwise.**
+
+**Would a test catch it? No.** Nothing in the suite asserts a negative about a wire payload's keys.
+
+**Fix, one thing it deliberately did not do, and one site it missed.** All five sites corrected
+including both `src/` mirrors; on `main`, `docs/SPEC.md:5671` now carries the `anthropic` row with an
+explicit guard — *"`ModelCapabilities` has no effort field, and must not grow one to make code match
+this table"*. `ADR-0009`'s original decision paragraph is **preserved** — an ADR records history —
+with a scoped, unmissable *NOT IMPLEMENTED — do not reconcile code to this paragraph* marker naming
+each false claim. **The determinism conclusion survives:** the re-reviewer was asked explicitly
+whether removing the premise orphaned it, and the argument's second leg (a role may be answered by a
+different backend next call, and `backend`/`model_id` are key components) is code-backed and
+independent. The modality weakens from "cannot pin" to "does not pin". **Removing a false premise
+without checking what rested on it is how a correct conclusion gets orphaned** — that check was worth
+running. **The miss, recorded rather than smoothed over:** a sixth carrier of the same clause,
+`tests/test_llm_cache.py:4`, was outside every lane's file set and **is still on `main`, unamended**,
+asserting that "adaptive thinking forbids pinning a temperature" in the docstring of the very module
+whose determinism argument the fix corrected. The five-site enumeration was complete for `docs/` and
+`src/`; it was never a claim about `tests/`.
+
+---
+
+**D67 — DESIGN DEFECT IN THE SPEC, CORRECTED AND LANDED (`d0b1150`); the replacement predicate is
+still unbuilt. `fleet resume` step 5's documented algorithm, implemented exactly as written, would
+have promoted never-built repos to Phase 4.** Verified against `7a8bfbb`; correction verified on
+`main` at `6a41840`.
+
+At `7a8bfbb`, `docs/SPEC.md:180-182` (Constraint 7) read: *"before re-entering a phase, `runner.py`
+re-checks the phase's declared preconditions (below) against SQLite; a failed precondition demotes the
+repo to the earliest phase whose precondition holds."* `SPEC.md:6777` said the same. Taken literally —
+walk phases ascending, stop at the earliest whose precondition holds — the walk stops too early in
+the wrong direction, because `BaseWorker.preconditions_hold` is not a durable-evidence predicate.
+`workers/rdepverify.py:199-203`:
+
+    row = await ctx.db.get_phase(str(ctx.run_id), ctx.repo_id, Phase.BUILD)
+    if row is None:
+        # No BUILD row at all is a first admission by the runner, not evidence of a failure;
+        # refusing here would deadlock a fresh run on a row nothing has written yet.
+        return True
+    return row.status is RepoStatus.SUCCEEDED
+
+That `return True` is **correct at its own call site** — a precondition gate must admit a fresh repo —
+and **wrong as a resume predicate**: a repo that has never been built has no BUILD row, so
+`preconditions_hold` returns `True` and an ascending walk marks it ready for Phase 4.
+`orchestrator/runner.py:214-218` says so outright: *"Neither verdict ever means 'skip the work'."*
+
+**Consequence, stated at the right strength.** No such resume was ever shipped — step 5 is
+unimplemented on `main` and was on every lane tip. What was shipped is the **instruction to build it
+that way**, in the document a future implementer reconciles against; the round propagated that
+phrasing into its own task brief before catching it. Recorded here because the ledger's subject is
+latent defects in shipped artifacts, and a normative SPEC sentence is a shipped artifact.
+
+**Found by** R3, doing design-only scoping of step 5 — before any code was written. The round ledger
+calls it "the save".
+
+**Fix, and its limits.** `d0b1150` rewrote Constraint 7 to *"re-checks each phase's durable evidence …
+and demotes the repo to the earliest phase whose **evidence** still holds"*, naming **two distinct
+predicates, not one** (ADR-0077 §6): a durable, payload-free `evidence_holds` for step 5's search,
+with `BaseWorker.preconditions_hold` left at its single existing call site. **`evidence_holds` does
+not exist on `main`** — it is subtask 5 of a ten-subtask decomposition
+(`.superpowers/sdd/sdd-backlog-b/design-resume-step5.md` §5). The SPEC no longer instructs the wrong
+algorithm; the right one is unbuilt.
+
+---
+
+**D68 — CONTRADICTION BETWEEN SPEC AND CODE; gate BUILT AND LANDED (`791b428`, `ea9ee57`) — and it
+has no caller. `resume`'s documented demotion was mechanically forbidden by the status machine.**
+Verified against `7a8bfbb`; gate and its no-caller status verified on `main` at `6a41840`.
+
+`SPEC.md` mandated demoting a repo to an earlier phase on resume. `models/enums.py` had
+`RepoStatus.SUCCEEDED: frozenset(),` (now `:47` on `main`), and the trailing comment states the intent
+as a virtue: *"Terminal statuses map to the EMPTY set, which is what makes them terminal mechanically
+rather than by prose: no crash sweep can resurrect an abandoned repo into RUNNING."* `transition()`
+consults `ALLOWED_TRANSITIONS`, so writing `PENDING` over a `SUCCEEDED` phase row raises. **The SPEC
+required a write the code refused.** The two had coexisted because nothing performs the write.
+
+**Found by** R3, in the same design pass as D67 — recorded there as "demotion is literally unwritable
+today".
+
+**Would a test catch it? No.** Both halves are individually correct and individually tested; the
+contradiction lives between them, and no test asserts that the SPEC's demotion is performable.
+
+**Addressed, landed, with a limit the branch itself insisted on and landing did not change.**
+`enums.py:61` adds a `RESUME_DEMOTE` map consulted only under a keyword-only `resume=True` (`:136`),
+mirroring the existing `OPERATOR_REOPEN` precedent axis-for-axis, plus `demote()` (`:141`) which is
+strictly stricter than `transition()` and returns a `PhaseDemotion` audit record with the status.
+**`git grep "demote(" -- src/` outside `enums.py` is empty on `main`** — the gate ships with **no
+caller**, exactly like `OPERATOR_REOPEN` before it. That is correct for a gate whose consumers are six
+subtasks away, and it **must not be read as shipped capability**: any statement that "resume can
+demote" is false on `main` today. The change also carries an honest limit —
+`transition(..., resume=True)` remains public and would demote *silently*, so `SPEC.md` §11.5 step 5
+names `demote()` and says so (`e5b8b11`), and the test that claimed the door was closed was **deleted
+and replaced** by one that pins the door open.
+
+---
+
+**D69 — OPEN (SPEC half, and the duplicate encoding). `fleet stubs abandon` writes a `findings.kind`
+that exists in no enum and in no SPEC section.** Verified against `7a8bfbb`; **re-verified on `main` at
+`6a41840`**.
+
+`git grep "StubAbandoned" 7a8bfbb` returned **exactly one hit in the entire repository**:
+`src/fleet/cli.py:10502`, a bare string literal inside a raw-SQL `INSERT INTO findings … VALUES (?, ?,
+'StubAbandoned', 'warn', ?, ?, ?)`. There was no enum member, no model, and **no mention in
+`docs/SPEC.md`**. The surrounding block also encoded the ABANDONED state transition in raw SQL, a
+second encoding of a rule that belongs to the stub state machine.
+
+**Consequence.** A finding kind that appears in one SQL string literal cannot be reconciled against
+anything: a consumer filtering `findings` by kind has no list to filter against, and an implementer
+writing the stub state machine from the SPEC will not produce this kind — which is precisely what
+happened. ST1, building `orchestrator/stubs.py` from the SPEC, first emitted `UnresolvedStub` for an
+operator abandon. **Two encodings of one event, disagreeing on kind**, which would have reported
+deliberately-abandoned stubs as ones the fleet failed to resolve.
+
+**Found by** the ST1 reviewer, and it is worth noting the adjudication that produced it: ST1's own
+report classified a *different* mismatch as "pre-existing" and the reviewer checked and found it **was
+not** — that error was the root of the lane's one Critical. **An implementer's "pre-existing defect"
+claim is exactly the claim a reviewer must check**, in both directions; this entry is the case where
+the claim held.
+
+**Half addressed, landed (`5c52ee5`).** `stubs.py:145` adds `STUB_ABANDONED = "StubAbandoned"` to
+`StubFinding` and the abandon path emits it, so the new state machine matches `cli.py`'s committed
+kind rather than inventing a rival — verified on `main`, where the string now appears in both files.
+**Still open, and re-verified on `main`:** `docs/SPEC.md` does not name the kind, and `cli.py:11015`'s
+raw-SQL transition remains a second encoding of a rule `stubs.py` now owns — which nothing yet calls
+(`git grep -l "orchestrator.stubs" -- src/` returns only the module itself). Neither is in that lane's
+scope.
+
+---
+
+**D70 — OPEN, low severity, recorded because the shape is this document's subject. `ruff format
+--check` has never passed on `src/fleet/cli.py`, the green suite does not run it, and landing moved
+the count.** Measured directly for this entry, twice.
+
+`ruff format --diff src/fleet/cli.py` against `main` at `7a8bfbb` reported **58 hunks**. The same
+command against `main` at `6a41840` reports **60**. The full-suite baseline on the first tree is green
+(1305 passed) and on the second is green (1575 passed), so formatting is not a suite gate on either.
+
+**Found by** RS1, which hit the failure while running its own checks and reported it as pre-existing,
+verified via `git stash`. **The correction its reviewer made is the part worth keeping**, and it
+belongs in this ledger more than the defect does: RS1 reported the failure as "identical"
+pre-existing; the reviewer **measured** it — 58 hunks at base, **59** at RS1's mid-round commit, 58
+after RS1's fix. Pre-existence stood; "identical" did not. **Verifying that a failure exists before
+and after is not verifying it is unchanged** — and the 58 → 60 move across the landing is that same
+lesson arriving a second time, on the same file, at the whole-round scale.
+
+**Severity: hygiene, not correctness.** Nothing behaves wrongly. It is recorded because a green suite
+that does not run a check the project's own toolchain provides is exactly the "we have not tested
+this" → "we have tested this" conversion this document exists to refuse, and because the next person
+to add `ruff format` to CI will find 60 hunks in the most-contended file in the repo.
