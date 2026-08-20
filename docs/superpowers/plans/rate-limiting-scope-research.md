@@ -45,8 +45,8 @@ sibling lane's uncommitted edit is reported as a defect anywhere in this documen
 
 **Ref for every claim below unless stated otherwise: `main` = `16879fe`.**
 
-Inherited without re-derivation, cited as inherited, from `.superpowers/sdd/design-resume-step5/`
-`research-1.md`: none — this lane shares no findings with R1. The `docs/PROGRESS.md` §38 and
+Inherited without re-derivation, cited as inherited, from
+`docs/superpowers/plans/resume-step5-subtasks-4-6-research.md` (`research-1.md`): none — this lane shares no findings with R1. The `docs/PROGRESS.md` §38 and
 `docs/INTEGRATION_HONESTY.md` D55 texts quoted below were read directly at `main`.
 
 ---

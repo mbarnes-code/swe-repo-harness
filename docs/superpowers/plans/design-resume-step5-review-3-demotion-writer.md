@@ -147,7 +147,7 @@ silently omits every demotion. Report only; `docs/SPEC.md` belongs to a live lan
 
 ### Minor 1 — the mutation table's M3 row overstates the isolation
 
-`.superpowers/sdd/design-resume-step5/task-6-report.md` §5 says M3 gives "**FAIL** findings test
+`docs/superpowers/plans/design-resume-step5-task6-demotion-writer-report.md` §5 says M3 gives "**FAIL** findings test
 only". Across the whole file **two** tests fail — the DEGRADED test
 (`tests/test_repository.py:1392-1394`) also asserts on the finding rows. The §5.1 write-up, which
 scopes the run with `-k "demoting_to_a_floor or phasedemoted_finding"`, is accurate; the table row
