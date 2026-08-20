@@ -866,7 +866,7 @@ REAP LANE (subtask 3): STOPPED BY CONTROLLER at ~3h, 0 commits, 3 unanswered sta
   the lane was slow, not stuck, and my messages never reached it in a usable window. That is a
   limitation of mid-flight messaging I should not have relied on three times.
   ITS WORK IS NOT LOST: +251 insertions to src/fleet/cli.py remain in the working tree and are
-  captured at .superpowers/sdd/design-resume-step5/reap-uncommitted.diff.
+  captured at docs/superpowers/plans/design-resume-step5-reap-uncommitted.diff.
   -> lane REAP2 takes over from the working tree.
   LESSON for round D: a lane with no commit after ~45 minutes should be asked to commit a WIP, and if
   a second check finds still nothing, taken over. Three hours of unreviewable work in a shared
