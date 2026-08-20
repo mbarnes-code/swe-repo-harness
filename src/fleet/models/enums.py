@@ -61,9 +61,11 @@ OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
 RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
     RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
 }  # The second such door (ADR-0077), same construction and same reason as OPERATOR_REOPEN above:
-# §11.5 step 5 demotes a repo to the earliest phase whose EVIDENCE still holds, and a demotion is
-# by definition a write of PENDING over a SUCCEEDED phase row. Reachable only through
-# `transition(..., resume=True)`, so the mechanical terminality of SUCCEEDED against the crash
+# §11.5 step 5 demotes a repo to its re-entry floor — the phase ABOVE the earliest one whose
+# EVIDENCE still holds, never that phase itself: that phase is where `reentry.phase_floor`'s
+# backward walk STOPS. A demotion is by definition a write of PENDING over a SUCCEEDED phase row,
+# and is reachable only through `transition(..., resume=True)` —
+# so the mechanical terminality of SUCCEEDED against the crash
 # sweep, the reaper and `_on_breach` is untouched — those paths pass no flag and still cannot
 # resurrect settled work. SUCCEEDED is the ONLY key, deliberately:
 #   - RHI is absent because §12 item 46 (ii) names `fleet resume` among the automatic sweeps that

@@ -179,7 +179,8 @@ Common contract for all four:
   (> `stale_after_s`, default 900) → treated as crashed, reset to `PENDING`, `attempts` retained.
 - **Resume validates evidence, never blind-replays** (Constraint 7): before re-entering a phase,
   `fleet resume` re-checks each phase's durable evidence against SQLite + Git and demotes the
-  repo to the earliest phase whose evidence still holds (§11.5 step 5). **Two distinct
+  repo to its re-entry floor — the phase **above** the earliest one whose evidence still holds,
+  never that phase itself (§11.5 step 5). **Two distinct
   predicates, not one** (ADR-0077 §6): the durable, payload-free `evidence_holds` is what step 5
   searches over, while `BaseWorker.preconditions_hold` stays at its single call site inside
   `PhaseRunner._re_entry`, where a typed payload and a `WorkerContext` exist — and where neither
@@ -4062,7 +4063,49 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'UnmergedDependency' (§3.4 step 5)
                                                   -- | 'OperatorQuarantine' (§10 quarantine)
                                                   -- | 'ConfigDrift' (one per accepted section, §10)
+                                                  -- | 'CapabilityDrift' (§13 row 37; repo_id IS
+                                                  --   NULL — a drift is a property of a TARGET)
+                                                  -- | 'BackendUnavailable' (§13 row 40, every
+                                                  --   target for a tier spent; exit-8 halt)
                                                   -- | ...
+                                                  -- CAVEAT. "Shipped" above means DECLARED, not
+                                                  --   emitted. Several names are READ by Python
+                                                  --   that nothing writes ('BaselineRed',
+                                                  --   'PreflightFailed', 'RuleConflict') and five
+                                                  --   have no Python at all ('WeakEdge' and the
+                                                  --   four Contract/Hoist kinds). The two
+                                                  --   annotated above each have a live INSERT in
+                                                  --   orchestrator/findings.py; every other name
+                                                  --   in the DECLARED list is emitted from cli.py.
+                                                  -- EMITTED BUT NEVER DECLARED — the direction the
+                                                  --   CAVEAT above did not contemplate. Each of
+                                                  --   these has a live writer in src/ and was
+                                                  --   absent from the list above. From a sweep of
+                                                  --   every `INSERT INTO findings` in src/:
+                                                  -- | 'PhaseDemoted'  -- state/repository.py,
+                                                  --     §11.5 step 5, one row per demoted phase
+                                                  -- | 'EmptyRepo' | 'SubmodulePresent'
+                                                  --     -- workers/clone.py, through the scan
+                                                  --     persist and the §3.1 gate
+                                                  -- | 'FileTooLarge:<path>'
+                                                  -- | 'ParseFailed:<path>'
+                                                  --     -- workers/symbolindex.py. PREFIXED, so a
+                                                  --     `kind = ?` equality match never sees them
+                                                  -- | 'TransformPreparationFailed'
+                                                  -- | 'BuildPreparationFailed'
+                                                  -- | 'DependencyResolutionFailed'
+                                                  -- | 'CoordinateRenderFailed'
+                                                  -- | 'BuildFileGenerationFailed'
+                                                  -- | 'VerifyPreparationFailed'
+                                                  --     -- cli.py `_abandon_repo`, which pairs
+                                                  --     each with REQUIRES_HUMAN_INTERVENTION
+                                                  -- | 'EcosystemAdapterUnavailable'
+                                                  -- | 'ModuleLockForeignRegistry'
+                                                  --     -- cli.py `_note_finding`
+                                                  -- | 'PullRequest' | 'VerificationReport'
+                                                  -- | 'OperatorAbort' | 'StubAbandoned'
+                                                  -- | 'WaveBudgetRaised' | 'RunBudgetRaised'
+                                                  --     -- cli.py, one dedicated writer each
     severity   TEXT NOT NULL DEFAULT 'warn',
     fingerprint TEXT NOT NULL,                    -- sha256 of the semantic identity of the finding
     payload    TEXT NOT NULL,                     -- Pydantic dump_json, post-redaction
@@ -6890,8 +6933,10 @@ to discard whatever a killed `git apply` left in the worktree, set the task `PEN
 re-run — again without incrementing `attempts` (`FailureClass.TRANSIENT_INFRA`). The anchor ref
 itself is re-created from `phases.base_ref` if it is missing. There is no third branch and no
 tree-SHA comparison, because a commit is either on the branch or it is not (§3.2 step 6);
-(5) demote each repo to the earliest phase whose durable evidence still holds
-(Constraint 7). This is a search **downward from the settled frontier**, never an ascending scan:
+(5) demote each repo to its **re-entry floor** — which is *not* the earliest phase whose durable
+evidence still holds: that phase is precisely where the backward search below **stops**, and the
+floor is the phase above it (Constraint 7). This is a search **downward from the settled
+frontier**, never an ascending scan:
 locate the lowest phase that is not **settled for demotion** — `SUCCEEDED`, `SKIPPED` **or
 `DEGRADED`** (`orchestrator/reentry._SETTLED_FOR_DEMOTION`; a repo with a
 `REQUIRES_HUMAN_INTERVENTION` row is skipped entirely) — then walk *backwards* asking
@@ -6916,9 +6961,21 @@ has landed work to discard (ADR-0077 §4). **`DEGRADED` is settled for demotion 
 being terminal**, and the distinction is load-bearing: `enums.TERMINAL_STATUSES` deliberately
 excludes it because it is resolvable, but it leaves the machine **only** through a budgeted
 revalidation round (§3.5.1), so demoting it to `PENDING` would spend that budget by the side door
-with no round recorded. Step 5 therefore neither demotes a `DEGRADED` row nor searches past one:
-it is excluded from the frontier search itself, and it is not a `RESUME_DEMOTE` key, so `demote()`
-refuses it outright (ADR-0077 §5); (6) recompute `blocked_by` from `phases` + `edges`
+with no round recorded. Step 5 therefore neither demotes **nor searches past** a `DEGRADED` row —
+**and the same is true of a `SKIPPED` one**. The two halves are enforced by two *different*
+mechanisms, and naming only one of them is how a reconciler rebuilds the defect. **Never
+demoted:** neither status is a `RESUME_DEMOTE` key, so `models.enums.demote()` **raises** on it
+(ADR-0077 §5), and membership in `_SETTLED_FOR_DEMOTION` separately keeps either from being picked
+as the frontier. **Never searched past:** the backward walk tests
+`orchestrator/reentry._HARD_STOPS` — `{DEGRADED, SKIPPED}`, and *not* `_SETTLED_FOR_DEMOTION`,
+which only makes the forward frontier scan pass over the row — and **breaks** there without moving
+the floor onto it. That break is load-bearing, not tidiness: an excluded phase never ran, so its
+evidence can never hold, and a walk that fell through it would demote every repo with an excluded
+middle phase to Phase 1 on **every** resume. `SKIPPED` earns its place for the operator's config,
+which resume does not re-decide; `DEGRADED` for the budgeted round above. The **`checkpoints`**
+carve-out is the one place the two part company — only `DEGRADED` is spared there, because only
+`DEGRADED` has a future round that resumes from the payload, while `SKIPPED` maps to the empty
+transition set and can never be re-entered (ADR-0082 §3); (6) recompute `blocked_by` from `phases` + `edges`
 so a since-fixed dependency unblocks its subtree; (7) regenerate `migration_state.json` from
 SQLite; (8) continue. Steps 1–7 make no network call and invoke no model, so a resume is free
 and can be run as a dry-run health check (`fleet resume --dry-run`).

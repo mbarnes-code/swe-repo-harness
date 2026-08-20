@@ -280,7 +280,37 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   all ('WeakEdge' and the four Contract/Hoist
                                                   --   kinds). The two annotated above each have a
                                                   --   live INSERT behind them, in
-                                                  --   orchestrator/findings.py
+                                                  --   orchestrator/findings.py; every other name
+                                                  --   in the DECLARED list is emitted from cli.py.
+                                                  -- EMITTED BUT NEVER DECLARED — the direction the
+                                                  --   CAVEAT above did not contemplate. Each of
+                                                  --   these has a live writer in src/ and was
+                                                  --   absent from the list above. From a sweep of
+                                                  --   every `INSERT INTO findings` in src/:
+                                                  -- | 'PhaseDemoted'  -- state/repository.py,
+                                                  --     §11.5 step 5, one row per demoted phase
+                                                  -- | 'EmptyRepo' | 'SubmodulePresent'
+                                                  --     -- workers/clone.py, through the scan
+                                                  --     persist and the §3.1 gate
+                                                  -- | 'FileTooLarge:<path>'
+                                                  -- | 'ParseFailed:<path>'
+                                                  --     -- workers/symbolindex.py. PREFIXED, so a
+                                                  --     `kind = ?` equality match never sees them
+                                                  -- | 'TransformPreparationFailed'
+                                                  -- | 'BuildPreparationFailed'
+                                                  -- | 'DependencyResolutionFailed'
+                                                  -- | 'CoordinateRenderFailed'
+                                                  -- | 'BuildFileGenerationFailed'
+                                                  -- | 'VerifyPreparationFailed'
+                                                  --     -- cli.py `_abandon_repo`, which pairs
+                                                  --     each with REQUIRES_HUMAN_INTERVENTION
+                                                  -- | 'EcosystemAdapterUnavailable'
+                                                  -- | 'ModuleLockForeignRegistry'
+                                                  --     -- cli.py `_note_finding`
+                                                  -- | 'PullRequest' | 'VerificationReport'
+                                                  -- | 'OperatorAbort' | 'StubAbandoned'
+                                                  -- | 'WaveBudgetRaised' | 'RunBudgetRaised'
+                                                  --     -- cli.py, one dedicated writer each
     severity   TEXT NOT NULL DEFAULT 'warn',
     fingerprint TEXT NOT NULL,                    -- sha256 of the semantic identity of the finding
     payload    TEXT NOT NULL,                     -- Pydantic dump_json, post-redaction
