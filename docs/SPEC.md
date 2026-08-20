@@ -1564,8 +1564,8 @@ silently rank every repo by the count of things it consumes. Three consequences:
 Propagation is idempotent (set union with a UNIQUE-keyed JSON array, re-derivable from
 `phases` + `edges` at any time) and **reversible**: if `r` is later fixed and re-run to
 `SUCCEEDED`, `fleet resume` removes `r` from every `blocked_by`, and any `d` whose `blocked_by`
-becomes empty returns to `PENDING` at its re-entry floor (§11.5 step 5), never the earliest incomplete phase. Nothing is permanently lost
-because a dependency once failed.
+becomes empty returns to `PENDING` at its re-entry floor (§11.5 step 5), never the earliest
+incomplete phase. Nothing is permanently lost because a dependency once failed.
 
 **Wave re-entry — un-blocking never re-opens a closed wave.** "Returns to `PENDING`" is only
 meaningful once it is said *where in the schedule* the repo returns, because by the time `r` is
