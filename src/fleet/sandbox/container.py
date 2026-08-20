@@ -147,6 +147,43 @@ def docker_run_argv(spec: ContainerSpec, *, docker_bin: str = "docker") -> list[
     return argv
 
 
+def claims(live_name: str, container_name: str) -> bool:
+    """Does the live sandbox `live_name` own the container `container_name`?
+
+    **Not equality.** `live_names` reaches `reap()` as SANDBOX names — `sandbox_name(run_id,
+    repo, attempt)`, the one string a caller can derive from a `phases` row without a registry of
+    in-flight `docker run`s. But no container `BuildverifyWorker` starts is ever named that:
+    `_invocation_name` (`workers/buildverify.py`) appends `-t<8 hex>` and sometimes a further
+    suffix (`-cc-probe`), because a `TRANSIENT_INFRA` retry re-runs the SAME `(run_id, repo,
+    attempt)` and must not collide with a container a dead daemon left registered under the
+    deterministic name. An equality test therefore matches NOTHING a live build is running under,
+    and the sweep `docker rm --force`s the build it was written to spare. MEASURED before this
+    predicate existed: a sweep with `live_names={fleet-<run>-acme-commons-1}` over a listing
+    containing `fleet-<run>-acme-commons-1-tde39ce31` issued `docker rm --force` for it.
+
+    **The separator is the whole boundary.** Ownership requires the candidate to extend the live
+    name by a `-`-delimited segment, never by bare characters. `fleet-<run>-repo-1` must not
+    claim `fleet-<run>-repo-10-t<token>`: attempt 1 and attempt 10 are different rungs, and a
+    bare `startswith(live_name)` would let a live attempt 1 spare attempt 10's orphans forever.
+    Requiring `-` rules that out by construction, because attempts are digits and a digit is not
+    `-`. This is the same reasoning `_container_prefix` records for its trailing `-t`, one layer
+    down and without borrowing that function's private convention: the sandbox layer knows only
+    that `sandbox_name` is `-`-delimited, not that some worker spells its per-call token `t<hex>`.
+    Matching `-t<hex>` here would be tighter, and would also mean that the first worker to name
+    its containers any other way gets them force-removed mid-build — the loud, destructive
+    direction of the two errors available.
+
+    **Which way this errs.** Toward sparing. Two same-rung containers — a crashed invocation's
+    orphan and the live retry's — are INDISTINGUISHABLE from a `phases` row, so this spares both.
+    That leaks one container's disk until the rung stops being live, at which point the next
+    sweep (idempotent, self-healing) takes it; `run()`'s `finally` and `on_cancel`'s prefix sweep
+    are two further paths that already reach it. The other direction destroys a running build and
+    is not recoverable by any later sweep. A silent leak with three backstops is the cheaper
+    error, and it is the direction chosen deliberately.
+    """
+    return container_name == live_name or container_name.startswith(f"{live_name}-")
+
+
 @dataclass(frozen=True, slots=True)
 class ContainerReapFailure:
     """One `reap()` entry that was attempted and could not be verified removed — distinct from a
@@ -326,7 +363,16 @@ class ContainerSandbox:
         """Remove every `fleet-<run_id>-*` container no live task claims (SPEC §11.5 step 2).
 
         `live_names` is required for the same reason it is on `WorktreeManager.reap`: a reaper
-        that assumes nothing is live kills a running build.
+        that assumes nothing is live kills a running build. Entries in it are SANDBOX names
+        (`sandbox_name(run_id, repo, attempt)`); a container is spared when `claims()` says a
+        live sandbox owns it, which is NOT equality — see that function for why equality spared
+        nothing a real build was running under, and for which direction the boundary errs. A
+        caller that does know an exact container name may pass it: equality is the degenerate
+        case of `claims()`.
+
+        Every candidate is re-checked against `run_prefix(run_id)` locally before any removal,
+        so a listing that came back over-wide cannot make this sweep reach outside the run's own
+        namespace.
 
         Previously this appended every candidate to `reaped` unconditionally, ignoring
         `remove()`'s own bool verdict — a `docker rm` that failed was reported reaped while the
@@ -339,15 +385,29 @@ class ContainerSandbox:
         an unguarded subprocess spawn could otherwise raise mid-sweep (D38; see
         `_remove_with_reason`'s docstring) — one entry's failure does not stop the sweep or
         discard removals already made, matching `WorktreeManager.reap`'s fix in `4a421a3`. A
-        container spared because it is in `live_names` is filtered out before any attempt, so it
-        lands in neither `reaped` nor `failed` — "deliberately spared" is a third fact, not a
-        failure.
+        container spared because a live sandbox `claims()` it — or because it fell outside the
+        run's prefix — is filtered out before any attempt, so it lands in neither `reaped` nor
+        `failed`: "deliberately spared" is a third fact, not a failure.
         """
         live = set(live_names)
+        prefix = run_prefix(run_id)
         reaped: list[str] = []
         failed: list[ContainerReapFailure] = []
-        for name in await self.list_by_prefix(run_prefix(run_id), timeout_s=timeout_s):
-            if name in live:
+        for name in await self.list_by_prefix(prefix, timeout_s=timeout_s):
+            if not name.startswith(prefix):
+                # The namespace floor, re-checked here rather than trusted from the listing.
+                # `list_by_prefix` asks DOCKER to filter, and docker's `--filter name=` is a
+                # regex evaluated by the daemon: a daemon quirk, a future edit that drops the
+                # `^` anchor or the `re.escape`, or a fake in a test is all it takes for a name
+                # outside `fleet-<run_id>-` to come back from that call — and every name that
+                # comes back is `docker rm --force`d. A reaper must not be one remote regex away
+                # from removing another run's container, so ownership is established locally,
+                # against a string this process built, before any removal. Skipped rather than
+                # raised: a name this sweep cannot attribute is not this sweep's to touch OR to
+                # fail on, and aborting would leak everything after it in iteration order. It
+                # lands in neither list, like any other container deliberately not attempted.
+                continue
+            if any(claims(live_name, name) for live_name in live):
                 continue
             reason = await self._remove_with_reason(name)
             if reason is not None:

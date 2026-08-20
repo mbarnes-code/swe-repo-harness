@@ -1056,6 +1056,222 @@ async def test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matche
 
 
 # --------------------------------------------------------------------------------------
+# `reap()` spares by OWNERSHIP, not equality — a live container's name carries a per-call token
+#
+# `live_names` can only ever carry SANDBOX names: `sandbox_name(run_id, repo, attempt)` is what a
+# caller derives from a live `phases` row. No container is named that. `_invocation_name`
+# (`workers/buildverify.py`) appends `-t<8 hex>` (+ an optional `-cc-probe`) to every `docker
+# run --name=` it issues, so under an equality test the live set matches NOTHING that is running
+# and the sweep force-removes the build it exists to spare. MEASURED against the pre-fix code:
+# `live_names={fleet-<run>-acme-commons-1}` over a listing containing
+# `fleet-<run>-acme-commons-1-tde39ce31` issued `docker rm --force` for that exact name.
+# --------------------------------------------------------------------------------------
+_FIXED_HEX = "a1b2c3d4"
+"""A stand-in for `uuid.uuid4().hex[:8]`, fixed so a failure is reproducible. The token's VALUE
+is irrelevant to every assertion below — what matters is that one exists at all."""
+
+
+def _live_sandbox_name() -> str:
+    """The name a live `phases` row yields — the only shape a `reap()` caller can supply."""
+    return sandbox_name(RUN_ID, "acme/commons", 1)
+
+
+async def test_reap_spares_a_live_container_whose_name_carries_a_per_call_token() -> None:
+    """The defect: `reap()` decided liveness by `name in live`, and no live container's name is
+    ever IN that set — `BuildverifyWorker` names them `<sandbox_name>-t<token>[-suffix]`.
+
+    This is the discriminating case for the fix. Under the old equality predicate the two live
+    names below are absent from `live` and are force-removed mid-build; under `claims()` they are
+    spared. The two orphans in the same listing must still be reaped, or "spare the live one"
+    would have been bought by reaping nothing.
+
+    `attempt_10_orphan` is the boundary, and it is the reason `claims()` requires a `-`
+    separator rather than a bare `startswith`. Attempt 1 and attempt 10 are different rungs;
+    `fleet-<run>-acme-commons-1` is a bare-character prefix of `fleet-<run>-acme-commons-10-t...`,
+    so a looser predicate would let a live attempt 1 spare attempt 10's orphans for the life of
+    the run — a silent leak dressed as liveness.
+    """
+    live_row = _live_sandbox_name()
+    live_build = f"{live_row}-t{_FIXED_HEX}"
+    live_probe = f"{live_row}-t{_FIXED_HEX}-cc-probe"
+    other_repo_orphan = f"{sandbox_name(RUN_ID, 'acme/widgets', 1)}-t{'d' * 8}"
+    attempt_10_orphan = f"{sandbox_name(RUN_ID, 'acme/commons', 10)}-t{'e' * 8}"
+    runner = RegexFilterRunner([live_build, live_probe, other_repo_orphan, attempt_10_orphan])
+
+    result = await ContainerSandbox(runner=runner).reap(run_id=RUN_ID, live_names={live_row})
+
+    assert live_build not in runner.removed, (
+        "a running build's container was force-removed: its name extends the live sandbox name "
+        "by buildverify's per-call token, which an equality test can never match"
+    )
+    assert live_probe not in runner.removed, (
+        "the C-toolchain probe of a live rung was force-removed; the `-cc-probe` suffix is a "
+        "further `-` segment under the SAME live sandbox, not a different owner"
+    )
+    assert set(runner.removed) == {other_repo_orphan, attempt_10_orphan}
+    assert set(result.reaped) == {other_repo_orphan, attempt_10_orphan}
+    assert result.failed == []
+    assert result.complete is True
+
+
+async def test_reap_never_removes_a_container_outside_the_runs_own_namespace() -> None:
+    """The hard safety property, proven rather than argued: a `reap()` for run A can never issue
+    `docker rm --force` for anything that is not `fleet-<run A>-*`.
+
+    The listing is deliberately supplied by a runner that IGNORES the `--filter` argument and
+    answers with everything it holds. That is not a hypothetical: `list_by_prefix` delegates the
+    match to the DAEMON's regex engine, and a daemon quirk, a dropped `^` anchor, or a lost
+    `re.escape` all reach `reap()` as an over-wide listing — which the pre-fix loop would have
+    force-removed name by name. The floor must therefore live in `reap()` itself, checked against
+    a prefix this process built.
+
+    `wt-WT1-example` is in the pool on purpose: `docs/DECISIONS.md` quotes THAT worktree's own
+    `git rev-parse --absolute-git-dir` as ADR-0074's live evidence, and it is on disk right now.
+    Nothing in this sweep may name it.
+    """
+    live_row = _live_sandbox_name()
+    mine_live = f"{live_row}-t{_FIXED_HEX}"
+    mine_orphan = f"{sandbox_name(RUN_ID, 'acme/widgets', 1)}-t{'d' * 8}"
+    other_run = UUID("00000000-0000-4000-8000-0000000fffff")
+    outsiders = [
+        f"{sandbox_name(other_run, 'acme/commons', 1)}-t{'f' * 8}",  # a CONCURRENT run's build
+        "fleet-build-cache",  # `fleet`-prefixed, but not this run's
+        "wt-WT1-example",  # ADR-0074's live evidence worktree
+        "postgres",  # somebody else's container entirely
+    ]
+
+    class _UnfilteredRunner(RegexFilterRunner):
+        """Answers `docker ps` with the whole pool, filter argument ignored — the over-wide
+        listing an unanchored or unescaped daemon-side regex produces."""
+
+        async def __call__(
+            self,
+            argv: Sequence[str],
+            *,
+            cwd: Path | None = None,
+            env: Mapping[str, str] | None = None,
+            deadline: float | None = None,
+            timeout_s: float | None = None,
+        ) -> ProcResult:
+            parts = tuple(argv)
+            if parts[1] == "ps":
+                return ProcResult(
+                    argv=parts, exit_code=0, stdout_tail="\n".join(self.names), stderr_tail="",
+                    duration_ms=1, timed_out=False,
+                )
+            return await RegexFilterRunner.__call__(
+                self, argv, cwd=cwd, env=env, deadline=deadline, timeout_s=timeout_s
+            )
+
+    runner = _UnfilteredRunner([mine_live, mine_orphan, *outsiders])
+
+    result = await ContainerSandbox(runner=runner).reap(run_id=RUN_ID, live_names={live_row})
+
+    for outsider in outsiders:
+        assert outsider not in runner.removed, (
+            f"reap() for run {RUN_ID} reached {outsider!r}, which is outside "
+            f"{run_prefix(RUN_ID)!r}"
+        )
+        assert outsider not in result.reaped
+        assert outsider not in [f.name for f in result.failed]
+    assert runner.removed == [mine_orphan], (
+        "the run's own orphan must still be reaped — a floor that spares everything would pass "
+        "the assertions above while reaping nothing"
+    )
+
+
+async def test_worktree_reap_never_removes_a_checkout_outside_the_runs_namespace(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """The same floor, one layer down, against a REAL git worktree registry.
+
+    `wt-WT1-example` is registered in the very `work_dir` the sweep enumerates, so git's
+    `worktree list --porcelain` genuinely returns it — this is not a fake declining to offer the
+    name. `reap(live_names=set())` is the maximally destructive call available (nothing is live),
+    and the checkout must survive it because its name does not start with `fleet-<run_id>-`.
+    """
+    work_dir = tmp_path / "work"
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=work_dir, run_id=RUN_ID)
+    orphan = await manager.create("acme-widgets", 1, "main")
+    outsider = work_dir / "wt-WT1-example"
+    await _git(git_repo, "worktree", "add", "--detach", str(outsider), "main")
+    registered = await manager.list_registered()
+    assert any(p.resolve() == outsider.resolve() for p in registered), (
+        "premise: git must actually enumerate the outsider, or this test proves nothing"
+    )
+
+    result = await manager.reap(live_names=set())
+
+    assert outsider.is_dir(), f"reap() removed {outsider}, outside {run_prefix(RUN_ID)!r}"
+    assert result.reaped == [orphan.name]
+    assert "wt-WT1-example" not in [f.name for f in result.failed]
+
+
+# --------------------------------------------------------------------------------------
+# Instrument validation (CLAUDE.md guardrail 6). The instrument above is "`reap()` over a
+# `RegexFilterRunner` pool, read through `runner.removed`". A detector never observed firing is
+# not evidence of absence, so it is exercised three ways: it FIRES on a planted orphan, stays
+# SILENT on a pool where every container is claimed, and fires AGAIN when one synthetic orphan is
+# injected into that same silent pool. The third is the one that catches an instrument broken on
+# fresh instances — a pool builder that quietly returns nothing would pass the first two.
+# --------------------------------------------------------------------------------------
+def _all_live_pool() -> tuple[list[str], set[str]]:
+    """A pool in which EVERY container is claimed by one of the returned live sandbox names."""
+    rows = [sandbox_name(RUN_ID, "acme/commons", 1), sandbox_name(RUN_ID, "acme/widgets", 3)]
+    pool = [
+        f"{rows[0]}-t{_FIXED_HEX}",
+        f"{rows[0]}-t{_FIXED_HEX}-cc-probe",
+        f"{rows[1]}-t{'b' * 8}",
+    ]
+    return pool, set(rows)
+
+
+async def test_instrument_fires_on_a_planted_orphan() -> None:
+    """Validation 1: the detector reports a removal when one is due."""
+    orphan = f"{sandbox_name(RUN_ID, 'acme/widgets', 1)}-t{'d' * 8}"
+    runner = RegexFilterRunner([orphan])
+
+    result = await ContainerSandbox(runner=runner).reap(run_id=RUN_ID, live_names=set())
+
+    assert runner.removed == [orphan]
+    assert result.reaped == [orphan]
+
+
+async def test_instrument_is_silent_on_an_all_live_pool() -> None:
+    """Validation 2: the detector reports nothing when nothing is due."""
+    pool, live = _all_live_pool()
+    runner = RegexFilterRunner(pool)
+
+    result = await ContainerSandbox(runner=runner).reap(run_id=RUN_ID, live_names=live)
+
+    assert runner.removed == []
+    assert result.reaped == []
+    assert result.failed == []
+
+
+async def test_instrument_fires_on_a_synthetic_orphan_injected_into_the_all_live_pool() -> None:
+    """Validation 3, the load-bearing one: the SAME fixture that produced silence above, plus one
+    synthetic orphan, must fire — and fire only on the injected name.
+
+    A `_all_live_pool()` that had silently degenerated (an empty listing, a runner that never
+    answers `docker ps`) would satisfy validations 1 and 2 and still be measuring nothing. Here
+    the silent pool is rebuilt, perturbed by exactly one name, and the detector has to
+    distinguish it from its neighbours.
+    """
+    pool, live = _all_live_pool()
+    injected = f"{sandbox_name(RUN_ID, 'acme/commons', 2)}-t{'c' * 8}"
+    assert injected not in pool
+    runner = RegexFilterRunner([*pool, injected])
+
+    result = await ContainerSandbox(runner=runner).reap(run_id=RUN_ID, live_names=live)
+
+    assert runner.removed == [injected]
+    assert result.reaped == [injected]
+    for claimed in pool:
+        assert claimed not in runner.removed
+
+
+# --------------------------------------------------------------------------------------
 # the tests that need a live daemon
 # --------------------------------------------------------------------------------------
 def _docker_usable() -> tuple[bool, str]:
