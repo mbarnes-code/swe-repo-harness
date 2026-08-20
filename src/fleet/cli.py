@@ -10027,7 +10027,8 @@ def resume(
     again forever without `--raise-wave-budget`; and the **schema version**, which a resume reads
     and never upgrades. Reads nothing from `migration_state.json` (§11.5).
 
-    **What is built today**, and it is not the whole verb. §11.5 steps 1 (config digests), 2
+    **What is built today**, and it is not the whole verb. §11.5 steps 1 (its config-digest
+    half only — nothing here reads `runs.harness_version`, the other half step 1 names), 2
     (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
     → `PENDING`, retaining `attempts`) and 7 (regenerate `migration_state.json`) run, plus
     `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. Steps 4, 5, 6 and 8 do not
@@ -10403,8 +10404,8 @@ def _refuse_unbuilt_resume_flags(
             "which has no implementation — cli.py hand-wires a `PhaseRunner` per verb and no "
             "assembly walks Phases 1–4 in order. Accepting the flag and ignoring it would let an "
             "operator believe they had scoped the resume. Re-run without it to get the "
-            "reconciliation that IS built (steps 1, 2, 3, 7, `--repoll-prs`, the budget "
-            "raises)."
+            "reconciliation that IS built (step 1's config digests, steps 2, 3 and 7, "
+            "`--repoll-prs`, the budget raises)."
         )
 
 
