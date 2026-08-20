@@ -7676,7 +7676,8 @@ every file:line below is that ref. The behaviour is `a3ff0ae` and `431b02f`
 (`src/fleet/orchestrator/budgets.py`, `tests/test_budgets.py`). **Supersedes nothing.** Recorded
 late, on a number allocated by the orchestrator: the implementing lane (R1 of the §5 rate-limiting
 decomposition) raised the need for an ADR as its first concern and deliberately took no number
-(`.superpowers/sdd/design-resume-step5/task-rl1-report.md` §4 item 1).
+(`docs/superpowers/plans/design-resume-step5-rl1-limiter-report.md` §4 item 1, promoted out of
+git-ignored scratch; snapshot taken while `main` was at `056b547`).
 
 **Provenance (CLAUDE.md Guardrail 1).** The *requirement* is SPEC, not an agent's invention:
 `docs/SPEC.md:7164-7169` already states that rate limiting is backpressure and that the owning
@@ -7819,7 +7820,8 @@ movement here.
 
 **Provenance (CLAUDE.md Guardrail 1).** The defect is fact: `d44b94f`. The *shape* concern is an
 **Agent Recommendation**, raised as the first concern of the lane that fixed the defect
-(`.superpowers/sdd/design-resume-step5/task-limfix-report.md` §7 item 1), which deliberately did
+(`docs/superpowers/plans/design-resume-step5-limfix-report.md` §7 item 1, promoted out of
+git-ignored scratch; snapshot taken while `main` was at `056b547`), which deliberately did
 not act on it and asked for an explicit ruling before R5 lands. Nothing below is a SPEC
 requirement; SPEC §11.8 requires an AIMD-adjustable ceiling and says nothing about how the
 primitive is factored internally.
