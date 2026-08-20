@@ -7129,3 +7129,142 @@ an instance attribute — and is documented in §4.2 as the boundary of the guar
 patched, because the point of §4 is that the claim matches the check.
 
 Each mutation was reverted from a backup copy and the file re-diffed clean before commit.
+
+---
+
+## ADR-0078 — §9 rule 2's accepted `backend:` names are the LIVE §7.7 registry — the adapters that actually imported on this host — and never `SHIPPED_BACKENDS`, the four names we merely ship: a name we can spell is not a backend that can answer, and the difference is the whole value of a startup gate
+
+**Status:** accepted, describing behaviour already landed on `main`. Anchored at `6a5e534` (`main`).
+The change itself is `c36160e` ("BK1 fix round 1", `src/fleet/cli.py`); the four adapters it
+narrows over are `21f5797` (`anthropic`), `92cfc94` (`openai_compatible`), `87b51f8` (`bedrock`)
+and `fa066f4` (`vertex`). **Supersedes nothing.** Recorded late: the behaviour shipped last round
+with no ADR and no test, which is item 16 of
+`docs/superpowers/plans/open-items-audit-round-b.md`.
+
+**Provenance (CLAUDE.md Guardrail 1).** The *policy* is SPEC, not an agent's invention:
+`docs/SPEC.md:5679-5685` already states that a backend whose SDK is not installed "fails its import
+inside `discover()` and is simply not registered", and that this becomes a startup error, with the
+missing extra named, only when the active profile routes a tier through it (§13 row 36,
+`docs/SPEC.md:7188`). What is an **Agent Recommendation** is the mechanism below — threading
+`discover()`'s keys through the `FleetSettings.load(known_backends=...)` parameter — and the
+equality (not membership) shape of the test that binds it. Nothing here should be cited as a SPEC
+requirement.
+
+### 1. The decision
+
+`cli._load_settings` calls `llm.discover()` and passes its keys as `known_backends=`
+(`src/fleet/cli.py:558`, used at `:560` and again at `:574` — **line numbers as of `6a5e534`**;
+a concurrent lane had uncommitted edits to that file when this was written, which had already
+shifted them by seven in the working tree, so cite the ref or cite the symbol
+`_load_settings`). §9 rule 2 then validates every
+`profiles.<profile>.<tier>[i].backend` against that set (`src/fleet/settings.py:1401`), so the gate
+asks **"is this backend registered?"** rather than **"is this name spelled like one we ship?"**.
+
+`SHIPPED_BACKENDS` (`src/fleet/settings.py:107`) survives as the *fallback* only:
+`src/fleet/settings.py:1171` uses it when `known_backends` is `None`, which is the direct-`load()`
+path used by tests and by a host with no SDKs at all. No production path reaches it.
+
+The accepted set is therefore a **subset of the four shipped names, sized by the host's installed
+SDKs**, and on any host that has not installed the `bedrock` and `vertex` extras it is a *proper*
+subset. That is the narrowing.
+
+### 2. What it narrowed to, measured under the interpreter that runs the code
+
+Guardrail 6 — three different questions, and this is the **`find_spec` = installed** one, asked
+under `.venv/bin/python` (the interpreter the harness and its tests run under), not under the
+system `python3`, which does have `boto3` and would have given the wrong answer:
+
+| Module | `find_spec` under `.venv/bin/python` | Imported by |
+|---|---|---|
+| `anthropic` | found | `llm/backends/anthropic.py` (core dependency) |
+| `openai` | found | `llm/backends/openai_compatible.py` (core dependency) |
+| `boto3` | **not found** | `llm/backends/bedrock.py:46-48` (`fleet[bedrock]`) |
+| `google` | **raises `ModuleNotFoundError`** | `llm/backends/vertex.py:58-59` (`fleet[vertex]`) |
+| `requests` | **not found** | `llm/backends/vertex.py:60`, travels with `fleet[vertex]` |
+
+`fleet.llm.client.discover()`, run in that interpreter, returns exactly
+`['anthropic', 'openai_compatible']`. So on this host the gate accepts **two** of the four names —
+the "two-name narrowing" the audit item refers to. Two is a property of this host, not of the
+harness: install both extras and `discover()` returns four and nothing is narrowed. The ADR records
+the *rule*, and two is today's measurement of it.
+
+### 3. Why the constant was the wrong name set
+
+Before `c36160e`, `known_backends=` was never supplied from `src/`, so the gate fell back to the
+literal four-name tuple. Two failures followed from that, and they compound:
+
+1. `discover()` had **zero call sites in `src/`**, so `@register_backend` never fired in a real
+   run. `RunContext.backends=None` fell back to an empty `registry()` and the first `complete()`
+   raised `UnknownBackend` in wave 7 — with repos already cloned. §13 row 36's promise ("fails at
+   startup, not in wave 7") was satisfied *vacuously*.
+2. Even with the registry populated, validating against the constant accepts a profile naming a
+   backend that **cannot answer on this host**. `bedrock` is spelled correctly and is genuinely a
+   backend we ship; on a host without `boto3` it is also unreachable. Accepting it converts a
+   startup error into a wave-7 error, which is the exact inversion the gate exists to prevent.
+
+The unifying point: the constant answers a question nobody asked. An operator's `models.yaml` is
+wrong in a way that matters only relative to **this** host, and the only artifact that knows this
+host is the registry.
+
+### 4. Consequences, including the two unpleasant ones
+
+- **A profile naming an uninstalled extra now exits 2 where it previously booted.** This is the
+  intended behaviour and it is a real, user-visible narrowing. The message distinguishes the three
+  causes (`src/fleet/settings.py:1401-1421`) so the operator is not sent hunting a spelling mistake
+  that is not there: uninstalled extra → `pip install 'fleet[<extra>]'`; correctly-spelled core
+  backend → "its module failed to import on this host; check the install"; anything else → a typo.
+- **`docs/SPEC.md:6365-6371`'s illustrative `models.yaml` routes the `default` profile's HEAVY tier
+  through `bedrock` and its WORKHORSE tier through `vertex`.** An operator who copies that example
+  onto a host without both extras now exits 2. The **shipped** `config/models.yaml` does not do
+  this — it is `anthropic`-only on `default` and `openai_compatible`-only on `local`, so no shipped
+  configuration is affected. Surfaced here rather than fixed: SPEC.md is the main session's to edit
+  (CLAUDE.md §3), and this ADR must not be read as having adjudicated that listing.
+- The `bedrock`/`vertex` adapters are still *shipped and tested* on a host without their extras:
+  `tests/test_llm_backend_bedrock.py:62-108` installs a `sys.modules` SDK stub, guarded on
+  `find_spec` (installed) rather than on `name in sys.modules` (imported so far), so it can never
+  shadow a really-installed `boto3`. Only the routing gate narrows.
+- `tests/test_cli.py:985-995`'s `skipif` — added by `c36160e` because the `local` profile routed every
+  tier through an `openai_compatible` adapter that did not yet exist — is a **live `discover()`
+  probe evaluated at collection**, not an xfail. `92cfc94` landed that adapter, so it re-armed by
+  itself and the test runs. It is left in place: it is the correct guard for exactly this class of
+  narrowing, and deleting it would have to be re-derived the next time an adapter is staged.
+
+### 5. What binds it
+
+`tests/test_backend_registry_gate.py`, two tests, one per half of the path.
+
+`test_startup_hands_the_gate_exactly_the_live_registry_and_never_a_superset` spies on
+`FleetSettings.load` and asserts `set(passed) == set(discover())` — an **equality**. The nearest
+pre-existing assertion, `tests/test_llm_backend_anthropic.py`'s
+`test_the_startup_gate_checks_the_live_registry_not_the_shipped_name_tuple`, is a disjunction
+(`tuple(passed) != SHIPPED_BACKENDS or set(passed) == set(discover())`), and a **superset**
+satisfies its first arm. That is the hole: widening the set one name at a time passes it silently.
+
+`test_a_shipped_name_the_live_registry_lacks_is_refused_at_startup` drives the whole path —
+`_load_settings` → `discover()` → `FleetSettings.load(known_backends=...)` → `_check_routing` —
+against a copy of the shipped `config/` whose CHEAP target is rerouted to `bedrock`, with
+`discover` replaced by a one-name registry. `discover` is replaced rather than leaning on this
+host's missing SDKs so the assertion holds identically on a host that installs all four extras,
+where the two sets coincide and the narrowing would otherwise be untestable. The rewritten target
+declares `region`, so the refusal can only come from the rule 2 registry gate and never from
+`_REQUIRED_TARGET_FIELDS`.
+
+Mutation-checked (Rule 12: the discriminating mutation is one under which the **old** assertion
+passes and the new one fails). Both mutations were applied in a detached `git worktree` at
+`6a5e534`, proven to have changed the file with `git diff`, and reverted with the file re-diffed
+clean — two sibling lanes were committing to this checkout at the time.
+
+| Mutation | old disjunction | new test 1 | new test 2 |
+|---|---|---|---|
+| `cli.py:558` → `tuple(discover()) + ("bedrock",)` (adds back a third name) | **passes** | **fails** | **fails** |
+| `settings.py:1401` → `... not in known_backends and ... not in SHIPPED_BACKENDS` (relaxes the gate) | **passes** | passes | **fails** |
+
+The first mutation is the discriminating one for the CLI half: the old assertion's first arm is
+true because a three-name tuple is not the four-name constant, so it reports green on the precise
+defect it was written to catch. The second shows the two new tests are not redundant — test 1
+inspects the argument the CLI constructs and is blind to a gate that ignores it.
+
+Not asserted here, and deliberately: `BackendReply.usage.model_id` echoing `target.model_id`
+verbatim (`c36160e`, `llm/backends/anthropic.py::_reply_from`). It is the other high-consequence
+line BK1 touched, it is already bound by a round-trip test through the real `CachingModelClient`,
+and no code path in this ADR reaches it.
