@@ -1196,12 +1196,17 @@ async def test_demoting_to_a_floor_pends_the_span_keeps_every_attempt_and_drops_
     assert all(record.from_status is RepoStatus.SUCCEEDED for record in demotions)
     assert all(record.to_status is RepoStatus.PENDING for record in demotions)
 
+    # The status claim and the attempts claim are asserted SEPARATELY, so that a mutation which
+    # breaks one cannot be masked by the other failing first — each assertion below is the
+    # discriminating one for its own property.
     state = await _phase_state(read_conn, REPO)
-    assert state[1] == ("SUCCEEDED", 1), "phase 1 is below the floor and is not re-entry territory"
-    assert state[2] == ("PENDING", 2)
-    assert state[3] == ("PENDING", 3)
-    assert state[4] == ("PENDING", 4)
-    assert [state[p][1] for p in (1, 2, 3, 4)] == [1, 2, 3, 4], (
+    assert {phase: state[phase][0] for phase in (1, 2, 3, 4)} == {
+        1: "SUCCEEDED",  # below the floor: not re-entry territory
+        2: "PENDING",
+        3: "PENDING",
+        4: "PENDING",
+    }
+    assert {phase: state[phase][1] for phase in (1, 2, 3, 4)} == {1: 1, 2: 2, 3: 3, 4: 4}, (
         "every attempts value is retained — asserted on the column, not inferred from the status"
     )
 
