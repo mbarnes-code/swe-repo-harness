@@ -1306,7 +1306,7 @@ async def test_limits_hands_each_tier_a_resizable_limiter(harness: Harness) -> N
 async def test_a_freed_slot_is_charged_at_wake_not_when_the_waiter_resumes() -> None:
     """The window between choosing a waiter and that waiter running must show no headroom.
 
-    Charging the slot inside the resumed waiter instead of inside `_wake_next` passes the
+    Charging the slot inside the resumed waiter instead of inside `_drain` passes the
     contention test — the woken tasks are scheduled ahead of any later arrival, so the race
     usually does not open. It opens when two slots are freed back to back with no await between
     them: both waiters are chosen, neither has resumed, and `borrowed` still reads 0. An arrival
