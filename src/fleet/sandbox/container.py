@@ -185,10 +185,35 @@ def claims(live_name: str, container_name: str) -> bool:
 
 
 @dataclass(frozen=True, slots=True)
+class ContainerListing:
+    """One `docker ps` answer: the names it returned, or why it is not an answer at all.
+
+    A bare `list[str]` cannot carry the difference between "this run has no containers" and
+    "docker did not tell me", and every caller that acts on the empty case treats the two the
+    same way — it reaps nothing and reports a clean sweep (docs/INTEGRATION_HONESTY.md D73, the
+    same four-state collapse as D44, on the read side). `error` is a reason string ready to hand
+    to an operator, never a bool: the operator's next action differs between a daemon that is
+    down and a `docker ps` killed at its deadline.
+
+    When `error` is set, `names` is EMPTY rather than partial. A short listing from a call that
+    did not settle would otherwise be indistinguishable from a complete one.
+    """
+
+    names: list[str]
+    error: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class ContainerReapFailure:
     """One `reap()` entry that was attempted and could not be verified removed — distinct from a
     container `reap()` never attempted because a live task still claims it (see
-    `ContainerReapResult`)."""
+    `ContainerReapResult`).
+
+    `name` is a container name in every case but one: when the `docker ps` listing itself fails,
+    the sweep never learns any container name, and the single entry it reports names the PREFIX it
+    could not enumerate (`fleet-<run_id>-*`). That is deliberate — the alternative is an empty
+    `ContainerReapResult`, which reads as a clean sweep (D73) — and the widening is stated here
+    because `name` is what an operator is expected to paste after `docker rm`."""
 
     name: str
     reason: str
@@ -211,7 +236,9 @@ class ContainerReapResult:
     `reaped` names containers this call actually removed (or found already gone — `docker rm` on
     a missing container is treated as success, matching `remove()`). `failed` names containers it
     attempted and could not verify removed, each with a reason distinguishing an environment
-    fault (docker was never even invoked) from a settled docker-level refusal. A container spared
+    fault (docker was never even invoked) from a settled docker-level refusal — plus the one
+    entry that names a prefix rather than a container, when the `docker ps` listing itself failed
+    and there was nothing to attempt (see `ContainerReapFailure`). A container spared
     because a live task still claims it appears in NEITHER list — "deliberately not attempted"
     and "attempted and unresolved" are different facts and must not collapse into one.
     """
@@ -328,8 +355,10 @@ class ContainerSandbox:
             )
         return None
 
-    async def list_by_prefix(self, prefix: str, *, timeout_s: float = 30.0) -> list[str]:
-        """Names of containers (running or not) whose name starts with `prefix`.
+    async def list_with_verdict(
+        self, prefix: str, *, timeout_s: float = 30.0
+    ) -> ContainerListing:
+        """`docker ps` for `prefix`, with "there are none" kept apart from "I could not find out".
 
         Docker's `name` filter is a REGEX, not a literal prefix, and `prefix` here is built by
         `sandbox_name`/`slug` (`sandbox/worktree.py`), which deliberately PRESERVES `.` — a regex
@@ -340,6 +369,22 @@ class ContainerSandbox:
         caller (`ContainerSandbox.reap`, `BuildverifyWorker.on_cancel`) force-removes every name
         this returns, so an over-matching filter `docker rm --force`s a DIFFERENT repo's live
         container.
+
+        `no_verdict` is asked BEFORE `result.ok`, for the reason the whole family asks it first
+        (ADR-0067 part 4): a `docker ps` that never started or was killed at its deadline answers
+        nothing about what exists, and `not result.ok` is true for that as well as for a real
+        docker-level refusal. Both belong in `error`; neither may be reported as an inventory.
+
+        **`stdout_tail` is not parsed when `error` is set.** A partial listing from a call that
+        did not settle is a subset of unknown size, and a subset of the inventory read as the
+        inventory is precisely how a reaper decides a container it never saw does not exist.
+
+        The `asyncio.create_subprocess_exec` spawn is left unguarded here, deliberately and
+        unlike the `OSError` guard in `_remove_with_reason`: `cli._reap_orphan_containers`
+        catches `OSError` around this whole call to report "docker was never invoked", and
+        `buildverify._sweep_containers` suppresses it — folding an environment fault into
+        `error` would take that fact away from both of them (D38: the guard belongs at the call
+        site that has something to say about it).
         """
         result = await self._runner(
             [
@@ -353,9 +398,41 @@ class ContainerSandbox:
             ],
             timeout_s=timeout_s,
         )
+        unsettled = no_verdict(result)
+        if unsettled is not None:
+            return ContainerListing(
+                names=[], error=f"docker ps for {prefix}* did not settle: {unsettled}"
+            )
         if not result.ok:
-            return []
-        return [line.strip() for line in result.stdout_tail.splitlines() if line.strip()]
+            return ContainerListing(
+                names=[],
+                error=(
+                    f"docker ps for {prefix}* failed (exit {result.exit_code}): "
+                    f"{result.stderr_tail}"
+                ),
+            )
+        return ContainerListing(
+            names=[line.strip() for line in result.stdout_tail.splitlines() if line.strip()],
+            error=None,
+        )
+
+    async def list_by_prefix(self, prefix: str, *, timeout_s: float = 30.0) -> list[str]:
+        """Names of containers (running or not) whose name starts with `prefix`.
+
+        **This is the LENIENT view and it collapses two states** (docs/INTEGRATION_HONESTY.md
+        D73): a failed `docker ps` and a run with no containers both come back `[]`. Callers that
+        act on the answer — anything that reports a sweep as clean, or that concludes a leak does
+        not exist — want `list_with_verdict` above, which keeps the two apart. This wrapper is
+        kept, with its signature unchanged, because `BuildverifyWorker._sweep_containers` and
+        `cli._reap_orphan_containers`'s `--dry-run` branch both iterate the returned list and
+        both live in modules with their own owners; making this method raise or return a record
+        would turn a best-effort cancellation sweep into an exception escaping `on_cancel`. Those
+        two call sites are the residual recorded under D73.
+
+        The filter's `re.escape` and the ordering of the `no_verdict`/`ok` checks are documented
+        on `list_with_verdict`, which is where the argv is built.
+        """
+        return (await self.list_with_verdict(prefix, timeout_s=timeout_s)).names
 
     async def reap(
         self, *, run_id: UUID | str, live_names: Iterable[str], timeout_s: float = 30.0
@@ -388,12 +465,31 @@ class ContainerSandbox:
         container spared because a live sandbox `claims()` it — or because it fell outside the
         run's prefix — is filtered out before any attempt, so it lands in neither `reaped` nor
         `failed`: "deliberately spared" is a third fact, not a failure.
+
+        **A `docker ps` that fails is reported, not swept past.** The listing comes from
+        `list_with_verdict`, not from the lenient `list_by_prefix`, because the two answers that
+        method returns `[]` for — "this run has no containers" and "docker did not tell me" — end
+        here as the same empty `ContainerReapResult`, which every caller reads as a clean sweep
+        (D73: the D44 collapse on the read side, and the one that is silent). When the listing
+        carries an error this returns a single `failed` entry naming the prefix, so `complete` is
+        False and the operator gets docker's own reason.
         """
         live = set(live_names)
         prefix = run_prefix(run_id)
         reaped: list[str] = []
         failed: list[ContainerReapFailure] = []
-        for name in await self.list_by_prefix(prefix, timeout_s=timeout_s):
+        listing = await self.list_with_verdict(prefix, timeout_s=timeout_s)
+        if listing.error is not None:
+            # The sweep has no inventory, so it swept nothing — and an empty `ContainerReapResult`
+            # is how this method says "I looked and the run is clean". Reported as a failure over
+            # the prefix rather than as a clean sweep: `complete` is False, and `cli._reap_lines`
+            # prints the reason, so the operator sees the namespace and docker's own words instead
+            # of `no orphan containers` (docs/INTEGRATION_HONESTY.md D73).
+            return ContainerReapResult(
+                reaped=[],
+                failed=[ContainerReapFailure(name=f"{prefix}*", reason=listing.error)],
+            )
+        for name in listing.names:
             if not name.startswith(prefix):
                 # The namespace floor, re-checked here rather than trusted from the listing.
                 # `list_by_prefix` asks DOCKER to filter, and docker's `--filter name=` is a

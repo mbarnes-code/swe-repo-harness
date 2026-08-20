@@ -988,6 +988,149 @@ async def test_remove_does_not_raise_when_docker_is_unreachable() -> None:
     assert removed is False
 
 
+class _ListingFailsRunner:
+    """`docker ps` answers with a scripted FAILURE; every other call succeeds. The read-path
+    counterpart of `_ContainerRemoveScriptRunner`, and the container analogue of `worktree.py`'s
+    `_AlwaysFailListRunner` — except that a failed `docker ps` is a settled non-zero exit, not an
+    `OSError`, which is exactly the state `list_by_prefix` used to collapse into `[]`."""
+
+    def __init__(self, *, exit_code: int = 1, stderr: str = "") -> None:
+        self.calls: list[tuple[str, ...]] = []
+        self._exit_code = exit_code
+        self._stderr = stderr
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        parts = tuple(argv)
+        self.calls.append(parts)
+        if parts[1] == "ps":
+            return ProcResult(
+                argv=parts,
+                exit_code=self._exit_code,
+                stdout_tail="",
+                stderr_tail=self._stderr,
+                duration_ms=1,
+                timed_out=False,
+            )
+        return ProcResult(
+            argv=parts, exit_code=0, stdout_tail="", stderr_tail="", duration_ms=1, timed_out=False
+        )
+
+
+# --------------------------------------------------------------------------------------
+# `ContainerSandbox.list_by_prefix` returned `[]` on a non-zero `docker ps`
+# (docs/INTEGRATION_HONESTY.md D73), so `reap()` handed its caller an empty
+# `ContainerReapResult` — indistinguishable from "this run has no containers", which
+# `cli._reap_lines` prints as `no orphan containers`. The D44 collapse on the READ side, and the
+# silent one: a reaper that believes there is nothing to reap does nothing and says it is clean.
+#
+# WHAT THESE TESTS MEASURE, and why it is not the obvious quantity. A test that measured removals
+# — `result.reaped`, or the `docker rm --force` argv in `runner.calls` — CANNOT observe this
+# defect: a failed listing produces zero removals both before and after the fix, so the number it
+# reads is 0 either way. Both are asserted below as the control, and the discriminating
+# assertions are on `failed`/`complete`, which is where the behaviour actually moves.
+# --------------------------------------------------------------------------------------
+async def test_reap_reports_a_failed_listing_instead_of_a_clean_empty_sweep() -> None:
+    """A `docker ps` that exits non-zero — a stopped daemon, a permission error on the socket —
+    must not be reported as a sweep that found nothing. `complete` is what a caller reads to tell
+    the two apart, and the reason carries docker's own stderr because the operator's next action
+    (start the daemon, then re-run) depends on which failure it was."""
+    runner = _ListingFailsRunner(
+        exit_code=1,
+        stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+    )
+    sandbox = ContainerSandbox(runner=runner)
+
+    result = await sandbox.reap(run_id=RUN_ID, live_names=set())
+
+    # The control: neither of these moves under the defect. A test built on them is blind to it.
+    assert result.reaped == []
+    assert not any(call[1] == "rm" for call in runner.calls), (
+        "nothing may be removed on the strength of an inventory docker never provided"
+    )
+    # The discriminating assertions.
+    assert result.complete is False, (
+        "an unreadable inventory reported as a complete sweep is the whole defect"
+    )
+    assert [f.name for f in result.failed] == [f"{run_prefix(RUN_ID)}*"], (
+        "the entry names the namespace the sweep could not enumerate; there is no container name "
+        "to report, because none was ever learned"
+    )
+    assert "failed (exit 1)" in result.failed[0].reason
+    assert "Cannot connect to the Docker daemon" in result.failed[0].reason
+
+
+async def test_reap_reports_a_listing_that_never_settled_rather_than_an_empty_inventory() -> None:
+    """The second of the three states `not result.ok` collapses (ADR-0067 part 4): a `docker ps`
+    that never started because the deadline had already passed. `run()` synthesises that as
+    `started=False` AND `timed_out=True` at once, so `no_verdict` must be asked BEFORE `ok` and
+    must read `started` first — otherwise a command that never ran is reported as one that ran
+    too long, and either way an inventory nobody obtained becomes an empty one."""
+    runner = FakeRunner(exit_code=124, started=False, timed_out=True)
+    sandbox = ContainerSandbox(runner=runner)
+
+    result = await sandbox.reap(run_id=RUN_ID, live_names=set())
+
+    assert result.complete is False
+    assert [f.name for f in result.failed] == [f"{run_prefix(RUN_ID)}*"]
+    assert "did not settle" in result.failed[0].reason
+    assert "never started" in result.failed[0].reason, (
+        "the never-started cause must not be reported as a timeout"
+    )
+    assert "failed (exit" not in result.failed[0].reason, (
+        "a call that never ran is not a docker-level refusal"
+    )
+
+
+async def test_reap_reports_a_real_empty_inventory_as_a_clean_complete_sweep() -> None:
+    """The no-over-correction control, and the reason the fix above is not simply "report a
+    failure whenever nothing was removed": a `docker ps` that exits 0 with no output is a real
+    answer — this run has no containers — and must stay a clean, complete sweep with an empty
+    `failed`. This test passes before the fix and after it; it is the one that would keep passing
+    under a mutation that removed the fix, which is why it cannot be the test that pins it."""
+    sandbox = ContainerSandbox(runner=FakeRunner(stdout=""))
+
+    result = await sandbox.reap(run_id=RUN_ID, live_names=set())
+
+    assert result == ContainerReapResult(reaped=[], failed=[])
+    assert result.complete is True
+
+
+async def test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one() -> (
+    None
+):
+    """Pins the residual D73 records, so it cannot be closed by accident in the wrong direction.
+
+    `list_by_prefix` still answers `[]` for a failed listing, and its signature is unchanged,
+    because `BuildverifyWorker._sweep_containers` and `cli._reap_orphan_containers`'s
+    `--dry-run` branch both iterate the returned list: making this method raise would turn a
+    best-effort cancellation sweep into an exception escaping `on_cancel`, and a `--dry-run`
+    preview into a traceback. Closing the residual means moving those two call sites to
+    `list_with_verdict` — in the modules that own them — not changing this method under them.
+
+    Both halves are asserted together on the SAME failure, because the pair is the contract: the
+    honest answer exists and is reachable, and the lenient one is lenient on purpose.
+    """
+    runner = _ListingFailsRunner(exit_code=1, stderr="permission denied on /var/run/docker.sock")
+    sandbox = ContainerSandbox(runner=runner)
+    prefix = run_prefix(RUN_ID)
+
+    lenient = await sandbox.list_by_prefix(prefix)
+    honest = await sandbox.list_with_verdict(prefix)
+
+    assert lenient == []
+    assert honest.names == []
+    assert honest.error is not None
+    assert "permission denied" in honest.error
+
+
 class RegexFilterRunner:
     """Emulates Docker's REAL `--filter name=^<pattern>` semantics against a fixed pool of
     container names — `<pattern>` is matched as a regex, exactly like the daemon does, instead of
