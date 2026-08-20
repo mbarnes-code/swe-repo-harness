@@ -1228,11 +1228,13 @@ async def test_a_demotion_writes_one_phasedemoted_finding_per_phase_and_never_a_
     converges on the same three rather than adding more.
 
     Why: a demotion throws away landed, green work, and ADR-0077 makes the finding an obligation
-    the caller cannot decline. `docs/SPEC.md` Constraint 7 currently tells this method's author to
-    write the demotion through `transition(..., resume=True)` — which returns a bare status and
-    emits nothing at all — so a writer that followed the SPEC would pass every status assertion
-    in the test above while every demotion in the fleet went unrecorded. Only an assertion on the
-    finding row itself can see that.
+    the caller cannot decline. This is not hypothetical: until `f02d124`, `docs/SPEC.md`
+    Constraint 7 told this method's author to write the demotion through
+    `transition(..., resume=True)` — which returns a bare status and emits nothing at all — so a
+    writer who followed the SPEC would have passed every status assertion in the test above while
+    every demotion in the fleet went unrecorded. Only an assertion on the finding row itself can
+    see that, which is measured rather than asserted: removing the `findings` INSERT leaves the
+    status/attempts/checkpoint test GREEN and fails only this one.
 
     Why *per phase*: `PhaseDemotion.payload()`'s docstring records the hazard —
     `cli._note_finding` fingerprints on `(run_id, repo_id, kind)` alone and UPSERTs, so three

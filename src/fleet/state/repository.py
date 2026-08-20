@@ -1358,8 +1358,10 @@ class SqliteStateRepository:
           nothing, so a demotion made through it is invisible to whoever reads the run;
           `demote()` returns the status *and* the `PhaseDemotion` the caller owes, and this
           method discharges that obligation by writing one `PhaseDemoted` finding per demoted
-          phase in the same transaction as the status change. (`docs/SPEC.md` Constraint 7 says
-          otherwise; it is wrong, and `enums.transition`'s own docstring says so.)
+          phase in the same transaction as the status change. (`docs/SPEC.md` Constraint 7 read
+          the other way until `f02d124` — it named `transition(..., resume=True)` as the demotion
+          path, which would have made every demotion in the fleet silent while every status
+          assertion still passed. The test below asserts on the finding row for that reason.)
         * the `checkpoints` row for the phase is deleted, because a checkpoint for a phase that
           is about to be re-run is a lie about work the run no longer claims;
         * a non-`SUCCEEDED` row in the span is left as it is. `PENDING`, `RUNNING` and `BLOCKED`
