@@ -39,6 +39,7 @@ from fleet.orchestrator.budgets import (
     LedgerHalted,
     Limits,
     RepoBudgetExhausted,
+    ResizableLimiter,
     RevalidationBudgetExhausted,
     RunBudgetExhausted,
     SpendKind,
@@ -716,3 +717,281 @@ async def test_limits_key_llm_semaphores_by_tier_not_by_backend(harness: Harness
     assert await slots(limits.for_tier(ModelTier.CHEAP)) == 16
     assert await slots(limits.git_net) == 8
     assert await slots(limits.docker) == 4
+
+
+# --------------------------------------------------------------------------------------
+# 8. `ResizableLimiter` — the §11.8 primitive whose ceiling moves while slots are held
+# --------------------------------------------------------------------------------------
+#
+# These are property tests, not shape tests. Asserting that `capacity` holds the number that was
+# passed to `resize` proves nothing about bounding: the number is only interesting if a task that
+# would have run is actually made to wait for it. Every assertion below is therefore made on
+# observed concurrency (a peak counter, an admission order, a list of tasks that got to run)
+# rather than on the limiter's own bookkeeping, except where the bookkeeping is the thing that
+# leaks (a slot charged to a cancelled task is invisible in every other observation).
+#
+# No test here sleeps for a real duration. `_settle` yields to the event loop with zero-duration
+# `asyncio.sleep(0)`, which is enough to run every ready task to its next await, and a limiter
+# under test is never waiting on time — only on other tasks.
+
+
+async def _settle(rounds: int = 8) -> None:
+    """Run every ready task to its next await. Zero-duration: adds nothing to the suite's clock."""
+    for _ in range(rounds):
+        await asyncio.sleep(0)
+
+
+async def test_limiter_never_admits_more_than_capacity_under_contention() -> None:
+    """Six tasks, three slots: the bound is what the peak counter saw, not what `capacity` says."""
+    limiter = ResizableLimiter(3)
+    live = 0
+    peak = 0
+
+    async def call() -> None:
+        nonlocal live, peak
+        async with limiter:
+            live += 1
+            peak = max(peak, live)
+            await _settle()  # hold the slot across every other task's chance to barge in
+            live -= 1
+
+    await asyncio.gather(*(call() for _ in range(6)))
+
+    assert peak == 3, "three is both the ceiling and reachable — a lower peak would not prove it"
+    assert limiter.borrowed == 0, "every slot returned"
+
+
+async def test_shrinking_while_slots_are_held_bars_entrants_and_harms_no_holder() -> None:
+    """§11.8's "halved on a 429" applies to the *next* call, never to the three already in flight.
+
+    A shrink that cancelled or errored its current holders would turn a throttle into a failed
+    attempt, which is the opposite of backpressure.
+    """
+    limiter = ResizableLimiter(3)
+    gates = [asyncio.Event() for _ in range(3)]
+    finished: list[int] = []
+
+    async def holder(index: int) -> None:
+        async with limiter:
+            await gates[index].wait()
+        finished.append(index)
+
+    holders = [asyncio.create_task(holder(i)) for i in range(3)]
+    await _settle()
+    assert limiter.borrowed == 3
+
+    limiter.resize(1)
+
+    entered = asyncio.Event()
+
+    async def entrant() -> None:
+        async with limiter:
+            entered.set()
+
+    late = asyncio.create_task(entrant())
+    await _settle()
+    assert not entered.is_set(), "capacity 1 with 3 borrowed admits nobody"
+
+    gates[0].set()
+    await _settle()
+    assert not entered.is_set(), "2 borrowed is still at or above the new ceiling of 1"
+    gates[1].set()
+    await _settle()
+    assert not entered.is_set(), "1 borrowed is still at the new ceiling of 1"
+    gates[2].set()
+    await _settle()
+    assert entered.is_set(), "the entrant runs only once the shrunk ceiling has drained"
+
+    await asyncio.gather(*holders, late)
+    assert finished == [0, 1, 2], "no holder was cancelled or errored by the shrink"
+
+
+async def test_growing_admits_parked_waiters_without_waiting_for_a_release() -> None:
+    """The reason `asyncio.Semaphore` cannot be used: raising the ceiling must wake waiters.
+
+    "One slot returned per clean minute" is worthless if the returned slot is only noticed the
+    next time an unrelated call happens to finish.
+    """
+    limiter = ResizableLimiter(3)
+    limiter.resize(1)
+    await limiter.acquire()
+
+    admitted: list[int] = []
+
+    async def waiter(index: int) -> None:
+        async with limiter:
+            admitted.append(index)
+
+    tasks = [asyncio.create_task(waiter(i)) for i in range(2)]
+    await _settle()
+    assert admitted == [], "capacity 1, one slot held"
+
+    limiter.resize(3)
+    assert limiter.borrowed == 3, "the grow charges both waiters before either of them resumes"
+    await _settle()
+    assert admitted == [0, 1], "both parked waiters ran on the grow alone — no release intervened"
+
+    limiter.release()
+    await asyncio.gather(*tasks)
+
+
+async def test_resize_clamps_to_floor_and_ceiling_and_refuses_zero() -> None:
+    """The clamp is asserted by what runs concurrently, not by reading `capacity` back."""
+    limiter = ResizableLimiter(8, floor=2, ceiling=8)
+
+    limiter.resize(1)
+    assert limiter.capacity == 2, "never below the floor"
+
+    live = 0
+    peak = 0
+
+    async def call() -> None:
+        nonlocal live, peak
+        async with limiter:
+            live += 1
+            peak = max(peak, live)
+            await _settle()
+            live -= 1
+
+    await asyncio.gather(*(call() for _ in range(4)))
+    assert peak == 2, "the floor is a real bound, not a number stored on the object"
+
+    limiter.resize(99)
+    assert limiter.capacity == 8, "never above the ceiling"
+
+    with pytest.raises(ValueError):
+        limiter.resize(0)
+    with pytest.raises(ValueError):
+        limiter.resize(-4)
+    assert limiter.capacity == 8, "a refused resize changed nothing"
+
+
+async def test_waiters_are_admitted_in_arrival_order() -> None:
+    """FIFO. Without it a run under sustained contention starves whichever call queued first,
+    and the tier ceiling starts producing timeouts instead of backpressure."""
+    limiter = ResizableLimiter(1)
+    await limiter.acquire()
+    order: list[str] = []
+
+    async def waiter(name: str) -> None:
+        async with limiter:
+            order.append(name)
+
+    tasks = [asyncio.create_task(waiter(name)) for name in ("a", "b", "c")]
+    await _settle()
+
+    limiter.release()
+    await asyncio.gather(*tasks)
+
+    assert order == ["a", "b", "c"]
+
+
+async def test_a_waiter_cancelled_while_parked_consumes_no_wake() -> None:
+    """Two queued, cancel the first, release once: the second must RUN.
+
+    A cancelled waiter that still absorbs the wake does not raise anything — it silently lowers
+    the effective ceiling by one for the rest of the run.
+    """
+    limiter = ResizableLimiter(1)
+    await limiter.acquire()
+    ran: list[str] = []
+
+    async def waiter(name: str) -> None:
+        await limiter.acquire()
+        ran.append(name)
+
+    first = asyncio.create_task(waiter("first"))
+    second = asyncio.create_task(waiter("second"))
+    await _settle()
+
+    first.cancel()
+    await _settle()
+    limiter.release()
+    await _settle()
+
+    assert ran == ["second"], "the release reached the waiter that was still there"
+    assert limiter.borrowed == 1, "exactly one slot is out — the cancelled waiter returned none"
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+
+async def test_a_waiter_cancelled_after_being_woken_hands_its_slot_on() -> None:
+    """The narrower race: cancelled *between* the wake and the resume, holding a charged slot.
+
+    `release()` charges the slot to the chosen waiter synchronously, so a task cancelled before
+    it resumes owns a slot nobody will ever release. Left uncorrected that is a permanent leak,
+    and on a tier whose ceiling is 2 it takes two of them to wedge the tier forever.
+    """
+    limiter = ResizableLimiter(1)
+    await limiter.acquire()
+    ran: list[str] = []
+
+    async def waiter(name: str) -> None:
+        await limiter.acquire()
+        ran.append(name)
+
+    first = asyncio.create_task(waiter("first"))
+    second = asyncio.create_task(waiter("second"))
+    await _settle()
+
+    limiter.release()  # charges the slot to `first`, which has not resumed yet
+    first.cancel()
+    await _settle()
+
+    assert ran == ["second"], "the slot `first` never used went on to `second`"
+    assert limiter.borrowed == 1
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    await second
+
+
+async def test_release_without_acquire_fails_loud() -> None:
+    """Rule 11. A negative borrowed count would silently raise the effective ceiling instead."""
+    limiter = ResizableLimiter(2)
+    with pytest.raises(RuntimeError):
+        limiter.release()
+
+
+async def test_limits_hands_each_tier_a_resizable_limiter(harness: Harness) -> None:
+    """The retype is the point of this change: `for_tier` must return something AIMD can move.
+
+    Asserted through the real `Limits.create` path, because a limiter that is resizable in
+    isolation but reached through a `Mapping` of semaphores would be resizable nowhere.
+    """
+    await harness.open_ledger(400.0)
+
+    class _NullExecutor:
+        def submit(self, *args: object, **kwargs: object) -> None:  # pragma: no cover - unused
+            raise NotImplementedError
+
+        def shutdown(self, wait: bool = True) -> None:  # pragma: no cover - unused
+            return None
+
+    limits = Limits.create(
+        ConcurrencySection(),
+        ledger=harness.ledger(),
+        cpu_pool=_NullExecutor(),  # type: ignore[arg-type]
+    )
+
+    heavy = limits.for_tier(ModelTier.HEAVY)
+    assert isinstance(heavy, ResizableLimiter)
+    assert heavy.capacity == 2
+
+    heavy.resize(1)
+    live = 0
+    peak = 0
+
+    async def call() -> None:
+        nonlocal live, peak
+        async with heavy:
+            live += 1
+            peak = max(peak, live)
+            await _settle()
+            live -= 1
+
+    await asyncio.gather(*(call() for _ in range(3)))
+    assert peak == 1, "a HEAVY tier shrunk to 1 actually serializes"
+
+    heavy.resize(99)
+    assert heavy.capacity == 2, "the ceiling stays the configured `concurrency.llm.heavy`"

@@ -49,6 +49,7 @@ import math
 import multiprocessing
 import time
 import uuid
+from collections import deque
 from collections.abc import AsyncIterator, Callable, Mapping
 from concurrent.futures import Executor, ProcessPoolExecutor
 from contextlib import asynccontextmanager, suppress
@@ -948,6 +949,132 @@ def new_cpu_pool(max_workers: int) -> ProcessPoolExecutor:
     )
 
 
+class ResizableLimiter:
+    """A counting concurrency limiter whose ceiling can change **while slots are held** (§11.8).
+
+    `asyncio.Semaphore` cannot do that. Its `_value` is available-slot count with no public
+    setter, and assigning to it does not wake the waiters that the new headroom just admitted, so
+    a grow is silently a no-op until the next unrelated `release()`. §11.8's AIMD rule — "halved
+    on a 429 or a `retry-after`, one slot returned per clean minute" — is a resize of a live
+    ceiling, so the primitive has to be one that supports it. This class is that primitive and
+    **nothing more**: it reads no config, subscribes to no signal, and decides no policy. What
+    calls `resize()`, and with what, is a later change.
+
+    **Counting, not per-borrower.** One task may hold two slots and is charged two, exactly as
+    `asyncio.Semaphore` behaves. That is deliberate: it makes this a drop-in at the one existing
+    acquisition site (`workers/classify.py`) rather than a change that must land atomically with
+    every other caller.
+
+    Two properties are easy to get wrong and are pinned by tests, not by inspection:
+
+    * **A slot is transferred at wake time, not at resume time.** `_wake_next` charges
+      `_borrowed` itself and hands the waiter a settled future. If instead the resumed waiter
+      charged itself, every task scheduled between the wake and the resume would see stale
+      headroom and barge in over the ceiling.
+    * **A cancelled waiter must not swallow a wake.** A task cancelled *after* `_wake_next` chose
+      it still owns a slot nobody will release, so `acquire()` gives it back and wakes the next
+      waiter in the same breath. Without that, one cancellation permanently shrinks the effective
+      ceiling by one.
+
+    Fairness is FIFO, and it falls out of transferring at wake time rather than needing a guard
+    in `acquire`: every path that creates headroom — `release`, `resize`, the cancellation
+    recovery — drains the queue **synchronously**, with no `await` between freeing a slot and
+    charging it to the oldest waiter. So a live waiter can never be parked while headroom exists,
+    and an arrival taking the fast path is therefore never jumping a queue.
+    """
+
+    __slots__ = ("_borrowed", "_capacity", "_ceiling", "_floor", "_waiters")
+
+    def __init__(self, capacity: int, *, floor: int = 1, ceiling: int | None = None) -> None:
+        """`floor` and `ceiling` bound every later `resize`; `ceiling` defaults to `capacity`.
+
+        Defaulting the ceiling to the starting capacity is what makes a *lowered* tier stay
+        lowered: `llm.concurrency_overrides` is the operator saying "run this slower", and a
+        controller that grew back to the unoverridden `concurrency.llm.*` would undo that.
+        """
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        if floor < 1:
+            raise ValueError(f"floor must be >= 1, got {floor}")
+        top = capacity if ceiling is None else ceiling
+        if top < floor:
+            raise ValueError(f"ceiling {top} is below floor {floor}")
+        self._floor = floor
+        self._ceiling = top
+        self._capacity = max(floor, min(top, capacity))
+        self._borrowed = 0
+        self._waiters: deque[asyncio.Future[None]] = deque()
+
+    @property
+    def capacity(self) -> int:
+        """The current ceiling — what `resize` moves."""
+        return self._capacity
+
+    @property
+    def borrowed(self) -> int:
+        """Slots held right now. May exceed `capacity` transiently after a shrink."""
+        return self._borrowed
+
+    def locked(self) -> bool:
+        """True when the next `acquire()` would park. Mirrors `asyncio.Semaphore.locked()`."""
+        return self._borrowed >= self._capacity
+
+    async def acquire(self) -> None:
+        """Take a slot, waiting FIFO until one is free."""
+        if not self.locked():
+            self._borrowed += 1
+            return
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self._waiters.append(fut)
+        try:
+            try:
+                await fut
+            finally:
+                self._waiters.remove(fut)
+        except asyncio.CancelledError:
+            if not fut.cancelled():
+                # Woken, then cancelled: we own a slot we will never use. Hand it straight on.
+                self._borrowed -= 1
+                self._wake_next()
+            raise
+
+    def release(self) -> None:
+        """Return a slot and wake the next waiter the current capacity admits."""
+        if self._borrowed <= 0:
+            raise RuntimeError("ResizableLimiter released more times than it was acquired")
+        self._borrowed -= 1
+        if self._borrowed < self._capacity:
+            self._wake_next()
+
+    def resize(self, capacity: int) -> None:
+        """Move the ceiling into `[floor, ceiling]`; growing admits waiters immediately.
+
+        A shrink never cancels or errors a current holder — `borrowed` is simply allowed to sit
+        above `capacity` until it drains, which is what "halved on a 429" has to mean for calls
+        already in flight.
+        """
+        if capacity < 1:
+            raise ValueError(f"capacity must be >= 1, got {capacity}")
+        self._capacity = max(self._floor, min(self._ceiling, capacity))
+        while self._borrowed < self._capacity and self._wake_next():
+            pass
+
+    def _wake_next(self) -> bool:
+        """Charge a slot to the first live waiter and settle its future. True if one was woken."""
+        for fut in self._waiters:
+            if not fut.done():
+                self._borrowed += 1
+                fut.set_result(None)
+                return True
+        return False
+
+    async def __aenter__(self) -> None:
+        await self.acquire()
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self.release()
+
+
 @dataclass(slots=True)
 class Limits:
     """All concurrency ceilings and the cost ledger for one run. Handed to workers, never imported.
@@ -959,7 +1086,7 @@ class Limits:
     git_net: asyncio.Semaphore
     subprocess: asyncio.Semaphore
     docker: asyncio.Semaphore
-    llm: Mapping[ModelTier, asyncio.Semaphore]
+    llm: Mapping[ModelTier, ResizableLimiter]
     cpu_pool: Executor
     ledger: CostLedger
 
@@ -976,7 +1103,7 @@ class Limits:
         LOWER a tier: "run this slower" is the intended response to throttling (§11.8)."""
         overrides = llm_overrides or {}
         llm = {
-            tier: asyncio.Semaphore(
+            tier: ResizableLimiter(
                 max(1, min(concurrency.llm.for_tier(tier), overrides.get(tier, 1 << 30)))
             )
             for tier in ModelTier
@@ -990,6 +1117,6 @@ class Limits:
             ledger=ledger,
         )
 
-    def for_tier(self, tier: ModelTier) -> asyncio.Semaphore:
-        """The semaphore every `ModelClient.complete` on this tier must hold."""
+    def for_tier(self, tier: ModelTier) -> ResizableLimiter:
+        """The limiter every `ModelClient.complete` on this tier must hold."""
         return self.llm[tier]
