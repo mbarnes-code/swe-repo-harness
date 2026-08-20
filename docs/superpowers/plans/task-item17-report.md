@@ -114,6 +114,23 @@ OO1 and "BK2 fix round 5 — commit `ddf52d9`".
 | `docs/SPEC.md:6927-6932` | Correct, untouched (and another lane's file regardless). |
 | `docs/DECISIONS.md:309`, `:5387` | Correct, untouched — both are the negative statement, which is the true one. |
 
+> **Editorial correction (2026-08-20), added by lane BIND. The row above is wrong and is left
+> standing on purpose.** `grep -ni thinking src/ tests/` returns **one** hit, not zero. Commit
+> `37fa292` measured that one at **02:02:16**, and this file was promoted into the tracked tree by
+> `5be5064` at **02:11:29** — so the zero was landed **nine minutes and thirteen seconds after** the
+> true number had been recorded (both timestamps from `git log -1 --format=%cI`, read this session).
+> D66's editorial correction in `docs/INTEGRATION_HONESTY.md` carries the same measurement.
+> Re-measured here, `grep -ni thinking src/ tests/ -r | wc -l` ⇒ **1**, and the hit is
+> `tests/test_llm_cache.py:4` — **the very line this row reports as FIXED**. It reads "the harness
+> pins no sampling controls — no `temperature`, `seed`, `top_p` or `thinking` key is built", which
+> is the *replacement* docstring: a negative assertion necessarily names the word it denies, so the
+> correct end state of this sweep is one hit, not zero. Nothing is outstanding; only the number is
+> wrong. **The claim is not edited** because this file is tracked as evidence of what was measured
+> at the time, and silently correcting it would destroy that record — but the zero must not be
+> taken at face value, so it is marked instead. **Swept for the class, not just this site:** a
+> whole-file scan for `zero`, `no hits` and `returns 0` finds the figure at this one row only, so
+> this is the file's only carrier — §4's verification section does not repeat it.
+
 The `docs/superpowers/plans/*.md` and `docs/INTEGRATION_HONESTY.md` hits are the audit and ledger
 records *of* the retraction, quoting the false clause to name it. Left alone by construction.
 

@@ -4085,3 +4085,45 @@ the floor only when no phase below the frontier holds **and** none is `DEGRADED`
 **Severity: the sentence is wrong in a case the code handles correctly.** No behaviour changed; the
 suite is unaffected (`tests/test_reentry_floor.py` binds the real rule in both directions). The risk
 is the one this whole class has: a reconciler follows the prose.
+
+> **Editorial correction (2026-08-20), lane BIND — this disclosure is now stale, and its site
+> enumeration was wrong when written. The history above stands; only what is still true changes.**
+>
+> **1. The overclaim is closed.** `f466287` made the edit this entry says was "not this lane's to
+> make unilaterally", writing one corrected clause and applying it verbatim to every site that
+> states the rule. Read back this session: `docs/SPEC.md:182`, `docs/SPEC.md:6952` and
+> `docs/DECISIONS.md:6713` each carry the identical 336-character clause once whitespace is
+> normalised — measured, not asserted. So the paragraph above beginning "Why it is recorded here
+> instead of patched" describes a state that no longer exists.
+>
+> **2. It is closed by a mechanism, not by another hand-maintained agreement** — which is what this
+> entry, and the five wrong-successor corrections it counts, argued was needed.
+> `tests/test_floor_rule_statements.py` binds the three prose copies to each other by normalised
+> text, parses the hard-stop status set, the cited symbol and the fallback phase **out of the prose
+> itself** and checks each against `orchestrator/reentry`, and binds the `enums.py` paraphrase by a
+> vocabulary whitelist plus that same parsed-out set. Its residual is recorded in the file's own
+> `_RESIDUAL` and is not claimed closed here.
+>
+> **3. The site enumeration above is wrong on two counts, corrected rather than deleted.** It reads
+> that `60d400b` fixed the quantifier "across `docs/SPEC.md` Constraint 7 and §11.5 step 5,
+> `src/fleet/state/schema.sql`'s SPEC mirror and `docs/DECISIONS.md` ADR-0076 §1 … so that five
+> sites state one rule". Measured this session: `60d400b --name-only` touched **`docs/SPEC.md` and
+> `src/fleet/state/schema.sql` only** — ADR-0076 §1 was corrected later, by `e0404b0`; and
+> `src/fleet/state/schema.sql` **has never contained a statement of the floor rule at all**
+> (`grep -ci "re-entry floor\|settled frontier\|floor"` ⇒ 0 today, and
+> `git log -S"floor" -- src/fleet/state/schema.sql` over all history returns no commit). The
+> schema half of `60d400b` was the `findings.kind` CAVEAT, co-shipped in the same commit; the
+> "five sites" figure was that commit's own count across **both** subjects and was carried into
+> this paragraph as if it counted floor-rule sites. The true count is **four statements** — three
+> prose (`docs/SPEC.md` ×2, `docs/DECISIONS.md` ×1) and one code paraphrase
+> (`src/fleet/models/enums.py`), which is exactly the set the new test binds.
+>
+> **What is still open, verified here rather than inherited from ADR-0076's assertion of it.**
+> `git show HEAD:src/fleet/cli.py | grep -n` finds the pre-`d0b1150` phrasing alive in two
+> operator-facing messages — `:10043` *"demote each repo to the earliest phase whose …"* and
+> `:10274` *"(re-check preconditions and demote to the earliest phase whose precondition holds)"* —
+> so both carry the retracted **predicate** and the wrong **quantifier**. That file is owned by
+> another lane and had uncommitted edits in the tree while this was written, so it is reported and
+> not touched. It is deliberately outside the new test's `_EXPECTED_SITES`: the census anchor keys
+> on the corrected wording, so a fifth carrier phrased the old way is not detected by it. That is a
+> gap in coverage, stated as one. **D71 remains the next free number** (highest allocated: D70).
