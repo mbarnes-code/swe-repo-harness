@@ -61,9 +61,14 @@ OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
 RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
     RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
 }  # The second such door (ADR-0077), same construction and same reason as OPERATOR_REOPEN above:
-# §11.5 step 5 demotes a repo to its re-entry floor — the phase ABOVE the earliest one whose
-# EVIDENCE still holds, never that phase itself: that phase is where `reentry.phase_floor`'s
-# backward walk STOPS. A demotion is by definition a write of PENDING over a SUCCEEDED phase row,
+# §11.5 step 5 demotes a repo to its re-entry floor — the phase ABOVE the HIGHEST phase below the
+# settled frontier whose EVIDENCE still holds (or which is a DEGRADED/SKIPPED hard stop), never
+# that phase itself; SCAN if there is no such phase. That phase is the FIRST one
+# `reentry.phase_floor`'s backward walk meets going down, and where it STOPS. NOT the EARLIEST
+# holder: whenever two or more phases below the frontier hold, the walk stops above the highest and
+# never reaches the earliest, so naming the earliest picks a rung the function never returns and
+# re-runs every phase between the two.
+# A demotion is by definition a write of PENDING over a SUCCEEDED phase row,
 # and is reachable only through `transition(..., resume=True)` —
 # so the mechanical terminality of SUCCEEDED against the crash
 # sweep, the reaper and `_on_breach` is untouched — those paths pass no flag and still cannot
