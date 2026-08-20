@@ -3380,13 +3380,32 @@ telling the operator its provider is down, when the correct action was to lower 
 is no rate limiter — R2 measured the shape of that gap: the 429 signal is in `llm/`, the semaphore is
 `orchestrator/budgets.py:962`, and its **only** acquisition is `workers/classify.py:162`, i.e. 1 of
 12 workers; `asyncio.Semaphore` has no resize API.
-*(Anchor repair, lane CITE 2026-08-20, not an adjudication of this entry.* `budgets.py:962` was
-measured at `6a41840` and is a blank line at `f9cb3f9`: the LLM tier limiter is now
-`Limits.for_tier` returning ADR-0083's `ResizableLimiter`. The acquisition site is unmoved —
-`workers/classify.py:162`, `async with ctx.limits.for_tier(tier)`, still 1 of 12 — but the
-"no resize API" clause is overtaken by ADR-0083/ADR-0084 and needs re-derivation by this entry's
-owner. **Nothing here changes D55's OPEN status**, which rests on the halt message, not the
-limiter.*)
+*(Adjudicated 2026-08-20 by the task-adjud lane, replacing the `CITE` lane's anchor-repair note
+above, which correctly declined to adjudicate.* **D55 remains OPEN; the "no resize API" clause is
+corrected, not the verdict.** The sentence is precise about what it names — `asyncio.Semaphore`
+the stdlib class, unchanged, still exposes no public method to grow or shrink a live ceiling — and
+that half of the claim is still true today, verified by inspection of the stdlib class this
+session. What has changed is which object sits at `Limits.for_tier`: it is no longer an
+`asyncio.Semaphore` at all. `src/fleet/orchestrator/budgets.py:1146` (`Limits.for_tier`) now
+returns ADR-0083's `ResizableLimiter`, a hand-rolled primitive whose `resize()` (`:1062-1072`)
+*is* safe to call while slots are held, and ADR-0084 hardened its interior admission gate. So the
+sentence's premise — that the object guarding this acquisition point cannot be resized — is now
+false; a resizable primitive sits there.
+
+**That does not close, or partly close, the defect.** D55 rests on the halt message asserting a
+`DOWN` diagnosis a throttled-but-not-outaged backend cannot support (§11.8's row 43), which is a
+question of whether anything *reads the 429 signal and calls `resize()`* — not of whether `resize()`
+exists. Verified this session: `grep -rn '\.resize(' src/fleet/` returns zero call sites anywhere
+in `src/`; ADR-0083 §3 records this absence of a caller as deliberate — a no-op until a later
+subtask builds the AIMD controller — and states that if the controller is never built, its own
+preferred remedy is to revert the primitive rather than leave it as dead code, not to keep it as an
+unused stand-in for a fix. `orchestrator/runner.py:640`
+still raises the unqualified `is DOWN` halt on `main` at `f10a863`, `llm/client.py:532`'s failover
+arm still does not branch on `exc.trigger`, and nothing in `src/` connects a 429/`retry-after`
+signal to `Limits.for_tier(tier).resize(...)`. The causal chain D55 describes — pure throttling
+reaches the same halt as a real outage — is unchanged end to end. **Net: premise corrected, defect
+fully open, 0% closed by this work.** This matches, and does not extend, `docs/PROGRESS.md`'s own
+running assessment that R2→R3 (not R1's primitive) is the slice that would close D55's causal hop.*)
 
 **Found by** R2 (research), scoping §13 rows 40 and 43 for build size and reading the halt path on
 the way. Recorded in the round ledger as "the highest-risk finding of the round".
@@ -4227,32 +4246,39 @@ or the prefix" is documented on that dataclass, because `name` is what an operat
 | Caller | Before | Now |
 |---|---|---|
 | `ContainerSandbox.reap` (`sandbox/container.py`) | read `[]`, returned an empty `ContainerReapResult` that reads as a clean sweep | reads `list_with_verdict`; a failed listing becomes one `failed` entry named `fleet-<run_id>-*`, `complete` is `False` |
-| `BuildverifyWorker._sweep_containers` (`workers/buildverify.py`) | iterated `[]`, swept nothing, said nothing | **unchanged — residual, see below** |
-| `cli._reap_orphan_containers`, `--dry-run` branch (`cli.py:10594` at `87ed419`, the `list_by_prefix` call under `if dry_run:`; the same branch's call is `:10605` at `f9cb3f9`) | previewed an empty list as "nothing to reap" | **unchanged — residual, see below** |
+| `BuildverifyWorker._sweep_containers` (`workers/buildverify.py`) | iterated `[]`, swept nothing, said nothing | **closed, `5ed4e47`** — reads `list_with_verdict`; a failed listing logs a `container_sweep_listing_failed` warning naming the reason and returns without sweeping, still without raising (see adjudication below) |
+| `cli._reap_orphan_containers`, `--dry-run` branch (`cli.py:10594` at `87ed419`, the `list_by_prefix` call under `if dry_run:`; the same branch's call is `:10605` at `f10a863`) | previewed an empty list as "nothing to reap" | **closed, `5ed4e47`** — reads `list_with_verdict`; a failed listing is returned as `error`, and `cli.py:10319`'s formatting prints "the container sweep did not run" instead of the clean headline |
 
-**The residual, stated rather than closed.** `list_by_prefix` is kept with its signature
-unchanged and is now documented as the *lenient* view. The two call sites above live in modules
-this change does not own, and neither can absorb a raised exception where it stands:
-`_sweep_containers` is reached from `on_cancel` and from a deadline kill inside
-`BuildverifyWorker.run()`, so an exception there would turn a best-effort cleanup into a failure
-of the thing being cleaned up; the `--dry-run` branch would turn a preview into a traceback.
-Closing this means moving those two sites to `list_with_verdict` **in the modules that own them**,
-not changing the method under them. `test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one`
-pins both halves on the same failure so the residual cannot be closed in the wrong direction by
-accident.
-
-*(Anchor repair, lane CITE 2026-08-20 — a status flag, not an adjudication.* The table's two
-**"unchanged — residual"** verdicts were measured at `87ed419`. At `f9cb3f9`,
-`git log --oneline -S'list_with_verdict' -- src/fleet/cli.py` returns `5ed4e47`
-*"buildverify/cli: close D73's two residual call sites on list\_by\_prefix"*, and both sites read
-`list_with_verdict` on `main`: `cli._reap_orphan_containers`'s `if dry_run:` branch calls
-`sandbox.list_with_verdict(prefix)`, and `BuildverifyWorker._sweep_containers` awaits
-`sandbox.list_with_verdict(prefix)` in its body (line deliberately not cited: see the last sentence
-of this note). This
-lane repaired the anchors only and did
-**not** re-derive the verdicts; `workers/buildverify.py` is being edited by another lane as this is
-written. D73's owner should re-measure per ADR-0073 and flip the two cells if the re-derivation
-holds.*)
+**The residual — CLOSED, `5ed4e47`, and then the wrapper it left behind was deleted at
+`f10a863`.** Originally stated rather than closed: `list_by_prefix` was kept, lenient, and the two
+call sites above lived in modules this entry's original fix did not own. `5ed4e47` moves both to
+`list_with_verdict` **in the modules that own them**, as this section called for. Verified directly
+against the code at `main` `f10a863` (not the commit message):
+`workers/buildverify.py:1088`'s `_sweep_containers` awaits `sandbox.list_with_verdict(prefix)` and, on a failed
+listing, logs a `container_sweep_listing_failed` warning and returns without sweeping — still
+deliberately not raising, for the reason this section already gave (all three of `_sweep_containers`'s
+call sites are cleanup after something else already failed); `cli.py:10605`'s `--dry-run` branch
+also awaits `sandbox.list_with_verdict(prefix)` and, on `listing.error is not None`,
+returns a dict carrying that `error` rather than an empty `reaped` list, which `_reap_lines`
+(`cli.py:10319`) formats as "the container sweep did not run" — the clean "no orphan containers"
+headline the original defect risked is no longer reachable on a failed listing.
+With both callers moved, `list_by_prefix` itself had zero remaining call sites in `src/`, so a
+later commit, `f10a863`, deleted the method from `sandbox/container.py` entirely rather than leave
+it as a dead wrapper (CLAUDE.md Rule 2); `grep -n 'def list_by_prefix\|list_by_prefix(' src/fleet/sandbox/container.py`
+against `f10a863` returns nothing. The pairing test this section previously cited,
+`test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one`, no longer exists
+for the same reason — its whole premise (a lenient/honest pair) is gone — and was replaced by
+`test_list_with_verdict_carries_dockers_own_words_on_a_failed_listing`
+(`tests/test_sandbox.py`), whose own docstring records this closure and cites `5ed4e47`; the two
+newer tests (`b5bbb31`'s `test_workers_build.py` additions, `a65a305`'s
+`_ScriptedDocker.ps_fails` case in `test_cli.py`) each independently pin one of the two call sites
+above on its reported verdict, with removal counts kept as controls since a failed listing produces
+zero removals either way. **This closes the residual; it does not reopen this entry's own "CLOSED,
+FIXED in `cfd89c7`" heading, which was never in question.** (Adjudicated 2026-08-20 by the
+task-adjud lane, replacing the `CITE` lane's anchor-repair note, which correctly declined to
+adjudicate and asked the next owner to re-measure. Note for the reader: `main` advanced from
+`18a1fc6` to `f10a863` — deleting `list_by_prefix` — while this adjudication was being written; the
+citations above were re-verified against `f10a863`, the tip at commit time.)
 
 **What the test measures, and the blindness it was written to avoid.** A test that measured
 *removals* — `result.reaped`, or the `docker rm --force` argv the fake runner recorded — **cannot
