@@ -344,8 +344,8 @@ def test_usage_echoes_the_config_model_id_not_the_served_name() -> None:
     EVERY call: a permanent, silent, total cache miss. `attempts.llm_cache_hit` would simply stay
     0, which is indistinguishable from a cold cache.
 
-    `schema.sql` ("RESOLVED id") and `TokenUsage.model_id` ("as the backend reported it") both
-    invite the other choice; the cache is the tiebreaker.
+    The "resolution" language around this field invites the other choice; the cache is the
+    tiebreaker, and this test — not the neighbouring prose — is what holds the invariant.
     """
     backend = oc.OpenAICompatibleBackend(
         FakeTransport(body(content='{"verdict": "ok"}', model="qwen3-1.7b-q4-served")),

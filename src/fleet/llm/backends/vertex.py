@@ -581,9 +581,12 @@ def _usage(raw: Mapping[str, object], target: BackendTarget) -> TokenUsage:
 
     **`model_id` echoes `target.model_id` VERBATIM, and the body's own `model` field — which this
     transport returns as a dated snapshot id — is deliberately discarded.** It is the single
-    highest-consequence line in this file, and both `TokenUsage.model_id`'s own comment ("the
-    RESOLVED model id, as the backend reported it") and `state/schema.sql`'s ("RESOLVED id")
-    actively invite the other choice. Here is why they must not be followed:
+    highest-consequence line in this file. The language of "resolution" that surrounds this field —
+    in its declaration on `TokenUsage`, in the `llm_cache.model_id` column of `state/schema.sql`,
+    and in `_stamp` itself — reads as licence to report whatever name the endpoint served the call
+    as, and three lanes independently followed it into the same bug. Those two comments now spell
+    the invariant out, but no prose enforces it. The mechanism below does, so check it against the
+    code:
 
     `_stamp` resolves `usage.model_id or target.model_id` — backend-reported WINS. The `llm_cache`
     READ key is built from the config string (`_key_parts`, from `route.targets[0].model_id`) while

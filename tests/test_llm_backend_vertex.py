@@ -625,11 +625,11 @@ def test_usage_model_id_echoes_the_config_string_even_when_vertex_reports_anothe
     `_stamp` resolves `usage.model_id or target.model_id` — backend-reported WINS. The `llm_cache`
     READ key is built from the config string (`_key_parts`, from `route.targets[0].model_id`) while
     the WRITE key is built from `usage.model_id` (`_store_response`). This transport returns a
-    dated snapshot id in `model`, and both `TokenUsage.model_id`'s own comment ("the RESOLVED model
-    id, as the backend reported it") and `state/schema.sql`'s ("RESOLVED id") invite passing it
-    through. Doing so makes read key != write key on EVERY call: a permanent, total cache miss
-    across the whole fleet, silent and indistinguishable from a cold cache because
-    `attempts.llm_cache_hit` simply stays 0.
+    dated snapshot id in `model`, and the "resolution" language around this field invited passing
+    that through in three independent lanes. Doing so makes read key != write key on EVERY call:
+    a permanent, total cache miss across the whole fleet, silent and indistinguishable from a cold
+    cache because `attempts.llm_cache_hit` simply stays 0. The invariant is pinned by this test
+    rather than left to whatever the neighbouring prose says.
 
     So the transport is faked reporting a DIFFERENT model name, and the two real `CacheKeyParts`
     are computed and compared.
