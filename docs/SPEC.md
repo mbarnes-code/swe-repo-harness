@@ -6970,8 +6970,9 @@ first phase that is either a `DEGRADED`/`SKIPPED` hard stop (`orchestrator/reent
 tested **before** `evidence` is consulted at all) or one whose `evidence_holds(repo, p)` — reading
 `phases` + Git, with no payload and no `WorkerContext` — holds. Where evidence holds, the phases
 below it are covered by it; at a hard stop they are not covered by anything — the walk stops
-because ADR-0077 §5 forbids moving the floor onto such a row or searching past it, and an excluded
-or degraded phase can never produce holding evidence anyway. The
+because ADR-0077 §5 forbids moving the floor onto such a row or searching past it — and for the
+`SKIPPED` half additionally because an excluded phase never ran, so it can never produce holding
+evidence at all. The
 ascending reading is unimplementable and wrong in both directions: ten of the fifteen
 `preconditions_hold` implementations return `False` precisely when there is nothing to resume, so
 a fresh repo has no earliest holding phase at all, while `rdepverify.preconditions_hold` returns

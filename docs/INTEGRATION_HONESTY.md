@@ -4061,7 +4061,7 @@ if no phase below the frontier holds."*
 `phase_floor` (`src/fleet/orchestrator/reentry.py:96-103`) breaks on `_HARD_STOPS` —
 `{DEGRADED, SKIPPED}` — *before* it consults `evidence`, so the walk stops above such a row and the
 floor never descends past it, however little evidence holds. `phase_floor`'s own docstring states
-that rule outright, on ADR-0077 §5 (`src/fleet/orchestrator/reentry.py:80-82` — cited, not quoted;
+that rule outright, on ADR-0077 §5 (`src/fleet/orchestrator/reentry.py:80-81` — cited, not quoted;
 see editorial point 4 below); the new prose does not.
 
 **Measured, not reasoned** — `phase_floor` called directly under `.venv/bin/python` with the test
@@ -4123,9 +4123,9 @@ is the one this whole class has: a reconciler follows the prose.
 > another module's text, because nothing enforces the copy and one reword leaves the quotation
 > pointing at a string no longer in the tree. It is **not** a correction of a false quotation, and
 > is recorded because `review-7` §3.3 reported the quoted sentence as absent from `reentry.py`.
-> Measured at `431b02f`, whitespace-normalised: it occurs at `reentry.py:80-82`, in the
+> Measured at `431b02f`, whitespace-normalised: it occurs at `reentry.py:80-81`, in the
 > `phase_floor` docstring this entry named, differing from the quotation only in its leading
-> capital. The review measured the **module** docstring (`:30-33`), which states the same rule in
+> capital. The review measured the **module** docstring instead, which states the same rule in
 > different words — the same paraphrase axis this entry's own class keeps being missed on.
 >
 > **What is still open, verified here rather than inherited from ADR-0076's assertion of it.**
