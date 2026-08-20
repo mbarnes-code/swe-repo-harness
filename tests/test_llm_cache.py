@@ -17,6 +17,7 @@ again is not a cache.
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime, timedelta
@@ -630,3 +631,63 @@ def test_no_declared_effort_persists_as_empty_string_in_a_not_null_check_free_co
         asyncio.run(drive())
     finally:
         release_write_slot()
+
+
+# ------------------------------------------------------------------------------------------
+# ADR-0075's `effort` annotation: the marker, beside the semantic
+# ------------------------------------------------------------------------------------------
+
+SCHEMA_PATH = Path(__file__).resolve().parents[1] / "src" / "fleet" / "state" / "schema.sql"
+SPEC_PATH = Path(__file__).resolve().parents[1] / "docs" / "SPEC.md"
+
+
+def _effort_annotation(text: str) -> str:
+    """The `llm_cache.effort` comment region, normalised: `--` markers and all runs of whitespace
+    collapsed away.
+
+    Scoped to the one column, deliberately. The SPEC fence and the real schema differ by 22
+    measured condensations elsewhere, and a whole-fence comparison would fire on every one of
+    them; this region carries none. Normalising the whitespace is what makes a re-indent or a
+    re-wrap of the same sentences pass, so only a change of *words* fails.
+    """
+    table = re.search(
+        r"CREATE TABLE IF NOT EXISTS llm_cache\b.*?^\);", text, re.DOTALL | re.MULTILINE
+    )
+    assert table is not None, "no `llm_cache` CREATE TABLE"
+    lines = table.group(0).splitlines()
+    starts = [i for i, line in enumerate(lines) if re.match(r"\s+effort\s+TEXT\b", line)]
+    assert len(starts) == 1, f"expected exactly one `effort` column declaration, found {starts}"
+    region = [lines[starts[0]].partition("--")[2]]
+    for line in lines[starts[0] + 1 :]:
+        if not re.match(r"\s*--", line):
+            break
+        region.append(line.partition("--")[2])
+    return " ".join(" ".join(region).split())
+
+
+def test_the_effort_column_carries_its_adr_0075_annotation_in_both_copies() -> None:
+    """The literal comment-only drift the semantic test above cannot see.
+
+    `c7f72c6` mirrored this annotation from `docs/SPEC.md` into `schema.sql` and bound it by
+    exercising the semantic (`''` written, `''` accepted, `NULL` rejected). That binding is the
+    right one and stays; what it does not catch is the defect it was written for — a comment-only
+    state, one copy carrying the annotation and the other not. Deleting the two lines again left
+    the whole file green.
+
+    That escape needs no adversary. The state that created it was exactly this one, and anyone
+    re-wrapping the `llm_cache` block or trimming it while adding a column re-creates it. So it is
+    accidentally reachable, and under the stop rule it is a defect rather than a stated boundary.
+
+    Scoped to the `effort` column's own comment region and normalised for whitespace, so it fires
+    on deletion and on divergent rewording while staying silent on a reflow — and so it never
+    touches the 22 condensations between the SPEC fence and the real schema, which is what made a
+    whole-fence extractor the wrong instrument rather than the only alternative.
+    """
+    schema = _effort_annotation(SCHEMA_PATH.read_text(encoding="utf-8"))
+    spec = _effort_annotation(SPEC_PATH.read_text(encoding="utf-8"))
+    assert "ADR-0075" in schema, "schema.sql's `effort` column no longer cites ADR-0075"
+    assert "ADR-0075" in spec, "docs/SPEC.md's `effort` column no longer cites ADR-0075"
+    assert schema == spec, (
+        "the two copies of the ADR-0075 `effort` annotation have drifted apart — this is the "
+        "comment-only state c7f72c6 existed to end"
+    )
