@@ -38,11 +38,35 @@ What this does NOT catch, stated rather than implied, worst first:
   to go through is what would remove it — a change to the **16** findings-INSERT call sites in
   `src/fleet` (**13** of them in `cli.py`, 2 in `orchestrator/findings.py`, 1 in
   `state/repository.py`; the "16" is the whole-`src/` count, not `cli.py`'s), not to this test.
+
+  **A shared blindness in this class was measured and closed rather than disclosed**: a SQL
+  comment between `INTO` and the table name (`INSERT INTO /* the findings table */ findings`) was
+  invisible to *both* instruments at once — `unresolved=()`, the kind absent, all four tests green
+  on a live writer emitting `SynthSqlCommentV1`. Comment-blanking (`_strip_sql_comments`) closes
+  the `/* */` and `--` forms in both. What stays open in the same class, measured: an
+  **unterminated** `/*` swallows the rest of the statement in both instruments and is silent — it
+  is also a SQL syntax error, so such a writer fails on its first execution rather than shipping
+  an unlisted kind. And a comment between `INSERT` and `INTO` (`INSERT/*c*/INTO findings`) is
+  fail-**loud** but through the drift branch, so the message names instrument drift for what is
+  really a live unlisted kind; the same misreport the `#`/`[` reformats already carry.
 * **A recognised site whose `kind` goes through a form the resolver accepts and mis-resolves.**
-  Every form the resolver does not understand returns "unresolved" and trips property 3, and a
-  name assigned more than once now resolves to the union of its assignments rather than to
-  whichever one `ast.walk` reached first (and a params *tuple* reached through such a name is
-  treated as not understood, which is louder still) — so this is narrow, but it is not zero.
+  This residual previously claimed "every form the resolver does not understand returns
+  'unresolved' and trips property 3". That was **false as written**, and the counterexample was
+  the dangerous kind: `_kind_slot` short-circuited on any non-`?` VALUES slot and never reached
+  `_resolve` at all, so named-parameter style (`VALUES (:run, :repo, :kind, ...)`) yielded the
+  kind `:kind` — property 2 failing under the *wrong name*, whose obvious "fix" is to add
+  `':kind'` to both listings, after which the site is silenced for good with all four tests green.
+  Measured: on that state the pre-fix module passes 4/4 and this one fails naming the site.
+  `_kind_slot` now accepts only a quoted literal; a named parameter, `?1`, `NULL` or an expression
+  is not understood and routes to the loud gate.
+
+  What remains, stated without the false universal: `_resolve` returns `None` for every form it
+  does not understand and that does trip property 3, and a name assigned more than once resolves
+  to the union of its assignments rather than to whichever one `ast.walk` reached first (a params
+  *tuple* reached through such a name is treated as not understood, which is louder still). But
+  "not understood ⇒ loud" is a property of `_resolve`, not of the module: any *other* step that
+  decides a value before `_resolve` sees it can be wrong quietly, which is exactly what
+  `_kind_slot` was doing. `_kind_slot` and `_params_elements` are the two such steps today.
 * **`_recognition_gap` matches text hits to recognised literals by line, not by column.** Two
   distinct findings INSERTs beginning on one physical line, only one of them recognised, would
   read as agreement. No such line exists or can exist under the 100-column limit these statements
@@ -130,6 +154,69 @@ def _listing(text: str, path: Path) -> tuple[frozenset[str], frozenset[str] | No
 #: and a quoted identifier are all the same write, and an unnormalised `"INSERT INTO findings" in
 #: sql` test saw none of them — which is how a real site was made to vanish by reformatting alone.
 _TABLE: Final = r"[\"'`\[]?(?:\w+\s*\.\s*)?findings\b"
+
+#: SQL's own comment syntax, which BOTH instruments were blind to at once — the single failure
+#: shape this module's two-instrument design exists to make impossible. Measured at `d123035`:
+#: `INSERT INTO /* the findings table */ findings (...)` emitting `SynthSqlCommentV1` left
+#: `unresolved=()`, the kind absent from the emitted set, and all four tests green, because `/` is
+#: outside `_TEXT_INSERT`'s interposable class *and* `INTO\s+findings` fails after whitespace
+#: normalisation. A comment is inert to SQLite, so removing it before either instrument reads the
+#: statement is a normalisation, not a widening: it can only make a site MORE visible, and a site
+#: made visible whose `kind` does not resolve fails loudly rather than silently.
+#:
+#: The text form accepts an ESCAPED `\n` as well as a real one to close `--`, because a multi-line
+#: SQL literal in Python source usually spells its newline rather than containing one while the
+#: runtime string the AST side reads contains the real character either way. Measured: with only
+#: the real newline accepted, `"INSERT INTO -- c\\n findings ..."` is seen by the AST instrument and
+#: not by the text one — loud (the drift branch), but reporting instrument drift for what is
+#: actually a live unlisted kind. The `\n` terminator is also what keeps the alternation
+#: unambiguous; without a terminator two branches can consume the same characters and the match
+#: backtracks exponentially on a near-miss.
+_SQL_COMMENT_TEXT: Final = r"/\*[\s\S]*?\*/|--[^\n]*?(?:\\n|\n)"
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """`sql` with its `/* */` and `--` comments blanked and its quoted literals left intact.
+
+    Quote-aware on purpose, and the naive `re.sub` version was **measured firing on correct
+    code**: with a blind stripper, a perfectly ordinary `VALUES (?, ?, ?, 'warn--ish', ?, ?, ?)`
+    had its statement truncated at the `--`, `_INSERT_RE` then failed, and the site was reported
+    as an unparsable findings INSERT. A detector that fires on correct code is worse than the gap
+    it closes (CLAUDE.md Rule 12's stop rule), so the scan tracks quotes.
+
+    SQL's doubled-quote escape (`'it''s'`) is read as two adjacent literals rather than one. The
+    characters are copied through either way, so the statement text is unchanged; the only thing
+    that changes is which side of a quote boundary a `--` between the halves would fall on, and no
+    such statement exists in `src/`.
+    """
+    out: list[str] = []
+    index = 0
+    while index < len(sql):
+        char = sql[index]
+        if char in "'\"":
+            end = sql.find(char, index + 1)
+            end = len(sql) if end == -1 else end + 1
+            out.append(sql[index:end])
+            index = end
+        elif sql.startswith("/*", index):
+            end = sql.find("*/", index + 2)
+            index = len(sql) if end == -1 else end + 2
+            out.append(" ")
+        elif sql.startswith("--", index):
+            end = sql.find("\n", index)
+            index = len(sql) if end == -1 else end
+            out.append(" ")
+        else:
+            out.append(char)
+            index += 1
+    return "".join(out)
+
+
+def _sql(sql: str) -> str:
+    """One statement, comment-free and single-spaced — the form every instrument compares."""
+    return " ".join(_strip_sql_comments(sql).split())
+
+
 _FINDINGS_INSERT: Final = re.compile(r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+" + _TABLE, re.IGNORECASE)
 _INSERT_RE: Final = re.compile(
     r"INSERT\s+(?:OR\s+\w+\s+)?INTO\s+" + _TABLE + r"[\"'`\]]?\s*"
@@ -157,8 +244,11 @@ _INSERT_RE: Final = re.compile(
 #: Deliberately looser than `_FINDINGS_INSERT` — it is the instrument that must not miss what the
 #: AST walk misses, and `_recognition_gap` fails loudly if it ever becomes the narrower of the two.
 _TEXT_INSERT: Final = re.compile(
-    r"INSERT\s+(?:OR\s+\w+\s+)?INTO[\s'\"()+\\]*(?:\w+\s*\.\s*)?findings\b", re.IGNORECASE
+    r"INSERT\s+(?:OR\s+\w+\s+)?INTO(?:[\s'\"()+\\]|" + _SQL_COMMENT_TEXT + r")*"
+    r"(?:\w+\s*\.\s*)?findings\b",
+    re.IGNORECASE,
 )
+_QUOTED_SLOT: Final = re.compile(r"'([^']*)'|\"([^\"]*)\"")
 _FuncDef = (ast.FunctionDef, ast.AsyncFunctionDef)
 
 
@@ -240,7 +330,7 @@ def _scopes(tree: ast.Module) -> dict[int, tuple[ast.AST, ...]]:
 
 def _kind_slot(sql: str) -> tuple[int, str] | None:
     """`(index among the `?` placeholders, "")` for a bound kind, or `(-1, literal)`."""
-    match = _INSERT_RE.search(" ".join(sql.split()))
+    match = _INSERT_RE.search(_sql(sql))
     if match is None:
         return None
     columns = [c.strip() for c in match.group(1).split(",")]
@@ -249,7 +339,14 @@ def _kind_slot(sql: str) -> tuple[int, str] | None:
         return None
     slot = values[columns.index("kind")]
     if slot != "?":
-        return -1, slot.strip("'")
+        # Only a *quoted literal* is a kind this module can read. `slot.strip("'")` used to accept
+        # anything: named-parameter style `VALUES (:run, :repo, :kind, ...)` was taken as the kind
+        # `:kind` and shipped into the emitted set, so property 2 failed with the wrong name and
+        # "fixing" it meant adding `':kind'` to both listings and silencing that site for good.
+        # Anything else -- `:kind`, `?1`, `@kind`, `NULL`, an expression -- is not understood, and
+        # the contract of this module is that what it does not understand fails loudly.
+        literal = _QUOTED_SLOT.fullmatch(slot)
+        return None if literal is None else (-1, literal.group(1) or literal.group(2) or "")
     return values[: columns.index("kind")].count("?"), ""
 
 
@@ -385,11 +482,11 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
             if found is None:
                 continue
             sql, sql_path, first, last = found
-            if _FINDINGS_INSERT.search(" ".join(sql.split())) is None:
+            if _FINDINGS_INSERT.search(_sql(sql)) is None:
                 continue
             recognised.add((sql_path, first, last))
             slot = _kind_slot(sql)
-            site = (path.name, " ".join(sql.split()).split(" ON CONFLICT")[0].strip())
+            site = (path.name, _sql(sql).split(" ON CONFLICT")[0].strip())
             if slot is None:
                 unresolved.append(f"{path.name}: unparsable findings INSERT: {site[1]}")
                 continue
