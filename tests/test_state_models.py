@@ -27,6 +27,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import re
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
@@ -788,6 +789,87 @@ def test_transition_demotes_without_writing_a_record_or_naming_a_new_sink(
         for line in source.splitlines()
         if line.strip().startswith(("import ", "from ")) and "fleet" in line
     ], "enums.py gained a fleet import — re-check whether transition() can now reach a sink"
+
+
+#: Every stance in which `RESUME_DEMOTE`'s own comment may NAME `transition(...)`: as the call a
+#: demotion writer must not make. A whitelist of *stances*, not a blacklist of wrong sentences —
+#: a sentence naming `transition()` in any other register ("reachable only through", "the path
+#: is", "call it with") matches none of these and trips the assertion without anyone having
+#: predicted its wording (CLAUDE.md Rule 12's whitelist inversion).
+_TRANSITION_DISAVOWALS: tuple[str, ...] = ("never", "not ", "instead of", "rather than")
+
+_TRANSITION_MENTION = re.compile(r"transition\s*\(")
+
+
+def _resume_demote_comment_block() -> str:
+    """`RESUME_DEMOTE`'s attached comment, whitespace-normalised into ONE string.
+
+    Normalised whole before matching, deliberately: a line-oriented check cannot see a claim a
+    reflow has split across a newline, and that is not hypothetical here — see the test below.
+    """
+    lines = inspect.getsource(enums_mod).splitlines()
+    start = next(i for i, line in enumerate(lines) if line.startswith("RESUME_DEMOTE"))
+    block: list[str] = []
+    for line in lines[start:]:
+        if not line.strip():          # the first blank line ends the statement and its comment
+            break
+        block.append(line)
+    return " ".join(" ".join(block).split())
+
+
+def test_resume_demote_s_comment_names_demote_and_only_ever_disavows_transition() -> None:
+    """The comment authorising the demotion write must send its reader to `demote()`.
+
+    Why it matters: `enums.py`'s `transition()` docstring, `state/repository.py`'s
+    `demote_to_floor` and `docs/SPEC.md` Constraint 7 all say the same thing — the demotion write
+    goes through `demote()`, never `transition(..., resume=True)` directly, because `transition()`
+    returns the status ALONE and a demotion made through it emits no `PhaseDemoted` finding and is
+    invisible to whoever reads the run. `RESUME_DEMOTE`'s own comment is the one an author writing
+    §11.5 step 5 opens FIRST, and for two commits it said the opposite: that a demotion "is
+    reachable only through `transition(..., resume=True)`". Acting on it yields a fleet whose every
+    demotion is silent with every status assertion still green.
+
+    Why the body looks like this: the false clause was corrected once, at its root, and came back —
+    a later commit re-wrapped the line onto its own row without reading it. A formatting pass
+    re-opened a closed defect, so the check normalises the whole block before matching and asserts
+    a WHITELIST of stances rather than grepping for the one sentence that was wrong.
+
+    What this pins: the comment names `demote()`, and every mention of `transition(` in it is a
+    disavowal. What it does NOT pin: that the rest of the block is true, or that the other three
+    sites still agree — nothing here reads them. It is a guard on one comment, not a proof of
+    consistency (CLAUDE.md Rule 12: a name asserting more than the body checks is the defect).
+    """
+    block = _resume_demote_comment_block()
+    # Anti-vacuity: an edit that empties or renames the block must fail loudly, not silently
+    # leave this test with nothing to consider.
+    assert "SUCCEEDED" in block and len(block) > 500, (
+        f"RESUME_DEMOTE's comment block did not parse as expected ({len(block)} chars) — this "
+        "test is now inspecting the wrong text and would pass vacuously"
+    )
+    assert "`demote()`" in block, (
+        "RESUME_DEMOTE's comment no longer names `demote()`. It is the first thing a step-5 "
+        "author reads; if it does not send them to demote(), they will call "
+        "transition(SUCCEEDED, PENDING, resume=True) and every demotion in the fleet becomes "
+        "silent — no PhaseDemoted finding, and every status assertion still green."
+    )
+    mentions = list(_TRANSITION_MENTION.finditer(block))
+    assert mentions, (
+        "RESUME_DEMOTE's comment no longer names transition(...) at all, so the 'never call it "
+        "directly' instruction has gone. Re-state it or delete this test deliberately."
+    )
+    undisavowed = [
+        block[max(0, m.start() - 70) : m.end() + 10]
+        for m in mentions
+        if not any(word in block[max(0, m.start() - 70) : m.start()].lower()
+                   for word in _TRANSITION_DISAVOWALS)
+    ]
+    assert not undisavowed, (
+        f"RESUME_DEMOTE's comment names transition(...) other than to disavow it: {undisavowed}. "
+        "The demotion write goes through `demote()` — never `transition(..., resume=True)` "
+        "directly, which opens the same door but returns the status ALONE and would demote "
+        "silently (ADR-0077 §4). Do NOT widen _TRANSITION_DISAVOWALS to go green: that is how "
+        "this claim came back the first time."
+    )
 
 
 def test_the_third_failed_attempt_is_terminal() -> None:

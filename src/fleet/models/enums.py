@@ -68,9 +68,10 @@ RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
 # holder: whenever two or more phases below the frontier hold, the walk stops above the highest and
 # never reaches the earliest, so naming the earliest picks a rung the function never returns and
 # re-runs every phase between the two.
-# A demotion is by definition a write of PENDING over a SUCCEEDED phase row,
-# and is reachable only through `transition(..., resume=True)` —
-# so the mechanical terminality of SUCCEEDED against the crash
+# A demotion is by definition a write of PENDING over a SUCCEEDED phase row, and the write goes
+# through `demote()` — never `transition(..., resume=True)` directly, which opens the same door
+# but returns the status ALONE and would demote silently (ADR-0077 §4). Both reach this map only
+# behind the `resume` flag, so the mechanical terminality of SUCCEEDED against the crash
 # sweep, the reaper and `_on_breach` is untouched — those paths pass no flag and still cannot
 # resurrect settled work. SUCCEEDED is the ONLY key, deliberately:
 #   - RHI is absent because §12 item 46 (ii) names `fleet resume` among the automatic sweeps that
