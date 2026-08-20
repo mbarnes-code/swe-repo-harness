@@ -10017,7 +10017,8 @@ def resume(
     ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """Reconcile after a crash and continue from the earliest incomplete phase.
+    """Reconcile after a crash and continue from each repo's re-entry floor (§11.5 step 5),
+    never the earliest incomplete phase.
 
     The three refusals that make a resume safe, in order: **config drift** per section, so
     `--accept-drift budgets` accepts exactly `budgets` and still refuses everything else (a single
@@ -10026,12 +10027,14 @@ def resume(
     again forever without `--raise-wave-budget`; and the **schema version**, which a resume reads
     and never upgrades. Reads nothing from `migration_state.json` (§11.5).
 
-    **What is built today**, and it is not the whole verb. §11.5 steps 1 (config digests), 3
-    (stale `RUNNING` → `PENDING`, retaining `attempts`) and 7 (regenerate
-    `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`.
-    Steps 2, 4, 5, 6 and 8 do not exist, so the verb reconciles the ledger and then refuses to
-    continue with exit 1 naming what is absent. `--dry-run` is the free health check §11.5
-    promises: it makes no network call, writes nothing, and previews the step-3 sweep.
+    **What is built today**, and it is not the whole verb. §11.5 steps 1 (config digests), 2
+    (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
+    → `PENDING`, retaining `attempts`) and 7 (regenerate `migration_state.json`) run, plus
+    `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. Steps 4, 5, 6 and 8 do not
+    exist, so the verb reconciles the ledger and then refuses to continue with **exit 2**
+    (`ResumeIncompleteError`, ADR-0076 — nothing failed, so it is deliberately not exit 1)
+    naming what is absent. `--dry-run` is the free health check §11.5 promises: it makes no
+    network call, writes nothing, and previews both the step-3 sweep and the step-2 reap.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -10082,10 +10085,13 @@ def resume(
             "already computes that floor and `state/repository.demote_to_floor` already writes "
             "it; what is missing is the resume-time evidence check that feeds them and the "
             "per-phase `PhaseRunner` assembly that walks Phases 1–4 in order, which cli.py "
-            "today only hand-wires per verb. Steps 2 (orphan "
-            "reap), 4 (ask Git whether the commit landed) and 6 (recompute `blocked_by`) are "
-            "absent too. The work reported above IS durable — the drift audit, any budget raise, "
-            "the PR re-poll, the stale-lease sweep and `migration_state.json` are all written "
+            "today only hand-wires per verb. Steps 4 (ask Git whether the commit landed), 6 "
+            "(recompute `blocked_by`) and 8 (continue into the phase runners) are absent too. "
+            "Step 2, the orphan reap, is NOT: it ran, and this run's report above carries its "
+            "result — the `step 2:` lines, or `reaped_worktrees`/`reaped_containers` under "
+            "`--json`. The work reported above IS durable — the drift audit, any budget "
+            "raise, the PR re-poll, the orphan reap, the stale-lease sweep and "
+            "`migration_state.json` are all written "
             "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
             "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
             "forge call per open PR for a refusal that cannot change until step 5 is written "
@@ -10397,7 +10403,8 @@ def _refuse_unbuilt_resume_flags(
             "which has no implementation — cli.py hand-wires a `PhaseRunner` per verb and no "
             "assembly walks Phases 1–4 in order. Accepting the flag and ignoring it would let an "
             "operator believe they had scoped the resume. Re-run without it to get the "
-            "reconciliation that IS built (steps 1, 3, 7, `--repoll-prs`, the budget raises)."
+            "reconciliation that IS built (steps 1, 2, 3, 7, `--repoll-prs`, the budget "
+            "raises)."
         )
 
 

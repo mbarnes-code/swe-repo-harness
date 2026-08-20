@@ -1809,8 +1809,8 @@ def test_resume_dry_run_does_not_read_a_dead_workers_row_as_a_claim_on_its_sandb
     `NOT (1 …)` → `NOT (0 …)`.
     `test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none`
     above builds **no `phases` rows at all**, so its live set is empty either way and no change to
-    the liveness predicate can move its outcome; ADR-0081 §2 credited it with this job for four
-    commits before that was measured.
+    the liveness predicate can move its outcome; ADR-0081 §2 credited it with this job from
+    `ead96e6`, the commit that landed the ADR, until the correction that retracted it.
     """
     repo = _reap_workspace(workspace)
     db = workspace / "state" / "fleet.db"
@@ -2154,6 +2154,98 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
         "the refusal drops `_HARD_STOPS`, which is the OTHER half a fix in this class already "
         "omitted once: a floor stated without it reads as evidence-only and re-runs excluded work"
     )
+
+
+def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines(
+    workspace: Path,
+) -> None:
+    """The refusal may only name the §11.5 steps that are genuinely unbuilt: 4, 6 and 8.
+
+    Why this is a defect and not a wording quibble: the same stdout that carried the claim
+    "Steps 2 (orphan reap) … are absent too" also carries the `step 2:` lines `_reap_lines`
+    emits for the reap that just ran. An operator reading a self-contradicting report has to
+    decide which half to believe, and the half that says "absent" is the one that sends them to
+    `docker ps`/`git worktree list` to do by hand the sweep the verb already did.
+
+    The clause was **true when `c45db53` wrote it** and went stale when the reap landed
+    (`e915b93`); `da70221` then rewrote the *adjacent* clause of the same sentence — the
+    retracted floor predicate — and left this one standing. A fix that repairs one clause of a
+    sentence and leaves the next false is the failure mode this whole class keeps reproducing,
+    which is why the assertion below reads the absent-step *list* rather than a fixed substring:
+    a successor that fixes step 2 and forgets step 8 trips it too.
+    """
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    output = " ".join(result.output.split())
+
+    # The CONTROL. True before the fix as well — which is precisely what made the claim
+    # self-contradicting rather than merely out of date.
+    assert "step 2:" in output, (
+        "the reap did not report at all, so this test is not exercising the contradiction"
+    )
+
+    head, sep, _ = output.partition(" are absent too")
+    assert sep, "the refusal no longer enumerates the absent steps in the expected shape"
+    absent = head[head.rindex("Steps ") :]
+
+    # The DISCRIMINATING assertions.
+    assert "2 (" not in absent, (
+        f"the refusal lists step 2 among the absent steps: {absent!r} — `_resume_impl` runs the "
+        "reap and this very output reports it"
+    )
+    assert "8 (" in absent, (
+        f"step 8 (continue) is unbuilt and unnamed: {absent!r} — the refusal enumerates what is "
+        "missing, and an enumeration that stops short is how the next reader concludes the verb "
+        "is closer to done than it is"
+    )
+
+
+def test_the_three_resume_re_entry_summaries_state_one_rule_and_it_is_not_the_earliest() -> None:
+    """`fleet resume --help` and its two `docs/SPEC.md` mirrors carry ONE phrase, not three.
+
+    The `resume` help line and `docs/SPEC.md`'s §10 verb-table row and §3.5 un-blocking sentence
+    are copies of each other: all three summarised re-entry as "the earliest incomplete phase",
+    which is the quantifier ADR-0076 §1 retracted — `reentry.phase_floor` stops at the phase
+    *above the highest* holder below the settled frontier, so wherever two phases below the
+    frontier hold, the earliest names a rung the function never returns.
+
+    A previous lane corrected neither, deliberately: fixing the help line alone would have
+    desynced it from the two SPEC lines it copies, and one-edit-at-a-time drift is what produced
+    this defect class. So the binding is on all three at once and on the shared phrase.
+
+    Why it lives here rather than in `tests/test_floor_rule_statements.py`: that module's census
+    anchors on the canonical *clause* ("the phase **above** the **highest** phase below …") and
+    asserts exactly two SPEC sites carry it. These three are summaries that deliberately do not
+    restate the rule — they name it and cite §11.5 step 5 — so adding them there would either
+    inflate that census or force a fourth variant of the clause into a one-line CLI help string.
+    """
+    spec = " ".join((Path(__file__).resolve().parents[1] / "docs" / "SPEC.md").read_text(
+        encoding="utf-8"
+    ).split())
+    help_result = runner.invoke(app, ["resume", "--help"], catch_exceptions=False)
+    assert help_result.exit_code == 0, help_result.output
+    help_text = " ".join(help_result.output.split())
+
+    phrase = "re-entry floor (§11.5 step 5), never the earliest incomplete phase"
+    assert spec.count(phrase) == 2, (
+        f"docs/SPEC.md states the resume re-entry summary with the shared phrase at "
+        f"{spec.count(phrase)} site(s), expected 2 (the §10 verb table and §3.5's "
+        "un-blocking sentence). A copy drifted, was deleted, or was added."
+    )
+    assert phrase in help_text, (
+        "`fleet resume --help` no longer carries the phrase its two SPEC mirrors do; the three "
+        "sites have started drifting apart again"
+    )
+
+    # The retracted quantifier may survive ONLY as the negation above — never as a claim.
+    for site, text in (("docs/SPEC.md", spec), ("fleet resume --help", help_text)):
+        for hit in re.finditer(r"earliest incomplete phase", text):
+            prefix = text[max(0, hit.start() - 10) : hit.start()]
+            assert prefix == "never the ", (
+                f"{site} states re-entry as the earliest incomplete phase "
+                f"(...{text[max(0, hit.start() - 90) : hit.end()]}...), the quantifier "
+                "ADR-0076 §1 retracted"
+            )
 
 
 def test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal(
