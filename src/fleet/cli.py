@@ -169,6 +169,13 @@ from fleet.rewrite.rules import (
     load_rules,
     rule_matches_path,
 )
+from fleet.sandbox.container import ContainerSandbox, claims
+from fleet.sandbox.worktree import (
+    WorktreeError,
+    WorktreeManager,
+    run_prefix,
+    sandbox_name,
+)
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
     ConfigError,
@@ -9894,6 +9901,34 @@ _STALE_HEARTBEAT_PREDICATE: Final = (
     "   AND (julianday(?) - julianday(heartbeat_at)) * 86400.0 > heartbeat_ttl_seconds"
 )
 
+#: Which `phases` rows §11.5 step 2 treats as *claiming* a sandbox, and therefore which
+#: `fleet-<run_id>-*` worktrees and containers it must NOT reap. Same two horizon parameters as
+#: the predicate above, in the same order.
+#:
+#: **"Live" is defined as "a row step 3 would not reclaim", and it is built FROM step 3's
+#: predicate rather than restated beside it.** A step-2 reader that drifted LOOSER than step 3's
+#: would delete the checkout of a worker step 3 is about to declare alive — the two-writer
+#: collision inverted, with the worktree gone instead of doubly written. Restating the two-clock
+#: conjunction in a second string literal is exactly how that drift happens, so this composes the
+#: one string that already exists. `NOT (1 <predicate>)` is the composition: the constant opens
+#: with ` AND `, so it needs a left operand, and SQLite has no boolean literal — `1` supplies one
+#: without changing the truth value. The NULL heartbeat case survives the negation intact: SQL
+#: `AND` with a false operand is false regardless of NULLs, so a row `_STALE_HEARTBEAT_PREDICATE`
+#: calls not-stale is a row this calls live.
+#:
+#: **The negation is load-bearing ONLY under `--dry-run`, and must not be deleted as dead code.**
+#: Step 2 runs AFTER `_reset_stale_running` (ADR-0081), so in a real resume every stale row has
+#: already become PENDING and `status = 'RUNNING'` alone would give the same answer. `--dry-run`
+#: does not run the sweep — it only counts what the sweep would reclaim — so without the negation
+#: a preview would report every crashed run's own orphans as live and preview reaping nothing,
+#: which is precisely the reading an operator runs the health check to get right.
+#:
+#: `lease_owner IS NOT NULL` is deliberately NOT part of this. It would narrow "live", and
+#: narrowing "live" is the dangerous direction here: every row it excluded would become reapable.
+_LIVE_SANDBOX_PREDICATE: Final = (
+    " AND status = 'RUNNING' AND NOT (1" + _STALE_HEARTBEAT_PREDICATE + ")"
+)
+
 
 async def _abort_impl(
     opts: GlobalOptions,
@@ -10162,6 +10197,7 @@ async def _resume_impl(
     # per-row `heartbeat_ttl_seconds` half. Both are required — see `_STALE_HEARTBEAT_PREDICATE`.
     now = _now()
     horizons = (_iso(now - timedelta(seconds=settings.config.run.stale_after_s)), _iso(now))
+
     if dry_run:
         stale = await _with_ro(path, lambda conn: _count_stale_running(conn, run_id, horizons))
         projection: str | None = None
@@ -10171,6 +10207,22 @@ async def _resume_impl(
         projection = str(
             await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
         )
+
+    # §11.5 step 2 — "reap containers and worktrees named `fleet-<run_id>-*` that no live
+    # `phases` row claims" — deliberately placed AFTER the step-3 sweep above, departing from
+    # §11.5's own step numbering. ADR-0081 records the decision: a crashed run's sandbox is still
+    # claimed by a row that says RUNNING until the sweep resets it, so a reap ordered before the
+    # sweep is a no-op on exactly the crashed runs the reap exists for.
+    #
+    # **Ordering alone is not the whole fix, and the ADR says so.** `--dry-run` skips the sweep
+    # entirely, so under a preview this code runs against unswept rows however it is ordered.
+    # That is why `_LIVE_SANDBOX_PREDICATE` negates step 3's staleness test rather than reading
+    # `status = 'RUNNING'`, and it shares this function's single `now`: step 2 and step 3 must
+    # agree about which rows are alive, and two `_now()` calls cannot be made to agree by
+    # inspection.
+    live_names = await _with_ro(path, lambda conn: _live_sandbox_names(conn, run_id, horizons))
+    reaped_worktrees = await _reap_orphan_worktrees(settings, run_id, live_names, dry_run=dry_run)
+    reaped_containers = await _reap_orphan_containers(run_id, live_names, dry_run=dry_run)
 
     return {
         "run_id": run_id,
@@ -10186,6 +10238,12 @@ async def _resume_impl(
         "raise_wave_budget": raise_wave_budget,
         "raise_wave_budget_applied": raise_wave_budget is not None and not dry_run,
         "stale_running_reset": stale,
+        # §11.5 step 2. `live_sandbox_names` is in the payload because it is the input an
+        # operator has to see to trust the other two keys: "0 orphans reaped" and "every orphan
+        # was spared as live" are the same output with opposite meanings.
+        "live_sandbox_names": sorted(live_names),
+        "reaped_worktrees": reaped_worktrees,
+        "reaped_containers": reaped_containers,
         "repoll_prs": repoll,
         "pr_sync": pr_sync,
         "pr_sync_error": pr_sync_error,
@@ -10208,11 +10266,63 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
         lines.append(
             f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)"
         )
+    lines.extend(_reap_lines(result, dry=dry))
     lines.extend(_budget_lines(result))
     lines.extend(_repoll_lines(result))
     if not dry:
         lines.append(f"  projection at {result['projection']}")
     return lines
+
+
+def _reap_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
+    """§11.5 step 2, reported so that a partial sweep can never read as a complete one.
+
+    **The `failed` list is printed entry by entry with its reason, and that is the point of this
+    function** (docs/INTEGRATION_HONESTY.md D44). `WorktreeManager.reap` and
+    `ContainerSandbox.reap` both go to deliberate trouble to keep "removed", "attempted and
+    unresolved" and "spared because a live row claims it" as three separate facts; a caller that
+    printed only `reaped` would collapse them again one layer up and hand the operator a clean
+    line for a sweep that left a container running or a checkout on disk. A count is not enough
+    either — the operator's next action is `docker rm <name>` or `git worktree remove <name>`,
+    and that needs the name.
+
+    **"No orphans" is only ever printed when `failed` is empty too.** The first draft of this
+    function printed the `reaped`-derived summary and the `failed` entries independently, so a
+    sweep that attempted two worktrees and removed neither emitted `no orphan worktrees`
+    followed by two `FAILED` lines — a headline contradicting the detail directly beneath it,
+    which is the D44 collapse this function was written to prevent, reintroduced in the reporting
+    layer. The clean line is now gated on both lists.
+
+    **Each line names the namespace it searched**, because "0 orphans" and "I was looking in the
+    wrong place" are the same output otherwise — see `_reap_orphan_worktrees` on why that
+    distinction is not hypothetical here.
+    """
+    out: list[str] = []
+    for kind, key in (("worktree", "reaped_worktrees"), ("container", "reaped_containers")):
+        report = result[key]
+        if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries both
+            continue
+        skipped = report["skipped"]
+        error = report["error"]
+        scope = report["namespace"]
+        reaped = cast(Sequence[str], report["reaped"])
+        failed = cast(Sequence[Mapping[str, str]], report["failed"])
+        if isinstance(skipped, str):
+            out.append(f"  step 2: no {kind} sweep — {skipped}")
+        elif isinstance(error, str):
+            out.append(f"  step 2: the {kind} sweep did not run — {error}")
+        elif reaped:
+            verb = "would reap" if dry else "reaped"
+            out.append(f"  step 2: {verb} {len(reaped)} orphan {kind}(s): {', '.join(reaped)}")
+        elif not failed:
+            out.append(f"  step 2: no orphan {kind}s in {scope}")
+        else:
+            out.append(f"  step 2: no orphan {kind} could be removed in {scope}")
+        out.extend(
+            f"  step 2: FAILED to reap {kind} {entry['name']} — {entry['reason']}"
+            for entry in failed
+        )
+    return out
 
 
 def _budget_lines(result: Mapping[str, object]) -> list[str]:
@@ -10311,6 +10421,206 @@ async def _reset_stale_running(path: Path, run_id: str, horizons: tuple[str, str
             return int(cursor.rowcount)
 
         return await writer.submit(unit)
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 2 — reap the `fleet-<run_id>-*` worktrees and containers no live row claims
+# --------------------------------------------------------------------------------------
+
+
+async def _live_sandbox_names(
+    conn: aiosqlite.Connection, run_id: str, horizons: tuple[str, str]
+) -> set[str]:
+    """The `fleet-<run_id>-<repo>-<attempt>` names step 2 must spare, derived from `phases`.
+
+    **TWO names per live row, not one**, and the second is not defensive padding.
+    `phases.attempts` is a *charged* counter while the sandbox name carries a *rung* number:
+    `PhaseRunner._dispatch` computes `attempt = phases.attempts + 1` (`orchestrator/runner.py`),
+    so the checkout a live worker is writing into right now is `attempts + 1`, while `attempts`
+    names the rung whose charge has already landed and whose sandbox the same worker may still
+    be tearing down. Sparing both is the safe direction of the two errors available here: a
+    spared orphan costs disk until the next `fleet resume` re-attempts it (the sweep is
+    idempotent and self-healing), whereas a reaped live checkout costs the run.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT repo_id, attempts FROM phases WHERE run_id = ?"  # noqa: S608
+        + _LIVE_SANDBOX_PREDICATE,
+        (run_id, *horizons),
+    )
+    return {
+        sandbox_name(run_id, str(repo_id), rung)
+        for repo_id, attempts in rows
+        for rung in (int(attempts), int(attempts) + 1)
+    }
+
+
+def _reap_worktree_manager(settings: FleetSettings, run_id: str) -> WorktreeManager:
+    """Seam: the one construction site, so a test can drive the sweep against a scripted git."""
+    return WorktreeManager(
+        repo_dir=(settings.root / settings.config.run.monorepo_path).resolve(),
+        work_dir=(settings.root / settings.config.run.work_dir).resolve(),
+        run_id=run_id,
+    )
+
+
+def _reap_container_sandbox() -> ContainerSandbox:
+    """Seam: the one construction site, so a test never has to reach a real docker daemon."""
+    return ContainerSandbox()
+
+
+async def _reap_orphan_worktrees(
+    settings: FleetSettings, run_id: str, live: set[str], *, dry_run: bool
+) -> dict[str, object]:
+    """The worktree half of step 2. Never raises — every outcome is reported to the operator.
+
+    The `--dry-run` branch does not call `reap()` at all: it re-applies `reap()`'s own two
+    filters (the `fleet-<run_id>-` prefix, then `live`) to the same `list_registered()` listing
+    and reports the difference. Calling `reap()` and discarding the result would remove the
+    worktrees, which is the one thing a preview may not do.
+
+    Nothing outside `fleet-<run_id>-*` is reachable from here in EITHER branch, because the
+    prefix filter is applied before any `remove()` and the preview applies the identical one.
+
+    **KNOWN LIMITATION, measured, not speculative — today this sweep finds nothing in a real run,
+    and the reported `namespace` is what makes that visible instead of silent.** Two independent
+    namespace mismatches sit between this code and the worktrees production actually cuts, and
+    both live outside this module (so they are reported here, not reached across and patched):
+
+    * **Registry.** `CloneWorker._materialize_worktree` (`workers/clone.py`) runs
+      `git worktree add` inside the repo's own MIRROR, `<cache_dir>/<slug(repo_id)>.git`. This
+      manager asks `run.monorepo_path`, so `list_registered()` interrogates a git directory that
+      never registered them.
+    * **Name.** `OrchestratorContext.worktree` (`orchestrator/context.py`) returns
+      `work_dir/<repo_id>`, with no `fleet-<run_id>-` prefix and no attempt suffix — so even
+      against the right registry, `reap()`'s prefix filter would spare every one of them.
+
+    `WorktreeManager` is not constructed anywhere else in `src/` (only `sandbox_name` is, by
+    `workers/buildverify.py` and `workers/rdepverify.py`, which is why the CONTAINER half of step
+    2 does work). Closing this needs `clone.py` and `context.py` to adopt `sandbox_name`, and
+    that is a separate change with its own migration question for worktrees already on disk.
+    """
+    monorepo = (settings.root / settings.config.run.monorepo_path).resolve()
+    scope = f"{run_prefix(run_id)}* registered in {monorepo}"
+    if not await asyncio.to_thread((monorepo / ".git").exists):
+        # A settled negative established by a `stat`, not by a subprocess exit code, and so not
+        # the unsettled-probe shape D44 was filed for: with no repository there is no worktree
+        # registry, so there is nothing this sweep could reap. Reported rather than skipped
+        # silently — an operator whose `run.monorepo_path` is mistyped must see that step 2
+        # found nothing because it had nowhere to look, not because the run was clean.
+        return {
+            "reaped": [],
+            "failed": [],
+            "error": None,
+            "skipped": f"no git repository at {monorepo} (`run.monorepo_path`)",
+            "namespace": scope,
+        }
+    manager = _reap_worktree_manager(settings, run_id)
+    try:
+        if dry_run:
+            prefix = run_prefix(run_id)
+            registered = await manager.list_registered()
+            names = [
+                p.name for p in registered if p.name.startswith(prefix) and p.name not in live
+            ]
+            return {
+                "reaped": names,
+                "failed": [],
+                "error": None,
+                "skipped": None,
+                "namespace": scope,
+            }
+        result = await manager.reap(live_names=live)
+    except WorktreeError as exc:
+        # `list_registered()` raising means git was never successfully consulted, so the sweep
+        # has no answer at all — a different fact from "it swept and some entries resisted", and
+        # carried in a different key for that reason.
+        return {
+            "reaped": [],
+            "failed": [],
+            "error": str(exc),
+            "skipped": None,
+            "namespace": scope,
+        }
+    return {
+        "reaped": list(result.reaped),
+        # NOT dropped, NOT folded into `reaped`, NOT reduced to a count: `ReapResult.failed`
+        # names worktrees this sweep attempted and could not verify gone, and a caller that
+        # reported only `reaped` would let an operator read a partial sweep as a complete one
+        # (docs/INTEGRATION_HONESTY.md D44). `_reap_lines` prints every entry with its reason.
+        "failed": [{"name": f.name, "reason": f.reason} for f in result.failed],
+        "error": None,
+        "skipped": None,
+        "namespace": scope,
+    }
+
+
+async def _reap_orphan_containers(
+    run_id: str, live: set[str], *, dry_run: bool
+) -> dict[str, object]:
+    """The container half of step 2. Never raises; same reporting shape as the worktree half.
+
+    **`live` is the set of SANDBOX names and is handed to `reap()` exactly as it is** — not
+    pre-expanded into concrete container names here. That is `reap()`'s documented contract:
+    since `aa16846` it spares via `sandbox/container.py`'s `claims()`, which matches a live
+    sandbox name against a container named `<sandbox_name>-t<token>` by `-`-delimited prefix
+    (`BuildverifyWorker` names every container that way, `workers/buildverify.py`
+    `_container_prefix`/`_invocation_name`).
+
+    An earlier draft of this function did expand the set itself: it listed the run's containers,
+    computed the spared subset here, and passed that concrete list as `live_names`. It cited
+    `reap()` sparing "by EXACT membership" — the pre-`aa16846` behaviour, false against the code
+    it was calling. Beyond restating logic that already exists, the expansion opened a window
+    `claims()` does not have: `spared` was computed from a listing taken before `reap()` took its
+    own, so any container started between the two listings was absent from `spared` and would be
+    `docker rm --force`d despite a live row claiming it — killing a running build, the exact
+    outcome the paragraph justifying the expansion said it was preventing.
+
+    `--dry-run` must not call `reap()` (it removes), so the preview re-applies `reap()`'s own two
+    filters — the run prefix, then `claims()` — to a listing of its own. It imports `claims`
+    rather than restating the rule, so the preview cannot drift from what the real sweep does.
+    """
+    sandbox = _reap_container_sandbox()
+    prefix = run_prefix(run_id)
+    scope = f"docker containers named {prefix}*"
+    try:
+        if dry_run:
+            present = await sandbox.list_by_prefix(prefix)
+            names = [
+                name
+                for name in present
+                if name.startswith(prefix)
+                and not any(claims(live_name, name) for live_name in live)
+            ]
+            return {
+                "reaped": names,
+                "failed": [],
+                "error": None,
+                "skipped": None,
+                "namespace": scope,
+            }
+        result = await sandbox.reap(run_id=run_id, live_names=live)
+    except OSError as exc:
+        # Neither `list_by_prefix` nor `reap` guards the spawn itself, so a host with no `docker`
+        # on PATH raises here. That is "docker was never asked", not "the run has no containers",
+        # and the two must not print the same line.
+        return {
+            "reaped": [],
+            "failed": [],
+            "error": f"docker was never invoked ({type(exc).__name__}: {exc})",
+            "skipped": None,
+            "namespace": scope,
+        }
+    return {
+        "reaped": list(result.reaped),
+        # Same obligation as the worktree half, one layer up: `ContainerReapResult.failed` is a
+        # container docker was asked about and did not confirm removed. Swallowing it would
+        # compound the D32 container leak with a backstop that lies about having caught it.
+        "failed": [{"name": f.name, "reason": f.reason} for f in result.failed],
+        "error": None,
+        "skipped": None,
+        "namespace": scope,
+    }
 
 
 def _validate_accept_drift(settings: FleetSettings, names: Sequence[str]) -> tuple[str, ...]:
