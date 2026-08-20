@@ -6964,9 +6964,13 @@ This is a search **downward from the settled
 frontier**, never an ascending scan:
 locate the lowest phase that is not **settled for demotion** — `SUCCEEDED`, `SKIPPED` **or
 `DEGRADED`** (`orchestrator/reentry._SETTLED_FOR_DEMOTION`; a repo with a
-`REQUIRES_HUMAN_INTERVENTION` row is skipped entirely) — then walk *backwards* asking
-`evidence_holds(repo, p)` — reading `phases` + Git, with no payload and no `WorkerContext` — and
-stop at the first phase whose evidence holds, because the phases below it are covered by it. The
+`REQUIRES_HUMAN_INTERVENTION` row is skipped entirely) — then walk *backwards*, stopping at the
+first phase that is either a `DEGRADED`/`SKIPPED` hard stop (`orchestrator/reentry._HARD_STOPS`,
+tested **before** `evidence` is consulted at all) or one whose `evidence_holds(repo, p)` — reading
+`phases` + Git, with no payload and no `WorkerContext` — holds. Where evidence holds, the phases
+below it are covered by it; at a hard stop they are not covered by anything — the walk stops
+because ADR-0077 §5 forbids moving the floor onto such a row or searching past it, and an excluded
+or degraded phase can never produce holding evidence anyway. The
 ascending reading is unimplementable and wrong in both directions: ten of the fifteen
 `preconditions_hold` implementations return `False` precisely when there is nothing to resume, so
 a fresh repo has no earliest holding phase at all, while `rdepverify.preconditions_hold` returns

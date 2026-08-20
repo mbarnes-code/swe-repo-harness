@@ -7331,8 +7331,10 @@ demoted row**. Verified against the code, each alone fails in the opposite direc
   every phase beneath it is rewritten, and `checkpoints.load()` hands that payload back reporting it
   usable — a VERIFY that resumes against a BUILD output the same transaction discarded.
 - ***Unconditional.*** `phase_floor` legitimately returns the frontier itself with nothing below it
-  to demote: the backward walk breaks on the first phase whose evidence holds
-  (`src/fleet/orchestrator/reentry.py:100-101`), which is what a healthy interrupted run looks like.
+  to demote: the backward walk breaks at the first phase in `orchestrator/reentry._HARD_STOPS`
+  (`src/fleet/orchestrator/reentry.py:98-99`, tested **before** `evidence` is read) or, failing
+  that, at the first phase whose evidence holds (`:100-101`) — and either one, met immediately
+  below the frontier, is what a healthy interrupted run looks like.
   Sweeping there deletes the in-progress checkpoint on **every** `fleet resume`, with nothing
   invalidated to justify it.
 
