@@ -4186,6 +4186,19 @@ is the one this whole class has: a reconciler follows the prose.
 > on the corrected wording, so a fifth carrier phrased the old way is not detected by it. That is a
 > gap in coverage, stated as one. **D71 remains the next free number** (highest allocated: D70).
 
+> **Editorial correction (2026-08-20).** The two sites above are fixed, not "STILL PRESENT and
+> STILL OPEN". `da70221` rewrote both operator-facing messages; `git show HEAD:src/fleet/cli.py |
+> grep -n "earliest phase whose precondition holds"` and `git show HEAD:src/fleet/cli.py | grep -n
+> "twelve workers"` (committed tree, not the working tree — a sibling lane has further uncommitted
+> edits to this file right now) each return no match. `e784573` binds the replacement text:
+> `tests/test_cli.py:1269` and `:2149` each assert `"HIGHEST phase below the settled frontier" in
+> result.output`. **Scope, stated precisely: only these two cited sites are verified fixed here.**
+> The `_EXPECTED_SITES` census-gap sentence above is untouched and still true — the two
+> `cli.py` sites remain outside the new test's census. And a *different* string in the same
+> `ResumeIncompleteError` message — the clause naming step 2 as "absent too", now false because the
+> orphan reap it describes runs before the refusal — is not addressed by `da70221` and is not
+> claimed fixed here; it is a separate, currently open defect in the same message.
+
 ---
 
 ### D71 — UNUSED. Allocated in error and never written; the number is free for allocation
@@ -4347,7 +4360,7 @@ exist for exactly this and a future sweep added outside them re-opens it silentl
 
 ---
 
-## D74 — OPEN, recorded only. Phase 3/4 worktree paths are computed twice, independently, and nothing enforces the two stay equal
+### D74 — OPEN, recorded only. Phase 3/4 worktree paths are computed twice, independently, and nothing enforces the two stay equal
 
 Found by the lane designing the worktree-namespace fix for D72
 (`docs/superpowers/plans/design-worktree-namespace.md`, its "Leg 4"). Verified here directly
