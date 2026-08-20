@@ -1048,7 +1048,9 @@ async def test_a_cancelled_waiter_hands_no_slot_over_a_ceiling_that_shrank_under
     first.cancel()
     await _settle()
 
-    assert breaches == [], f"a cancelled waiter admitted someone over the shrunk ceiling: {breaches}"
+    assert breaches == [], (
+        f"a cancelled waiter admitted someone over the shrunk ceiling: {breaches}"
+    )
     assert ran == [], "one slot is still held against a ceiling of 1 — nobody may be admitted"
 
     with pytest.raises(asyncio.CancelledError):

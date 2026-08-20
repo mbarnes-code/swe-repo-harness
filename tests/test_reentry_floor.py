@@ -65,7 +65,7 @@ def _rows_with(overrides: dict[Phase, PhaseRow | None]) -> dict[Phase, PhaseRow 
 
 
 def _all_evidence(value: bool) -> dict[Phase, bool]:
-    return {phase: value for phase in _ALL_PHASES}
+    return dict.fromkeys(_ALL_PHASES, value)
 
 
 # ---------------------------------------------------------------------------------------
