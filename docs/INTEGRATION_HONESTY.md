@@ -4238,7 +4238,9 @@ and that namespace is not where the fleet's worktrees are.
 **Deliberately not fixed here.** The fix is structural — it requires changing the worktree naming
 in `orchestrator/context.py` and the git dir in `workers/clone.py`, both outside the step-2 lane's
 scope and outside this one's, and a separate design lane owns it. Recorded so a future lane has
-the evidence rather than the symptom. **Do not close this by making `WorktreeManager` scan the
+the evidence rather than the symptom; that design landed while this was being written and is
+`docs/superpowers/plans/design-worktree-namespace.md` (`c6bdd26`), which re-verifies these same
+three legs and adds a fourth about the Phase 3/4 worktrees a rename alone would make reapable. **Do not close this by making `WorktreeManager` scan the
 mirrors**: that decides the namespace question by the reaper's convenience rather than by what
 `§3.3` says a sandbox name is, and legs 1 and 2 would still disagree.
 
