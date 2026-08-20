@@ -30,7 +30,7 @@ Working tree is clean, so file contents read below are `main`'s.
 | 14 | **NOT-A-TASK** | Exactly the shape the audit brief names: a documented adversarial-only escape deliberately not patched, with the reason recorded (ADR-0077 §4.2) and the accidentally-reachable-vs-adversarial standard stated. Patching identity would buy the appearance of closure. |
 | 15 | **VALID (all three legs)** | (a) `orchestrator/stubs.py:556-560` — `reconcile(..., now: datetime \| None = None, open_pr_max_age_s: float \| None = None)`; both default `None`, so the merge-wait bound is opt-in. (b) `stubs.py:564,586,661` emit `UnresolvedStub`; SPEC §13 row 45 (`SPEC.md:7197`) requires dependents `BLOCKED` with an `UnmergedDependency` finding past the bound — `UnmergedDependency` appears nowhere in `stubs.py`. (c) `tests/test_config_keys_are_read.py:191` still carries `"fleet.yaml:pr.merge_wait_timeout_s"`. The `open_pr_max_age_s` naming dodge is real and is the reason the ratchet is not tripped. |
 | 16 | **VALID** | `grep -c '^## ADR-' docs/DECISIONS.md` → **77**; the last is `## ADR-0077`. **0078 is free.** No test binds BK1's two-name narrowing. |
-| 17 | **VALID (both halves)** | `schema.sql:474` is `effort      TEXT NOT NULL,` with **no** ADR-0075 comment, against `SPEC.md:4251`'s `effort TEXT NOT NULL,  -- ADR-0075: '' = target declared none.` And `tests/test_llm_cache.py:4` still reads *"adaptive thinking forbids pinning a temperature"* — the retracted claim, unamended. |
+| 17 | **STALE** | Both halves fixed by `c7f72c6` (landed after this row was written). `src/fleet/state/schema.sql:504` (the line moved to `:504` as the file grew; was `:474`) now carries `-- ADR-0075: '' = target declared none. NOT NULL and no CHECK, so absence needs no migration.` beside `effort TEXT NOT NULL,`, bound by `test_no_declared_effort_persists_as_empty_string_in_a_not_null_check_free_column`. And `tests/test_llm_cache.py:4`'s docstring no longer reads "adaptive thinking forbids pinning a temperature" — it now states the retraction itself: "the harness pins no sampling controls — no `temperature`, `seed`, `top_p` or `thinking` key is built anywhere under `src/fleet/llm/`". Re-verified this session via `git show main:src/fleet/state/schema.sql` and `git show main:tests/test_llm_cache.py`. |
 | 18 | **STALE** | `git worktree list` now shows **two** entries: the primary checkout on `main`, and `worktrees/wt-WT1-example` on `agent/WT1-example`. The eight round-B lane worktrees are gone. **The survivor is out of scope for this item**: `agent/WT1-example` is a *round-A* leftover from the ADR-0074 pre-commit-hook verification (cited as live evidence in `DECISIONS.md:6458-6566`, `tools/worktree/README.md:117`, `task-HOOK1-report.md:53`), it is an ancestor of `main` (`git branch --merged main` lists it), and this round's own ledger records it as **"LEFT DELIBERATELY"** (`ledger-sdd-backlog-b.md:2009`). Item 18 described ten lane worktrees after eight lanes merged; that condition no longer obtains. |
 | 19 | **VALID — the recorded number is right** | `.venv/bin/ruff 0.16.2 format --check --diff src/fleet/cli.py` → exit 1, **60** `@@` hunks, "1 file would be reformatted". The `7a8bfbb` baseline re-measured independently by piping `git show 7a8bfbb:src/fleet/cli.py` through `--stdin-filename src/fleet/cli.py` → exit 1, **58** hunks. §38's "60 on landed `main`, 58 at `7a8bfbb`" is exactly correct, and the +2 ratchet is real. The decision (fix vs. ratchet) is unmade. |
 | 20 | **DUPLICATE** | Verbatim carry of **§37f item 6** ("Round 38 reconciliation is still pending: `research-38.md`/`review-38.md` remain tracked but uncommitted as their own checkpoint; `workers/base.py`/`workers/buildverify.py` history from that thread has not been read against this round's D34/D35/D36/D41 corrections"). §38 itself labels it as carried unchanged. Both files are still tracked (`git ls-files` → `docs/superpowers/plans/research-38.md`, `review-38.md`) and the claim is **still true** — but it is not a twenty-first distinct finding of this round. |
@@ -39,13 +39,13 @@ Working tree is clean, so file contents read below are `main`'s.
 
 | Verdict | Count | Items |
 |---|---|---|
-| **VALID** | **15** | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 15, 16, 17, 19 |
-| **STALE** | **1** | 18 |
+| **VALID** | **14** | 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 13, 15, 16, 19 |
+| **STALE** | **2** | 17, 18 |
 | **NOT-A-TASK** | **3** | 6, 12, 14 |
 | **PARTIAL** | **0** | — |
 | **DUPLICATE** | **1** | 20 |
 
-**Assessment of the list as a record.** This is a good list. Fifteen of twenty are real and
+**Assessment of the list as a record.** This is a good list. Fourteen of twenty are real and
 unmoved; the three NOT-A-TASKs are all *explicitly labelled as limits in their own text* ("structural",
 "deliberately not patched", "recorded so the judgement stays visible") — they are not the list
 padding itself, they are honest caveats parked in a backlog section where a reader may mistake
@@ -53,8 +53,10 @@ them for work. The one duplicate self-declares. The three traps the audit brief 
 and **§38 got all three right**: item 7's "no caller" survives a call-site-level check rather than a
 name grep; item 10's *three false sites / two modules* is precise about the false ones rather than
 the total `_unavailable`-ish hits (22 name matches in `cli.py`, only 3 are the call); item 13's
-re-count of 22 and item 19's 60/58 both reproduce exactly. The single stale entry went stale
-outside git after the text was written.
+re-count of 22 and item 19's 60/58 both reproduce exactly. Two entries have gone stale since the
+text was written, by different routes: item 18 went stale **outside git** (the worktree teardown
+happened in the working world, not in a commit this list re-verifies against); item 17 went stale
+**inside git** — `c7f72c6`, landed after this row, is the exact fix the row described as missing.
 
 ---
 
@@ -72,11 +74,12 @@ Assessed for "is this still the right next thing" against `main` = `25af323`.
 | 6 | §13 row 43 — rate limiting (LARGE) | **Still right, and its scoping premise re-measures correct:** `limits.for_tier(...)` is acquired at exactly **one** call site in all of `src/` — `workers/classify.py:162` — out of 12 workers. `asyncio.Semaphore` is still constructed fixed-size at `budgets.py:979`. |
 | 7 | §13 row 38 — `ContextTruncated` (MEDIUM, greenfield) | **Still right, with one wording correction.** `ContextTruncated` has **zero occurrences in `src/`** — genuinely greenfield. But "nothing in `src/` sizes against `max_context`" is slightly too strong: `settings.py:1444-1450` *does* compare a target's declared `max_context` against `requirement.min_context` at config-validation time. What is absent is any **runtime** sizing of an actual prompt. The task is unchanged; the sentence should be. |
 | 8 | Prove one backend adapter against a real endpoint, in a throwaway venv | **Still right.** `boto3` absent, `google` absent. |
-| 9 | Housekeeping, batched | **Partly already done — de-scope it.** *"Prune the ten stale `agent/*` worktrees"* is **complete**: eight were torn down, and the one survivor (`agent/WT1-example`) is the round-A ADR-0074 hook fixture that this round's own ledger records as deliberately kept. Pruning it would destroy live evidence cited in `DECISIONS.md:6458-6566` and `tools/worktree/README.md:117` — **do not prune it**. The rest of the batch stands and was re-verified individually: the three false `_unavailable` strings (item 10), the `schema.sql:474` ADR-0075 mirror (item 17), `test_llm_cache.py:4` (item 17), and the `ruff format` fix-or-ratchet decision at a **confirmed 60 hunks**. The `heartbeat_ttl_seconds` writer is also still genuinely missing — `settings.py:218-222` declares `stale_after_s` as "THE authoritative liveness TTL" that a phase "captures verbatim into `phases.heartbeat_ttl_seconds` when claimed", and `test_config_keys_are_read.py:201` records the opposite: *"nothing constructs `phases.heartbeat_ttl_seconds` from the key"*. |
+| 9 | Housekeeping, batched | **Partly already done — de-scope it further.** *"Prune the ten stale `agent/*` worktrees"* is **complete**: eight were torn down, and the one survivor (`agent/WT1-example`) is the round-A ADR-0074 hook fixture that this round's own ledger records as deliberately kept. Pruning it would destroy live evidence cited in `DECISIONS.md:6458-6566` and `tools/worktree/README.md:117` — **do not prune it**. **The `schema.sql` ADR-0075 mirror and `test_llm_cache.py:4` amendment are also now done** (item 17, corrected this session): `c7f72c6` landed both. What remains of the batch: the three false `_unavailable` strings (item 10) and the `ruff format` fix-or-ratchet decision at a **confirmed 60 hunks**. The `heartbeat_ttl_seconds` writer is also still genuinely missing — `settings.py:218-222` declares `stale_after_s` as "THE authoritative liveness TTL" that a phase "captures verbatim into `phases.heartbeat_ttl_seconds` when claimed", and `test_config_keys_are_read.py:201` records the opposite: *"nothing constructs `phases.heartbeat_ttl_seconds` from the key"*. |
 | 10 | Reconcile with round 38 | **Still right, but it is a §37f task wearing a §38 number** (see item 20). It has now been carried across two checkpoints without being started; if it is not going to be done it should be closed explicitly rather than re-listed a third time. |
 
-**Only one entry needs changing: #9's worktree clause is done, and the remaining worktree must
-not be pruned.** Everything else is still the right next thing.
+**Two entries need changing, both inside #9: the worktree clause is done and the remaining
+worktree must not be pruned, and (corrected this session) the `schema.sql`/`test_llm_cache.py:4`
+clause is also done — `c7f72c6` landed both.** Everything else is still the right next thing.
 
 ---
 

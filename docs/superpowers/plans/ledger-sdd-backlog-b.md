@@ -1995,6 +1995,11 @@ DOCS REFRESHED AND COMMITTED -> 5feb1e7. The refresh was NOT a copy of the draft
   AND A SIXTH COPY OF THE COMMENT: D66's "all five sites corrected" holds for docs/ and src/, but
   **tests/test_llm_cache.py:4 still carries the clause.** Every single pass over that comment has
   found one more copy. Recorded as open rather than quietly fixed.
+  > **Editorial note (2026-08-20, round C, lane DOCSTALE).** This entry is a historical record of
+  > round B's close and is left as written — it was true at 5feb1e7. It no longer describes `main`:
+  > `c7f72c6` (round C) rewrote `tests/test_llm_cache.py:4`'s docstring to state the retraction
+  > itself rather than the false premise. See `docs/INTEGRATION_HONESTY.md` (D66) and
+  > `docs/PROGRESS.md` open item 14 for the matching corrections on those two live documents.
   §38 numbering: it also resolved the §37f reservation of "38" for the research-38/review-38
   thread, confirming by `git log` that the thread has no commit past 32365cf, releasing the number,
   and demoting the pending reconciliation to open item 20 instead of a held slot.
