@@ -184,7 +184,10 @@ Common contract for all four:
   searches over, while `BaseWorker.preconditions_hold` stays at its single call site inside
   `PhaseRunner._re_entry`, where a typed payload and a `WorkerContext` exist — and where neither
   of its verdicts ever means "skip the work". The demotion write itself goes through
-  `transition(..., resume=True)` (`RESUME_DEMOTE`, §5.1) and emits a `PhaseDemoted` finding.
+  **`models.enums.demote()`** (`RESUME_DEMOTE`, §5.1), which returns the new status together with
+  the `PhaseDemotion` the caller writes as a `PhaseDemoted` finding in the same `StateWriter` unit
+  as the status change — never `transition(..., resume=True)` directly, which opens the same door
+  but returns the status ALONE and would demote silently (ADR-0077 §4).
 - **Attempts:** `attempts` increments once per *substantive* attempt, never for transient
   infrastructure errors (ADR-0014), and never for a **backend failover** (ADR-0023). Ladder:
   attempt 1 deterministic, attempt 2 the `transform_repair` role (`WORKHORSE` tier) on a fresh
