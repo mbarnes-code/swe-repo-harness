@@ -1,23 +1,27 @@
-"""The §11.5-step-5 re-entry-floor rule, bound: four statements of it, and the code they describe.
+"""The §11.5-step-5 re-entry-floor rule, bound: every statement of it, and the code they describe.
 
-The rule is stated in four places — `docs/SPEC.md` Constraint 7, `docs/SPEC.md` §11.5 step 5,
-`docs/DECISIONS.md` ADR-0076 §1, and the `RESUME_DEMOTE` comment in `src/fleet/models/enums.py`.
-Until this file, **nothing bound any of them to each other, or to
-`orchestrator/reentry.phase_floor`**.
+The rule is restated in full in six places — `docs/SPEC.md` Constraint 7, `docs/SPEC.md` §11.5
+step 5, `docs/DECISIONS.md` ADR-0076 §1, the docstring of `orchestrator.reentry.phase_floor`
+itself, the `RESUME_DEMOTE` comment in `src/fleet/models/enums.py`, and (in the operator register,
+twice) `src/fleet/cli.py`'s two step-5 refusals — and *summarised* in three more: `fleet resume
+--help` and its two `docs/SPEC.md` mirrors. Until this file, **nothing bound any of them to each
+other, or to `orchestrator/reentry.phase_floor`**.
 They agreed because a lane made them agree by hand in `f466287`, and the round that produced them
 produced five successive wrong-successor corrections — a fix shipping a narrower or differently
 wrong version of the claim it was correcting — so hand agreement is exactly the state that has
 already failed here.
 
-Three layers, because the four statements are not the same kind of artifact and pretending they are
+Four layers, because these statements are not the same kind of artifact and pretending they are
 would be the "convention wearing a mechanism's clothes" CLAUDE.md Rule 12 forbids:
 
-**Layer A — identity, for the three prose copies.** They are byte-identical once whitespace is
-normalised (336 characters, measured). A census locates every site that states the quantifier, then
-each census site must carry the canonical clause *anchored at that offset*; a site that states the
-rule in its own words is named by file and line. Whitespace is normalised away first, so a reflow
-or re-indent passes and only a change of *words* fails — the shape `6e0a5fa` established for the
-ADR-0075 `effort` annotation, whose reflow control is what made it survivable.
+**Layer A — identity, for the four full restatements in the markdown register.** They are
+byte-identical once whitespace is normalised (336 characters, measured; `reentry.py`'s docstring
+joined them when the wrong quantifier was corrected out of it). A census locates every site that
+states the quantifier, then each census site must carry the canonical clause *anchored at that
+offset*; a site that states the rule in its own words is named by file and line. Whitespace is
+normalised away first, so a reflow or re-indent passes and only a change of *words* fails — the
+shape `6e0a5fa` established for the ADR-0075 `effort` annotation, whose reflow control is what made
+it survivable.
 
 **Layer B — the text drives the assertion, so the docs are bound to the code and not merely to each
 other.** The status names the clause calls hard stops are *parsed out of the clause* and compared
@@ -33,7 +37,7 @@ words ("stop at the first phase whose evidence holds, because the phases below i
 it") and was invisible to the census. Wrap-awareness — the technique that caught five other misses
 this round — cannot help: normalising whitespace answers "the text is split", never "the claim is
 paraphrased". So Layer D drops the quantifier and anchors on the *shape of a stop claim* instead:
-any sentence in the three governed files that binds a stop verb to a stop **condition**
+any sentence in the five governed files that binds a stop verb to a stop **condition**
 ("stops/breaks at/on the first ...", "... whose evidence") must also name a hard stop. Its scope
 and the two variants measured and rejected are in `_RESIDUAL` item 4.
 
@@ -43,8 +47,17 @@ So it is bound by what it must *name* — a whitelist of the load-bearing distin
 same parsed-out hard-stop set as Layer B. This is genuinely weaker than Layer A and the weakness is
 stated rather than implied: see `test_the_enums_paraphrase_names_every_load_bearing_distinction`.
 
+**Layer E — the summary register.** `fleet resume --help` and its two `docs/SPEC.md` mirrors do
+not restate the rule: they *name* it, cite §11.5 step 5, and deny the retracted quantifier in one
+breath. No clause, so no Layer A; no stop condition, so no Layer D. All nine cases of this module
+passed while all three of those sites said "the earliest incomplete phase" — a measured blind
+spot, closed by binding the shared phrase, whitelisting the retracted words to their negation, and
+exercising that negation against `phase_floor`.
+
 What this file does **not** bind is recorded in that test's docstring and in the module-level
-`_RESIDUAL` note below, so that no future reader mistakes three layers for closure.
+`_RESIDUAL` note below, so that no future reader mistakes four layers for closure. In particular,
+`src/fleet/cli.py`'s two operator-facing restatements are outside the census by register and are
+bound in `tests/test_cli.py` instead: `_RESIDUAL` item 6.
 """
 
 from __future__ import annotations
@@ -53,7 +66,9 @@ import re
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
+from fleet.cli import app
 from fleet.models.enums import Phase, RepoStatus
 from fleet.orchestrator import reentry
 from fleet.orchestrator.reentry import phase_floor
@@ -61,10 +76,10 @@ from fleet.state.repository import PhaseRow
 
 _RESIDUAL = """Not bound, stated rather than implied:
 
-1. A consistent rewrite of all three prose copies to one *false* sentence passes Layer A (they
-   still agree) and passes Layer C. Only Layer B's parsed-out claims — the hard-stop status set,
-   the cited symbol, the fallback phase — are checked against the code, so a falsehood outside
-   those three claims is not caught by anything here.
+1. A consistent rewrite of all four full restatements to one *false* sentence passes Layer A
+   (they still agree) and passes Layer C. Only Layer B's parsed-out claims — the hard-stop
+   status set, the cited symbol, the fallback phase — are checked against the code, so a
+   falsehood outside those three claims is not caught by anything here.
 2. Layer C is a token whitelist. A rewrite of the `enums.py` comment that keeps all seven required
    tokens while stating something false passes. Textual identity is the wrong instrument for a
    paraphrase and there is no honest stronger one short of deleting the paraphrase; the residual is
@@ -77,8 +92,9 @@ _RESIDUAL = """Not bound, stated rather than implied:
    proved sufficient.
 
 4. Layer D is narrower than "every claim about the walk", which is not mechanisable here, and the
-   two wider variants were measured before being rejected rather than dismissed. Over the same
-   three files, sentence-split on normalised text:
+   two wider variants were measured before being rejected rather than dismissed. Over the three
+   files governed when they were measured -- `reentry.py` and `cli.py` joined later and each adds
+   **0** considered sentences, re-measured -- sentence-split on normalised text:
 
    * **Wide** (walk-subject + any stop verb in the same sentence, hard stop required): flags both
      real defects on the pre-fix tree -- and **6 of the 19** sentences it considers on the
@@ -98,18 +114,54 @@ _RESIDUAL = """Not bound, stated rather than implied:
    the anchor into a loud failure, exactly as the census's does, but it cannot tell "re-worded"
    from "deleted". And "names a hard stop" is not "states the hard-stop rule": a sentence naming
    `DEGRADED` for an unrelated reason passes, which is residual 1 in a new place.
+
+5. Layer E binds a *phrase*, not a claim. The three summary sites name the floor and deny one
+   named wrong quantifier; nothing here checks that a summary re-worded into some *third* wrong
+   quantifier ("the lowest unsettled phase") is wrong, because the summaries do not restate the
+   rule and there is no clause to compare. The count assertion turns such a re-wording into a
+   loud failure -- the phrase is gone -- but, as in residual 3, it cannot tell "re-worded" from
+   "deleted", and it cannot tell "re-worded correctly" from "re-worded wrongly".
+
+6. Two further sites state the rule in full and are **not** in this census: the operator-facing
+   `ResumeIncompleteError` and `UsageError` messages in `src/fleet/cli.py` (`:10083`, `:10401`).
+   They restate it in the uppercase, markdown-free register an error message needs (`ABOVE the
+   HIGHEST phase below the settled frontier ...`), so `_CENSUS` -- deliberately case-sensitive and
+   anchored on markdown emphasis -- cannot see them, and widening it to reach them would make it
+   match the register-free prose of every future paraphrase. They are bound instead by
+   `tests/test_cli.py:1269` and `:2149`, which assert the phrase in the *rendered* output of the
+   two commands that emit it. That is a real binding in another file, not a gap; it is recorded
+   here because a reader counting this module's census sites would otherwise conclude the rule is
+   stated in five places when it is stated in seven. Layer D does now cover both (`cli.py` joined
+   `_GOVERNED`), on the semantic axis only.
 """
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SPEC = _ROOT / "docs" / "SPEC.md"
 _DECISIONS = _ROOT / "docs" / "DECISIONS.md"
 _ENUMS = _ROOT / "src" / "fleet" / "models" / "enums.py"
+_REENTRY = _ROOT / "src" / "fleet" / "orchestrator" / "reentry.py"
+_CLI = _ROOT / "src" / "fleet" / "cli.py"
+
+
+def _flex(literal: str) -> str:
+    """`literal` as a regex whose inter-word gaps match any run of whitespace.
+
+    Layer A's promise is "a reflow passes, a re-word fails", and until `_CENSUS`/`_CLAUSE` were
+    built this way the promise was only half true: normalisation is applied to the *matched* text,
+    but the anchor and the terminator are matched against the raw file, so a wrap falling inside
+    either one made the census miss a site or the clause "not reach its terminator" — a hard
+    failure on a purely cosmetic edit. `docs/SPEC.md:1567` already wraps mid-phrase (`never the
+    earliest\\nincomplete phase`), which is how the same blind spot was measured on the summary
+    sites Layer E covers. Every current match still matches: a single space is a run of one.
+    """
+    return r"\s+".join(re.escape(word) for word in literal.split())
+
 
 # The census anchor: the quantifier phrase, which every prose statement of the rule carries and
 # which the pre-`60d400b` ("earliest") and pre-`f466287` (`SCAN` fallback ignoring `_HARD_STOPS`)
 # wordings also carried. Anchoring the census on text older than the correction is deliberate: a
 # site reverted to either wrong version is still *found*, and then fails the clause check by name.
-_CENSUS = re.compile(r"the phase \*\*above\*\* the \*\*highest\*\* phase below")
+_CENSUS = re.compile(_flex("the phase **above** the **highest** phase below"))
 
 # The canonical clause, as `f466287` wrote it once and applied to all three sites.
 #
@@ -121,11 +173,26 @@ _CENSUS = re.compile(r"the phase \*\*above\*\* the \*\*highest\*\* phase below")
 # through terminator, before normalisation), so 600 admits any plausible reflow -- even one
 # character per line -- while excluding any reach into another site.
 _CLAUSE = re.compile(
-    r"the phase \*\*above\*\* the \*\*highest\*\* phase below[\s\S]{0,600}?there is no such phase"
+    _flex("the phase **above** the **highest** phase below")
+    + r"[\s\S]{0,600}?"
+    + _flex("there is no such phase")
 )
 
 # How many prose statements exist, per file. A deleted or added copy fails here first.
-_EXPECTED_SITES = {"docs/SPEC.md": 2, "docs/DECISIONS.md": 1}
+#
+# `reentry.py` is here because the module that *implements* the rule stated it wrongly for the
+# whole of this defect class: `phase_floor`'s summary line read "the earliest phase this repo must
+# re-enter at" — the quantifier `60d400b` retracted everywhere else — while the module docstring
+# eighteen lines above described the backward walk correctly. Nothing saw it, because the census
+# ran over the two doc files only. Measured on the state that shipped it: `TRANSFORM` is the
+# earliest phase below the frontier whose evidence does not hold and `phase_floor` returns
+# `VERIFY`; with `TRANSFORM` `DEGRADED` the earliest reading names `SCAN` and it returns `BUILD`.
+_CENSUS_FILES: tuple[Path, ...] = (_SPEC, _DECISIONS, _REENTRY)
+_EXPECTED_SITES = {
+    "docs/SPEC.md": 2,
+    "docs/DECISIONS.md": 1,
+    "src/fleet/orchestrator/reentry.py": 1,
+}
 
 
 def _normalise(text: str) -> str:
@@ -146,7 +213,7 @@ def _prose_statements() -> dict[str, str]:
     mismatch.
     """
     found: dict[str, str] = {}
-    for path in (_SPEC, _DECISIONS):
+    for path in _CENSUS_FILES:
         rel = path.relative_to(_ROOT).as_posix()
         text = path.read_text(encoding="utf-8")
         hits = list(_CENSUS.finditer(text))
@@ -201,7 +268,14 @@ def _enums_paraphrase() -> str:
 # Layer D -- the stop condition, wherever it is stated and in whatever words
 # ------------------------------------------------------------------------------------------
 
-_GOVERNED: tuple[Path, ...] = (_SPEC, _DECISIONS, _ENUMS)
+#: `reentry.py` and `cli.py` joined the governed set with Layer E. Measured before adding, per
+#: Guardrail 6: each contributes **0** additional considered sentences today (2 before, 2 after),
+#: so the count assertion below is unchanged and neither file brings a false positive. What they
+#: buy is future: `reentry.py`'s module docstring already paraphrases the walk in its own words,
+#: and `cli.py:10083`/`:10401` restate the whole rule to an operator in the uppercase register —
+#: neither is reachable by the census, so before this the semantic axis was the only axis that
+#: could ever see a wrong stop claim in them, and it was not looking at them.
+_GOVERNED: tuple[Path, ...] = (_SPEC, _DECISIONS, _ENUMS, _REENTRY, _CLI)
 
 #: What the walk is, in any register the four statements use.
 _WALK_SUBJECT = re.compile(
@@ -319,9 +393,10 @@ def _row(phase: Phase, status: RepoStatus) -> PhaseRow:
 # ------------------------------------------------------------------------------------------
 
 
-def test_the_three_prose_statements_of_the_floor_rule_are_one_statement() -> None:
-    """`docs/SPEC.md` Constraint 7, `docs/SPEC.md` §11.5 step 5 and `docs/DECISIONS.md` ADR-0076 §1
-    carry the same clause, word for word once whitespace is normalised.
+def test_the_four_statements_of_the_floor_rule_are_one_statement() -> None:
+    """`docs/SPEC.md` Constraint 7, `docs/SPEC.md` §11.5 step 5, `docs/DECISIONS.md` ADR-0076 §1
+    and `orchestrator/reentry.phase_floor`'s docstring carry the same clause, word for word once
+    whitespace is normalised.
 
     This is the drift that actually happened, twice, four hours apart: `60d400b`/`e0404b0` applied
     one wording to three sites and `f466287` had to re-apply a corrected one, because ADR-0076 §1
@@ -332,10 +407,10 @@ def test_the_three_prose_statements_of_the_floor_rule_are_one_statement() -> Non
     failure names the file and line that diverged rather than a count.
     """
     statements = _prose_statements()
-    assert len(statements) == 3, f"expected 3 prose statements, found {sorted(statements)}"
+    assert len(statements) == 4, f"expected 4 statements, found {sorted(statements)}"
     distinct = set(statements.values())
     assert len(distinct) == 1, (
-        "the three copies of the re-entry-floor rule have drifted apart — this is the "
+        "the copies of the re-entry-floor rule have drifted apart — this is the "
         "hand-maintained-agreement state that produced five wrong-successor corrections this "
         "round:\n" + "\n".join(f"  {site}: {text}" for site, text in sorted(statements.items()))
     )
@@ -491,6 +566,131 @@ def test_the_enums_paraphrase_names_every_load_bearing_distinction() -> None:
     )
 
 
+# ------------------------------------------------------------------------------------------
+# Layer E -- the summary register: sites that NAME the floor instead of restating it
+# ------------------------------------------------------------------------------------------
+
+#: The shared summary phrase. `fleet resume --help` and its two `docs/SPEC.md` mirrors (§10's verb
+#: table, §3.5's un-blocking sentence) deliberately do NOT restate the rule — they name it, cite
+#: §11.5 step 5, and disclaim the retracted quantifier in one breath. Layer A's clause is the
+#: wrong instrument for a one-line CLI help string, which is why the census never saw them and why
+#: all nine of this module's cases passed while all three said "the earliest incomplete phase".
+_SUMMARY = "re-entry floor (§11.5 step 5), never the earliest incomplete phase"
+
+#: The retracted quantifier. It may appear in these texts **only** as the negation inside
+#: `_SUMMARY` — an enumeration of escapes inverted into a whitelist (CLAUDE.md Rule 12): the word
+#: itself cannot be forbidden, because the correct prose is exactly the prose that says it.
+_RETRACTED = re.compile(r"earliest incomplete phase")
+
+#: Where the summary is stated, and how often. Sources with zero occurrences are absent, so a copy
+#: sprouting in `docs/DECISIONS.md` or `reentry.py` fails as loudly as one going missing.
+#:
+#: `src/fleet/cli.py` and `fleet resume --help` are the same site counted twice, deliberately: the
+#: file entry is the docstring, the help entry is what Typer prints from it. Requiring **both** is
+#: the assertion that the one reaches the other — move the summary into a `help=` argument, or let
+#: Typer stop rendering the docstring, and the file keeps its 1 while the help drops to 0.
+_EXPECTED_SUMMARY_SITES = {
+    "fleet resume --help": 1,
+    "docs/SPEC.md": 2,
+    "src/fleet/cli.py": 1,
+}
+
+
+def _summary_sources() -> dict[str, str]:
+    """Every text that could carry a resume re-entry summary, normalised.
+
+    The help entry is the **rendered** `--help`, not `cli.py`'s docstring source: a docstring is
+    only a help string if Typer prints it, and the operator reads what Typer prints. The five
+    files are read as text so that a summary appearing anywhere in them is counted, wrap or no
+    wrap — `docs/SPEC.md:1567` wraps mid-phrase (`never the` / `earliest incomplete phase`), so a
+    line-oriented probe finds one SPEC site where there are two, which is how this was mis-measured
+    before.
+    """
+    result = CliRunner().invoke(app, ["resume", "--help"], catch_exceptions=False)
+    assert result.exit_code == 0, result.output
+    sources = {"fleet resume --help": _normalise(result.output)}
+    for path in (_SPEC, _DECISIONS, _ENUMS, _REENTRY, _CLI):
+        sources[path.relative_to(_ROOT).as_posix()] = _normalise(path.read_text(encoding="utf-8"))
+    return sources
+
+
+def test_the_resume_re_entry_summaries_are_one_phrase_wherever_they_are_stated() -> None:
+    """The three summary sites, bound where this rule's binding lives.
+
+    `fleet resume --help` and its two `docs/SPEC.md` mirrors are copies of each other; all three
+    once summarised re-entry as "the earliest incomplete phase", the quantifier ADR-0076 §1
+    retracted. Measured: this module's nine cases all passed throughout, because Layers A–C anchor
+    on the canonical *clause* and Layer D on a stop *condition*, and a summary carries neither.
+    Moved here from `tests/test_cli.py`, which pinned them until now — §10's command surface is
+    where the *help text* is bound, not where this *rule* is, and a rule bound in two files is the
+    hand-maintained agreement this module exists to end.
+
+    The binding is on all three at once and on the shared phrase, for the reason the previous lane
+    gave for correcting neither alone: fixing the help line by itself desyncs it from the two SPEC
+    lines it copies, and one-edit-at-a-time drift is what produced this defect class.
+    """
+    counts = {
+        source: text.count(_SUMMARY)
+        for source, text in _summary_sources().items()
+        if _SUMMARY in text
+    }
+    assert counts == _EXPECTED_SUMMARY_SITES, (
+        f"the resume re-entry summary is stated at {counts}, expected "
+        f"{_EXPECTED_SUMMARY_SITES} (`fleet resume --help` and the `cli.py` docstring it is "
+        "printed from, §10's verb table and §3.5's un-blocking sentence). A copy drifted, was "
+        "deleted, or was added."
+    )
+
+
+def test_the_retracted_quantifier_survives_only_as_the_negation_the_summary_makes() -> None:
+    """ "Earliest incomplete phase" may be *denied*, never *claimed* — the discriminating half.
+
+    The count assertion above cannot tell "this site was re-worded" from "this site went back to
+    the retracted quantifier": both drop the phrase. This one names the difference. Every
+    occurrence of the retracted words in any governed text must be immediately preceded by
+    `never the `; a site reverting to "continue from each repo's earliest incomplete phase" fails
+    here and reports its own surrounding text.
+    """
+    claimed: list[str] = []
+    for source, text in _summary_sources().items():
+        for hit in _RETRACTED.finditer(text):
+            if text[max(0, hit.start() - 10) : hit.start()] != "never the ":
+                claimed.append(f"  {source}: ...{text[max(0, hit.start() - 90) : hit.end()]}...")
+    assert not claimed, (
+        "these texts state re-entry AS the earliest incomplete phase, the quantifier ADR-0076 §1 "
+        "retracted — `phase_floor` stops ABOVE the highest holder below the settled frontier, so "
+        "wherever two phases below the frontier hold, the earliest names a rung it never "
+        "returns:\n" + "\n".join(claimed)
+    )
+
+
+def test_the_floor_is_not_the_earliest_incomplete_phase_as_the_summaries_deny() -> None:
+    """The summaries' negative claim, exercised against `phase_floor` rather than spell-checked.
+
+    "Earliest incomplete phase" is a claim about *status rows*, not about evidence, so it is a
+    different quantifier from the one Layer B exercises: it names the settled frontier. On three
+    `SUCCEEDED` phases with `VERIFY` `PENDING`, the earliest incomplete phase IS `VERIFY` and the
+    floor is `BUILD` — one rung **below** it, in the opposite direction from the "earliest holder"
+    error. Both readings are wrong and they are wrong in opposite directions, which is why naming
+    only one of them in the prose would leave the summary half-true.
+    """
+    rows = {
+        Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+        Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SUCCEEDED),
+        Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+        Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+    }
+    earliest_incomplete = next(
+        phase for phase in Phase if rows[phase].status is not RepoStatus.SUCCEEDED
+    )
+    floor = phase_floor(rows, {Phase.SCAN: True, Phase.TRANSFORM: True, Phase.BUILD: False})
+    assert earliest_incomplete is Phase.VERIFY  # the state the summaries describe
+    assert floor is not earliest_incomplete and floor is Phase.BUILD, (
+        f"the summaries say re-entry is the floor and NEVER the earliest incomplete phase "
+        f"({earliest_incomplete!r}); `phase_floor` returned {floor!r}"
+    )
+
+
 def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
     """A three-layer binding is not closure, and this file must not read as if it were.
 
@@ -504,6 +704,11 @@ def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
     assert "\n4. " in _RESIDUAL, (
         "`_RESIDUAL` item 4 -- Layer D's own scope, and the two wider variants measured and "
         "rejected -- has been deleted. Layer D reads as broader coverage than it has without it."
+    )
+    assert "\n5. " in _RESIDUAL and "\n6. " in _RESIDUAL, (
+        "`_RESIDUAL` items 5 and 6 -- Layer E binds a phrase and not a claim, and the two "
+        "`cli.py` restatements this census still cannot reach -- have been deleted. Without them "
+        "the census reads as covering every site that states the rule, and it does not."
     )
 
 

@@ -2200,52 +2200,14 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
     )
 
 
-def test_the_three_resume_re_entry_summaries_state_one_rule_and_it_is_not_the_earliest() -> None:
-    """`fleet resume --help` and its two `docs/SPEC.md` mirrors carry ONE phrase, not three.
-
-    The `resume` help line and `docs/SPEC.md`'s §10 verb-table row and §3.5 un-blocking sentence
-    are copies of each other: all three summarised re-entry as "the earliest incomplete phase",
-    which is the quantifier ADR-0076 §1 retracted — `reentry.phase_floor` stops at the phase
-    *above the highest* holder below the settled frontier, so wherever two phases below the
-    frontier hold, the earliest names a rung the function never returns.
-
-    A previous lane corrected neither, deliberately: fixing the help line alone would have
-    desynced it from the two SPEC lines it copies, and one-edit-at-a-time drift is what produced
-    this defect class. So the binding is on all three at once and on the shared phrase.
-
-    Why it lives here rather than in `tests/test_floor_rule_statements.py`: that module's census
-    anchors on the canonical *clause* ("the phase **above** the **highest** phase below …") and
-    asserts exactly two SPEC sites carry it. These three are summaries that deliberately do not
-    restate the rule — they name it and cite §11.5 step 5 — so adding them there would either
-    inflate that census or force a fourth variant of the clause into a one-line CLI help string.
-    """
-    spec = " ".join((Path(__file__).resolve().parents[1] / "docs" / "SPEC.md").read_text(
-        encoding="utf-8"
-    ).split())
-    help_result = runner.invoke(app, ["resume", "--help"], catch_exceptions=False)
-    assert help_result.exit_code == 0, help_result.output
-    help_text = " ".join(help_result.output.split())
-
-    phrase = "re-entry floor (§11.5 step 5), never the earliest incomplete phase"
-    assert spec.count(phrase) == 2, (
-        f"docs/SPEC.md states the resume re-entry summary with the shared phrase at "
-        f"{spec.count(phrase)} site(s), expected 2 (the §10 verb table and §3.5's "
-        "un-blocking sentence). A copy drifted, was deleted, or was added."
-    )
-    assert phrase in help_text, (
-        "`fleet resume --help` no longer carries the phrase its two SPEC mirrors do; the three "
-        "sites have started drifting apart again"
-    )
-
-    # The retracted quantifier may survive ONLY as the negation above — never as a claim.
-    for site, text in (("docs/SPEC.md", spec), ("fleet resume --help", help_text)):
-        for hit in re.finditer(r"earliest incomplete phase", text):
-            prefix = text[max(0, hit.start() - 10) : hit.start()]
-            assert prefix == "never the ", (
-                f"{site} states re-entry as the earliest incomplete phase "
-                f"(...{text[max(0, hit.start() - 90) : hit.end()]}...), the quantifier "
-                "ADR-0076 §1 retracted"
-            )
+# `test_the_three_resume_re_entry_summaries_state_one_rule_and_it_is_not_the_earliest` used to
+# live here. It moved to `tests/test_floor_rule_statements.py` (Layer E) with this change: the
+# three sites it pins state the §11.5-step-5 re-entry-floor RULE, and that module measured
+# itself blind to them — all nine of its cases passed while all three said "the earliest
+# incomplete phase". Binding one rule in two files is the hand-maintained agreement that module
+# exists to end, so this is a move and not a copy. What stayed here is what belongs to §10's
+# command surface: the two rendered-output assertions above, which pin what the step-5 REFUSAL
+# says, not what the floor rule is.
 
 
 def test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal(
