@@ -1094,9 +1094,7 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             )
             return
         if listing.error is not None:
-            ctx.log.warning(
-                "container_sweep_listing_failed", prefix=prefix, reason=listing.error
-            )
+            ctx.log.warning("container_sweep_listing_failed", prefix=prefix, reason=listing.error)
             return
         with contextlib.suppress(OSError, ValueError):
             for name in listing.names:
