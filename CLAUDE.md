@@ -20,6 +20,8 @@ To prevent context window bloat and single-session exhaustion:
 - **Subagent Task Delegation:** Delegate heavy I/O tasks (file scanning, AST transformations, writing worker implementations, running unit tests) to dedicated subagents using the `/agents` tool or task dispatching.
 - **Isolated Contexts:** Each subagent operates in a fresh, isolated context window and returns **only a structured summary or JSON result** back to the main thread.
 - **Single-Task Focus:** Never assign a subagent more than one logical task. Once a subagent completes its task, integrate its output and terminate its session.
+- **Central Number Allocation:** The orchestrator assigns ADR numbers, D-numbers, and every other append-only shared identifier **at dispatch**. Two concurrent lanes both wrote ADR-0075 because main was at 0074 and each independently took "the next number" — no worker could have seen the other. Expect `docs/DECISIONS.md` not to auto-merge when several lanes append to its tail.
+- **Name the Ref in Cross-Lane Briefs:** `HEAD` is main, where a sibling lane has not landed. A brief saying "anchor findings with `git show HEAD:`" produced a **false** finding — the field flagged as non-optional was already optional on the sibling's branch. `HEAD` for main-state claims, the sibling's branch for cross-lane ones; the brief must say which. Never quote another module's comment verbatim: nothing enforces the copy, and one reword leaves the quotation pointing at a string no longer in the tree.
 
 ---
 
@@ -53,7 +55,7 @@ If reference materials contradict each other, pick the cleaner, more tested patt
 Before adding code, inspect existing exports, interface abstractions, and shared utilities in `src/`.
 
 ### Rule 9 — Tests Verify Intent
-Tests must verify *why* logic matters (e.g., ensuring a failed build increments a retry counter in `migration_state.json`).
+Tests must verify *why* logic matters (e.g., ensuring a failed build increments a retry counter in `migration_state.json`). **Rule 12 is how you prove a test actually does that.**
 
 ### Rule 10 — Checkpoint After Every Step
 After every major component completion, log progress in `docs/PROGRESS.md` detailing: *What was completed*, *What was verified*, and *Next subagent task*.
@@ -61,6 +63,11 @@ After every major component completion, log progress in `docs/PROGRESS.md` detai
 ### Rule 11 — Fail Loud
 Never hide errors. If a build or AST transformation fails after 3 subagent retries, mark the target repo as `REQUIRES_HUMAN_INTERVENTION` in `migration_state.json` and move to the next item.
 
+### Rule 12 — Prove a Test Is Stronger, Then Stop
+- **Old-passes / new-fails on the same input.** A rewritten test earns its place only from a mutation under which the *old* assertion passes and the new one fails — showing the new test fails proves nothing about the old. `tests/test_settings.py:591-593` is the shape: a message satisfying `"pip install" not in message` while failing `"anthropik" in message`. When several mutations are cited only the **discriminating** one counts, and a mutation must be shown to have **actually changed the code** before its result means anything (one silently no-op'd because the regex missed a trailing comment; the "pass" it reported was worthless).
+- **Mutation testing verifies the implementation, not the truth of the test's name.** A test can pass, and pass under mutation, while the property in its name is false — the mutation perturbs only the path the test walks, never the other doors to the same state. A reviewer bound an audit side effect into `transition()`, left the return value alone, and the test stayed green while its name became false. When a name asserts an *absence* ("without recording", "cannot be taken without"), the name needs its own proof: see `test_transition_demotes_without_writing_a_record_or_reaching_a_sink` in `tests/test_state_models.py`.
+- **Invert an enumeration of escapes into a whitelist.** Once a third escape defeats a blacklist of forbidden sinks, assert what the code *may* name at all (`TRANSITION_GLOBALS`) — a side effect must then name something to reach it, so unpredicted forms trip it too.
+- **Stop rule — adversarial-only is a boundary, accidentally-reachable is a defect.** Ask whether a normal author would trip the escape a reviewer demonstrated. Escapes requiring a deliberately side-effecting subclass get **documented as a stated boundary and not patched**; patching them buys the appearance of closure while the escapes bypass the mechanism the patch would harden. Fix the accidentally reachable one. Never close a documentary gap with a convention wearing a mechanism's clothes — a fake mechanism is worse than an honest disclosure because it *looks* enforced.
 ---
 
 ## 5. Workspace Directory Layout
@@ -86,6 +93,7 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 
 2. **Fact-Checking Reference Material**
    - Before referencing third-party dependencies, reference harnesses, or file contents in specs and ADRs, verify the facts directly against the codebase (`pyproject.toml`, manifests, imports). Never cite assumed dependencies.
+   - Three different questions, three different probes: **`find_spec` = installed · `sys.modules` = imported so far · `pyproject.toml` = declared.** `pyproject.toml` answers "what do we declare", never "can this import here?" — the system `python3` has `boto3` and `.venv` does not, so a read of the manifest *and* a probe run under the wrong interpreter both return the wrong answer. Run the probe in the interpreter that will run the code, and write down which of the three you asked: one lane fixed a declared-vs-installed error and shipped an imported-so-far-vs-installed one a round later (a stub guarded on `"requests" not in sys.modules`, shadowing a really-installed `requests` session-wide).
 
 3. **Interface-First External Services (Dependency Inversion)**
    - High-level orchestration engine logic must never depend directly on concrete vendor SDK singletons. Always route third-party APIs (LLM providers, external tools) through lightweight Python `Protocol` interfaces (e.g., `ModelClient`).
@@ -97,6 +105,14 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 5. **Fresh Context on Error Retries**
    - Repair loops and LLM re-prompts must provide fresh, verbatim error logs (`stderr`, build output) and target source files rather than appending full transcript histories or failed diff patches.
 
-6. **Measurement Discipline & the Multi-Agent Audit Hazard**
+6. **Measurement, Stand-In & Audit Discipline**
    - Never pass an unmeasured number into an ADR or spec brief. Re-measure before it enters `docs/`; a false claim carrying a "measured" label is worse than no claim.
+   - **Verify the resolved value in the environment that will run it — never a stand-in for it.** A declaration read is not a value exercised. Deleting `effort: low` from YAML did not stop the parameter being sent: the field carried a non-optional default, so the edit substituted a value the operator never wrote (`src/fleet/models/tasks.py:100-102` records the fix). Reasoning from *importer identity* to *call path* likewise declared a code path unreachable that was live in shipped `fleet pr`. Load the settings, construct the model, run the command. An implementer's "this defect is pre-existing" is the same claim in disguise — check it, don't inherit it.
+   - **Validate an instrument against a known-bad state before trusting a clean result.** A detector never observed firing is not evidence of absence. Three checks, not one: it fires on the known-bad state, stays silent on an already-swept file, and **fires on a synthetic fault injected into a clean one** — the third is what catches a detector silently broken on fresh instances, and it is what caught a mutation harness that was not mutating.
+   - **After fixing an overclaim, re-run the original detector against the fix.** The fix reliably introduces a *narrower* overclaim — a scope or probe narrowing of the one just corrected (a NOT-IMPLEMENTED marker whose scope line excluded the exact claim it existed to neutralise). "Be careful" did not work; re-running the detector is what caught it.
    - A read-only audit subagent **cannot distinguish landed code from another agent's uncommitted edits**. Check `git status` before telling a worker it duplicated work.
+
+7. **Documents Are Inputs to Future Edits**
+   - **Fix the code and its doc listing in the same change.** A code listing inside `docs/SPEC.md` is not documentation; it is what the next author reconciles against. One §5.1 listing kept a pre-change docstring and so deleted the very warning the remedy rested on — in the single artifact the downstream subtask's author reads. A stale listing restores the defect on the next reconciliation.
+   - **"The SPEC says X but the code cannot do X" is two edits, not one.** Adjudicating the implementation is half the job; correct the SPEC sentence in the same breath or it regenerates the defect. A claim that the backend reads effort from the target's "declared capabilities" — a field `ModelCapabilities` never had — outlived its adjudication by six rounds into a land blocker, because a reconciler would add `supports_effort` to make code match spec and thereby suppress an explicitly declared value. `docs/SPEC.md:5671` now forbids that growth in the listing itself.
+   - **Sweep for the class, not the reported site — wrong text propagates by copy.** One misleading cache-key comment caused the same bug in three independent lanes and existed in **five** places, one wrapped across two lines so a single-line grep missed it; a request to fix two stale `effort` sites turned up seven of 33 occurrences. After any rename or renumber, grep the whole tree (code comments and test docstrings included). When you *delete* a false claim, grep for what cited it. Mirror-image error, equally real: **editing a correct sentence because it matched your grep** — report it, don't edit it.
