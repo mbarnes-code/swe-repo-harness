@@ -1124,6 +1124,26 @@ async def _plant_checkpoint(writer: StateWriter, repo_id: str, phase: Phase) -> 
     )
 
 
+async def _quarantine_phase(writer: StateWriter, repo_id: str, phase: Phase) -> None:
+    """Move one already-`PENDING` phase row to `SKIPPED`, the statement `fleet quarantine` uses.
+
+    Raw SQL deliberately, and not a shortcut around the state machine: no `SqliteStateRepository`
+    method writes `SKIPPED` at all, and `complete_phase` cannot reach it either
+    (`ALLOWED_TRANSITIONS[RUNNING]` carries no `SKIPPED` edge). The only production writers are
+    `cli.py`'s own `UPDATE phases SET status = 'SKIPPED'` statements, of which this is one — so
+    the row this plants is a row the harness really produces, via `PENDING -> SKIPPED`.
+    """
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "UPDATE phases SET status = 'SKIPPED', updated_at = ? "
+            " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+            (NOW.isoformat(), RUN, repo_id, int(phase)),
+        )
+
+    await writer.submit(unit)
+
+
 async def _phase_state(
     conn: aiosqlite.Connection, repo_id: str
 ) -> dict[int, tuple[str, int]]:
@@ -1224,8 +1244,7 @@ async def test_demoting_to_a_floor_pends_the_span_keeps_every_attempt_and_drops_
 async def test_a_demotion_writes_one_phasedemoted_finding_per_phase_and_never_a_silent_one(
     demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
 ) -> None:
-    """Three demoted phases produce three `PhaseDemoted` rows, one per phase, and a re-run
-    converges on the same three rather than adding more.
+    """Three demoted phases produce three `PhaseDemoted` rows, one per phase.
 
     Why: a demotion throws away landed, green work, and ADR-0077 makes the finding an obligation
     the caller cannot decline. This is not hypothetical: until `f02d124`, `docs/SPEC.md`
@@ -1259,11 +1278,68 @@ async def test_a_demotion_writes_one_phasedemoted_finding_per_phase_and_never_a_
         assert payload["to_status"] == "PENDING"
         assert payload["reason"] == "phase-2 evidence gone"
 
-    # §11.7: re-running the same demotion re-raises the same findings without duplicating them.
-    await store.demote_to_floor(
-        RUN, REPO, floor=Phase.TRANSFORM, reason="phase-2 evidence gone", now=NOW
-    )
+    # A second call over the SAME rows demotes nothing: phases 2-4 are PENDING now, so the
+    # `is not RepoStatus.SUCCEEDED` filter skips every one and no INSERT runs. Asserting the row
+    # count here would say nothing about §11.7 — the count is held by the absence of a write, not
+    # by the UPSERT. What it does bind is that the no-op really is one: the return value is empty
+    # and no fourth row appears. The §11.7 claim is bound by the test below, on a demotion that
+    # actually reaches the INSERT a second time.
+    assert (
+        await store.demote_to_floor(
+            RUN, REPO, floor=Phase.TRANSFORM, reason="phase-2 evidence gone", now=NOW
+        )
+        == ()
+    ), "already-PENDING rows are not demotable, so the second call writes nothing at all"
     assert len(await _demotion_findings(read_conn, REPO)) == 3
+
+
+async def test_re_demoting_a_re_succeeded_phase_upserts_its_finding_instead_of_colliding(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """§11.7 on the path that actually reaches the INSERT twice: demote, let phases 2-4 succeed
+    again, demote again. Three rows still, carrying the SECOND reason.
+
+    Why this test exists at all, and why the obvious one does not do its job. Re-calling
+    `demote_to_floor` on the rows it just demoted is a **no-op** — they are `PENDING`, the
+    `is not RepoStatus.SUCCEEDED` filter skips them, `demotions` is empty and the findings INSERT
+    never executes. A row count asserted after that call is satisfied by the absence of any write,
+    so it holds identically with `_DEMOTE_FINDING_SQL`'s entire `ON CONFLICT ... DO UPDATE` tail
+    deleted. Measured, not argued: with the clause removed the whole file stayed green, which is
+    the old-passes case Rule 12 asks for. This test re-earns the SUCCEEDED status first, so the
+    second demotion re-executes the INSERT against `ux_findings_ident`
+    (`src/fleet/state/schema.sql`) with the same per-phase fingerprint — without the clause it
+    raises `IntegrityError: UNIQUE constraint failed`, aborting the write unit and rolling back a
+    demotion that has done nothing wrong.
+
+    The `reason` assertion is the second half: `DO UPDATE SET payload = excluded.payload` must
+    actually *replace* the row, not merely tolerate the collision. `DO NOTHING` would keep the
+    count at three while leaving the stale reason behind, and a reader of `findings` would be
+    told the repo was demoted for a cause that no longer applies.
+    """
+    store, writer = demotion_bed
+    await _four_succeeded(store, writer, REPO)
+
+    await store.demote_to_floor(RUN, REPO, floor=Phase.TRANSFORM, reason="r1", now=NOW)
+    first = await _demotion_findings(read_conn, REPO)
+    assert len(first) == 3
+    assert {payload["reason"] for _, payload in first} == {"r1"}
+
+    for phase in (Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY):
+        await _settle_phase(store, REPO, phase, status=RepoStatus.SUCCEEDED, attempts=1)
+
+    demotions = await store.demote_to_floor(
+        RUN, REPO, floor=Phase.TRANSFORM, reason="r2", now=NOW
+    )
+
+    assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY]
+    second = await _demotion_findings(read_conn, REPO)
+    assert len(second) == 3, "the same three phases converge on the same three rows"
+    assert {fingerprint for fingerprint, _ in second} == {
+        fingerprint for fingerprint, _ in first
+    }, "the identity is the semantic one, so the rows are updated in place rather than added to"
+    assert {payload["reason"] for _, payload in second} == {"r2"}, (
+        "DO UPDATE replaces the payload — a DO NOTHING would leave the first run's reason"
+    )
 
 
 async def test_the_demotion_is_one_write_unit_so_a_failure_leaves_no_half_demoted_repo(
@@ -1394,6 +1470,48 @@ async def test_a_degraded_phase_in_the_span_keeps_both_its_status_and_its_checkp
     assert sorted(int(payload["phase"]) for _, payload in await _demotion_findings(
         read_conn, REPO
     )) == [2, 4]
+
+
+async def test_a_skipped_phase_keeps_its_status_but_still_loses_its_checkpoint(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """ADR-0082 §3: the sweep's carve-out names `DEGRADED` alone, and `SKIPPED` is not in it.
+
+    The asymmetry against the backward walk is the point, so it is pinned rather than left
+    incidental. `phase_floor` hard-stops on `SKIPPED` exactly as it does on `DEGRADED`
+    (ADR-0077 §5) because the walk protects a **decision** — the operator's config, which resume
+    does not re-take. This carve-out protects a different thing: a payload a future round will
+    legitimately resume from. `DEGRADED` has such a round and keeps a live `RUNNING` edge for it;
+    `SKIPPED` is in `TERMINAL_STATUSES` and maps to the EMPTY transition set, so no round in this
+    run re-enters it. Sparing its checkpoint would preserve a payload nothing can read.
+
+    The status half still holds — a `SKIPPED` row is never demoted, because `demote()` refuses
+    everything but `SUCCEEDED` — so this test discriminates the two carve-outs from each other
+    rather than testing the demotion filter twice.
+
+    The row is planted the way production makes one: a phase that ran, was reset to `PENDING` by
+    the crash sweep with its partial checkpoint intact, and was then quarantined. That is the only
+    shape in which a `SKIPPED` phase has a checkpoint to lose.
+    """
+    store, writer = demotion_bed
+    for phase in Phase:
+        status = RepoStatus.PENDING if phase is Phase.BUILD else RepoStatus.SUCCEEDED
+        await _settle_phase(store, REPO, phase, status=status, attempts=int(phase))
+        await _plant_checkpoint(writer, REPO, phase)
+    await _quarantine_phase(writer, REPO, Phase.BUILD)
+
+    demotions = await store.demote_to_floor(
+        RUN, REPO, floor=Phase.TRANSFORM, reason="quarantined neighbour", now=NOW
+    )
+
+    assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.VERIFY]
+    state = await _phase_state(read_conn, REPO)
+    assert state[3] == ("SKIPPED", 3), "a SKIPPED row is never demoted — ADR-0077 §5 still holds"
+    assert state[2] == ("PENDING", 2)
+    assert state[4] == ("PENDING", 4)
+    assert await _checkpoint_phases(read_conn, REPO) == {1}, (
+        "the SKIPPED phase's checkpoint goes with the rest of the span: only DEGRADED is spared"
+    )
 
 
 async def test_the_checkpoint_assertion_is_silent_on_a_clean_repo_and_fires_on_an_injected_row(

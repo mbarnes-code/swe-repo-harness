@@ -1400,6 +1400,18 @@ class SqliteStateRepository:
         from a stale anchor. ADR-0077 §5 forbids the alternative; nothing here is claimed to
         resolve the tension.
 
+        **`SKIPPED` is deliberately NOT in that carve-out, and the asymmetry against the backward
+        walk is the decision, not an oversight (ADR-0082 §3).** `phase_floor` hard-stops on
+        `SKIPPED` exactly as it does on `DEGRADED`, because the walk protects a *decision* resume
+        may not re-take — a budget nobody granted, or the operator's config. This carve-out
+        protects something else: a payload some future round will legitimately resume from. Only
+        `DEGRADED` has such a round, keeping a live edge to `RUNNING` for §3.5.1
+        (`models.enums.ALLOWED_TRANSITIONS`); `SKIPPED` is in `TERMINAL_STATUSES` and maps to the
+        EMPTY set, so nothing in this run can re-enter it. Sparing its checkpoint would preserve
+        a payload no reader can ever reach, and leave a stale one behind if the phase were later
+        re-opened. `test_a_skipped_phase_keeps_its_status_but_still_loses_its_checkpoint` turns
+        red if `SKIPPED` is added to the filter below.
+
         `attempts` is retained for every phase, on every path: the SET list does not name the
         column and this method does not call `complete_phase`, which is the only writer of
         `phases.attempts` in `src/`. No lease fence is carried, deliberately — resume holds no
