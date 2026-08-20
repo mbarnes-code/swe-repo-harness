@@ -255,9 +255,16 @@ and `tests/test_reentry_floor.py` binds each of them separately.
 
 Step 3 is stated as `demote_to_floor` landed it (`src/fleet/state/repository.py`): the sweep is
 span-wide but conditional on something actually having been demoted, and it leaves `DEGRADED` rows'
-checkpoints alone. **Open, and deliberately not decided here:** that exclusion names `DEGRADED`
-only, so a `SKIPPED` row above the floor still loses its `checkpoints` row. Subtask 6 owns that
-question; ADR-0077 §5 speaks to the status, not to the checkpoint.
+checkpoints alone. **Decided — no longer open, and not subtask 6's to re-adjudicate:** that
+exclusion names `DEGRADED` only, so a `SKIPPED` row above the floor keeps its status and still
+loses its `checkpoints` row. The asymmetry is the answer, not an oversight: the walk's hard stop
+protects a *decision* (a budget nobody granted, or an operator's config exclusion), which both
+statuses need, while the sweep's carve-out protects a *payload a future round will legitimately
+resume from* — and only `DEGRADED` has such a round, since `SKIPPED` is in `TERMINAL_STATUSES` with
+an empty transition set. **ADR-0082 §3** (`docs/DECISIONS.md`) settled it and states that
+`repository.py` needs no change on this point; commit `704e52f` pinned it with
+`test_a_skipped_phase_keeps_its_status_but_still_loses_its_checkpoint`
+(`tests/test_repository.py`). ADR-0077 §5 speaks only to the status, which is why it did not.
 
 ### `evidence_holds` — a new, resume-owned predicate
 
