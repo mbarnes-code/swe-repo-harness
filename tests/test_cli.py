@@ -27,6 +27,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -58,6 +59,8 @@ from fleet.migrations import LATEST_VERSION
 from fleet.models.build import BuildUnit, SupportFile
 from fleet.models.enums import Ecosystem, Phase
 from fleet.models.state import SCHEMA_VERSION
+from fleet.sandbox.container import ContainerSandbox
+from fleet.sandbox.worktree import WorktreeManager
 from fleet.state.db import SCHEMA_PATH, StateWriter
 from fleet.util.proc import ProcResult
 from fleet.util.proc import run as proc_run
@@ -1518,6 +1521,385 @@ def test_resume_reclaims_once_both_horizons_are_breached(workspace: Path) -> Non
 
     status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
     assert (status, attempts, fence, owner) == ("PENDING", 3, 10, None)
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 2 — the orphan reap (ADR-0081)
+# --------------------------------------------------------------------------------------
+
+REAP_YAML = (
+    "run:\n  monorepo_path: monorepo\n  work_dir: work/\n"
+    "preflight:\n  min_free_bytes: 1048576\n"
+)
+"""`FLEET_YAML` with the repo INSIDE the workspace. The shipped fixture says `../acme-monorepo`,
+which resolves above `tmp_path` into pytest's shared tmp base — a directory a sibling test (or a
+sibling lane) could be writing at the same time. A reap test that cut real worktrees there would
+be reaping in a tree it does not own."""
+
+
+def _proc(argv: Sequence[str], exit_code: int, stdout: str = "", stderr: str = "",
+          *, started: bool = True, timed_out: bool = False) -> ProcResult:
+    return ProcResult(
+        argv=tuple(argv), exit_code=exit_code, stdout_tail=stdout, stderr_tail=stderr,
+        duration_ms=1, timed_out=timed_out, started=started,
+    )
+
+
+class _ScriptedDocker:
+    """The docker CLI at `util.proc.run`'s interface, so `ContainerSandbox` itself is under test.
+
+    A hand-written fake of `ContainerSandbox` would assert this module's *expectations* of the
+    reap rather than the reap; injecting at the subprocess boundary keeps `reap()`, `claims()`
+    and `_remove_with_reason` on the tested path, which is where the sparing rule actually lives.
+    """
+
+    def __init__(
+        self,
+        present: Sequence[str] = (),
+        rm_fails: Sequence[str] = (),
+        starts_after_first_listing: str | None = None,
+    ) -> None:
+        self.present = list(present)
+        self.rm_fails = set(rm_fails)
+        self.removed: list[str] = []
+        self.listings = 0
+        #: A container that appears only once the sweep has already listed once — a build that
+        #: started while step 2 was running. Nothing can make it appear to a sweep that lists a
+        #: single time, which is the point: see the test that uses it.
+        self._late = starts_after_first_listing
+
+    async def __call__(self, argv: Sequence[str], **_kw: Any) -> ProcResult:
+        args = list(argv)
+        if args[1:3] == ["ps", "--all"]:
+            pattern = args[args.index("--filter") + 1].removeprefix("name=")
+            hits = [n for n in self.present if re.match(pattern, n)]
+            self.listings += 1
+            if self._late is not None and self.listings == 1:
+                self.present.append(self._late)
+            return _proc(args, 0, "\n".join(hits))
+        if args[1:3] == ["rm", "--force"]:
+            name = args[3]
+            if name in self.rm_fails:
+                return _proc(args, 1, stderr=f"Error response from daemon: {name} is in use")
+            self.removed.append(name)
+            self.present.remove(name)
+            return _proc(args, 0)
+        raise AssertionError(f"the reap ran an unexpected docker command: {args}")
+
+
+class _NeverSettlingGit:
+    """A `git` whose `worktree remove` never starts — D44's unsettled probe, which
+    `WorktreeManager.remove` must refuse to treat as a licence to delete."""
+
+    def __init__(self, registered: Sequence[Path]) -> None:
+        self.registered = list(registered)
+
+    async def __call__(self, argv: Sequence[str], **_kw: Any) -> ProcResult:
+        args = list(argv)
+        if args[3:5] == ["worktree", "list"]:
+            body = "".join(f"worktree {p}\n\n" for p in self.registered)
+            return _proc(args, 0, body)
+        if args[3:5] == ["worktree", "remove"]:
+            return _proc(args, 124, started=False, timed_out=True)
+        if args[3:5] == ["worktree", "prune"]:
+            return _proc(args, 0)
+        raise AssertionError(f"the reap ran an unexpected git command: {args}")
+
+
+@pytest.fixture(autouse=True)
+def _no_test_may_reach_the_host_docker_daemon(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`fleet resume` now sweeps containers, and every resume test would otherwise `docker ps`
+    against whatever daemon the developer has running — and `docker rm --force` anything it
+    matched. Autouse, because the hazard belongs to the code under test and not to the tests that
+    remember to opt out of it: the default here is a daemon that reports nothing."""
+    monkeypatch.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(
+        runner=_ScriptedDocker()
+    ))
+
+
+def _git_in(repo: Path, *args: str) -> None:
+    """One fixed-argv `git`, never a shell. The single subprocess site in this section, so the
+    two bandit suppressions are asserted once rather than at every call — the same shape
+    `tests/test_transform_e2e.py` and `tests/test_scan_e2e.py` already use for their git
+    fixtures. `git` comes from PATH deliberately: these fixtures must exercise the same binary
+    `WorktreeManager` will invoke, and that is whatever `git_bin="git"` resolves to."""
+    subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+        ["git", *args],  # noqa: S607 - `git` from PATH, as every suite in this repo does
+        cwd=repo, check=True, capture_output=True,
+    )
+
+
+def _reap_workspace(workspace: Path) -> Path:
+    """Repoint the run at a real git repo inside `tmp_path` and return it."""
+    write_config(workspace, fleet=REAP_YAML)
+    _reseal_config_digests(workspace)
+    repo = workspace / "monorepo"
+    repo.mkdir()
+    _git_in(repo, "init", "--initial-branch=main", ".")
+    _git_in(repo, "config", "user.email", "fleet@example.invalid")
+    _git_in(repo, "config", "user.name", "Fleet Test")
+    (repo / "README.md").write_text("hello\n", encoding="utf-8")
+    _git_in(repo, "add", "README.md")
+    _git_in(repo, "commit", "-m", "initial")
+    return repo
+
+
+def _cut(repo: Path, workspace: Path, name: str) -> Path:
+    """A REAL `git worktree add`, so the sweep is validated against git's own registry rather
+    than against a listing the test wrote itself."""
+    path = workspace / "work" / name
+    _git_in(repo, "worktree", "add", "--detach", str(path), "HEAD")
+    return path
+
+
+def _sandbox(repo_id: str, attempt: int) -> str:
+    return f"fleet-{RUN_ID}-{repo_id}-{attempt}"
+
+
+def test_resume_reap_spares_the_rung_the_live_row_is_actually_on(workspace: Path) -> None:
+    """A live row at `attempts = 2` is working in `-3`, NOT in `-2`, and `-3` must survive.
+
+    Why `+ 1` is the whole test and not an off-by-one nicety: `phases.attempts` is a *charged*
+    counter and the sandbox name carries a *rung* number. `PhaseRunner._dispatch` dispatches with
+    `attempt = ladder.attempts + 1` (`orchestrator/runner.py:686`), so the checkout a live worker
+    holds open right now is always one past what its row records. A reap that derived live names
+    from `attempts` alone would classify every live sandbox in the fleet as an orphan and delete
+    the checkout of every worker still running — the sweep would be at its most destructive
+    exactly when the fleet is at its healthiest.
+
+    `-2` is spared too, and deliberately: it is the rung whose charge has already landed and
+    whose sandbox the same worker may still be tearing down (`workers/rdepverify.py:331` removes
+    `sandbox_name(..., ctx.attempt)` on cancel). Sparing an orphan costs disk until the next
+    resume; reaping a live checkout costs the run.
+    """
+    repo = _reap_workspace(workspace)
+    db = workspace / "state" / "fleet.db"
+    fresh = datetime.now(UTC).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=2)
+
+    live_rung = _cut(repo, workspace, _sandbox("acme-commons", 3))
+    teardown_rung = _cut(repo, workspace, _sandbox("acme-commons", 2))
+    orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    payload = json.loads(result.stdout)
+
+    assert _sandbox("acme-commons", 3) in payload["live_sandbox_names"], (
+        "the live set was derived from `attempts` without the `+ 1` the dispatcher adds"
+    )
+    assert payload["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 1)]
+    assert live_rung.exists(), "the reap deleted the checkout a live worker is writing into"
+    assert teardown_rung.exists()
+    assert not orphan.exists()
+
+
+def test_resume_reap_is_silent_on_a_clean_tree_and_fires_on_one_injected_into_it(
+    workspace: Path,
+) -> None:
+    """The third of the three validations CLAUDE.md guardrail 6 requires, and the only one that
+    can catch a detector broken on FRESH instances rather than on the fixture it was developed
+    against: same workspace, same driver, one synthetic orphan injected between two invocations.
+
+    A detector validated only against a pre-planted orphan can pass while being silently inert on
+    anything created after setup — and this sweep's whole job is to find debris that appeared
+    after the harness stopped looking.
+    """
+    repo = _reap_workspace(workspace)
+
+    clean = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert clean.exit_code == ExitCode.USAGE, clean.output
+    assert json.loads(clean.stdout)["reaped_worktrees"]["reaped"] == []
+
+    injected = _cut(repo, workspace, _sandbox("acme-commons", 4))
+
+    after = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert after.exit_code == ExitCode.USAGE, after.output
+    assert json.loads(after.stdout)["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 4)]
+    assert not injected.exists(), "the detector was inert on a worktree created after setup"
+
+
+def test_resume_reap_cannot_reach_a_worktree_outside_the_run_namespace(workspace: Path) -> None:
+    """Two neighbours registered in the same repo survive: another run's sandbox, and a worktree
+    with no `fleet-` prefix at all.
+
+    Why this is asserted rather than assumed: the repository holds worktrees that are evidence,
+    not debris — `worktrees/wt-WT1-example` is quoted in ADR-0074 and is a live fixture for
+    another lane. A reap whose predicate widened to "anything registered that no row claims"
+    would remove them, and would look like a passing sweep while doing it.
+    """
+    repo = _reap_workspace(workspace)
+    other_run = _cut(repo, workspace, "fleet-99999999-9999-4999-8999-999999999999-acme-1")
+    unrelated = _cut(repo, workspace, "wt-WT1-example")
+    orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    assert json.loads(result.stdout)["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 1)]
+    assert other_run.exists(), "the sweep crossed into another run's namespace"
+    assert unrelated.exists(), "the sweep removed a worktree that is not a fleet sandbox at all"
+    assert not orphan.exists()
+
+
+def test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none(
+    workspace: Path,
+) -> None:
+    """`--dry-run` is a health check, so it must both leave the orphan on disk AND name it.
+
+    A preview that removed nothing and reported nothing is indistinguishable from a clean fleet,
+    which is the one answer a health check must never get wrong; a preview that reported by
+    calling `reap()` and discarding the result would be a preview that reaps.
+    """
+    repo = _reap_workspace(workspace)
+    orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
+
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--dry-run"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert f"would reap 1 orphan worktree(s): {_sandbox('acme-commons', 1)}" in result.output
+    assert orphan.exists(), "a --dry-run reaped a worktree"
+
+
+def test_resume_reports_every_worktree_the_sweep_could_not_remove(workspace: Path) -> None:
+    """D44, one layer up: `ReapResult.failed` reaches the operator by NAME and with its reason,
+    and the clean headline is not printed above it.
+
+    The failure injected is D44's own shape — a `git worktree remove` that never started, which
+    `WorktreeManager.remove` refuses to read as a licence to delete. A caller that reported only
+    `reaped` would print a sweep with two stuck checkouts as a completed one, and the operator's
+    next action (`git worktree remove <name>`) needs the name, so a count would not do either.
+
+    The second assertion is the discriminating half. A `_reap_lines` that emitted the
+    `reaped`-derived summary and the failures independently still passed the first assertion
+    while printing `no orphan worktrees` immediately above two `FAILED` lines — the headline
+    contradicting the detail beneath it, which is the same collapse in the reporting layer.
+    """
+    repo = _reap_workspace(workspace)
+    stuck = [workspace / "work" / _sandbox("acme-commons", n) for n in (1, 2)]
+    for path in stuck:
+        path.mkdir(parents=True)
+    monkey = _NeverSettlingGit(stuck)
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(
+            "fleet.cli._reap_worktree_manager",
+            lambda settings, run_id: WorktreeManager(
+                repo_dir=repo, work_dir=workspace / "work", run_id=run_id, runner=monkey
+            ),
+        )
+        result = runner.invoke(app, [*base_args(workspace), "resume"])
+
+    assert result.exit_code == ExitCode.USAGE, result.output
+    for path in stuck:
+        assert f"FAILED to reap worktree {path.name}" in result.output
+        assert path.exists(), "an unsettled `worktree remove` was treated as licence to delete"
+    assert "did not settle" in result.output, "the reason was reduced to a bare name"
+    assert "no orphan worktrees" not in result.output, (
+        "a sweep that removed nothing and failed twice printed the clean headline"
+    )
+
+
+def test_resume_reap_hands_the_container_sweep_sandbox_names_not_expanded_ones(
+    workspace: Path,
+) -> None:
+    """The live set reaches `ContainerSandbox.reap` as SANDBOX names, and `claims()` does the
+    matching — the caller must not pre-expand it into concrete container names.
+
+    No container is ever named `sandbox_name(...)` on its own: `BuildverifyWorker` appends
+    `-t<token>` per invocation. `reap()` has spared by `-`-delimited prefix since `aa16846`, so
+    handing it the sandbox names is both sufficient and race-free. A caller that instead listed
+    the containers itself, computed a spared set and passed THAT would leave a window between its
+    listing and `reap()`'s own in which a newly started container is missing from the spared set
+    and gets `docker rm --force`d with a live row claiming it.
+
+    `-t` tokens differ between the two containers so the assertion cannot be satisfied by string
+    equality anywhere on the path.
+    """
+    _reap_workspace(workspace)
+    db = workspace / "state" / "fleet.db"
+    fresh = datetime.now(UTC).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=2)
+
+    live_container = f"{_sandbox('acme-commons', 3)}-t0badcafe"
+    orphan_container = f"{_sandbox('acme-commons', 1)}-tdeadbeef"
+    docker = _ScriptedDocker(present=[live_container, orphan_container, "unrelated-service"])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
+        result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert json.loads(result.stdout)["reaped_containers"]["reaped"] == [orphan_container]
+    assert docker.removed == [orphan_container], (
+        "the sweep force-removed a container a live row claims"
+    )
+
+
+def test_resume_container_sweep_lists_once_so_a_build_starting_mid_sweep_survives(
+    workspace: Path,
+) -> None:
+    """The property the test above CANNOT see, and the reason it needed a second one.
+
+    That test hands a static docker inventory to the sweep, so it measures "which of these fixed
+    names ended up removed". Under a caller that lists the containers itself, computes a spared
+    set and passes THAT to `reap()`, the answer is unchanged and the test passes — the quantity
+    it watches does not move under the defect (CLAUDE.md guardrail 6, the fourth question). The
+    defect only shows up in the WINDOW between two listings, so the fixture has to open one.
+
+    `starts_after_first_listing` is a second container on the live rung — a retry of a build the
+    live row owns — that docker first reports only after the sweep has listed once. A sweep that
+    takes ONE listing cannot see it and therefore cannot kill it. A sweep that takes two sees it
+    in the second, finds it absent from a spared set computed from the first, and
+    `docker rm --force`s a running build.
+    """
+    _reap_workspace(workspace)
+    db = workspace / "state" / "fleet.db"
+    fresh = datetime.now(UTC).isoformat(timespec="microseconds")
+    _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=2)
+
+    orphan_container = f"{_sandbox('acme-commons', 1)}-tdeadbeef"
+    late_start = f"{_sandbox('acme-commons', 3)}-tfeedface"
+    docker = _ScriptedDocker(
+        present=[f"{_sandbox('acme-commons', 3)}-t0badcafe", orphan_container],
+        starts_after_first_listing=late_start,
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
+        result = runner.invoke(app, [*base_args(workspace), "resume"])
+
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert docker.listings == 1, (
+        "the sweep asked docker twice; the gap between the two answers is a window in which a "
+        "container a live row claims is absent from the spared set"
+    )
+    assert late_start not in docker.removed, (
+        "a build that started while step 2 was running was force-removed"
+    )
+    assert docker.removed == [orphan_container]
+
+
+def test_resume_reports_every_container_docker_would_not_confirm_removed(
+    workspace: Path,
+) -> None:
+    """The container half of the same obligation: `ContainerReapResult.failed` is printed with
+    its reason, never folded into `reaped` and never dropped.
+
+    D32 is the open container-leak defect this sweep is the backstop for. A backstop that
+    reported a `docker rm` refusal as a completed removal would not merely miss the leak — it
+    would tell the operator the leak had been caught.
+    """
+    _reap_workspace(workspace)
+    stuck = f"{_sandbox('acme-commons', 1)}-tdeadbeef"
+    docker = _ScriptedDocker(present=[stuck], rm_fails=[stuck])
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
+        result = runner.invoke(app, [*base_args(workspace), "resume"])
+
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert f"FAILED to reap container {stuck}" in result.output
+    assert "is in use" in result.output, "docker's own reason was discarded"
+    assert "no orphan containers" not in result.output
 
 
 def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
