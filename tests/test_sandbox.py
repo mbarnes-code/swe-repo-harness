@@ -993,7 +993,8 @@ class _ListingFailsRunner:
     """`docker ps` answers with a scripted FAILURE; every other call succeeds. The read-path
     counterpart of `_ContainerRemoveScriptRunner`, and the container analogue of `worktree.py`'s
     `_AlwaysFailListRunner` — except that a failed `docker ps` is a settled non-zero exit, not an
-    `OSError`, which is exactly the state `list_by_prefix` used to collapse into `[]`."""
+    `OSError`, which is exactly the state pre-fix `ContainerSandbox.list_by_prefix` used to
+    collapse into `[]` (D73; `list_with_verdict`, read by `reap()` below, is the fix)."""
 
     def __init__(self, *, exit_code: int = 1, stderr: str = "") -> None:
         self.calls: list[tuple[str, ...]] = []
@@ -1104,29 +1105,21 @@ async def test_reap_reports_a_real_empty_inventory_as_a_clean_complete_sweep() -
     assert result.complete is True
 
 
-async def test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one() -> (
-    None
-):
-    """Pins the residual D73 records, so it cannot be closed by accident in the wrong direction.
-
-    `list_by_prefix` still answers `[]` for a failed listing, and its signature is unchanged,
-    because `BuildverifyWorker._sweep_containers` and `cli._reap_orphan_containers`'s
-    `--dry-run` branch both iterate the returned list: making this method raise would turn a
-    best-effort cancellation sweep into an exception escaping `on_cancel`, and a `--dry-run`
-    preview into a traceback. Closing the residual means moving those two call sites to
-    `list_with_verdict` — in the modules that own them — not changing this method under them.
-
-    Both halves are asserted together on the SAME failure, because the pair is the contract: the
-    honest answer exists and is reachable, and the lenient one is lenient on purpose.
+async def test_list_with_verdict_carries_dockers_own_words_on_a_failed_listing() -> None:
+    """Direct unit coverage of `ContainerListing.error`, once a level below `reap()`'s own
+    coverage of the same failure (`test_reap_reports_a_failed_listing_instead_of_a_clean_empty_
+    sweep`). D73's residual — the lenient `list_by_prefix` wrapper that `BuildverifyWorker.
+    _sweep_containers` and `cli._reap_orphan_containers`'s `--dry-run` branch used to read instead
+    of this method — is closed (`5ed4e47`): both now read `list_with_verdict` directly, and
+    `list_by_prefix` itself had zero callers left in `src/` once they moved, so it was deleted
+    rather than kept as a dead wrapper (Rule 2).
     """
     runner = _ListingFailsRunner(exit_code=1, stderr="permission denied on /var/run/docker.sock")
     sandbox = ContainerSandbox(runner=runner)
     prefix = run_prefix(RUN_ID)
 
-    lenient = await sandbox.list_by_prefix(prefix)
     honest = await sandbox.list_with_verdict(prefix)
 
-    assert lenient == []
     assert honest.names == []
     assert honest.error is not None
     assert "permission denied" in honest.error
@@ -1136,8 +1129,8 @@ class RegexFilterRunner:
     """Emulates Docker's REAL `--filter name=^<pattern>` semantics against a fixed pool of
     container names — `<pattern>` is matched as a regex, exactly like the daemon does, instead of
     a stub that treats it as a literal prefix. That distinction is the whole point: a fake that
-    special-cases prefix matching would pass even if `list_by_prefix` stopped escaping, and prove
-    nothing about the bug this guards (research-36 Q1.5(1) — MEASURED: `docker ps --filter
+    special-cases prefix matching would pass even if `list_with_verdict` stopped escaping, and
+    prove nothing about the bug this guards (research-36 Q1.5(1) — MEASURED: `docker ps --filter
     'name=^resq1d-a.b-1-t'` matched a SIBLING container `resq1d-aXb-1-t...` because `.` is a regex
     metacharacter `slug` deliberately preserves).
     """
@@ -1178,11 +1171,16 @@ async def test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matche
     PRESERVES `.` in a repo id (`my.repo.js` stays `my.repo.js`), and Docker's `name` filter is a
     REGEX, so an unescaped `^{prefix}` lets that `.` match ANY character. `_container_prefix`
     (`buildverify.py`) builds exactly this shape — `sandbox_name(run_id, repo, attempt) + "-t"` —
-    and `on_cancel` sweeps it with `list_by_prefix`, force-removing everything it returns. Two
+    and `on_cancel` sweeps it via `_sweep_containers`, which reads `list_with_verdict` and
+    force-removes every name the listing returns. (Name kept for the regression citation despite
+    testing `list_with_verdict` directly now: `list_by_prefix` itself — the lenient wrapper D73's
+    residual used to leave in place — had zero production callers left once that residual closed
+    in `5ed4e47`, and was deleted rather than kept as a dead wrapper (Rule 2); the `re.escape` this
+    test pins always lived in `list_with_verdict`, which built the argv, not in the wrapper.) Two
     sibling repos whose names differ only where the target has a literal `.` — `my.repo.js` and
     `myXrepo.js` — must stay distinguishable, or a cancel/sweep for one repo `docker rm --force`s
     the OTHER repo's live container (which then exits 137, read by the harness as a substantive
-    failure, not infrastructure — research-36 Q1(d)). Without `re.escape` in `list_by_prefix`,
+    failure, not infrastructure — research-36 Q1(d)). Without `re.escape` in `list_with_verdict`,
     both names come back and this assertion fails.
     """
     target_repo = "my.repo.js"
@@ -1193,7 +1191,7 @@ async def test_list_by_prefix_escapes_dots_so_a_sibling_repo_is_not_cross_matche
     runner = RegexFilterRunner([target_name, victim_name])
     sandbox = ContainerSandbox(runner=runner)
 
-    matched = await sandbox.list_by_prefix(prefix)
+    matched = (await sandbox.list_with_verdict(prefix)).names
 
     assert matched == [target_name]
     assert victim_name not in matched
@@ -1295,8 +1293,8 @@ async def test_reap_never_removes_a_container_outside_the_runs_own_namespace() -
     `docker rm --force` for anything that is not `fleet-<run A>-*`.
 
     The listing is deliberately supplied by a runner that IGNORES the `--filter` argument and
-    answers with everything it holds. That is not a hypothetical: `list_by_prefix` delegates the
-    match to the DAEMON's regex engine, and a daemon quirk, a dropped `^` anchor, or a lost
+    answers with everything it holds. That is not a hypothetical: `list_with_verdict` delegates
+    the match to the DAEMON's regex engine, and a daemon quirk, a dropped `^` anchor, or a lost
     `re.escape` all reach `reap()` as an over-wide listing — which the pre-fix loop would have
     force-removed name by name. The floor must therefore live in `reap()` itself, checked against
     a prefix this process built.
@@ -1497,7 +1495,7 @@ async def test_real_container_runs_without_network_and_is_torn_down(tmp_path: Pa
     assert "mounted" in lines
     # `--network=none` leaves loopback and nothing else.
     assert lines[-1] == "1", f"expected only loopback, got: {result.stdout_tail!r}"
-    assert spec.name not in await sandbox.list_by_prefix(run_prefix(RUN_ID))
+    assert spec.name not in (await sandbox.list_with_verdict(run_prefix(RUN_ID))).names
 
 
 def _fleet_build_image_usable() -> tuple[bool, str]:

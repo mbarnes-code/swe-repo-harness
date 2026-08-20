@@ -200,7 +200,7 @@ def claims(live_name: str, container_name: str) -> bool:
     starts every container this predicate spares, does not go through it: it builds the argv
     itself with `docker_run_argv` (`workers/buildverify.py:792`, `:1133`) and runs it on its own
     `CommandRunner`, using the `ContainerSandbox` it constructs (`:1050`) only for
-    `list_by_prefix`/`remove`. The paths that do reach one of these containers are:
+    `list_with_verdict`/`remove`. The paths that do reach one of these containers are:
 
     * **General** — the next idempotent `reap()`, once the rung stops being live. Real since
       `cli._reap_orphan_containers` gained the call (`cli.py:10608`); before that it was a
@@ -449,24 +449,6 @@ class ContainerSandbox:
             error=None,
         )
 
-    async def list_by_prefix(self, prefix: str, *, timeout_s: float = 30.0) -> list[str]:
-        """Names of containers (running or not) whose name starts with `prefix`.
-
-        **This is the LENIENT view and it collapses two states** (docs/INTEGRATION_HONESTY.md
-        D73): a failed `docker ps` and a run with no containers both come back `[]`. Callers that
-        act on the answer — anything that reports a sweep as clean, or that concludes a leak does
-        not exist — want `list_with_verdict` above, which keeps the two apart. This wrapper is
-        kept, with its signature unchanged, because `BuildverifyWorker._sweep_containers` and
-        `cli._reap_orphan_containers`'s `--dry-run` branch both iterate the returned list and
-        both live in modules with their own owners; making this method raise or return a record
-        would turn a best-effort cancellation sweep into an exception escaping `on_cancel`. Those
-        two call sites are the residual recorded under D73.
-
-        The filter's `re.escape` and the ordering of the `no_verdict`/`ok` checks are documented
-        on `list_with_verdict`, which is where the argv is built.
-        """
-        return (await self.list_with_verdict(prefix, timeout_s=timeout_s)).names
-
     async def reap(
         self, *, run_id: UUID | str, live_names: Iterable[str], timeout_s: float = 30.0
     ) -> ContainerReapResult:
@@ -500,12 +482,11 @@ class ContainerSandbox:
         `failed`: "deliberately spared" is a third fact, not a failure.
 
         **A `docker ps` that fails is reported, not swept past.** The listing comes from
-        `list_with_verdict`, not from the lenient `list_by_prefix`, because the two answers that
-        method returns `[]` for — "this run has no containers" and "docker did not tell me" — end
-        here as the same empty `ContainerReapResult`, which every caller reads as a clean sweep
-        (D73: the D44 collapse on the read side, and the one that is silent). When the listing
-        carries an error this returns a single `failed` entry naming the prefix, so `complete` is
-        False and the operator gets docker's own reason.
+        `list_with_verdict`, which keeps "this run has no containers" apart from "docker did not
+        tell me" — collapsing the two into the same empty `ContainerReapResult` is what every
+        caller used to read as a clean sweep (D73: the D44 collapse on the read side, and the one
+        that is silent). When the listing carries an error this returns a single `failed` entry
+        naming the prefix, so `complete` is False and the operator gets docker's own reason.
         """
         live = set(live_names)
         prefix = run_prefix(run_id)
@@ -525,7 +506,7 @@ class ContainerSandbox:
         for name in listing.names:
             if not name.startswith(prefix):
                 # The namespace floor, re-checked here rather than trusted from the listing.
-                # `list_by_prefix` asks DOCKER to filter, and docker's `--filter name=` is a
+                # `list_with_verdict` asks DOCKER to filter, and docker's `--filter name=` is a
                 # regex evaluated by the daemon: a daemon quirk, a future edit that drops the
                 # `^` anchor or the `re.escape`, or a fake in a test is all it takes for a name
                 # outside `fleet-<run_id>-` to come back from that call — and every name that
