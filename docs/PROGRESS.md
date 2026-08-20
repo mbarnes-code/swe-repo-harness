@@ -5352,7 +5352,7 @@ in the `37`-series and carries no collision the way `37d` did.
 (`docs/superpowers/plans/research-38.md` / `review-38.md`); that thread still has **no section of
 its own** and no commit past the files' creation (`git log --oneline -- research-38.md` → `32365cf`,
 the §37 checkpoint), so the reservation is released here and the pending reconciliation survives as
-an open item (item 20) rather than as a held number. If that thread ever writes a section it takes
+an open item (item 17) rather than as a held number. If that thread ever writes a section it takes
 the next free suffix, not this slot.
 
 ### What was completed
@@ -5518,7 +5518,7 @@ recorded under "What was verified".
   the same bug three times, a SPEC rule inverted by a markdown parse — 1305 tests passed over all of
   it, and 1575 pass over what remains of it. That is the strongest statement about the suite's
   coverage this round supports. (One qualifier: green is a *pytest* claim. `ruff format --check`
-  fails on `cli.py` — see open item 19.)
+  fails on `cli.py` — see open item 16.)
 - **Reviewers verified rather than accepted, and the checks changed verdicts.** A mutation claim was
   re-derived arithmetically instead of transcribed; a lane's "no tool exists for this" blocker was
   refuted by checking what is *installed* (httpx 0.28.1 ships as a hard transitive of `openai`); a
@@ -5558,7 +5558,7 @@ so no post-round total is asserted here.** Per row, what is traceable on `main`:
 - **Row 37** (capability drift recorded silently) — `CapabilityDrift` is persisted for the first
   time (FD1), and BK1 prevented a new instance of the row's own failure mode.
 - **Row 35 / row 45** (unresolved stubs, revalidation) — the state machine exists and is tested in
-  isolation; **it still has no caller in `src/`** (open item 8), so neither row is closed by it.
+  isolation; **it still has no caller in `src/`** (open item 7), so neither row is closed by it.
 - **Row 40** (backend unavailability) — the `BackendUnavailable` finding is built and persisted; the
   `failover.py` / `BackendHealth` module scoped as MEDIUM is **not built**. Dispatch-path coverage
   was extended after a reviewer found a `cli.py` path exiting 8 with no finding at all.
@@ -5638,17 +5638,23 @@ each fix is recorded per entry.
     where it served as **the stated premise for cache determinism**. No `thinking`, `temperature`,
     `seed` or `top_p` key is constructed anywhere in `src/fleet/llm/`. Fixed and landed (`87884d7`
     and the BK2 marker rounds that followed); the determinism *conclusion* survives on an
-    independent, code-backed leg. **One mirror was missed and is still on `main`** — see open item 17.
+    independent, code-backed leg. **One mirror was missed and is still on `main`** — see open item 14.
 15. **SPEC §7.7 asserted "effort where the target's declared capabilities carry it"** while
     `ModelCapabilities` has no field that can carry it. Corrected in place on `main`
     (`docs/SPEC.md:5671` now says so explicitly and forbids growing a `supports_effort` gate).
 16. **`ruff format --check` fails on `src/fleet/cli.py`** (D70) — 58 hunks measured at `7a8bfbb`,
-    **60 measured on landed `main`**. See open item 19.
+    **60 measured on landed `main`**. See open item 16.
 
 ### What is still NOT proven / left open
 
-Twenty items. None is softened, and none of the seven the landing genuinely closed is carried
-forward. Each was re-verified against `main` at `6a41840` while this section was written.
+Seventeen items. Three further entries that read as work are **not** work — they are permanent
+limits — and have been moved out of the numbered list into their own subsection below, so a reader
+tallying debt does not count them. None of the seventeen is softened, and none of the seven the
+landing genuinely closed is carried forward. Each was re-verified against `main` at `6a41840` while
+this section was written, and the whole list was re-audited afterwards at `b754aac`
+(`docs/superpowers/plans/open-items-audit-round-b.md`): fifteen re-verify unchanged, one — item 15,
+the worktrees — had gone stale in the world outside git and is rewritten below, and one — item 17 —
+is a duplicate and now says so.
 
 1. **No backend adapter has ever made a real network request.** `anthropic` and `openai` are
    installed in `.venv`, and `_SdkTransport` is covered by six tests driving a real `AsyncOpenAI`
@@ -5677,17 +5683,15 @@ forward. Each was re-verified against `main` at `6a41840` while this section was
    `models/enums.py:383` still do, and `DOWN` has no representation in `src/`. Left with a comment,
    not fixed; the misclassification was deliberately out of scope (LARGE) and is **live on `main`
    today**. (D55.)
-6. **`failover_triggers_recorded` can never read "complete"** — structural, per defect 10 above. The
-   row is honest about this; the gap itself is not closed. (D60.)
-7. **`orchestrator/stubs.py` has no caller in `src/`.** The module is complete and tested in
+6. **`orchestrator/stubs.py` has no caller in `src/`.** The module is complete and tested in
    isolation; re-verified on `main` — `git grep -l "orchestrator.stubs"` under `src/` returns only
    the module itself. Meanwhile `cli.py:11015` still carries a **second, raw-SQL encoding of T4**.
    ST1 aligned the finding *kind* (`stubs.py:145` now emits `StubAbandoned`, matching the committed
    CLI path), so the two no longer disagree — but two encodings of one rule remain. (D69.)
-8. **`RESUME_DEMOTE` / `demote()` also ship with no caller in `src/`** — `git grep "demote(" -- src/`
+7. **`RESUME_DEMOTE` / `demote()` also ship with no caller in `src/`** — `git grep "demote(" -- src/`
    outside `enums.py` is empty on `main`. Correct for a gate, but **any future claim that "resume can
    demote" is false today.** (D68.)
-9. **`fleet resume` is still refused, and the refusal names its own gaps.** `cli.py:10041`'s
+8. **`fleet resume` is still refused, and the refusal names its own gaps.** `cli.py:10041`'s
    `ResumeIncompleteError` (exit 2) states that steps **5, 2, 4 and 6** have no implementation;
    `--from-phase`, `--repo` and `--reset-attempts` are still in the refusal set
    (`_refuse_unbuilt_resume_flags`, `cli.py:10264-10266`). Step 8 ("continue") is subtask 10 of the
@@ -5695,58 +5699,83 @@ forward. Each was re-verified against `main` at `6a41840` while this section was
    distinction matters, because the earlier phrasing "steps 2, 4, 5, 6 and 8 remain unbuilt" was
    inference, and only the first four are on the record.** `ResumeIncompleteError` is an explicit
    placeholder its own ADR (0076) says should be **deleted** when step 5 lands.
-10. **Three `_unavailable` call sites still carry text that is false.** Measured on `main`:
-    `cli.py:2408`, `:2520` (both `workers/relocate.py`) and `:10958` (`workers/buildverify.py`) — two
-    distinct modules, down from five sites and four modules at `7a8bfbb` because RS1's landing routed
-    `resume` through a truthful refusal. The false sentence itself is unchanged at `cli.py:905`.
-    Reported, not reworded; needs an owner. (D63.)
-11. **`cache.py:621-628` still resolves `effort` from the primary target**, so effort is
+9. **Three `_unavailable` call sites still carry text that is false.** Measured on `main`:
+   `cli.py:2408`, `:2520` (both `workers/relocate.py`) and `:10958` (`workers/buildverify.py`) — two
+   distinct modules, down from five sites and four modules at `7a8bfbb` because RS1's landing routed
+   `resume` through a truthful refusal. The false sentence itself is unchanged at `cli.py:905`.
+   Reported, not reworded; needs an owner. (D63.)
+10. **`cache.py:621-628` still resolves `effort` from the primary target**, so effort is
     mis-attributed on failover to a standby with a different effort. Documented in CLEAN1's rewritten
     docstring; **not fixed**.
-12. **The `effort` component of the cache key is partitioned for backends whose transports never send
-    it.** Adjudicated as record-accuracy rather than a cache defect — `config/models.yaml` ships
-    **zero** `bedrock`/`vertex` targets, re-verified on `main` (six targets, all `anthropic` or
-    `openai_compatible`) — and deliberately not routed. Recorded so the judgement stays visible.
-13. **FD1's F4 was reported and not closed**: `_mapped_errors()` is a zero-arg funnel with **22**
+11. **FD1's F4 was reported and not closed**: `_mapped_errors()` is a zero-arg funnel with **22**
     `with _mapped_errors()` call sites on `main` (re-counted; the draft's "19" was measured on a
     branch), carrying no `run_id` and no writer. The related `fleet pr` no-flush path *was* fixed
     after a reviewer proved the "unreachable" premise false — `cli.py`'s `fleet pr` verb builds a
     `RunContext` and runs `PrwriterWorker` directly with **no `PhaseRunner`** — but the funnel itself
     is untouched.
-14. **DEM1's `transition()` tripwire has seven documented adversarial escapes**, four of which bypass
-    whitelisted-global *identity* entirely, so freezing identities would have bought **the appearance
-    of closure**. Documented in ADR-0077 §4.2 and **deliberately not patched**. The distinction drawn
-    — adversarial-only escape = documented limit, accidentally-reachable escape = defect — is the
-    standard the next round should hold it to.
-15. **ST1's deferred items.** The merge-wait bound is opt-in (both args default `None`); the
+12. **ST1's deferred items.** The merge-wait bound is opt-in (both args default `None`); the
     past-bound sweep emits `UnresolvedStub` where §13 row 45 describes BLOCKED/`UnmergedDependency`;
     and **the wiring lane must delete the `KNOWN_INERT` line for `fleet.yaml:pr.merge_wait_timeout_s`**
     (`tests/test_config_keys_are_read.py:191`, verified still present) when it first passes the real
     setting. Note the naming: the config leaf is `pr.merge_wait_timeout_s`; `stubs.py`'s parameter is
     deliberately named `open_pr_max_age_s` so the ratchet's bare-word reader-detector is not tripped
     by a parameter name, which would have closed a ledger entry falsely.
-16. **An ADR for BK1's backend-name narrowing is warranted and unwritten.** BK1 narrows the accepted
+13. **An ADR for BK1's backend-name narrowing is warranted and unwritten.** BK1 narrows the accepted
     set from four names to two by passing the live registry as `known_backends`; **no test catches
     it.** `docs/DECISIONS.md` carries 77 ADRs and stops at 0077, so the number is free: **0078**.
-17. **Two doc corrections did not fully land.** `docs/SPEC.md:4251`'s ADR-0075 annotation on the
+14. **Two doc corrections did not fully land.** `docs/SPEC.md:4251`'s ADR-0075 annotation on the
     `effort` column has **no mirror** in `src/fleet/state/schema.sql:474` (still a bare
     `effort TEXT NOT NULL`), and **no test binds the two**; and the retracted "adaptive thinking"
     claim survives unamended on `main` at `tests/test_llm_cache.py:4`, which no lane touched. Both
     re-verified today. Neither is a red suite; both are the round failing to fully land a correction
     it claims.
-18. **Ten `agent/*` worktrees are still present** after all eight branches merged. Housekeeping, but
-    a stale worktree is exactly the kind of state a later round mistakes for live work — and
-    ADR-0074's hook keys on the worktree/branch correspondence.
-19. **`ruff format --check` still fails on `src/fleet/cli.py`, and the count moved.** Measured for
+15. **The eight round-B lane worktrees are gone; the one that remains is evidence and must not be
+    pruned.** This item first read *"ten `agent/*` worktrees are still present"* — true when written,
+    false now: `git worktree list` at `b754aac` returns **two** entries, the primary checkout on
+    `main` and `worktrees/wt-WT1-example` on `agent/WT1-example`. The eight lane worktrees were torn
+    down after this section was written, so the housekeeping the item asked for is done.
+    **What remains is not cleanup debt.** `agent/WT1-example` is the round-A fixture from ADR-0074's
+    pre-commit-hook verification, and `docs/DECISIONS.md:6458-6566` quotes **that worktree's own**
+    `git rev-parse --absolute-git-dir` output —
+    `/home/redmage/swe repo harness/.git/worktrees/wt-WT1-example`, against the primary's `.git` —
+    as the live evidence for the hook's primary-vs-linked detection, and names it again in the
+    four-case verification matrix (row A). `tools/worktree/README.md:117` cites the same worktree,
+    and `docs/superpowers/plans/ledger-sdd-backlog-b.md:2009` records it as **"LEFT DELIBERATELY"**.
+    It is an ancestor of `main` (`git branch --merged main` lists it), so nothing un-landed is
+    stranded in it. **Deleting it on the strength of a stale housekeeping line would destroy evidence
+    an ADR depends on** — that is the whole reason this item is rewritten rather than dropped.
+16. **`ruff format --check` still fails on `src/fleet/cli.py`, and the count moved.** Measured for
     this section: **60 hunks** on landed `main`, against **58** at `7a8bfbb`. The round has to decide
     whether this is fixed or ratcheted, and the delta is its own lesson — D70 records that RS1 first
     reported this failure as "identical" pre-existing and its reviewer *measured* it instead
     (58 → 59 → 58). **Verifying that a failure exists before and after is not verifying it is
     unchanged**, and landing moved it again.
-20. **The round-38 reconciliation is still pending**, carried unchanged from §37f item 6:
-    `research-38.md` / `review-38.md` are tracked with no checkpoint of their own, and the
-    `workers/base.py` / `workers/buildverify.py` history from that thread has never been read against
-    §37e's D34/D35/D36/D41 corrections.
+17. **The round-38 reconciliation is still pending** — and this is **not a finding of this round**:
+    it is **§37f item 6, carried forward verbatim**, recorded here only so it is not lost, and it
+    should be counted once, against §37f, by anyone tallying debt. `research-38.md` /
+    `review-38.md` are tracked with no checkpoint of their own, and the `workers/base.py` /
+    `workers/buildverify.py` history from that thread has never been read against §37e's
+    D34/D35/D36/D41 corrections. Still true at `b754aac`; both files are still tracked.
+
+### Permanent limits, recorded so they are not mistaken for backlog
+
+Three entries stood in the numbered list above and should not have. Nobody can close them: each is
+either a structural property of the system or a judgement deliberately taken with its reason on the
+record. They stay visible — they are honest caveats, and every one of them says so in its own text —
+but they are not tasks, and counting them as open debt overstates it.
+
+- **`failover_triggers_recorded` can never read "complete"** — structural, per defect 10 above. The
+  row is honest about this; the gap itself is not closed, and cannot be, because the per-tier
+  evidence that would justify "complete" does not exist. (D60.)
+- **The `effort` component of the cache key is partitioned for backends whose transports never send
+  it.** Adjudicated as record-accuracy rather than a cache defect — `config/models.yaml` ships
+  **zero** `bedrock`/`vertex` targets, re-verified on `main` (six targets, all `anthropic` or
+  `openai_compatible`) — and deliberately not routed. Recorded so the judgement stays visible.
+- **DEM1's `transition()` tripwire has seven documented adversarial escapes**, four of which bypass
+  whitelisted-global *identity* entirely, so freezing identities would have bought **the appearance
+  of closure**. Documented in ADR-0077 §4.2 and **deliberately not patched**. The distinction drawn
+  — adversarial-only escape = documented limit, accidentally-reachable escape = defect — is the
+  standard the next round should hold it to.
 
 ### Next subagent task, in priority order
 
@@ -5767,7 +5796,7 @@ forward. Each was re-verified against `main` at `6a41840` while this section was
    `preconditions_hold`** — `runner.py:214-218` says it outright, "neither verdict ever means 'skip
    the work'". Delete `ResumeIncompleteError` when subtask 7 lands, per ADR-0076.
 2. **Write ADR-0078** for the backend-name narrowing, and add the test that would have caught it
-   (open item 16). The number is free and the behaviour change is currently recorded nowhere.
+   (open item 13). The number is free and the behaviour change is currently recorded nowhere.
 3. **Give `orchestrator/stubs.py` a caller**, and retire `cli.py:11015`'s raw-SQL T4 encoding in the
    same change. Until then §13 rows 35 and 45 are unclosed regardless of the module's test count.
 4. **Wire `RunContext.llm_policy`** (open item 2): a `CallPolicy.from_config` builder, the `cli.py`
@@ -5779,14 +5808,24 @@ forward. Each was re-verified against `main` at `6a41840` while this section was
 6. **§13 row 43 — rate limiting (LARGE).** The only fix for open item 5, which is live on `main`
    today. Scoping must confront what §11.8 does not: the 429 signal is in `llm/`, the semaphore is in
    `budgets.py`, only 1 of 12 workers acquires it, and `asyncio.Semaphore` cannot be resized.
-7. **§13 row 38 — `ContextTruncated` (MEDIUM, greenfield).** Nothing in `src/` sizes against
-   `max_context` today.
+7. **§13 row 38 — `ContextTruncated` (MEDIUM, greenfield).** Nothing in `src/` sizes a real prompt
+   against `max_context` **at runtime**; `ContextTruncated` itself has zero occurrences in `src/`.
+   The earlier phrasing here — "nothing in `src/` sizes against `max_context`" — was too strong:
+   `settings.py:1444-1450` **does** compare a target's declared `max_context` against
+   `require_capabilities`' `min_context`, raising `ConfigValidationError` at **config-validation**
+   time. It is the runtime sizing that is absent. The task is unchanged; only its justification was
+   overstated.
 8. **Prove one backend adapter against a real endpoint** (open item 1) — in a throwaway venv with
    the extras installed, never the working one. Until then "the harness can call a model" is a claim
    backed only by mocks.
 9. **Housekeeping, batched:** reword the three false `_unavailable` strings; mirror the ADR-0075
    `effort` annotation into `schema.sql:474` and bind the two with a test; amend
-   `tests/test_llm_cache.py:4`; write `heartbeat_ttl_seconds`' missing writer; prune the ten stale
-   `agent/*` worktrees; and decide whether the `ruff format` failure on `cli.py` (now 60 hunks) is
-   fixed or ratcheted.
-10. **Reconcile with round 38** (open item 20), unchanged from §37f.
+   `tests/test_llm_cache.py:4`; write `heartbeat_ttl_seconds`' missing writer; and decide whether the
+   `ruff format` failure on `cli.py` (now 60 hunks) is fixed or ratcheted. **The worktree clause of
+   this batch is done and is struck:** the eight round-B lane worktrees have been torn down, and the
+   one that remains, `agent/WT1-example`, **must not be pruned** — `docs/DECISIONS.md:6458-6566`
+   quotes that worktree's own `git rev-parse --absolute-git-dir` output as ADR-0074's live evidence.
+   See open item 15, which carries the full citation; the two must not drift apart.
+10. **Reconcile with round 38** (open item 17), unchanged from §37f — and note that it *is* §37f
+    item 6, not a new one; if it is not going to be done it should be closed explicitly rather than
+    listed a third time.

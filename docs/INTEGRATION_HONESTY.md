@@ -799,6 +799,11 @@ purest form yet: not a check that was believed to be running and was not checkin
 Each is recorded here with the assertion that now holds it, because a fixed defect with no test is
 a defect waiting for its next commit.
 
+**Header/status convention, for every `D<n>` entry below:** the status word in an entry's `**D<n> —
+…**` header is that entry's *current* status, so when a `**Status — …**` block or a later correction
+inside the entry changes it, the header must be rewritten to match in the same pass — the original
+analysis text stays verbatim underneath, per this file's in-place correction convention.
+
 **D1 — `use_extension` named a `.bzl` no ruleset ships.** `render_module_bazel` defaulted
 `extension_bzl` to `@<ruleset>//:extensions.bzl`, and nothing in `src/` ever passed the parameter.
 Real Bazel: `cannot load '@@rules_python+//:extensions.bzl': no such file` … `2 extensions failed`,
@@ -1213,10 +1218,10 @@ is **pre-existing behaviour**, not something this round introduced.
 
 ### D19 — found by reading the DEBUG output of the first green Go build, which is the only place it is reported
 
-**D19 — OPEN. The versions Bazel fetches for Go are not the versions the harness pinned, and the
-harness's `go.sum` is not what verified them.** Unlike every other entry in this section, D19 is a
-**correctness gap rather than a missing test** — no assertion closes it; a code change does.
-Verbatim from the build that this round's headline rests on:
+**D19 — NARROWED AND ACCEPTED. The versions Bazel fetches for Go are not the versions the harness
+pinned, and the harness's `go.sum` is not what verified them.** Unlike every other entry in this
+section, D19 is a **correctness gap rather than a missing test** — no assertion closes it; a code
+change does. Verbatim from the build that this round's headline rests on:
 
     DEBUG: …/gazelle+/internal/bzlmod/go_deps.bzl:753:36: The following Go modules were required
     by the root module at the given versions, but were implicitly updated to higher versions due
@@ -1493,21 +1498,21 @@ reads the lie. That is not a defence: a field written by production code, read b
 asserted by nothing is a checkpoint waiting to be trusted. **Would a test catch it? No**, for the
 same reason — there is nothing to assert against until the field acquires a reader.
 
-**D29 — OPEN. `_c_toolchain_gate` misattributes timeouts and never-started probes as "no C
-compiler", non-retryably — the THIRD instance of this bug in one gate.** The gate branches exactly
-twice: `if result.ok: return None`, then `if result.exit_code == _DOCKER_CANNOT_RUN` (125), then an
-**unconditional fallthrough** to the refusal that begins *"no C compiler in the sandbox image"*
-(`buildverify.py:700–722`). Everything else lands there: a probe that **timed out**
-(`result.timed_out`, whose exit code is not 125), and a `docker` binary that **never started at
-all** (`ProcResult.started is False`). Neither consulted the image. Both are reported as a verdict
-about its contents, and both are **`retryable=False`**, so a **transient** condition —
-a loaded daemon, a slow pull-less start — **terminates the repo**. **Severity: high**, and the
-count is the point: §29 recorded this gate's first implementation probing *"the wrong predicate in
-both directions"*, §31 recorded the 125 misattribution, and **this is the third**. The 125 arm's
-own comment states the correct principle — *"the probe never executed inside it … says nothing
-about whether the image has a C compiler"* — and the fallthrough violates it for two more cases.
-**Would a test catch it? Yes:** feed the gate a timed-out `ProcResult` and a `started=False` one,
-and assert neither refusal mentions a compiler.
+**D29 — CLOSED, FIXED in `68a41ff`. `_c_toolchain_gate` misattributes timeouts and never-started
+probes as "no C compiler", non-retryably — the THIRD instance of this bug in one gate.** The gate
+branches exactly twice: `if result.ok: return None`, then `if result.exit_code ==
+_DOCKER_CANNOT_RUN` (125), then an **unconditional fallthrough** to the refusal that begins *"no C
+compiler in the sandbox image"* (`buildverify.py:700–722`). Everything else lands there: a probe
+that **timed out** (`result.timed_out`, whose exit code is not 125), and a `docker` binary that
+**never started at all** (`ProcResult.started is False`). Neither consulted the image. Both are
+reported as a verdict about its contents, and both are **`retryable=False`**, so a **transient**
+condition — a loaded daemon, a slow pull-less start — **terminates the repo**. **Severity: high**,
+and the count is the point: §29 recorded this gate's first implementation probing *"the wrong
+predicate in both directions"*, §31 recorded the 125 misattribution, and **this is the third**.
+The 125 arm's own comment states the correct principle — *"the probe never executed inside it …
+says nothing about whether the image has a C compiler"* — and the fallthrough violates it for two
+more cases. **Would a test catch it? Yes:** feed the gate a timed-out `ProcResult` and a
+`started=False` one, and assert neither refusal mentions a compiler.
 
 **D30 — OPEN. Gazelle capture globs only `BUILD.bazel`, so a repo carrying a legacy `BUILD` file
 ships a package with no targets at exit 0.** `GENERATED_BUILD_FILE = "BUILD.bazel"`
@@ -1893,23 +1898,24 @@ explicit `exit_code` reading, or a message that prints `timed_out=` rather than 
 
 ### Tier 1 — burns the repo
 
-**D34 — OPEN. `classify_build_failure` has no `125` branch, and the build steps ARE `docker run`.**
-`BuildverifyWorker._argv` (`buildverify.py:889–920`) returns `tuple(docker_run_argv(spec))` whenever
-`payload.image is not None`, so the process the classifier judges is **the docker client**, and a
-real build or test can exit **125**: unreachable daemon, image deleted mid-run, malformed
-`--memory`/`--cpus`. **125 is in neither `INFRA_EXIT_CODES` (`{8, 9, 36} | OOM_EXIT_CODES`,
-`buildverify.py:206`) nor `UNREPEATABLE_EXIT_CODES` (`{2, 127}`, `buildverify.py:212`)**, so it
-falls through every branch to the terminal line `return (TEST_FAILURE if unit == TEST_UNIT else
-BUILD_ERROR), True` (`buildverify.py:388`). **A daemon restart mid-wave is therefore reported as a
-broken `BUILD.bazel`**, spends all three ADR-0014 rungs — **two of them LLM-bearing, prompting a
-model to repair a file that is fine** — and lands `REQUIRES_HUMAN_INTERVENTION` anyway. **Severity:
-high**, and the aggravating fact is that **the same file already knows this**:
-`_DOCKER_CANNOT_RUN: Final = 125` is defined at `buildverify.py:114`, **245 lines above the
-classifier**, and is consulted in exactly one place — the `_c_toolchain_gate` probe
-(`buildverify.py:675`) — whose own comment states the principle the classifier violates. **Would a
-test catch it? No.** `test_the_exit_code_table_is_the_policy` (`tests/test_workers_build.py:1974–1993`)
-has rows for **1, 2, 3, 4, 8, 9, 36, 127, 137 and -9** and **no 125 row**; the missing row is the
-defect. Adding `125 → TRANSIENT_INFRA, True` closes both.
+**D34 — CLOSED, FIXED in `44d5550`. `classify_build_failure` has no `125` branch, and the build
+steps ARE `docker run`.** `BuildverifyWorker._argv` (`buildverify.py:889–920`) returns
+`tuple(docker_run_argv(spec))` whenever `payload.image is not None`, so the process the classifier
+judges is **the docker client**, and a real build or test can exit **125**: unreachable daemon,
+image deleted mid-run, malformed `--memory`/`--cpus`. **125 is in neither `INFRA_EXIT_CODES` (`{8,
+9, 36} | OOM_EXIT_CODES`, `buildverify.py:206`) nor `UNREPEATABLE_EXIT_CODES` (`{2, 127}`,
+`buildverify.py:212`)**, so it falls through every branch to the terminal line `return
+(TEST_FAILURE if unit == TEST_UNIT else BUILD_ERROR), True` (`buildverify.py:388`). **A daemon
+restart mid-wave is therefore reported as a broken `BUILD.bazel`**, spends all three ADR-0014
+rungs — **two of them LLM-bearing, prompting a model to repair a file that is fine** — and lands
+`REQUIRES_HUMAN_INTERVENTION` anyway. **Severity: high**, and the aggravating fact is that **the
+same file already knows this**: `_DOCKER_CANNOT_RUN: Final = 125` is defined at
+`buildverify.py:114`, **245 lines above the classifier**, and is consulted in exactly one place —
+the `_c_toolchain_gate` probe (`buildverify.py:675`) — whose own comment states the principle the
+classifier violates. **Would a test catch it? No.** `test_the_exit_code_table_is_the_policy`
+(`tests/test_workers_build.py:1974–1993`) has rows for **1, 2, 3, 4, 8, 9, 36, 127, 137 and -9**
+and **no 125 row**; the missing row is the defect. Adding `125 → TRANSIENT_INFRA, True` closes
+both.
 
 **Status — CLOSED, FIXED in `44d5550`.** Re-verified at `82654e8`: `classify_build_failure`
 (`buildverify.py:412-471`) tests `result.exit_code == _DOCKER_CANNOT_RUN` at `:430` — before
@@ -1921,19 +1927,20 @@ the entry's premise as originally written: at the initial commit `classify_build
 to its final `return`, with no 125 branch anywhere in it — the defect was real when filed and is
 absent now.
 
-**D35 — OPEN. `clone._unshallow` turns every transient failure into `REQUIRES_HUMAN_INTERVENTION`,
-on the single most transient operation the worker performs.** `_unshallow` (`clone.py:478–489`)
-runs `git fetch --unshallow` **inside `ctx.limits.git_net`** — it holds the network limiter, which
-is the harness's own statement that this is the call most likely to be slow — and on any non-`ok`
-returns a **gate string**. `run` maps a gate to `FailureClass.PREFLIGHT, retryable=False`
-(`clone.py:302–310`), which is terminal. **`PREFLIGHT` is defined in `workers/base.py:136` as
-*"the repo's own shape; identical on every attempt"***, and a network timeout is the opposite of
-that. **Severity: high** — one slow fetch permanently sidelines a repo that would have cloned on
-the next attempt. **The class already knows how to do this correctly:** `_error_for`
-reads `timed_out` off the exception and returns `TIMEOUT`/`TRANSIENT_INFRA`
-with `retryable=True` (`clone.py:555–580`) — but it is only reachable from the `except` path, and `_unshallow` calls
-`git.exec(..., check=False)`, which **returns instead of raising**, so the correct handler 77 lines
-below is bypassed by construction. **Would a test catch it? No** — see D45.
+**D35 — NEVER REPRODUCIBLE IN VISIBLE HISTORY. `clone._unshallow` turns every transient failure
+into `REQUIRES_HUMAN_INTERVENTION`, on the single most transient operation the worker performs.**
+`_unshallow` (`clone.py:478–489`) runs `git fetch --unshallow` **inside `ctx.limits.git_net`** —
+it holds the network limiter, which is the harness's own statement that this is the call most
+likely to be slow — and on any non-`ok` returns a **gate string**. `run` maps a gate to
+`FailureClass.PREFLIGHT, retryable=False` (`clone.py:302–310`), which is terminal. **`PREFLIGHT`
+is defined in `workers/base.py:136` as *"the repo's own shape; identical on every attempt"***, and
+a network timeout is the opposite of that. **Severity: high** — one slow fetch permanently
+sidelines a repo that would have cloned on the next attempt. **The class already knows how to do
+this correctly:** `_error_for` reads `timed_out` off the exception and returns
+`TIMEOUT`/`TRANSIENT_INFRA` with `retryable=True` (`clone.py:555–580`) — but it is only reachable
+from the `except` path, and `_unshallow` calls `git.exec(..., check=False)`, which **returns
+instead of raising**, so the correct handler 77 lines below is bypassed by construction. **Would a
+test catch it? No** — see D45.
 
 **Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** `git diff a1178f7 HEAD -- src/fleet/workers/clone.py`
 (re-verified at `82654e8`) shows `_unshallow` already had this entry's correct shape at the
@@ -1951,18 +1958,19 @@ may have existed pre-squash — nothing checkable in `git log` shows that it did
 *never reproducible in visible history*, not *never existed*. See the note after D41 for how this
 entry came to exist despite that.
 
-**D36 — OPEN. `clone._preflight` reports `EmptyRepo` for a `rev-parse` that never ran, and returns
-`status="ok"` while doing it.** `head_sha = await git.resolve(branch)` (`clone.py:409`);
-`Git.resolve` (`vcs/git.py:265–271`) is `rev-parse --verify --quiet` returning
-`sha if result.ok and sha else None`, so it answers **`None` for a passed deadline exactly as it
-does for a rev that does not exist**. `_preflight` then appends the finding `"EmptyRepo"` and
-returns early (`clone.py:410–423`), `run` takes `cut_worktree = ... and preflight.head_sha is not
-None` (`clone.py:313`) — **false**, so **no worktree is cut** — and returns
-`WorkerResult(status="ok", ...)` with `worktree_path=None`. **Severity: high, and it is the worst
-shape in this set:** the other eleven persist a wrong verdict as a **failure**, which an operator
-reads; this one persists a wrong finding **as a success**. Downstream workers then fail on a
-**missing worktree** (D40's gate) and blame the clone that reported green. **Would a test catch it?
-No.** The catching test asserts that a timed-out `resolve` cannot produce `status="ok"` at all.
+**D36 — NEVER REPRODUCIBLE IN VISIBLE HISTORY. `clone._preflight` reports `EmptyRepo` for a
+`rev-parse` that never ran, and returns `status="ok"` while doing it.** `head_sha = await
+git.resolve(branch)` (`clone.py:409`); `Git.resolve` (`vcs/git.py:265–271`) is `rev-parse --verify
+--quiet` returning `sha if result.ok and sha else None`, so it answers **`None` for a passed
+deadline exactly as it does for a rev that does not exist**. `_preflight` then appends the finding
+`"EmptyRepo"` and returns early (`clone.py:410–423`), `run` takes `cut_worktree = ... and
+preflight.head_sha is not None` (`clone.py:313`) — **false**, so **no worktree is cut** — and
+returns `WorkerResult(status="ok", ...)` with `worktree_path=None`. **Severity: high, and it is
+the worst shape in this set:** the other eleven persist a wrong verdict as a **failure**, which an
+operator reads; this one persists a wrong finding **as a success**. Downstream workers then fail
+on a **missing worktree** (D40's gate) and blame the clone that reported green. **Would a test
+catch it? No.** The catching test asserts that a timed-out `resolve` cannot produce `status="ok"`
+at all.
 
 **Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** This entry's own premise does not match the
 code even before checking history: `_preflight` never calls `Git.resolve` (`vcs/git.py:265-271`,
@@ -1976,55 +1984,57 @@ a *settled* `rev-parse --verify --quiet` that genuinely answers "no such rev" re
 `_preflight` gets a `head_sha` to act on. Never reproducible in visible history; same squash
 caveat as D35.
 
-**D37 — OPEN. A timed-out parse probe is reported as *"no rewrite engine is installed on this
-host"*, the run still exits SUCCESS, and the `break` abandons the probe for every remaining file in
-the repo.** `AstGrepDriver._scan_for_error_nodes` (`rewrite/astgrep.py:181–207`) is **correct
-locally**: it reads `if result.started and not result.timed_out:` before any exit code, and raises
-`EngineUnavailableError` otherwise, printing `timed_out=` in the message. **One layer up it is
-undone twice.** `cli._transform_criterion` catches that exception into `unprobed`
-(`cli.py:4162–4163`) — a list rendered by `cli.py:3090–3097` as a **non-blocking warning that adds
-no violation**, so `§3.2`'s fourth clause silently goes unchecked and the command still exits
-SUCCESS — and the catch site is a **`break`**, which exits the `for unit in rewritten` loop and
-therefore **skips the probe for every remaining rewritten file in that repo**. **Severity: high.**
-One slow probe on file 1 of 40 turns a corrupt rewrite in files 2–40 into a green transform.
-**Operator-facing text: *"no rewrite engine is installed on this host"*** — for a host where
-`tools/bin/ast-grep` is vendored and ran. **The docstring one layer down claims the tool failure
-*"raises rather than resolving to a parse result nobody measured"*: true of the helper, false of
-the pipeline**, which is the same doc-versus-caller split D25 records. **Would a test catch it? No**
-on both halves; the cheap one is a timed-out probe asserted to produce a **violation**, not a
-warning, and a `continue` asserted to reach file 2.
+**D37 — CLOSED, FIXED in `2af7dfb`. A timed-out parse probe is reported as *"no rewrite engine is
+installed on this host"*, the run still exits SUCCESS, and the `break` abandons the probe for
+every remaining file in the repo.** `AstGrepDriver._scan_for_error_nodes`
+(`rewrite/astgrep.py:181–207`) is **correct locally**: it reads `if result.started and not
+result.timed_out:` before any exit code, and raises `EngineUnavailableError` otherwise, printing
+`timed_out=` in the message. **One layer up it is undone twice.** `cli._transform_criterion`
+catches that exception into `unprobed` (`cli.py:4162–4163`) — a list rendered by
+`cli.py:3090–3097` as a **non-blocking warning that adds no violation**, so `§3.2`'s fourth clause
+silently goes unchecked and the command still exits SUCCESS — and the catch site is a **`break`**,
+which exits the `for unit in rewritten` loop and therefore **skips the probe for every remaining
+rewritten file in that repo**. **Severity: high.** One slow probe on file 1 of 40 turns a corrupt
+rewrite in files 2–40 into a green transform. **Operator-facing text: *"no rewrite engine is
+installed on this host"*** — for a host where `tools/bin/ast-grep` is vendored and ran. **The
+docstring one layer down claims the tool failure *"raises rather than resolving to a parse result
+nobody measured"*: true of the helper, false of the pipeline**, which is the same
+doc-versus-caller split D25 records. **Would a test catch it? No** on both halves; the cheap one
+is a timed-out probe asserted to produce a **violation**, not a warning, and a `continue` asserted
+to reach file 2.
 
 ### Tier 2 — wrong operator target, right retry direction
 
-**D38 — OPEN. `filter_repo.relocate` reports *"install git-filter-repo"* for two conditions that
-are not that, one of them via a substring proxy.** `if not result.started or result.exit_code == 127
-or "No such file" in result.stderr_tail:` → `FilterRepoUnavailableError` (`vcs/filter_repo.py:163–167`).
-**Three predicates, one message.** `not result.started` is the passed-deadline case (D34's
-mechanism). And the third is a **substring match on stderr** — the thing §3.3 says the harness
-never does — while `filter_repo_argv` (`vcs/filter_repo.py:123–143`) emits `--path` for every
-`source_paths` entry and `--replace-text <file>` when set: git-filter-repo prints
-`No such file or directory` for a **missing `--replace-text` file** or a **bad `--path`**, neither
-of which means the binary is absent. **Severity: medium** — the verdict is at least in the right
-direction (unavailable is not the repo's fault), but the operator is sent to install a tool that is
-already installed. **Would a test catch it? No.** Note the interaction with **D21**: `replace_text`
-is never set by any caller today, so the `--replace-text` variant is currently latent and becomes
-live the moment D21 is fixed.
+**D38 — CLOSED, FIXED in `8464dc6`. `filter_repo.relocate` reports *"install git-filter-repo"* for
+two conditions that are not that, one of them via a substring proxy.** `if not result.started or
+result.exit_code == 127 or "No such file" in result.stderr_tail:` → `FilterRepoUnavailableError`
+(`vcs/filter_repo.py:163–167`). **Three predicates, one message.** `not result.started` is the
+passed-deadline case (D34's mechanism). And the third is a **substring match on stderr** — the
+thing §3.3 says the harness never does — while `filter_repo_argv` (`vcs/filter_repo.py:123–143`)
+emits `--path` for every `source_paths` entry and `--replace-text <file>` when set:
+git-filter-repo prints `No such file or directory` for a **missing `--replace-text` file** or a
+**bad `--path`**, neither of which means the binary is absent. **Severity: medium** — the verdict
+is at least in the right direction (unavailable is not the repo's fault), but the operator is sent
+to install a tool that is already installed. **Would a test catch it? No.** Note the interaction
+with **D21**: `replace_text` is never set by any caller today, so the `--replace-text` variant is
+currently latent and becomes live the moment D21 is fixed.
 
-**D39 — OPEN. `GitHubCli._exec` and `GiteaCli._exec` report `gh`/`curl` as uninstalled for a passed
-deadline; `GitHubCli.available()` additionally answers a two-part question with a flat No.** Both
-open with `if not result.started or result.exit_code == 127:` → `GhUnavailableError`
-(`vcs/github.py:150–154`) / `GiteaUnavailableError` (`vcs/gitea.py:291–295`), naming the binary.
-**Severity: low, and the containment is real** — `prwriter` catches `ForgeError` (which both derive
-from) into `FailureClass.TRANSIENT_INFRA` with an explicit comment *"both re-queue, neither judges"*
-(`workers/prwriter.py:259–260`), so **the retry verdict is right and only the message is wrong**.
-That makes this the family's benign form and worth recording as the contrast case. **The second
-half is not benign:** `available()` (`vcs/github.py:162–169`) wraps `gh auth status` in
-`except GhError: return False`, and `GhUnavailableError` subclasses `GhError` — so a **network
-timeout** (started, timed out, exit 124 → falls to the `check` branch → `GhError`) and a **passed
-deadline** both return `False` from a method whose docstring asks *"Is `gh` installed AND
-authenticated?"*. A flat No to a two-part question nobody measured either half of. **Would a test
-catch it? No** — and `tests/test_vcs.py:804` shows the shape the fake supports: `started=False` is
-constructible, `timed_out` is not (D45).
+**D39 — CLOSED, FIXED in `8464dc6` and `854189a`. `GitHubCli._exec` and `GiteaCli._exec` report
+`gh`/`curl` as uninstalled for a passed deadline; `GitHubCli.available()` additionally answers a
+two-part question with a flat No.** Both open with `if not result.started or result.exit_code ==
+127:` → `GhUnavailableError` (`vcs/github.py:150–154`) / `GiteaUnavailableError`
+(`vcs/gitea.py:291–295`), naming the binary. **Severity: low, and the containment is real** —
+`prwriter` catches `ForgeError` (which both derive from) into `FailureClass.TRANSIENT_INFRA` with
+an explicit comment *"both re-queue, neither judges"* (`workers/prwriter.py:259–260`), so **the
+retry verdict is right and only the message is wrong**. That makes this the family's benign form
+and worth recording as the contrast case. **The second half is not benign:** `available()`
+(`vcs/github.py:162–169`) wraps `gh auth status` in `except GhError: return False`, and
+`GhUnavailableError` subclasses `GhError` — so a **network timeout** (started, timed out, exit 124
+→ falls to the `check` branch → `GhError`) and a **passed deadline** both return `False` from a
+method whose docstring asks *"Is `gh` installed AND authenticated?"*. A flat No to a two-part
+question nobody measured either half of. **Would a test catch it? No** — and
+`tests/test_vcs.py:804` shows the shape the fake supports: `started=False` is constructible,
+`timed_out` is not (D45).
 
 **Status — CLOSED. Both halves fixed.** The `_exec` half (the `gh`/`curl` "uninstalled" misreport
 for a passed deadline) was fixed earlier at `8464dc6`. The second half — `available()`'s flat
@@ -2046,18 +2056,18 @@ only callers are tests (this file, and `test_gitea.py`'s live-forge equivalent),
 as a skip gate. This closes a real contract violation — the method's own docstring promises a
 two-outcome answer it was not giving — with zero production blast radius today.
 
-**D40 — OPEN. `symbolindex` and `interrogate` use `Path.is_dir()` as "did the clone run", and get
-`PREFLIGHT, retryable=False` wrong for every `OSError`.** Both open `run` with
-`if not await asyncio.to_thread(root.is_dir):` → `PREFLIGHT`, `retryable=False`,
-*"worktree {root} does not exist; run the clone worker first"* (`workers/symbolindex.py:228–236`,
-`workers/interrogate.py:261–269`). **`Path.is_dir()` swallows every `OSError` and returns `False`**:
-EACCES on a parent, ELOOP, a stale NFS handle, ENAMETOOLONG, or a path that exists and is a
-**file**. Each of those is reported as *"the clone never ran"*, terminally, under the class
+**D40 — CLOSED, FIXED in `f1aac12`. `symbolindex` and `interrogate` use `Path.is_dir()` as "did
+the clone run", and get `PREFLIGHT, retryable=False` wrong for every `OSError`.** Both open `run`
+with `if not await asyncio.to_thread(root.is_dir):` → `PREFLIGHT`, `retryable=False`, *"worktree
+{root} does not exist; run the clone worker first"* (`workers/symbolindex.py:228–236`,
+`workers/interrogate.py:261–269`). **`Path.is_dir()` swallows every `OSError` and returns
+`False`**: EACCES on a parent, ELOOP, a stale NFS handle, ENAMETOOLONG, or a path that exists and
+is a **file**. Each of those is reported as *"the clone never ran"*, terminally, under the class
 `base.py:136` defines as *"identical on every attempt"* — and a permissions or mount fault is the
 textbook retryable. **Severity: medium**, raised by its pairing with **D36**: the clone that
-returned `status="ok"` with no worktree lands here, and the operator is told to run the worker that
-already reported success. **Would a test catch it? No.** The distinguishing test is `root` as a
-regular file, or a directory with mode `0o000`.
+returned `status="ok"` with no worktree lands here, and the operator is told to run the worker
+that already reported success. **Would a test catch it? No.** The distinguishing test is `root` as
+a regular file, or a directory with mode `0o000`.
 
 **Status — CLOSED, FIXED in `f1aac12`.** `workers/interrogate.py` gains `worktree_presence(root)`,
 which stats the path directly instead of going through `Path.is_dir()`: `FileNotFoundError` and
@@ -2073,21 +2083,21 @@ no subprocess) instead of terminal `PREFLIGHT`. Pinned by new cases in
 reported `status="ok"` with no worktree material now hits a worker that retries instead of
 terminally blaming the wrong worker.
 
-**D41 — OPEN. `clone`'s three silent zeros: a probe that never ran returns a measured-looking
-answer, and one of them disarms the gate two lines below it.** All three read `result.ok` and
-substitute a default: `_submodule_count` → `return 0` (`clone.py:491–495`), `_has_lfs` →
-`result.ok and "filter=lfs" in ...` i.e. **`False`** (`clone.py:497–499`), `_largest_blob_bytes` →
-`return 0` (`clone.py:501–518`). **The LFS one is load-bearing:** `has_lfs=False` makes
-`if gate is None and has_lfs and payload.require_lfs_binary and not shutil.which("git-lfs")`
-(`clone.py:436`) — the gate **on the line after the probe** — unconditionally false, so a repo that
-does declare `filter=lfs` proceeds into a history rewrite with no `git-lfs` on PATH. And
-`_largest_blob_bytes` returning `0` for a `cat-file` that never ran means
-`if largest_blob > payload.max_blob_bytes` (`clone.py:440`) **never fires**, so `OversizeBlob` is
-structurally unreportable on the timeout path. **Severity: medium, trending high** — all three
-values are persisted to `repos.*` columns (SPEC §3.1 step 1's table) as **measurements**, and a
-`0` that means *"we did not look"* is indistinguishable in the DB from a `0` that means
-*"we looked and there are none"*. **Would a test catch it? No.** The honest form is `int | None` /
-`bool | None` with the gate refusing on `None`.
+**D41 — NEVER REPRODUCIBLE IN VISIBLE HISTORY. `clone`'s three silent zeros: a probe that never
+ran returns a measured-looking answer, and one of them disarms the gate two lines below it.** All
+three read `result.ok` and substitute a default: `_submodule_count` → `return 0`
+(`clone.py:491–495`), `_has_lfs` → `result.ok and "filter=lfs" in ...` i.e. **`False`**
+(`clone.py:497–499`), `_largest_blob_bytes` → `return 0` (`clone.py:501–518`). **The LFS one is
+load-bearing:** `has_lfs=False` makes `if gate is None and has_lfs and payload.require_lfs_binary
+and not shutil.which("git-lfs")` (`clone.py:436`) — the gate **on the line after the probe** —
+unconditionally false, so a repo that does declare `filter=lfs` proceeds into a history rewrite
+with no `git-lfs` on PATH. And `_largest_blob_bytes` returning `0` for a `cat-file` that never ran
+means `if largest_blob > payload.max_blob_bytes` (`clone.py:440`) **never fires**, so
+`OversizeBlob` is structurally unreportable on the timeout path. **Severity: medium, trending
+high** — all three values are persisted to `repos.*` columns (SPEC §3.1 step 1's table) as
+**measurements**, and a `0` that means *"we did not look"* is indistinguishable in the DB from a
+`0` that means *"we looked and there are none"*. **Would a test catch it? No.** The honest form is
+`int | None` / `bool | None` with the gate refusing on `None`.
 
 **Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY.** All three probes already distinguished "never
 ran" from "ran and settled" at the repository's first commit — the opposite of what this entry
@@ -2122,51 +2132,52 @@ document's own credibility either way.
 
 ### Tier 3 — honest verdict, dishonest message or mechanism
 
-**D42 — OPEN. `result.ok` is used as the answer to four git *questions*, and the answers are
-asserted downstream as facts about history.** `Git.ref_exists` → `return result.ok`
-(`vcs/git.py:280–282`); `Git.apply_check` → `return result.ok` (`vcs/git.py:344–357`);
+**D42 — CLOSED, FIXED in `d37f4ba`. `result.ok` is used as the answer to four git *questions*, and
+the answers are asserted downstream as facts about history.** `Git.ref_exists` → `return
+result.ok` (`vcs/git.py:280–282`); `Git.apply_check` → `return result.ok` (`vcs/git.py:344–357`);
 `Git.is_ancestor` → `return result.ok` (`vcs/git.py:476–482`); `Git.resolve` → `sha if result.ok
 and sha else None` (`vcs/git.py:265–271`). **Exhaustion is live on every one of them**, not
 theoretical: `Git.__init__` defaults `timeout_s=DEFAULT_TIMEOUT_S = 600.0` (`vcs/git.py:53, 204`)
-and `exec` passes both `self.deadline` and `self.timeout_s` into the runner (`vcs/git.py:230–239`),
-so any of the four can return the *No* answer for a reason that is not an answer. Downstream this
-becomes assertion: `PatchApplyError(... "the patch does not apply to the current tree")` and
-`RollbackAnchorError(... "the anchor is not an ancestor of the current tip", vcs/commits.py:335)` —
-**a claim about a history relationship that was never measured**. `apply_check`'s own docstring
-says *"a non-zero exit is the answer No"* (`vcs/git.py:346`); **exit 124 is not the answer No.**
-**Severity: low, and the mitigation is real** — these surface as `UNKNOWN`/retryable rather than
-terminal, so the fleet recovers; what is wrong is that the operator reads a confident sentence
-about their patch or their anchor. **Would a test catch it? No** (D45). The honest form is a
-tri-state or a raise, not a bool.
+and `exec` passes both `self.deadline` and `self.timeout_s` into the runner
+(`vcs/git.py:230–239`), so any of the four can return the *No* answer for a reason that is not an
+answer. Downstream this becomes assertion: `PatchApplyError(... "the patch does not apply to the
+current tree")` and `RollbackAnchorError(... "the anchor is not an ancestor of the current tip",
+vcs/commits.py:335)` — **a claim about a history relationship that was never measured**.
+`apply_check`'s own docstring says *"a non-zero exit is the answer No"* (`vcs/git.py:346`); **exit
+124 is not the answer No.** **Severity: low, and the mitigation is real** — these surface as
+`UNKNOWN`/retryable rather than terminal, so the fleet recovers; what is wrong is that the
+operator reads a confident sentence about their patch or their anchor. **Would a test catch it?
+No** (D45). The honest form is a tri-state or a raise, not a bool.
 
-**D43 — OPEN. A `resolve()` that returns `None` because it timed out FORCE-MOVES the migration
-branch, discarding committed work.** `cli.py:3761–3763`: `tip = await git.resolve(branch)` →
-`if tip is None: await git.exec(["checkout", "-B", branch, "HEAD"])`. `-B` is
-**create-or-reset-hard**: if `migrate/<repo>` exists and carries this run's commits, a `rev-parse`
-that merely **failed to answer** resets it to `HEAD` and **the migration commits are reachable only
-from the reflog**. The `else` arm is the careful one — it reads the `Fleet-Run-Id` trailer and
-**refuses** a foreign run's branch (`cli.py:3765–3775`) — so the code's entire ownership check is
-placed on the branch of a question that can silently answer wrong. **The same shape re-cuts the
-phase rollback anchor:** `anchor = await git.resolve(anchor_ref)`; `if anchor is None:` →
-`rev_parse(branch)` → `update_ref` (`cli.py:3779–3782`), i.e. a timed-out lookup **re-anchors
-phase 2 at the current tip**, so a later rollback rewinds to the wrong place. **Severity: low
-likelihood, catastrophic outcome** — this is the only entry in this set that destroys work rather
-than misreporting it. **Would a test catch it? No.** The fix is one line: `resolve` must
-distinguish *"absent"* from *"unanswered"* before anything acts on `None`.
+**D43 — CLOSED, FIXED in `d37f4ba` (inherited from D42's fix; not independently pinned). A
+`resolve()` that returns `None` because it timed out FORCE-MOVES the migration branch, discarding
+committed work.** `cli.py:3761–3763`: `tip = await git.resolve(branch)` → `if tip is None: await
+git.exec(["checkout", "-B", branch, "HEAD"])`. `-B` is **create-or-reset-hard**: if
+`migrate/<repo>` exists and carries this run's commits, a `rev-parse` that merely **failed to
+answer** resets it to `HEAD` and **the migration commits are reachable only from the reflog**. The
+`else` arm is the careful one — it reads the `Fleet-Run-Id` trailer and **refuses** a foreign
+run's branch (`cli.py:3765–3775`) — so the code's entire ownership check is placed on the branch
+of a question that can silently answer wrong. **The same shape re-cuts the phase rollback
+anchor:** `anchor = await git.resolve(anchor_ref)`; `if anchor is None:` → `rev_parse(branch)` →
+`update_ref` (`cli.py:3779–3782`), i.e. a timed-out lookup **re-anchors phase 2 at the current
+tip**, so a later rollback rewinds to the wrong place. **Severity: low likelihood, catastrophic
+outcome** — this is the only entry in this set that destroys work rather than misreporting it.
+**Would a test catch it? No.** The fix is one line: `resolve` must distinguish *"absent"* from
+*"unanswered"* before anything acts on `None`.
 
-**D44 — OPEN. `WorktreeManager.remove`'s comment names one cause for a condition with four, then
-`rmtree`s on all of them.** `sandbox/worktree.py:158–166`: the comment asserts *"git refuses a path
-it does not know as a worktree. If the directory is gone (or never existed) that is success; if it
-is still there, git's refusal is real"* — and the code below it is
+**D44 — CLOSED, FIXED in `f1aac12`. `WorktreeManager.remove`'s comment names one cause for a
+condition with four, then `rmtree`s on all of them.** `sandbox/worktree.py:158–166`: the comment
+asserts *"git refuses a path it does not know as a worktree. If the directory is gone (or never
+existed) that is success; if it is still there, git's refusal is real"* — and the code below it is
 `if not result.ok and path.exists(): shutil.rmtree(path, ignore_errors=True)`. **`git's refusal is
 real` is exactly what `not result.ok` fails to establish**: the `worktree remove --force` may have
 timed out mid-operation, or never started at all under a passed deadline, in which case **git was
 never consulted** and the harness deletes a registered worktree out from under it, leaving the
 admin record for the `worktree prune` on the next line to reap. **Severity: low** — worktrees are
-disposable by design and re-entry re-cuts them, which is why this is tier 3 and not tier 1 — but it
-is the clearest specimen in the set of the family's **documentation** signature: **a comment that
-names one cause for a condition that has four.** Grep for that phrasing; it is where these live.
-**Would a test catch it? No.**
+disposable by design and re-entry re-cuts them, which is why this is tier 3 and not tier 1 — but
+it is the clearest specimen in the set of the family's **documentation** signature: **a comment
+that names one cause for a condition that has four.** Grep for that phrasing; it is where these
+live. **Would a test catch it? No.**
 
 **Status — CLOSED, FIXED in `f1aac12`.** This was the data-loss member of the family — an
 unsettled probe authorising an `rmtree`. `WorktreeManager.remove` (`sandbox/worktree.py`) now
@@ -2193,15 +2204,16 @@ did not." That is a judgement call about where the boundary sits, not an inciden
 detail, and it is the reason this family's fixes read as one shape applied twice rather than two
 unrelated patches.
 
-**D45 — OPEN, and it is a testability gap that explains the clustering. `tests/test_vcs.py`'s
-`ScriptedRunner` has no `timed_out` parameter.** Its `__init__` accepts `stdout`, `exit_code` and
-`started` (`tests/test_vcs.py:159–163`) and its `__call__` returns a `ProcResult` with
-**`timed_out=False` hard-coded** (`tests/test_vcs.py:176–182`). So **the entire `vcs/` layer cannot
-be regression-tested against this family with the fake it has** — D35, D38, D39, D42, D43 and D44
-all live behind it. **Severity: medium, and it is the causal entry of the twelve:** a fake that
-cannot express a state is a fake that guarantees the state is never asserted on, which is why
-`started=False` **does** appear in a test (`tests/test_vcs.py:804`) and `timed_out=True` appears in
-none. **Would a test catch it? The question is inverted here** — this is why the others have no
+**D45 — NEVER REPRODUCIBLE IN VISIBLE HISTORY (mechanism); coverage gap now closed, and it is a
+testability gap that explains the clustering. `tests/test_vcs.py`'s `ScriptedRunner` has no
+`timed_out` parameter.** Its `__init__` accepts `stdout`, `exit_code` and `started`
+(`tests/test_vcs.py:159–163`) and its `__call__` returns a `ProcResult` with **`timed_out=False`
+hard-coded** (`tests/test_vcs.py:176–182`). So **the entire `vcs/` layer cannot be
+regression-tested against this family with the fake it has** — D35, D38, D39, D42, D43 and D44 all
+live behind it. **Severity: medium, and it is the causal entry of the twelve:** a fake that cannot
+express a state is a fake that guarantees the state is never asserted on, which is why
+`started=False` **does** appear in a test (`tests/test_vcs.py:804`) and `timed_out=True` appears
+in none. **Would a test catch it? The question is inverted here** — this is why the others have no
 tests. The fix is one keyword argument, and it makes six of the eleven above cheaply testable.
 
 **Status — NEVER REPRODUCIBLE IN VISIBLE HISTORY (mechanism); coverage gap now closed.**
@@ -2222,10 +2234,11 @@ only needed new coverage: parametrized tests across all four probes."* Added:
 `test_d42_probe_killed_at_deadline_raises_naming_the_kill` (`tests/test_vcs.py`), both
 parametrized across the four probe methods this entry names.
 
-**D46 — OPEN. The `TRANSIENT_INFRA` fix D34 shipped guarantees four byte-identical, deterministic
-125s before it ever charges a rung, because the retry re-issues the same `docker run --name=`.**
-Recorded here per review-36 I3: at `68a41ff` this measurement exists only in that commit's body,
-not in this ledger, so it was invisible to anyone reading the register rather than `git log`.
+**D46 — CLOSED, FIXED in `8464dc6`. The `TRANSIENT_INFRA` fix D34 shipped guarantees four
+byte-identical, deterministic 125s before it ever charges a rung, because the retry re-issues the
+same `docker run --name=`.** Recorded here per review-36 I3: at `68a41ff` this measurement exists
+only in that commit's body, not in this ledger, so it was invisible to anyone reading the register
+rather than `git log`.
 
 `sandbox/container.py`'s `sandbox_config` (`container.py:103-109`, docstring) already names the
 mechanism: `name` defaults to `sandbox_name(run_id, repo, attempt)`, which is **identical** across
