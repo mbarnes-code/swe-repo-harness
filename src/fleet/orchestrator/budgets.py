@@ -967,16 +967,24 @@ class ResizableLimiter:
 
     Two properties are easy to get wrong and are pinned by tests, not by inspection:
 
-    * **A slot is transferred at wake time, not at resume time.** `_wake_next` charges
-      `_borrowed` itself and hands the waiter a settled future. If instead the resumed waiter
-      charged itself, every task scheduled between the wake and the resume would see stale
-      headroom and barge in over the ceiling.
+    * **A slot is transferred at wake time, not at resume time.** `_drain` charges `_borrowed`
+      itself and hands the waiter a settled future. If instead the resumed waiter charged itself,
+      every task scheduled between the wake and the resume would see stale headroom and barge in
+      over the ceiling.
     * **A cancelled waiter must not swallow a wake, nor spend one it cannot afford.** A task
-      cancelled *after* `_wake_next` chose it still owns a slot nobody will release, so
-      `acquire()` gives it back and — when the current ceiling still admits one — wakes the next
-      waiter in the same breath. Without the hand-off, one cancellation permanently shrinks the
-      effective ceiling by one; without the ceiling check, a cancellation inside a shrink window
-      admits a waiter over the ceiling the shrink just set.
+      cancelled *after* it was chosen still owns a slot nobody will release, so `acquire()` gives
+      the slot back and re-drains. Without the hand-off, one cancellation permanently shrinks the
+      effective ceiling by one; if the drain did not re-read the ceiling, a cancellation inside a
+      shrink window would admit a waiter over the ceiling the shrink just set.
+
+    **`_drain` is the single admission gate, and it is the only thing a caller has to call.**
+    Every path that frees a slot or moves the ceiling ends in a bare `self._drain()`; none of them
+    tests the ceiling first, because the drain tests it. That is deliberate. The earlier shape
+    charged a slot unconditionally and left the ceiling check to each caller, and the one caller
+    that omitted it admitted a waiter over a halved ceiling (ADR-0084). A new caller states its
+    intent — "admit whoever fits now" — and cannot express the precondition wrongly, in either
+    direction: it can neither charge past the ceiling nor under-admit by waking one where the
+    headroom was two.
 
     Fairness is FIFO, and it falls out of transferring at wake time rather than needing a guard
     in `acquire`: every path that creates headroom — `release`, `resize`, the cancellation
@@ -1035,15 +1043,13 @@ class ResizableLimiter:
                 self._waiters.remove(fut)
         except asyncio.CancelledError:
             if not fut.cancelled():
-                # Woken, then cancelled: we own a slot we will never use. Hand it straight on,
-                # but only if the ceiling still admits it — a `resize` down between the wake and
-                # the cancellation leaves `_borrowed` above `_capacity`, and an unguarded
-                # hand-off would charge the slot to the next waiter and admit it over the
-                # shrunken ceiling. Dropping it strands nothing: `release` and `resize` both
-                # re-drain the queue as soon as there is real headroom.
+                # Woken, then cancelled: we own a slot we will never use. Give it back and
+                # re-drain. No ceiling test here — the drain re-reads the ceiling, so a `resize`
+                # down that landed between the wake and the cancellation withholds the slot
+                # instead of admitting a waiter over the shrunken ceiling. Withholding strands
+                # nothing: the next `release` or `resize` drains it once the headroom is real.
                 self._borrowed -= 1
-                if self._borrowed < self._capacity:
-                    self._wake_next()
+                self._drain()
             raise
 
     def release(self) -> None:
@@ -1051,8 +1057,7 @@ class ResizableLimiter:
         if self._borrowed <= 0:
             raise RuntimeError("ResizableLimiter released more times than it was acquired")
         self._borrowed -= 1
-        if self._borrowed < self._capacity:
-            self._wake_next()
+        self._drain()
 
     def resize(self, capacity: int) -> None:
         """Move the ceiling into `[floor, ceiling]`; growing admits waiters immediately.
@@ -1064,17 +1069,30 @@ class ResizableLimiter:
         if capacity < 1:
             raise ValueError(f"capacity must be >= 1, got {capacity}")
         self._capacity = max(self._floor, min(self._ceiling, capacity))
-        while self._borrowed < self._capacity and self._wake_next():
-            pass
+        self._drain()
 
-    def _wake_next(self) -> bool:
-        """Charge a slot to the first live waiter and settle its future. True if one was woken."""
-        for fut in self._waiters:
-            if not fut.done():
-                self._borrowed += 1
-                fut.set_result(None)
-                return True
-        return False
+    def _drain(self) -> None:
+        """Admit as many parked waiters as the **current** ceiling has room for, oldest first.
+
+        The one admission gate. A slot is charged only inside the `_borrowed < _capacity` test,
+        so calling this from a state with no headroom — `_borrowed` sitting above `_capacity`
+        after a shrink, say — admits nobody and charges nothing. Callers therefore need no
+        precondition; see the class docstring for why that is the point rather than a
+        convenience.
+
+        Synchronous throughout: there is no `await` between the test and the charge, which is
+        what stops a fast-path arrival barging the headroom this loop is handing out. `done()`
+        futures are skipped rather than removed — a woken waiter's own `finally` removes it — so
+        a waiter that was already chosen is never chosen twice and arrival order is preserved.
+        """
+        while self._borrowed < self._capacity:
+            for fut in self._waiters:
+                if not fut.done():
+                    self._borrowed += 1
+                    fut.set_result(None)
+                    break
+            else:
+                return
 
     async def __aenter__(self) -> None:
         await self.acquire()

@@ -16,10 +16,12 @@ the defect the CAS exists to prevent.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import random
 from collections.abc import AsyncIterator, Iterator
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -748,6 +750,59 @@ async def _settle(rounds: int = 8) -> None:
         await asyncio.sleep(0)
 
 
+@contextmanager
+def _watch_admissions(limiter: ResizableLimiter) -> Iterator[list[tuple[int, int]]]:
+    """Record `(borrowed, capacity)` at the instant each parked waiter is handed its slot.
+
+    **What this measures, and why it is not `borrowed`.** The over-admission this class had is
+    invisible in `borrowed`: a cancelled waiter hands on a slot that was *already* charged, so the
+    count reads the same either side of the breach (2 before, 2 after, against a ceiling of 1).
+    The observable event is the **admission** — a parked waiter being charged a slot and having
+    its future settled — and the quantity that says whether it was legitimate is the ceiling in
+    force at that same instant. `borrowed > capacity` in an entry below therefore means a slot was
+    handed to a waiter the ceiling had no room for.
+
+    **Why it hooks the future rather than the limiter.** An instrument that wraps whichever
+    private method happens to do the waking is only valid for the shape it was written against.
+    The predecessor of this helper subclassed the limiter and overrode `_wake_next`; when that
+    method was folded into `_drain` the override stopped being called, the instrument recorded
+    nothing, and the fuzz below went on **passing vacuously** — a detector that cannot fire is
+    indistinguishable from a clean result. Settling the waiter's future is the one step every
+    shape must perform, so patching the loop's `create_future` survives a refactor of the
+    limiter's internals *and* survives a mutation that reintroduces the old shape, which is what
+    lets the same instrument judge both.
+
+    Recording happens before `super().set_result`, while the future is still in `_waiters` — the
+    waiter's own `finally` removes it only once it resumes — which is also what distinguishes a
+    real waiter from any other future created on this loop.
+
+    Enter this **before the waiters park.** A future created outside the window is an ordinary
+    one whose admission goes unrecorded, and the first draft of the test below opened the window
+    after the queue had formed and read a real admission as silence. The guard below turns that
+    mistake into an error instead of a clean result.
+    """
+    if limiter._waiters:
+        raise AssertionError("waiters parked before the watch opened would be invisible to it")
+    loop = asyncio.get_running_loop()
+    original = loop.create_future
+    admissions: list[tuple[int, int]] = []
+
+    class _WatchedFuture(asyncio.Future[None]):
+        def set_result(self, result: None, /) -> None:
+            if any(fut is self for fut in limiter._waiters):
+                admissions.append((limiter.borrowed, limiter.capacity))
+            super().set_result(result)
+
+    def create_future() -> asyncio.Future[None]:
+        return _WatchedFuture(loop=loop)
+
+    loop.create_future = create_future  # type: ignore[method-assign]
+    try:
+        yield admissions
+    finally:
+        loop.create_future = original  # type: ignore[method-assign]
+
+
 async def test_limiter_never_admits_more_than_capacity_under_contention() -> None:
     """Six tasks, three slots: the bound is what the peak counter saw, not what `capacity` says."""
     limiter = ResizableLimiter(3)
@@ -1009,6 +1064,127 @@ async def test_a_cancelled_waiter_hands_no_slot_over_a_ceiling_that_shrank_under
     assert limiter.borrowed == 0
 
 
+async def test_a_drain_from_a_full_ceiling_admits_nobody_so_no_caller_needs_a_guard() -> None:
+    """The guarantee ADR-0084 buys: the admission gate itself refuses, not each caller in turn.
+
+    The test above pins the *behaviour* of one call site. This pins the **shape** that stops the
+    next call site repeating its history: `_drain` is called here directly, from the worst state
+    a caller can be in — `borrowed` above `capacity` after a shrink, with two live waiters queued
+    — and must charge nothing. A future caller (R5's AIMD controller adds some) that writes a
+    bare `self._drain()` therefore cannot over-admit however wrong its idea of the ceiling is,
+    because it never gets to express one.
+
+    Discriminating mutation: restore the old split — `_drain` charging one slot unconditionally,
+    with `release` and `resize` guarding their own calls, i.e. `d44b94f`'s behaviour with the
+    check back outside. Every other test in this file passes under it, including both tests that
+    `d44b94f` added, because no *existing* caller misbehaves. Only this one fails, on the bare
+    `_drain()` below charging a third slot against a ceiling of 1.
+    """
+    limiter = ResizableLimiter(2, floor=1)
+    await limiter.acquire()
+    await limiter.acquire()  # the test holds both slots itself; no holder task can race us
+    ran: list[str] = []
+
+    async def waiter(name: str) -> None:
+        await limiter.acquire()
+        ran.append(name)
+
+    with _watch_admissions(limiter) as admissions:
+        first = asyncio.create_task(waiter("first"))
+        second = asyncio.create_task(waiter("second"))
+        await _settle()
+        assert ran == [], "both slots are held; the queue is two deep"
+
+        limiter.resize(1)  # the 429: borrowed 2, ceiling 1 — no headroom exists at all
+        assert admissions == [], "a shrink admits nobody"
+
+        limiter._drain()  # the gate itself, called by a caller that checked nothing
+        await _settle()
+        assert admissions == [], f"the gate charged a slot it had no room for: {admissions}"
+        assert limiter.borrowed == 2, "nothing was charged and nothing was returned"
+        assert ran == [], "nobody was admitted over the shrunken ceiling"
+
+        limiter.release()  # borrowed 1, ceiling 1 — still no headroom, still nobody
+        await _settle()
+        assert admissions == [], f"a slot went out with the ceiling exactly full: {admissions}"
+        assert ran == []
+
+        limiter.release()  # borrowed 0 < 1 — now the headroom is real, and exactly one goes out
+        await _settle()
+        assert admissions == [(1, 1)], "one waiter admitted, inside the ceiling, once"
+        assert ran == ["first"], "and it was the oldest — the drain did not reorder the queue"
+
+    second.cancel()
+    await asyncio.gather(first, second, return_exceptions=True)
+
+
+def test_only_the_fast_path_and_the_drain_may_charge_a_slot() -> None:
+    """A whitelist, not a blacklist of the ways a caller might over-admit (CLAUDE.md Rule 12).
+
+    Guarding `_drain` closes the escape a caller reaches *through* it. It says nothing about a
+    caller that hand-rolls `self._borrowed += 1` beside its own ceiling test — which is the shape
+    the class had, and the one that shipped a defect. Enumerating the ways to do that is a
+    blacklist a third form defeats, so this asserts instead what the class may name at all: an
+    increment of `_borrowed` may appear in exactly two methods. `acquire` is the fast path, whose
+    guard is `locked()` on the line above it; `_drain` is the gate. A new charge site anywhere
+    else trips this test whether or not its author remembered a ceiling check.
+
+    Read from the source rather than from `dis`, because the point is what the next author will
+    write, and asserted over the AST rather than a grep so that reformatting does not move it.
+    """
+    path = inspect.getsourcefile(ResizableLimiter)
+    assert path is not None
+    tree = ast.parse(Path(path).read_text(encoding="utf-8"))
+    limiter_class = next(
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ClassDef) and node.name == "ResizableLimiter"
+    )
+
+    def charges(node: ast.AST) -> bool:
+        """True for `self._borrowed += ...`; the `-= 1` returns are not charges."""
+        return (
+            isinstance(node, ast.AugAssign)
+            and isinstance(node.op, ast.Add)
+            and isinstance(node.target, ast.Attribute)
+            and node.target.attr == "_borrowed"
+            and isinstance(node.target.value, ast.Name)
+            and node.target.value.id == "self"
+        )
+
+    def rebinds(node: ast.AST) -> bool:
+        """True for `self._borrowed = ...`, which would smuggle a charge past `charges`."""
+        return isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Attribute)
+            and target.attr == "_borrowed"
+            and isinstance(target.value, ast.Name)
+            and target.value.id == "self"
+            for target in node.targets
+        )
+
+    charge_sites = {
+        method.name
+        for method in limiter_class.body
+        if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
+        for node in ast.walk(method)
+        if charges(node)
+    }
+    rebind_sites = {
+        method.name
+        for method in limiter_class.body
+        if isinstance(method, ast.FunctionDef | ast.AsyncFunctionDef)
+        for node in ast.walk(method)
+        if rebinds(node)
+    }
+
+    assert charge_sites == {"acquire", "_drain"}, (
+        f"a slot is charged outside the fast path and the admission gate: {charge_sites}"
+    )
+    assert rebind_sites == {"__init__"}, (
+        f"`_borrowed` is rebound outside the constructor, dodging the gate: {rebind_sites}"
+    )
+
+
 async def test_random_resize_and_cancel_interleavings_never_admit_over_the_ceiling() -> None:
     """A seeded fuzz over the whole class, watching the **admission event**, not a counter.
 
@@ -1018,9 +1194,10 @@ async def test_random_resize_and_cancel_interleavings_never_admit_over_the_ceili
     charged**, so `borrowed` does not rise when it over-admits — measured on the deterministic
     case above, where `borrowed` reads 2 both before and after the over-admitting cancellation,
     against a ceiling of 1. A rise in `borrowed` is therefore the wrong thing to watch. The charge
-    itself is the right thing: a wake taken while `borrowed >= capacity`. The class has exactly
-    two charge sites — `acquire`'s fast path, guarded inline by `locked()`, and `_wake_next` — so
-    wrapping `_wake_next` sees every transfer.
+    itself is the right thing, and `_watch_admissions` records it at the only step every possible
+    shape of this class must take: settling the parked waiter's future. Its predecessor overrode
+    the private method that did the waking, and was silently neutered the moment that method was
+    renamed — see `_watch_admissions`, which is where that near-miss is written down.
 
     *The driver.* A woken-but-not-resumed waiter exists only between a charge and the next turn
     of the loop, so a driver that awaits after every operation can never cancel one, and never
@@ -1028,59 +1205,51 @@ async def test_random_resize_and_cancel_interleavings_never_admit_over_the_ceili
     operation per turn, reported 0/800 seeds against the **unfixed** class. The bursts below
     issue several operations in a single turn, which is what reaches the window.
 
-    Validated per CLAUDE.md Guardrail 6 before its clean result was trusted: it fires on the
-    known-bad state (the ceiling check in `acquire`'s cancellation recovery removed — 68/400
-    seeds, 71 events, e.g. seed 13 charging a 3rd slot against a ceiling of 2), stays silent on
-    the swept class (0/400), and fires on a fresh fault injected into the swept class (an
-    unguarded second `_wake_next` in `release` — 400/400 seeds, 3,531 events).
+    Validated per CLAUDE.md Guardrail 6 before its clean result was trusted, three states, each
+    re-measured against this instrument rather than inherited from the one it replaced: it fires
+    on the known-bad state (the pre-`d44b94f` split shape with `acquire`'s cancellation recovery
+    unguarded — 68/400 seeds, 71 events), stays silent on the swept class (0/400), and fires on a
+    fresh fault injected into the swept class (an extra unguarded charge in `release` — 400/400
+    seeds, 3,531 events).
     """
-
-    class Watched(ResizableLimiter):
-        """Records every wake taken while the ceiling had no room for it."""
-
-        __slots__ = ("breaches",)
-
-        def __init__(self, capacity: int, *, floor: int = 1, ceiling: int | None = None) -> None:
-            super().__init__(capacity, floor=floor, ceiling=ceiling)
-            self.breaches: list[tuple[int, int, int]] = []
-
-        def _wake_next(self) -> bool:
-            before, cap = self._borrowed, self._capacity
-            woke = super()._wake_next()
-            if woke and before >= cap:
-                self.breaches.append((seed, before + 1, cap))
-            return woke
-
-    breaches: list[tuple[int, int, int]] = []
+    over_admitted: list[tuple[int, int, int]] = []
     for seed in range(400):
         rng = random.Random(seed)
-        limiter = Watched(rng.randint(1, 4), floor=1, ceiling=4)
+        limiter = ResizableLimiter(rng.randint(1, 4), floor=1, ceiling=4)
 
-        async def body(limiter: Watched = limiter, rng: random.Random = rng) -> None:
+        async def body(
+            limiter: ResizableLimiter = limiter, rng: random.Random = rng
+        ) -> None:
             async with limiter:
                 for _ in range(rng.randint(0, 3)):
                     await asyncio.sleep(0)
 
-        tasks = [asyncio.create_task(body()) for _ in range(20)]
-        for _ in range(60):
-            for _ in range(rng.randint(1, 4)):  # one turn, several operations
-                roll = rng.random()
-                if roll < 0.40:
-                    limiter.resize(rng.randint(1, 4))
-                elif roll < 0.80:
-                    alive = [t for t in tasks if not t.done()]
-                    if alive:
-                        rng.choice(alive).cancel()
-            await asyncio.sleep(0)
+        with _watch_admissions(limiter) as admissions:
+            tasks = [asyncio.create_task(body()) for _ in range(20)]
+            for _ in range(60):
+                for _ in range(rng.randint(1, 4)):  # one turn, several operations
+                    roll = rng.random()
+                    if roll < 0.40:
+                        limiter.resize(rng.randint(1, 4))
+                    elif roll < 0.80:
+                        alive = [t for t in tasks if not t.done()]
+                        if alive:
+                            rng.choice(alive).cancel()
+                await asyncio.sleep(0)
 
-        limiter.resize(4)
-        await _settle(64)
-        for task in tasks:
-            task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        breaches.extend(limiter.breaches)
+            limiter.resize(4)
+            await _settle(64)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
 
-    assert breaches == [], f"(seed, in flight, ceiling) admitted over the ceiling: {breaches[:5]}"
+        over_admitted.extend(
+            (seed, borrowed, cap) for borrowed, cap in admissions if borrowed > cap
+        )
+
+    assert over_admitted == [], (
+        f"(seed, in flight, ceiling) admitted over the ceiling: {over_admitted[:5]}"
+    )
 
 
 async def test_release_without_acquire_fails_loud() -> None:
