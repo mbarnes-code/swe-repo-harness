@@ -275,11 +275,16 @@ will not paper over it, and re-running it after resolving is exactly the retry p
    unpoliced in aggregate (§5), the docker daemon is a single global namespace shared by every
    lane's sandbox tests, and no one has measured a concurrent run. `CLAUDE.md`'s rule stands until
    someone does.
-3. **The `.superpowers/` SDD ledger does not travel.** Only 8 of the ~40 files under
-   `.superpowers/sdd/sdd-backlog-a/` are tracked; the briefs, reviews and `progress.md` are
-   untracked, so a fresh worktree sees almost none of them and a per-worktree ledger would fragment
-   the record. **Keep the ledger in the primary checkout**: briefs should tell agents to write
-   reports to the primary's absolute path, not to `.superpowers/` relative to their worktree.
+3. **The `.superpowers/` SDD workspace does not travel, and does not survive.** It is git-ignored
+   working scratch: briefs, review packages, reviews and the round ledger. A fresh worktree sees
+   none of it, so a per-worktree ledger would fragment the record. **Keep the ledger in the primary
+   checkout**: briefs should tell agents to write reports to the primary's absolute path, not to
+   `.superpowers/` relative to their worktree.
+   **Anything another document cites must be promoted to `docs/superpowers/plans/` before the
+   workspace is deleted at round close.** Round B nearly shipped this defect twice: five committed
+   references (two of them in ADRs) pointed into git-ignored scratch, and `.githooks/pre-commit`
+   and `install-hooks.sh` cited a report that was never tracked at all. A citation into
+   `.superpowers/` is a dangling reference waiting for the next cleanup.
 4. **Uncommitted work in the primary does not travel either.** `new-worktree.sh` branches from
    `HEAD`. If the primary has uncommitted changes an agent needs, commit them first or pass an
    explicit `base-ref`.

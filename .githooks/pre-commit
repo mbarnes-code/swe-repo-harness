@@ -16,7 +16,7 @@
 # own per-worktree git-dir under .git/worktrees/<name>/, but shares the common dir (refs,
 # config, and -- because of how core.hooksPath is installed -- this very hook) with the primary.
 # In the primary checkout the two are identical. Verified empirically; see
-# .superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md for the transcript. This is the same
+# docs/superpowers/plans/task-HOOK1-report.md for the transcript. This is the same
 # comparison tools/worktree/new-worktree.sh already uses to refuse running from a worktree, so
 # it is not a novel pattern in this codebase.
 #

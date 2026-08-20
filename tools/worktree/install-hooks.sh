@@ -8,7 +8,7 @@
 # per-worktree administrative dir (.git/worktrees/<name>/hooks), untracked and never populated by
 # `git worktree add`. core.hooksPath is how this repo gets ONE tracked, committed hook directory
 # instead of N untracked ones. Verified empirically (see
-# .superpowers/sdd/sdd-backlog-a/task-HOOK1-report.md): a hook dropped in the PRIMARY's
+# docs/superpowers/plans/task-HOOK1-report.md): a hook dropped in the PRIMARY's
 # .git/hooks/ already fires when committing from a linked worktree (hooks are read from the
 # common dir by default, no config needed for that much) -- but that path is untracked, so it
 # cannot ship in the repo. core.hooksPath is what makes the hook directory itself something
