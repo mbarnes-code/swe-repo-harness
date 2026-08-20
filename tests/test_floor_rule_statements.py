@@ -26,6 +26,17 @@ the fallback phase the clause names is *parsed out* and fed to `phase_floor`. No
 assertion when the prose changes: editing the prose changes what is asserted, and a false edit
 fails.
 
+**Layer D — the stop condition, on the semantic axis rather than the phrase axis.** Layers A–C all
+anchor on the *quantifier phrase*, and a sixth wrong successor came through the gap that leaves: a
+sentence seventeen lines below the corrected clause stated the same rule in entirely different
+words ("stop at the first phase whose evidence holds, because the phases below it are covered by
+it") and was invisible to the census. Wrap-awareness — the technique that caught five other misses
+this round — cannot help: normalising whitespace answers "the text is split", never "the claim is
+paraphrased". So Layer D drops the quantifier and anchors on the *shape of a stop claim* instead:
+any sentence in the three governed files that binds a stop verb to a stop **condition**
+("stops/breaks at/on the first ...", "... whose evidence") must also name a hard stop. Its scope
+and the two variants measured and rejected are in `_RESIDUAL` item 4.
+
 **Layer C — vocabulary, for the code comment.** `enums.py`'s statement is a paraphrase, correctly:
 it is a code comment in a different register, and demanding textual identity of it would be wrong.
 So it is bound by what it must *name* — a whitelist of the load-bearing distinctions, plus the
@@ -64,6 +75,29 @@ _RESIDUAL = """Not bound, stated rather than implied:
    anchor". No marker was injected because `docs/SPEC.md`, `docs/DECISIONS.md` and `enums.py` are
    not this lane's files and structural anchoring (the precedent in `tests/test_llm_cache.py`)
    proved sufficient.
+
+4. Layer D is narrower than "every claim about the walk", which is not mechanisable here, and the
+   two wider variants were measured before being rejected rather than dismissed. Over the same
+   three files, sentence-split on normalised text:
+
+   * **Wide** (walk-subject + any stop verb in the same sentence, hard stop required): flags both
+     real defects on the pre-fix tree -- and **6 of the 19** sentences it considers on the
+     *correct* tree, every one of them true. Shipping it means a six-entry hand-maintained
+     whitelist of correct prose that grows on every future edit and is keyed on sentence text,
+     which is the hand-maintained agreement this module exists to end.
+   * **Wide, case-insensitive**: worse than wide -- it *passes* `docs/SPEC.md:6969`, the Critical
+     defect, because the same sentence contains the ordinary English word "skipped" (in "a repo
+     with a `REQUIRES_HUMAN_INTERVENTION` row is skipped entirely"). A detector silent on the
+     known-bad state fails Guardrail 6's first check. This is why `_HARD_STOP_NAMED` is
+     deliberately **case-sensitive**; adding `re.IGNORECASE` to it re-opens exactly that hole.
+
+   Layer D (narrow) measured: 2 sentences considered, **2 flagged** at `431b02f` (both defects),
+   **0 flagged** after the fix. What it still cannot do: it sees only sentences that phrase the
+   stop condition in that shape, so a restatement like "the walk ends as soon as a phase's
+   evidence is durable" is not considered at all -- the count assertion turns a re-wording past
+   the anchor into a loud failure, exactly as the census's does, but it cannot tell "re-worded"
+   from "deleted". And "names a hard stop" is not "states the hard-stop rule": a sentence naming
+   `DEGRADED` for an unrelated reason passes, which is residual 1 in a new place.
 """
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -161,6 +195,107 @@ def _enums_paraphrase() -> str:
         f"span ('step 5 demotes' .. 'between the two.'); got: {comment[:200]!r}"
     )
     return comment[start : end + len("between the two.")]
+
+
+# ------------------------------------------------------------------------------------------
+# Layer D -- the stop condition, wherever it is stated and in whatever words
+# ------------------------------------------------------------------------------------------
+
+_GOVERNED: tuple[Path, ...] = (_SPEC, _DECISIONS, _ENUMS)
+
+#: What the walk is, in any register the four statements use.
+_WALK_SUBJECT = re.compile(
+    r"backward(?:s)? (?:walk|search|scan)|walk \*?backward|walks? backward|phase_floor|"
+    r"the walk\b|search(?:es)? \*?downward",
+    re.IGNORECASE,
+)
+
+#: A stop *condition*, not a mere mention of stopping. This is the whole difference between a
+#: layer with two considered sentences and zero false positives and one with nineteen and six:
+#: "the walk stops above the highest" says which rung, "the walk stops at the first phase whose
+#: evidence holds" says on what condition, and only the second can be wrong about `_HARD_STOPS`.
+_STOP_CONDITION = re.compile(
+    r"(?:stops?|stopping|breaks?|ends?|halts?)\b[^.;]{0,60}?\b(?:at|on|upon)\b[^.;]{0,40}?\bfirst\b"
+    r"|(?:stops?|stopping|breaks?)\b[^.;]{0,40}?\bwhose evidence\b"
+    r"|first phase whose evidence (?:holds|still holds)",
+    re.IGNORECASE,
+)
+
+#: **Case-sensitive, deliberately, and this is load-bearing.** Lowercase "skipped" is an ordinary
+#: English word: `docs/SPEC.md`'s step-5 paragraph contains "a repo with a
+#: `REQUIRES_HUMAN_INTERVENTION` row is skipped entirely" in the very sentence that stated the
+#: stop condition wrongly, so a case-insensitive version of this pattern is *silent on the defect
+#: this layer exists to catch* -- measured, see `_RESIDUAL` item 4. Do not add `re.IGNORECASE`.
+_HARD_STOP_NAMED = re.compile(r"_HARD_STOPS|\bDEGRADED\b|\bSKIPPED\b|hard stop")
+
+#: How many sentences state the stop condition at all. Asserted, for the same reason
+#: `_EXPECTED_SITES` is: a re-wording past `_STOP_CONDITION` would otherwise reduce this layer to
+#: zero considered sentences and pass vacuously. Measured, not guessed.
+_EXPECTED_STOP_CONDITION_SENTENCES = 2
+
+#: Normalised text has exactly one space per whitespace run, so a sentence boundary is a
+#: terminator followed by that single space. Splitting on `:` and `;` as well as `.` matters:
+#: `docs/SPEC.md` §11.5 step 5 is one multi-clause paragraph, and without the `:` split the
+#: defective clause shares a segment with three unrelated ones.
+_SENTENCE_BREAK = re.compile(r"(?<=[.;:])\s")
+
+
+def _stop_condition_sentences() -> list[tuple[str, str]]:
+    """`[(site, sentence)]` for every sentence in the governed files that says the walk stops
+    *on a condition* -- in any words, not only the census's quantifier phrase."""
+    out: list[tuple[str, str]] = []
+    for path in _GOVERNED:
+        rel = path.relative_to(_ROOT).as_posix()
+        raw = path.read_text(encoding="utf-8")
+        text = _normalise(raw)
+        # offset in the normalised text -> offset in the raw text, so a failure names a real line
+        offsets: list[int] = []
+        previous_was_space = False
+        for index, char in enumerate(raw):
+            if char.isspace():
+                if not previous_was_space:
+                    offsets.append(index)
+                previous_was_space = True
+            else:
+                offsets.append(index)
+                previous_was_space = False
+        starts = [0] + [m.end() for m in _SENTENCE_BREAK.finditer(text)]
+        for start, end in zip(starts, [*starts[1:], len(text)], strict=True):
+            sentence = text[start:end]
+            if _WALK_SUBJECT.search(sentence) and _STOP_CONDITION.search(sentence):
+                out.append((f"{rel}:{_line_of(raw, offsets[start])}", sentence.strip()))
+    return out
+
+
+def test_every_sentence_stating_the_walks_stop_condition_names_the_hard_stop() -> None:
+    """The layer the census could not be: it anchors on the *shape of the claim*, not the phrase.
+
+    `docs/SPEC.md:6969` and `docs/DECISIONS.md:7333` each stated where `phase_floor`'s backward
+    walk stops and omitted the `_HARD_STOPS` break that `reentry.py:98-99` tests *first*. Neither
+    shared a word with the corrected clause seventeen lines above, so neither was in the census,
+    and no amount of whitespace normalisation would have found them -- normalising answers "the
+    text is split", never "the claim is paraphrased". A reconciler implementing the walk from
+    either sentence returns `SCAN` where `phase_floor` returns `VERIFY` (BUILD `DEGRADED`) and
+    `BUILD` (TRANSFORM `SKIPPED`).
+
+    Measured at `431b02f`: 2 sentences considered, 2 flagged. After the fix: 2 considered, 0
+    flagged. The count is asserted first, so a re-wording past `_STOP_CONDITION` fails loudly
+    instead of emptying the layer.
+    """
+    sentences = _stop_condition_sentences()
+    assert len(sentences) == _EXPECTED_STOP_CONDITION_SENTENCES, (
+        f"{len(sentences)} sentence(s) in {[p.name for p in _GOVERNED]} state where the backward "
+        f"walk stops, expected {_EXPECTED_STOP_CONDITION_SENTENCES} "
+        f"(found: {[site for site, _ in sentences]}). A statement was added, deleted, or re-worded "
+        f"past `_STOP_CONDITION` -- if deliberate, update the constant in the same change."
+    )
+    silent = [(site, text) for site, text in sentences if not _HARD_STOP_NAMED.search(text)]
+    assert not silent, (
+        "these sentences say where the backward walk stops without naming the `_HARD_STOPS` break "
+        "that `reentry.py:98-99` tests BEFORE evidence -- a reconciler following them rebuilds the "
+        "walk that demotes every repo with an excluded middle phase to `SCAN` on every resume:\n"
+        + "\n".join(f"  {site}: {text}" for site, text in silent)
+    )
 
 
 def _row(phase: Phase, status: RepoStatus) -> PhaseRow:
@@ -366,6 +501,10 @@ def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
     """
     assert "Not bound" in _RESIDUAL
     assert _RESIDUAL.count("\n1. ") == 1 and "\n2. " in _RESIDUAL and "\n3. " in _RESIDUAL
+    assert "\n4. " in _RESIDUAL, (
+        "`_RESIDUAL` item 4 -- Layer D's own scope, and the two wider variants measured and "
+        "rejected -- has been deleted. Layer D reads as broader coverage than it has without it."
+    )
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience for a scoped manual run
