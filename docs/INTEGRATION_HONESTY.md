@@ -4043,3 +4043,45 @@ marker binds only the `effort` column. Every other comment in the two listings �
 this reason — has no binding at all, and the 22-condensation measurement is why a general one is
 still unbuilt. The semantic assertions `c7f72c6` added are untouched and still bind what the marker
 cannot: a `CHECK` arriving without the comment changing.
+
+---
+
+**A fresh overclaim, landed knowingly in `60d400b`/`e0404b0` and disclosed rather than silently
+narrowed. This entry claims no D-number** — it discloses a defect in prose this session applied, and
+the correction is one edit across five sites that must stay identical, which is not this lane's to
+make unilaterally. **D71 remains the next free number.**
+
+`60d400b` fixed the re-entry-floor quantifier ("earliest" → "highest") across `docs/SPEC.md`
+Constraint 7 and §11.5 step 5, `src/fleet/state/schema.sql`'s SPEC mirror and `docs/DECISIONS.md`
+ADR-0076 §1, applying an upstream lane's wording verbatim so that five sites state one rule in one
+author's words and cannot drift apart again. That wording ends with a fallback clause: *"and `SCAN`
+if no phase below the frontier holds."*
+
+**The fallback clause is false whenever a phase below the frontier is `DEGRADED` or `SKIPPED`.**
+`phase_floor` (`src/fleet/orchestrator/reentry.py:96-103`) breaks on `_HARD_STOPS` —
+`{DEGRADED, SKIPPED}` — *before* it consults `evidence`, so the walk stops above such a row and the
+floor never descends past it, however little evidence holds. The function's own docstring says so
+("the backward search stops at a `DEGRADED` or `SKIPPED` row without ever moving the floor onto it",
+ADR-0077 §5); the new prose does not.
+
+**Measured, not reasoned** — `phase_floor` called directly under `.venv/bin/python` with the test
+module's own `_row` builder, `evidence = {}` (nothing holds) in every case:
+
+| rows below a `PENDING` `VERIFY` frontier | returned floor |
+|---|---|
+| `SCAN`/`TRANSFORM`/`BUILD` all `SUCCEEDED` | `SCAN` — the clause is right here |
+| same, but `BUILD` `DEGRADED` | **`VERIFY`**, not `SCAN` |
+| same, but `TRANSFORM` `SKIPPED` | **`BUILD`**, not `SCAN` |
+
+**Why it is recorded here instead of patched.** This is the shape CLAUDE.md guardrail 6 predicts —
+the fix for an overclaim introducing a narrower successor of itself — arriving for the fifth time
+this round, and caught only because the re-sweep was run against the applied text rather than
+against the tree it replaced. Patching it at some sites and not others would restore precisely the
+drift the single-author wording exists to prevent, and the brief that carried the wording forbade
+re-authoring it. The correction is one edit, made at all five sites at once, by whoever owns the
+canonical sentence: the hard-stop rows bound the walk before evidence is consulted, so `SCAN` is
+the floor only when no phase below the frontier holds **and** none is `DEGRADED` or `SKIPPED`.
+
+**Severity: the sentence is wrong in a case the code handles correctly.** No behaviour changed; the
+suite is unaffected (`tests/test_reentry_floor.py` binds the real rule in both directions). The risk
+is the one this whole class has: a reconciler follows the prose.
