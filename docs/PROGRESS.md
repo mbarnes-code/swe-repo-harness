@@ -5235,7 +5235,14 @@ in the `37`-series and carries no collision the way `37d` did.
    unresolved"; each `remove()` is now wrapped, and the loop continues past a failure. **Second and
    third "no production caller" findings**: `grep -rn '\.reap(' src/` is zero hits (`fleet resume`
    step 2 doesn't exist yet), so no existing caller could have been misled by the old collapse — Y1
-   fixed it anyway because the docstring promises the method to a future caller. The reviewer's
+   fixed it anyway because the docstring promises the method to a future caller. **Correction
+   (2026-08-20, this session): `fleet resume` step 2 now exists** — `e915b93` landed it — and
+   `grep -rn '\.reap(' src/` is no longer zero hits: `cli.py:10553`
+   (`manager.reap(live_names=live)`) and `cli.py:10643` (`sandbox.reap(run_id=run_id,
+   live_names=live)`) are real production callers today. This does not undo Y1's finding — the
+   callers did not exist when Y1 wrote it, so the old collapse genuinely had none to mislead — it
+   only means the "zero hits" measurement is scoped to that day and would mislead a reader
+   checking it against the current tree. The reviewer's
    trace also surfaced a genuinely new, still-open sibling: `ContainerSandbox.reap()`
    (`sandbox/container.py:239-254`) reports every removal as reaped regardless of whether `docker
    rm` actually succeeded — a reporting collapse adjacent to D32, queued, not fixed this round.
@@ -5970,8 +5977,8 @@ Measured against `docs/superpowers/plans/design-resume-step5.md` §5. Dependency
 Each was present at `6a5e534`. **No D-number was allocated for any of them**, which is itself open item 5.
 
 1. **`docs/SPEC.md` Constraint 7 named `transition(..., resume=True)` as the demotion write and claimed it emits `PhaseDemoted`.** Both false (`enums.py:127`; `transition()` emits nothing). §38 defect 13 recorded this as corrected; **CR-1 found the survivor**, and the reviewer's failure scenario **was the live subtask-6 lane**. Fixed at `f02d124`, with the scoping root in ADR-0077 §4 fixed at `b7fc5ec` so it cannot regenerate.
-2. **`src/fleet/cli.py:10043-10045` and `:10274` ship D67's *rejected* algorithm to operators** — "demote each repo to the earliest phase whose precondition holds" — the exact predicate §38 defect 11 established would promote never-built repos to Phase 4. D67 swept the SPEC only. **`:10043` is line-wrapped across two string literals, so a single-line grep reported the class as fixed.** Read at `431b02f` and still present; `08ba8e2` does not touch `cli.py`. **Open** — the file is owned by the in-flight lane.
-3. **`cli.py:10044` says "All twelve workers".** Measured: **11**. **Open**, same blocker.
+2. **`src/fleet/cli.py:10043-10045` and `:10274` shipped D67's *rejected* algorithm to operators** — "demote each repo to the earliest phase whose precondition holds" — the exact predicate §38 defect 11 established would promote never-built repos to Phase 4. D67 swept the SPEC only. **`:10043` is line-wrapped across two string literals, so a single-line grep reported the class as fixed.** Read at `431b02f` and still present; `08ba8e2` does not touch `cli.py`. **AMENDED 2026-08-20 (this session), against `main` at `0559f2c`: CLOSED, not open** — this is the same site as item 3 under "What is still NOT proven" below, whose 2026-08-20 amendment this item was not updated to match when that one landed. `da70221` rewrote the message; `git show HEAD:src/fleet/cli.py | grep -n "earliest phase whose precondition holds"` returns no match. The census gap (`_EXPECTED_SITES` in `tests/test_floor_rule_statements.py` still not carrying these two `cli.py` sites) remains open and is tracked at item 3 below — do not re-close it here a second time.
+3. **`cli.py:10044` said "All twelve workers".** Measured then: **11**. **AMENDED 2026-08-20 (this session): CLOSED, same fix as item 2** — `git show HEAD:src/fleet/cli.py | grep -n "twelve workers"` returns no match; re-measured `grep -rn "@register_worker" src/fleet/workers/ | wc -l` → still **11**, i.e. the count was always right and only the word "twelve" was wrong.
 4. **The `findings.kind` listing was 19–21 names short of reality.** 27 kinds are emitted; `schema.sql` and the SPEC listed 8 and 6 of them, in curated listings **whose own caveat exists precisely to answer "which kinds are actually emitted"**. Fixed at `8ea1881`, made mechanical at `b995458`/`363ecc1`.
 5. **`docs/SPEC.md:6867` defined the frontier as "not SUCCEEDED/SKIPPED", omitting DEGRADED** — a site distinct from the known Constraint 7 one. Fixed at `23a4396`, which then regenerated the defect in its own replacement text (see #1–#3 above).
 6. **The plan document's own pseudocode defined `held(row) := DEGRADED` and never used it**, so its walk had no DEGRADED stop and subtasks 3–10 would each have reconciled against the weaker algorithm. Caught before any of them was dispatched; fixed at `8c00971`.

@@ -1371,28 +1371,34 @@ vendored and the ledger's ast-grep row is **REAL** — while **the symptom is un
 never revisited, because the entry named a blocker that had been removed rather than the mechanism
 that was doing the blocking.
 
-**D21 — OPEN, SECURITY. The `--replace-text` secret scrub is unwired end to end.**
-`RelocationSpec.replace_text` (`vcs/filter_repo.py:117`) defaults to `None`; `filter_repo.py:139`
-is the **only** other occurrence in `src/`, and it is the render site that never fires because
-**no caller in `src/` ever sets the field**. The setting that would feed it,
-`settings.history_scrub_file` (`settings.py:310`), defaults to `"config/rules/secrets.txt"` and is
-**read by nothing** — one occurrence in `src/`, zero in `tests/`. And **`config/` does not exist in
-this repository at all**, so the default names a path that has never been present. **Severity:
-high, and it is the one entry in this document that is a security property rather than a
-correctness one.** §11.4 promises secrets are scrubbed from rewritten history; the harness rewrites
-history for every ingested repo and scrubs nothing. **Would a test catch it? No.** The ledger's
-`git-filter-repo` row already says `--replace-text` has *"zero test hits of any kind"* — that row
-was right about the coverage and is now joined by the wiring: there is no code path to cover.
+**D21 — CLOSED, FIXED in `32365cf` (2026-08-17, one day after this section was written). The
+`--replace-text` secret scrub is now wired end to end.** This entry read **OPEN, SECURITY** as
+written on 2026-08-16 (§33 below); re-verified this session and that is no longer the state of the
+tree. `git grep -n replace_text -- src/fleet/cli.py` now shows `cli.py:7252` passing
+`replace_text=resolve_replace_text(settings.root, settings.config.redaction.history_scrub_file)`
+into the `RelocationSpec` the render site reads — the caller this entry said did not exist.
+`config/` is no longer absent either: `config/rules/secrets.txt` exists in the tree today, so
+`settings.history_scrub_file`'s default now names a real path. `tests/test_build_e2e.py:1267`
+asserts `"--replace-text" in call.argv`, closing the "would a test catch it" gap this entry
+originally answered "No" to. Nothing here retracts the original finding — the wiring genuinely was
+missing when written; it stopped being missing the next day and the record was never updated to
+say so.
 
-**D22 — OPEN, SECURITY. The Gitea credential file's mode is never enforced.** `chmod`, `st_mode`,
-`0o600` and `0o077` have **zero occurrences anywhere in `src/`**; all **ten** hits are in `tests/`.
-The docstrings promise a mode-600 `curl -K` file and `build_forge` refuses nothing. **Severity:
-medium** — the token stays out of argv (ADR-0040, tested), and this host's file happens to be
-`0600` with `.secrets/` gitignored, so the exposure is a **world-readable file working silently**
-rather than a leak that has happened. **Would a test catch it? No**, and the ledger's Gitea row has
-named the missing `st_mode & 0o077` refusal in its "what would close the gap" column since it was
-written. What is new here is only the count — *every* mode operation in this project is test-side —
-which is what turns "not enforced" from an impression into a fact.
+**D22 — CLOSED, FIXED in `32365cf` (2026-08-17, one day after this section was written). The
+Gitea credential file's mode is now enforced.** This entry read **OPEN, SECURITY** as written on
+2026-08-16; re-verified this session and that is no longer the state of the tree.
+`src/fleet/vcs/gitea.py:106-129` now defines `_require_private_credential_file`, called from
+`build_forge` at `:269`, which reads `path.stat().st_mode` and raises `GiteaError` when
+`mode & 0o077` — the exact `st_mode & 0o077` refusal this entry said was missing. The "zero
+occurrences in `src/`" measurement no longer holds: `grep -rn "$t" src/` (`$t` in `chmod`,
+`st_mode`, `0o600`, `0o077`) returns **2, 3, 1, 1** across `src/` — `chmod` and `0o600` occur only
+in `gitea.py:110`'s own docstring (which now narrates its history: *"had zero occurrences anywhere
+in `src/` before this"*), `0o077` only at the enforcement line `gitea.py:124`, and `st_mode` twice
+in `gitea.py` (`:110`, `:121`) plus once more in `workers/interrogate.py:172` — an unrelated
+directory check (`stat.S_ISDIR(root.stat().st_mode)`) that predates this fix and was never part of
+D22's claim either way. No test asserts the credential-mode refusal directly, so "would a test
+catch it" is unresolved either way; that is a narrower, separate gap from "is it enforced," which
+is now yes.
 
 **D23 — OPEN. Retargeted edges are never persisted; both readers always see NULL.**
 `state/repository.insert_edges` (`repository.py:1752`) enumerates **fifteen** columns and
@@ -1449,12 +1455,25 @@ anything calls it with a registry.
 ### D26–D33 — found by code review of the round's own landing, not by running it
 
 These eight were found by reviewing the diff that landed §33's two items, plus the code adjacent to
-it. **None is fixed**; all are recorded as OPEN, in the order the §33 *Next* list takes them.
-Three of them (**D26**, **D27**, **D28**) are in the publish path this round touched, which is the
-argument for reviewing a change and not only testing it.
+it. All are recorded as OPEN below, in the order the §33 *Next* list takes them, because none was
+fixed **when this section was written (2026-08-16)**. **Two no longer are: D26 and D27 were both
+closed the next day at `8464dc6` (checkpoint 36, 2026-08-17 02:28), re-verified this session and
+left corrected in place below rather than deleted** — the entries record what a reviewer found and
+when; the fix is noted where it landed. Three of them (**D26**, **D27**, **D28**) are in the
+publish path this round touched, which is the argument for reviewing a change and not only testing
+it.
 
-**D26 — OPEN. `_publish`'s idempotence guard asks a question the tree cannot answer, and a
-transient failure becomes `REQUIRES_HUMAN_INTERVENTION`.** The sequence is
+**D26 — CLOSED, FIXED in `8464dc6` (2026-08-17, the day after this entry was written). `_publish`'s
+idempotence guard asked a question the tree could not answer, and a transient failure became
+`REQUIRES_HUMAN_INTERVENTION`.** The guard is now pathspec-scoped rather than whole-worktree;
+`tests/test_cli.py:3168`,
+`test_publish_is_not_blocked_by_worktree_droppings_outside_the_pathspec` (docstring: *"D26:
+`_publish`'s idempotence guard used to ask `is_dirty()` … rather than the pathspec it had just
+staged"*), drives exactly the re-entry scenario below and asserts both
+`result is None` and `output.already_published is True`. The "zero occurrences in `tests/`"
+measurement below no longer holds — `already_published` now has one, in that assertion — which is
+itself the coverage this entry originally said was missing. What follows is the original sequence,
+unchanged, for the historical record:
 `git.exec(["add", "--", *paths])` → `published = await git.is_dirty()` →
 `output.already_published = not published` → commit if `published` (`cli.py:5177–5180`). The `add`
 stages an **explicit pathspec**; `is_dirty()` is `git status --porcelain` over the **whole
@@ -1473,8 +1492,18 @@ run, which on this path it never is — so the field can never be `True` in prod
 catch it? Yes, and cheaply:** re-run `_publish` over a worktree carrying one untracked file, and
 assert the second call is a no-op rather than a failure.
 
-**D27 — OPEN. `_publish_module_lock` compares against the FILE, not the BRANCH, and its docstring
-names that as a feature.** The order is: registry check → read `MODULE.bazel.lock` **off the
+**D27 — CLOSED, FIXED in `8464dc6` (2026-08-17, the day after this entry was written).
+`_publish_module_lock` used to compare against the FILE, not the BRANCH, and its docstring named
+that as a feature.** `src/fleet/cli.py:5407-5421`'s current docstring narrates the fix in the
+function's own name for it — *"Idempotent by blob SHA against what is actually ON
+`integration_branch` (D27), never against the worktree file alone"* — and the code at
+`:5474-5478` computes `local_sha = await integration.hash_object(...)` against
+`branch_sha = await integration.blob_at(payload.integration_branch, ...)`, returning early only
+when they agree. `tests/test_cli.py:3229`,
+`test_publish_module_lock_survives_a_crash_between_materialize_and_commit`, drives the exact scenario below (materialize, skip the
+commit, re-enter) and asserts `git show <ref>:MODULE.bazel.lock` resolves — the test this entry
+said would catch it. What follows is the original sequence, unchanged, for the historical record:
+the order was registry check → read `MODULE.bazel.lock` **off the
 integration worktree's filesystem** → `output.module_lock_published = True` → `if current ==
 lock.content: return` → `materialize` → `add` → `commit` (`cli.py:5313–5330`). A dispatch that dies
 **between `materialize` and `commit`** leaves the correct bytes **on disk and uncommitted**. Every
@@ -4206,8 +4235,15 @@ is the one this whole class has: a reconciler follows the prose.
 Not a defect record: no code, no test, and no failed run is filed under D71. The number is
 mentioned four times above (`:3267`, `:4008`, `:4052`, `:4139`), every time as "the next free
 number," never as a heading that opens an entry — this document's convention for a real record is
-a line beginning `**D<n> —` or `### D<n> —`, and no such line for D71 exists anywhere in this
-file (`grep -n '^\*\*D71\b\|^### D71\b'` returns nothing). The gap exists because D72 and D73 (the
+a line beginning `**D<n> —` or `### D<n> —`. Before this placeholder existed, `grep -n
+'^\*\*D71\b\|^### D71\b'` returned nothing; **it does not return nothing now.** This entry's own
+heading is written in exactly that form, so the anchored detector — correctly — matches it, and
+returns exactly one hit: the heading line immediately above. That is not a mistake to fix by rewording the heading;
+the point of filing this placeholder was to make D71's status discoverable by the same convention
+a real record uses, and a detector that stayed silent on a filed placeholder would be the broken
+one. Read the single hit as "one placeholder, zero defect entries" rather than "zero entries": the
+number is still unassigned to any code, test, or failed run — only reserved by this notice. The
+gap exists because D72 and D73 (the
 section immediately following) were allocated centrally under the mistaken belief that D70 was not
 the highest pre-existing number; those two numbers are committed and cited elsewhere, so
 renumbering them down to close this gap would break live citations to fix an appearance, and is
