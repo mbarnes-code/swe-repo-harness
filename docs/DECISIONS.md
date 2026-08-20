@@ -7315,18 +7315,161 @@ and not available for reuse; its absence from this file is not a deletion.
 
 ---
 
-## ADR-0081 — RESERVED, not yet written
+## ADR-0081 — §11.5 step 2 runs **after** the step-3 stale sweep, and the ordering alone is **not** the fix: `--dry-run` never runs that sweep, so liveness is derived from step 3's own staleness predicate negated, at both rungs `attempts` and `attempts + 1` — and the worktree half of the sweep, correct as written, **reaps nothing in a real run today** because production cuts its checkouts outside the namespace `WorktreeManager.reap` sweeps
 
-Allocated to the in-flight §11.5 step-2 orphan-reap lane (subtask 3, worktree/container reap wired
-into `_resume_impl`), for its decision to run the reap **after** `_reset_stale_running` rather than
-at the position §11.5's own step numbering puts it: reaping before the crash sweep is a no-op on
-exactly the crashed runs the reap exists for, because a crashed run's worktree is still claimed by
-a `RUNNING` `phases` row until the sweep resets it. That lane has not committed, and this ADR is
-its own to land — a draft exists at `.superpowers/sdd/design-resume-step5/adr-0081-draft.md` and
-is deliberately left unlanded here. This number is reserved and not available for reuse; its
-absence from this file is not a deletion.
+**Status:** accepted, describing behaviour landed on `main` in `e915b93`, `0b0db5c` and `3440b12`
+(`src/fleet/cli.py`, `tests/test_cli.py`). Anchored at `3440b12`; every file:line below is that
+ref unless another is named. **Supersedes nothing.** Consumes, and does not modify,
+`src/fleet/sandbox/worktree.py`'s `reap` and `src/fleet/sandbox/container.py`'s `reap` — the
+step-2 primitives `docs/superpowers/plans/design-resume-step5.md:29-33` (at `7670fc2`) identifies
+as already existing and already written against §11.5 by name. Replaces this file's own
+`ADR-0081 — RESERVED, not yet written` placeholder (at `3fe9ed7`); that placeholder also pointed
+at a draft at `.superpowers/sdd/design-resume-step5/adr-0081-draft.md`, which **does not exist** —
+the lane it was reserved for committed nothing at all.
+
+**Provenance (CLAUDE.md Guardrail 1).** The ordering departure is an **Agent Recommendation**
+allocated the number by the orchestrator, not a SPEC requirement: SPEC §11.5 numbers the reap as
+step 2 and the stale sweep as step 3, which is the order this ADR departs from. Everything in §3
+and §4 below is measured against the code at `3440b12` and cited; §4 in particular corrects the
+brief this lane was given, which recorded the namespace mismatch as a suspicion to investigate.
+
+### 1. As numbered, step 2 is a no-op on exactly the runs it exists for
+
+The reap must spare a sandbox that a live task still owns, so its input is the set of `phases`
+rows that still claim one. A crashed worker leaves its row saying `RUNNING` — nothing clears it
+but the step-3 sweep (`src/fleet/cli.py:9857-9861`, `_RESET_RUNNING_TO_PENDING_SQL`). So a step 2
+that ran before step 3 and read liveness off `status` alone would treat every crashed worker's row
+as a live claim and spare precisely the orphans a crash produced, which is the only debris the
+step has to clean. Ordered before the sweep it is not merely weaker; on the crash path it removes
+nothing at all.
+
+### 2. The decision, and the half of it the ordering does not buy
+
+**Step 2 is placed below the step-3 sweep** (`src/fleet/cli.py:10211-10231`). On a real
+`fleet resume` the sweep has already reset every stale row to `PENDING` by the time the reap
+reads, so a plain `status = 'RUNNING'` would be a correct liveness test at that point.
+
+**That is not sufficient, because `--dry-run` does not run the sweep.** The preview only *counts*
+what the sweep would reclaim (`_count_stale_running`, `src/fleet/cli.py:10398-10408`); the rows
+themselves are untouched, by design — a preview that mutated the ledger would not be one. So under
+a preview the reap reads unswept rows no matter where it is ordered, and a `status`-only test
+would report a crashed run's own orphans as live and preview reaping nothing. That is the single
+answer a health check must not get wrong, and it is the reading an operator runs `--dry-run` to
+get.
+
+So liveness is `status = 'RUNNING' AND NOT (<step 3's staleness predicate>)`
+(`_LIVE_SANDBOX_PREDICATE`, `src/fleet/cli.py:9928-9930`), composed from
+`_STALE_HEARTBEAT_PREDICATE` rather than restated beside it: a step-2 reader that drifted looser
+than step 3's would delete the checkout of a worker step 3 is about to declare alive. `NOT (1 …)`
+is how the composition is spelled — that constant opens with ` AND ` so it needs a left operand,
+and SQLite has no boolean literal. The negation survives the NULL-heartbeat case intact, because
+SQL `AND` with a false operand is false whatever the other operands are, so a row step 3 calls
+not-stale is a row this calls live.
+
+**The consequence for a future editor, stated so the reconciliation does not undo it:** in the
+non-dry path the negation is dead weight, and a reader who checks only that path will find it
+provably redundant and delete it. It is load-bearing under `--dry-run` alone. The comment at
+`src/fleet/cli.py:9919-9924` says so at the definition, and
+`test_resume_dry_run_names_the_orphans_it_would_reap_and_removes_none`
+(`tests/test_cli.py:1745`) fails if it goes.
+
+`lease_owner IS NOT NULL` was considered as a third conjunct — "still holds a lease" spelled
+mechanically, since the sweep NULLs that column when it hands a lease back — and **rejected**. It
+would narrow "live", and every row it excluded would become reapable. Narrowing "live" is the
+direction that deletes a running worker's checkout; the errors available here are not symmetric.
+
+Position relative to §11.5 step 7 is immaterial and the reap sits below it: the sweep writes no
+`phases` row, so the projection regenerated from SQLite is identical either side of it.
+
+### 3. The name a live row claims is `attempts + 1`, and `attempts` is spared as well
+
+`phases.attempts` is a *charged* counter; the sandbox name carries a *rung* number.
+`PhaseRunner._dispatch` dispatches with one more than the row records
+(`src/fleet/orchestrator/runner.py:686`), so the checkout a live worker holds open right now is
+always `sandbox_name(run_id, repo_id, attempts + 1)` (`src/fleet/sandbox/worktree.py:61-66`). A
+live set derived from `attempts` alone would classify **every** live sandbox in the fleet as an
+orphan — the sweep at its most destructive exactly when the fleet is healthiest.
+`test_resume_reap_spares_the_rung_the_live_row_is_actually_on` (`tests/test_cli.py:1659`) fails
+under a mutation that drops the `+ 1`.
+
+`attempts` is spared too (`src/fleet/cli.py:10460`): it names the rung whose charge has landed and
+whose sandbox the same worker may still be tearing down — `RdepverifyWorker`'s cancellation path
+removes the sandbox named for `ctx.attempt` (`src/fleet/workers/rdepverify.py:331`). The two
+errors are not symmetric here either: a spared orphan costs disk until the next `fleet resume`
+retries it, a reaped live checkout costs the run.
+
+### 4. What the sweep can actually reach today — the worktree half finds nothing, and says so
+
+`WorktreeManager.reap` removes a registered worktree when its directory name starts with
+`fleet-<run_id>-` and is absent from the live set (`src/fleet/sandbox/worktree.py:330`).
+Two independent facts put production's worktrees outside that description, and both were measured
+at `3440b12`:
+
+- **Registry.** `CloneWorker._materialize_worktree` runs `git worktree add` inside the repo's own
+  mirror, `<cache_dir>/<slug(repo_id)>.git` (`src/fleet/workers/clone.py:397-407`, `:636-637`).
+  Step 2 builds its manager against `run.monorepo_path` (`src/fleet/cli.py:10464-10470`), so the
+  `git worktree list` it runs interrogates a git directory that never registered them.
+- **Name.** `OrchestratorContext.worktree` returns `work_dir/<repo_id>`
+  (`src/fleet/orchestrator/context.py:206-208`), which is what every worker receives as
+  `WorkerContext.workdir`. There is no `fleet-<run_id>-` prefix and no attempt suffix, so even
+  against the right registry the prefix filter would spare all of them.
+
+`WorktreeManager` is constructed nowhere else in `src/`; only `sandbox_name` is imported by
+production code, by `src/fleet/workers/buildverify.py:64` and
+`src/fleet/workers/rdepverify.py:56`. That asymmetry is the whole picture: **the container half of
+step 2 works** — every container is named from `sandbox_name` plus a per-invocation `-t<token>`,
+and `ContainerSandbox.reap` spares by `-`-delimited prefix (`src/fleet/sandbox/container.py:184`)
+— while **the worktree half is a correct implementation of a sweep over an empty namespace.**
+
+This is not fixed here. Closing it means changing `clone.py` and `context.py` to name checkouts
+with `sandbox_name`, which is a separate change carrying its own migration question for the
+worktrees already on disk under the old names. What this ADR *does* decide is that the sweep must
+not report the resulting silence as a clean run: every emitted step-2 line names the namespace it
+searched (`_reap_lines`, `src/fleet/cli.py:10283-10331`), because "no orphans" and "I was looking
+in the wrong place" are otherwise the same output, and the docstring at
+`src/fleet/cli.py:10491-10507` records the limitation where the next author of this function will
+read it.
+
+### 5. `failed` is reported per entry, and the clean headline is gated on it
+
+D44 (`docs/INTEGRATION_HONESTY.md`) is the four-state collapse: "removed", "attempted and
+unresolved", and "deliberately spared" are three facts, and a caller that prints only what it
+removed hands the operator a clean line for a sweep that left a checkout on disk or a container
+running. Both primitives keep the three apart in their return values; step 2 prints every
+`failed` entry with its reason and the name, because the operator's next action is
+`git worktree remove <name>` or `docker rm <name>` and a count does not support it.
+
+The first draft of `_reap_lines` computed the headline and the failure lines independently, and so
+printed `no orphan worktrees` immediately above two `FAILED` lines — the same collapse
+reintroduced one layer up, in the reporting rather than the return value. The clean line is now
+gated on both lists being empty (`src/fleet/cli.py:10323-10326`), and
+`test_resume_reports_every_worktree_the_sweep_could_not_remove` (`tests/test_cli.py:1763`) asserts
+the absence of the headline as well as the presence of the detail; that second assertion is what
+the independent-headline mutation fails while the first assertion still passes.
+
+### 6. The live set reaches the container sweep unexpanded
+
+`live_names` is handed to `ContainerSandbox.reap` as sandbox names
+(`src/fleet/cli.py:10608`), not pre-expanded into concrete container names. An earlier draft of
+this lane's code did expand it — listing the run's containers, computing the spared subset in
+`cli.py`, and passing that — on the stated premise that `reap()` spares by exact equality. That
+premise was true before `aa16846` and false against the code it was calling. Beyond restating a
+rule that already exists, the expansion opened a window `claims()` does not have: the spared set
+was computed from a listing taken before `reap()` took its own, so a container started between the
+two was absent from the spared set and would be force-removed with a live row claiming it — the
+outcome the paragraph justifying the expansion said it was preventing.
+
+The test that pins this is worth naming because the obvious test does not work.
+`test_resume_reap_hands_the_container_sweep_sandbox_names_not_expanded_ones`
+(`tests/test_cli.py:1801`) hands the sweep a static docker inventory and passes under the
+expansion mutation: the quantity it measures — which of a fixed set of names ends up removed —
+does not move under the defect. The defect lives in the window between two listings, so
+`test_resume_container_sweep_lists_once_so_a_build_starting_mid_sweep_survives`
+(`tests/test_cli.py:1837`) opens one, with a container on the live rung that docker first reports
+after the sweep has already listed once. A one-listing sweep cannot see it and cannot kill it.
 
 ---
+
 
 ## ADR-0082 — A demotion's `checkpoints` sweep is **span-wide and conditional on a demotion having actually happened**, and it spares `DEGRADED` alone: the backward walk's hard stops and the sweep's carve-out answer two different questions, so `SKIPPED` stops the walk and still loses its checkpoint — and the residual `DEGRADED` stale-anchor hazard is a **stated boundary**, unreachable only by an induction spread across three modules that nothing binds to this method's signature
 
