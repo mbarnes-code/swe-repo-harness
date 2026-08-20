@@ -40,8 +40,9 @@ def target(backend: str, model_id: str, *, effort: str = "high") -> BackendTarge
 
 
 def profile() -> dict[ModelTier, tuple[BackendTarget, ...]]:
-    """A realistic §9 `default` profile: HEAVY with same-model transport failover, WORKHORSE with
-    a local standby, CHEAP single-target."""
+    """A realistic §9 profile: HEAVY with same-model transport failover, WORKHORSE with a local
+    standby, CHEAP single-target. Shaped like §9's `hosted_failover` example rather than its
+    `default`, which routes every tier through core backends so the example file is copyable."""
     return {
         ModelTier.HEAVY: (target("anthropic", "heavy-a"), target("bedrock", "heavy-a")),
         ModelTier.WORKHORSE: (

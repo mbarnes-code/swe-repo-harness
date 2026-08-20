@@ -6359,20 +6359,17 @@ default_profile: default
 
 profiles:
 
-  # ---- 1. Hosted Anthropic, with same-model transport failover. The shipped default; these are
-  #         exactly the ADR-0009 model ids, now as DATA rather than as structure.
+  # ---- 1. Hosted Anthropic. The shipped default; these are exactly the ADR-0009 model ids, now
+  #         as DATA rather than as structure. Every target here names a CORE backend, so this
+  #         file is copyable as-is on an install with no optional extras — the same-model
+  #         transport failover lives in profile 4, deliberately out of `default_profile`.
   default:
     HEAVY:
       - { backend: anthropic,        model_id: claude-opus-5,              effort: high,
           api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
-      - { backend: bedrock,          model_id: claude-opus-5,              effort: high,
-          region: us-east-1,              price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
-                                                  # same model, different transport
     WORKHORSE:
       - { backend: anthropic,        model_id: claude-sonnet-5,            effort: high,
           api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
-      - { backend: vertex,           model_id: claude-sonnet-5,            effort: high,
-          region: us-east5,               price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
     CHEAP:
       # ADR-0075: no `effort:` here. `BackendTarget.effort` is optional and defaults to None,
       # which every backend renders as "send no effort parameter". Do not re-add `effort: low`.
@@ -6419,6 +6416,28 @@ profiles:
     CHEAP:
       - { backend: openai_compatible, model_id: local-cheap,               effort: low,
           base_url: "http://localhost:8001/v1", api_key_env: LOCAL_LLM_API_KEY, price: free }
+
+  # ---- 4. Hosted with same-model TRANSPORT failover: one model id reached through two vendors'
+  #         transports, so a single provider's outage degrades rather than halts. This is NOT the
+  #         default profile and that is load-bearing: rule 2 below validates only the SELECTED
+  #         profile, so these targets cost nothing until `--profile hosted_failover` — at which
+  #         point `bedrock` and `vertex` must genuinely be installed on the host
+  #         (`pip install 'fleet[bedrock]' 'fleet[vertex]'`), or startup exits 2 naming the extra.
+  hosted_failover:
+    HEAVY:
+      - { backend: anthropic,        model_id: claude-opus-5,              effort: high,
+          api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
+      - { backend: bedrock,          model_id: claude-opus-5,              effort: high,
+          region: us-east-1,              price: { in_per_mtok: 5.0, out_per_mtok: 25.0 } }
+                                                  # same model, different transport
+    WORKHORSE:
+      - { backend: anthropic,        model_id: claude-sonnet-5,            effort: high,
+          api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
+      - { backend: vertex,           model_id: claude-sonnet-5,            effort: high,
+          region: us-east5,               price: { in_per_mtok: 3.0, out_per_mtok: 15.0 } }
+    CHEAP:
+      - { backend: anthropic,        model_id: claude-haiku-4-5-20251001,
+          api_key_env: ANTHROPIC_API_KEY, price: { in_per_mtok: 1.0, out_per_mtok: 5.0 } }
 ```
 
 Five rules the loader enforces at startup, before a repo is touched:
@@ -6426,9 +6445,18 @@ Five rules the loader enforces at startup, before a repo is touched:
 1. **Every `roles` value is a `ModelTier` member**, and every tier named by any role has a
    **non-empty** target list in the selected profile. A role routed to an empty tier is a startup
    error, never a runtime `KeyError` in wave 7.
-2. **Every `backend` resolves** in the §7.7 registry, and each backend validates its own target
-   fields — `openai_compatible` refuses a target with no `base_url`; `bedrock`/`vertex` refuse one
-   with no `region` (§13 row 36).
+2. **Every `backend` resolves** in the §7.7 registry — the adapters that actually imported on
+   *this* host, never the four names the harness merely ships (ADR-0078) — and each backend
+   validates its own target fields — `openai_compatible` refuses a target with no `base_url`;
+   `bedrock`/`vertex` refuse one with no `region` (§13 row 36). **Only the SELECTED profile's
+   targets are checked**, so a profile naming an optional-extra backend costs an unrelated
+   operator nothing and exits 2 — naming `pip install 'fleet[<extra>]'` — for the operator who
+   selects it. That is the constraint the example above is written to respect: `default_profile`
+   routes every tier through core backends only, so the file copies onto a stock install and
+   boots. **Do not widen this gate to accept a name the host cannot serve.** A name we can spell
+   is not a backend that can answer; accepting `bedrock` on a host without `boto3` converts a
+   startup error into an `UnknownBackend` in wave 7 with repos already cloned, which is the exact
+   inversion the gate exists to prevent (ADR-0078 §3).
 3. **`llm.require_capabilities` is met** by the *first* target of each named tier, using declared
    (not probed) capabilities merged with `capabilities_override`. Failure is exit 2 with the tier,
    the requirement, and the offending target named (§13 row 38).
