@@ -66,7 +66,16 @@ def _status_of(row: PhaseRow | None) -> RepoStatus:
 def phase_floor(
     rows: Mapping[Phase, PhaseRow | None], evidence: Mapping[Phase, bool]
 ) -> Phase | None:
-    """Return the earliest phase this repo must re-enter at, or `None` if nothing should move.
+    """Return this repo's re-entry floor, or `None` if nothing should move.
+
+    The floor is the phase **above** the **highest** phase below the settled frontier whose
+    durable evidence still holds **or** which is a `DEGRADED`/`SKIPPED` hard stop
+    (`orchestrator/reentry._HARD_STOPS`, tested *before* evidence, so such a row ends the walk
+    whatever holds below it), never that phase itself, and `SCAN` only if there is no such phase
+    (`docs/SPEC.md` Constraint 7 / §11.5 step 5, ADR-0076 §1, `models/enums.RESUME_DEMOTE` — one
+    wording, bound by `tests/test_floor_rule_statements.py`). Never the *earliest*: wherever two
+    phases below the frontier hold, the walk stops above the highest and never reaches the
+    earliest, so naming the earliest picks a rung this function never returns.
 
     `rows` should carry an entry for every `Phase`; a phase with no persisted row yet may be
     omitted or mapped to `None` — both mean `PENDING`. `evidence` supplies
