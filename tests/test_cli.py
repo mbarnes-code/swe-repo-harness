@@ -1558,11 +1558,17 @@ class _ScriptedDocker:
         present: Sequence[str] = (),
         rm_fails: Sequence[str] = (),
         starts_after_first_listing: str | None = None,
+        ps_fails: str | None = None,
     ) -> None:
         self.present = list(present)
         self.rm_fails = set(rm_fails)
         self.removed: list[str] = []
         self.listings = 0
+        #: `docker ps` exits non-zero with this stderr — a stopped daemon, or a socket this user
+        #: cannot open. `present` is deliberately still populated: the containers ARE there, and
+        #: the sweep simply cannot be told about them. A fake that also emptied `present` would
+        #: be testing the empty-inventory case under a different name.
+        self._ps_fails = ps_fails
         #: A container that appears only once the sweep has already listed once — a build that
         #: started while step 2 was running. Nothing can make it appear to a sweep that lists a
         #: single time, which is the point: see the test that uses it.
@@ -1574,6 +1580,8 @@ class _ScriptedDocker:
             pattern = args[args.index("--filter") + 1].removeprefix("name=")
             hits = [n for n in self.present if re.match(pattern, n)]
             self.listings += 1
+            if self._ps_fails is not None:
+                return _proc(args, 1, stderr=self._ps_fails)
             if self._late is not None and self.listings == 1:
                 self.present.append(self._late)
             return _proc(args, 0, "\n".join(hits))
@@ -1900,6 +1908,56 @@ def test_resume_reports_every_container_docker_would_not_confirm_removed(
     assert f"FAILED to reap container {stuck}" in result.output
     assert "is in use" in result.output, "docker's own reason was discarded"
     assert "no orphan containers" not in result.output
+
+
+def test_resume_dry_run_reports_a_docker_ps_it_could_not_run_instead_of_no_orphans(
+    workspace: Path,
+) -> None:
+    """D73's second residual: the `--dry-run` preview read the LENIENT `list_by_prefix`, which
+    returns `[]` for a stopped daemon and for a run with no containers alike, so a health check
+    run during a docker outage printed `no orphan containers`.
+
+    That is the one answer a preview must never fabricate. `--dry-run` exists to be believed —
+    an operator runs it precisely when they suspect debris — and "there is nothing wrong" is the
+    false reassurance D73 is about. The non-preview branch has distinguished the two since
+    `cfd89c7`; only the preview still collapsed them.
+
+    **What this measures.** `docker.removed` and the previewed name list are CONTROLS: a preview
+    removes nothing by definition, and a failed listing yields an empty preview both before and
+    after the fix, so neither quantity moves under the defect. The discriminating assertions are
+    on the reported VERDICT — that `_reap_lines` printed the sweep as not having run, in docker's
+    own words, and that the clean headline is absent.
+
+    The container fixture still HOLDS an orphan: docker knows about it and simply cannot say so.
+    A fixture with an empty `present` would be testing the honestly-empty case by another name.
+    """
+    _reap_workspace(workspace)
+    orphan = f"{_sandbox('acme-commons', 1)}-tdeadbeef"
+    docker = _ScriptedDocker(
+        present=[orphan],
+        ps_fails="Cannot connect to the Docker daemon at unix:///var/run/docker.sock.",
+    )
+
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
+        result = runner.invoke(app, [*base_args(workspace), "resume", "--dry-run"])
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    # The CONTROLS. Neither moves under the defect.
+    assert docker.removed == [], "a --dry-run removed a container"
+    assert orphan not in result.output, (
+        "the preview cannot name a container it was never told about — true before the fix too"
+    )
+    # The DISCRIMINATING assertions.
+    assert "the container sweep did not run" in result.output, (
+        "a preview that could not read the inventory reported on it anyway"
+    )
+    assert "Cannot connect to the Docker daemon" in result.output, (
+        "docker's own reason is what tells the operator to start the daemon and re-run"
+    )
+    assert "no orphan containers" not in result.output, (
+        "telling an operator their fleet is clean because docker would not answer is the defect"
+    )
 
 
 def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
