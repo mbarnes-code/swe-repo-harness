@@ -705,11 +705,17 @@ async def test_limits_key_llm_semaphores_by_tier_not_by_backend(harness: Harness
         llm_overrides={ModelTier.WORKHORSE: 2},
     )
 
-    async def slots(sem: asyncio.Semaphore) -> int:
-        """How many holders fit before the next acquire would block — the number that matters."""
+    async def slots(gate: asyncio.Semaphore | ResizableLimiter) -> int:
+        """How many holders fit before the next acquire would block — the number that matters.
+
+        Both kinds, and the annotation has to say so: the `llm` tiers below are
+        `ResizableLimiter` and `git_net` / `docker` are still `asyncio.Semaphore`. This reads
+        only what the two share, `locked()` and `acquire()`. `ResizableLimiter.__slots__` has no
+        `_value`, so anything reaching for semaphore internals here raises at runtime.
+        """
         taken = 0
-        while not sem.locked():
-            await sem.acquire()
+        while not gate.locked():
+            await gate.acquire()
             taken += 1
         return taken
 
