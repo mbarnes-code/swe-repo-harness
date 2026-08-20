@@ -482,7 +482,7 @@ LAND1 pre-scanned all five lanes against every KNOWN_INERT/qualified key: **no l
   precondition holds" — the phrasing in SPEC §11.5 AND in my own brief to RS1 — would have marked
   never-built repos as ready for Phase 4. The algorithm must search **DOWNWARD from the settled
   frontier** using a NEW `evidence_holds` predicate, **never `preconditions_hold`**.
-  runner.py:214-218 says it outright: "Neither verdict ever means 'skip the work'".
+  runner.py:214 says it outright: "Neither verdict ever means 'skip the work'".
   Had we implemented from B1's framing (which I propagated into the RS1 brief) we would have
   shipped a resume that silently promotes unbuilt repos. This is why step 5 was scoped OUT of RS1.
 **SECOND CONTRADICTION: demotion is literally unwritable today.** SPEC.md:180-182/6777 says demote
@@ -1327,7 +1327,10 @@ BOUNDED WORDING states exactly what is pinned AND that "the enumeration is delib
   asserts the absence of an ADVERSARY rather than a PROPERTY."
   That distinction — adversarial-only escape = documented limit; accidentally-reachable escape =
   defect — is the right frame, and I put it to the final reviewer explicitly.
-Test renamed to `..._without_writing_a_record_or_reaching_a_sink`.
+Test renamed to `..._without_writing_a_record_or_reaching_a_sink`. (Narrowed again in the CR1
+round to `..._without_writing_a_record_or_naming_a_new_sink`: "reaching a sink" is the
+absence the seven §4.2 escapes defeat, and "naming a new sink" is the one the whitelist
+equality actually proves. The name above is the round-B state, kept as history.)
 
 ## CLEAN1 fix-1 re-review — ACCEPTED. I1/M1/M2/M3/region all ADDRESSED. 4 Minor.
 **M1's DISCRIMINATION INDEPENDENTLY VERIFIED**: under Mutation A the VERBATIM PRE-FIX BODY PASSES

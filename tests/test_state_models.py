@@ -610,10 +610,15 @@ def test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else() ->
     # than listed, because a hand-written list is airtight on keys and leaky on values: an earlier
     # cut named three of the five reachable targets, so widening RESUME_DEMOTE to admit
     # SUCCEEDED -> SKIPPED passed this test and the key assertion above. Every status except
-    # PENDING (the one legal target) and SUCCEEDED itself (an idempotent no-op, §11.7) must raise,
-    # and adding a RepoStatus member enlarges this loop automatically.
+    # PENDING (the one legal target) and SUCCEEDED itself (an idempotent no-op, §11.7) must raise.
+    # Adding a `RepoStatus` member enlarges this loop automatically but does NOT pass silently:
+    # the count below is a deliberate stop, because whether a new status belongs in RESUME_DEMOTE
+    # is a decision, not a default. Whoever adds the member makes it here and edits the count.
     elsewhere = [s for s in RepoStatus if s not in (RepoStatus.PENDING, RepoStatus.SUCCEEDED)]
-    assert len(elsewhere) == 5, "every non-PENDING target must be covered, not a chosen subset"
+    assert len(elsewhere) == 5, (
+        "RepoStatus has grown: every non-PENDING target must be covered, not a chosen subset. "
+        "Decide whether the new member belongs in RESUME_DEMOTE, then update this count to match."
+    )
     for target in elsewhere:
         with pytest.raises(ValueError, match="illegal status transition"):
             transition(RepoStatus.SUCCEEDED, target, resume=True)
@@ -703,7 +708,7 @@ assertion's own failure message.
 """
 
 
-def test_transition_demotes_without_writing_a_record_or_reaching_a_sink(
+def test_transition_demotes_without_writing_a_record_or_naming_a_new_sink(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`transition(SUCCEEDED, PENDING, resume=True)` demotes, and does not record it (ADR-0077 §4).
@@ -726,7 +731,11 @@ def test_transition_demotes_without_writing_a_record_or_reaching_a_sink(
 
     So the load-bearing assertion is now a WHITELIST of what `transition()` may name at all
     (`TRANSITION_GLOBALS`), which catches side effects by construction rather than by anticipating
-    their form. All six forms above now fail it.
+    their form. All six forms above now fail it. The test's NAME is scoped to exactly that —
+    "naming a NEW sink", not "reaching" one. An earlier name claimed the broader absence, which
+    ADR-0077 §4.2's seven verified escapes defeat while this body stays green; a name asserting an
+    absence needs its own proof, and the proof here reaches only as far as the whitelist does
+    (CLAUDE.md Rule 12).
 
     It is strong and it is NOT a proof, which is recorded here rather than discovered later: a side
     effect routed entirely through names already on the whitelist passes every assertion below.
@@ -741,9 +750,12 @@ def test_transition_demotes_without_writing_a_record_or_reaching_a_sink(
     with caplog.at_level(logging.DEBUG):
         result = transition(RepoStatus.SUCCEEDED, RepoStatus.PENDING, resume=True)
 
+    # A bare status, never the `(status, PhaseDemotion)` pair a caller could audit with — and the
+    # identity check IS that assertion, because a `(status, record)` tuple is not
+    # `RepoStatus.PENDING`. An `isinstance(result, RepoStatus) and not isinstance(result, tuple)`
+    # line used to follow this one and was deleted: `RepoStatus` is a `StrEnum`, so no instance of
+    # it is ever a `tuple`, and no mutation could fail it while this line held (Rule 12).
     assert result is RepoStatus.PENDING
-    # ...a bare status, never a `(status, PhaseDemotion)` pair the caller could audit with.
-    assert isinstance(result, RepoStatus) and not isinstance(result, tuple)
 
     # The whitelist: `transition()` may reference these names and no others. A sink of any kind —
     # module, attribute, builtin, deferred import — must be named to be reached.

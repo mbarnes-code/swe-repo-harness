@@ -5631,7 +5631,15 @@ each fix is recorded per entry.
     and landed (`791b428`, `ea9ee57`) — **and it still has no caller**.
 13. **`docs/SPEC.md` named `transition()`, not `demote()`, as the demotion path** — so the author of
     the demotion writer would have followed the SPEC, emitted no finding, and demoted silently.
-    Corrected on DEM1 and landed (`e5b8b11`).
+    **Corrected in two rounds, and this entry claimed completeness after the first.** It read
+    "Corrected on DEM1 and landed (`e5b8b11`)" until CR1 found the survivor. `d0b1150` rewrote
+    §11.5 step 5 **and** the §3 Constraint 7 bullet in one commit; `e5b8b11` scoped its remedy to
+    "§11.5 step 5" and left Constraint 7 at `SPEC.md:186` still naming
+    `transition(..., resume=True)` as the demotion write *and* still asserting that path "emits a
+    `PhaseDemoted` finding" — a claim `transition()` has never satisfied. Constraint 7 is
+    corrected in **`f02d124`**, and ADR-0077 §4 item 1 now names both paragraphs so a reconciler
+    cannot re-narrow the remedy to one of them. The lesson is Guardrail 6's, unchanged: a remedy
+    scoped to the reported site, then written up here as if it covered the class.
 14. **The docs asserted LLM behaviour that no code implements, and one instance was load-bearing**
     (D66). "Adaptive thinking forbids temperature pinning" appeared in `docs/SPEC.md` (four sites),
     `docs/DECISIONS.md` (ADR-0009) and two `src/` mirrors — `models/tasks.py` and `llm/cache.py` —
@@ -5793,7 +5801,7 @@ but they are not tasks, and counting them as open debt overstates it.
    continue, delegating to `_transform_impl` → `_build_impl` → `_verify_impl` with **no new
    `PhaseRunner` instantiation** (L). **The hard constraint, and the reason step 5 was scoped out of
    RS1:** the search runs **downward from the settled frontier** using `evidence_holds`, **never
-   `preconditions_hold`** — `runner.py:214-218` says it outright, "neither verdict ever means 'skip
+   `preconditions_hold`** — `runner.py:214` says it outright, "neither verdict ever means 'skip
    the work'". Delete `ResumeIncompleteError` when subtask 7 lands, per ADR-0076.
 2. **Write ADR-0078** for the backend-name narrowing, and add the test that would have caught it
    (open item 13). The number is free and the behaviour change is currently recorded nowhere.

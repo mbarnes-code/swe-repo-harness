@@ -489,7 +489,7 @@ re-derives the broken algorithm.
 
 §11.5 step 5 says "re-check each phase's **declared preconditions**", and Constraint 7 names
 `runner.py` as the thing that re-checks them. But `runner.py`'s only precondition mechanism is
-`preconditions_hold`, whose own contract (`runner.py:214-218`) says:
+`preconditions_hold`, whose own contract (`runner.py:213-214`) says:
 
 > `False` means "it does not — run the phase whole from its anchor" … **Neither verdict ever means
 > "skip the work".**

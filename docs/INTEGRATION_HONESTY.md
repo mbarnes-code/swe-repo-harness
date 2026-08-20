@@ -3873,7 +3873,7 @@ the wrong direction, because `BaseWorker.preconditions_hold` is not a durable-ev
 That `return True` is **correct at its own call site** — a precondition gate must admit a fresh repo —
 and **wrong as a resume predicate**: a repo that has never been built has no BUILD row, so
 `preconditions_hold` returns `True` and an ascending walk marks it ready for Phase 4.
-`orchestrator/runner.py:214-218` says so outright: *"Neither verdict ever means 'skip the work'."*
+`orchestrator/runner.py:214` says so outright: *"Neither verdict ever means 'skip the work'."*
 
 **Consequence, stated at the right strength.** No such resume was ever shipped — step 5 is
 unimplemented on `main` and was on every lane tip. What was shipped is the **instruction to build it
@@ -3911,7 +3911,9 @@ today".
 **Would a test catch it? No.** Both halves are individually correct and individually tested; the
 contradiction lives between them, and no test asserts that the SPEC's demotion is performable.
 
-**Addressed, landed, with a limit the branch itself insisted on and landing did not change.**
+**Addressed, landed in TWO rounds — and this paragraph asserted completeness after the first.**
+The gate and its limit are as described below; what was wrong here was the SPEC half, corrected in
+`f02d124` and restated in the closing paragraph of this entry.
 `enums.py:61` adds a `RESUME_DEMOTE` map consulted only under a keyword-only `resume=True` (`:136`),
 mirroring the existing `OPERATOR_REOPEN` precedent axis-for-axis, plus `demote()` (`:141`) which is
 strictly stricter than `transition()` and returns a `PhaseDemotion` audit record with the status.
@@ -3919,9 +3921,15 @@ strictly stricter than `transition()` and returns a `PhaseDemotion` audit record
 caller**, exactly like `OPERATOR_REOPEN` before it. That is correct for a gate whose consumers are six
 subtasks away, and it **must not be read as shipped capability**: any statement that "resume can
 demote" is false on `main` today. The change also carries an honest limit —
-`transition(..., resume=True)` remains public and would demote *silently*, so `SPEC.md` §11.5 step 5
-names `demote()` and says so (`e5b8b11`), and the test that claimed the door was closed was **deleted
-and replaced** by one that pins the door open.
+`transition(..., resume=True)` remains public and would demote *silently*, so `SPEC.md` names
+`demote()` and says so — at first in **§11.5 step 5 only** (`e5b8b11`), and that scoping is the half
+of this record that was wrong. `d0b1150` had rewritten §11.5 step 5 **and** the §3 Constraint 7
+bullet together; `e5b8b11` swept only the first, so Constraint 7 (`SPEC.md:186`) went on naming
+`transition(..., resume=True)` as the demotion write *and* asserting that path "emits a
+`PhaseDemoted` finding", which it has never done — in the paragraph the demotion writer's author
+reads first. Corrected in **`f02d124`** (CR1 C-1); ADR-0077 §4 item 1 now names both paragraphs so
+the remedy cannot be re-narrowed to one. The test that claimed the door was closed was **deleted and
+replaced** by one that pins the door open.
 
 ---
 

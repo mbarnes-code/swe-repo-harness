@@ -6916,12 +6916,19 @@ demotions would go silent while a test named "cannot be taken without the findin
 That is exactly the failure this gate exists to prevent, arriving through the door the gate left
 open. So the reinforcement is placed where that author will actually meet it:
 
-1. **`docs/SPEC.md` §11.5 step 5 names `demote()`** and says explicitly that
-   `transition(..., resume=True)` "returns the status ALONE and would demote silently".
+1. **`docs/SPEC.md` names `demote()` in BOTH paragraphs a writer reads** — §11.5 step 5 *and* the
+   §3 Constraint 7 bullet — and both say explicitly that `transition(..., resume=True)` "returns
+   the status ALONE and would demote silently". Constraint 7 is named second because it was
+   **missed the first time**: the round that first wrote this item scoped its own remedy to
+   "§11.5 step 5", so Constraint 7 went on naming `transition(..., resume=True)` as the demotion
+   write *and* asserting that path emits the finding — which `transition()` has never done.
+   Corrected in `f02d124` (CR1 C-1). A remedy that names one of two sibling paragraphs, then is
+   written up as complete, is the failure this ADR exists to prevent arriving through its own
+   documentation (CLAUDE.md Guardrails 6 and 7).
 2. **`transition()`'s own docstring says `DO NOT pass resume=True here`**, and names `demote()`.
 3. **`PhaseDemotion`'s docstring carries an `HONEST LIMIT` paragraph** stating the gap in the one
    place a reader of the type is guaranteed to look.
-4. **A test pins the gap** (`test_transition_demotes_without_writing_a_record_or_reaching_a_sink`)
+4. **A test pins the gap** (`test_transition_demotes_without_writing_a_record_or_naming_a_new_sink`)
    so it is visible in the suite rather than contradicted by it. If anyone closes the door, that
    test fails and is deleted deliberately — which is the correct way to find out. **What it pins,
    precisely:** `transition()`'s body may reference only the names in `TRANSITION_GLOBALS`, holds
@@ -7031,7 +7038,7 @@ repo's demotions into a single finding or fingerprint per phase.
 ### 6. The second contradiction, resolved by naming two predicates instead of one
 
 Constraint 7 said "re-checks the phase's **declared preconditions**", and `runner.py`'s only
-precondition mechanism is `BaseWorker.preconditions_hold` — whose own contract (`runner.py:214-218`)
+precondition mechanism is `BaseWorker.preconditions_hold` — whose own contract (`runner.py:212-214`)
 says:
 
 > `True` means "the checkpoint describes the tree in front of me, re-enter for `remaining_units`
