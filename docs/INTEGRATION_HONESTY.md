@@ -4137,3 +4137,123 @@ is the one this whole class has: a reconciler follows the prose.
 > not touched. It is deliberately outside the new test's `_EXPECTED_SITES`: the census anchor keys
 > on the corrected wording, so a fifth carrier phrased the old way is not detected by it. That is a
 > gap in coverage, stated as one. **D71 remains the next free number** (highest allocated: D70).
+
+---
+
+## D72–D73 — §11.5 step 2's two halves: one sweeping an empty namespace, one that could not report its own failure
+
+Both numbers were allocated centrally at dispatch (CLAUDE.md §3). **D71 was never allocated and
+remains free**: the disclosures at `:4008`, `:4052` and `:4139` each explicitly decline a number
+and say so, and this section does not quietly close that gap by taking it — the brief that
+dispatched this work believed D71 was the highest pre-existing number, and it was D70. Highest allocated after this
+section: **D73**.
+
+### D73 — CLOSED, FIXED in `cfd89c7`. `list_by_prefix` collapsed a failed `docker ps` into "no containers"
+
+`ContainerSandbox.list_by_prefix` returned `[]` when `docker ps` did not exit 0. A daemon that is
+down, a permission error on the socket, and a run that genuinely has no containers were one
+answer. **This is D44's collapse on the read side, and it is the silent member of the family:**
+D44's `ReapResult.failed` swallowed the failure of something that was *attempted*, so at least an
+attempt had happened; here nothing is attempted at all, because the sweep is told there is nothing
+to sweep.
+
+**Why it stopped being theoretical.** §11.5 step 2 landed a caller (`e915b93`): `fleet resume`
+sweeps orphan containers on every non-`--dry-run` run, unconditionally
+(`cli.py:10231`). `ContainerReapResult.complete` is `not self.failed`, so a sweep during a docker
+outage returned `reaped=[] failed=[] complete=True` and `cli._reap_lines` printed
+`no orphan containers`. A mechanism that appears to run and cannot fire, reporting success —
+CLAUDE.md Rule 11 is *fail loud*.
+
+**The fix, shaped like D44's rather than newly invented.** `list_with_verdict` returns a
+`ContainerListing` carrying either `names` or an `error` reason string — a string and not a bool,
+because the operator's next action differs between a daemon that is down and a `docker ps` killed
+at its deadline. `no_verdict` is asked before `result.ok` (ADR-0067 part 4), so a call that never
+started is not reported as a docker-level refusal, and `stdout_tail` is not parsed when `error` is
+set: a partial listing read as the inventory is exactly how a reaper concludes that a container it
+never saw does not exist. `reap()` reads that method and, on an error, returns one `failed` entry
+naming the **prefix** it could not enumerate — so `complete` is `False` and the operator gets
+docker's own words. The widening of `ContainerReapFailure.name` from "a container" to "a container
+or the prefix" is documented on that dataclass, because `name` is what an operator pastes after
+`docker rm`.
+
+**Every caller, and how each behaves now.** Three in `src/`:
+
+| Caller | Before | Now |
+|---|---|---|
+| `ContainerSandbox.reap` (`sandbox/container.py`) | read `[]`, returned an empty `ContainerReapResult` that reads as a clean sweep | reads `list_with_verdict`; a failed listing becomes one `failed` entry named `fleet-<run_id>-*`, `complete` is `False` |
+| `BuildverifyWorker._sweep_containers` (`workers/buildverify.py:1053`) | iterated `[]`, swept nothing, said nothing | **unchanged — residual, see below** |
+| `cli._reap_orphan_containers`, `--dry-run` branch (`cli.py:10594`) | previewed an empty list as "nothing to reap" | **unchanged — residual, see below** |
+
+**The residual, stated rather than closed.** `list_by_prefix` is kept with its signature
+unchanged and is now documented as the *lenient* view. The two call sites above live in modules
+this change does not own, and neither can absorb a raised exception where it stands:
+`_sweep_containers` is reached from `on_cancel` and from a deadline kill inside
+`BuildverifyWorker.run()`, so an exception there would turn a best-effort cleanup into a failure
+of the thing being cleaned up; the `--dry-run` branch would turn a preview into a traceback.
+Closing this means moving those two sites to `list_with_verdict` **in the modules that own them**,
+not changing the method under them. `test_list_by_prefix_stays_the_lenient_view_and_list_with_verdict_the_honest_one`
+pins both halves on the same failure so the residual cannot be closed in the wrong direction by
+accident.
+
+**What the test measures, and the blindness it was written to avoid.** A test that measured
+*removals* — `result.reaped`, or the `docker rm --force` argv the fake runner recorded — **cannot
+observe this defect**: a failed listing produces zero removals both before and after the fix, so
+the number it reads is `0` either way. Both are asserted in
+`test_reap_reports_a_failed_listing_instead_of_a_clean_empty_sweep` as *controls*, and the
+discriminating assertions are on `failed` and `complete`. Demonstrated, not argued: under a
+mutation restoring the pre-fix read (`reap()` back on `list_by_prefix`), pytest fails at the
+`result.complete is False` line — the two removal-counting assertions above it executed and
+passed. The same mutation leaves
+`test_reap_reports_a_real_empty_inventory_as_a_clean_complete_sweep` green, which is why that one
+is the no-over-correction control and not the test that pins the fix.
+
+### D72 — OPEN, recorded only. Step 2's worktree half is a correct sweep over an empty namespace
+
+**Not a defect in the step-2 code.** `_reap_orphan_worktrees` and `WorktreeManager.reap` do
+exactly what they say. The namespace they sweep is empty because nothing else in `src/` ever puts
+a worktree into it. Three independent legs, each verified here at `8df4af8` rather than inherited
+from the report that first raised it:
+
+1. **The names carry no run prefix.** `OrchestratorContext.worktree` (`orchestrator/context.py:206-208`)
+   returns `work_dir / repo_id`. That path is what reaches a worker
+   (`context.py:232` `workdir=`, `cli.py:2207` `worktree_path=`). `WorktreeManager.reap`
+   (`sandbox/worktree.py:303-310`) removes "every `fleet-<run_id>-*` worktree not in
+   `live_names`". A directory named `<repo_id>` is not `fleet-<run_id>-<repo>-<attempt>`, so no
+   worktree the fleet actually cuts can match the glob.
+2. **The worktrees are registered in a different git dir.** `CloneWorker._materialize_worktree`
+   (`workers/clone.py:397-407`) runs `git worktree add --detach` through `self._git(mirror, ctx)`
+   — the **per-repo mirror**. `WorktreeManager` interrogates one fixed repo:
+   `_git_run` (`sandbox/worktree.py:134-141`) is `git -C self.repo_dir …`, and its sole
+   construction site `cli._reap_worktree_manager` (`cli.py:10464-10471`) sets
+   `repo_dir = settings.root / run.monorepo_path`. `git worktree list` on the monorepo cannot see
+   worktrees registered in a mirror.
+3. **There is no third party that would bridge the two.** `WorktreeManager(` appears exactly once
+   in `src/` — `cli.py:10466`. Nothing else constructs it, so no other code path supplies a
+   `repo_dir` that would make legs 1 and 2 line up.
+
+**Net effect: the container half of step 2 works; the worktree half is a correct sweep over an
+empty namespace.** It reports `no orphan worktrees` truthfully about the namespace it examined,
+and that namespace is not where the fleet's worktrees are.
+
+**Deliberately not fixed here.** The fix is structural — it requires changing the worktree naming
+in `orchestrator/context.py` and the git dir in `workers/clone.py`, both outside the step-2 lane's
+scope and outside this one's, and a separate design lane owns it. Recorded so a future lane has
+the evidence rather than the symptom. **Do not close this by making `WorktreeManager` scan the
+mirrors**: that decides the namespace question by the reaper's convenience rather than by what
+`§3.3` says a sandbox name is, and legs 1 and 2 would still disagree.
+
+### A hazard the same work exposed: the resume tests reached the host docker daemon
+
+Independent of both defects, and worth its own line because it is about the *suite*, not the code.
+`cli._reap_container_sandbox` returns a bare `ContainerSandbox()`, whose default runner is the real
+`util.proc.run`. When §11.5 step 2 landed (`e915b93`) the sweep became unconditional on the resume
+path (`cli.py:10231`), and nine `test_resume_*` tests already existed in `tests/test_cli.py`. For
+the two commits until `0b0db5c`, running the suite meant `docker ps --filter name=^fleet-…` against
+whatever daemon the developer had running — and, off the `--dry-run` branch, `docker rm --force`
+for anything that matched. `0b0db5c` closed it with an **autouse** fixture,
+`_no_test_may_reach_the_host_docker_daemon` (`tests/test_cli.py:1609-1617`), which monkeypatches
+that seam to a scripted docker. Autouse is the right shape and the reason is in its docstring: the
+hazard belongs to the code under test, not to the tests that remember to opt out of it. Recorded
+because "a test suite that reaches a real daemon" is a hazard that outlives the defect that
+exposed it, and because the seam functions (`_reap_container_sandbox`, `_reap_worktree_manager`)
+exist for exactly this and a future sweep added outside them re-opens it silently.
