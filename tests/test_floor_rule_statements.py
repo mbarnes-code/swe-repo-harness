@@ -1,17 +1,21 @@
 """The §11.5-step-5 re-entry-floor rule, bound: every statement of it, and the code they describe.
 
-The rule is restated in full in six places — `docs/SPEC.md` Constraint 7, `docs/SPEC.md` §11.5
-step 5, `docs/DECISIONS.md` ADR-0076 §1, the docstring of `orchestrator.reentry.phase_floor`
-itself, the `RESUME_DEMOTE` comment in `src/fleet/models/enums.py`, and (in the operator register,
-twice) `src/fleet/cli.py`'s two step-5 refusals — and *summarised* in three more: `fleet resume
---help` and its two `docs/SPEC.md` mirrors. Until this file, **nothing bound any of them to each
-other, or to `orchestrator/reentry.phase_floor`**.
+The rule is restated in full in **eight** places — `docs/SPEC.md` Constraint 7, `docs/SPEC.md`
+§11.5 step 5, `docs/DECISIONS.md` ADR-0076 §1, the docstring of `orchestrator.reentry.phase_floor`
+itself, **`orchestrator/reentry.py`'s module docstring**, the `RESUME_DEMOTE` comment in
+`src/fleet/models/enums.py`, and (in the operator register, twice) `src/fleet/cli.py`'s two step-5
+refusals — and *summarised* in three more: `fleet resume --help` and its two `docs/SPEC.md`
+mirrors. Until this file, **nothing bound any of them to each other, or to
+`orchestrator/reentry.phase_floor`**.
+(This sentence said "six" while enumerating seven, in the file written to bind quantifiers. The
+eighth is the module docstring Layer F now binds; it was the one restatement bound by nothing at
+all, seventeen lines above the one `21d6a87` enrolled.)
 They agreed because a lane made them agree by hand in `f466287`, and the round that produced them
 produced five successive wrong-successor corrections — a fix shipping a narrower or differently
 wrong version of the claim it was correcting — so hand agreement is exactly the state that has
 already failed here.
 
-Four layers, because these statements are not the same kind of artifact and pretending they are
+Six layers, because these statements are not the same kind of artifact and pretending they are
 would be the "convention wearing a mechanism's clothes" CLAUDE.md Rule 12 forbids:
 
 **Layer A — identity, for the four full restatements in the markdown register.** They are
@@ -54,6 +58,17 @@ passed while all three of those sites said "the earliest incomplete phase" — a
 spot, closed by binding the shared phrase, whitelisting the retracted words to their negation, and
 exercising that negation against `phase_floor`.
 
+**Layer F — `reentry.py`'s module docstring, the rule's longest statement.** The file that
+*implements* the rule states it twice: once in `phase_floor`'s docstring (a Layer A census site
+since `21d6a87`) and once, at greater length and in different words, in the module docstring
+seventeen lines above. The second was bound by nothing — Layer A cannot see it (no quantifier
+phrase) and Layer D considered **0** of its sentences (measured) — so flipping "the walk may not
+continue *below* one" to its opposite left all twelve cases green. It is bound as a paraphrase,
+like `enums.py`: required phrases, the hard-stop set parsed out of its own words, and the disaster
+it names ("demote every repo with an excluded middle phase all the way to `SCAN`") exercised
+against `phase_floor`. Widening Layer D to reach it was measured and rejected — see
+`_MODULE_RULE_OPENS`.
+
 What this file does **not** bind is recorded in that test's docstring and in the module-level
 `_RESIDUAL` note below, so that no future reader mistakes four layers for closure. In particular,
 `src/fleet/cli.py`'s two operator-facing restatements are outside the census by register and are
@@ -62,6 +77,7 @@ bound in `tests/test_cli.py` instead: `_RESIDUAL` item 6.
 
 from __future__ import annotations
 
+import ast
 import re
 from pathlib import Path
 
@@ -77,9 +93,22 @@ from fleet.state.repository import PhaseRow
 _RESIDUAL = """Not bound, stated rather than implied:
 
 1. A consistent rewrite of all four full restatements to one *false* sentence passes Layer A
-   (they still agree) and passes Layer C. Only Layer B's parsed-out claims — the hard-stop
-   status set, the cited symbol, the fallback phase — are checked against the code, so a
-   falsehood outside those three claims is not caught by anything here.
+   (they still agree) and passes Layer C. Layer B's parsed-out claims are what reach the code,
+   and there are now **four** of them: the hard-stop status set, the cited symbol, the fallback
+   phase, and the *order* of the two tests. A falsehood outside those four is caught by nothing
+   here.
+
+   This item previously scoped the residual to "a falsehood outside those three claims", which
+   put it outside the gap that actually existed — the accepted falsehood was **inside** claim
+   one. `(DEGRADED|SKIPPED|SUCCEEDED|PENDING)` was a closed whitelist, so a *superset* clause
+   naming `RUNNING` as a hard stop yielded the same two-element set and compared equal; and
+   nothing read the ordering word at all, so "tested *after* evidence" — the inverse of what
+   `phase_floor` does — read as agreement. Both halves applied to all four sites at once passed
+   12/12, measured at `d123035` before either was fixed. Both are closed: `_named_hard_stops`
+   reads whatever the statement enumerates rather than what this file expects it to, and
+   `_observed_hard_stop_order` measures the code's real order and compares it to the prose's word.
+   The same shape one level out is **not** closed: a hard-stop claim made outside the enumeration
+   attached to the words "hard stop" ("..., and a `RUNNING` row also ends the walk") is not read.
 2. Layer C is a token whitelist. A rewrite of the `enums.py` comment that keeps all seven required
    tokens while stating something false passes. Textual identity is the wrong instrument for a
    paraphrase and there is no honest stronger one short of deleting the paraphrase; the residual is
@@ -131,8 +160,28 @@ _RESIDUAL = """Not bound, stated rather than implied:
    `tests/test_cli.py:1269` and `:2149`, which assert the phrase in the *rendered* output of the
    two commands that emit it. That is a real binding in another file, not a gap; it is recorded
    here because a reader counting this module's census sites would otherwise conclude the rule is
-   stated in five places when it is stated in seven. Layer D does now cover both (`cli.py` joined
-   `_GOVERNED`), on the semantic axis only.
+   stated in five places when it is stated in eight. `cli.py` is in `_GOVERNED`, so Layer D
+   *sweeps* both — but swept is not considered: measured, `cli.py` contributes **0** sentences
+   that `_STOP_CONDITION` matches, so Layer D asserts nothing about either restatement today. The
+   enrolment buys the future case (a re-statement in the stop-condition shape would be
+   considered); the earlier wording here said it "does now cover both", which claimed the future
+   case as the present one.
+
+7. Layer F binds `reentry.py`'s module docstring the way Layer C binds `enums.py`'s comment, and
+   inherits Layer C's residual: a rewrite keeping the three required phrases while asserting
+   something false around them passes. Two further gaps, reproduced rather than supposed:
+
+   * **Scope.** Layer F reads numbered item 2 only, because item 1 and the closing paragraph name
+     `PENDING` and `REQUIRES_HUMAN_INTERVENTION` for unrelated reasons and would corrupt the
+     parsed-out hard-stop set. A false statement of the same rule *elsewhere in that docstring* is
+     bound by nothing. Measured: appending "a `SKIPPED` row below the frontier is passed over, not
+     treated as an end of the walk" — false against the `_HARD_STOPS` break — leaves all 13 cases
+     green, and so does "the floor may be set to a `SKIPPED` phase when nothing below it holds".
+     Neither falls in Layer F's span and neither matches `_STOP_CONDITION`. A false sentence that
+     *is* in the stop-condition shape is loud, through Layer D's count assertion (measured).
+   * **Re-worded vs deleted.** `_MODULE_RULE_OPENS`/`_MODULE_RULE_CLOSES` are natural-language
+     anchors, like the census's. Renumbering item 2, or re-wording past them, fails loudly — but
+     the failure cannot tell "moved" from "removed". Residual 3 in a new place.
 """
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -238,6 +287,31 @@ def _prose_statements() -> dict[str, str]:
     return found
 
 
+#: The status names a statement attaches to the words "hard stop", however it punctuates them:
+#: `` `DEGRADED`/`SKIPPED` hard stop `` in the markdown clause, `DEGRADED/SKIPPED hard stop` in
+#: `enums.py`'s uppercase register, `` `DEGRADED` and `SKIPPED` are hard stops `` in `reentry.py`'s
+#: module docstring. **Open, not a whitelist of expected names** -- see
+#: `test_the_hard_stop_statuses_the_clause_names_are_the_ones_the_code_stops_at` for the measured
+#: superset that a closed four-name parse let through with all 12 cases green.
+_HARD_STOP_ENUMERATION = re.compile(
+    r"((?:`?[A-Z][A-Z_]+`?(?:/|,\s*|\s+and\s+))*`?[A-Z][A-Z_]+`?)\s*(?:is|are)?\s*hard stops?"
+)
+
+
+def _named_hard_stops(text: str, what: str) -> set[str]:
+    """Every status name `text` calls a hard stop, read out of `text` rather than expected of it.
+
+    A statement that no longer attaches an enumeration to the words "hard stop" fails loudly here
+    instead of yielding an empty set that would compare equal to nothing and pass vacuously.
+    """
+    enumeration = _HARD_STOP_ENUMERATION.search(text)
+    assert enumeration is not None, (
+        f"{what} no longer names any status as a hard stop (expected an enumeration immediately "
+        f"before the words 'hard stop'); got: {text[:200]!r}"
+    )
+    return set(re.findall(r"[A-Z][A-Z_]+", enumeration.group(1)))
+
+
 def _enums_paraphrase() -> str:
     """The `RESUME_DEMOTE` comment's statement of the floor rule, normalised and scoped.
 
@@ -275,6 +349,11 @@ def _enums_paraphrase() -> str:
 #: and `cli.py:10083`/`:10401` restate the whole rule to an operator in the uppercase register —
 #: neither is reachable by the census, so before this the semantic axis was the only axis that
 #: could ever see a wrong stop claim in them, and it was not looking at them.
+#:
+#: **Being swept is not being considered, and Layer D's enrolment of `reentry.py` was reported as
+#: closure of a measured blind spot when it was not.** Zero considered sentences means zero
+#: assertions: the module docstring's own rule statement is bound by **Layer F**, not by this
+#: layer, and Layer F exists because widening `_STOP_CONDITION` to reach it flags correct prose.
 _GOVERNED: tuple[Path, ...] = (_SPEC, _DECISIONS, _ENUMS, _REENTRY, _CLI)
 
 #: What the walk is, in any register the four statements use.
@@ -425,12 +504,22 @@ def test_the_hard_stop_statuses_the_clause_names_are_the_ones_the_code_stops_at(
     """Parsed out of the prose, compared to `reentry._HARD_STOPS`. Nobody re-authors this.
 
     The clause says the walk also stops above a phase "which is a `DEGRADED`/`SKIPPED` hard stop".
-    Those two names are read *from the clause*, so editing the prose to name a different set — or
-    to drop one — fails here without anyone touching this file, and adding a status to
-    `_HARD_STOPS` without saying so in the prose fails equally.
+    Those names are read *from the clause*, so editing the prose to name a different set — or
+    to drop one, or to add one — fails here without anyone touching this file, and adding a status
+    to `_HARD_STOPS` without saying so in the prose fails equally.
+
+    **The enumeration is open, and it was closed until this change — measured.** The parse used to
+    be `(DEGRADED|SKIPPED|SUCCEEDED|PENDING)`: a whitelist of four names, so a clause naming a
+    *fifth* status as a hard stop yielded the same two-element set and passed. Reproduced at
+    `d123035`: rewriting all four census sites to "`DEGRADED`/`SKIPPED`/`RUNNING` hard stop"
+    passed all 12 cases of this module while being false against `reentry._HARD_STOPS`. A
+    reconciler implementing that prose stops the walk on every `RUNNING` row — every repo whose
+    middle phase is mid-flight re-enters at the phase above it. CLAUDE.md Rule 12's "invert an
+    enumeration of escapes into a whitelist" applied one level up: read whatever the clause names
+    in the enumeration attached to "hard stop", and let the comparison decide.
     """
     clause = next(iter(set(_prose_statements().values())))
-    named = {m.group(1) for m in re.finditer(r"`(DEGRADED|SKIPPED|SUCCEEDED|PENDING)`", clause)}
+    named = _named_hard_stops(clause, "the floor clause")
     actual = {status.name for status in reentry._HARD_STOPS}
     assert named == actual, (
         f"the floor clause names {sorted(named)} as hard stops; `reentry._HARD_STOPS` is "
@@ -490,6 +579,30 @@ def test_the_floor_is_above_the_highest_holder_not_the_earliest_as_all_four_stat
     )
 
 
+#: Which of the clause's two tests it says runs first. Parsed, not expected: the word is the whole
+#: behavioural claim, and inverting it is the half of the superset defeat with a real consequence.
+_ORDERING = re.compile(r"tested \*(before|after)\* evidence")
+
+
+def _observed_hard_stop_order() -> str:
+    """`"before"` or `"after"`: which test `phase_floor` really applies first, measured.
+
+    Measured on the one state that separates them. `BUILD` is `DEGRADED` and its evidence does not
+    hold, `SCAN`'s does. Testing `_HARD_STOPS` first ends the walk at `BUILD` without the floor
+    moving onto or below it, so the floor is `VERIFY`. Consulting evidence first moves the floor
+    down at least one rung, whichever way the two tests are then arranged -- so every non-`VERIFY`
+    result means evidence was consulted at the hard-stop row, which is what "after" asserts.
+    """
+    rows = {
+        Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+        Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SUCCEEDED),
+        Phase.BUILD: _row(Phase.BUILD, RepoStatus.DEGRADED),
+        Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+    }
+    floor = phase_floor(rows, {Phase.SCAN: True, Phase.BUILD: False})
+    return "before" if floor is Phase.VERIFY else "after"
+
+
 def test_a_hard_stop_below_the_frontier_ends_the_walk_before_evidence_is_consulted() -> None:
     """ "tested *before* evidence, so such a row ends the walk whatever holds below it" — the half
     of the clause `f466287` added, and the half `d0de310` disclosed as missing.
@@ -498,6 +611,14 @@ def test_a_hard_stop_below_the_frontier_ends_the_walk_before_evidence_is_consult
     consulted first the floor would descend to `BUILD`; because `_HARD_STOPS` is tested first the
     walk ends immediately and the floor is `VERIFY`. `f466287` measured `VERIFY`; measured again
     here.
+
+    **The clause's own ordering word drives the second assertion.** Until this change nothing read
+    it: the census, `_CLAUSE`, `_HARD_STOP_NAMED` and all four Layer-B/C parses are indifferent to
+    `before` vs `after`, so rewriting all four sites to "tested *after* evidence" — false against
+    the `_HARD_STOPS` break, which really does precede the evidence test — passed all 12 cases
+    (measured at `d123035`). A reconciler implementing that prose moves the evidence test first;
+    for a repo whose `BUILD` row is `DEGRADED` and whose `BUILD` evidence does not hold, the floor
+    then lands below a `DEGRADED` phase, the one outcome ADR-0077 §5 forbids.
     """
     rows = {
         Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
@@ -510,6 +631,16 @@ def test_a_hard_stop_below_the_frontier_ends_the_walk_before_evidence_is_consult
         f"a `DEGRADED` row below the frontier must end the walk above itself; got {floor!r} — "
         f"`BUILD` would mean the floor landed ON the hard stop, `SCAN` that the walk passed it and "
         f"reached the fallback, i.e. that evidence was consulted first"
+    )
+    stated = _ORDERING.search(next(iter(set(_prose_statements().values()))))
+    assert stated is not None, (
+        "the floor clause no longer says when the hard-stop test runs relative to the evidence "
+        "test (expected 'tested *before* evidence' or 'tested *after* evidence')"
+    )
+    assert stated.group(1) == _observed_hard_stop_order(), (
+        f"the floor clause says the `_HARD_STOPS` test is applied *{stated.group(1)}* evidence; "
+        f"`phase_floor` applies it *{_observed_hard_stop_order()}*. Whichever is wrong, a "
+        f"reconciler implementing the prose changes which rung the floor lands on."
     )
 
 
@@ -558,11 +689,127 @@ def test_the_enums_paraphrase_names_every_load_bearing_distinction() -> None:
     assert not missing, "the `RESUME_DEMOTE` floor-rule comment no longer names: " + "; ".join(
         f"{d} (expected one of {list(t)})" for d, t in sorted(missing.items())
     )
-    named = set(re.findall(r"\b(DEGRADED|SKIPPED|SUCCEEDED|PENDING)\b", paraphrase))
+    named = _named_hard_stops(paraphrase, "the `RESUME_DEMOTE` comment")
     actual = {status.name for status in reentry._HARD_STOPS}
     assert named == actual, (
         f"the `RESUME_DEMOTE` comment names {sorted(named)} as hard stops; "
         f"`reentry._HARD_STOPS` is {sorted(actual)}"
+    )
+
+
+# ------------------------------------------------------------------------------------------
+# Layer F -- `reentry.py`'s MODULE docstring, the rule's longest statement
+# ------------------------------------------------------------------------------------------
+
+#: `21d6a87` enrolled `reentry.py` in `_CENSUS_FILES` with one expected site -- `phase_floor`'s
+#: docstring -- and reported the measured blind spot closed. It was not: the **module** docstring
+#: seventeen lines above states the same rule at greater length, in its own words, and was bound by
+#: nothing. Measured at `d123035`: **0** of its sentences match `_STOP_CONDITION`, so Layer D never
+#: considered one; it carries none of `_CENSUS`'s quantifier phrase, so Layer A never saw it.
+#: Reproduced before fixing: editing "the walk may not continue *below* one" to "the walk continues
+#: *below* one" -- false against the `_HARD_STOPS` break -- left all 12 cases green.
+#:
+#: **Widening Layer D to reach it was measured and rejected.** The sentence `_STOP_CONDITION` would
+#: newly have to consider is "... if the backward walk reaches either, it stops there without
+#: moving the floor onto it", and it names no hard stop of its own -- "either" back-references the
+#: heading two sentences earlier -- so `_HARD_STOP_NAMED` would flag **correct** prose. A detector
+#: that fires on correct prose is worse than the gap (CLAUDE.md Rule 12's stop rule), so this is a
+#: Layer C-shaped binding instead: what the statement must NAME, plus claims parsed out of it and
+#: fed to the live `phase_floor`.
+_MODULE_RULE_OPENS = "2. **`DEGRADED`"
+_MODULE_RULE_CLOSES = "the floor onto it."
+
+#: Each entry is a load-bearing half of the module docstring's rule, with the phrase that carries
+#: it. Whitespace-flexed, so a reflow of the docstring passes and only a change of words fails --
+#: which is the point: "the walk may not continue *below* one" losing its "may not" is the review's
+#: reproduced defeat, and it is a change of words.
+_REQUIRED_IN_MODULE_RULE: dict[str, str] = {
+    "the floor may not land ON an excluded phase": "the floor may not land *on* a `SKIPPED` phase",
+    "the walk may not continue BELOW one": "the walk may not continue *below* one",
+    "and the walk stops there rather than moving the floor onto it": (
+        "it stops there without moving the floor onto it"
+    ),
+}
+
+
+def _reentry_module_rule() -> str:
+    """`reentry.py`'s module-docstring statement of the hard-stop rule, normalised and scoped.
+
+    Scoped to numbered item 2 -- the hard-stop rule -- because item 1 and the closing paragraph
+    name `PENDING` and `REQUIRES_HUMAN_INTERVENTION` for unrelated reasons, and including them
+    would corrupt the parsed-out hard-stop set exactly as the `enums.py` bullets would.
+    """
+    text = _REENTRY.read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(text))
+    assert docstring is not None, "src/fleet/orchestrator/reentry.py has no module docstring"
+    normalised = _normalise(docstring)
+    start = normalised.find(_MODULE_RULE_OPENS)
+    end = normalised.find(_MODULE_RULE_CLOSES, start + 1)
+    assert start != -1 and end != -1, (
+        "`reentry.py`'s module docstring no longer states the hard-stop rule in the expected span "
+        f"({_MODULE_RULE_OPENS!r} .. {_MODULE_RULE_CLOSES!r}). It is the rule's longest statement "
+        f"and the file that implements it; got: {normalised[:200]!r}"
+    )
+    return normalised[start : end + len(_MODULE_RULE_CLOSES)]
+
+
+def test_the_reentry_module_docstring_states_the_rule_the_code_implements() -> None:
+    """The rule's longest statement, bound where it lives — in the file that implements it.
+
+    It says three things `phase_floor` must do, and each is checked rather than trusted: that the
+    statuses it calls hard stops are `reentry._HARD_STOPS`, read out of its own words; that it
+    still states both directional halves (the floor may not land *on* an excluded phase, and the
+    walk may not continue *below* one); and that the disaster it names — "demote every repo with
+    an excluded middle phase all the way to `SCAN`" — is one `phase_floor` does not produce, with
+    the phase read out of the sentence rather than written here.
+
+    **What this is and is not.** Like Layer C, it is a vocabulary-and-parsed-claims binding, not
+    textual identity: this docstring is deliberately in a different register from the canonical
+    clause and demanding identity of it would force prose that is worse to read. So a rewrite that
+    keeps the three phrases while asserting something false around them passes; that is
+    `_RESIDUAL` item 7, and no convention is offered in place of closing it.
+    """
+    rule = _reentry_module_rule()
+    missing = {
+        distinction: phrase
+        for distinction, phrase in _REQUIRED_IN_MODULE_RULE.items()
+        if re.search(_flex(phrase), rule) is None
+    }
+    assert not missing, (
+        "`reentry.py`'s module docstring no longer states: "
+        + "; ".join(f"{d} (expected {p!r})" for d, p in sorted(missing.items()))
+        + ". Flipping one of these is how a false rule statement reached HEAD with all 12 cases "
+        "of this module green."
+    )
+
+    named = _named_hard_stops(rule, "`reentry.py`'s module docstring")
+    actual = {status.name for status in reentry._HARD_STOPS}
+    assert named == actual, (
+        f"`reentry.py`'s module docstring names {sorted(named)} as hard stops; "
+        f"`reentry._HARD_STOPS` is {sorted(actual)}"
+    )
+
+    excluded = re.search(r"`(\w+)` phase is a config exclusion", rule)
+    disaster = re.search(r"all the way to `(\w+)`", rule)
+    assert excluded is not None and disaster is not None, (
+        "`reentry.py`'s module docstring no longer names the excluded status and the phase a walk "
+        "that passed over it would reach, so its own failure claim cannot be exercised"
+    )
+    rows = {
+        Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+        Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus[excluded.group(1)]),
+        Phase.BUILD: _row(Phase.BUILD, RepoStatus.SUCCEEDED),
+        Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+    }
+    floor = phase_floor(rows, {})
+    assert floor is not None and floor is not Phase[disaster.group(1)], (
+        f"the module docstring says a walk that passed over a `{excluded.group(1)}` middle phase "
+        f"would demote all the way to `{disaster.group(1)}`, and that `phase_floor` does not; with "
+        f"`TRANSFORM` `{excluded.group(1)}` and no evidence anywhere it returned {floor!r}"
+    )
+    assert int(floor) > int(Phase.TRANSFORM), (
+        f"the walk passed *below* the excluded `TRANSFORM` phase and landed on {floor!r}; the "
+        f"module docstring says it may not continue below one"
     )
 
 
@@ -704,6 +951,12 @@ def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
     assert "\n4. " in _RESIDUAL, (
         "`_RESIDUAL` item 4 -- Layer D's own scope, and the two wider variants measured and "
         "rejected -- has been deleted. Layer D reads as broader coverage than it has without it."
+    )
+    assert "\n7. " in _RESIDUAL, (
+        "`_RESIDUAL` item 7 -- Layer F's scope, and the two false statements measured green "
+        "outside it -- has been deleted. Without it, binding `reentry.py`'s module docstring "
+        "reads as binding the whole docstring, which is the narrower-successor shape that "
+        "produced this layer in the first place."
     )
     assert "\n5. " in _RESIDUAL and "\n6. " in _RESIDUAL, (
         "`_RESIDUAL` items 5 and 6 -- Layer E binds a phrase and not a claim, and the two "
