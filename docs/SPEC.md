@@ -180,8 +180,10 @@ Common contract for all four:
 - **Resume validates evidence, never blind-replays** (Constraint 7): before re-entering a phase,
   `fleet resume` re-checks each phase's durable evidence against SQLite + Git and demotes the
   repo to its re-entry floor — the phase **above** the **highest** phase below the settled frontier
-  whose evidence still holds, never that phase itself, and `SCAN` if no phase below the frontier
-  holds (§11.5 step 5). **Two distinct
+  whose durable evidence still holds **or** which is a `DEGRADED`/`SKIPPED` hard stop
+  (`orchestrator/reentry._HARD_STOPS`, tested *before* evidence, so such a row ends the walk
+  whatever holds below it), never that phase itself, and `SCAN` only if there is no such phase
+  (§11.5 step 5). **Two distinct
   predicates, not one** (ADR-0077 §6): the durable, payload-free `evidence_holds` is what step 5
   searches over, while `BaseWorker.preconditions_hold` stays at its single call site inside
   `PhaseRunner._re_entry`, where a typed payload and a `WorkerContext` exist — and where neither
@@ -6948,10 +6950,12 @@ re-run — again without incrementing `attempts` (`FailureClass.TRANSIENT_INFRA`
 itself is re-created from `phases.base_ref` if it is missing. There is no third branch and no
 tree-SHA comparison, because a commit is either on the branch or it is not (§3.2 step 6);
 (5) demote each repo to its **re-entry floor** — the phase **above** the **highest** phase below
-the settled frontier whose durable evidence still holds, never that phase itself, and `SCAN` if no
-phase below the frontier holds (Constraint 7). That phase is precisely where the backward search
-below **stops**: it is the *first* holder the walk meets going down, hence the highest, never the
-*earliest*. Whenever two or more phases below the frontier hold, the walk stops above the highest
+the settled frontier whose durable evidence still holds **or** which is a `DEGRADED`/`SKIPPED` hard
+stop (`orchestrator/reentry._HARD_STOPS`, tested *before* evidence, so such a row ends the walk
+whatever holds below it), never that phase itself, and `SCAN` only if there is no such phase
+(Constraint 7). That phase is precisely where the backward search
+below **stops**: it is the *first* holder or hard stop the walk meets going down, hence the
+highest, never the *earliest*. Whenever two or more phases below the frontier hold, the walk stops above the highest
 and never reaches the earliest, so naming the earliest picks a rung this function never returns and
 re-runs every phase between the two. Nor is the floor "the lowest phase whose evidence does not
 hold": under a sparse or non-monotone `evidence` mapping those differ, and
