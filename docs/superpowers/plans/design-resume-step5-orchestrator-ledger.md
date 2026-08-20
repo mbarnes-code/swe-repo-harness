@@ -1205,6 +1205,10 @@ CITE lane: complete (18a1fc6, docs only).
   CONCERNS -> routed: D73's two "unchanged — residual" cells look closed by 5ed4e47 (the RESIDUAL lane
   is already carrying that); D55's "asyncio.Semaphore has no resize API" is OVERTAKEN BY ADR-0083.
   Neither adjudicated — correctly, since closing is not re-anchoring.
+  *(2026-08-20: D55 has since been adjudicated at INTEGRATION_HONESTY.md:3405-3440. "OVERTAKEN"
+  applies to the PREMISE ONLY and is not a closure: the stdlib class still has no resize API, what
+  changed is that `Limits.for_tier` returns ADR-0083's `ResizableLimiter` instead. Verdict there:
+  premise corrected, defect FULLY OPEN, 0% closed — `resize()` has no production caller.)*
 
 RESIDUAL lane: complete (f10a863, container.py + tests/test_sandbox.py, +30/-51).
   Residual verified closed IN CODE not from the report: buildverify.py:1088 and cli.py:10605 both call

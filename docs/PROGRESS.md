@@ -5573,6 +5573,15 @@ so no post-round total is asserted here.** Per row, what is traceable on `main`:
   underlying misclassification (open item 5). AIMD has no home: the 429 signal is in `llm/`, the
   semaphore is at `budgets.py:962`, its only acquisition is `workers/classify.py:162` — 1 of 12
   workers — and `asyncio.Semaphore` has no resize API. §11.8 acknowledges none of this.
+  *(Two premises re-measured 2026-08-20, §39 — the row is still **not built**. (i) The count is
+  **1 of 5**, not 1 of 12: five workers touch `ctx.llm` (`classify`, `rewrite`, `buildgen`,
+  `prwriter`, `buildverify`) and neither `llm/client.py` nor `llm/calls.py` acquires anything.
+  (ii) The object at `Limits.for_tier` is **no longer an `asyncio.Semaphore`** — it is ADR-0083's
+  `ResizableLimiter`, whose `resize()` is safe to call while slots are held. The stdlib class is
+  unchanged and still exposes no resize API; what changed is which object sits at that acquisition
+  point. Framing per D55 (`docs/INTEGRATION_HONESTY.md`): **premise corrected, defect fully open,
+  0% closed** — `grep -rn '\.resize(' src/fleet/` is still empty, nothing reads a 429 and calls it,
+  and the AIMD controller is unbuilt.)*
 - **Row 38** (`ContextTruncated`) — **not built**, greenfield. re-measured on `main`: `max_context` has **11** hits in `src/` (5 in
   `settings.py`'s §9 rule-3 gate, 1 declaration in `models/tasks.py`, 5 declaring capability
   constants in the three new backend adapters, which is why the figure grew from the 5 measured at
@@ -5833,6 +5842,20 @@ but they are not tasks, and counting them as open debt overstates it.
 6. **§13 row 43 — rate limiting (LARGE).** The only fix for open item 5, which is live on `main`
    today. Scoping must confront what §11.8 does not: the 429 signal is in `llm/`, the semaphore is in
    `budgets.py`, only 1 of 12 workers acquires it, and `asyncio.Semaphore` cannot be resized.
+   *(Premise re-measured 2026-08-20, §39 — **the task is unchanged and still LARGE**. Do NOT scope
+   a resizable ceiling: `Limits.for_tier` already returns ADR-0083's `ResizableLimiter`, whose
+   `resize()` is safe to call while slots are held, so re-implementing it — or re-opening
+   ADR-0083's explicitly rejected "swap the semaphore object" option — would rebuild landed work.
+   `asyncio.Semaphore` the stdlib class is unchanged and still has no resize API; what changed is
+   which object sits at that acquisition point. The acquisition count is **1 of 5**, not 1 of 12
+   (five workers touch `ctx.llm`; neither `llm/client.py` nor `llm/calls.py` acquires anything).
+   Framing per D55: **premise corrected, defect fully open, 0% closed** — `resize()` has no
+   production caller in `src/` and no AIMD controller reads 429s. What remains in scope is the
+   controller, the 429→`resize()` hop, and widening the acquisition beyond `classify`. If this
+   lane instead takes the shorter R2+R3-only path and never builds the controller, ADR-0083 §3's
+   own recommendation is to **revert `a3ff0ae`/`431b02f`**, not to keep `ResizableLimiter` as dead
+   code — so "the primitive exists" is a reason not to re-implement it, never a reason to treat it
+   as already-earned progress.)*
 7. **§13 row 38 — `ContextTruncated` (MEDIUM, greenfield).** Nothing in `src/` sizes a real prompt
    against `max_context` **at runtime**; `ContextTruncated` itself has zero occurrences in `src/`.
    The earlier phrasing here — "nothing in `src/` sizes against `max_context`" — was too strong:
@@ -6040,3 +6063,66 @@ Seventeen items. Each was measured or read against `main` at `431b02f` or `08ba8
 8. **Subtasks 8, 9, 10 in order**, each gated on the one before. **ADR-0079 must be written before subtask 9** (flag semantics for `--from-phase` / `--repo` / `--reset-attempts`, leaving `--revalidation` refused), and subtask 9's brief must carry open item 7: `--from-phase` is the path that turns the DEGRADED boundary into a defect. **ADR-0080 must be written before subtask 10** (step-8 delegation, **no new `PhaseRunner` instantiation**).
 9. **§13 row 43 — rate limiting.** `ResizableLimiter` exists and decides nothing. R2→R3 of `rate-limiting-scope-research.md` is the slice that closes D55's causal hop. Confront what §11.8 does not — research 2's measurement, of which I re-ran only the worker count: **only 5 of the 11 registered workers touch `ctx.llm`, only 1 acquires a limiter, and neither `llm/client.py` nor `llm/calls.py` acquires anything at all.**
 10. **Re-audit §38's thirteen carried items** (open item 15) rather than inheriting them. The round-B audit found ~80% of the items *it* inherited were stale and one had been false when first written and ridden five checkpoints. **This section's own carried items are the same risk, and they are marked as inherited for exactly that reason.**
+
+### Addendum — FIXA lane, 2026-08-20 (after §39's suite run; **the suite has NOT been re-run since**)
+
+Three code-vs-doc contradictions the final whole-round review found, closed. **No behaviour changed.**
+
+**What was completed.**
+1. `src/fleet/models/enums.py` — `RESUME_DEMOTE`'s own comment said a demotion "is reachable only
+   through `transition(..., resume=True)`", contradicting the three sites that say the opposite and
+   are correct (`enums.transition`'s docstring, `state/repository.demote_to_floor`, `docs/SPEC.md`
+   Constraint 7). Corrected by **reusing SPEC Constraint 7's clause verbatim** rather than composing
+   a fourth variant. Lineage worth keeping: `f02d124` fixed this claim at its root and `8ea1881`
+   later **reflowed the line without reading it**, restoring the falsehood — a formatting pass
+   re-opened a closed defect.
+2. `src/fleet/orchestrator/budgets.py` — `Limits.for_tier`'s docstring claimed the limiter is held
+   by *every* `ModelClient.complete`. Re-measured this session: the sole acquisition in `src/` is
+   `workers/classify.py`'s `async with ctx.limits.for_tier(tier)`; five workers touch `ctx.llm` and
+   the other four reach `complete()` through `llm/calls.py`, which acquires nothing, as does
+   `llm/client.py`. The docstring now states 1-of-5 and says plainly that most paths are unbounded.
+   **Acquisition was NOT widened** — that is a later subtask with its own design.
+3. The D55 premise mirrors — four scoping documents, not the three the review named. §38's row-43
+   record and next-work item 6 above, `plans/ledger-sdd-backlog-b.md`, and (found by re-sweep)
+   `plans/open-items-audit-round-b.md` item 6. Each now carries a dated note in D55's own framing:
+   **premise corrected, defect fully open, 0% closed**, plus ADR-0083 §3's revert recommendation so
+   "the primitive exists" cannot be banked as progress.
+   `plans/design-resume-step5-orchestrator-ledger.md`'s "OVERTAKEN BY ADR-0083" line was annotated
+   for the same reason.
+
+**What was verified.**
+- `tests/test_state_models.py` gains one binding for item 1 —
+  `test_resume_demote_s_comment_names_demote_and_only_ever_disavows_transition`. It normalises the
+  whole comment block before matching (a reflow cannot hide a claim from it) and asserts a
+  **whitelist of stances**: `demote()` must be named, and every mention of `transition(` must be a
+  disavowal. Three mutations, each proven to have changed the file by `md5sum` + `diff`:
+  **M1** restore the exact pre-fix text → 165 pre-existing tests pass, only the new one fails;
+  **M2** keep `demote()` named but make the `transition(` mention affirmative → same result, so the
+  whitelist half fires independently of the name half; **M3** reflow the corrected text across five
+  lines including a break *inside* the disavowal window → passes, which is the `8ea1881` shape a
+  line-oriented grep would have missed.
+- Scoped suite green at the fix: `tests/test_state_models.py tests/test_budgets.py
+  tests/test_floor_rule_statements.py` → **166 passed**, clean `bazel disk` line. `ruff` and `mypy`
+  clean on the three changed Python files. **The full suite has not been re-run and is stale.**
+- Two-axis re-sweep (phrase **and** claim-in-other-words, whole-file whitespace normalisation with
+  an offset→line map, run before and after): **zero surviving hits in `src/`** on all six patterns.
+- Checked and deliberately **left alone** (correct sentences that merely matched the sweep):
+  `plans/design-resume-step5.md:461`'s option-B sketch (mechanically true *of the map*, and a
+  design-space enumeration written before `demote()` existed); `plans/rate-limiting-scope-research.md`
+  and `research-2.md`, which quote the old docstring and then correctly call it false;
+  `plans/design-resume-step5-orchestrator-ledger.md:624`'s "ceiling defaults to STARTING capacity"
+  (verified true against `DECISIONS.md:7756-7760`); `INTEGRATION_HONESTY.md:3411`'s D55 sentence,
+  already adjudicated in place.
+
+**Narrower successors caught in this lane's own re-read.** The first cut of item 2's docstring said
+"the client's own failover and repair re-issues are unbounded too" — false for the `classify` path,
+whose `async with` wraps the entire `complete()` call, re-issues included. Corrected before commit.
+Item 3's first cut said "the primitive exists, do not re-implement it" without ADR-0083 §3's revert
+preference, which would have read as a blessing on dead code; the clause was added.
+
+**Next subagent task.** Two sites this lane did not own and did not edit, both accurate as history
+and both now overtaken by item 2 — route or close them explicitly:
+`docs/DECISIONS.md:7779` (ADR-0083 disclosing, in the present tense, that it "does not sweep the
+stale `for_tier` docstring claim") and `plans/design-resume-step5-rl1-limiter-report.md:181`
+(R1 recording that it left the claim standing for R4). Neither is wrong about what its own change
+did; both now point a reader at a falsehood that is gone.

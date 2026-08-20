@@ -3436,6 +3436,17 @@ reaches the same halt as a real outage — is unchanged end to end. **Net: premi
 fully open, 0% closed by this work.** This matches, and does not extend, `docs/PROGRESS.md`'s own
 running assessment that R2→R3 (not R1's primitive) is the slice that would close D55's causal hop.*)
 
+*(2026-08-20, FIXA lane — **sweep only, verdict untouched.** The premise correction above had been
+made here and nowhere else, leaving four scoping documents still asserting the old premise as live:
+`docs/PROGRESS.md`'s §38 row-43 record and its next-work item 6, `docs/superpowers/plans/
+ledger-sdd-backlog-b.md`'s R2 research summary, and `docs/superpowers/plans/open-items-audit-round-b.md`
+item 6 (found by re-sweep; the review named only the first three). Each now carries a dated note
+using this entry's framing — premise corrected, defect fully open, 0% closed — plus ADR-0083 §3's
+revert recommendation, so that "the primitive exists" cannot be read as progress on row 43.
+`docs/superpowers/plans/design-resume-step5-orchestrator-ledger.md`'s "OVERTAKEN BY ADR-0083" note
+was annotated for the same reason. Re-verified this session: `grep -rn '\.resize(' src/fleet/` is
+empty. **D55 stays OPEN at 0%.**)*
+
 **Found by** R2 (research), scoping §13 rows 40 and 43 for build size and reading the halt path on
 the way. Recorded in the round ledger as "the highest-risk finding of the round".
 

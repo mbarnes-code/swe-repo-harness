@@ -1144,5 +1144,19 @@ class Limits:
         )
 
     def for_tier(self, tier: ModelTier) -> ResizableLimiter:
-        """The limiter every `ModelClient.complete` on this tier must hold."""
+        """This tier's LLM concurrency limiter. **Most `ModelClient.complete` calls do not hold
+        it, and are unbounded today.**
+
+        Measured in `src/` (2026-08-20): the sole acquisition is `workers/classify.py`'s
+        `async with ctx.limits.for_tier(tier)`, which does wrap that worker's whole `complete()`
+        call, failover targets and schema repairs included. Five workers touch `ctx.llm` —
+        `classify`, `rewrite`, `buildgen`, `prwriter`, `buildverify` — and the other four reach
+        `ModelClient.complete` through `llm/calls.py`, which acquires nothing; neither does
+        `llm/client.py`. So this is 1 of 5 call paths, not a tier-wide gate, and the four
+        unbounded paths are unbounded for every re-issue the client makes inside them.
+
+        For anyone wiring `resize()` to a 429 signal (§11.8, D55): halving this limiter throttles
+        `classify` alone and leaves the four heavy consumers at full rate. Widening the
+        acquisition is a separate subtask with its own design — do not infer it has happened
+        from the presence of this limiter."""
         return self.llm[tier]

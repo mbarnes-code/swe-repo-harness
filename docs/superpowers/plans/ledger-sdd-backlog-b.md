@@ -200,6 +200,11 @@ MINOR M4 settings.py:1400 uses `is None`, so `base_url: ''` PASSES startup. Real
 Row 40 failover.py/BackendHealth = MEDIUM. Row 43 rate limiting = LARGE (AIMD has no home: 429
   signal is in llm/, semaphore is budgets.py:962, its ONLY acquisition is workers/classify.py:162
   = 1 of 12 workers, and asyncio.Semaphore has NO resize API. §11.8 acknowledges none of this).
+  *(Premise re-measured 2026-08-20: row 43 is still LARGE and still NOT BUILT, but do not scope a
+  resizable ceiling — Limits.for_tier already returns ADR-0083's ResizableLimiter, which resizes
+  safely while held. asyncio.Semaphore the stdlib class is unchanged; what changed is which object
+  sits there. Count is 1 of 5, not 1 of 12. Per D55: premise corrected, defect FULLY OPEN, 0%
+  closed — resize() has no production caller and no AIMD controller reads 429s.)*
 Row 38 ContextTruncated = MEDIUM, greenfield (max_context has 5 hits, all declaration/startup gate,
   ZERO runtime sizing — B1's claim independently confirmed).
 
