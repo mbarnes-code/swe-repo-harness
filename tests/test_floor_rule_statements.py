@@ -393,7 +393,7 @@ _HARD_STOP_NAMED = re.compile(r"_HARD_STOPS|\bDEGRADED\b|\bSKIPPED\b|hard stop")
 #: How many sentences state the stop condition at all. Asserted, for the same reason
 #: `_EXPECTED_SITES` is: a re-wording past `_STOP_CONDITION` would otherwise reduce this layer to
 #: zero considered sentences and pass vacuously. Measured, not guessed.
-_EXPECTED_STOP_CONDITION_SENTENCES = 2
+_EXPECTED_STOP_CONDITION_SENTENCES = 3
 
 #: Normalised text has exactly one space per whitespace run, so a sentence boundary is a
 #: terminator followed by that single space. Splitting on `:` and `;` as well as `.` matters:
