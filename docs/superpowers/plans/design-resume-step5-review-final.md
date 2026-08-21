@@ -489,3 +489,11 @@ Grounded in what I found, not in what the documents say.
 10. **Leave D72, D74 and D55 open.** All three are correctly recorded, correctly scoped, and none is
    ready: D72's fix needs `clone.py` and `context.py` to adopt `sandbox_name` plus a migration
    decision for worktrees already on disk; D74 is expected to be touched by that same fix.
+
+   > **Correction (2026-08-21), round D final review I3 — the helper named in item 10 is wrong;
+   > the ruling itself (leave all three open) stands.** The cross-phase repo checkout takes
+   > **`checkout_name`**, the attempt-FREE `fleet-<run_id>-<repo>` form, not `sandbox_name`:
+   > `docs/SPEC.md` §3.3's name-form table gives that primitive that form, and ADR-0085 §1 argues
+   > it from `OrchestratorContext.worktree(repo_id)` having no `attempt` parameter. This snapshot
+   > inherited the name from `cli._reap_orphan_worktrees`'s docstring, which said `sandbox_name`
+   > until it was corrected in the same commit as this marker. Nothing above is edited.

@@ -8089,7 +8089,18 @@ whitelist exist to cover.
 are **not** landed here: no production call site adopts either name yet, and the disposition of
 worktrees already on disk (design task 6) is undecided. **D72 is therefore NOT closed by this
 ADR** — `docs/INTEGRATION_HONESTY.md`'s entry stands unamended, and `_reap_orphan_worktrees`'s
-KNOWN-LIMITATION docstring in `src/fleet/cli.py` remains true as written.
+KNOWN-LIMITATION docstring in `src/fleet/cli.py` ~~remains true as written~~.
+
+> **Correction (2026-08-21, final-review finding I3) — the struck certification was wrong about
+> one clause, and it is the clause that prescribes work.** The docstring's two *diagnostic*
+> halves (wrong registry, wrong name) were and are accurate. Its closing sentence, however, said
+> the fix needs `clone.py` and `context.py` to adopt **`sandbox_name`** — and §1 immediately
+> below argues that the cross-phase checkout cannot carry an attempt, while `docs/SPEC.md` §3.3's
+> name-form table (rewritten in this same change) gives that primitive `fleet-<run_id>-<repo>`.
+> The helper for that form is **`checkout_name`**, added by this ADR's own task 2. So this Status
+> paragraph certified as true a sentence that prescribed the form §1 rules out. Corrected in the
+> docstring, at the source, in the same commit as this marker; nothing above is edited, because
+> the rest of the certification held.
 
 Every file:line below is measured at `7d8f916` (this commit's parent) unless another ref is named. **Supersedes nothing.**
 Consumes and does not modify `WorktreeManager.reap`. Interacts with **ADR-0081**, which recorded

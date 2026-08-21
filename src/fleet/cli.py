@@ -11246,8 +11246,17 @@ async def _reap_orphan_worktrees(
 
     `WorktreeManager` is not constructed anywhere else in `src/` (only `sandbox_name` is, by
     `workers/buildverify.py` and `workers/rdepverify.py`, which is why the CONTAINER half of step
-    2 does work). Closing this needs `clone.py` and `context.py` to adopt `sandbox_name`, and
-    that is a separate change with its own migration question for worktrees already on disk.
+    2 does work). Closing this needs `clone.py` and `context.py` to adopt **`checkout_name`** —
+    the attempt-FREE `fleet-<run_id>-<repo>` form — and that is a separate change with its own
+    migration question for worktrees already on disk.
+
+    **NOT `sandbox_name`, which this docstring prescribed until round D's final review.** The
+    directory both files own is the cross-phase repo checkout, and `docs/SPEC.md` §3.3's
+    name-form table gives that primitive `fleet-<run_id>-<repo>` explicitly: Phase 2 reads the
+    tree Phase 1 cloned, so an attempt in the name would hand Phase 2 — and every retry — a
+    different empty directory. ADR-0085 §1 makes the same argument from the type,
+    `OrchestratorContext.worktree(repo_id)` having no `attempt` parameter. A reconciler who made
+    the code match the old sentence would have implemented the form the table forbids.
     """
     monorepo = (settings.root / settings.config.run.monorepo_path).resolve()
     scope = f"{run_prefix(run_id)}* registered in {monorepo}"
