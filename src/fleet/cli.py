@@ -7864,8 +7864,10 @@ async def _build_impl(
     never rehydrated from SQLite, while `_open_phase_waves` drops every wave whose members are
     all settled — so a SECOND `fleet build` over a partially complete run computed the root files
     over the unsettled waves alone and republished a `MODULE.bazel` missing whole ecosystems,
-    exiting 0 both times. Since `fleet resume` is `_unavailable`, re-invoking `fleet build` is the
-    only way to continue a partial run, so that was the normal operator path.
+    exiting 0 both times. Since `fleet resume` reconciles the ledger and then refuses to continue
+    with exit 2 (`ResumeIncompleteError`; §11.5 steps 6 and 8 have no implementation),
+    re-invoking `fleet build` is the only way to continue a partial run, so that was the normal
+    operator path.
 
     Hoisting the ingest is what makes the domain expressible: the units the root files must cover
     are exactly the eligible fleet, that set is known from SQLite before anything builds, and it
@@ -12066,7 +12068,7 @@ def stubs_resolve(
     with _mapped_errors():
         _phase_preflight(ctx)
         _ = (provider, revalidation, dry_run)
-        _unavailable("stubs resolve", "src/fleet/workers/buildverify.py (revalidation round)")
+        _unavailable("stubs resolve", "src/fleet/workers/buildverify.py")
 
 
 @stubs_app.command("abandon")

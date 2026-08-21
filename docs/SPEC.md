@@ -1594,8 +1594,10 @@ for reviving it. The rule: **closed waves are never re-opened.** Instead the un-
 appended as a **synthetic wave** at `wave_index = max(waves) + 1`, its internal order recomputed by
 topological layering over the un-blocked set alone (so an un-blocked chain of four still migrates
 in dependency order, across four synthetic waves if needed). Rows are written to `waves` /
-`wave_members` like any other wave and carry `waves.synthetic = 1` so the projection can say why a
-repo migrated late. Their Phase 4 runs against the **current** integration tip — a fresh snapshot
+`wave_members` like any other wave and carry `waves.synthetic = 1`, which records that the wave
+was appended to an already-sequenced plan rather than produced by the sequencing pass; it names
+no cause, so the projection can say a repo migrated outside its original layer but not what
+freed it. Their Phase 4 runs against the **current** integration tip — a fresh snapshot
 ref per §3.3 step 1, not the tip their original wave saw — and any Phase 3 merge is rebased onto
 it, because everything that closed in between has already landed.
 

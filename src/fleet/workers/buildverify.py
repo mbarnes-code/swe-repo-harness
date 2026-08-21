@@ -1029,9 +1029,10 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
         own — `util.proc.run`'s `asyncio.timeout_at` firing and killing the `docker run` child
         before `_run_one`'s outer watchdog ever wakes — used to leak: `run_task` completes by
         itself, so `_run_one` never calls `on_cancel`, and the container the killed client left
-        behind was previously left for `ContainerSandbox.reap` at `fleet resume` — a mechanism
-        with zero callers in `src/`, guarding a command that is itself `_unavailable`
-        (`cli.py:9792`), i.e. it was never actually swept. `run()` now calls `_sweep_containers`
+        behind was previously left for `ContainerSandbox.reap` at `fleet resume` — whose only
+        caller in `src/` is `cli._reap_orphan_containers`, run as §11.5 step 2, so the container
+        survives until an operator runs that verb rather than until the task that leaked it
+        ends. `run()` now calls `_sweep_containers`
         itself at both points a `docker run` child can be killed at its own deadline (the
         C-toolchain probe and the build/test step) instead of relying on either mechanism, so that
         half of D32 no longer depends on `on_cancel` or on `reap`/`resume` ever running.
