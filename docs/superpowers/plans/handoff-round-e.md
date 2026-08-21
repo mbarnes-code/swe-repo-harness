@@ -17,6 +17,9 @@ what it learned about carrying things forward.
 | **[ledger]** | reported by the lane that measured it, recorded in round D's ledger, not independently re-derived here |
 | **[decision]** | a ruling or a deliberate deferral, not a measurement |
 
+**Every "still live" or "still open" claim in this document carries the SHA it was measured at, and
+that is a requirement, not a courtesy.** See this section's last rule for why.
+
 **Re-measure, do not distrust, and do not inherit.** Round B's open-items audit found roughly four
 in five of the items *it* inherited were stale. Round D re-measured the same class and found the
 carried subtask status **correct** — independently re-verified rather than assumed. So the
@@ -36,6 +39,15 @@ acting on it verbatim would have landed a fresh false citation inside the fix fo
 finding. **Every finding carried below has an anchor, and every one must be re-measured at the
 moment of action, not at dispatch.**
 
+**A handoff is where the *reporter's* side of that bites.** Three times in round D a lane measured
+"still live at HEAD", a sibling's fix landed **between the measurement and the report**, and the
+stale reading shipped as current — **this document did it twice in its own first version** (§8 item
+6), and two of the three instances were caught only because the orchestrator re-ran the check. The
+rule above covers the **implementer**. This is the **reporter's** half, and a handoff is the worst
+place for it precisely because **every claim here is read days later, by someone who will not
+re-measure unless told to.** Hence the SHA requirement: a claim of the form "X is still broken" is
+only as good as the SHA beside it, and a reader who finds none should assume it has rotted.
+
 ---
 
 ## 1. Read these first, in order
@@ -53,8 +65,14 @@ moment of action, not at dispatch.**
    `ResumeIncompleteError` deferral annotated onto ADR-0076's own bullet.
 5. **`docs/INTEGRATION_HONESTY.md`: D71 (free), D72, D74, D55, D75.** Read D71's *body and its
    marker*, not its heading.
-6. **`.superpowers/sdd/round-d/r3-research.md`** — the source-verified brief for subtask 8. **See
-   the warning in §9 before relying on this path.**
+6. **`docs/superpowers/plans/resume-step5-subtask-8-research.md`** — the source-verified brief for
+   subtask 8: five costed decisions, four D74 seams, the `append_synthetic_waves` identity result and
+   the quarantine-undo hazard. **Promoted into the tracked tree by lane W9** from `.superpowers/`
+   scratch, unchanged but for a provenance banner (§9).
+7. **`docs/superpowers/plans/resume-step5-subtask-7-research.md`** — promoted alongside it. **Its
+   §§1–3 are history**: subtask 7 has landed, and the I4 transaction boundary and the dry-run D74
+   seam were both closed inside it. **Read §4 — that half is the subtask-9 brief**, and it is what
+   ADR-0079 must settle.
 
 ---
 
@@ -236,8 +254,11 @@ carry the perishability warning in §0.
    identically, and §3.5 puts contract ids in the same field. The root cause is a **false sentence in
    the code**: `src/fleet/models/state.py`'s `blocked_by` field description claims RHI is *"the ONE
    status 'abandoned' names"*. **This is a class, not a site** — the research lane was read-only and
-   did not edit it, so it is still there. **[ledger; the sentence re-verified present at
-   `src/fleet/models/state.py` — probe @ 1d0e39c]**
+   did not edit it. **[ledger; sentence re-verified present at `src/fleet/models/state.py` — probe @
+   `ab3aaad`]** **A lane was fixing it as this handoff was written, so treat the sentence itself as
+   IN-FLIGHT and re-check `git log -S"the ONE status" -- src/fleet/models/state.py` before acting.
+   The hazard does not depend on the sentence surviving** — the quarantine population is real
+   whatever the docstring says, and that is the part subtask 8 must design against.
 
 Design row 8 also asserts **"Files touched: `cli.py`"**, which is not achievable: nothing in `src/`
 reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writer, sole caller
@@ -322,20 +343,34 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
    `ResumeIncompleteError` deletion.
 5. **Re-audit §38's thirteen carried open items** rather than inheriting them (§40 open item 4,
    untouched). Round B's audit of a comparable carried set found roughly four in five stale.
-6. **Three small, live, unowned items**, each cheap and each an instance of a class this project
-   already pays for:
-   * `src/fleet/sandbox/container.py`'s `claims()` docstring cites `ContainerSandbox.run()`'s
-     `finally` at `(:330-331)`; the symbol is already named beside it and the parenthetical has
-     rotted. Delete the parenthetical. **[probe @ 1d0e39c: the citation is present and `finally` is
-     no longer at that line]**
-   * `docs/DECISIONS.md`'s ADR-0082 marker states *"before this change: 16 citations. After it, 15"*.
-     The correction **quotes the citation it retired inside itself**, so the retired citation is
-     still a member of its own class and the after-count re-measures to 16. Class result true; raw
-     total wrong. **[probe @ 1d0e39c: the sentence is present as written]**
-   * `src/fleet/models/state.py`'s `blocked_by` description claims RHI is *"the ONE status
-     'abandoned' names"*. **False** — `fleet quarantine` writes `SKIPPED` and propagates identically.
-     This one is **not cosmetic**: it is the false premise behind §6 item 3, and it is a **class, not
-     a site**. **[probe @ 1d0e39c: the sentence is present]**
+6. **One live item, and two that were fixed underneath this handoff — read the correction, not the
+   original.** *(Corrected 2026-08-21, lane W9, at `0ea771e`: two of the three items this section
+   originally listed as "still live at HEAD" had already been fixed when I measured them. My basis
+   was "no commit after `42a4369` addresses them", derived from a `git log` taken earlier in the
+   session; `0ea771e` landed after that reading and before my commit. Both are struck below rather
+   than deleted, because a round-E lane sent to fix an already-fixed site would **edit correct
+   text** — the mirror-image error `CLAUDE.md` names by that name.)*
+   * **LIVE, and the important one.** `src/fleet/models/state.py`'s `blocked_by` field description
+     claims RHI is *"the ONE status 'abandoned' names"*. **False** — `fleet quarantine` writes
+     `SKIPPED` and propagates identically, and §3.5 puts contract ids in the same field. This is
+     **not cosmetic**: it is the false premise behind §6 item 3, the quarantine-undo hazard on
+     subtask 8's path, and it is a **class, not a site**. **[probe @ `ab3aaad`: sentence present]**
+     **A lane was fixing it as this handoff was written — treat it as IN-FLIGHT, not open: check
+     `git log -S"the ONE status" -- src/fleet/models/state.py` before dispatching anyone at it.**
+     What survives whatever that lane lands is the *reason* it matters, which is §6 item 3.
+   * ~~`src/fleet/sandbox/container.py`'s `claims()` docstring cites `ContainerSandbox.run()`'s
+     `finally` at `(:330-331)`.~~ **FIXED at `0ea771e`.** The parenthetical is gone, and that lane
+     swept the whole docstring afterwards and removed a **second** line reference the finding never
+     named. **[probe @ `ab3aaad`: zero line references of either form remain in that file.]** Do not
+     re-open it.
+   * ~~`docs/DECISIONS.md`'s ADR-0082 marker states *"before this change: 16 citations. After it,
+     15"*, which re-measures to 16.~~ **FIXED at `0ea771e`, and the fix is better than the finding.**
+     That lane re-measured **with the scope axis stated** and found the pair was impossible rather
+     than merely wrong: *"16 before, 15 after"* had taken **one number from each variant**
+     (blockquote-inclusive 16 → 16, blockquote-exclusive 15 → 14). The marker now states the
+     predicate, gives the class result, and prints **both** variant totals rather than presenting
+     either as *the* number. **[probe @ `ab3aaad`: `grep -n 'After it' docs/DECISIONS.md` returns
+     nothing.]** Do not re-open it.
 7. **A pre-existing `mypy` note, carried and not fixed:** 9 errors measured in `tests/`, identical in
    code and message at two round-D anchors, in a name-shadowing artifact; `mypy` does not gate
    `tests/` here (`pyproject.toml` sets `packages = ["fleet"]`). The fix is renaming the `JoinedStr`
@@ -345,15 +380,30 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
 
 ## 9. What this handoff cannot catch — and one path warning
 
-**The round-D lane reports and orchestrator ledger are in an UNTRACKED directory.** `.superpowers/`
-is untracked at `1d0e39c` (`git status --short` → `?? .superpowers/`). Everything cited above as
-`.superpowers/sdd/round-d/…` — including **`r3-research.md`, the source-verified brief for subtask
-8** — **will vanish when that scratch directory is cleaned, and nothing in the tracked tree
-reconstructs it.** Previous rounds handled this by promoting the load-bearing scratch files into
-`docs/superpowers/plans/` before deletion (`1050e0a`, `6b5d287`, `0e945b8`). **Round E should promote
-`r3-research.md` early, and per CLAUDE.md Guardrail 7 must check the destination does not already
-exist first** — one `cp` in this project silently clobbered an unrelated committed report, caught
-only by `git status` before staging — and must repoint citations of the old path in the same change.
+**The round-D lane reports and orchestrator ledger are in an UNTRACKED directory.**
+`.superpowers/` is untracked (`git status --short` → `?? .superpowers/`), so everything in
+`.superpowers/sdd/round-d/` — the orchestrator ledger, seven lane reports and eight reviews —
+**vanishes when that scratch directory is cleaned, and nothing in the tracked tree reconstructs it.**
+
+**The two load-bearing files have been promoted** into `docs/superpowers/plans/` by lane W9,
+following the precedent of `1050e0a`, `6b5d287` and `0e945b8`. Both destinations were checked absent
+first — one `cp` in this project silently clobbered an unrelated committed report, caught only by
+`git status` before staging — and both bodies were verified **byte-identical** to their scratch
+originals after a two-line provenance banner:
+
+* `resume-step5-subtask-8-research.md` (was `r3-research.md`) — **subtask 8's entire brief.**
+* `resume-step5-subtask-7-research.md` (was `r2-research.md`) — promoted **because its §4 is not
+  history.** Subtask 7 has landed, so §§1–3 record a question already answered; but §4 is the
+  **subtask-9** brief — the `--from-phase` refusal split verified against
+  `_refuse_unbuilt_resume_flags`, a defect subtask 9 inherits in the same function, and ambiguity 4's
+  three options costed and deliberately unpicked. That is exactly what **ADR-0079** has to settle,
+  and ADR-0079 is still unwritten. A brief whose live half gates an unwritten ADR is not history.
+
+**The rest of `.superpowers/sdd/round-d/` was NOT promoted, and that is a judgement, not an
+oversight**: the ledger and the lane reports are round D's *process* record, and their durable
+conclusions already live in `docs/PROGRESS.md` §40's round-close block, in ADRs 0085/0087/0088/0089,
+and in this handoff. If round E needs to audit round D's **method** rather than consume its
+conclusions, that material must be promoted **before** the scratch directory is deleted.
 
 **This document cannot catch a consistent rewrite of every copy of a claim into one false sentence.**
 Its tags say how each claim was verified; they do not make the claims self-checking. The **[ledger]**
