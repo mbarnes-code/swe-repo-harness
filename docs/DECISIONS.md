@@ -7549,15 +7549,27 @@ which decided all three non-demotable statuses for the *status* write and said n
 >
 > **Scope, enumerated by a sweep rather than from memory** — the first version of this line listed
 > **four** kinds (`models/enums.py`, `state/checkpoints.py`, `cli.py`, `tests/`) and there are
-> **six**, which is the incomplete-scope-line shape this project keeps regenerating. Predicate: a
-> path ending `.py`/`.md`/`.sql` followed by `:N` or `:N-M`, over this ADR's whole section, whole-
-> section whitespace normalised. Reproduced identically at `7275adb`, `b1de826` and the working tree
-> before this change: **16** citations. After it, **15**, because one of them is re-anchored below.
-> The six kinds: `models/enums.py` (×6), `cli.py` (×4),
-> `docs/superpowers/plans/design-resume-step5.md` (×2), `state/checkpoints.py` (×1), `docs/SPEC.md`
-> (×1), `tests/test_repository.py` (×1).
+> **six**, which is the incomplete-scope-line shape this project keeps regenerating. The six:
+> `models/enums.py`, `cli.py`, `docs/superpowers/plans/design-resume-step5.md`,
+> `state/checkpoints.py`, `docs/SPEC.md`, `tests/test_repository.py`. Six reproduces under every
+> predicate variant tried, at `7275adb`, `b1de826` and `main`.
 >
-> All fifteen read at `8c00971` unless another ref is named beside them. **Three of the four outside
+> **The class result, stated without a raw total, because the raw total is what failed.** Predicate:
+> a path ending `.py`/`.md`/`.sql` followed by `:N` or `:N-M`; normaliser: whole-section whitespace
+> collapse; scope: this ADR's section **excluding blockquote lines**, i.e. the citations a reader is
+> actually sent to rather than ones quoted inside a correction. On that predicate this change takes
+> the section from **15 live citations to 14** — one pointer re-anchored, nothing else touched.
+>
+> **An earlier version of this paragraph said "16 before, 15 after", and no single predicate yields
+> that pair.** Blockquote-*inclusive* it is 16 → **16**; blockquote-*exclusive*, 15 → 14. The pair
+> was one number from each. Worse, the reason the inclusive total does not move is this very
+> paragraph: it **quotes the citation it retires**, so the retired citation stays a member of its own
+> class — the identical defect this lane found and fixed one file over, where two supersession
+> markers restated the phrase they superseded and satisfied a census on their own. A remedy that
+> contains its own quarry is a shape, not an accident; in prose the fix is to state the predicate
+> and let the class result carry the claim, which is the form that has reproduced every time.
+>
+> All fourteen read at `8c00971` unless another ref is named beside them. **Three of the four outside
 > `src/`/`tests/` name their own ref inline** (`as of 8c00971`, `at b7fc5ec` ×2). The fourth did
 > not: §3's pointer to `design-resume-step5.md:258-260` relied on this ADR's header anchor alone,
 > and does **not** resolve at `main` — the paragraph it names has moved to `:278` and has since been

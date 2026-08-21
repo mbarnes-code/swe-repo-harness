@@ -195,7 +195,7 @@ def claims(live_name: str, container_name: str) -> bool:
 
     **What actually backstops that leak: one general path and two conditional ones.** Enumerated
     against `src/` rather than from memory, because the version of this list that stood here until
-    `HEAD` named `ContainerSandbox.run()`'s `finally` (`:330-331`) — a path that CANNOT fire for
+    `HEAD` named `ContainerSandbox.run()`'s `finally` — a path that CANNOT fire for
     these containers. That method has zero callers in `src/`, and `BuildverifyWorker`, which
     starts every container this predicate spares, does not go through it: it builds the argv
     itself with `docker_run_argv` — called from `BuildverifyWorker._argv` for the build/test step
@@ -216,7 +216,7 @@ def claims(live_name: str, container_name: str) -> bool:
     * **Conditional, explicit cancellation only** — `BuildverifyWorker.on_cancel`'s prefix sweep,
       reached from `_run_one`'s watchdog.
 
-    `--rm` (`docker_run_argv`, `:133`) is why a cleanly-exiting invocation leaves nothing at all,
+    `--rm` (built by `docker_run_argv`) is why a cleanly-exiting invocation leaves nothing at all,
     but it is not a backstop for an orphan whose client was killed.
     """
     return container_name == live_name or container_name.startswith(f"{live_name}-")
