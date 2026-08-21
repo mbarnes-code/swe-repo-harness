@@ -8020,6 +8020,142 @@ whitelist exist to cover.
 
 ---
 
+## ADR-0085 — The fleet has **two** worktree name forms, not one: Phase 3/4 keeps the attempt-scoped `sandbox_name`, and the cross-phase repo checkout gets an attempt-**free** `fleet-<run_id>-<repo>`, because Phase 2 reads the tree Phase 1 cloned — and SPEC §3.2/§3.3, which asserted the attempt-scoped form of worktrees unqualified, are corrected in this same change
+
+**Status:** accepted. Lands tasks **1 and 2 of 7** from
+`docs/superpowers/plans/design-worktree-namespace.md` (design anchored at `d2e0090`). Tasks 3–7
+are **not** landed here: no production call site adopts either name yet, and the disposition of
+worktrees already on disk (design task 6) is undecided. **D72 is therefore NOT closed by this
+ADR** — `docs/INTEGRATION_HONESTY.md`'s entry stands unamended, and `_reap_orphan_worktrees`'s
+KNOWN-LIMITATION docstring in `src/fleet/cli.py` remains true as written.
+
+Every file:line below is measured at `7d8f916` (this commit's parent) unless another ref is named. **Supersedes nothing.**
+Consumes and does not modify `WorktreeManager.reap`. Interacts with **ADR-0081**, which recorded
+that the worktree half of §11.5 step 2 "reaps nothing in a real run today": that remains true after
+this change, because this change adds a name and no caller of it.
+
+**Provenance (CLAUDE.md Guardrail 1).** The choice of *two* forms is an **Agent Recommendation**
+carried up from the design document's §2, allocated ADR-0085 by the orchestrator. SPEC did not
+require it; SPEC asserted the opposite, which is why §2 below is a SPEC correction and not a
+SPEC citation.
+
+### 1. Why the cross-phase checkout cannot carry an attempt
+
+**One sentence, as the task asked for it: the Phase 1/2 repo checkout is reused across phases and
+across attempts, so an attempt in its name would hand Phase 2 — and every retry — a different,
+empty directory instead of the tree Phase 1 cloned.** The mechanism is
+`CloneWorker.preconditions_hold` (`src/fleet/workers/clone.py`), which treats an
+already-initialised worktree at the same path as re-entry rather than as a collision, and
+`OrchestratorContext.worktree(repo_id)` (`src/fleet/orchestrator/context.py`), whose signature has
+no `attempt` parameter — not an oversight, but the same fact expressed in a type.
+
+### 2. Why Phase 3/4 can, and keeps `sandbox_name`
+
+**One sentence: `_plan_build` and `_plan_verify` remove and re-cut their worktree on every plan
+(`src/fleet/cli.py`, `_plan_build`/`_plan_verify`), so the attempt is genuinely part of that
+directory's identity and an attempt-scoped name is the honest one.** They also already register in
+the registry the reaper interrogates (`run.monorepo_path`), so for those two families a name is the
+only thing missing — which is why they keep the form they would have had, rather than being moved
+onto the new one for symmetry.
+
+### 3. What the two forms do **not** guarantee, measured
+
+Neither form is injective over `RepoId` (`^[a-z0-9][a-z0-9._-]{0,99}$`,
+`src/fleet/models/repo.py`), and this ADR states that rather than letting a helper imply otherwise.
+
+Measured under `.venv/bin/python` with `src/` on the path, as a **value** probe (what does this
+function compute), not a declaration read:
+
+* **Predicate:** `slug(x) == x`. **Normaliser:** none — exact string equality.
+  **Sample:** every string over the alphabet `{a, z, 0, 9, ., _, -}` of length 1–4 that
+  `RepoId`'s pattern admits (1600 ids). **Class result: 228 of the 1600 fail**, and they are one
+  class — ids with a trailing `-`, which `slug`'s closing `.strip("-")` erases
+  (`slug("a-") == "a"`). The design document's §1 statement that "**`slug(repo_id) == repo_id` for
+  every legal `RepoId`**" is therefore **false as written**; it holds for ids that do not end in a
+  hyphen, which is the case its worked example used.
+* Consequence for the new form, also measured: `checkout_name(r, "acme-") == checkout_name(r, "acme")`,
+  and — because dropping the attempt removes the field that disambiguated the tail —
+  `checkout_name(r, "log4j-2") == sandbox_name(r, "log4j", 2)`.
+
+**Both are disclosed, neither is patched here.** The scheme was already non-injective before this
+change (`tests/test_sandbox.py`'s
+`test_reap_never_removes_a_container_outside_the_runs_own_namespace` pins an existing
+`sandbox_name` pair of exactly this shape), so this is not a regression introduced by the second
+form; and disambiguating it is a change to the *scheme* — every producer, every consumer, and the
+containers too — not to a one-line join. Recording it as a stated boundary is worth more than a
+convention wearing a mechanism's clothes (CLAUDE.md Rule 12's stop rule). It is a live input to
+design task 6: a run whose fleet contains both `log4j` and `log4j-2` can put one name in
+`live_names` and spare the wrong directory.
+
+### 4. The SPEC correction, and why it was two edits and not one
+
+"The SPEC says X but the code cannot do X" is two edits (CLAUDE.md Guardrail 7). Adjudicating the
+name was half; the three §-level sentences are the other half, corrected in the same commit:
+
+* **§3.2** asserted that "the `fleet-<run_id>-<repo>-<attempt>` worktrees and containers carry
+  [the run id]" — true of the run id, wrong about the form. Now `fleet-<run_id>-…`, pointing at §3.3.
+* **§3.3** asserted flatly that "Containers and worktrees are named
+  `fleet-<run_id>-<repo>-<attempt>`". Replaced by a three-row table that assigns a form to each
+  primitive with its lifecycle reason, and that **forbids its own regrowth**: a sentence elsewhere
+  asserting the attempt-scoped form of worktrees unqualified is named there as a defect in that
+  sentence, so a future reconciler cannot restore it to make some other listing agree.
+* **§11.5 step 2** was **already correct** and its meaning is unchanged: it reaps the glob
+  `fleet-<run_id>-*`, which contains both forms. Only a cross-reference was added, because a
+  reader who expanded that glob using the old §3.3 would have expanded it into one form. Editing a
+  correct sentence further would have been the mirror-image error Guardrail 7 names.
+
+**Class result for the correction.** Predicate: a window of ≤260 characters of *normalised* text in
+which the literal `fleet-<run_id>-<repo>-<attempt>` and the word `worktree` co-occur (case
+insensitive), less two exemptions taken **by rule** rather than as a hand-maintained list: a window
+that also names the family the form belongs to (`Phase 3/4`, `cut-and-recut`) is by construction
+not *unqualified*; and a window inside this ADR's own §4, which quotes the sentences it corrects,
+is a record of what was replaced rather than an assertion of it. Normaliser: whole-file `[ \t\r\n]+` → one space, with offsets mapped back
+to 1-based lines. **`docs/SPEC.md` held 2 sites of this class at `7d8f916` (§3.2, §3.3); it holds
+0 now.** The detector was validated on four checks before that number was believed: it fires on
+`HEAD`'s SPEC, is silent on the swept file, fires on a synthetic fault injected into the swept file
+**wrapped across a newline**, and stays green under a cosmetic reflow of the edited region. The
+third check failed on the first attempt — the predicate was case-sensitive and blind to a
+capitalised "Worktrees" — which is the whole reason that check exists; the known-bad census was
+re-measured after the fix and was unchanged at 2. On that same wrapped fault a **line-oriented grep
+returns 0**: the false all-clear.
+
+The class was swept tree-wide, not just at the reported sites. Two further in-class sites were
+found and corrected in this commit — `sandbox_name`'s own docstring and
+`src/fleet/sandbox/__init__.py`'s module docstring ("Both are named …"), plus
+`WorktreeManager.create`'s. **Five residual sites in three files are reported, not edited**: one in
+`src/fleet/sandbox/container.py` — the "(the same string as its worktree)" parenthetical, which
+asserts the form of *containers* (true) and is merely under-qualified about which worktree family
+pairs with them; and four in two historical records (`docs/INTEGRATION_HONESTY.md` ×1, this
+defect's design document ×3) which correctly state what was true at their own commit and are to be
+annotated, never rewritten.
+
+### 5. The helper, and the assertion shape that earns its tests
+
+`checkout_name(run_id, repo)` (`src/fleet/sandbox/worktree.py`) is one join beside `sandbox_name`.
+The acceptance property is **not** "the name round-trips the repo id" — §3 shows it cannot be —
+but "the name is inside this run's namespace for every id `RepoId` admits", which is exactly what
+`reap()` filters on.
+
+Every test assertion that pins the *shape* of the name is written against a **literal** string
+containing `fleet-`, never against a second call to `checkout_name` or `run_prefix`, and the reap
+test builds its fixture directory from that literal too. Under the discriminating mutation
+`NAME_PREFIX = "fleet"` → `"fleetx"` (2 changed lines; the harness aborts on a zero-line diff and
+that check is read before any test result), the helper-vs-helper form of both assertions **passes**
+— it asserts only that the helper agrees with itself — while the literal form of both **fails**.
+That old-passes/new-fails pair is what the tests are for. Two further mutations kill them:
+re-introducing an attempt suffix into `checkout_name`, and dropping `reap()`'s prefix filter.
+
+### 6. What this ADR does not decide
+
+* Whether `OrchestratorContext.worktree` and the two planners adopt these names (design tasks 3a/3b),
+  which must land in **one** commit or Phase 3 workers receive a path nothing created.
+* What happens to `work/<repo_id>` directories already on disk, and the checkpoint invalidation a
+  layout change causes for mid-flight runs (design task 6).
+* Whether the non-injectivity in §3 is worth closing, and at what cost to the container names that
+  share the scheme.
+
+---
+
 ## ADR-0087 — §11.5 step 4's own `git reset --hard <base_ref>` sketch is **wrong**, and the SPEC sentence is corrected in the same change: a crash-discard resets to `tasks.pre_commit_sha`; and "there is no third branch" is a claim about Git's **verdict**, never licence to invent one when the question could not be asked
 
 **Status.** Accepted. Landed with §11.5 step 4 (the Git-as-arbiter task reconciliation) in

@@ -934,8 +934,9 @@ worktree on branch `migrate/<repo>`.
 
    **The mutation branch is run-reconciled, not run-scoped.** `migrate/<repo>` is deliberately the
    one Git resource without a `run_id` in its name — the refs under `refs/fleet/<run_id>/…` and the
-   `fleet-<run_id>-<repo>-<attempt>` worktrees and containers carry it, this does not — so that a
-   PR's branch keeps one stable name across resumes and stub revalidations. Cross-run behaviour is
+   `fleet-<run_id>-…` worktrees and containers carry it (§3.3 states the two worktree name forms),
+   this does not — so that a PR's branch keeps one stable name across resumes and stub
+   revalidations. Cross-run behaviour is
    therefore stated explicitly rather than left to whichever run got there first: **before a run's
    first Phase 2 mutation on a repo, if `migrate/<repo>` exists and its tip's `Fleet-Run-Id`
    trailer is not this `run_id`, and no `fleet resume` of that earlier run is in progress, the
@@ -1404,8 +1405,27 @@ error and proposes an edit, code applies it and re-runs the build. The **exit co
 verdict**; the model is never asked whether the build passed.
 
 **Idempotency / resume.** Each attempt is one `attempts` row with `command`, `exit_code`,
-`duration_ms`, and truncated output. Containers and worktrees are named
-`fleet-<run_id>-<repo>-<attempt>` and reaped on startup, so a crashed run leaves no orphans.
+`duration_ms`, and truncated output. Containers and worktrees are reaped on startup, so a crashed
+run leaves no orphans.
+
+**Two name forms, and the difference is a lifecycle, not a preference (ADR-0085).** Every
+isolation primitive this run owns begins with `fleet-<run_id>-`, which is the whole of what
+§11.5 step 2 filters on. Within that namespace:
+
+| primitive | name | why |
+|---|---|---|
+| a container | `fleet-<run_id>-<repo>-<attempt>` | one attempt runs it; the next attempt gets a new one |
+| a Phase 3/4 worktree | `fleet-<run_id>-<repo>-<attempt>` | removed and re-cut on every plan, so the attempt is part of its identity |
+| the cross-phase repo checkout | `fleet-<run_id>-<repo>` | Phase 2 reads the tree Phase 1 cloned; an attempt in this name would hand Phase 2, and every retry, a different empty directory |
+
+The last row is a **deliberate exception to the single-owner-encoded-in-the-name rule**, not an
+omission: the checkout is owned by successive tasks across the run, and its exclusion comes from
+the phase sequencing rather than from its name. This table is the authority for the forms; a
+sentence elsewhere in this document that asserts the attempt-scoped form of *worktrees*
+unqualified is a defect in that sentence, and must not be reintroduced to make some other listing
+agree. Neither form is injective over `RepoId` — `slug` erases a trailing hyphen and a repo id
+ending `-<int>` reproduces an attempt suffix — which is a stated boundary recorded in ADR-0085
+§3, not a property this table claims.
 
 **Success criterion.** `bazel build //<dest>/...` exit 0 **and** `bazel test //<dest>/...`
 exit 0, both inside the sandbox, both recorded as `attempts` rows. For a **contract node**,
@@ -6935,7 +6955,9 @@ Durable, in SQLite, before any externally-visible effect:
 `harness_version` (major component only), abort on mismatch unless the drifted sections are named
 in `--accept-drift <section>` — `--force-config-drift` accepts every section at once and is
 recorded as an audited finding; (2) reap containers and worktrees named
-`fleet-<run_id>-*` that no live `phases` row claims; (3) reset `RUNNING` rows whose
+`fleet-<run_id>-*` that no live `phases` row claims — the glob, deliberately, and not any single
+name form: §3.3 gives two worktree forms inside it and this step must find both; (3) reset
+`RUNNING` rows whose
 `heartbeat_at` is older than `stale_after_s` to `PENDING`, retaining `attempts`; (4) **ask Git,
 per ambiguous task, whether its commit landed, and correct the row to match** — for every task
 left `RUNNING` (or any `phases` row whose `post_commit_sha` does not resolve on its branch), run

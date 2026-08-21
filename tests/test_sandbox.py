@@ -36,6 +36,7 @@ from fleet.sandbox.worktree import (
     Worktree,
     WorktreeError,
     WorktreeManager,
+    checkout_name,
     run_prefix,
     sandbox_name,
 )
@@ -140,6 +141,70 @@ def test_worktree_and_container_share_one_name() -> None:
 
 
 # --------------------------------------------------------------------------------------
+# ADR-0085 — the SECOND name form: the cross-phase checkout is run-scoped but attempt-FREE.
+#
+# Every assertion below that pins the SHAPE of the name is written against a literal string
+# containing `fleet-`, never against a second call to `checkout_name` or to `run_prefix`. That is
+# the whole point of these tests: `assert checkout_name(...).startswith(run_prefix(...))` is
+# satisfied by ANY prefix scheme, because both sides move together under a rename — it asserts
+# only that the helper agrees with itself. The discriminating mutation is `NAME_PREFIX = "fleet"`
+# -> `"fleetx"`: the helper-vs-helper form passes under it, the literal form fails.
+# --------------------------------------------------------------------------------------
+def test_checkout_name_is_run_scoped_and_carries_no_attempt() -> None:
+    """`fleet-<run_id>-<repo>` (ADR-0085). Phase 2 reads the tree Phase 1 cloned, so the
+    cross-phase checkout cannot carry an attempt: an attempt-scoped name would hand Phase 2, and
+    every retry, a different empty directory. It must still land inside `run_prefix`'s glob, or
+    §11.5 step 2 cannot see it."""
+    assert checkout_name(RUN_ID, "acme-commons") == f"fleet-{RUN_ID}-acme-commons"
+    # Same slug discipline as `sandbox_name`: one path segment, one legal container name.
+    assert checkout_name(RUN_ID, "acme/commons") == f"fleet-{RUN_ID}-acme-commons"
+    assert "/" not in checkout_name(RUN_ID, "acme/commons")
+    # No attempt suffix, stated as a difference from the form that has one.
+    assert checkout_name(RUN_ID, "acme-commons") != sandbox_name(RUN_ID, "acme-commons", 0)
+    assert not checkout_name(RUN_ID, "acme-commons").endswith("-0")
+
+
+def test_checkout_name_starts_with_the_run_prefix_for_every_legal_repo_id() -> None:
+    """SPEC §11.5 step 2 reaps by `fleet-<run_id>-*`, so the acceptance property is not "the name
+    round-trips the repo id" — it is "the name is inside this run's namespace", for EVERY id
+    `RepoId`'s pattern admits, not just the tidy ones.
+
+    The expected prefix is spelled out as a literal here rather than taken from `run_prefix`; see
+    the block comment above. The generated ids deliberately include the tails that make
+    `slug(repo_id) != repo_id` (a trailing hyphen, which `slug`'s `.strip("-")` erases) — the
+    property still holds over them, which is why it is stated as a prefix property and not as an
+    equality against `repo_id`."""
+    import itertools
+    import re
+
+    pattern = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
+    expected_prefix = f"fleet-{RUN_ID}-"
+    legal = [
+        "".join(t)
+        for n in (1, 2, 3, 4)
+        for t in itertools.product("az09._-", repeat=n)
+        if pattern.match("".join(t))
+    ]
+    assert len(legal) > 1000, "the generator stopped producing legal ids; the property is untested"
+    assert "a-" in legal and "a--" in legal, "the slug-lossy tails must be in the sample"
+    offenders = [r for r in legal if not checkout_name(RUN_ID, r).startswith(expected_prefix)]
+    assert offenders == [], f"{len(offenders)} legal RepoIds fell outside the run namespace"
+
+
+def test_checkout_name_collides_where_slug_is_not_injective() -> None:
+    """A disclosure test, not an aspiration: `checkout_name`'s docstring states two collisions,
+    and this is what stops that statement from rotting into a false reassurance. Dropping the
+    attempt removes the field that disambiguated the tail, so a repo id ending `-<int>` collides
+    with a DIFFERENT repo's attempt-scoped name. Asserted against literals, so a change to either
+    helper that silently closes or widens the collision fails here rather than passing quietly."""
+    assert checkout_name(RUN_ID, "log4j-2") == f"fleet-{RUN_ID}-log4j-2"
+    assert sandbox_name(RUN_ID, "log4j", 2) == f"fleet-{RUN_ID}-log4j-2"
+    # `slug`'s `.strip("-")` erases a trailing hyphen, and `RepoId` permits one.
+    assert checkout_name(RUN_ID, "acme-") == f"fleet-{RUN_ID}-acme"
+    assert checkout_name(RUN_ID, "acme") == f"fleet-{RUN_ID}-acme"
+
+
+# --------------------------------------------------------------------------------------
 # worktrees, against a real git repo
 # --------------------------------------------------------------------------------------
 async def _git(cwd: Path, *args: str) -> ProcResult:
@@ -230,6 +295,46 @@ async def test_reap_spares_a_live_owner(git_repo: Path, tmp_path: Path) -> None:
     assert result.complete is True
     assert live.path.is_dir(), "a live task's worktree was reaped"
     assert not dead.path.exists()
+
+
+async def test_reap_accepts_the_attempt_free_checkout_name_and_spares_a_bare_repo_id(
+    git_repo: Path, tmp_path: Path
+) -> None:
+    """ADR-0085's whole point, stated as the reaper's verdict rather than as string equality:
+    the attempt-free form is inside `reap()`'s `fleet-<run_id>-*` filter and the layout production
+    writes today (`work_dir/<repo_id>`, D72) is not.
+
+    Both worktrees are cut by raw `git worktree add`, not by `create()` — `create()` can only
+    produce the attempt-scoped form, so it cannot set up this fixture. The directory names are
+    LITERALS; the helper is then asserted equal to the literal. That direction matters: build the
+    fixture path by calling `checkout_name` and both sides of every assertion move together under
+    a rename, and the test passes while asserting nothing (see the ADR-0085 block above).
+    """
+    work = tmp_path / "work"
+    work.mkdir()
+    adopted = work / f"fleet-{RUN_ID}-acme-commons"
+    old_form = work / "acme-commons"
+    await _git(git_repo, "worktree", "add", "--detach", str(adopted), "main")
+    await _git(git_repo, "worktree", "add", "--detach", str(old_form), "main")
+    assert adopted.name == checkout_name(RUN_ID, "acme-commons"), (
+        "the helper no longer produces the name this fixture was built from"
+    )
+
+    manager = WorktreeManager(repo_dir=git_repo, work_dir=work, run_id=RUN_ID)
+    # The denominator (design §6 trap 4): `reaped == []` is also what a sweep of an EMPTY registry
+    # returns, so the registry is asserted to hold both candidates before the filter runs.
+    registered = {p.name for p in await manager.list_registered()}
+    assert registered == {f"fleet-{RUN_ID}-acme-commons", "acme-commons"}
+
+    result = await manager.reap(live_names=set())
+
+    assert result.reaped == [f"fleet-{RUN_ID}-acme-commons"]
+    assert result.failed == []
+    assert not adopted.exists()
+    assert old_form.is_dir(), (
+        "a bare repo_id directory was reaped: the prefix filter is what confines the sweep to "
+        "this run, and widening it would delete a neighbouring run's checkout"
+    )
 
 
 # --------------------------------------------------------------------------------------

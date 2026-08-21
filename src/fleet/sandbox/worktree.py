@@ -7,6 +7,13 @@ have no answer. It is enforced here structurally: the name encodes the owner
 (`fleet-<run_id>-<repo>-<attempt>`, SPEC §3.3), and `create()` refuses a name that already exists
 rather than handing out a second reference to it.
 
+**Two name forms, and the single-owner rule scopes to one of them (ADR-0085).** The sentence
+above is about the cut-and-recut worktrees `create()` produces, whose owner is one `(repo,
+attempt)` task. The cross-phase repo checkout is a different lifecycle — Phase 2 reads the tree
+Phase 1 cloned — so it carries `checkout_name()`'s attempt-free `fleet-<run_id>-<repo>`, is owned
+by successive tasks over the run, and gets its exclusion from the phase sequencing rather than
+from its name. Both forms begin with `run_prefix(run_id)`, which is all `reap()` filters on.
+
 **Reaping must be crash-safe and owner-aware.** `fleet resume` step 2 reaps worktrees named
 `fleet-<run_id>-*` "that no live `phases` row claims" (SPEC §11.5) — so `reap()` takes the live
 set explicitly and will not remove a worktree a running task still owns. Symmetrically,
@@ -59,11 +66,36 @@ def run_prefix(run_id: UUID | str) -> str:
 
 
 def sandbox_name(run_id: UUID | str, repo: str, attempt: int) -> str:
-    """`fleet-<run_id>-<repo>-<attempt>` (SPEC §3.3). One string names the worktree directory and
-    the container, so an orphan of either kind is attributable to a task without a database."""
+    """`fleet-<run_id>-<repo>-<attempt>` (SPEC §3.3). One string names the CUT-AND-RECUT worktree
+    directory (Phase 3/4) and the container, so an orphan of either kind is attributable to a task
+    without a database. The cross-phase repo checkout is the other form — `checkout_name()`."""
     if attempt < 0:
         raise ValueError(f"attempt must be non-negative, got {attempt}")
     return f"{run_prefix(run_id)}{slug(repo)}-{attempt}"
+
+
+def checkout_name(run_id: UUID | str, repo: str) -> str:
+    """`fleet-<run_id>-<repo>` — the run-scoped, **attempt-free** name for the cross-phase repo
+    checkout (ADR-0085). Deliberately NOT `sandbox_name`: Phase 2 reads the tree Phase 1 cloned,
+    so an attempt suffix would hand every phase and every retry a different, empty directory.
+    It still begins with `run_prefix(run_id)`, so `reap()`'s filter finds it unchanged.
+
+    **Two disclosed collisions, neither introduced here and neither closed here.** `slug` is not
+    injective over `RepoId` (`^[a-z0-9][a-z0-9._-]{0,99}$`), and dropping the attempt removes the
+    only field that made the tail unambiguous:
+
+    * `slug` ends with `.strip("-")`, so a trailing hyphen is erased and
+      `checkout_name(r, "acme-")` == `checkout_name(r, "acme")`.
+    * A repo id whose tail is `-<int>` reproduces an attempt suffix:
+      `checkout_name(r, "log4j-2")` == `sandbox_name(r, "log4j", 2)`.
+
+    Both are measured, not hypothetical (ADR-0085 §3). They are stated rather than fixed because
+    the same non-injectivity already exists in `sandbox_name` for nested ids —
+    `test_reap_never_removes_a_container_outside_the_runs_own_namespace` pins one such pair — and
+    disambiguating the scheme is a change to the scheme, not to this one-line join. What this
+    function must not do is imply an injectivity it does not have.
+    """
+    return f"{run_prefix(run_id)}{slug(repo)}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -152,7 +184,9 @@ class WorktreeManager:
         deadline: float | None = None,
         timeout_s: float | None = 300.0,
     ) -> Worktree:
-        """Cut `fleet-<run_id>-<repo>-<attempt>` at `ref` and hand it to its one owning task.
+        """Cut a Phase 3/4 `fleet-<run_id>-<repo>-<attempt>` at `ref` and hand it to its one
+        owning task. This constructor produces the attempt-scoped form only; the cross-phase
+        checkout's attempt-free name comes from `checkout_name()` (ADR-0085).
 
         `--detach` because the worktree is a disposable view of a commit: the branch
         (`migrate/<repo>`) is created and advanced by `vcs/commits.py`, and two worktrees holding
