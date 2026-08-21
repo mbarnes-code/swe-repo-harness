@@ -165,6 +165,19 @@ outcome ADR-0077 §5 forbids, and re-running phases the operator's budget never 
 *(`:428-430`'s "editing the prose to name a different set — or to drop one — fails here" is the
 overclaim: drop fails, superset does not.)*
 
+> **Correction (2026-08-21), lane W2 — the *failure scenario* in the paragraph above does not follow
+> from the code, and is recorded as `docs/INTEGRATION_HONESTY.md` D75. The finding's first half —
+> that a *superset* clause passes — was measured and is true, and it is fixed. This marker corrects
+> only the second half, which was reasoned rather than measured.** Both branches of `phase_floor`'s
+> backward loop are a bare `break` with no other effect, so moving the evidence test first is a
+> **no-op**: measured over 2,401 row states × 16 `evidence` subsets = 38,416 inputs, **0 differing
+> returns**, reproduced independently by two lanes, with `tests/test_reentry_floor.py` staying 41/41
+> green under the swap. Landing the floor *on* a `DEGRADED` phase needs the hard-stop test
+> **deleted**, not reordered, and four existing cases in `tests/test_reentry_floor.py` already fail
+> on that deletion (measured). The ordering word is now bound by
+> `test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims` (`4cde582`), so the
+> gap the finding pointed at is closed even though its scenario was wrong.
+
 **I2 — `src/fleet/orchestrator/reentry.py:12-27` states the floor rule and is bound by nothing;
 `21d6a87`'s fix is a narrower successor.** `21d6a87` enrolled `reentry.py` in `_CENSUS_FILES` with
 `_EXPECTED_SITES["src/fleet/orchestrator/reentry.py"] == 1` — the `phase_floor` docstring at `:71`.

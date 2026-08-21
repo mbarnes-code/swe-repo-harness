@@ -182,6 +182,15 @@ _RESIDUAL = """Not bound, stated rather than implied:
    * **Re-worded vs deleted.** `_MODULE_RULE_OPENS`/`_MODULE_RULE_CLOSES` are natural-language
      anchors, like the census's. Renumbering item 2, or re-wording past them, fails loudly — but
      the failure cannot tell "moved" from "removed". Residual 3 in a new place.
+
+8. The item-1 span added beside Layer F narrows the Scope bullet above but does not close it. It
+   binds the *direction* (parsed out, compared to a direction measured from `phase_floor`), the
+   predicate item 1 swears off (parsed out, resolved through `reentry.py`'s AST) and the disaster
+   it names (parsed out, exercised). It inherits the same "false around the required phrases"
+   residual, and it says nothing about the **closing paragraph** — the `REQUIRES_HUMAN_INTERVENTION`
+   / nothing-left-unsettled sentence — which remains bound by nothing. Measured on a scratch copy:
+   rewriting it so a terminal repo is "demoted to `SCAN`" rather than returning `None` — false
+   against the code — leaves every case green.
 """
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -810,6 +819,238 @@ def test_the_reentry_module_docstring_states_the_rule_the_code_implements() -> N
     assert int(floor) > int(Phase.TRANSFORM), (
         f"the walk passed *below* the excluded `TRANSFORM` phase and landed on {floor!r}; the "
         f"module docstring says it may not continue below one"
+    )
+
+
+#: **A second Layer-F span, over numbered item 1 -- the half that was left unbound, which is the
+#: more dangerous half.** The span above covers numbered item **2** only: measured, 950 of the
+#: docstring's 2,581 characters. Item 1 and the closing paragraph were bound by nothing -- Layer A
+#: cannot see them (no quantifier phrase), Layer D considers **0** of their sentences (measured),
+#: and this file's own Layer F span excludes them. Reproduced on a scratch copy before writing
+#: this, each mutation confirmed by `git diff` to have changed the text *before* its result was
+#: read: "then walks backward from there" -> "walks forward" left every case **green**, as did
+#: "never consults `BaseWorker.preconditions_hold`" -> "always consults". A reconciler implementing
+#: either rebuilds the ascending scan that promotes a never-cloned repo to the last phase -- the
+#: default state of every repo at the start of a run, and the inversion item 1 exists to forbid.
+#: Item 2's inversion demotes excluded-middle repos to `SCAN`; item 1's *promotes* fresh repos past
+#: work they have never done.
+_MODULE_SEARCH_OPENS = "1. **The search runs backward"
+_MODULE_SEARCH_CLOSES = "asking only whether `evidence` holds at each earlier phase."
+
+#: Item 1's load-bearing phrases, whitespace-flexed like `_REQUIRED_IN_MODULE_RULE`, so a reflow
+#: passes and only a change of words fails. Deliberately NOT including the direction words: those
+#: are parsed out below and compared against a direction *measured from `phase_floor` itself*,
+#: because a required-phrase list can only ever say "these words are present".
+_REQUIRED_IN_MODULE_SEARCH: dict[str, str] = {
+    "the walk is anchored on the settled frontier, not on a scan of the ladder": (
+        "from the settled frontier"
+    ),
+    "a forward scan is named as the disaster, not merely as an alternative": (
+        "would promote a never-cloned repo"
+    ),
+}
+
+
+def _reentry_module_search() -> str:
+    """`reentry.py`'s module-docstring statement of the *search direction*, normalised and scoped.
+
+    Scoped to numbered item 1 for the same reason `_reentry_module_rule` is scoped to item 2: the
+    two items make different claims and a span over both would mix them.
+    """
+    text = _REENTRY.read_text(encoding="utf-8")
+    docstring = ast.get_docstring(ast.parse(text))
+    assert docstring is not None, "src/fleet/orchestrator/reentry.py has no module docstring"
+    normalised = _normalise(docstring)
+    start = normalised.find(_MODULE_SEARCH_OPENS)
+    end = normalised.find(_MODULE_SEARCH_CLOSES, start + 1)
+    assert start != -1 and end != -1, (
+        "`reentry.py`'s module docstring no longer states the search direction in the expected "
+        f"span ({_MODULE_SEARCH_OPENS!r} .. {_MODULE_SEARCH_CLOSES!r}). Item 1 is where the module "
+        f"states its central correction; got: {normalised[:200]!r}"
+    )
+    return normalised[start : end + len(_MODULE_SEARCH_CLOSES)]
+
+
+def _observed_walk_direction() -> str:
+    """`"backward"` or `"forward"`: which way `phase_floor` really moves off the frontier.
+
+    Measured, not written here. `SCAN`/`TRANSFORM` `SUCCEEDED` and `BUILD`/`VERIFY` `PENDING` puts
+    the frontier at `BUILD`; with no evidence anywhere, a walk that moves *down* returns a phase
+    below it and a scan that moves *up* cannot.
+    """
+    rows = {
+        Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
+        Phase.TRANSFORM: _row(Phase.TRANSFORM, RepoStatus.SUCCEEDED),
+        Phase.BUILD: _row(Phase.BUILD, RepoStatus.PENDING),
+        Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
+    }
+    floor = phase_floor(rows, {})
+    assert floor is not None, "phase_floor returned None for an unsettled repo"
+    return "backward" if int(floor) < int(Phase.BUILD) else "forward"
+
+
+def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks() -> None:
+    """Numbered item 1 of the module docstring, bound the way item 2 is: parsed, then executed.
+
+    Three claims, none of them written twice. **The direction** is read out of the docstring's own
+    words and compared to `_observed_walk_direction()`, so flipping "walks backward from there" to
+    "forward" makes the file disagree with the function it describes. **The predicate it swears off**
+    is read out of "never consults `X`" and checked against every name `reentry.py` actually
+    references, resolved through the AST rather than by substring -- so the sentence stops being
+    true the moment someone wires that predicate in, and re-wording it to name a different symbol
+    changes what is checked. **The disaster it names** -- promoting a never-cloned repo "straight to
+    the last phase" -- is read out and exercised against the live `phase_floor` with no rows at all.
+
+    **What this still cannot catch**, stated rather than implied (see `_RESIDUAL` item 8): a
+    consistent rewrite of item 1 that keeps the two required phrases, the direction words and the
+    disaster sentence while asserting something false *around* them -- the same residual Layer F
+    carries for item 2. It also says nothing about the docstring's closing paragraph, which remains
+    bound by nothing.
+    """
+    span = _reentry_module_search()
+
+    missing = {
+        distinction: phrase
+        for distinction, phrase in _REQUIRED_IN_MODULE_SEARCH.items()
+        if re.search(_flex(phrase), span) is None
+    }
+    assert not missing, (
+        "`reentry.py`'s module docstring no longer states: "
+        + "; ".join(f"{d} (expected {p!r})" for d, p in sorted(missing.items()))
+    )
+
+    stated = {m.group(1).lower() for m in re.finditer(r"(?:search runs|walks)\s+\**(backward|forward)", span)}
+    observed = _observed_walk_direction()
+    assert stated == {observed}, (
+        f"`reentry.py`'s module docstring says the search {sorted(stated) or ['<nothing>']} off the "
+        f"frontier; `phase_floor` measurably walks {observed}. A reconciler implementing the "
+        f"docstring builds the ascending scan item 1 exists to forbid, which promotes a "
+        f"never-cloned repo past every phase it has not run."
+    )
+
+    sworn_off = re.search(r"never consults `([\w.]+)`", span)
+    assert sworn_off is not None, (
+        "item 1 no longer names the predicate the search refuses to consult, so the refusal cannot "
+        "be checked against the code"
+    )
+    symbol = sworn_off.group(1).rsplit(".", 1)[-1]
+    tree = ast.parse(_REENTRY.read_text(encoding="utf-8"))
+    referenced = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)} | {
+        node.id for node in ast.walk(tree) if isinstance(node, ast.Name)
+    }
+    assert symbol not in referenced, (
+        f"`reentry.py`'s module docstring says the search never consults `{symbol}`, and "
+        f"`reentry.py` references it. One of the two is wrong and the docstring is what subtask 5 "
+        f"and subtask 7's authors read first."
+    )
+
+    reach = re.search(r"promote a never-cloned repo straight to the (\w+) phase", span)
+    assert reach is not None, (
+        "item 1 no longer names where a forward scan would send a never-cloned repo, so its own "
+        "failure claim cannot be exercised"
+    )
+    ladder = list(Phase)
+    forbidden = {"last": ladder[-1], "first": ladder[0]}[reach.group(1)]
+    floor = phase_floor({}, {})
+    assert floor is not forbidden, (
+        f"the module docstring says a forward scan would promote a never-cloned repo straight to "
+        f"the {reach.group(1)} phase (`{forbidden.name}`), and that `phase_floor` does not; with no "
+        f"rows and no evidence it returned {floor!r}"
+    )
+
+
+# ------------------------------------------------------------------------------------------
+# Layer G -- the step-5 design plan, the one `plans/` document implementers are routed to
+# ------------------------------------------------------------------------------------------
+
+#: **Why one file and not the directory.** `docs/superpowers/plans/design-resume-step5.md` is the
+#: document §5 of itself routes subtask authors at, and the only `plans/` file any live task brief
+#: names as an authority. It quotes the RETRACTED "earliest phase whose precondition holds" wording
+#: three times, attributed to live `docs/SPEC.md` line anchors, and nothing in this module's census
+#: reaches `docs/superpowers/plans/` -- so a subtask-4/5/7 author reading it was being handed the
+#: sentence `60d400b`/`f466287` removed, as if it were current.
+#:
+#: **Extending the census to the whole directory was measured and rejected.** The retracted phrase
+#: occurs 38 times across 13 files under `docs/` (whole-file whitespace normalisation with an
+#: offset-to-line map), and all but these are legitimate history: review reports, ledger entries and
+#: `PROGRESS.md` checkpoints quoting the phrase precisely because it was retracted. A directory-wide
+#: rule would need a hand-maintained exemption list, which is the instrument CLAUDE.md guardrail 6
+#: says rots. So the scope is one file, chosen by a stated reason rather than by convenience, and
+#: the rest is disclosed in `_RESIDUAL` item 9 instead of being silently exempted.
+_STEP5_PLAN = _ROOT / "docs" / "superpowers" / "plans" / "design-resume-step5.md"
+
+#: The retracted quantifier itself -- text far older than the markers this layer requires, so a
+#: reverted marker reads as a failure rather than as a deletion.
+_RETRACTED_QUANTIFIER = re.compile(r"earliest\s+phase\s+whose\s+precondition\s+holds", re.IGNORECASE)
+
+#: A supersession marker. **`SUPERSEDED` only, deliberately.** The same file also carries
+#: `**SETTLED` markers, but those retire *open questions* (§3's ambiguity list), not retracted
+#: quotations -- accepting them here would let a `SETTLED` marker three paragraphs away vouch for an
+#: unmarked quote, and would make the orphan direction below fire on every settled ambiguity.
+_SUPERSESSION_MARKER = re.compile(r"\*\*SUPERSEDED\b")
+
+#: Markdown heading, any depth -- the section boundary this layer scopes to.
+_HEADING = re.compile(r"^#{1,6} .*$", re.MULTILINE)
+
+
+def _step5_plan_sections() -> list[tuple[int, str]]:
+    """`[(first_line_number, section_text)]`, split on markdown headings."""
+    text = _STEP5_PLAN.read_text(encoding="utf-8")
+    starts = [0] + [m.start() for m in _HEADING.finditer(text)]
+    bounds = starts + [len(text)]
+    return [
+        (text.count("\n", 0, bounds[i]) + 1, text[bounds[i] : bounds[i + 1]])
+        for i in range(len(bounds) - 1)
+    ]
+
+
+def test_the_step5_design_plan_marks_its_retracted_spec_quotes_as_superseded() -> None:
+    """The retracted quantifier may appear in the step-5 plan -- but never unmarked.
+
+    `docs/superpowers/plans/design-resume-step5.md` is what subtasks 4, 5 and 7 are being built
+    from, and it quotes *"demote to the earliest phase whose precondition holds"* against
+    `SPEC.md:180-182` and `SPEC.md:6777-6779`. Those quotes were verbatim and correct at the
+    document's own declared anchor `7a8bfbb`; `60d400b`/`f466287` then retracted the wording, and
+    `docs/SPEC.md` carries no occurrence of it at HEAD. A record of what was true then is history,
+    so the quotes stay -- but an author who meets one must meet the retraction beside it, which is
+    what this asserts, section by section.
+
+    **Both directions, and neither by count.** A retracted quote in a section with no marker fails
+    by `file:line`; a marker in a section with no quote fails the same way, so deleting the quotes
+    and leaving the markers is a failure rather than a silent pass.
+
+    **What it cannot catch** (`_RESIDUAL` item 9): it is scoped to one file by a stated reason, so
+    the other twelve files carrying the phrase are outside it; it asserts a marker is *present in
+    the section*, not that the marker is *true*; and re-wording the retracted phrase itself makes
+    every occurrence invisible to it, the same anchor residual the census carries.
+    """
+    unmarked: list[str] = []
+    orphaned: list[str] = []
+    quoted = 0
+    for first_line, section in _step5_plan_sections():
+        hits = list(_RETRACTED_QUANTIFIER.finditer(section))
+        marked = _SUPERSESSION_MARKER.search(section) is not None
+        quoted += len(hits)
+        if hits and not marked:
+            unmarked += [
+                f"{_STEP5_PLAN.name}:{first_line + section.count(chr(10), 0, m.start())}"
+                for m in hits
+            ]
+        if marked and not hits:
+            orphaned.append(f"{_STEP5_PLAN.name}:{first_line}")
+
+    assert quoted, (
+        f"{_STEP5_PLAN.name} no longer quotes the retracted quantifier anywhere. If the quotes were "
+        "deleted deliberately, delete this layer in the same change -- it is anchored on them."
+    )
+    assert not unmarked, (
+        "these sections of the step-5 design plan quote the RETRACTED 'earliest phase whose "
+        "precondition holds' wording with no supersession marker in the same section, and that "
+        "document is what subtasks 4, 5 and 7 are built from: " + ", ".join(unmarked)
+    )
+    assert not orphaned, (
+        "these sections carry a supersession marker with nothing retracted left in them -- the "
+        "marker outlived what it superseded and now misdirects: " + ", ".join(orphaned)
     )
 
 

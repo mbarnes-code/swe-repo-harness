@@ -4287,7 +4287,9 @@ is the one this whole class has: a reconciler follows the prose.
 ### D71 — UNUSED. Allocated in error and never written; the number is free for allocation
 
 Not a defect record: no code, no test, and no failed run is filed under D71. The number is
-mentioned four times above (`:3267`, `:4008`, `:4052`, `:4139`), every time as "the next free
+mentioned four times above — each one an occurrence of the sentence **"D71 remains/is the next free
+number"**, which is the durable anchor for them; at `b4567a5` those four sentences are at `:3323`,
+`:4119`, `:4163` and `:4254` — every time as "the next free
 number," never as a heading that opens an entry — this document's convention for a real record is
 a line beginning `**D<n> —` or `### D<n> —`. Before this placeholder existed, `grep -n
 '^\*\*D71\b\|^### D71\b'` returned nothing; **it does not return nothing now.** This entry's own
@@ -4305,6 +4307,21 @@ not done. This entry exists instead — the same choice made for three unwritten
 today: a short, clearly-marked placeholder rather than a silent renumber (`docs/DECISIONS.md`
 ADR-0079–0081, `f76da41`). It marks the distinction a reader cannot otherwise make from a bare gap:
 **free is not deleted.** D71 remains open for the next lane that needs a number.
+
+> **Editorial correction (2026-08-21), lane W2 — this placeholder's own four citations had rotted,
+> and the high-water mark beside the fourth was stale. The entry's verdict is unchanged: D71 is
+> free.** The citations read `:3267`, `:4008`, `:4052`, `:4139`; re-measured this session with a
+> whitespace-normalised whole-file scan and an offset-to-line map, the four sentences are at
+> `:3323`, `:4119`, `:4163`, `:4254` — off by +56, +111, +111, +115. All four texts still exist and
+> still say what this entry says they say; only the anchors moved, under section growth in this same
+> file. They are now given **by their sentence** as well as by line, because a register mention has
+> no symbol to name and a sentence is the nearest thing to one. Separately, the fourth site says
+> *"(highest allocated: D70)"*. That was true when written and is not now: counted by this file's own
+> entry syntax (`^\*\*D<n> —` / `^### D<n> —`), every number D1–D75 is present, so the highest
+> allocated is **D75** — this session's own new entry, below. **That parenthetical is a hand-asserted
+> high-water mark and it has now rotted once; re-measure it with the predicate above rather than
+> inheriting it.** The `(highest allocated: D70)` sentence itself is left as written: it sits inside
+> a dated editorial correction of its own and is a record of what was true at that commit.
 
 ---
 
@@ -4492,3 +4509,42 @@ put this defect's two legs at risk of disagreeing.
 **Deliberately not fixed here.** The fix belongs to the worktree-namespace design that raised it,
 which has its own plan and reserved ADR numbers. Recorded so that design's lane inherits the
 evidence rather than rediscovering it.
+
+---
+
+## D75 — corrections to tracked review findings
+
+### D75 — CORRECTION RECORDED, no code defect. The round-C final review's I1 "inverted ordering" failure scenario does not follow from the code
+
+`docs/superpowers/plans/design-resume-step5-review-final.md` finding **I1** states that if a
+reconciler "moves the evidence test first", then "for a repo whose BUILD row is `DEGRADED` and whose
+BUILD evidence does not hold, `phase_floor` then sets `floor = BUILD` and walks below it — landing
+the re-entry floor **on** a `DEGRADED` phase, the one outcome ADR-0077 §5 forbids". That consequence
+does not follow. **Both branches of the backward walk in `orchestrator/reentry.phase_floor` are a
+bare `break` with no other effect, so swapping them is a no-op**: whichever fires first, the loop
+ends on the same iteration with the same `floor`.
+
+**Measured, twice, independently.** Lane W3 measured it at `0e945b8`; this entry's author reproduced
+it from scratch at `4cde582` rather than inheriting the number: all 7 `RepoStatus` values × 4
+`Phase` positions = **2,401 row states**, × all **16** subsets of `evidence` = **38,416 inputs**,
+comparing `phase_floor` against a copy with the two tests swapped — **0 differing returns**. W3
+independently corroborated with `tests/test_reentry_floor.py` staying **41/41** green under the
+swap. The scenario I1 describes requires the hard-stop test to be **deleted**, not reordered, and a
+deletion is loud: measured under the deletion (change confirmed by `git diff --numstat` before the
+result was read), **five cases fail — four of them behavioural and pre-existing** —
+`test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it`,
+`test_skipped_phase_is_never_the_floor_the_walk_stops_at_it_exactly_as_for_degraded`,
+`test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds` and
+`test_search_does_not_pass_a_skipped_phase_even_when_nothing_earlier_holds`.
+
+**The observation underneath I1 stands, and is now closed.** The ordering *word* in the canonical
+clause really was unbound — the prose could say "tested *after* evidence" and no layer read it.
+`tests/test_reentry_floor.py::test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims`
+(`4cde582`) binds it, and `test_floor_rule_statements._observed_hard_stop_order` measures the code's
+real order rather than asserting one. What is corrected here is **only the claimed consequence**.
+
+**Why this is a ledger entry and not an edit to the review.** The review correctly records what its
+author measured at `d123035`; the superset half of I1 was measured and is true, and the ordering
+half was reasoned rather than measured, which the finding does not distinguish. Guardrail 7 governs:
+a dated in-file marker is placed beside I1 in the review, and the finding itself is not rewritten.
+**Status: correction recorded, no code defect, nothing to fix in `src/`.**

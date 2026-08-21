@@ -184,6 +184,19 @@ reading makes it three.
 > (5) re-check each phase's declared preconditions and demote to the earliest phase whose
 > precondition holds (Constraint 7)
 
+> **SUPERSEDED (2026-08-21), lane W2 — both quotes above are RETRACTED SPEC wording, kept as the
+> record of what this design was reacting to. They were verbatim and correct at this document's own
+> declared anchor `7a8bfbb` (see "Refs read" at the top); they are NOT what `docs/SPEC.md` says
+> today, and no line in `docs/SPEC.md` carries "earliest phase whose precondition holds" any more.**
+> At `main`, Constraint 7 and §11.5 step 5 both read: demote the repo to its **re-entry floor** —
+> the phase *above* the *highest* phase below the settled frontier whose durable evidence still
+> holds **or** which is a `DEGRADED`/`SKIPPED` hard stop
+> (`orchestrator/reentry._HARD_STOPS`, tested before evidence), never that phase itself, and `SCAN`
+> only if there is no such phase. The retraction is `60d400b`/`f466287`; the rule is implemented by
+> `orchestrator/reentry.phase_floor` and bound by `tests/test_floor_rule_statements.py`, whose
+> census does **not** reach this directory. Anyone building subtasks 4, 5 or 7 from this document
+> must take the wording from `docs/SPEC.md`, not from these quotes.
+
 ### Why the literal reading is unimplementable against the code
 
 **(a) It is monotonically false for the case it is written for.** Ten of the fifteen implementations
@@ -191,6 +204,13 @@ reading makes it three.
 return `False` precisely when there is nothing to resume. For a repo with no checkpoints, the walk
 `p ∈ {1,2,3,4}` produces `False, False, False, False`. "The earliest phase whose precondition holds"
 is the empty set and the SPEC defines no behaviour for it.
+
+> **SUPERSEDED (2026-08-21), lane W2 — this section analyses the RETRACTED wording quoted above and
+> is preserved as the argument that produced the correction, not as a statement about `docs/SPEC.md`
+> today.** "The earliest phase whose precondition holds" is no longer in the SPEC; the argument
+> below is what removed it. Its conclusion stands and is implemented — see
+> `orchestrator/reentry.phase_floor` and ADR-0076.
+
 
 **(b) It inverts for a fresh repo.** `rdepverify.preconditions_hold` returns `True` when the BUILD
 row is missing (`rdepverify.py:199-202`, quoted above), which is exactly a repo that has never
@@ -293,6 +313,16 @@ what makes step 5 implementable at all without solving §1.
    This is a direct contradiction with §11.5 step 5 and is the subject of §6.
    (`OPERATOR_REOPEN` covers only `RHI → PENDING`, and `operator=True` has **no caller anywhere in
    `src/`** — `fleet retry`'s documented escape is itself unwired.)
+
+   > **SETTLED (2026-08-21), lane W2 — no longer an ambiguity, and "step 3 cannot be written today"
+   > is false at `main`. Do not re-adjudicate this.** True at this document's declared anchor
+   > `7a8bfbb`, where `git show 7a8bfbb:src/fleet/models/enums.py` contains no `RESUME_DEMOTE`
+   > (verified, zero matches). §5 task 1 landed it: `models/enums.RESUME_DEMOTE` plus the
+   > `resume=True` gate in `transition()`, with `demote()` as the only sanctioned door — call
+   > `demote()`, **not** `transition(..., resume=True)`, which returns the status alone and emits no
+   > `PhaseDemoted` finding. ADR-0077 records the decision; `state/repository.demote_to_floor` is the
+   > writer; `orchestrator/reentry.phase_floor` computes the floor it writes to. The `OPERATOR_REOPEN`
+   > parenthetical is untouched and not re-verified here.
 2. **`attempts` on demotion.** Steps 3 and 4 both say "retaining `attempts`" / "do not increment
    `attempts`" explicitly. Step 5 says nothing at all. If a repo is demoted from Phase 4 to Phase 2,
    do Phases 3 and 4 keep their own `attempts` counters, or reset? By analogy with step 3 they
@@ -311,6 +341,19 @@ what makes step 5 implementable at all without solving §1.
    becomes the frontier and gets demoted — which would bypass the revalidation budget entirely.
    §11.5 step 5 contains no carve-out. Recommend treating DEGRADED as settled-for-demotion-purposes
    and recording it as an ADR; the SPEC does not say.
+
+   > **SETTLED (2026-08-21), lane W2 — resolved in ADR-0077 §5, and this item is contradicted by
+   > this document's own §3 body. Do not re-adjudicate it and do not file the recommended ADR; it
+   > exists.** The recommendation was carried out: ADR-0077 §5 makes `DEGRADED` and `SKIPPED`
+   > non-demotable, and ADR-0082 §3 settles the separate question of the `checkpoints` sweep. Two
+   > sentences of the item are now false against the algorithm block in "The algorithm, restated
+   > precisely" above, which was updated when the ADR landed while this item was not: that block
+   > defines `settled(row)` as `{SUCCEEDED, SKIPPED, DEGRADED}` and `hard_stop(row)` as
+   > `{DEGRADED, SKIPPED}`, both annotated `# ADR-0077 §5`, and says outright that "`hard_stop` is
+   > design ambiguity 5, resolved in **ADR-0077 §5**". So "Under `settled()` above it is *not*
+   > settled" is false — it **is** settled there — and "a DEGRADED Phase 3 becomes the frontier and
+   > gets demoted" cannot happen: `orchestrator/reentry._HARD_STOPS` stops the walk on it without
+   > moving the floor onto it.
 
 ---
 
@@ -407,7 +450,7 @@ one task is L and it is deliberately last.
 
 | # | Title | Size | Depends on | Files touched | Success criterion |
 |---|---|---|---|---|---|
-| 1 | **Decide and land the demotion transition** — extend `ALLOWED_TRANSITIONS` / `transition()` for `SUCCEEDED → PENDING` under a resume-scoped gate, per §6 | S | — | `src/fleet/models/enums.py`, `docs/DECISIONS.md` (new ADR), `docs/SPEC.md` (§11.5 step 5 wording), `tests/test_enums.py` | `transition(SUCCEEDED, PENDING, resume=True)` returns PENDING; `transition(SUCCEEDED, PENDING)` still raises; `transition(RHI, PENDING, resume=True)` still raises; the schema-domain test still derives its CHECK list from the enum |
+| 1 | **Decide and land the demotion transition** — extend `ALLOWED_TRANSITIONS` / `transition()` for `SUCCEEDED → PENDING` under a resume-scoped gate, per §6 | S | — | `src/fleet/models/enums.py`, `docs/DECISIONS.md` (new ADR), `docs/SPEC.md` (§11.5 step 5 wording), `tests/test_state_models.py` + `tests/test_schema_sql.py` (**not** `tests/test_enums.py` — that module has never existed; the transition tests live in `test_state_models.py` and the CHECK-domain test in `test_schema_sql.py`) | `transition(SUCCEEDED, PENDING, resume=True)` returns PENDING; `transition(SUCCEEDED, PENDING)` still raises; `transition(RHI, PENDING, resume=True)` still raises; the schema-domain test still derives its CHECK list from the enum |
 | 2 | **`phase_floor` — the pure frontier + demotion computation** | S | 1 | new `src/fleet/orchestrator/reentry.py`, `tests/test_reentry_floor.py` | A pure function `phase_floor(rows: Mapping[Phase, PhaseRow \| None], evidence: Mapping[Phase, bool]) -> Phase \| None`, no I/O. Table-driven test over all 7 `RepoStatus` × 4 phases; RHI ⇒ `None`; all-settled ⇒ `None`; missing row treated as PENDING; DEGRADED per the ADR from task 1 |
 | 3 | **Step 2 — reap orphan worktrees and containers** | S | — | `src/fleet/cli.py` (`_resume_impl`), reads `src/fleet/sandbox/worktree.py:303`, `container.py:323`, `tests/test_cli.py` | `live_names` derived from `phases` rows still holding a lease; a `fleet-<run_id>-*` worktree no live row claims is removed; `ReapResult.failed` is surfaced in the emitted lines, never swallowed (D44); `--dry-run` reaps nothing |
 | 4 | **Step 4 — Git-as-arbiter task reconciliation** | M | 3 | `src/fleet/cli.py`, reads `src/fleet/vcs/commits.py:298,312,344`, `tests/test_cli.py` | For a task whose trailered commit is on `migrate/<repo>`: row → `DONE`, SHA written to `attempts.commit_sha` and `phases.post_commit_sha`, **`attempts` byte-identical before and after** (assert on the column). For one that is not: `discard_task`, row → `PENDING`, `attempts` again unchanged. Missing `phases.base_ref` is recreated. No third branch |
@@ -436,8 +479,16 @@ in the imperative, and every other task in §5 is downstream of the answer.
 
 **The contradiction, both sides quoted.**
 
-`docs/SPEC.md:180-182`:
+`docs/SPEC.md:180-182` **at this document's declared anchor `7a8bfbb`**:
 > a failed precondition **demotes the repo to the earliest phase whose precondition holds**.
+
+> **SUPERSEDED (2026-08-21), lane W2 — the quote above is RETRACTED SPEC wording, preserved because
+> the contradiction it half-states is what this section decides.** `60d400b`/`f466287` removed it;
+> `docs/SPEC.md` Constraint 7 now states the re-entry floor (the phase *above* the *highest* phase
+> below the settled frontier whose evidence holds or which is a `DEGRADED`/`SKIPPED` hard stop). The
+> contradiction itself was real and **is resolved**: §5 task 1 landed `models/enums.RESUME_DEMOTE`
+> and the `resume=True` gate, so `SUCCEEDED → PENDING` is now legal through `demote()` alone. See
+> ADR-0077, and the SETTLED marker on ambiguity 1 in §3.
 
 `src/fleet/models/enums.py:45,48-49`:
 > ```python
