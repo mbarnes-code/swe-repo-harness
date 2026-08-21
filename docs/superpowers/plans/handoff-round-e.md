@@ -264,6 +264,7 @@ carry the perishability warning in §0.
    did not edit it. **[ledger; sentence re-verified present at `src/fleet/models/state.py` — probe @
    `ab3aaad`]** **A lane was fixing it as this handoff was written, so treat the sentence itself as
    IN-FLIGHT and re-check `git log -S"the ONE status" -- src/fleet/models/state.py` before acting.
+   **[IN-FLIGHT resolved 2026-08-21, lane W3 (round E): the sentence was replaced at `9b34497`. The CLASS behind it was swept in the commit carrying this marker — two live sites total (this docstring and its byte-identical `docs/SPEC.md` §5.5 listing), no third. That sweep also found `9b34497`'s OWN replacement text carried a fresh false claim, "there is no StubState.ABANDONED" (it exists, in `models/enums.py::StubState`), corrected in the same commit. Do not dispatch a lane at this sentence; the hazard below still stands.]**
    The hazard does not depend on the sentence surviving** — the quarantine population is real
    whatever the docstring says, and that is the part subtask 8 must design against.
 
@@ -367,6 +368,7 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
      subtask 8's path, and it is a **class, not a site**. **[probe @ `ab3aaad`: sentence present]**
      **A lane was fixing it as this handoff was written — treat it as IN-FLIGHT, not open: check
      `git log -S"the ONE status" -- src/fleet/models/state.py` before dispatching anyone at it.**
+     **[IN-FLIGHT resolved 2026-08-21, lane W3 (round E): the sentence was replaced at `9b34497`. The CLASS behind it was swept in the commit carrying this marker — two live sites total (this docstring and its byte-identical `docs/SPEC.md` §5.5 listing), no third. That sweep also found `9b34497`'s OWN replacement text carried a fresh false claim, "there is no StubState.ABANDONED" (it exists, in `models/enums.py::StubState`), corrected in the same commit. Do not dispatch a lane at this sentence; the hazard below still stands.]**
      What survives whatever that lane lands is the *reason* it matters, which is §6 item 3.
    * ~~`src/fleet/sandbox/container.py`'s `claims()` docstring cites `ContainerSandbox.run()`'s
      `finally` at `(:330-331)`.~~ **FIXED at `0ea771e`.** The parenthetical is gone, and that lane
