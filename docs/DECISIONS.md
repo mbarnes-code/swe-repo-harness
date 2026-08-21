@@ -9544,22 +9544,60 @@ must not treat the writer set as closed"*.
 `blocked_by` returns **0**. **The class "code in `src/` that REMOVES an entry from `blocked_by`" has
 zero members. Subtask 8 writes the first remover.**
 
-#### 2.4 An open sub-question the ruling does not distinguish — recorded, not decided
+#### 2.4 RULED (round-E orchestrator): **R2-CLOSED**
 
-R1's addendum §8.2 splits R2 in two, and the ruling as issued says "R2" without choosing:
+R1's addendum §8.2 splits R2 in two; the ruling as issued in §2 above says "R2" without choosing
+between them. This sub-question — correctly left open by the authoring lane, because it was the
+orchestrator's to make — is now ruled:
 
 | | shape | an entry the predicate cannot resolve |
 |---|---|---|
 | **R2-open** | re-derive the blocker set; whatever is not re-derived is removed | **erased** |
 | **R2-closed** | remove only what is positively shown to be no longer blocking | **retained** |
 
-The distinction is a predicate polarity, not a mechanism, and it is not costed differently. Two
-measured facts bear on it, both recorded here without deciding: `docs/SPEC.md` §3.5 **mandates** a
-`contract_id` in the SQL column `phases.blocked_by` on `contracts.status='FAILED'` (a writer with no
-producer today), and §3.1's SCC and §3.4's merge-timeout propagations are likewise SPEC-mandated with
-no producer — so an R2-open recompute erases their entries on the first resume after any of them is
-implemented. **Recorded as open. Whoever implements subtask 8 must have this ruled first, or state
-which polarity they built and why.**
+The distinction is a predicate polarity, not a mechanism, and it is not costed differently.
+**RULED: R2-CLOSED.** Three reasons, each independently re-verified at `ae58e18` before being
+recorded here:
+
+1. **The shipped sentence forbids R2-open.** `src/fleet/models/state.py`'s `blocked_by` field
+   description states, verbatim at `ae58e18`, *"a recompute must not treat the writer set as
+   closed"* — byte-identically mirrored in `docs/SPEC.md` §5.5. Since `50ad1e4` (the test file is
+   present at that commit) that sentence is bound to the code by six parsed-and-checked claims in
+   `tests/test_blocked_by_writer_statements.py`, so it is a mechanism this ruling would violate, not
+   a convention it would merely contradict.
+2. **Three of five triggers reaching the propagation rule have zero producers today, not two of
+   four.** Re-measured at `ae58e18` rather than propagated: the field's own docstring and
+   `docs/SPEC.md` §3.5 name **five** triggers reaching the §3.5 propagation rule. RHI containment
+   and `fleet quarantine` are LIVE — `runner._contain` and `cli._quarantine_impl` are the only
+   non-delegating callers of `append_blocked_by` in `src/`. An SCC's failed members (§3.1), a
+   `pr.merge_wait_timeout_s` breach (§3.4), and a failed contract's non-terminal descendants (§3.5's
+   own sentence: *"`contracts.status='FAILED'` the scheduler applies the same propagation rule"*)
+   are SPEC-mandated with **zero**
+   producers in `src/` — a whole-tree sweep of `src/fleet` for a call site writing `blocked_by` from
+   any of the three finds none, and this split is independently pinned by
+   `tests/test_blocked_by_writer_statements.py::test_the_spec_mandated_writers_have_the_producer_count_the_prose_states`
+   and `::test_the_contract_trigger_spec_3_5_mandates_is_in_the_enumeration`. *(Correction made while
+   recording: the dispatch brief for this ruling stated "two of the four writers have zero
+   producers — §3.1 SCC and §3.4 merge-timeout"; that count does not hold. The contract trigger is a
+   fifth, not folded into the other four — the test module's own docstring records that "four
+   writers" was wrong at `9b34497` and *still* wrong after `a69fba8` for exactly this reason. The
+   correction only strengthens the ruling: a third producer-less writer means R2-open erases a wider
+   set permanently, not a narrower one.)* Entries written by any of the three zero-producer triggers
+   can never be re-derived from live state, so R2-open would erase them **permanently, on every
+   `fleet resume`**, from the moment any one of them is implemented.
+3. **The failure modes are asymmetric.** R2-closed's cost: a `blocked_by` entry persists longer than
+   necessary, so a dependent stays blocked — **visible and recoverable** by an operator. R2-open's
+   cost: **silently undoing an audited `OperatorQuarantine`** — invisible, unrecoverable, and
+   specifically **not detectable by SPEC §12 item 46(ii)**, which (§6 above) watches only whether a
+   sweep moves a repo **out of** RHI, a quantity this defect leaves unchanged.
+
+**Cost of the ruling being wrong, recorded:** some `blocked_by` entries are never cleared and an
+operator must unblock a dependent by hand — a visible nuisance, weighed against a silent correctness
+failure.
+
+**Recorded as decided, not re-argued.** Whoever implements subtask 8 builds the
+retain-what-cannot-be-resolved polarity; this entry does not authorise any further change to §2's
+ruling R or to any other ruling in this ADR.
 
 ---
 
