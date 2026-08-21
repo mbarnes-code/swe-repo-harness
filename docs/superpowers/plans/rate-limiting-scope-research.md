@@ -453,8 +453,14 @@ directive; nothing in `CLAUDE.md` or the SPEC mandates either option.*
 > table below is DONE**, landed at `a3ff0ae` with tests at `431b02f` under ADR-0083. Not
 > re-verified criterion-by-criterion here; what was measured (2026-08-21, `grep -c` on
 > `tests/test_budgets.py`) is **22** `ResizableLimiter` references, with dedicated cases for
-> capacity under contention (`:806`), `resize` clamping and refusing zero (`:900`), a randomised
-> resize/cancel fuzz (`:1190`) and `Limits` handing each tier one (`:1264`) — note ADR-0084 and
+> capacity under contention (`test_limiter_never_admits_more_than_capacity_under_contention`),
+> `resize` clamping and refusing zero (`test_resize_clamps_to_floor_and_ceiling_and_refuses_zero`),
+> a randomised resize/cancel fuzz
+> (`test_random_resize_and_cancel_interleavings_never_admit_over_the_ceiling`) and `Limits` handing
+> each tier one (`test_limits_hands_each_tier_a_resizable_limiter`) — named by symbol, not by line:
+> this marker's own banner says citations into a moving file should be resolved by symbol, and the
+> first draft of this sentence cited these four by line number, which is the class the banner
+> exists to stop. Note ADR-0084 and
 > `docs/superpowers/plans/design-resume-step5-rl1-limiter-report.md` on what that fuzz could and
 > could not see. A lane scoping from this table
 > must start at R2/R3, not at R1. R2–R7 are unbuilt, and per D55 the landed primitive closes **0%**

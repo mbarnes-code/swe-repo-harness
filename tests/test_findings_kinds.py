@@ -130,8 +130,14 @@ _PLACEHOLDER: Final = re.compile(r"<[^>]*>")
 #: now loud: the relative path is the module's identity, and `_exemption_drift` fails in **both**
 #: directions — one site too many is an undeclared site riding a declared one's exemption, one too
 #: few is an entry that has outlived the code it was written for. The count is a *measured*
-#: property of the tree (2 at `0e945b8`: `cli.py:1589` scan-persist and `cli.py:2034` §3.1 gate),
-#: not a budget; when a site is legitimately added or removed, re-measure it in the same change.
+#: property of the tree, not a budget; when a site is legitimately added or removed, re-measure it
+#: in the same change. Measured **2** at `0e945b8` and again at `eaa112f`, and anchored by SYMBOL
+#: rather than by line: the `executemany` inside `cli.py`'s `_scan_rows` (the scan persist) and the
+#: `execute` inside its `_gate_empty_repos` (the §3.1 gate). This comment first cited those two as
+#: `cli.py:1589` and `:2034`. Both were **correct at `0e945b8`** and had rotted to `:1590`/`:2035`
+#: by `eaa112f` — under a day — which is why they are named rather than numbered here: a symbol
+#: anchor survives a line growing above it, a line anchor cannot, and this pair proves how fast
+#: that happens in `cli.py`.
 _WORKER_FINDINGS: Final = "worker-findings"
 _INDIRECT_SITES: Final = {
     ("cli.py", "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "

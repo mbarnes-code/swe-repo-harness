@@ -360,28 +360,54 @@ def _loop_test_order() -> tuple[str, ...]:
 
 
 def test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims() -> None:
-    """`phase_floor`'s docstring says the hard-stop test runs *before* the evidence test. Nothing
-    checked that it does, and the word is the kind that survives a reflow: the review that raised
-    this rewrote the canonical clause to "tested *after* evidence" and **all 12 cases of
-    `tests/test_floor_rule_statements.py` still passed**, because that file parses the hard-stop
-    *set* out of the prose and never the ordering. So the word is parsed out of the docstring here
-    and checked against the AST of the function it describes -- editing the prose changes what is
-    asserted, per CLAUDE.md guardrail 7.
+    """`phase_floor`'s docstring says the hard-stop test runs *before* the evidence test. This
+    parses that word out of the docstring and checks it against the **AST** of the function it
+    describes, so editing the prose changes what is asserted (CLAUDE.md guardrail 7).
 
-    **What this is worth, stated rather than implied: the order is behaviourally inert today.**
-    Both branches are a bare `break` with no other effect, so swapping them changes nothing.
-    Measured exhaustively at `0e945b8` -- all 7 `RepoStatus` values across all 4 `Phase` positions
-    (2,401 row states) x all 16 subsets of `evidence` = **38,416 inputs, 0 differing returns**
-    between `phase_floor` and a copy with the two tests swapped. The review's stated failure
-    scenario for this half (a reconciler moves the evidence test first, `floor` lands on a
-    `DEGRADED` phase) does not follow from a reorder; it needs the hard-stop test *deleted*, which
-    `test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it` and
-    `test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds` already catch.
+    **Correction, 2026-08-21 (`eaa112f`), to this docstring's first version.** It said "nothing
+    checked that it does" and that `tests/test_floor_rule_statements.py` "parses the hard-stop
+    *set* out of the prose and never the ordering". Both were **false at this test's own commit**
+    (`4cde582`): `4f353e3`, an ancestor of it, had already added `_ORDERING`,
+    `_observed_hard_stop_order` and
+    `test_a_hard_stop_below_the_frontier_ends_the_walk_before_evidence_is_consulted` to that file,
+    and its `_prose_statements()` enumerates `phase_floor`'s own docstring -- the one parsed
+    below -- as a census site carrying the identical clause. The "all 12
+    cases still passed" figure was also stated unanchored; it belongs to `d123035`. Anchored
+    counts (`pytest --collect-only -q`): that file had **13** cases at `0e945b8` and **15** at
+    `eaa112f`; the 12 is `d123035`'s, as that file's own docstring records.
 
-    This is therefore a binding on a *description*, not on a behaviour, and it is worth having for
-    one reason: the moment either `break` becomes anything else -- a `continue`, a `return`, an
-    audit write -- the order stops being inert, and a reader who reached for the docstring first
-    would then be acting on it. A false description is cheap to write and expensive exactly then.
+    **What the sibling check can and cannot see -- measured, because the correction above would
+    otherwise make this test look redundant.** At `eaa112f`, with the two `if` blocks in
+    `phase_floor`'s backward walk **swapped** and the prose untouched
+    (`git diff --numstat` 2/2), `tests/test_floor_rule_statements.py` reports **15 passed** --
+    including its ordering case -- while this test **fails**. `_observed_hard_stop_order` probes
+    one state (`BUILD` `DEGRADED`, `BUILD` evidence `False`, `SCAN` evidence `True`) and reads the
+    returned floor; that state yields `VERIFY` under *both* orders, because both branches are a
+    bare `break`. It moves only when the hard-stop test is **deleted**. It is a deletion detector
+    under an ordering name, and no behavioural probe can be anything else here -- which is the
+    fourth question CLAUDE.md guardrail 6 asks: name the quantity the instrument watches and ask
+    whether the defect could leave it unchanged. A returned floor cannot move under a reorder.
+
+    **So the order is behaviourally inert, and this binding is on a *description*.** Measured
+    exhaustively at `0e945b8` -- all 7 `RepoStatus` values across all 4 `Phase` positions (2,401
+    row states) x all 16 subsets of `evidence` = **38,416 inputs, 0 differing returns** between
+    `phase_floor` and a copy with the two tests swapped; re-confirmed at `eaa112f` by the 15-passed
+    result above. The review's failure scenario for this half (a reconciler moves the evidence test
+    first, `floor` lands on a `DEGRADED` phase) does not follow from a reorder; it needs the
+    hard-stop test *deleted*, which **four** existing cases in this file catch --
+    `test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it`,
+    `test_skipped_phase_is_never_the_floor_the_walk_stops_at_it_exactly_as_for_degraded`,
+    `test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds` and
+    `test_search_does_not_pass_a_skipped_phase_even_when_nothing_earlier_holds` (measured under the
+    deletion: 5 failed, 37 passed; the fifth failure is this test's own unresolvable-structure
+    branch). An earlier version of this sentence said "two"; the count was low.
+
+    Worth having for one reason: the moment either `break` becomes anything else -- a `continue`, a
+    `return`, an audit write -- the order stops being inert, and a reader who reached for the
+    docstring first would then be acting on it. A false description is cheap to write and expensive
+    exactly then. If `_observed_hard_stop_order` is ever given a probe that really separates the two
+    orders, re-measure the swap: this test becomes a second, structural witness rather than the
+    only one, and that is a fine thing to say here instead.
     """
     clause = _ORDER_CLAUSE.search(" ".join((phase_floor.__doc__ or "").split()))
     assert clause is not None, (
