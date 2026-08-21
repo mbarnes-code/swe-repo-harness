@@ -9244,6 +9244,41 @@ performs and documents.
     is the *other* reason that sentence was false, raised in the R2 brief's §4.1: whether
     `--revalidation` and `--raise-revalidation-rounds` belong in this refusal at all. That is
     still subtask 9's question, and ADR-0079's.
+  - **FALSIFIED, AND GIVEN THE ANCHOR THE TWO BULLETS ABOVE LACK (2026-08-21, lane W14) — both
+    were true at `65f5e4c`, their own commit, and `a9e9640` falsified them; read them at
+    `65f5e4c` from here on.** `a9e9640` added a dated marker to the second site named above,
+    `docs/superpowers/plans/resume-step5-subtask-7-research.md` §4.2, so both the state the
+    measurement bullet records for that site, and the **1** remaining member the class-result
+    bullet records, stopped holding at `a9e9640`. Neither bullet is edited: each is the record of
+    what was true at its own commit, and this is an annotation standing beside them.
+  - **The re-measurement, carrying its anchor — which is the form the claims above lack.**
+    Measured at `a9e9640`, over every tracked file, with each run of whitespace in the **whole
+    file** collapsed to one space and match offsets mapped back to original line numbers: the
+    retracted sentence occurred at **2** sites — this section, and that brief's §4.2 — and **0**
+    times in `src/`; both predicate variants, with and without the *"Every flag below"* lead-in,
+    selected the same 2. Subtracted by the rule the class-result bullet above states — *"a dated
+    correction marker stands within the same passage"* — **both** sites subtract at `a9e9640`, so
+    the class *"live citations of the deleted sentence"* had **0** members in that tree. Every
+    number here is a claim about one fixed tree, so no later commit can falsify it. That
+    property, not care, is what stops this chain: each unanchored present-tense claim before it
+    was falsified by the very commit that acted on what it described.
+  - **The sweep was validated before its clean result was believed, and it carries one limit the
+    statement of limits above does not.** Four checks: it fires on the known-bad tree (`9885c84`,
+    one hit in `src/fleet/cli.py` — the state `c135c42` cleaned); it is silent on files already
+    clean at `a9e9640` (`src/fleet/cli.py`, `docs/SPEC.md`); it fires on a synthetic wrapped copy
+    injected into each of those two clean files; and it stays green under a cosmetic reflow of
+    this section's own quotation, so it asserts meaning and not layout. **Added limit:** the
+    normaliser rejoins a sentence wrapped across a *prose* line break, but not one whose
+    continuation line carries a comment leader, because collapsing whitespace leaves the leader
+    standing between the two words — the first synthetic fault was written that way and read as
+    **0** until it was rewritten. Same family as the hyphenated-line-break limit stated above.
+  - **What this marker deliberately does not contain, and the re-run that proves it.** It quotes
+    neither the retracted sentence, nor the symbol name whose embedded cue `a9e9640`'s own marker
+    flags, nor the adjective the measurement bullet above uses for a site that carries no dated
+    marker — so it adds no member to any class counted above. Re-run against this file *after*
+    this insertion, all three sweeps returned exactly what they returned before it. The insertion
+    is additive, and no citation of `docs/DECISIONS.md` anywhere in the tracked tree points below
+    it, so nothing rots by its line growth.
 - It allocates no D-number. Every claim it corrects is corrected in the code and here in the same
   change, so there is no residual contradiction for `docs/INTEGRATION_HONESTY.md` to carry. **D78
   remains free.**
