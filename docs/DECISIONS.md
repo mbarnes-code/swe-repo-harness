@@ -8523,6 +8523,16 @@ reachable, M10 because every fixture seeded an `attempts` row.
 reason published for it at `7d8f916` in three places: `_persist_arbitration`'s docstring, §5b of
 this ADR, and `7d8f916`'s own commit message.
 
+**Provenance note (2026-08-21, lane W1): this section landed in `7583583`, not in `b1de826`.** A
+sibling lane's bare `git commit` swept these hunks out of the **shared index** between this lane's
+staging and that lane's commit, so `b1de826` — whose message asserts it corrected two sites — is
+**empty**, and `git diff b1de826^ b1de826` reports zero changed lines. Nothing was lost or
+duplicated: this section and the `_persist_arbitration` docstring correction are each present at
+HEAD exactly once, `git log -S` names `7583583` as the commit that introduced them, and the blobs
+match this lane's staged content byte-for-byte. Neither commit is rewritten and a message cannot be
+edited (Guardrail 7), so this note is the record — without it, a reconciler reading `b1de826` finds
+a verification claim with no diff behind it and no way to tell whether the correction was lost.
+
 **The retracted claim, quoted verbatim from §5b as it read at `7d8f916`:**
 
 > `revalidation_round DESC` added to the `ORDER BY` — `schema.sql` puts it in the uniqueness key
