@@ -7500,24 +7500,52 @@ which decided all three non-demotable statuses for the *status* write and said n
 
 > **Editorial correction (2026-08-21), lane W2 — the citations into
 > `src/fleet/orchestrator/reentry.py` and `src/fleet/state/repository.py` are now **symbol** anchors,
-> not `file:line` ones. Nothing this ADR claims has changed.** Re-measured at `0e945b8` with a
-> whitespace-normalised whole-file scan and an offset-to-line map: this ADR carried **20**
-> line-anchored citations into those two files — 11 naming the file, 9 bare `` `:N` `` companions —
-> and every one of them resolved **correctly** at the declared anchor `8c00971`. None was ever
-> false. **12 of the 20 no longer resolve to the same text at `main`**, and the eight that still do
-> are coincidence rather than durability: `1e857f3` grew `phase_floor`'s docstring by nine lines and
-> `704e52f` grew `demote_to_floor`'s by twelve ("behaviour unchanged — docstring only"), pushing the
-> `_HARD_STOPS` break, `span`, the `if demotions:` guard and the `DEGRADED` carve-out down by nine
-> and twelve lines respectively. **What the normaliser bought, stated rather than assumed:** none of
-> the 11 file-naming citations wraps across a newline, so a line-oriented `grep` would have found
-> all 11 — but **8 of the 9 bare companions sit on a different physical line from the file name they
-> attach to**, and a line-oriented sweep cannot associate them at all. That is where the count 11
-> becomes 20. An anchored-but-unresolvable citation is still a reconciler pointed at the wrong code
-> — §6's table sent a reader checking "carve-out names `DEGRADED` only" onto the *demotion* loop's
+> not `file:line` ones. Nothing this ADR claims has changed.**
+>
+> **The class result, which is what this correction rests on.** Predicate: a citation naming
+> `reentry.py` or `repository.py` (not `test_repository.py`) followed by `:N` or `:N-M`. Normaliser:
+> whole-file whitespace collapse with an offset-to-line map. Measured at `0e945b8`: **11** such
+> citations; at `main`, **0** — and **no bare `` `:N` `` companion is left attached to either file**
+> either (the nine that remain in this ADR all attach to `models/enums.py` or `cli.py`, checked by
+> nearest-preceding attribution). Every one of the 11 resolved **correctly** at the declared anchor
+> `8c00971`; none was ever false. What made them worth removing is that **most no longer resolve at
+> `main`**: `1e857f3` grew `phase_floor`'s docstring by nine lines and `704e52f` grew
+> `demote_to_floor`'s by twelve ("behaviour unchanged — docstring only"), pushing the `_HARD_STOPS`
+> break, `span`, the `if demotions:` guard and the `DEGRADED` carve-out down with them.
+>
+> **A number this marker previously carried, withdrawn rather than softened.** It said "**20**
+> line-anchored citations — 11 naming the file, 9 bare companions", and "8 of the 9 bare companions
+> sit on a different physical line". The direct half reproduces exactly; the bare half does not,
+> because *attributing* a bare `` `:N` `` to a file is predicate-dependent and this marker never
+> stated the predicate. Under nearest-preceding attribution the same text yields 11 bare references
+> (22 occurrences, 17 distinct `(file, span)` pairs) — and 17 is the very count this correction was
+> issued to replace, which is how a raw total with an unstated predicate fails. The 11→0 class
+> result above is stated instead; it survived independent re-measurement and the total did not.
+>
+> An anchored-but-unresolvable citation is still a reconciler pointed at the wrong code — §6's table
+> sent a reader checking "carve-out names `DEGRADED` only" onto the *demotion* loop's
 > `is not RepoStatus.SUCCEEDED` filter a few lines above it, inside the same method. A symbol anchor
-> is true at every ref, so the numbers are removed rather than re-measured. The remaining
-> `file:line` citations in this ADR (into `models/enums.py`, `state/checkpoints.py`, `cli.py`,
-> `tests/`) are untouched and still read at `8c00971` unless another ref is named beside them.
+> is true at every ref, so the numbers are removed rather than re-measured.
+>
+> **Scope, enumerated by a sweep rather than from memory** — the first version of this line listed
+> **four** kinds (`models/enums.py`, `state/checkpoints.py`, `cli.py`, `tests/`) and there are
+> **six**, which is the incomplete-scope-line shape this project keeps regenerating. Predicate: a
+> path ending `.py`/`.md`/`.sql` followed by `:N` or `:N-M`, over this ADR's whole section, whole-
+> section whitespace normalised. Reproduced identically at `7275adb`, `b1de826` and the working tree
+> before this change: **16** citations. After it, **15**, because one of them is re-anchored below.
+> The six kinds: `models/enums.py` (×6), `cli.py` (×4),
+> `docs/superpowers/plans/design-resume-step5.md` (×2), `state/checkpoints.py` (×1), `docs/SPEC.md`
+> (×1), `tests/test_repository.py` (×1).
+>
+> All fifteen read at `8c00971` unless another ref is named beside them. **Three of the four outside
+> `src/`/`tests/` name their own ref inline** (`as of 8c00971`, `at b7fc5ec` ×2). The fourth did
+> not: §3's pointer to `design-resume-step5.md:258-260` relied on this ADR's header anchor alone,
+> and does **not** resolve at `main` — the paragraph it names has moved to `:278` and has since been
+> rewritten from "Open, and deliberately not decided here" to "Decided — no longer open". Because it
+> is a *pointer* a reader is meant to follow rather than a dated measurement, it is re-anchored on
+> that document's "The algorithm, restated precisely" heading in this same change. **An earlier
+> draft of this very paragraph asserted all four carried an inline ref; re-running the check against
+> the fix is what caught it, not care.**
 
 
 **Provenance (CLAUDE.md Guardrail 1).** Nothing here is a SPEC requirement that pre-existed it.
@@ -7593,8 +7621,10 @@ outgrew**. The two mechanisms answer different questions:
 
 Sparing a `SKIPPED` phase's checkpoint would therefore buy nothing and cost one durable stale
 payload. Dropping it with the rest of the span is the safe direction, and **`repository.py` needs no
-change on this point.** The open question `docs/superpowers/plans/design-resume-step5.md:258-260`
-handed to subtask 6 is answered here: same hard stop, different checkpoint treatment, for the reason
+change on this point.** The open question handed to subtask 6 by
+`docs/superpowers/plans/design-resume-step5.md`'s "The algorithm, restated precisely" — cited by
+heading, not by line: it stood at `:258-260` at `8c00971` and does not resolve there today — is
+answered here: same hard stop, different checkpoint treatment, for the reason
 above.
 
 ### 4. The residual `DEGRADED` stale-anchor hazard — a stated boundary, with its premises named
