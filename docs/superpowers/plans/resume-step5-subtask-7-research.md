@@ -372,6 +372,28 @@ built). Guardrail 7 — "fix the code and its doc listing in the same change" �
 un-refusal's to correct, not a later sweep's. Flagging it here so subtask 9's implementer does not
 inherit it as a premise.
 
+> **SUPERSEDED IN PART (2026-08-21), lane W13 — the docstring sentence quoted above no longer
+> exists in `src/`, so the quotation is a RETRACTION QUOTATION from here on, not a live citation.
+> The *first* of the two reasons this section gives is NOT superseded and §4 is NOT settled.**
+> `c135c42` rewrote both `cli._refuse_unbuilt_resume_flags`' docstring and the `UsageError` that
+> repeated it; the docstring now states that §11.5 step 5 **is** built and runs unconditionally,
+> and that what is absent is steps 6 and 8. The quotation is kept as the record of what this brief
+> was reacting to — it was verbatim and correct at this document's own anchors (`6bf198f`,
+> re-anchored at `7275adb` in §7), which both predate `c135c42`. Anyone building subtask 9 must
+> take the docstring's present wording from `src/fleet/cli.py` by symbol, not from here.
+>
+> **What `c135c42` closed is only the SECOND reason — that the sentence became false once step 5
+> was built (`2f0db34`). The FIRST reason remains OPEN and is still subtask 9's:** §4.1 measures
+> `--revalidation` and `--raise-revalidation-rounds` as §3.5.1 stub-lifecycle knobs rather than
+> floor knobs, and `c135c42` did not change the refusal's membership — all five flags are still
+> refused. Whether those two belong in `_refuse_unbuilt_resume_flags` at all is unresolved here
+> and is **ADR-0079's to settle**; §4.1's split, §4.3's three unpicked options, §4.4 and §4.5's
+> open conflict all still stand, and Guardrail 7's "same change" obligation above still binds
+> subtask 9 for that first reason. This marker deliberately does **not** re-quote the dead
+> sentence: a sweep for that sentence's text still finds it in exactly one passage of this file,
+> the quotation above. (A *cue*-based sweep does gain a match here, on the substring `unbuilt`
+> inside the symbol name `_refuse_unbuilt_resume_flags` — a name, not a claim.)
+
 ### 4.3 Ambiguity 4 — the three `--from-phase` options, with costs. **I am not picking one.**
 
 First, three constraints that bind **all three** options, measured:
