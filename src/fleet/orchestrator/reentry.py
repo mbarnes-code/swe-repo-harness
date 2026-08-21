@@ -629,17 +629,29 @@ Spelled here rather than imported from `graph.sequence.PREFLIGHT_FINDING_KINDS` 
 frozenset is §3.1 criterion (c)'s *exemption* lookup — four kinds that explain why a repo has no
 wave — and it is free to gain or lose a member for reasons that have nothing to do with what
 blocks a dependent. Sharing it would couple this predicate to that one.
+
+**It does not decide a verdict.** `BLOCKING_STATUSES` holds `SKIPPED` outright, so a quarantined
+blocker and a `SKIPPED`-for-any-other-reason blocker are retained alike and `still_blocking` never
+reads this name. It is here because it is the one live producer of a `SKIPPED` entry in
+`blocked_by` (`cli._quarantine_impl`), because `docs/SPEC.md` §12 item 46(ii) names that case by
+name, and because it is what lets a fixture build the audited shape and the bare shape as two
+distinguishable inputs — which is the only way the bare-`SKIPPED` retention can be tested at all.
 """
 
 BLOCKING_STATUSES: Final[frozenset[RepoStatus]] = frozenset(
-    {RepoStatus.REQUIRES_HUMAN_INTERVENTION}
+    {RepoStatus.REQUIRES_HUMAN_INTERVENTION, RepoStatus.SKIPPED}
 )
-"""The statuses that block a dependent on their own, with no finding needed.
+"""The statuses of a blocker that hold its dependents in `blocked_by`.
 
-Exactly one member, and the smallness is the point: `SKIPPED` is deliberately **absent** even
-though `fleet quarantine` writes it, because a bare `SKIPPED` is a config exclusion and the
-quarantine case is `SKIPPED` **plus** an audited `QUARANTINE_FINDING_KIND` row. `still_blocking`
-states that pair; a status set alone cannot.
+`SKIPPED` is a member for a semantic reason, not a cautious one: **a `SKIPPED` repo has not
+landed.** Clearing its dependent's entry admits that dependent to migrate against a dependency
+that never ran, which is a silent correctness failure; leaving the entry in place leaves the
+dependent blocked, which an operator can see and clear by hand. That is the same asymmetry
+ADR-0090 §2.4 weighs, applied to the same question one level down.
+
+So the *reason* a repo is `SKIPPED` — an audited `QUARANTINE_FINDING_KIND` row, a config
+exclusion, an `EmptyRepo` gate — does not change the verdict, and `still_blocking` does not
+consult it.
 """
 
 
@@ -647,13 +659,18 @@ states that pair; a status set alone cannot.
 class BlockerState:
     """What a resume managed to look up about one name appearing in some repo's `blocked_by`.
 
-    `finding_kinds` has **no default**, and that is a mechanism rather than a preference: the
-    quarantine half of the predicate is the difference between "an operator removed this repo on
-    purpose" and "the config excludes it", so a caller that forgot to read `findings` would, with
-    a default of `frozenset()`, hand every quarantined blocker in as an ordinary `SKIPPED` and get
-    it removed. With no default the omission is a `TypeError` at construction instead of a silent
-    un-quarantine. A caller that genuinely has no findings for a repo writes `frozenset()` and
-    means it.
+    `finding_kinds` has **no default**, but the reason has changed and the old one is retired
+    here rather than left standing. It used to be load-bearing: while a bare `SKIPPED` was
+    removable, a caller that forgot to read `findings` would have handed every quarantined blocker
+    in as an ordinary `SKIPPED` and un-quarantined it, and a `TypeError` at construction was the
+    only thing standing between that mistake and a silent audit reversal. **`BLOCKING_STATUSES`
+    now holds `SKIPPED` outright, so that mistake changes no verdict and the guard no longer
+    guards anything.**
+
+    What the field still does is carry a fact the verdict does not depend on: which `SKIPPED`
+    blockers an operator quarantined on purpose. It stays required so that the two `SKIPPED`
+    shapes are distinct inputs a fixture can construct — a defaulted field that no verdict reads
+    would quickly be passed nowhere and the audited case would stop being expressible.
     """
 
     status: RepoStatus
@@ -663,9 +680,10 @@ class BlockerState:
 def still_blocking(name: str, blocker_statuses: Mapping[str, BlockerState]) -> bool:
     """Is `name` still a reason to hold a dependent in `blocked_by`? **Fail-closed.**
 
-    The blocking population is `REQUIRES_HUMAN_INTERVENTION` together with `SKIPPED` carrying an
-    audited `OperatorQuarantine` finding — the two live producers of a `blocked_by` entry
-    (`runner._contain` via `WaveScheduler.propagate_blocked`, and `cli._quarantine_impl`).
+    The blocking population is `BLOCKING_STATUSES` — `REQUIRES_HUMAN_INTERVENTION` and `SKIPPED`.
+    Neither has landed, and the two of them are what the two live producers of a `blocked_by`
+    entry write (`runner._contain` via `WaveScheduler.propagate_blocked` writes the first,
+    `cli._quarantine_impl` the second).
 
     **An entry this function cannot resolve is RETAINED, never removed** — a name absent from
     `blocker_statuses` answers `True`. That polarity is ADR-0090 §2.4's ruling (R2-CLOSED),
@@ -689,18 +707,22 @@ def still_blocking(name: str, blocker_statuses: Mapping[str, BlockerState]) -> b
        46(ii) as it stood before this change, which watched only whether a sweep moves a repo
        *out of* `REQUIRES_HUMAN_INTERVENTION` — a quantity that defect leaves unchanged.
 
-    **Stated residue.** A blocker resolved as bare `SKIPPED` with no `QUARANTINE_FINDING_KIND` in
-    its `finding_kinds` is treated as no longer blocking and its entry is removed. No live writer
-    produces such an entry (the only `SKIPPED` producer is `fleet quarantine`, which always writes
-    the finding), so in the shipped tree the case arises only if the finding row is missing — and
-    `BlockerState`'s no-default field is what keeps "missing" from meaning "not looked up".
+    **A bare `SKIPPED` blocker — one with no `QUARANTINE_FINDING_KIND` — is retained too, and it
+    is measured-unreachable today.** Measured at `4902938` by AST call-graph over `src/**/*.py`:
+    the only non-delegating writers of `blocked_by` are `runner._contain` (writes
+    `REQUIRES_HUMAN_INTERVENTION`) and `cli._quarantine_impl`, and the latter writes its
+    `OperatorQuarantine` finding in the same command, so no shipped path produces a `SKIPPED`
+    blocker without that finding. Retaining it therefore changes no live behaviour. It is retained
+    because the *reason* a repo is `SKIPPED` does not bear on the question this predicate asks: a
+    `SKIPPED` repo has not landed, whatever excluded it, and a dependent admitted against it
+    migrates against a dependency that never ran. This branch is not dead logic to be tidied away
+    — `tests/test_reentry_unblocking.py` asserts it, and narrowing `BLOCKING_STATUSES` back to
+    `{REQUIRES_HUMAN_INTERVENTION}` plus a quarantine-finding check reddens that test.
     """
     state = blocker_statuses.get(name)
     if state is None:
         return True  # unresolvable -> RETAINED (ADR-0090 §2.4, R2-CLOSED)
-    if state.status in BLOCKING_STATUSES:
-        return True
-    return state.status is RepoStatus.SKIPPED and QUARANTINE_FINDING_KIND in state.finding_kinds
+    return state.status in BLOCKING_STATUSES
 
 
 @dataclass(frozen=True, slots=True)

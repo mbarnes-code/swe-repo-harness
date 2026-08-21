@@ -22,6 +22,12 @@ unresolvable name in `Unblocking.remaining` vs `Unblocking.removed`** — and it
 * `test_an_entry_naming_a_string_that_resolves_to_no_repo_survives_untouched` is the
   **discriminating** one. Its blocker is absent from `blocker_statuses` entirely, so it is the only
   fixture whose verdict differs between the two polarities.
+* `test_a_bare_skipped_blocker_is_retained_because_a_skipped_repo_has_not_landed` is case 4, and
+  it discriminates a **different** defect: not the fail-open polarity but the narrowing of
+  `BLOCKING_STATUSES` back to `{REQUIRES_HUMAN_INTERVENTION}` plus a quarantine-finding check,
+  which is precisely the shape a reconciler reaches for. It is measured-unreachable in the shipped
+  tree — no writer produces a `SKIPPED` blocker without an `OperatorQuarantine` finding — so this
+  test is what keeps the branch from being deleted as dead logic.
 
 **Anchors are kept distinct on purpose.** No two fixtures share a blocker name, and no fixture's
 blocker appears in `blocker_statuses` under a second status — a fixture whose "resolvable" and
@@ -54,6 +60,7 @@ _ROWS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("quarantined-dep", ("acme-gated",)),
     ("abandoned-dep", ("acme-fixed",)),
     ("orphan-dep", ("contract:acme.protos:1.4",)),
+    ("excluded-dep", ("acme-excluded",)),
 )
 
 _STATUSES: dict[str, BlockerState] = {
@@ -61,12 +68,16 @@ _STATUSES: dict[str, BlockerState] = {
         status=RepoStatus.SKIPPED, finding_kinds=frozenset({QUARANTINE_FINDING_KIND})
     ),
     "acme-fixed": BlockerState(status=RepoStatus.SUCCEEDED, finding_kinds=frozenset()),
+    # case 4: `SKIPPED` with NO quarantine finding. Measured-unreachable in the shipped tree, and
+    # deliberately built as a *distinct* input from `acme-gated` so the retention is expressible.
+    "acme-excluded": BlockerState(status=RepoStatus.SKIPPED, finding_kinds=frozenset()),
 }
 
 _FLOORS: dict[str, Phase] = {
     "quarantined-dep": Phase.TRANSFORM,
     "abandoned-dep": Phase.BUILD,
     "orphan-dep": Phase.SCAN,
+    "excluded-dep": Phase.TRANSFORM,
 }
 
 
@@ -129,17 +140,43 @@ def test_an_unresolvable_repo_name_is_retained_for_the_same_reason_as_a_contract
     assert still_blocking("acme-never-scanned", _STATUSES) is True
 
 
+def test_a_bare_skipped_blocker_is_retained_because_a_skipped_repo_has_not_landed() -> None:
+    """Case 4. Watches: `acme-excluded`'s side of the split, and `excluded-dep`'s admissibility.
+
+    `acme-excluded` is `SKIPPED` with **no** `QUARANTINE_FINDING_KIND`. It resolves, so the
+    fail-open polarity answers it exactly as fail-closed does and **M1 cannot express this case** —
+    it discriminates a different mutation: narrowing `BLOCKING_STATUSES` back to
+    `{REQUIRES_HUMAN_INTERVENTION}` and re-adding a quarantine-finding check, which is the change a
+    reconciler makes to satisfy a criterion phrased only about RHI and quarantine.
+
+    Why it is retained rather than removed: a `SKIPPED` repo **has not landed**, whatever excluded
+    it, so clearing the entry admits `excluded-dep` to migrate against a dependency that never ran.
+    The reason for the exclusion is not the question this predicate asks.
+
+    Measured-unreachable today, which is why the assertion is what keeps the branch alive: the only
+    non-delegating writers of `blocked_by` are `runner._contain` (`REQUIRES_HUMAN_INTERVENTION`)
+    and `cli._quarantine_impl`, and the latter writes its `OperatorQuarantine` finding in the same
+    command, so nothing in the shipped tree produces this shape. Without this test the branch reads
+    as dead logic to the next author.
+    """
+    entry = _plan()["excluded-dep"]
+    assert entry.remaining == ("acme-excluded",)
+    assert entry.removed == ()
+    assert still_blocking("acme-excluded", _STATUSES) is True
+
+
 # ---------------------------------------------------------------------------------------
 # the predicate itself
 # ---------------------------------------------------------------------------------------
 
 
-def test_the_predicate_names_rhi_and_the_quarantine_pair_and_nothing_else() -> None:
-    """Watches: the four verdicts that define the blocking population.
+def test_the_predicate_retains_every_skipped_shape_and_rhi_and_nothing_else() -> None:
+    """Watches: the whole verdict table, all five shapes at once.
 
-    A bare `SKIPPED` and a `SKIPPED` carrying some *other* finding are both removable -- asserted
-    so that the `QUARANTINE_FINDING_KIND` check cannot be vacuous. If the predicate accepted any
-    `SKIPPED`, the third assertion would fail.
+    Every `SKIPPED` shape is retained -- audited quarantine, config exclusion, some other finding
+    -- because none of them has landed and the *reason* is not what this predicate asks about.
+    `SUCCEEDED` is the one shape that resolves to removable. Narrowing `BLOCKING_STATUSES` back to
+    `{REQUIRES_HUMAN_INTERVENTION}` flips three of these five verdicts.
     """
     rhi = BlockerState(status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, finding_kinds=frozenset())
     quarantined = BlockerState(
@@ -157,16 +194,25 @@ def test_the_predicate_names_rhi_and_the_quarantine_pair_and_nothing_else() -> N
         "e": BlockerState(status=RepoStatus.SUCCEEDED, finding_kinds=frozenset()),
     }
     verdicts = {name: still_blocking(name, resolved) for name in resolved}
-    assert verdicts == {"a": True, "b": True, "c": False, "d": False, "e": False}
-    assert RepoStatus.SKIPPED not in BLOCKING_STATUSES
+    assert verdicts == {"a": True, "b": True, "c": True, "d": True, "e": False}
+    assert set(BLOCKING_STATUSES) == {
+        RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+        RepoStatus.SKIPPED,
+    }
 
 
 def test_blocker_state_has_no_default_for_its_finding_kinds() -> None:
-    """Watches: whether the quarantine lookup can be omitted silently.
+    """Watches: whether `finding_kinds` can be omitted at construction.
 
-    With a default of `frozenset()` a caller that forgot to read `findings` would hand every
-    quarantined blocker in as an ordinary `SKIPPED` and un-quarantine it. The absence of a default
-    turns that omission into a `TypeError` at construction -- a mechanism rather than a convention.
+    **The rationale this test used to carry is retired and is written out here rather than left
+    standing.** It was: with a default of `frozenset()`, a caller that forgot to read `findings`
+    would hand every quarantined blocker in as an ordinary `SKIPPED` and un-quarantine it. Since
+    `BLOCKING_STATUSES` holds `SKIPPED` outright that mistake changes no verdict, so this is no
+    longer a guard against a silent audit reversal and must not be cited as one.
+
+    What it still holds is that the two `SKIPPED` shapes stay distinct inputs: a defaulted field
+    no verdict reads would be passed nowhere, and case 4's fixture -- the only place the bare shape
+    is expressible -- would stop being distinguishable from the audited one.
     """
     with pytest.raises(TypeError):
         BlockerState(status=RepoStatus.SKIPPED)  # type: ignore[call-arg]
@@ -256,7 +302,7 @@ def test_a_repo_with_nothing_removed_is_still_reported() -> None:
     an operator needs to know why a resume did not admit it.
     """
     plan = _plan()
-    assert set(plan) == {"quarantined-dep", "abandoned-dep", "orphan-dep"}
+    assert set(plan) == {"quarantined-dep", "abandoned-dep", "orphan-dep", "excluded-dep"}
 
 
 def test_unblocking_is_frozen_so_a_caller_cannot_edit_the_plan_it_was_handed() -> None:
