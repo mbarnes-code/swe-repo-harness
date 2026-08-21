@@ -74,6 +74,14 @@ What this does NOT catch, stated rather than implied, worst first:
 * **The worker channel is a narrower instrument than this one**: `_worker_findings` sees only
   `findings.append(<literal>)` on a bare name, and nothing cross-checks it. It feeds the single
   `_INDIRECT_SITES` exemption; see its own docstring for the scope.
+* **The exemption list is hand-maintained, and only its *extent* is mechanical.** `_INDIRECT_SITES`
+  keys a site by `(module path relative to `src/fleet`, normalised SQL)` and declares how many
+  sites it covers, so an undeclared statement riding a declared one's exemption and an entry that
+  has outlived its code are both loud (`_exemption_drift`, both directions). What stays open, and
+  is a judgement no count can make: whether the declared channel is still the *right* channel for
+  the site — an entry could name `worker-findings` for a statement that has since started binding
+  its `kind` from somewhere else entirely, and the count would not move. Re-read the entry, not
+  just its number, whenever the site it names is edited.
 """
 
 from __future__ import annotations
@@ -90,6 +98,8 @@ import pytest
 REPO_ROOT: Final = Path(__file__).resolve().parents[1]
 SRC: Final = REPO_ROOT / "src" / "fleet"
 SCHEMA_PATH: Final = SRC / "state" / "schema.sql"
+#: `_worker_findings`' scope, as a directory rather than as a directory *name* — see its docstring.
+_WORKERS_DIR: Final = SRC / "workers"
 SPEC_PATH: Final = REPO_ROOT / "docs" / "SPEC.md"
 
 #: The `findings.kind` comment block, in both copies, runs from the `kind` column declaration to
@@ -110,10 +120,22 @@ _PLACEHOLDER: Final = re.compile(r"<[^>]*>")
 #:
 #: `cli.py`'s scan persist and its §3.1 gate both bind `kind` from a comprehension over worker
 #: output (`output.findings`, `evidence.gated`), so the literals live in the workers.
+#:
+#: **The key is a module path relative to `src/fleet`, and the value carries how many sites the
+#: entry is expected to cover** — because a hand-maintained exemption list is the part that rots
+#: (CLAUDE.md guardrail 6), and this one used to be a blanket rather than a pass for named sites.
+#: It was keyed by `path.name`, so a future `src/fleet/<pkg>/cli.py` inherited the exemption
+#: without anyone deciding that, and it carried no count, so a *third* `cli.py` statement pasting
+#: this same SQL with an unrelated variable in the `kind` slot was exempted in silence. Both are
+#: now loud: the relative path is the module's identity, and `_exemption_drift` fails in **both**
+#: directions — one site too many is an undeclared site riding a declared one's exemption, one too
+#: few is an entry that has outlived the code it was written for. The count is a *measured*
+#: property of the tree (2 at `0e945b8`: `cli.py:1589` scan-persist and `cli.py:2034` §3.1 gate),
+#: not a budget; when a site is legitimately added or removed, re-measure it in the same change.
 _WORKER_FINDINGS: Final = "worker-findings"
 _INDIRECT_SITES: Final = {
     ("cli.py", "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
-               "created_at) VALUES (?, ?, ?, 'warn', ?, ?, ?)"): _WORKER_FINDINGS,
+               "created_at) VALUES (?, ?, ?, 'warn', ?, ?, ?)"): (_WORKER_FINDINGS, 2),
 }
 
 
@@ -462,6 +484,35 @@ def _resolve(expr: ast.expr, src: _Src, scope: tuple[ast.AST, ...]) -> set[str] 
     return None
 
 
+def _exemption_drift(exempted: dict[tuple[str, str], int]) -> list[str]:
+    """Every `_INDIRECT_SITES` entry covered exactly the number of sites it declares, or why not.
+
+    The exemption list is the hand-maintained part, so it is checked in both directions rather
+    than trusted. Too many sites means an undeclared statement is riding a declared one's
+    exemption — the silent-miss shape, since such a site's `kind` is never resolved and never
+    reported. Too few means the entry has outlived the code it was written for, which is how an
+    exemption list goes stale without anyone noticing.
+    """
+    out: list[str] = []
+    for site, (channel, expected) in _INDIRECT_SITES.items():
+        actual = exempted.get(site, 0)
+        if actual == expected:
+            continue
+        out.append(
+            f"{site[0]}: `_INDIRECT_SITES` declares {expected} site(s) supplied by the "
+            f"`{channel}` channel for this SQL, and {actual} matched. "
+            + (
+                "A statement pasting this SQL was added without a decision to exempt it; resolve "
+                "its `kind` or raise the declared count in the same change."
+                if actual > expected
+                else "The site this entry was written for is gone or now resolves; drop or "
+                "re-count the entry in the same change."
+            )
+            + f" SQL: {site[1]}"
+        )
+    return out
+
+
 def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
     """`(every kind a findings writer can emit, the sites this module could not resolve)`."""
     src = _Src()
@@ -470,6 +521,9 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
     #: `(file, first line, last line)` of every SQL literal the walk below recognised. This is
     #: what `_recognition_gap` cross-checks; without it, recognition is a silent pre-filter.
     recognised: set[tuple[Path, int, int]] = set()
+    #: How many sites each `_INDIRECT_SITES` entry actually exempted, checked against its declared
+    #: count by `_exemption_drift`.
+    exempted: dict[tuple[str, str], int] = {}
     worker_channel_needed = False
     for path, tree in src.trees.items():
         scopes = _scopes(tree)
@@ -486,9 +540,9 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
                 continue
             recognised.add((sql_path, first, last))
             slot = _kind_slot(sql)
-            site = (path.name, _sql(sql).split(" ON CONFLICT")[0].strip())
+            site = (path.relative_to(SRC).as_posix(), _sql(sql).split(" ON CONFLICT")[0].strip())
             if slot is None:
-                unresolved.append(f"{path.name}: unparsable findings INSERT: {site[1]}")
+                unresolved.append(f"{site[0]}: unparsable findings INSERT: {site[1]}")
                 continue
             index, literal = slot
             if index < 0:
@@ -503,12 +557,15 @@ def _emitters() -> tuple[frozenset[str], tuple[str, ...]]:
             if elements is not None and index < len(elements):
                 resolved = _resolve(elements[index], src, scopes[id(node)])
             if resolved is None:
-                if _INDIRECT_SITES.get(site) == _WORKER_FINDINGS:
+                declared = _INDIRECT_SITES.get(site)
+                if declared is not None and declared[0] == _WORKER_FINDINGS:
                     worker_channel_needed = True
+                    exempted[site] = exempted.get(site, 0) + 1
                     continue
-                unresolved.append(f"{path.name}: unresolved `kind` at {site[1]}")
+                unresolved.append(f"{site[0]}: unresolved `kind` at {site[1]}")
                 continue
             kinds |= {_normalise(k) for k in resolved}
+    unresolved.extend(_exemption_drift(exempted))
     unresolved.extend(_recognition_gap(src, recognised))
     if worker_channel_needed:
         kinds |= _worker_findings(src)
@@ -588,10 +645,18 @@ def _worker_findings(src: _Src) -> set[str]:
     Scoped to `src/fleet/workers/`, where `findings` is documented as carrying KINDS only
     (`workers/clone.py:148`). The `GraphFinding`/`RewriteFinding` objects that other modules append
     to a list of the same name are not string literals and are not collected.
+
+    The scope test is "under `src/fleet/workers/`", not "in a directory named `workers`". The
+    earlier `path.parent.name != "workers"` said the second while this docstring said the first,
+    and the gap was one ordinary edit wide in each direction: a `src/fleet/workers/adapters/`
+    subpackage appending a kind was invisible — 0 unresolved, 0 unlisted, all four tests green —
+    and any unrelated `.../workers/` directory elsewhere under `src/fleet` would have been swept
+    in. No subpackage exists there today (measured at `0e945b8`: `src/fleet/workers/` is flat),
+    so this closes a latent gap rather than a live one.
     """
     out: set[str] = set()
     for path, tree in src.trees.items():
-        if path.parent.name != "workers":
+        if _WORKERS_DIR not in path.parents:
             continue
         for node in ast.walk(tree):
             if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)):
