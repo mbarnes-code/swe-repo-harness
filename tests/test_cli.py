@@ -877,37 +877,81 @@ def test_unknown_run_id_names_the_run(workspace: Path) -> None:
     assert "does-not-exist" in result.output
 
 
+UNAVAILABLE_CALL_SITES: Mapping[str, tuple[tuple[str, ...], str]] = MappingProxyType(
+    {
+        "plan": (("plan",), "src/fleet/workers/relocate.py"),
+        "migrate": (
+            ("migrate",),
+            "src/fleet/workers/relocate.py (Phase 2 of the end-to-end run)",
+        ),
+        "stubs resolve": (
+            ("stubs", "resolve", "acme-commons"),
+            "src/fleet/workers/buildverify.py",
+        ),
+    }
+)
+"""Every `_unavailable` call site, and the ONLY text each may put after `Related module: `.
+
+A POSITIONAL whitelist, and the counterpart to `UNAVAILABLE_MESSAGE_VOCABULARY` below: that one
+governs the message's fixed prose, this one governs its one variable field. The two partition the
+message at `Related module: ` and neither can see the other's half, which is why both are here.
+
+All three call sites are covered because the sweep that found the first escape found it in the
+shape the **`migrate`** site already uses — a parenthetical hung off the module argument — and
+`migrate` and `stubs resolve` had no test over their messages at all. Guarding only the site a
+reviewer reported is how a class survives its own fix (CLAUDE.md: sweep for the class).
+
+Widening an entry to go green is the wrong response unless the new text is still a pointer and
+still says nothing about the named module — see the assertion's own failure message.
+"""
+
+
 UNAVAILABLE_MESSAGE_VOCABULARY: frozenset[str] = frozenset(
     {"and", "any", "cannot", "cli", "config", "dispatching", "error", "fleet", "has", "identity",
-     "implementation", "in", "it", "its", "mirror", "module", "mutex", "no", "nothing", "plan",
-     "preconditions", "py", "related", "relocate", "run", "schema", "src", "stopped", "the",
-     "then", "this", "validated", "verb", "version", "was", "without", "work", "workers",
-     "written"}
+     "implementation", "in", "it", "its", "mirror", "mutex", "no", "nothing", "preconditions",
+     "run", "schema", "stopped", "the", "then", "this", "validated", "verb", "version", "was",
+     "without", "work", "written"}
 )
-"""Every word `fleet plan`'s unavailable-verb message is allowed to contain.
+"""Every word the unavailable-verb message's fixed prose may contain, before `Related module: `.
 
 This is a WHITELIST, not a list of forbidden stub-words, and that inversion is the point: a
 status claim about the named module has to be made out of WORDS, so an unpredicted form of one —
 "unimplemented", "TODO", "placeholder", "not yet wired", "(still a stub)" — enlarges the spoken
 set and trips the assertion without anyone having predicted that wording.
 
-The normaliser is `[a-z]+` runs of the lower-cased output with ANSI colour stripped first, so
-wrapping, punctuation, digits and `§` are invisible to it: a message re-wrapped at a different
-terminal width has the same spoken set, and a word cannot hide in a line break. It splits on the
-dot too, so a dotted path contributes `relocate` and `py` separately — deliberate, because the
-module argument is a POINTER and its components are ordinary words here.
+**Scoped to the prose, and that scope is load-bearing.** `module`, `related` and every component
+of the module path are deliberately absent, because they live on the other side of the split. A
+prose edit therefore cannot REFER to the named module — not by the word `module`, not by its
+path — without tripping this, which is what closes a hole the earlier, whole-message version of
+this set left open. Measured rather than argued: appending `The module has no implementation.`
+to the prose introduces no word the whole-message set lacked — `the`, `module`, `has`, `no` and
+`implementation` are all spoken elsewhere in the message already — so equality over the wider
+scope stays GREEN while the message tells an operator that a dispatched worker is unwritten.
+Prose-scoped, the same edit is RED on `module`. (Set equality is blind to a licensed word
+appearing in a NEW PLACE; narrowing the scope is what gives `module` a place it may not appear.)
 
-Editing the message legitimately will also trip it. **Widening this set to go green is the wrong
-response** unless the new word says nothing about the named module's status — see the
-assertion's own failure message.
+The normaliser is `[a-z]+` runs of the lower-cased output with ANSI colour stripped and
+whitespace collapsed, so wrapping, punctuation, digits and `§` are invisible to it: a message
+re-wrapped at a different terminal width has the same spoken set, and a word cannot hide in a
+line break.
+
+**It is hand-maintained and it rots CLOSED.** The assertion is an equality, so message drift in
+either direction — a word added, a word dropped — is a red. A stale set produces false failures
+and never a false pass, which is the only rot a hand-maintained list may have. Editing the
+message legitimately will therefore trip it; **widening this set to go green is the wrong
+response** unless the new word says nothing about the named module — see the failure message.
 """
 
 
-def test_unavailable_verb_names_a_module_without_calling_it_a_stub(workspace: Path) -> None:
+@pytest.mark.parametrize("verb", sorted(UNAVAILABLE_CALL_SITES))
+def test_unavailable_verb_names_a_module_without_calling_it_a_stub(
+    verb: str, workspace: Path
+) -> None:
     """A verb with no implementation exits 1 naming a module — never a bare traceback, and never
     a claim about the named module's status. Rule 11: fail loud, say where.
 
-    Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers.
+    Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers, then
+    widened to all three `_unavailable` call sites.
 
     **The inverted assertion is the point.** This test previously required the word
     `NotImplementedError` to be PRESENT in the output, which is why D63 survived: the message
@@ -916,49 +960,83 @@ def test_unavailable_verb_names_a_module_without_calling_it_a_stub(workspace: Pa
     only test over the message certified the false word. An instrument that asserts a claim
     cannot also falsify it.
 
-    **The name asserts an ABSENCE, so the name needs its own proof (CLAUDE.md Rule 12).**
-    Inverting that assertion to `"NotImplementedError" not in output` left a one-entry blacklist,
-    and one forbidden word does not prove "without calling it a stub". Verified, not
-    hypothesised: with the `plan` call site passing
-    `"src/fleet/workers/relocate.py (still a stub)"` — the same shape the `migrate` call site
-    already uses to hang a parenthetical off the module argument — the rendered message reads
-    `Related module: src/fleet/workers/relocate.py (still a stub).` and every assertion this test
-    had passed while its name was false.
+    **The name asserts an ABSENCE, so the name needs its own proof (CLAUDE.md Rule 12), and it
+    took three cuts to get one.** Cut one was `"NotImplementedError" not in output` — a one-entry
+    blacklist, defeated by `"src/fleet/workers/relocate.py (still a stub)"` at the call site, the
+    parenthetical shape `migrate` already uses. Cut two answered that with a whole-message word
+    whitelist, and left a hole a reviewer walked straight through: `has`, `no` and
+    `implementation` are the message's own words, so appending ` has no implementation` to the
+    module argument said of a dispatched worker exactly what D63 said, in licensed vocabulary.
+    Both escapes needed nothing but a different string literal at a call site — the accidentally
+    reachable side of the stop rule, twice.
 
-    So the load-bearing assertion is now a WHITELIST of the words the message may contain at all
-    (`UNAVAILABLE_MESSAGE_VOCABULARY`), which catches status claims by construction rather than
-    by anticipating their form.
+    Cut three splits the message at `Related module: ` and whitelists each half by a different
+    mechanism:
 
-    What it does NOT catch, recorded here rather than discovered later: a false claim assembled
-    entirely out of licensed words. `Related module: src/fleet/workers/relocate.py has no
-    implementation.` says of a dispatched worker exactly what D63 said, in vocabulary this test
-    permits, and passes every assertion below — verified the same way as the counterexample
-    above, not assumed. This pins the message's VOCABULARY; it does not pin its meaning. The
-    meaning is held by `_unavailable`'s own docstring and by D63.
+    * the variable half positionally — the pointer must be, exactly, the one string
+      `UNAVAILABLE_CALL_SITES` licenses for this verb, so ANY text appended to it fails whatever
+      words it is built from;
+    * the fixed half by vocabulary — `UNAVAILABLE_MESSAGE_VOCABULARY`, which excludes `module`,
+      `related` and every path component, so prose cannot refer to the named module at all
+      without tripping.
+
+    Neither half can see the other's, so the pair is complementary rather than layered: a word
+    added to the prose is invisible to the positional assertion, and everything after the split
+    is invisible to the vocabulary one.
+
+    What remains, measured and stated rather than implied closed: prose that says something false
+    about the module while referring to it only as `it` — the one licensed word that could carry
+    the reference. Appending `It has no implementation.` to the prose is green here, verified the
+    same way as the escapes above. Reaching it needs a sentence a reader would parse as being
+    about the module rather than about the verb, built from 32 words that cannot name the module
+    and cannot add a word of their own; that is contrivance, not the different-string-literal
+    reach both earlier escapes had. It is a boundary, and unlike the previous two it is not one
+    this test's own criterion says to fix.
     """
-    result = runner.invoke(app, [*base_args(workspace), "plan"], catch_exceptions=False)
+    argv, pointer = UNAVAILABLE_CALL_SITES[verb]
+    result = runner.invoke(app, [*base_args(workspace), *argv], catch_exceptions=False)
     assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-    assert "workers/relocate.py" in result.output
     assert "Traceback" not in result.output
     assert "no implementation in the CLI" in result.output
 
-    # D63's own word, kept as a named regression pin. The whitelist below subsumes it — that word
-    # is not licensed — but Rule 12 says a redundancy question between two instruments is settled
-    # with mutations before either is deleted, and this one has not been. It also carries the
-    # ledger reference a bare vocabulary set cannot.
+    # D63's own word, kept as a named regression pin. Both whitelists below subsume it — but Rule
+    # 12 says a redundancy question between two instruments is settled with mutations before
+    # either is deleted, and this one has not been. It also carries the ledger reference a
+    # whitelist cannot.
     assert "NotImplementedError" not in result.output, (
         "D63: the message must not tell an operator that a live, dispatched module is a stub"
     )
 
-    spoken = set(re.findall(r"[a-z]+", re.sub(r"\x1b\[[0-9;]*m", "", result.output.lower())))
-    assert spoken == UNAVAILABLE_MESSAGE_VOCABULARY, (
-        "the unavailable-verb message speaks a word UNAVAILABLE_MESSAGE_VOCABULARY does not "
-        "license, or has stopped speaking one it does. If you added a word: this message names a "
-        "module as a POINTER and asserts NOTHING about it (see `_unavailable`), so a word that "
-        "characterises the named module's status — stub, unimplemented, TODO, placeholder, "
-        "missing, pending — is D63 returning in new wording, and the fix is the message, not "
-        "this set. Do NOT simply add the word to go green. If you removed one, check that the "
-        "operator can still tell WHERE the gap is; that is the whole reason this message exists."
+    message = " ".join(re.sub(r"\x1b\[[0-9;]*m", "", result.output).split())
+    prose, split, tail = message.partition("Related module: ")
+    assert split, (
+        "the message no longer names a module. Rule 11: an operator told only that a verb is "
+        "unavailable cannot act on it, and `where` is the whole reason this message is long."
+    )
+
+    # The variable half: a POINTER, and exactly the licensed one. Whatever is appended to it —
+    # `(still a stub)`, ` has no implementation` — is a claim about the module, and the module
+    # argument is not where claims may be made (see `_unavailable`).
+    assert tail == f"{pointer}.", (
+        f"`fleet {verb}` puts something other than its licensed pointer after `Related module: "
+        f"`. This field names a module and asserts NOTHING about it: an annotation appended "
+        f"here is D63's claim in a new position, and it passes a vocabulary check whenever it is "
+        f"built from the message's own words. Fix the call site, not this table — and if the "
+        f"pointer genuinely changed, change it here in full."
+    )
+
+    # The fixed half: only these words, so prose cannot characterise the module — or name it.
+    licensed = UNAVAILABLE_MESSAGE_VOCABULARY | set(re.findall(r"[a-z]+", verb))
+    spoken = set(re.findall(r"[a-z]+", prose.lower()))
+    assert spoken == licensed, (
+        "the unavailable-verb message's prose speaks a word UNAVAILABLE_MESSAGE_VOCABULARY does "
+        "not license, or has stopped speaking one it does. If you added a word: this message "
+        "names a module as a POINTER and asserts NOTHING about it (see `_unavailable`), so a "
+        "word that characterises the named module's status — stub, unimplemented, TODO, "
+        "placeholder, missing, pending — is D63 returning in new wording, and so is `module` or "
+        "a path component, which would let the prose refer to it. The fix is the message, not "
+        "this set. If you removed a word, check that the operator can still tell WHERE the gap "
+        "is; that is the whole reason this message exists."
     )
 
 
