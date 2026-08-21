@@ -384,9 +384,20 @@ def test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims(
     one state (`BUILD` `DEGRADED`, `BUILD` evidence `False`, `SCAN` evidence `True`) and reads the
     returned floor; that state yields `VERIFY` under *both* orders, because both branches are a
     bare `break`. It moves only when the hard-stop test is **deleted**. It is a deletion detector
-    under an ordering name, and no behavioural probe can be anything else here -- which is the
-    fourth question CLAUDE.md guardrail 6 asks: name the quantity the instrument watches and ask
-    whether the defect could leave it unchanged. A returned floor cannot move under a reorder.
+    under an ordering name -- which is the fourth question CLAUDE.md guardrail 6 asks, answered:
+    name the quantity the instrument watches and ask whether the defect could leave it unchanged.
+    A **returned floor** cannot move under a reorder, so no probe that reads only the return value
+    can see one.
+
+    Narrower than the sentence this paragraph replaced, which said no *behavioural* probe could:
+    one can. Hand `phase_floor` an `evidence` mapping whose `get` records the phases it is asked
+    about. Measured at `570bcb5` on the sibling's own probe state: the returned floor is `VERIFY`
+    either way, while the recorded lookups are `[]` under "hard stop first" and `['BUILD']` under
+    "evidence first". That is a behavioural probe of a side channel rather than of the return value,
+    and it would make the sibling's check real. This test does not build it, because the AST is a
+    cheaper and more direct witness of a claim that is *about* source order -- but the option is
+    written down here so "impossible" is not banked when what was measured is "not with this
+    probe".
 
     **So the order is behaviourally inert, and this binding is on a *description*.** Measured
     exhaustively at `0e945b8` -- all 7 `RepoStatus` values across all 4 `Phase` positions (2,401
