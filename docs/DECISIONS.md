@@ -9339,3 +9339,507 @@ performs and documents.
   Repaired at `42a4369`, and the test that would have caught it asserts the **resolved** mirror path
   by moving the mirror on disk, so it binds neither side of the parameter boundary and survives the
   next inversion.
+
+---
+
+## ADR-0090 — Subtask 8's five rulings: `waves` is reached by a new narrow `SchedulerStore.append_unblocked_wave`; decision **R does not exist as posed** — §3.5 and §11.5 never contradicted and `open_wave` already refuses the failure R2 was costed against; §3.5's "current integration tip" clause is **already satisfied by shipped code**; and §12 item 46(ii), the acceptance criterion for this work, watches a quantity the quarantine-undo defect leaves **unchanged**
+
+**Status: DECIDED, NOT IMPLEMENTED.** Rulings issued by the round-E orchestrator; recorded at
+`75636cd`. Every measurement below was first taken at `34d6f82` and **re-derived at `75636cd`**
+after three commits landed under this lane (`68e539a`, `8cf4958`, `75636cd`). The re-derivation
+reproduced **every** number and **every** verbatim quotation identically — the only two `src/`
+edits in that span are docstring text in `cli._build_impl` and a `_unavailable` argument in
+`stubs_resolve`, neither at any site cited here — so the `34d6f82` anchors below hold at `75636cd`.
+
+Subtask 8 of `docs/superpowers/plans/design-resume-step5.md` — "step 6 — recompute `blocked_by`,
+append the synthetic wave". **No code lands in this change.** The one non-ADR edit shipping with it
+is design row 8's correction (§8 below), because the row states **three** things these rulings
+falsify — **two** success-criterion clauses and its "Files touched" column — and CLAUDE.md is explicit that *"the SPEC says X but the code
+cannot do X" is two edits, not one* — split across commits, the row regenerates the defect at the
+next reconciliation.
+
+**This ADR records rulings. It does not make them, and it does not promise that a later subtask will
+fix anything.** Where a ruling leaves a sub-question open, it is written down as open (§2.4).
+
+### 0. Evidence lineage — stated because two rulings rest on behaviour that was executed, not read
+
+| lane | role | anchor | what it produced |
+|---|---|---|---|
+| **R1** | research, read-only | `47df73d`, re-anchored to `a69fba8` mid-lane | the option costing, the SPEC readings, the §12 46(ii) finding |
+| **W7** | worker, executing | probes at `698f750`, all three verdicts re-derived at `34d6f82` | facts 1–3 below, executed in a per-lane detached worktree with a four-check instrument battery each |
+| **this lane (W11)** | recording | `34d6f82`, re-derived at `75636cd` | every number below re-measured independently before it entered this file, and again after HEAD moved |
+
+**Where R1 and W7 disagree, W7 governs: R1 read the source, W7 ran it.** One correction is already
+earned and must not propagate. R1 names the Phase-4 `_VerifyPlan` builder **`cli._verify_plan`**;
+that name **does not exist**. Re-measured here at `34d6f82` by AST over `src/**/*.py`
+(`.venv/bin/python`, predicate = a `FunctionDef`/`AsyncFunctionDef`/`ClassDef` whose `.name` matches):
+
+| name | definitions in `src/` | call / construction sites in `src/` |
+|---|---|---|
+| `_verify_plan` | **0** | 0 |
+| `_prepare_verify` | **1** (`fleet/cli.py`) | 1 (`fleet/cli.py`) |
+| `_VerifyPlan` | 1 class (`fleet/cli.py`) | 1 |
+
+**Cite `cli._prepare_verify`.** This ADR does.
+
+**Method, for every number below.** Interpreter: `.venv/bin/python` (never a bare `python`). Text
+sweeps normalise whitespace across the **whole file** and map offsets back to line numbers, never a
+line-oriented `grep`. Locations are given **by symbol**; of the three line citations
+this change replaces with symbols, one already resolved to a docstring line (§8). **No `pytest` was run — suite lock.** The command a later lane owes is in §9.
+
+---
+
+### 1. W — RULED: option **W2**, a new narrow `SchedulerStore.append_unblocked_wave`
+
+**The ruling, verbatim.** *"RULED: option W2, a new narrow `SchedulerStore.append_unblocked_wave`
+(SQL-only, no `WavePlan`). W1 is eliminated by a committed primary source: SPEC §3.5's scope note
+(`06a1867`) names `append_synthetic_waves` as not the remedy, and R1 re-confirmed its identity-return
+by exercising it. Cost: 4 edit sites in 2 files, Protocol 7->8 methods; a second writer of `waves`;
+the topological layering re-implemented rather than reusing `layer()`. Closes seams S2 and S4 by
+construction, which is what D74 asks for."*
+
+**W1's elimination rests on a committed sentence, not on a cost estimate.** `docs/SPEC.md` §3.5's
+scope note, present at `34d6f82`, says of `graph.sequence.append_synthetic_waves` that it is
+*"**not** the remedy for it (that function filters to refs carrying no wave index, and every repo a
+resume demotes already has one)"*. Choosing W1 means editing a function the SPEC has just certified
+is the wrong instrument. R1 exercised the identity return: on subtask 8's own population — every node
+already carrying a wave index — `append_synthetic_waves(plan, graph, refs)` returns `result is plan`,
+`True`, with the wave count unchanged and zero synthetic waves added.
+
+**The cost, re-measured at `34d6f82`.** `SchedulerStore` (`orchestrator/scheduler.py`, a
+`@runtime_checkable` `Protocol`) declares **7** methods — `record_plan`, `wave_indices`,
+`wave_members`, `wave_started_at`, `begin_wave`, `blast_radii`, `append_blocked_by` — and has **3**
+structural implementations carrying the identical 7: `SqliteSchedulerStore`
+(`orchestrator/scheduler.py`), `cli._ScanWaveStore`, `cli._ScopedWaveStore`. Adding one method is
+therefore **4 edit sites in 2 files** and takes the Protocol **7 → 8**. (Round D's brief costed this
+as "8 methods to 9, 3 edit sites"; it counted the implementations but not the Protocol declaration.
+The corrected figure is R1's, and it reproduces here by an independent AST pass.)
+
+**Why the alternative routes are not available, measured rather than assumed.**
+
+- `SqliteSchedulerStore.record_plan` is the **only** writer of `waves` / `wave_members`. Its sole
+  non-delegating production caller is **`cli._sequence_impl`**; the other two call sites are the
+  `_ScanWaveStore.record_plan` / `_ScopedWaveStore.record_plan` passthrough bodies, which are
+  implementations delegating inward, not callers of a plan write. (AST call-graph with enclosing
+  symbol, `src/**/*.py`, `34d6f82`.)
+- There is **no DB→`WavePlan` loader** in `src/`: `WavePlan(...)` is constructed at exactly **2**
+  sites, both in `src/fleet/graph/sequence.py`. So a resume-time route through `record_plan` (W3)
+  would first have to rebuild a plan that does not exist at resume time.
+
+**Seams S2 and S4, named because the labels appear in the handoff without their definitions.** They
+are defined in `docs/superpowers/plans/resume-step5-subtask-8-research.md` §4.1:
+
+- **S2 — `max(waves) + 1` derived twice.** `append_synthetic_waves` computes the offset from an
+  **in-memory** `WavePlan`; `SqliteSchedulerStore.wave_indices` reads the **DB**. A plan rebuilt at
+  resume time cannot contain prior synthetic waves (they exist only as rows), so the second resume
+  that appends one collides with an existing row.
+- **S4 — `waves.max_usd`.** The DDL freezes it at first admission; `record_plan`'s upsert
+  **overwrites** it. Verified verbatim in `record_plan`'s body at `34d6f82`:
+  `ON CONFLICT (run_id, wave_index) DO UPDATE SET computed_at = excluded.computed_at, synthetic =
+  excluded.synthetic, max_usd = excluded.max_usd`. Reaching the wave tables through `record_plan`
+  therefore **re-budgets every closed wave** as a side effect of moving one member.
+
+W2 closes both **by construction** rather than by convention: it allocates from
+`SELECT MAX(wave_index) FROM waves` **inside** the write transaction (closing S2 at the source of
+truth) and touches **no existing `waves` row** (closing S4 by never issuing the overwrite).
+
+**One attribution corrected while recording it.** The ruling says this "is what D74 asks for". D74's
+own ledger entry (`docs/INTEGRATION_HONESTY.md`, read at `34d6f82`) is about **Phase 3/4 worktree
+paths** and explicitly declines a fix here; what D74 supplies is the *shape* — "two independent
+computations of one value, nothing enforcing agreement" — and it is the round-E handoff's §4 D74
+bullet, not D74's entry, that routes four fresh seams of that shape onto subtask 8's path. Recorded
+as: **W2 closes S2 and S4 by construction, which is the D74 *class* of defect, not an obligation
+D74's entry states.**
+
+---
+
+### 2. R — RULED: **the decision does not exist as posed. Its premise is REFUTED; implement R2.**
+
+**The ruling, verbatim.** *"RULED: the decision does not exist as posed. Its premise is REFUTED;
+implement R2. The handoff asserts 'the SPEC contradicts itself here' between §3.5's reversal and
+§11.5's recompute. R1 read all three sources and found no contradiction: §3.5 states the recompute in
+its own parenthesis and its reversal clause is sufficient, not necessary. Option R1 is eliminated by
+§3.4's `pr_merged` counterexample. Option R3 is eliminated as unnecessary, because `open_wave` checks
+every earlier index — confirmed by execution (W7 fact 1: a 3-wave fixture with the blocker two waves
+back across a CLOSED wave, `open_wave(2)` raising and naming wave 0). So R2's costed failure ('a
+dependent migrates against a dependency that has not landed') cannot occur. Guardrail 7 does not fire
+— no SPEC sentence needs correcting for a contradiction that is not there."*
+
+#### 2.1 The premise, and why it is false
+
+The round-E handoff §5 asserts: *"**The SPEC contradicts itself here**, between §3.5's 'reversal' and
+§11.5's 'recompute', and the two give **opposite answers**."* Re-measured against
+`docs/SPEC.md` at `75636cd` (each quoted string located by a whole-file normalised sweep, **1**
+occurrence each), **six** sentences bear on reversal, and **not one of them states an exclusive
+condition** — two state the recompute and name no trigger, three state a trigger in conditional
+form, and the sixth supplies a trigger that is not `SUCCEEDED` at all:
+
+| source | what it says about reversal | exclusive? |
+|---|---|---|
+| §3.5, parenthesis | *"re-derivable from `phases` + `edges` at any time"* | — states the recompute |
+| §3.5, reversal clause | *"**if** `r` is later fixed and re-run to `SUCCEEDED` … removes `r`"* | **No** — a sufficient condition |
+| §11.5 step 6 | *"recompute `blocked_by` from `phases` + `edges` so a since-fixed dependency unblocks its subtree"* | — states the recompute |
+| §12 item 14 | *"Re-running the abandoned repo to `SUCCEEDED` removes it from every `blocked_by`"* | **No** — same conditional form |
+| §13 row 13 | *"reversible on re-run"* | **No** — looser still; drops `SUCCEEDED` |
+| §3.4, Bounded waiting | *"Blocking is reversible **by the same rule**: a later `pr_merged` event clears it and re-admits the dependents"* | **Counterexample** — a reversal that is not `SUCCEEDED` |
+
+§3.5 and §11.5 do not name two mechanisms; they name **one, twice** — §3.5 states the recompute
+inside its own parenthesis using §11.5 step 6's identical phrase. The load-bearing move is logical
+rather than textual: *"if P then Q"* is not *"only if P"*. §3.4's Bounded-waiting bullet then makes
+"only when `SUCCEEDED`" positively false by supplying a reversal trigger that is a `pr_merged` event
+and calling it *"the same rule"*. **Option R1 — "remove `r` only when `r` is `SUCCEEDED`" — is
+eliminated by the primary source, not by cost.**
+
+**Guardrail 7 does not fire.** There is no false SPEC sentence to correct here, because there is no
+contradiction. This is recorded explicitly so that a later reader does not "rediscover" the
+contradiction and *correct a SPEC sentence that is already right* — the mirror-image error CLAUDE.md
+names ("editing a correct sentence because it matched your grep"). The one SPEC edit this work does
+owe is an **addition**, not a correction, and it is §6 below.
+
+#### 2.2 R3's elimination rests on an executed result, not a source read
+
+R2 was costed as *"un-blocks `d` while `r` sits demoted at a floor in a closed wave, so `d` migrates
+against a dependency that has not landed"*. `WaveScheduler.open_wave` iterates **every** earlier wave
+index and breaks only once `earlier >= wave_index`; its own docstring says so
+(*"The check is over every earlier index rather than only `wave_index - 1`"*). The appended wave sits
+above every existing index, so every wave holding a demoted `r` is earlier than it; `r` is `PENDING`,
+which is not in `SETTLED_STATUSES`; so `r`'s wave answers `OPEN` and the open **raises**.
+
+**W7 executed this (fact 1), and it is the reason the ruling can stand on it.** Three waves, blocker
+**two** back, with a **CLOSED** wave 1 in between so a `wave_index - 1` implementation would sail
+through; statuses driven through the real CAS pair rather than poked; the blocker returned to
+`PENDING` by the production writer `SqliteStateRepository.demote_to_floor` — i.e. step 5's own
+demotion. Result: `open_wave(2)` raised and the message **named wave 0**. The battery's four checks
+all reported: fires on known-bad (`if earlier != wave_index - 1: continue` inserted → no raise);
+silent on the clean tree; fires on a synthetic fault injected through a **different** function
+(`wave_state`'s member scan neutered → every wave answers CLOSED → no raise); and a cosmetic control
+(loop variable renamed, comments added) stayed **green**. Each mutation was gated by
+`git diff --numstat --no-index BACKUP MUTATED` read **before** the probe result.
+
+**Therefore R2's costed failure cannot occur, and R3 buys nothing** — its whole benefit is a refusal
+the sequencer already performs, at the cost of a fourth `blocked_by` population and a step-6 → step-5
+audit coupling.
+
+#### 2.3 What the decision actually reduces to
+
+Not a choice between two SPEC readings. It reduces to **the blocker predicate** — which population
+counts as "still blocking" — and that is where the real hazard lives (§2.4). Measured at `34d6f82`,
+the implemented producers of a `blocked_by` entry are exactly **two**:
+
+| producer | route | status it sets |
+|---|---|---|
+| RHI containment | `PhaseRunner._contain` → `WaveScheduler.propagate_blocked` → `append_blocked_by`, under the guard `if written is RepoStatus.REQUIRES_HUMAN_INTERVENTION:` | RHI |
+| `fleet quarantine` | `cli._quarantine_impl` → `append_blocked_by` directly | SKIPPED |
+
+(AST call-graph with enclosing symbol; the two `cli` passthrough wrappers are implementations, not
+callers.) **A recompute keyed on RHI alone silently re-admits the dependents of a quarantined repo,
+undoing an audited `OperatorQuarantine` on every `fleet resume`.** The tree already warns about this
+in `src/fleet/models/state.py`'s `blocked_by` field description, which at `34d6f82` says *"a recompute
+must not treat the writer set as closed"*.
+
+**Class result, re-measured at `34d6f82`.** Normalised sweep for `blocked_by\s*=\s*\?` over
+`src/**/*.py` + `src/**/*.sql`: **exactly 1** site — the
+`UPDATE phases SET blocked_by = ?, status = 'BLOCKED', updated_at = ?` inside
+`SqliteSchedulerStore.append_blocked_by`, an append. A companion sweep for a removal verb applied to
+`blocked_by` returns **0**. **The class "code in `src/` that REMOVES an entry from `blocked_by`" has
+zero members. Subtask 8 writes the first remover.**
+
+#### 2.4 An open sub-question the ruling does not distinguish — recorded, not decided
+
+R1's addendum §8.2 splits R2 in two, and the ruling as issued says "R2" without choosing:
+
+| | shape | an entry the predicate cannot resolve |
+|---|---|---|
+| **R2-open** | re-derive the blocker set; whatever is not re-derived is removed | **erased** |
+| **R2-closed** | remove only what is positively shown to be no longer blocking | **retained** |
+
+The distinction is a predicate polarity, not a mechanism, and it is not costed differently. Two
+measured facts bear on it, both recorded here without deciding: `docs/SPEC.md` §3.5 **mandates** a
+`contract_id` in the SQL column `phases.blocked_by` on `contracts.status='FAILED'` (a writer with no
+producer today), and §3.1's SCC and §3.4's merge-timeout propagations are likewise SPEC-mandated with
+no producer — so an R2-open recompute erases their entries on the first resume after any of them is
+implemented. **Recorded as open. Whoever implements subtask 8 must have this ruled first, or state
+which polarity they built and why.**
+
+---
+
+### 3. D — RULED: **D-c stays in force; subtask 8 owns nothing here**
+
+**The ruling, verbatim.** *"RULED: D-c stays in force; subtask 8 owns nothing here. Already taken and
+disclosed in two committed primary sources (SPEC §3.5's scope note and ADR-0089 §4) and pinned by a
+test. D-b is eliminated because subtask 7 has landed. Cost: step 8 cannot open any wave past the
+lowest demoted one — which may in fact be correct, since a demoted repo genuinely must re-run before
+its dependents. This is why design row 8's criterion must change."*
+
+**The question is not open; it was already answered in the tree.** `docs/SPEC.md` §3.5's scope note
+(added `06a1867`) states that *"closed waves are never re-opened"* governs the
+`blocked_by` → `PENDING` path *"and no other"*, and that step 5's re-opening is *"neither authorised
+nor forbidden by any sentence here: it is disclosed, and deliberately not fixed, in **ADR-0089 §4**"*.
+ADR-0089 §4 — heading verified present at `34d6f82`: *"DISCLOSURE (2026-08-21, `2f0db34`) — step 5
+**re-opens any closed wave it demotes a member out of**"* — says in its own words *"No fix is
+attempted here and none is promised."* It is pinned by
+`tests/test_cli.py::test_resume_step_5_re_opens_the_closed_wave_it_demotes_a_member_out_of`
+(present at `34d6f82`; 1 occurrence).
+
+**D-b is eliminated because subtask 7 has landed:** `demote_to_floor` now has a production caller,
+`cli._apply_floor_demotions` (AST call-graph, `34d6f82` — 1 call site in `src/`).
+
+**The cost, stated as the emergent property it is.** Because `open_wave` checks **every** earlier
+index (§2.2, executed), a repo left `PENDING` at a floor makes its wave answer `OPEN`, and
+`fleet resume` step 8 can then open **no** wave above the lowest demoted one until those repos
+re-settle. That is arguably the correct behaviour — a demoted repo genuinely must re-run before its
+dependents — and it is exactly why R3 is unnecessary. It was previously stated nowhere an operator
+reads; it is stated here.
+
+**Seam S1 holds under execution.** W7 fact 3 enumerated `demote_to_floor`'s complete write set from
+the database with two instruments that do not share a blind spot — a cell-by-cell value diff over all
+22 user tables, and an `AFTER INSERT`/`UPDATE`/`DELETE` trigger on every table — over a fixture
+holding **3** `waves` rows and **4** `wave_members` rows, so "unchanged" is a measurement and not
+"both empty". Observed: `phases` UPDATE ×3 (`status` only), `checkpoints` DELETE ×3, `findings`
+INSERT ×3, and **0 operations on `waves` and 0 on `wave_members`**. The pair earned its keep: a
+value-preserving `UPDATE wave_members SET wave_index = wave_index` injected as a synthetic fault was
+**invisible** to the value diff and caught by the trigger instrument. **Step 5's demotion writes
+nothing to the wave tables, so subtask 8's step-6 write has no ordering conflict with it there.**
+
+---
+
+### 4. A — RULED: rely on `waves.synthetic`; do **not** mint a `BlockedByCleared` finding kind
+
+**The ruling, verbatim.** *"RULED: rely on `waves.synthetic`; do NOT mint a `BlockedByCleared`
+finding kind. No SPEC sentence requires one, and minting a kind adds a permanent obligation to
+`tests/test_findings_kinds.py`'s `_recognition_gap` census. Record R1's §5 recipe — exactly what a new
+kind must register with, by symbol — so this is cheaply reversible if the asymmetry bites."*
+
+**What the flag can and cannot say.** `src/fleet/state/projection.py` emits
+`"synthetic": bool(row["synthetic"])` per wave, so the projection can say *"this repo migrated in an
+appended wave"* — which is the level §3.5's promise ("the projection can say **why** a repo migrated
+late") actually claims. It **cannot** say which blocker was removed: the removed names leave
+`phases.blocked_by` and are recorded nowhere. **The asymmetry with step 5 is real but not
+equivalent** — step 5's `PhaseDemoted` finding is mandatory *because a demotion discards landed,
+green work*; step 6's un-blocking discards nothing, it restores a repo to a queue. The SPEC's stated
+reason for the step-5 finding does not transfer.
+
+#### 4.1 The reversal recipe, by symbol — what a new kind must register with
+
+Against `tests/test_findings_kinds.py` at `34d6f82`. All five, or one of four tests fails by
+`file:line`:
+
+1. **The `schema.sql` listing.** Add the name **single-quoted** inside the `findings.kind` comment
+   block in `src/fleet/state/schema.sql`, **below** the `_EMITTED_HEADING` heading (measured value:
+   `'EMITTED BUT NEVER DECLARED'`). The block is delimited by `_BLOCK_START` / `_BLOCK_END` and names
+   are extracted by `_QUOTED`.
+2. **The `docs/SPEC.md` copy of the same block.**
+   `test_the_two_findings_kind_listings_name_the_same_set` asserts equality in **both** directions.
+   Edit both listings in one commit.
+3. **A live writer the AST walk resolves.** `_emitters()` must resolve the `kind` slot to a string
+   literal. The template is `PhaseDemoted`: a module-level `PHASE_DEMOTED_KIND` in
+   `src/fleet/models/enums.py` (2 occurrences at `34d6f82`), referenced from the `INSERT INTO
+   findings` built on `_DEMOTE_FINDING_SQL` in `src/fleet/state/repository.py`. `_resolve`'s
+   `ast.Name` branch falls back to a cross-module constant registry, so the constant may live in
+   `enums.py` while the INSERT lives elsewhere.
+4. **Visible to `_recognition_gap`'s text instrument too.** It compares the AST-recognised spans
+   against `_text_insert_sites` in **both** directions and fails by `file:line` on either. The only
+   escape is `_INDIRECT_SITES`, which holds exactly **1** entry at `34d6f82` (measured by AST) and is
+   checked in both directions by `_exemption_drift`. **Do not add an entry** — write a resolvable
+   INSERT instead.
+5. **The idempotency key.** `ux_findings_ident` (`src/fleet/state/schema.sql`) is
+   `(run_id, IFNULL(repo_id, ''), kind, fingerprint)`, so the writer needs a deterministic
+   fingerprint — the analogue of `_demotion_fingerprint` in `src/fleet/state/repository.py` — or every
+   resume writes a second row.
+
+**Cost of reversing this ruling, stated:** 2 listing edits (byte-identical copies), 1 constant,
+1 INSERT + a fingerprint helper, and 1 ADR, because no SPEC sentence requires the kind.
+
+---
+
+### 5. T — RULED: **dissolved.** The clause is already satisfied by shipped code
+
+**The ruling, verbatim.** *"RULED: dissolved. SPEC §3.5's orphaned 'current integration tip' clause is
+already satisfied by shipped code — confirmed by execution (W7 fact 2: with a stale ref available and
+the tip moved, three `_prepare_verify` calls each cut at the live tip, including a repeat call for a
+repo that already had one; both `_ingest` merges' first parent == the tip read immediately before).
+Not work for subtask 8 or 10. The residue — the missing binding between clause and code — is recorded
+as D76 by a sibling lane; cite it, do not duplicate it."*
+
+The clause, verbatim from `docs/SPEC.md` §3.5: *"Their Phase 4 runs against the **current**
+integration tip — a fresh snapshot ref per §3.3 step 1, not the tip their original wave saw — and any
+Phase 3 merge is rebased onto it, because everything that closed in between has already landed."*
+
+**Executed, not read.** W7 fact 2 made a stale snapshot ref available **first** and then moved the
+branch tip, so "unconditional" is demonstrated rather than assumed: three `cli._prepare_verify` calls
+returned three new refs, each at the tip as it stood at that call — **including a repeated call for a
+repo that already had one**. The Phase 3 half advanced the branch tip **between** the two ingests;
+each `BuildgenWorker._ingest` merge's first parent equalled the tip read immediately before that call.
+Four-check battery on both halves: fires on known-bad (a reuse-the-newest-snapshot branch inserted
+ahead of the mutex; and a snapshot cut at `incoming` instead of `integration_branch`), silent on the
+clean tree, fires on synthetic faults in a **different module** and at fixture level, cosmetic control
+green.
+
+**The caveat, recorded at exactly the confidence W7 gave it — this is a SOURCE READ, NOT
+EXERCISED.** `_prepare_verify` is unconditional, but that is a property of the **function, not its
+caller**. `cli._verify_impl` memoises: `plans: dict[str, _VerifyPlan]` is declared **outside** the
+wave loop and the body skips a repo already in it, so within one `fleet verify` process a repo planned
+while wave 0 ran keeps wave 0's ref while a later wave runs. The mitigation is `wave_members`'
+`PRIMARY KEY (run_id, node_kind, node_id)` — verified verbatim in `src/fleet/state/schema.sql` at
+`34d6f82` — which means a repo holds exactly one `wave_index`, so the memo cannot hand a later wave's
+member an earlier wave's ref. **W7 explicitly did not exercise this** and called doing so
+disproportionate (it would require driving `_verify_impl` over a multi-wave fleet with a real
+monorepo, worker pool and settings). **It is recorded here as a source read and must not be cited as
+an executed result.**
+
+**The residue is a missing binding, not missing work.** Nothing in the suite ties §3.5's clause to
+`cli._prepare_verify`'s snapshot cut, so a future change that caches an `integration_ref` across
+resumes would go green. That is recorded as **D76** by a sibling lane of this round — *"OPEN, recorded
+only. SPEC §3.5's 'current integration tip' clause has no binding"* — which **landed at `8cf4958`**,
+after this ADR's measurement anchor and before its commit; verified present in
+`docs/INTEGRATION_HONESTY.md` at `75636cd`. **Cited, not duplicated. T is not work for subtask 8 or
+subtask 10.**
+
+---
+
+### 6. §12 item 46(ii) — the acceptance criterion for this work is blind to the defect this work can introduce
+
+This is the sharpest finding of the round and it is recorded here rather than acted on.
+
+`docs/SPEC.md` §12 item **46** (*"The model layer's own invariants, as assertions rather than as
+prose."*), sub-item **(ii)**, verbatim at `34d6f82`:
+
+> (ii) An illegal `RepoStatus` transition raises; an abandoned repo is re-openable **only** through
+> the audited `OPERATOR_REOPEN` map, and a test that drives every automatic sweep — the reaper,
+> `fleet resume`, `stub_reconcile`, `blocked_by` recomputation — finds none of them able to move a
+> repo out of `REQUIRES_HUMAN_INTERVENTION`.
+
+**46(ii) constrains one quantity: whether a sweep can move a repo *out of* RHI.** A step-6 recompute
+that empties the `blocked_by` of a **quarantined** repo's dependents never touches the quarantined
+repo's own status (it is `SKIPPED`, not RHI) and never moves any repo out of RHI (the dependents it
+re-admits were `BLOCKED`). **The quantity 46(ii) watches reads identically before and after the
+defect.** This is precisely the shape CLAUDE.md's Guardrail 6 names — *name the quantity the
+instrument watches and ask whether the defect being hunted could leave that quantity unchanged* — and
+here the answer is yes. **An implementation of step 6 can satisfy §12 item 46(ii) in full, pass its
+test, and silently undo an audited `OperatorQuarantine` on every `fleet resume`.**
+
+**And 46(ii)'s `blocked_by`-recomputation clause is vacuous today.** The class result in §2.3 — zero
+code in `src/` removes a `blocked_by` entry — means the fourth sweep 46(ii) names **does not exist**,
+so no test can drive it. **Subtask 8 is the change that makes that clause testable for the first
+time**, which is exactly when a criterion that is too narrow becomes load-bearing.
+
+**The proposed addition, recorded — not applied here.** R1's §8.1 drafts a widening of 46(ii):
+
+> …finds none of them able to move a repo out of `REQUIRES_HUMAN_INTERVENTION`, **nor to clear a
+> `blocked_by` entry naming a repo that `fleet quarantine` set to `SKIPPED` under an audited
+> `OperatorQuarantine` finding.**
+
+It is an **addition**, not a correction: 46(ii) is **true as written** and merely insufficient, so
+Guardrail 7 does not compel it. **The shipping requirement is the part that matters: it must land in
+the same commit as the predicate it constrains**, or a later reconciler narrows the predicate back to
+RHI to make code match spec and 46(ii) certifies the result green. **This ADR does not edit §12** —
+that belongs to subtask 8's implementation, and §13 row 13 and §3.5's propagation block stay
+untouched (both were read and both are correctly scoped as written).
+
+---
+
+### 7. What bounds every test of all of this: nothing writes `waves.synthetic = 1` today
+
+Reported by lane R1, and — per the dispatch brief — independently by lane W8. **I did not read W8's
+report, so that second attribution is relayed, not verified.** Re-measured here at `34d6f82` and
+again at `75636cd`:
+
+| instrument | predicate | scope | result |
+|---|---|---|---|
+| A (AST) | `ast.Call` whose func is a `Name`/`Attribute` spelled `append_synthetic_waves` | `src/**/*.py` | **0** |
+| A (positive control) | same | `tests/**/*.py` | **1** — `tests/test_graph_sequence.py`, in `test_a_freed_repo_is_appended_at_max_wave_plus_one` |
+| B (normalised text) | `append_synthetic_waves\s*\(` | `src/**/*.py` | **1**, and it is the `def` itself |
+
+The instruments disagree by exactly one, in the direction the blind-spot check predicts (A excludes
+definitions by construction). **Net production call sites: 0.**
+
+And it is the only producer, measured rather than assumed: a normalised sweep of `src/` for
+`synthetic=True` / `synthetic = True` / `synthetic=1` returns **exactly 1** site —
+`_materialize_waves(layered, {}, depends, synthetic=True)` **inside `append_synthetic_waves`** — and
+`SqliteSchedulerStore.record_plan` writes the column as `1 if wave.synthetic else 0`, so the DB flag
+can only ever be 1 for a wave that function produced. **Therefore no shipped path writes
+`waves.synthetic = 1` today**, and any test of subtask 8's wave behaviour is testing a *first*
+producer rather than a change to an existing one.
+
+**Related class, already closed by a sibling — recorded so it is not re-opened as an obligation.**
+R1 reported a 6-site class attributing `waves.synthetic` exclusively to stub resolution. Re-measured
+here with a normalised whole-file sweep over the five files R1 named, predicate = either of the two
+phrasings *"freed by a late resolution"* / *"appended by stub resolution"*:
+
+| anchor | sites |
+|---|---|
+| `34d6f82^` | **6** (`models/graph.py` 1, `docs/SPEC.md` 2, `state/schema.sql` 1, `graph/sequence.py` 1, `tests/test_graph_sequence.py` 1) |
+| `34d6f82` | **0** |
+
+**The class has 6 sites → 0.** `34d6f82` closed it; the DDL comment now reads *"Records HOW the wave
+was allocated, not why: the flag names no cause"*. Nothing here is owed. The sweep's stated residue:
+it is keyed to those two phrasings, so a seventh site spelling the claim a third way would escape it.
+
+---
+
+### 8. Design row 8, corrected in this same commit
+
+`docs/superpowers/plans/design-resume-step5.md` §5 row 8, verbatim before this change:
+
+> | 8 | **Step 6 — recompute `blocked_by` and append the synthetic wave** | M | 7 | `src/fleet/cli.py`, reads `orchestrator/scheduler.py:255,411`, `graph/sequence.py:291` | A repo whose blocking ancestor is now SUCCEEDED loses that entry from `blocked_by`; one whose list empties returns to PENDING at its floor and lands in a synthetic wave at `max(waves)+1` with `waves.synthetic = 1`; **no closed wave is re-opened** |
+
+**Three things in the row are false. Two of them are in the success criterion, and one is in the
+"Files touched" column** — recorded this way because the dispatch brief described "three clauses" in
+the criterion, and re-measurement against R1 §4-D(d) and against the code gives **two** criterion
+clauses plus the column. The attribution is corrected here rather than propagated.
+
+| # | text | why it is false, measured |
+|---|---|---|
+| 1 (criterion) | *"whose blocking ancestor is now SUCCEEDED"* | `SUCCEEDED` is a **sufficient**, not a necessary, reversal trigger. Eliminated by §3.4's Bounded-waiting bullet (`pr_merged` clears the block, "by the same rule") and by §3.5's own parenthesis. Ruling R, §2 above. |
+| 2 (criterion) | *"**no closed wave is re-opened**"* | Does **not** hold for the step-5 demoted population: a demoted member leaves `SETTLED_STATUSES` and `WaveScheduler.wave_state` **computes** wave status on every read (the `waves` DDL has no status column), so the wave answers `OPEN` — or `PARTIAL` if that wave's wall clock has already breached; in neither case `CLOSED`. Disclosed in **ADR-0089 §4**, scoped in SPEC §3.5's note, pinned by `tests/test_cli.py::test_resume_step_5_re_opens_the_closed_wave_it_demotes_a_member_out_of`, and observed in W7 fact 1 (`wave_state_0` = `OPEN` after `demote_to_floor`). |
+| 3 (Files touched) | *"`src/fleet/cli.py`"* alone | Not achievable. `record_plan` is the only `waves` writer and its sole production caller is `cli._sequence_impl`; there is no DB→`WavePlan` loader (`WavePlan(` = 2 construction sites, both in `graph/sequence.py`). Ruling W puts the new method on the `SchedulerStore` **Protocol** in `orchestrator/scheduler.py` plus its `SqliteSchedulerStore` implementation — **4 edit sites in 2 files**. |
+
+All **three** line citations in that column are also replaced with symbols per CLAUDE.md ("cite by
+symbol, never by line"). Re-resolved at `34d6f82`: `graph/sequence.py:291` still lands on
+`def append_synthetic_waves` (R1's observation reproduces), `scheduler.py:255` lands on
+`SqliteSchedulerStore.append_blocked_by`'s `async def`, and `scheduler.py:411` lands **inside**
+`WaveScheduler.propagate_blocked`'s docstring — a line citation resolving to a docstring line is
+already a rotted citation.
+
+The rewritten row states the removal condition as ruling R settles it, names the real file set,
+routes the wave write through `append_unblocked_wave` rather than `record_plan`, and replaces the
+unachievable absence claim with the one W2 **can** guarantee by construction — *no existing `waves`
+row is modified* — while pointing at ADR-0089 §4 for the absence that does not hold. The **open**
+sub-question of §2.4 (removal polarity) is referenced, not silently resolved.
+
+**Note on this correction's own detector-visibility, because this project has measured the
+failure repeatedly.** The rewritten row carries a dated editorial parenthetical in the convention
+row 4 already uses, and that parenthetical **quotes the retired criterion verbatim** so a reader can
+see what was withdrawn. A count-based sweep for *"is now SUCCEEDED"* over
+`docs/superpowers/plans/design-resume-step5.md` therefore still returns **1** after this change, and
+that single hit **is the quotation inside the correction** — a retraction and its quarry are
+textually indistinguishable to such a sweep. Subtract quotations-inside-retractions **by rule**; do
+not read the count as a survival.
+
+---
+
+### 9. What this ADR does not do, and what it cannot catch
+
+- **It implements nothing.** No `src/` file changes in this commit. There is no mechanism here, and
+  no promise that a later subtask will add one — only what is decided, what is disclosed, and what is
+  measured.
+- **It does not edit `docs/SPEC.md`.** The §12 item 46(ii) widening is recorded as a proposal with a
+  shipping requirement (§6) and belongs to subtask 8's implementation.
+- **The removal-predicate polarity (§2.4) is open.** Recording it as open is deliberate; an ADR that
+  resolved it silently would be inventing a ruling.
+- **Tests NOT run — suite lock.** A full-suite session held the lock for this lane's whole life. The
+  command a later lane owes, with **no `-k` filter**:
+  `.venv/bin/python -m pytest tests/test_scheduler.py tests/test_graph_sequence.py tests/test_cli.py
+  tests/test_repository.py tests/test_state_models.py tests/test_projection.py
+  tests/test_findings_kinds.py tests/test_floor_rule_statements.py tests/test_reentry_floor.py
+  tests/test_reentry_evidence.py`, plus `python -m mypy` with **no path arguments**. This change
+  touches only `docs/`, so no `mypy` run is owed by it.
+- **The residue W7 named is narrowed, not closed.** Its probes exercise `WaveScheduler.open_wave`,
+  `cli._prepare_verify`, `BuildgenWorker._ingest` and `demote_to_floor` **directly**; production
+  reaches three of the four through further callers (`admit()`, `_verify_impl`, `cli._demote_to_floors`).
+  A caller that bypasses these functions is outside what was measured.
+- **This ADR's own sweeps are keyed to stated predicates** (§7's two phrasings; §2.3's
+  `blocked_by\s*=\s*\?`). A site spelling the same claim a third way, or a writer reached through
+  dynamically-constructed SQL, is invisible to them.
+- **The SPEC readings in §2.1 are a reading.** The six sentences are quoted at length precisely so a
+  later reader can check the logic — *"if P then Q"* is not *"only if P"* — rather than inherit it.
