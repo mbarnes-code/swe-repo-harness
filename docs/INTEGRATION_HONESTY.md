@@ -4352,6 +4352,25 @@ and say so, and this section does not quietly close that gap by taking it — th
 dispatched this work believed D71 was the highest pre-existing number, and it was D70. Highest allocated after this
 section: **D73**.
 
+> **Editorial correction (2026-08-21), lane W10 — this entry's three citations have rotted. The
+> entry above is left exactly as its author wrote it, including the three numbers; its verdict is
+> unchanged and correct: D71 was never allocated and remains free.** The body cites `:4008`,
+> `:4052` and `:4139`. Re-measured with a whitespace-normalised whole-file scan and an
+> offset-to-line map (predicate `D71 (remains|is) the next free number`, case-insensitive,
+> leading `>` stripped per line), those three disclosures are at `:4124`, `:4168` and `:4259` at
+> `31484d5`. All three texts still exist and still decline a number, exactly as the entry says;
+> only the anchors moved, under growth in this same file. **The durable anchor for them is their
+> own sentence**, "D71 remains/is the next free number" — the same anchor the D71 marker above
+> names, because a register mention has no symbol and a sentence is the nearest thing to one. This
+> is the second time the class has rotted: these three numbers are the *same measurement* the D71
+> entry body took, copied into a second entry, so correcting one copy was never going to be
+> enough. A sweep for that sentence finds every copy; a sweep for the numbers finds none of them.
+>
+> *"Highest allocated after this section: **D73**"* is **not** corrected and is not a defect: it is
+> scoped to this section's own effect and was true at its commit, unlike the unscoped
+> `(highest allocated: D70)` the D71 marker above had to correct. Left as written deliberately, so
+> that a later sweep of the high-water-mark class does not "fix" a sentence that is right.
+
 ### D73 — CLOSED, FIXED in `cfd89c7`. `list_by_prefix` collapsed a failed `docker ps` into "no containers"
 
 `ContainerSandbox.list_by_prefix` returned `[]` when `docker ps` did not exit 0. A daemon that is
