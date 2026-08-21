@@ -6129,7 +6129,7 @@ did; both now point a reader at a falsehood that is gone.
 
 ---
 
-## 40. Checkpoint — 2026-08-21 · **round D, opened mid-round and NOT closed**: the resume step-5 critical path moves for the first time since §39 — **subtask 4 lands at `fe743e6`**, taking the landed set to **1, 2, 3, 4, 6** and leaving **5, 7, 8, 9, 10** not started **on `main`** (subtask 5 is in flight and uncommitted as this is written, and is reported as in-flight, not landed), with the critical path `5 → 7 → 8 → 9 → 10` and its first link unblocked · §39's five PARTIAL open items are re-measured against the primary source and **four of five verdicts reproduced; one did not, and one commit attribution was wrong** — the corrections are annotated in §39 in place, never by rewriting it · **no full suite was run and none may be claimed**: the last measured whole-tree anchor is `1692 passed` at `1ae3ffc`, and `git diff --stat 1ae3ffc..HEAD -- src/ tests/` is **non-empty**, so that anchor no longer certifies HEAD
+## 40. Checkpoint — 2026-08-21 · **round D, opened mid-round and NOT closed**: the resume step-5 critical path moves for the first time since §39 — **subtask 4 lands at `fe743e6`**, taking the landed set to **1, 2, 3, 4, 6** and leaving **5, 7, 8, 9, 10** not started **on `main`** (subtask 5 is in flight and uncommitted as this is written, and is reported as in-flight, not landed), with the critical path `5 → 7 → 8 → 9 → 10` and its first link unblocked · §39's five PARTIAL open items are re-measured against the primary source and **four of five verdicts reproduced; one did not, and one commit attribution was wrong** — the corrections are annotated in §39 in place, never by rewriting it · **no full suite was run and none may be claimed**: the last measured whole-tree anchor is `1692 passed` at `1ae3ffc`, and `git diff --stat 1ae3ffc..HEAD -- src/ tests/` is **non-empty**, so that anchor no longer certifies HEAD · **AMENDED 2026-08-21 (round close, this session): round D closed at `1d0e39c`, and this headline's reading is superseded, not deleted.** Subtask 5 and subtask 7 both landed after this was written, taking the step-5 critical path to **7 of 10 subtasks landed** and leaving **8, 9, 10** not started; the round total is **26** commits, not the 7 read at `19d7fb0`; and **a live Critical — a `for_repo` contract inversion that made `fleet resume` a hard `TypeError` — was introduced and fixed inside the round** at `42a4369`. **Every figure above keeps its `19d7fb0` anchor and was not re-measured**; the round-close figures, measured at `1d0e39c`, are in the **"Round close"** block at the end of this section, which also says which of the lists below it supersedes. **The suite position is the one claim this amendment does not move**: still no full suite against any round-D commit, still no number invented
 
 **Anchor.** Every figure in this section is measured against the **committed tree at `19d7fb0`** unless it names another commit. **The round is still live as this is written** — four lanes are committing, and HEAD moved twice during the writing of this section (`6bf198f` → `19d7fb0`). The commit list below is therefore a reading at an anchor, not a closed round total; a round-E lane must re-derive it with `git rev-list 0e945b8..<tip>` rather than inherit it.
 
@@ -6191,3 +6191,183 @@ did; both now point a reader at a falsehood that is gone.
 3. **Subtasks 7, 8, 9, 10 in order**, each gated on the one before. Subtask 7 is what gives `phase_floor` and `demote_to_floor` their first caller. **ADR-0079 must be written before subtask 9.**
 4. **Re-audit §38's thirteen carried open items** rather than inheriting them.
 5. **Re-anchor the `### D71 — UNUSED` entry's four citations on headings, not lines** — the entry states that rule and does not follow it.
+
+### Round close — amendment measured at `1d0e39c`, 2026-08-21
+
+**Everything above this heading keeps its `19d7fb0` anchor and was not re-measured.** §40 records
+what was true as it was written, mid-round, with four lanes still committing; this block records
+what is true at round close and says which of the readings above it supersedes. Nothing above is
+rewritten.
+
+**Anchor.** `git rev-list --count 0e945b8..1d0e39c` → **26** commits, cross-checked with
+`git log --oneline 0e945b8..1d0e39c | wc -l` → 26. **19 of the 26 touch `src/` or `tests/`, 7 are
+documentation only** (`git rev-list --count 0e945b8..1d0e39c -- src/ tests/` → 19). The code delta
+is **13 files, +3,920 / −59** (`git diff --shortstat 0e945b8..1d0e39c -- src/ tests/`). The
+7-commit list above was a reading at an anchor and is superseded by this count, exactly as that
+paragraph told a round-E lane it would be.
+
+**One of the 26 is an empty commit, and the record has to say so.** `git show --numstat --format=""
+b1de826` emits nothing. Its message asserts it retracted the `revalidation_round` justification in
+`ADR-0087 §5d`; the content had already been swept into `7583583`, a sibling's commit, by the
+shared-index race described below. Nothing was lost or duplicated — the hunk appears once — but the
+permanent record carries a **verification claim that is false at its own commit**. A commit message
+cannot be edited, so it is annotated here and in `ADR-0087` rather than corrected.
+
+#### The resume step-5 critical path — 7 of 10 subtasks landed
+
+**LANDED: 1, 2, 3, 4, 5, 6, 7. NOT STARTED: 8, 9, 10.** The critical path is now `8 → 9 → 10`.
+Subtasks 1, 2, 3 and 6 were landed before this round; 4, 5 and 7 landed in it.
+
+* **Subtask 4** — §11.5 step 4, Git-as-arbiter task reconciliation. `fe743e6`, `6bf198f`
+  (**ADR-0087**), `7d8f916` (V2 fix round), `b1de826` (the empty commit above).
+* **Subtask 5** — `evidence_holds`, the four per-phase durable predicates. `abd009b`
+  (**ADR-0088**), `7baaac3`, `7b2d48e` (V4 fix round), `7500005`.
+* **Subtask 7** — §11.5 step 5 wired into `_resume_impl`. `2f0db34`, `42a4369`, `1ce1901`
+  (**ADR-0089**), `64512f2`, `1d0e39c`.
+
+The three NOT-STARTED verdicts are re-derived **by absence at `1d0e39c`**, not carried from a lane
+report:
+
+* **Subtask 8** (step 6 — recompute `blocked_by`, append the synthetic wave). **Class result: the
+  class "code in `src/` that removes an entry from `blocked_by`" has zero members.** The only writer
+  is `SqliteSchedulerStore.append_blocked_by`, reached from `WaveScheduler.propagate_blocked` and
+  directly from `fleet quarantine`; the column is append-only today despite the SPEC calling it
+  reversible. Subtask 8 writes the first remover.
+* **Subtask 9** (un-refuse the step-5 flags). `_refuse_unbuilt_resume_flags` is still defined in
+  `src/fleet/cli.py` and still called from `_resume_impl`.
+* **Subtask 10** (step 8 — "continue"). `ResumeIncompleteError` is still defined and still raised on
+  the `fleet resume` path; **ADR-0089 rewrote its message rather than deleting the class**, and
+  annotated ADR-0076's "should be deleted, not repurposed" bullet beside itself recording the
+  deferral to subtask 10 and why. That annotation is what subtask 10 must discharge.
+
+#### A Critical was introduced and fixed inside this round
+
+`2f0db34` (subtask 7) called `RepoEvidence.for_repo(..., git_cache_dir=<...>/git)`. `7b2d48e`,
+landing **six minutes later**, inverted that contract to an unsuffixed `cache_dir`. The parameter is
+keyword-only with no `**kwargs`, so `main` carried a hard **`TypeError` on the unconditional
+`fleet resume` path**, outside subtask 7's `except`. Fixed in **`42a4369`**.
+
+**It was two edits, not one.** Renaming the keyword alone yields `<cache>/git/git/<slug>.git` —
+silently the very failure the inversion existed to prevent. The fix was verified by resolving the
+path **in the running interpreter**, not from the parameter name: the caller passes the unsuffixed
+root and `for_repo` appends the segment, giving exactly one `git`. The regression test asserts the
+**resolved** path by moving the mirror on disk, so it binds neither side of the parameter boundary
+and survives the next inversion.
+
+**Neither lane's premise was wrong when it was formed; the tree moved underneath both.** The
+caller-sweep could not see a caller that landed six minutes before it, and the call was correct when
+written. The rule that yields: **re-derive the caller set at the moment of the change, not from a
+reading taken earlier in the session.** Recorded here because a defect that was live at a tracked
+commit is history, not embarrassment — and because it is the sharpest evidence this project has that
+a cross-lane contract change needs its sweep re-run at commit time.
+
+#### The register at round close
+
+* **ADRs written this round: 0085** (`eaa112f`, the two worktree name forms), **0087** (`6bf198f`),
+  **0088** (`abd009b`), **0089** (`1ce1901`). `docs/DECISIONS.md`'s high-water heading is
+  **ADR-0089**.
+* **ADR-0086 is reserved and unused** — zero occurrences in `docs/DECISIONS.md`. It was allocated at
+  dispatch for the worktree namespace's task 6, which did not run. **A reserved gap, not a numbering
+  defect; do not re-use it.** ADR-0079 and ADR-0080 remain `RESERVED, not yet written`, and §40's
+  own next-task list still requires ADR-0079 before subtask 9.
+* **D75 landed** (`19d7fb0`). **D71 and D78 are free.** D76 and D77 were allocated at dispatch and
+  returned unused — zero occurrences of either in `docs/INTEGRATION_HONESTY.md`. D77 was released
+  because the SPEC contradiction it would have recorded was fixed in the same change that found it,
+  leaving no residual defect to register.
+* **D72 tasks 1 and 2 landed** at `eaa112f` — the two name forms decided, and `checkout_name`
+  implemented. **D72 is NOT closed**: tasks 3–7 remain, and **`checkout_name` has no production call
+  site** — every occurrence in `src/` outside `sandbox/worktree.py`'s definition is an import, an
+  `__all__` entry, or a docstring mention.
+* **D72, D74 and D55 remain open by decision.** None is ready; none is inherited-and-unchecked.
+
+#### What was measured, and at exactly what scope
+
+**The suite position is UNCHANGED, and it is the one claim this amendment does not move.** No full
+suite has been run against any of round D's 26 commits and none is claimed here.
+
+**The last whole-tree anchor is `1692 passed / 0 failed / 0 skipped` at `1ae3ffc`, and it is stale.**
+Re-measured at round close: `git diff --shortstat 1ae3ffc..1d0e39c -- src/ tests/` → **13 files
+changed, 3,920 insertions, 59 deletions**, over **19** commits that touch those trees
+(`git rev-list --count 1ae3ffc..1d0e39c -- src/ tests/`). That is why the anchor no longer certifies
+HEAD, and it is a larger delta than the `6 files / +1,022 / −20` this section measured at `19d7fb0`.
+**No number is invented in its place.** A round-E lane must re-run the full suite with every lane
+held, capturing the anchor with `git rev-parse HEAD` before the run and confirming it unchanged
+after.
+
+What *is* measured, each stated with the scope that makes it meaningful — and stated because an
+undisclosed scoping is how a green claim outlives the thing it claimed about:
+
+| measurement | exact scope | anchor |
+|---|---|---|
+| **115 source files, no issues** | `python -m mypy` with **no path arguments**, so `pyproject.toml`'s `packages = ["fleet"]` + `strict` set the scope | run after `1ce1901` and again after `64512f2` |
+| **126 passed** | `pytest tests/test_cli.py` with **no `-k` filter** (an earlier `-k resume` scoping is disclosed, not relied on) | at HEAD after a sibling's last edit |
+| **216 passed** | a **pristine checkout**, own `BAZEL_ROOT`, of `test_reentry_evidence` (31) + `test_reentry_floor` + `test_floor_rule_statements` + `test_instruments_are_armed` + `test_findings_kinds` + `test_state_models` | `1d0e39c` |
+| **3 passed** | `pytest tests/test_instruments_are_armed.py -q`, verified by the orchestrator at a clean tree | `1d0e39c` |
+
+That last row settles a disagreement between two careful lanes rather than assuming one. Subtask 7's
+lane reported `test_no_test_subclass_defines_a_method_its_base_no_longer_has` **failing at HEAD** and
+bisected it to `7583583`; the lane that owns the file had fixed exactly that (an unresolvable `dict`
+base) at `f1e9686`, an ancestor of HEAD. The report was **stale** — its reading predated `f1e9686` or
+was taken in a dirty tree. **There is no red instrument at HEAD**, and it was settled by running the
+thing, not by preferring a source.
+
+Also unplanned and load-bearing: `tests/test_instruments_are_armed.py` — **the instrument that
+checks other instruments are armed — was RED on `main`** during the round. `42a4369`'s
+`class _RecordingEvidence(dict)` made the base unresolvable, a hard failure by design, so the file
+failed **and the class went unchecked**. The instrument-checker had the exact failure mode it exists
+to detect in others. Fixed at `f1e9686`: name resolution now ends where Python's does. Class result:
+unresolved bases **1 → 0**; methods examined **34 → 35** (floor 30).
+
+#### Superseding notes for the two lists above
+
+The lists above are left as written. Their status at `1d0e39c`:
+
+* **Open item 1** (no suite number) **stands, restated with a larger delta** — see the table above.
+* **Open item 2** (subtasks 5, 7, 8, 9, 10 not started) is **superseded**: 5 and 7 landed; 8, 9, 10
+  have not started, re-derived by absence above.
+* **Open item 3** (D72, D74, D55 open) **stands**, with D72 now partially advanced and explicitly
+  still open.
+* **Open item 4** (§38's thirteen carried items un-re-audited) **stands, untouched.**
+* **Open item 5** (`### D71 — UNUSED`'s four stale citations) is **discharged in the Guardrail 7
+  shape, not by re-anchoring the body.** The entry body is left byte-for-byte as its author wrote it
+  — all four numbers included — and a dated editorial marker beside it records the re-measured
+  anchors and names the durable one (the sentence "D71 remains/is the next free number", because a
+  register mention has no symbol). The marker also records that **an earlier version of itself
+  edited those four numbers out of the body**, which was a rewrite rather than an annotation, and
+  that the body was restored verbatim. One convention, applied one way.
+* **Open item 6** is **half discharged**: ADR-0085 is written (`eaa112f`); ADR-0086 remains a
+  reserved, unwritten gap.
+* **Next-task item 1** (run a full suite) **stands and is round E's first task.**
+* **Next-task item 2** (subtask 5) is **discharged** — landed at `abd009b`/`7b2d48e`.
+* **Next-task item 3** is **advanced**: subtask 7 landed; 8, 9, 10 remain in that order, and
+  **ADR-0079 is still unwritten and still required before subtask 9.**
+* **Next-task items 4 and 5** stand; item 5's remedy shape is settled as above.
+
+#### The round's method results, and where they are carried
+
+The round's dominant product was again verification machinery rather than code, and five results are
+carried into round E's handoff (`docs/superpowers/plans/handoff-round-e.md`) with their anchors:
+
+1. **A class result held where a raw total did not, four separate times** — and the fourth instance
+   is the sharpest: one review's raw total was itself an instance of the wrapped-match miss it was
+   reviewing for, reproducing only when its normaliser omitted a blockquote strip. Four numbers, one
+   quantity, every divergence explained; the class result reproduced every time. Guardrail 6's
+   "prefer a class result to a raw match total" now has four measured confirmations in one round.
+2. **A routed finding is perishable.** A finding measured true by a reviewer was **false by the time
+   the implementer acted**, through the same citation rot the finding was about — naming the site
+   would have landed a fresh false citation *inside the fix for a false-citation finding*. The lane
+   landed the measurement across four commits plus the durable reason for its scoping instead.
+3. **A citation rotted three times in one day**: `:1589 → :1590 → :1597`. It was **correct when
+   written** each time. That is a stronger argument for symbol anchors than "the author cited a wrong
+   line" — which was measured false.
+4. **`git commit` commits the shared index, and staging "by explicit path" does not protect against
+   a sibling's concurrent `git add`.** One commit contains work its author did not write. Narrowed
+   by two independent lanes to the **pathspec form `git commit -- <paths>`**, which commits from the
+   working tree and bypasses the index; the load-bearing verification is
+   `git rev-parse :<path>` == `git rev-parse HEAD:<path>` **after** the commit, not the `git add`.
+5. **Guardrail 6's third check (fire on a synthetic fault injected into a clean file) caught two
+   lanes' detectors that had already passed checks 1 and 2** — one blind to a whitespace run split by
+   a stripped quote, one case-sensitive. Roughly one catch per two lanes that ran it.
+
+**Round D is closed at `1d0e39c`.** The entry document for round E is
+`docs/superpowers/plans/handoff-round-e.md`, written in the same session as this amendment.
