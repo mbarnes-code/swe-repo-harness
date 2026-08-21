@@ -1,5 +1,25 @@
 > Round-C research artifact, produced by lane R-2 (`design-resume-step5`), promoted unchanged from `.superpowers/` scratch by lane DOCSTALE.
 
+> **Status marker, added 2026-08-21 (round D, lane W3). The body below is left as written — it is a
+> record of what was measured at its own commit, not a live plan.** What changed since:
+> **R1 has LANDED** (`a3ff0ae` "budgets: a tier ceiling that can move while calls are in flight
+> (R1)", tests at `431b02f`, decided by ADR-0083). `Limits.for_tier` returns a `ResizableLimiter`,
+> so §3.1's and §4.2's `asyncio.Semaphore` listings and the `for_tier -> asyncio.Semaphore`
+> signature below describe the *pre-R1* tree. **Do not scope R1 again**, and do not re-open Option
+> B ("swap the semaphore object"), which ADR-0083 explicitly rejected.
+> Everything else in §5 is still unbuilt: R2–R7 have no implementation, `resize()` has **no
+> production caller** in `src/fleet` (`grep -rn '\.resize(' src/fleet/` re-run this session:
+> empty), nothing reads a 429 and calls it, and §13 row 43's disaster is still live. Framing per
+> D55 in `docs/INTEGRATION_HONESTY.md`: **premise corrected, defect fully open, 0% closed** — the
+> existence of the primitive is not progress against row 43, and ADR-0083 §3's own recommendation
+> is to revert `a3ff0ae`/`431b02f` if the controller never ships.
+> One measurement in the body is also superseded rather than merely aged: §1.2's acquirer count is
+> right (**1**) and its "1 of 5" framing at §1.2 is the sharp one; the "1 of 12 workers" figure
+> that circulates in the §38 scoping lists is the stale one. `orchestrator/budgets.py`'s
+> `Limits.for_tier` docstring carries the current statement of that (re-measured at `b526f47`).
+> Line citations into `budgets.py` throughout this file (`:950-995`, `:962`, `:978-983`,
+> `:993-995`) predate ADR-0083's rewrite of that region and should be resolved by symbol.
+
 # Research R2 — scoping §13 row 43 (rate limiting), next-task 6, LARGE
 
 ## 0. Evidence provenance
@@ -225,6 +245,13 @@ that is already there.
 
 ## 3. Q2 — the semaphore: what it is, what it bounds, who holds it
 
+> *(Status marker, 2026-08-21, round D — the listing in §3.1 is the **pre-R1** tree. Since
+> `a3ff0ae`, `Limits.llm` is `Mapping[ModelTier, ResizableLimiter]` and `for_tier` returns a
+> `ResizableLimiter`; the docstring quoted below has also been corrected — the limiter guards
+> **1 of 5** LLM call paths, not every `complete()`. Read
+> `src/fleet/orchestrator/budgets.py::Limits.for_tier` for the current text. Everything §3 says
+> about *what the ceiling bounds and who holds it* is unchanged.)*
+
 ### 3.1 Definition
 
 `src/fleet/orchestrator/budgets.py:950-995`:
@@ -421,6 +448,18 @@ directive; nothing in `CLAUDE.md` or the SPEC mandates either option.*
 ---
 
 ## 5. Q4 — the decomposition
+
+> *(Status marker, 2026-08-21, round D — see the banner at the top of this file. **Row R1 in the
+> table below is DONE**, landed at `a3ff0ae` with tests at `431b02f` under ADR-0083. Not
+> re-verified criterion-by-criterion here; what was measured (2026-08-21, `grep -c` on
+> `tests/test_budgets.py`) is **22** `ResizableLimiter` references, with dedicated cases for
+> capacity under contention (`:806`), `resize` clamping and refusing zero (`:900`), a randomised
+> resize/cancel fuzz (`:1190`) and `Limits` handing each tier one (`:1264`) — note ADR-0084 and
+> `docs/superpowers/plans/design-resume-step5-rl1-limiter-report.md` on what that fuzz could and
+> could not see. A lane scoping from this table
+> must start at R2/R3, not at R1. R2–R7 are unbuilt, and per D55 the landed primitive closes **0%**
+> of §13 row 43. The dependency order and the "if only one subtask ever ships, ship R3" judgement
+> below are unaffected.)*
 
 Sizes follow `design-resume-step5.md` §5: **S** ≈ one focused pass, <150 LOC + tests; **M** ≈
 150–350 LOC + tests; **L** ≈ larger.
