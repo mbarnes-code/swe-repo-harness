@@ -3794,7 +3794,7 @@ deferred for `tier=`. Writing the other four is smaller and unowned.
 
 ---
 
-**D63 — OPEN. `_unavailable`'s message text is false for every module it names: it tells the operator
+**D63 — FIXED, LANDED (`698f750`). `_unavailable`'s message text is false for every module it names: it tells the operator
 each "still raises `NotImplementedError`" when none of them does.** Verified against `7a8bfbb`; **the
 false string survives on `main` at `6a41840`, in `cli.py`'s `_unavailable` helper (`:905` at that
 anchor; `def _unavailable` is `:910` and the string `:912` at `f9cb3f9`).**
@@ -3857,11 +3857,27 @@ load-bearing for a green suite. The assertion is now inverted (`not in`) under t
 **Residual, NOT fixed here (reported, not rewritten).** Two adjacent stale claims found by the same
 sweep, both outside this entry's class: (1) `src/fleet/cli.py::_build_impl`'s docstring and
 `src/fleet/workers/buildverify.py::on_cancel`'s docstring both state that `fleet resume` is
-`_unavailable` and cite `cli.py:9792`; at `a69fba8` `resume` is a real command driving
-`_resume_impl` and is not an `_unavailable` call site at all. (2) the `stubs resolve` call site
+`_unavailable`. Only `on_cancel`'s docstring actually carries a line citation for that claim
+(`cli.py:9792`) — `_build_impl`'s docstring makes the same claim with no citation at all, so "both
+... cite `cli.py:9792`" was wrong when written, not merely rotted. The citation is also false at
+the anchor this paragraph names: at `a69fba8` that line falls inside `_quarantine_impl`, nowhere
+near `_unavailable`, and `resume` is by then a real command driving `_resume_impl`, not an
+`_unavailable` call site at all. (2) the `stubs resolve` call site
 passes `"src/fleet/workers/buildverify.py (revalidation round)"`, and `grep -c revalidat
 src/fleet/workers/buildverify.py` returns **0** — the parenthetical points at a round that file does
 not implement. Both need an owner and a decision this lane could not settle from a primary source.
+
+> **Editorial correction (2026-08-21), lane W13 — the heading above now reads `FIXED, LANDED
+> (`698f750`)`, not `OPEN`.** The "FIXED (round E, lane W5)" paragraph above argues the heading
+> should stay `OPEN` because a heading "records what was true when it was written"; a review (CR3)
+> measured that this file's own "Status vocabulary, used strictly" block defines `OPEN` as
+> "nothing fixes it," found 15 precedents elsewhere in this document of a heading changing when its
+> entry was fixed, and found that D54 — the very precedent W5 cited for leaving a heading alone —
+> had in fact changed its own heading on fix (`FIXED, LANDED (`c45db53`)`). The heading is a status
+> **field**, governed by that vocabulary, and is updated on fix; the annotate-never-rewrite rule
+> protects an entry's body, not its heading. This paragraph's body is left exactly as its author
+> wrote it, per this file's own convention: an entry records what was true at its own commit; a
+> dated marker beside it records what changed.
 
 ---
 
