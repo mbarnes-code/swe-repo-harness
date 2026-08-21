@@ -2159,7 +2159,7 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
 def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines(
     workspace: Path,
 ) -> None:
-    """The refusal may only name the §11.5 steps that are genuinely unbuilt: 4, 6 and 8.
+    """The refusal may only name the §11.5 steps that are genuinely unbuilt: 6 and 8.
 
     Why this is a defect and not a wording quibble: the same stdout that carried the claim
     "Steps 2 (orphan reap) … are absent too" also carries the `step 2:` lines `_reap_lines`
@@ -2173,6 +2173,14 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
     sentence and leaves the next false is the failure mode this whole class keeps reproducing,
     which is why the assertion below reads the absent-step *list* rather than a fixed substring:
     a successor that fixes step 2 and forgets step 8 trips it too.
+
+    **Step 4 is the second instance of exactly that class, and it is why this test grew a third
+    assertion.** The Git-as-arbiter reconciliation landed with ADR-0087, and the refusal listing
+    it as absent went stale the same way step 2's clause did. Its own `step 4:` lines are
+    conditional — they print only when the run holds a `RUNNING` task — so the contradiction is
+    quieter than step 2's and the stale clause survives longer; the payload key `git_arbitration`
+    is unconditional and is what an operator reading `--json` sees beside the claim. The
+    landed/discarded/unresolved behaviour itself is pinned by the `test_resume_step4_*` cases.
     """
     result = runner.invoke(app, [*base_args(workspace), "resume"])
     assert result.exit_code == ExitCode.USAGE, result.output
@@ -2192,6 +2200,10 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
     assert "2 (" not in absent, (
         f"the refusal lists step 2 among the absent steps: {absent!r} — `_resume_impl` runs the "
         "reap and this very output reports it"
+    )
+    assert "4 (" not in absent, (
+        f"the refusal lists step 4 among the absent steps: {absent!r} — `_resume_impl` runs the "
+        "Git-as-arbiter reconciliation and reports it under `git_arbitration`"
     )
     assert "8 (" in absent, (
         f"step 8 (continue) is unbuilt and unnamed: {absent!r} — the refusal enumerates what is "
@@ -2575,10 +2587,17 @@ def test_resume_step4_discards_the_worktree_of_a_task_whose_commit_never_landed(
     wording).
     """
     db = workspace / "state" / "fleet.db"
-    worktree, anchor = _arbitration_worktree(workspace)
+    worktree, phase_anchor = _arbitration_worktree(workspace)
+    # An EARLIER task of the same phase, already `DONE` and already committed. Its commit sits
+    # BETWEEN the phase anchor and this task's anchor, which is the whole reason the two anchors
+    # exist — and the only arrangement in which the wrong one is distinguishable from the right
+    # one. A fixture that anchored both at the same commit would pass under a `discard_task` call
+    # handed `phases.pre_commit_sha`, and pass silently.
+    _land_task_commit(worktree, task_id="44444444-4444-4444-8444-444444444444")
+    task_anchor = _git_out(worktree, "rev-parse", "HEAD")
     debris = worktree / "half-applied.java"
     debris.write_text("class Broken {\n", encoding="utf-8")
-    _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
+    _seed_running_task(db, task_anchor=task_anchor, phase_anchor=phase_anchor)
 
     result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
     assert result.exit_code == ExitCode.USAGE, result.output
@@ -2595,8 +2614,13 @@ def test_resume_step4_discards_the_worktree_of_a_task_whose_commit_never_landed(
         "a SHA was recorded for a commit that is not on the branch"
     )
     assert not debris.exists(), "the half-applied tree survived the discard"
-    assert _git_out(worktree, "rev-parse", "HEAD") == anchor, "the branch moved off the anchor"
-    assert (worktree / "src.java").exists(), "the discard reached past this task's own anchor"
+    # The DISCRIMINATING pair: both hold at `tasks.pre_commit_sha` and both fail at
+    # `phases.pre_commit_sha`, which is the anchor §11.5 step 4's own sketch named.
+    assert _git_out(worktree, "rev-parse", "HEAD") == task_anchor, (
+        "the discard rewound past this task's own anchor, deleting an earlier DONE task's commit"
+    )
+    assert (worktree / "dest.java").exists(), "the earlier task's landed work was deleted"
+    assert (worktree / "src.java").exists(), "the discard reached past the phase anchor too"
 
 
 def test_resume_step4_recreates_the_missing_anchor_at_the_sha_it_named_not_at_the_tip(

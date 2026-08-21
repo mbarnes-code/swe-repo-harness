@@ -8017,3 +8017,154 @@ whitelist exist to cover.
   ledger entry; the defect it descends from was fixed at `d44b94f` and needs no new record.
 - It leaves the pre-existing `E501` at `tests/test_budgets.py:1051` alone (CLAUDE.md Rule 3 — it is
   not this change's mess), and reports it here rather than editing a correct line into scope.
+
+---
+
+## ADR-0087 — §11.5 step 4's own `git reset --hard <base_ref>` sketch is **wrong**, and the SPEC sentence is corrected in the same change: a crash-discard resets to `tasks.pre_commit_sha`; and "there is no third branch" is a claim about Git's **verdict**, never licence to invent one when the question could not be asked
+
+**Status.** Accepted. Landed with §11.5 step 4 (the Git-as-arbiter task reconciliation) in
+`src/fleet/cli.py` — `_reconcile_tasks_with_git`, `_recreate_phase_anchor`,
+`_persist_arbitration`, `_arbitration_lines` — and `tests/test_cli.py`'s `test_resume_step4_*`
+cases. Anchored by **symbol**, not `file:line`: every function above is one grep away at any ref,
+and ADR-0082's editorial correction records what `file:line` citations into a moving file cost.
+
+### 1. The contradiction, both sides quoted
+
+`docs/SPEC.md` §11.5 step 4, **as it read before this change**:
+
+> Nothing came back ⇒ nothing landed: `git reset --hard <base_ref> && git clean -fdx` to discard
+> whatever a killed `git apply` left in the worktree, set the task `PENDING`, and let it re-run
+
+`src/fleet/vcs/commits.py`, module docstring, on the same operation:
+
+> **Two anchors, and they are not interchangeable.** `phases.pre_commit_sha` precedes the phase's
+> *first* mutation; `tasks.pre_commit_sha` precedes *this* task's. Crash-discard of one task
+> resets to the TASK anchor. Resetting a crashed task to the phase anchor is forbidden and
+> `discard_task()` cannot express it: it would delete the commits of earlier tasks whose rows are
+> already `DONE` and will therefore never re-run, leaving the phase's success criterion to pass on
+> a tree missing most of its rewrites.
+
+These are not two readings of one sentence. They are opposite instructions for the same branch of
+the same step, and the SPEC's is the destructive one.
+
+**It is executable, which is what makes it dangerous.** `discard_task` does not *refuse* the phase
+anchor mechanically — its only refusal is "not an ancestor of the current tip", and the phase
+anchor is always an ancestor. It refuses it by **name** (the parameter is `task_pre_commit_sha`)
+and by docstring. A reconciler following the SPEC would therefore pass `phases.pre_commit_sha`,
+every call would succeed, and each one would silently delete the landed commits of every earlier
+`DONE` task in that phase. `docs/SPEC.md` §3.2 step 6.5 already states the correct rule — with the
+right anchor, in a shell block, under the heading "never rewinds past this task's start" — so the
+SPEC contradicted **itself**, and the wrong copy was the one §11.5 step 4 hands to an implementer.
+
+### 2. Decision
+
+**The code is right and the SPEC sentence was wrong; the implementation calls
+`discard_task(git, task_pre_commit_sha=tasks.pre_commit_sha, branch=…)`, and the SPEC sentence is
+corrected in the same change** (CLAUDE.md Guardrail 7: adjudicating the implementation is half the
+job — leaving the sentence regenerates the defect at the next reconciliation, and this one
+regenerates it as *data loss*, not as a wrong comment).
+
+**The correction was swept as a class, not applied to the reported site** (Guardrail 7 again). A
+whitespace-normalised sweep for `reset --hard` across `docs/`, `src/` and `tests/` found the wrong
+anchor named at **two** SPEC sites, not one:
+
+| Site | Was | Now |
+|---|---|---|
+| §11.5 step 4 | `git reset --hard <base_ref> && git clean -fdx` | `git reset --hard <tasks.pre_commit_sha> && git clean -fdx`, with the reason and the §3.2 step 6.5 back-reference inline |
+| §13 row 10 ("Crash mid-mutation") | `commit absent → git reset --hard <phases.base_ref>` | `commit absent → git reset --hard <tasks.pre_commit_sha>`, and the row's "Where" column now names `tasks.pre_commit_sha` and `vcs/commits.py`'s two entry points |
+
+A line-oriented grep found the §11.5 site and **not** the §13 one: row 10 is a single very long
+table row and the phrase sits mid-line, which is the wrapped-match failure Guardrail 7 names. The
+detector was re-run against the fix: every surviving `reset --hard` in `docs/SPEC.md` either names
+`tasks.pre_commit_sha` or is about whole-phase rollback, where `phases.base_ref` is correct.
+
+### 3. The second adjudication: "there is no third branch" is about the verdict
+
+§11.5 step 4 ends "There is no third branch and no tree-SHA comparison, because a commit is either
+on the branch or it is not", and `find_task_commit`'s docstring says the same ("There is no third
+answer, because there is no third state git can be in"). Both are true, and **neither is a
+statement about what to do when Git cannot be asked at all** — a `RUNNING` task whose worktree is
+gone, whose `migrate/<repo>` branch does not exist, whose phase never cut an anchor, or whose
+`git` call did not settle.
+
+Collapsing that into either branch is the four-state collapse `RollbackIndeterminateError` already
+refuses one layer down (D29/D34-45), and both collapses are concrete harms:
+
+* into YES ⇒ a task marked `DONE` carrying a SHA nobody found, so §11.5 step 5's evidence check
+  and every downstream phase build on a pointer into nothing;
+* into NO ⇒ `discard_task` against a tree that may hold the only copy of the work.
+
+**Decision: a candidate that could not be asked is reported in `unresolved` with its reason and its
+row is left byte-for-byte as it was.** The next resume asks again; nothing is lost, and the
+operator is told by name and reason, in the `step 4: UNRESOLVED …` line, rather than by a count
+(the D44 discipline `_reap_lines` already applies to `ReapResult.failed`). This is an *Agent
+Recommendation* extending an existing decision, not a new mechanism (Guardrail 1).
+
+### 4. Scope, stated rather than implied
+
+**Candidate set = `tasks.status = 'RUNNING'`, and nothing else.** §11.5 step 4 names `RUNNING`,
+`schema.sql`'s `ix_mutations_open` note names it again ("asking git whether a RUNNING task's
+commit is on the branch"), and §3.2 step 6.5 writes `tasks.pre_commit_sha` in the same transaction
+that writes `RUNNING` — so `RUNNING` is exactly the status in which both of this step's questions
+have an anchor to be asked against. A `CLAIMED` row has no anchor and has touched neither the
+branch nor the worktree.
+
+**NOT implemented, and named here so it is not mistaken for done:** §11.5 step 4's parenthetical
+second selector, "*or any `phases` row whose `post_commit_sha` does not resolve on its branch*". A
+phase row with a dangling pointer and no `RUNNING` task is not reconciled by this change. It is a
+different correction — recompute the column from `commits_in_range`, or clear it — and it belongs
+with §11.5 step 5's `evidence_holds`, which is the consumer that reads the column. The refusal
+message and `fleet resume --help` both now say step 4 runs; neither claims the parenthetical.
+
+**`phases.attempts` is never named by any statement in either branch.** §11.5 step 4 says so twice
+("do not increment `attempts`" / "again without incrementing `attempts`"). The constraint is met
+by the absence of the write, not by a compensating decrement, and it is asserted on the column.
+
+**`tasks.pre_commit_sha` survives the discard branch.** After `discard_task` the branch tip *is*
+that anchor, so the value is still true; clearing it would leave a second crash — before the row is
+re-claimed and `record_task_anchor` re-reads the tip — with no anchor at all, and `discard_task`
+refuses to guess one. `rollback_phase`'s contract is what clears it, and this is not that.
+
+### 5. Instrument validation (CLAUDE.md Rule 12, Guardrail 6)
+
+Seven single-anchor mutations, applied by script to the committed tree. The harness asserts the
+anchor matched **exactly once**, prints `git diff --numstat` and **aborts on zero changed lines
+before the pytest result is read**, then restores from a byte-for-byte backup and prints the
+residual diff (`''` in every row below). Selector: `-k "step4 or step_5_refusal"`, 8 tests.
+
+| Mutation | Changed | Result |
+|---|---|---|
+| **M1** — `UPDATE phases … , attempts = attempts + 1` in the landed branch | 2/1 | 1 failed: `…adopts_the_commit_git_says_landed_without_charging_an_attempt` |
+| **M2** — `discard_task(task_pre_commit_sha=<phase anchor>)`, i.e. the old SPEC sentence implemented | 1/1 | 1 failed: `…discards_the_worktree_of_a_task_whose_commit_never_landed` |
+| **M3** — re-cut the missing anchor at the branch tip instead of `phases.pre_commit_sha` | 1/0 | 1 failed: `…recreates_the_missing_anchor_at_the_sha_it_named_not_at_the_tip` |
+| **M4** — collapse "no worktree" into the discard branch | 2/1 | 1 failed: `…reports_a_candidate_it_could_not_ask_git_about_instead_of_a_verdict` |
+| **M5** — let `--dry-run` reach `_persist_arbitration` | 1/1 | 1 failed: `…dry_run_reports_both_verdicts_and_writes_neither` |
+| **M6** — refusal message lists step 4 as absent again | 1/1 | 1 failed: `test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines` |
+| **C** — cosmetic reflow of `_persist_arbitration`'s prologue (control) | 4/2 | **8 passed** — the suite asserts meaning, not layout |
+
+**M2 is the one worth recording, because on its first run it did not fire.** The discard fixture
+originally anchored the task and the phase at the same commit, so passing the phase anchor to
+`discard_task` was *semantically* a no-op and eight tests passed under the exact defect this ADR
+exists to prevent — a validated instrument, blind to the defect being hunted (Guardrail 6). The
+fixture now commits an **earlier task's** work between the two anchors, which is the only
+arrangement in which the wrong anchor is distinguishable from the right one, and the test asserts
+both that `HEAD` is the task anchor and that the earlier task's file survives. M2 then fires.
+
+The same class was found once more in the same round: the pre-existing
+`test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines` was written for
+step 2's stale "absent" clause and its docstring still enumerated "4, 6 and 8". Step 4 landing made
+it the second instance of its own class. It gained a `"4 (" not in absent` assertion; M6 is that
+assertion's discriminating mutation, and the two pre-existing assertions pass under it.
+
+### 6. What this ADR does not do
+
+- It does not touch `src/fleet/vcs/commits.py`, `src/fleet/orchestrator/reentry.py` or
+  `src/fleet/state/repository.py`. Step 4 is a **driver** over primitives that already exist.
+- It does not decide §11.5 step 5. The insertion slot between step 4 and `project_once` is
+  reserved by a comment and left empty.
+- It does not implement §11.5 step 4's parenthetical `phases.post_commit_sha` selector (§4 above).
+- It allocates no D-number. The SPEC sentence it corrects is fixed in the same change, so there is
+  no residual defect for `docs/INTEGRATION_HONESTY.md` to carry; a ledger entry recording a
+  contradiction that no longer exists is a reader's second source of truth, not a record.
+- It does not re-open ADR-0081's step-2/step-3 ordering, whose reasoning step 4 inherits and cites
+  rather than restates.
