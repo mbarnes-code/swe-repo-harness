@@ -3656,8 +3656,15 @@ first cut of the fix that shipped command buffered findings and never flushed th
 discard one layer up. Closed in fix round 3 (`337e1cf`) with the drain in a `finally` inside the
 still-open writer. Two related items are **disclosed, not closed**, in code an operator reads:
 `attempts.llm_failovers` is still unwritten (see D62), and `tier=` has no production caller on `main`
-— `findings.py:337` declares `tier: ModelTier | None = None` and the single call site at
-`runner.py:625-628` passes none — so **every shipped row is `scope: "run"`**.
+— `LlmFindingSink.record_backend_unavailable` (`orchestrator/findings.py`) declares
+`tier: ModelTier | None = None` and the single call site, in `PhaseRunner._drive`'s
+`FailureClass.BACKEND_UNAVAILABLE` branch (`orchestrator/runner.py`), passes none — so **every
+shipped row is `scope: "run"`**. *(Citations re-anchored by symbol, 2026-08-21, round E lane W18,
+per COMMON.md rule 5. Both line numbers this sentence carried were off by one at `da45a43`:
+`findings.py:337` names the `async def` line while the `tier:` declaration is on 338, and
+`runner.py:625-628` stops one line before the call's closing paren on 629. Both still resolved to
+the right symbols, so this was rot, not falsity, and nothing else in this entry was altered. The
+claim itself is re-measured and promoted to its own entry at D78.)*
 
 ---
 
@@ -4793,3 +4800,184 @@ recording rather than fixing inside the next subtask, and the fix (excluding `DE
 fall-through, or routing through `transition()`) touches the same file a sibling round-E lane just
 changed (`50ad1e4`, `WaveScheduler.propagate_blocked` / `append_blocked_by` caller-naming); a
 future lane should re-measure before touching `scheduler.py` again.
+
+---
+
+## D78 — OPEN, recorded only. `LlmFindingSink.record_backend_unavailable`'s `tier=` arm has zero producers, so every `BackendUnavailable` row this harness ships is run-scoped and both derived fields refuse to answer
+
+**Measured in round E by lane W18 against `main` at `da45a43`.** Carried from a round-D backlog
+item that lane W1 re-measured at `47df73d`; it reproduces unchanged. Class result rather than a
+commit list: of the **16** commits in `47df73d..da45a43`, **none** touches any file this entry
+names — `git diff --name-only 47df73d..da45a43` does not list `orchestrator/findings.py`,
+`orchestrator/runner.py`, `workers/base.py`, `workers/classify.py`, `tests/test_llm_findings.py` or
+`tests/test_runner.py`. Recorded rather than removed, by orchestrator ruling — see "Why this is
+recorded and not deleted".
+
+`LlmFindingSink.record_backend_unavailable` (`src/fleet/orchestrator/findings.py`) declares
+`tier: ModelTier | None = None` and branches its entire honesty block on it. With `tier`:
+`failover_triggers` is narrowed to that tier, `failover_triggers_scope` is `"tier"`,
+`failover_triggers_recorded` is `"none"`/`"partial"` **about that tier**, `throttling_observed` is a
+real boolean, and `_caveat` emits `_CAVEAT_TIER`. Without it: the whole-run map, scope `"run"`,
+`failover_triggers_recorded` `"unknown"`, `throttling_observed` `null`, and `_CAVEAT_RUN`.
+**Nothing in `src/` takes the first branch.**
+
+**Enumeration — by AST, not by grep.** A grep for `tier=` miscounts a wrapped call and cannot see a
+`**kwargs` forward. The instrument (`ast.Call` whose `func` terminal identifier is
+`record_backend_unavailable`, over every `*.py` under a root) was validated three ways before its
+clean result was trusted: it fired on a synthetic file containing exactly those two shapes (a
+five-line wrapped call with `tier=` and a separate `**kw` forward), stayed silent on an
+already-swept package (`src/fleet/llm`), and stayed silent on a call-free control file.
+
+| root | calls to `record_backend_unavailable` | of those, passing `tier=` | `**kwargs` forwards |
+| --- | --- | --- | --- |
+| `src/` | **1** | **0** | 0 |
+| `tests/` | **8**, in **7** test functions, all in `tests/test_llm_findings.py` | **4**, in 4 of those 7 | 0 |
+
+The one `src/` call is in `PhaseRunner._drive`'s `FailureClass.BACKEND_UNAVAILABLE` branch
+(`src/fleet/orchestrator/runner.py`) and passes `repo_id=`, `phase=`, `observed=` only. A
+whitespace-normalised whole-repo sweep for the bare identifier (normaliser: `re.sub(r"\s+", " ",
+text)` across the whole file, so a wrapped occurrence cannot escape) finds it in exactly three
+tracked source files — `orchestrator/findings.py` ×4 (the `def` plus three docstring mentions),
+`orchestrator/runner.py` ×2 (the call plus one comment), `tests/test_llm_findings.py` ×8 — and in no
+other tracked file. So there is no `getattr`, string-dispatch or bound-method-alias site that spells
+the name out, and the AST enumeration is complete against that predicate: the class "production call
+sites that can reach the narrowed arm" has **zero** members. **What this predicate cannot exclude**
+is a call through a name assembled at runtime from fragments; nothing in this codebase does that,
+but it was not proven and is not claimed.
+
+**Why it cannot be wired from where it is called.** `TierUnavailable` carries `tier` and
+`targets_tried`, and both are lost at the exception→`WorkerError` boundary. `WorkerError`
+(`src/fleet/workers/base.py`) declares exactly six fields — `failure_class`, `retryable`,
+`exit_code`, `stderr_tail`, `artifact_ref`, `exception_type` — and **no `tier`** (counted off the
+class's own annotated assignments, not off a docstring). `_error_for`
+(`src/fleet/workers/classify.py`) maps `TierUnavailable` to `FailureClass.BACKEND_UNAVAILABLE` and
+keeps only `stderr_tail=redact_text(str(exc))`; the generic escape path,
+`error_from_exception` (`src/fleet/workers/base.py`), keeps `stderr_tail=str(exc)`. The only
+surviving carrier is therefore `observed`, and parsing it is forbidden by the design the finding
+rests on: nothing in this codebase branches on message text.
+
+### This is NOT a SPEC gap — SPEC and code already agree, and no SPEC edit is owed in either direction
+
+**State this before touching anything here.** Measured against `git show HEAD:docs/SPEC.md` at
+`da45a43` — the committed blob, not the working tree, because a sibling lane had `docs/SPEC.md`
+modified while this was being written — whitespace normalised across the whole file:
+
+`BackendUnavailable` occurs **5** times: one `findings.kind` comment in the state-schema listing, one
+artefact-column mention in §13 row 40, and **three requirement sentences** — §11.8's *"Fail closed
+when a tier is exhausted"* paragraph and §13 row 40 both say the run *"writes a `BackendUnavailable`
+finding **naming the tier and every target tried**"* (2 occurrences of that exact phrase), and
+§12.43 acceptance case (iv) says the run exits 8 *"with a `BackendUnavailable` finding **naming the
+tier and each target tried**"* (1 occurrence).
+
+**The SPEC mandates naming the tier. It does not mandate the `tier=` parameter, and it does not
+describe the arm at all.** In the same normalised sweep, `docs/SPEC.md` contains **0** occurrences
+of `failover_triggers`, **0** of `failover_triggers_scope`, **0** of `failover_triggers_recorded`,
+**0** of `throttling_observed`, **0** of `asserts_outage`, and **0** collocations of `scope` within
+40 characters of `tier` (and 0 of `tier` within 40 of `scope`). Every one of those fields is an
+implementation-level honesty design, not a SPEC requirement. **Predicate stated, because one of
+these is case-sensitive and a careless re-measurement will disagree:** the payload field `caveat`
+also has **0** case-sensitive occurrences, but a case-**in**sensitive search returns **2** — both
+the English word `CAVEAT.` introducing the state-schema listing's own "Shipped means DECLARED, not
+emitted" note, neither the field. Counted case-sensitively, `caveat` is 0; do not read the two
+`CAVEAT.` hits as the field surviving.
+
+**And the requirement is already met, on the shipped path, without the arm** — verified through the
+live chain rather than inferred from a docstring: `PhaseRunner._drive` passes
+`observed=self._detail(failure)`; `PhaseRunner._detail` returns `error.stderr_tail`; `_error_for`
+sets that to `redact_text(str(exc))`; and `TierUnavailable.__init__` composes
+`f"tier {tier} exhausted after targets: {', '.join(targets_tried) or '-'}"`. The shipped row names
+the tier and every target tried, in order. The covering test is named for exactly that —
+`tests/test_llm_findings.py::test_backend_unavailable_names_the_tier_and_every_target_tried` — and
+it passes **no** `tier=`.
+
+**So a future reader must not "reconcile" the SPEC against the unused parameter.** There is no
+sentence in `docs/SPEC.md` promising a tier-scoped payload, and growing one to make the SPEC match
+this parameter would manufacture a requirement that has never existed. That is the `supports_effort`
+failure mode this project already paid six rounds for: a reconciler adding a field to make code
+match a table, and thereby suppressing a value an operator had declared.
+
+### Why this is recorded and not deleted
+
+The obvious remedy — the parameter is dead in `src/`, so delete it under Rule 2 — was evaluated and
+rejected by the orchestrator on this lane's evidence. Three reasons, in order of weight:
+
+1. **Removal is not a one-parameter change.** It deletes `_CAVEAT_TIER` and collapses `_caveat` to a
+   constant; it orphans `LlmFindingSink.observed_triggers`'s own `tier` narrowing parameter, whose
+   only `src/` argument comes from this call; it turns three persisted payload fields into
+   constants, so `failover_triggers_scope` becomes a field that looks like it discriminates and
+   cannot; and it deletes
+   `tests/test_llm_findings.py::test_a_cheap_tier_throttle_does_not_contaminate_a_heavy_tier_outage_row`,
+   the regression test for a contamination defect that **was real and was on `main`** — stated at
+   the grain that is checkable rather than as "it shipped to an operator", which was not
+   established. At `31e6776` (an ancestor of `HEAD`) `LlmFindingSink._triggers` was a flat
+   `dict[str, str]` keyed by target across the whole run, and `throttling_observed` was
+   `any(t == "RATE_LIMIT" for t in triggers.values())` over that run-wide map with **no `null`
+   arm at all** — so a CHEAP-tier 429 set `throttling_observed: true` on a HEAVY-tier outage row,
+   telling an operator to lower concurrency while a dead HEAVY endpoint went unrepaired. It was
+   caught in review as FD1 finding N1 and corrected by tier-keying the map at `337e1cf`, also on
+   `main`. Rule 2 says write the minimum code that solves the problem; it does not say delete a
+   guard against a defect that happened.
+2. **This document has already adjudicated the class, twice, and never by deletion.** D56 and D57
+   are — in D57's own words — *"the same defect class — a dependency-injection parameter that
+   exists, is documented, and is never supplied."* D56 (`llm.client.discover()`, zero call sites in
+   `src/`) was closed by **wiring it** (`c36160e`). D57 (`FleetSettings.load(capabilities=...)`) is
+   **OPEN, recorded**. Neither was deleted.
+3. **It is scheduled work, not speculation.** `docs/PROGRESS.md` carries it as a defect item and
+   again as a next task — wire the `tier=` arm and `attempts.llm_failovers` together, because both
+   need the same cross-lane change and doing them separately pays that cost twice.
+
+**Why this is its own entry rather than a footnote to D59.** Until this entry, the only place in
+this file that carried the claim was an aside inside **D59, whose heading reads "FIXED, LANDED"**. By
+the "Status vocabulary, used strictly" block above — and by the ruling recorded at `39862ec`, that a
+status heading is a **field** governing discoverability rather than history — a reader scanning this
+register for OPEN items could not see it. D57 makes the same argument explicitly for itself against
+D56: *"Recording it separately is what stops 'BK1 wired the injection' from being read as covering
+both."* Same reasoning, same remedy. D59's aside has been left in place and re-anchored by symbol in
+the same commit as this entry; it now points here.
+
+### Would a test catch it? No — and one test actively pins the zero-producer state
+
+Measured, not assumed, and the D63 check was run rather than skipped:
+
+* **The arm's behaviour is well covered.** 4 of the 8 recorder calls in `tests/test_llm_findings.py`
+  drive the narrowed arm, and `test_the_caveat_never_contradicts_the_scope_field_of_its_own_row`
+  drives **both** arms in one test and asserts the caveat cannot contradict its own row's scope. So
+  "the narrowed arm works" is proven; that is not the gap.
+* **What no test asserts is that the arm is reachable from production.** This is D54's shape: the
+  absence of a producer is not a thing a test asserts.
+* **One test does more than fail to catch it — it pins the current state.**
+  `tests/test_runner.py::test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_exist`
+  drives the real `PhaseRunner` halt through `run_wave` and asserts, on the resulting row,
+  `failover_triggers_scope == "run"` and `failover_triggers_recorded == "unknown"`. **Unlike D63's
+  case this assertion is true of today's tree** and is the right test of the shipped arm — but it is
+  load-bearing for the zero-producer state, and its own docstring says so (*"Nothing in `src/` passes
+  `tier=` … so every row this harness writes today is `scope: \"run\"`"*). Whoever wires the arm
+  must update that test in the same commit or the wiring lands red. Counts: `failover_triggers_scope`
+  is asserted **5** times in `tests/test_llm_findings.py` and **once** in `tests/test_runner.py`, and
+  the `test_runner.py` one is the only assertion of it on the production path.
+
+### What would have to exist for the arm to become reachable
+
+Exactly one of:
+
+1. `WorkerError` (`src/fleet/workers/base.py`) grows a `tier` field, `_error_for`
+   (`src/fleet/workers/classify.py`) populates it from `exc.tier` on the `TierUnavailable` branch,
+   and `PhaseRunner._drive`'s halt branch forwards it as `tier=`; **or**
+2. `TierUnavailable`'s raise sites in `src/fleet/llm/client.py` route the tier to the halt path by
+   some carrier other than `observed`.
+
+Parsing the tier back out of `observed` is **not** an option — `observed` is the worker's verbatim
+`stderr_tail` by design, and nothing in this codebase branches on message text. Either route also
+has to update the pinning test named above. `docs/PROGRESS.md` pairs this with
+`attempts.llm_failovers` (D62) because both need the same boundary change.
+
+**Severity: low-to-medium, and deliberately not rated higher.** Nothing false ships: the run-scoped
+row is correct, its two refusals (`"unknown"` / `null`) are honest, and the caveat it carries matches
+its own scope. The cost is operator-facing and bounded — §13 row 43's throttle-vs-outage question
+stays unanswerable *in the row*, so an operator must match the tier-keyed map against `observed` by
+eye, which the caveat text tells them to do. Not rated lower because the arm that would answer it is
+built, tested, and one boundary field away from being reachable.
+
+**Related:** D55 (throttling vs outage), D59 (the sink itself; its aside is the prior record of this
+claim), D60 (why `failover_triggers_recorded` can never read `"complete"`), D62
+(`attempts.llm_failovers`, the paired unwritten field), D56/D57 (the defect class and its precedent).
