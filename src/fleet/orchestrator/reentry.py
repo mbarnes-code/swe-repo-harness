@@ -613,3 +613,163 @@ async def resume_floor(
         # thing an operator would read in the traceback is `_EvidenceWanted` — an internal
         # control-flow signal that has nothing to do with why their resume stopped.
         known[wanted] = await probe(wanted)
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 6 — which `blocked_by` entries still block, and what a resume may un-block
+# --------------------------------------------------------------------------------------
+# Section-local imports, per the note above the step-5 block: this section was appended while
+# sibling lanes held the header, and one contiguous tail keeps the edits independent.
+from collections.abc import Iterable, Sequence  # noqa: E402
+
+QUARANTINE_FINDING_KIND: Final = "OperatorQuarantine"
+"""The `findings.kind` `fleet quarantine` writes beside the `SKIPPED` it sets (SPEC §10, §3.1(c)).
+
+Spelled here rather than imported from `graph.sequence.PREFLIGHT_FINDING_KINDS` on purpose: that
+frozenset is §3.1 criterion (c)'s *exemption* lookup — four kinds that explain why a repo has no
+wave — and it is free to gain or lose a member for reasons that have nothing to do with what
+blocks a dependent. Sharing it would couple this predicate to that one.
+"""
+
+BLOCKING_STATUSES: Final[frozenset[RepoStatus]] = frozenset(
+    {RepoStatus.REQUIRES_HUMAN_INTERVENTION}
+)
+"""The statuses that block a dependent on their own, with no finding needed.
+
+Exactly one member, and the smallness is the point: `SKIPPED` is deliberately **absent** even
+though `fleet quarantine` writes it, because a bare `SKIPPED` is a config exclusion and the
+quarantine case is `SKIPPED` **plus** an audited `QUARANTINE_FINDING_KIND` row. `still_blocking`
+states that pair; a status set alone cannot.
+"""
+
+
+@dataclass(frozen=True, slots=True)
+class BlockerState:
+    """What a resume managed to look up about one name appearing in some repo's `blocked_by`.
+
+    `finding_kinds` has **no default**, and that is a mechanism rather than a preference: the
+    quarantine half of the predicate is the difference between "an operator removed this repo on
+    purpose" and "the config excludes it", so a caller that forgot to read `findings` would, with
+    a default of `frozenset()`, hand every quarantined blocker in as an ordinary `SKIPPED` and get
+    it removed. With no default the omission is a `TypeError` at construction instead of a silent
+    un-quarantine. A caller that genuinely has no findings for a repo writes `frozenset()` and
+    means it.
+    """
+
+    status: RepoStatus
+    finding_kinds: frozenset[str]
+
+
+def still_blocking(name: str, blocker_statuses: Mapping[str, BlockerState]) -> bool:
+    """Is `name` still a reason to hold a dependent in `blocked_by`? **Fail-closed.**
+
+    The blocking population is `REQUIRES_HUMAN_INTERVENTION` together with `SKIPPED` carrying an
+    audited `OperatorQuarantine` finding — the two live producers of a `blocked_by` entry
+    (`runner._contain` via `WaveScheduler.propagate_blocked`, and `cli._quarantine_impl`).
+
+    **An entry this function cannot resolve is RETAINED, never removed** — a name absent from
+    `blocker_statuses` answers `True`. That polarity is ADR-0090 §2.4's ruling (R2-CLOSED),
+    "remove only what is positively shown to be no longer blocking", and it rests on three
+    measured facts rather than on caution:
+
+    1. `models.state.RepoState.blocked_by`'s own field description says *"a recompute must not
+       treat the writer set as closed"*, and since `50ad1e4` that sentence is bound to the code by
+       `tests/test_blocked_by_writer_statements.py` — so R2-open would violate a mechanism, not
+       merely contradict a convention.
+    2. **Three of the five** triggers that field enumerates as reaching SPEC §3.5's propagation
+       rule are SPEC-mandated with **zero** producers today (an SCC's failed members §3.1, a
+       `pr.merge_wait_timeout_s` breach §3.4, and a failed contract's non-terminal descendants
+       §3.5 — the last of which §3.5 mandates as a `contract_id`, a string that resolves to no
+       repo at all). An entry from any of those paths **cannot be re-derived from live state**, so
+       erasing "whatever was not re-derived" would erase it permanently on every `fleet resume`
+       from the moment any one of them is implemented.
+    3. The failure modes are asymmetric. Retaining too long leaves a dependent blocked — visible
+       to an operator and recoverable by hand. Removing too eagerly silently undoes an audited
+       `OperatorQuarantine`: invisible, unrecoverable, and **not** detectable by SPEC §12 item
+       46(ii) as it stood before this change, which watched only whether a sweep moves a repo
+       *out of* `REQUIRES_HUMAN_INTERVENTION` — a quantity that defect leaves unchanged.
+
+    **Stated residue.** A blocker resolved as bare `SKIPPED` with no `QUARANTINE_FINDING_KIND` in
+    its `finding_kinds` is treated as no longer blocking and its entry is removed. No live writer
+    produces such an entry (the only `SKIPPED` producer is `fleet quarantine`, which always writes
+    the finding), so in the shipped tree the case arises only if the finding row is missing — and
+    `BlockerState`'s no-default field is what keeps "missing" from meaning "not looked up".
+    """
+    state = blocker_statuses.get(name)
+    if state is None:
+        return True  # unresolvable -> RETAINED (ADR-0090 §2.4, R2-CLOSED)
+    if state.status in BLOCKING_STATUSES:
+        return True
+    return state.status is RepoStatus.SKIPPED and QUARANTINE_FINDING_KIND in state.finding_kinds
+
+
+@dataclass(frozen=True, slots=True)
+class Unblocking:
+    """What §11.5 step 6 would do to one repo's `blocked_by`, computed once for both routes.
+
+    `removed` **and** `remaining` are both carried so that no caller ever re-derives "did this
+    list empty?" from the other one. Two independent computations of a single value with nothing
+    enforcing agreement is defect **D74**'s shape, and it is the same reason `floor` is carried
+    here rather than looked up again at admission time: the floor is step 5's answer, and step 6
+    reports it, never recomputes it.
+
+    `floor is None` means step 5 computed no floor for this repo. It is **not** a synonym for
+    "nothing to admit": whether a repo whose list empties without a floor may be admitted, and at
+    which phase, is the wiring's decision and deliberately not made here.
+    """
+
+    repo_id: str
+    removed: tuple[str, ...]
+    remaining: tuple[str, ...]
+    floor: Phase | None
+
+
+def plan_unblocking(
+    *,
+    blocked_by_rows: Iterable[tuple[str, Sequence[str]]],
+    blocker_statuses: Mapping[str, BlockerState],
+    floors: Mapping[str, Phase],
+) -> tuple[Unblocking, ...]:
+    """The whole of §11.5 step 6's decision, as one pure function. No I/O, no clock, no connection.
+
+    `blocked_by_rows` is one entry per `phases` row — `(repo_id, names)`, the decoded
+    `phases.blocked_by` column — because `SqliteSchedulerStore.append_blocked_by` writes the same
+    blocker into every non-`SUCCEEDED` phase of a repo and a repo therefore has up to four of
+    them. The per-repo union is taken **here**, so the store method and the `--dry-run` preview do
+    not each own a copy of it.
+
+    **`floors` is passed IN and never re-derived.** Step 5 already computed it
+    (`cli._demote_to_floors` over `phase_floor`); recomputing it here would put one value in two
+    places with nothing binding them — D74 again, and the whole reason `demotable_phases` exists
+    as one shared rule rather than as a preview beside a write.
+
+    Deterministic by construction: names are sorted (matching what `append_blocked_by` persists,
+    `json.dumps(sorted(names))`) and repos are emitted in sorted order, so the identical inputs
+    yield the identical tuple on the `--dry-run` path and on the write path. That is one call
+    shared by both routes, not two routes kept in agreement.
+
+    One `Unblocking` is returned per repo present in `blocked_by_rows`, including repos where
+    nothing was removed — "this repo is still blocked, by these names" is a fact an operator needs
+    and a count of removals cannot carry (D44).
+    """
+    unions: dict[str, set[str]] = {}
+    for row_repo_id, row_names in blocked_by_rows:
+        unions.setdefault(row_repo_id, set()).update(row_names)
+    plans: list[Unblocking] = []
+    for repo_id in sorted(unions):
+        blockers = unions[repo_id]
+        removed = tuple(
+            sorted(name for name in blockers if not still_blocking(name, blocker_statuses))
+        )
+        remaining = tuple(
+            sorted(name for name in blockers if still_blocking(name, blocker_statuses))
+        )
+        plans.append(
+            Unblocking(
+                repo_id=repo_id,
+                removed=removed,
+                remaining=remaining,
+                floor=floors.get(repo_id),
+            )
+        )
+    return tuple(plans)
