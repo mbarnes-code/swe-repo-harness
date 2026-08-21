@@ -131,20 +131,29 @@ class RepoState(FleetModel):
     blocked_by: list[RepoId] = Field(
         default_factory=list,
         description="Set union of transitive ancestors over the ordering subgraph appended by the "
-        "§3.5 propagation rule — NOT the ancestors of one status. Four writers reach that rule: "
-        "RepoStatus.REQUIRES_HUMAN_INTERVENTION (§3.5) and `fleet quarantine`, which writes "
-        "SKIPPED (§10), are LIVE — measured at `47df73d`, runner._contain and cli._quarantine_impl "
-        "are the only non-delegating callers of the §3.5 append in `src/`. An SCC's failed members "
-        "(§3.1) and a `pr.merge_wait_timeout_s` breach (§3.4) are SPEC-mandated with 0 producers "
-        "today, so a recompute must not treat the writer set as closed. A recompute defined as "
-        "'the RHI ancestors' therefore EMPTIES the `blocked_by` of every quarantined repo's "
-        "dependents and re-admits them, undoing an audited OperatorQuarantine on each `fleet "
-        "resume`. 'abandoned' is prose, not a status: RepoStatus has no ABANDONED member and "
-        "StubState.ABANDONED is a different machine, so the word names nothing this field holds. "
-        "SPEC §3.5 additionally MANDATES a `contract_id` in the SQL column `phases.blocked_by` on "
-        "`contracts.status='FAILED'`; measured at `31484d5`, no code writes one (0 producers) and "
-        "this `list[RepoId]` annotation would reject it, so the column and this field are not "
-        "interchangeable and this is not a licence to widen either. Reversible (§3.5, §12.14).",
+        "§3.5 propagation rule — NOT the ancestors of one status. The triggers reaching that rule "
+        "are enumerated here rather than counted, because a stated cardinal has been wrong in both "
+        "previous versions of this sentence: RepoStatus.REQUIRES_HUMAN_INTERVENTION (§3.5) and "
+        "`fleet quarantine`, which writes SKIPPED (§10), are LIVE — measured at `34d6f82`, "
+        "runner._contain and cli._quarantine_impl are the only non-delegating callers in `src/`. "
+        "Non-delegating means it calls `SqliteSchedulerStore.append_blocked_by`, or the "
+        "`WaveScheduler.propagate_blocked` rule that fronts it, and is itself neither of those two "
+        "nor a same-named wrapper forwarding to an inner store; under the bare reading 'callers of "
+        "the append' the named pair is wrong in both directions, so "
+        "`tests/test_blocked_by_writer_statements.py` derives the set from the AST and fails "
+        "either way. An SCC's failed members (§3.1), a `pr.merge_wait_timeout_s` breach (§3.4) and "
+        "a failed contract's non-terminal descendants (§3.5) — SPEC §3.5 routes "
+        "`contracts.status='FAILED'` through the same propagation rule — are SPEC-mandated with 0 "
+        "producers today, so a recompute must not treat the writer set as closed. A recompute "
+        "defined as 'the RHI ancestors' therefore EMPTIES the `blocked_by` of every quarantined "
+        "repo's dependents and re-admits them, undoing an audited OperatorQuarantine on each "
+        "`fleet resume`. 'abandoned' is prose, not a status: RepoStatus has no ABANDONED member "
+        "and StubState.ABANDONED is a different machine, so the word names nothing this field "
+        "holds. For that contract case, SPEC §3.5 additionally MANDATES a `contract_id` in the SQL "
+        "column `phases.blocked_by` on `contracts.status='FAILED'`; measured at `31484d5`, no code "
+        "writes one (0 producers) and this `list[RepoId]` annotation would reject it, so the "
+        "column and this field are not interchangeable and this is not a licence to widen either. "
+        "Reversible (§3.5, §12.14).",
     )
     depends_on: list[RepoId] = Field(default_factory=list)
     depends_on_contracts: list[str] = Field(
