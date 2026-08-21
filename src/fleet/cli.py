@@ -144,6 +144,13 @@ from fleet.orchestrator.budgets import (
     new_cpu_pool,
 )
 from fleet.orchestrator.context import RunContext, default_logger
+from fleet.orchestrator.reentry import (
+    EvidenceRow,
+    RepoEvidence,
+    demotable_phases,
+    evidence_holds,
+    resume_floor,
+)
 from fleet.orchestrator.registry import get_worker
 from fleet.orchestrator.runner import (
     DISK_EXIT_CODE,
@@ -200,6 +207,7 @@ from fleet.state.repository import (
     AttemptRow,
     EdgeRow,
     EventRow,
+    FloorSnapshotStaleError,
     SqliteStateRepository,
     SymbolRow,
 )
@@ -10032,14 +10040,23 @@ def resume(
     half only — nothing here reads `runs.harness_version`, the other half step 1 names), 2
     (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
     → `PENDING`, retaining `attempts`), 4 (ask Git whether each `RUNNING` task's commit landed
-    and correct the row to match, charging no attempt either way) and 7 (regenerate
+    and correct the row to match, charging no attempt either way), 5 (re-check each phase's
+    durable evidence and demote every repo to its re-entry floor) and 7 (regenerate
     `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and
-    `--raise-wave-budget`. Steps 5, 6 and 8 do not
+    `--raise-wave-budget`. Steps 6 and 8 do not
     exist, so the verb reconciles the ledger and then refuses to continue with **exit 2**
-    (`ResumeIncompleteError`, ADR-0076 — nothing failed, so it is deliberately not exit 1)
-    naming what is absent. `--dry-run` is the free health check §11.5 promises: it makes no
-    network call, writes nothing, and previews the step-3 sweep, the step-4 arbitration (every
-    git READ, no git or SQL write) and the step-2 reap.
+    (`ResumeIncompleteError`, ADR-0076 as amended by ADR-0089 — nothing failed, so it is
+    deliberately not exit 1) naming what is absent. `--dry-run` is the free health check §11.5
+    promises: it makes no network call, writes nothing, and previews the step-3 sweep, the
+    step-4 arbitration, the step-5 demotion plan (both of them every git READ, no git or SQL
+    write) and the step-2 reap.
+
+    **One consequence of step 5 that this verb does not repair, stated because nothing else
+    reports it (ADR-0089 §4).** A wave is `CLOSED` iff every one of its `wave_members` rows is
+    settled — `orchestrator.scheduler.wave_state` computes it from `phases`, and no column
+    stores it. A demotion writes `SUCCEEDED → PENDING`, so a repo demoted out of a closed wave
+    re-opens that wave. `docs/SPEC.md` §3.5's "closed waves are never re-opened" governs
+    un-blocking, and §11.5 step 5 does not mention waves at all.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -10086,10 +10103,11 @@ def resume(
             "phase's durable evidence and demote each repo to its re-entry floor, the phase "
             "ABOVE the HIGHEST phase below the settled frontier whose evidence still holds or "
             "which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN if there "
-            "is no such phase — has no implementation. `orchestrator/reentry.phase_floor` "
-            "already computes that floor and `state/repository.demote_to_floor` already writes "
-            "it; what is missing is the resume-time evidence check that feeds them and the "
-            "per-phase `PhaseRunner` assembly that walks Phases 1–4 in order, which cli.py "
+            "is no such phase — RAN, and this run's report above carries its result (the "
+            "`step 5:` lines, or `reentry_floors` under `--json`). Every repo now sits at the "
+            "phase it should re-enter from. What the verb still cannot do is CONTINUE: nothing "
+            "here re-derives `blocked_by` from the rows step 5 just demoted, and nothing "
+            "assembles the per-phase `PhaseRunner` that walks Phases 1–4 in order, which cli.py "
             "today only hand-wires per verb. Steps 6 "
             "(recompute `blocked_by`) and 8 (continue into the phase runners) are absent too. "
             "Steps 2 and 4 are NOT: the orphan reap and the Git-as-arbiter task reconciliation "
@@ -10097,11 +10115,11 @@ def resume(
             "`step 4:` lines, or `reaped_worktrees`/`reaped_containers`/`git_arbitration` under "
             "`--json`. The work reported above IS durable — the drift audit, any budget "
             "raise, the PR re-poll, the orphan reap, the stale-lease sweep, the task "
-            "reconciliation and `migration_state.json` are all written "
+            "reconciliation, the re-entry demotion and `migration_state.json` are all written "
             "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
             "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
-            "forge call per open PR for a refusal that cannot change until step 5 is written "
-            "(ADR-0076)."
+            "forge call per open PR for a refusal that cannot change until steps 6 and 8 are "
+            "written (ADR-0076, and ADR-0089 on why the error outlives step 5)."
         )
 
 
@@ -10237,9 +10255,13 @@ async def _resume_impl(
         settings, path, run_id, horizons=horizons, dry_run=dry_run
     )
 
-    # §11.5 step 5 — the demotion to each repo's re-entry floor — goes HERE, between step 4 and
+    # §11.5 step 5 — the demotion to each repo's re-entry floor — sits HERE, between step 4 and
     # the projection: it reads the `phases.post_commit_sha` pointers step 4 has just reconciled
     # against Git, and step 7 must publish the result of the demotion, not the state before it.
+    # It also runs BELOW the step-3 sweep, which is what makes the FLOOR right rather than merely
+    # avoiding a collision: a `RUNNING` row is not settled, so it is the frontier the backward
+    # search starts from, and step 3 is what turns a dead worker's row back into one.
+    floors = await _demote_to_floors(settings, path, run_id, dry_run=dry_run, now=now)
 
     projection: str | None = None
     if not dry_run:
@@ -10288,6 +10310,11 @@ async def _resume_impl(
         # operator whether landed work was adopted or a worktree was discarded, and those are
         # opposite facts about the same run.
         "git_arbitration": arbitration,
+        # §11.5 step 5, the whole report for the same reason step 4's is: "3 repos demoted"
+        # cannot tell an operator whether landed work was discarded or a frontier was merely
+        # confirmed, and `applied` is what separates the preview from the write (the defect
+        # `raise_budget_applied` exists for, one key down).
+        "reentry_floors": floors,
         # §11.5 step 2. `live_sandbox_names` is in the payload because it is the input an
         # operator has to see to trust the other two keys: "0 orphans reaped" and "every orphan
         # was spared as live" are the same output with opposite meanings.
@@ -10317,6 +10344,7 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
             f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)"
         )
     lines.extend(_arbitration_lines(result, dry=dry))
+    lines.extend(_floor_lines(result, dry=dry))
     lines.extend(_reap_lines(result, dry=dry))
     lines.extend(_budget_lines(result))
     lines.extend(_repoll_lines(result))
@@ -10387,6 +10415,51 @@ def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
         f"  step 4: spared {entry['repo_id']} phase {entry['phase']} task {entry['task_id']} — "
         "its phase lease is still live, so Git was not asked and nothing was discarded"
         for entry in spared
+    )
+    return out
+
+
+def _floor_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
+    """§11.5 step 5, reported per repo, because the three outcomes are not degrees of one thing.
+
+    "3 repos demoted" is the line this function refuses to print, for `_arbitration_lines`' reason
+    one step over: a demotion DISCARDS landed work and re-runs it, a repo left unchanged has a
+    frontier that was merely confirmed, and a repo reported `UNRESOLVED` was not judged at all.
+    An operator's next action differs for each, so each gets its own line with its own reason
+    (docs/INTEGRATION_HONESTY.md D44).
+
+    `applied` rather than `dry` decides the headline verb. The two can disagree: a real run whose
+    every repo was already at its floor writes nothing, and printing "demoted" there would report
+    a state change that did not happen — the defect `raise_budget_applied` exists for.
+    """
+    report = result["reentry_floors"]
+    if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries it
+        return []
+    demoted = cast(Sequence[Mapping[str, object]], report["demoted"])
+    unchanged = cast(Sequence[Mapping[str, object]], report["unchanged"])
+    unresolved = cast(Sequence[Mapping[str, object]], report["unresolved"])
+    verb = "would demote" if dry else "demoted"
+    out: list[str] = []
+    if not demoted and not unresolved:
+        out.append(
+            f"  step 5: {int(cast(int, report['candidates']))} repo(s) already sit at their "
+            "re-entry floor; nothing to demote"
+        )
+    for entry in demoted:
+        phases = cast(Sequence[str], entry["phases"])
+        evidence = cast(Mapping[str, bool], entry["evidence"])
+        read = ", ".join(f"{name}={holds}" for name, holds in evidence.items())
+        out.append(
+            f"  step 5: {verb} {entry['repo_id']} to floor {entry['floor']} — "
+            f"{', '.join(phases)} back to PENDING (attempts retained)"
+            + (f"; evidence read {read}" if read else "")
+        )
+    out.extend(
+        f"  step 5: {entry['repo_id']} unchanged — {entry['reason']}" for entry in unchanged
+    )
+    out.extend(
+        f"  step 5: UNRESOLVED for {entry['repo_id']} — {entry['reason']}"
+        for entry in unresolved
     )
     return out
 
@@ -10850,6 +10923,216 @@ async def _persist_arbitration(
 
         await writer.submit(unit)
     return unwritten
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 5 — demote every repo to its re-entry floor
+# --------------------------------------------------------------------------------------
+
+_FLOOR_ROWS_SQL: Final = (
+    "SELECT repo_id, phase, status, post_commit_sha FROM phases "
+    " WHERE run_id = ? ORDER BY repo_id, phase"
+)
+
+
+async def _demote_to_floors(
+    settings: FleetSettings,
+    path: Path,
+    run_id: str,
+    *,
+    dry_run: bool,
+    now: datetime,
+) -> dict[str, object]:
+    """§11.5 step 5: re-check each phase's durable evidence and demote each repo to its floor.
+
+    **A driver over `orchestrator/reentry.py` and `demote_to_floor`, not new machinery.** The
+    floor rule lives in `phase_floor`, the four durable predicates in `evidence_holds`, the lazy
+    pairing of the two in `resume_floor`, the membership rule of the write in `demotable_phases`
+    and the write itself in `SqliteStateRepository.demote_to_floor`. Nothing here restates any of
+    them; this function supplies the three things none of those can reach on their own — the
+    `phases` rows, the per-repo paths production writes to, and the one `findings` fact
+    (`VerificationReport`) that `fleet.orchestrator` may not import `fleet.cli` to look up.
+
+    **ONE route, not two.** `--dry-run` and the real run compute the identical plan from the
+    identical read; the branch is the terminal persist and nothing above it, which is step 4's
+    shape rather than step 3's. Step 3 needs a second function because its two SQL texts are two
+    routes kept in agreement by a shared predicate constant; step 5 has one computation, so a
+    preview derived by a second comprehension over `span >= floor and SUCCEEDED` would be defect
+    D74 introduced on purpose — hence `demotable_phases`, called here and inside the transaction.
+    `report["applied"]` is an explicit boolean for the reason `raise_budget_applied` is: a payload
+    that reports only what was asked let `--dry-run` assert a state change that never happened.
+
+    **`--dry-run` reaches Git and nothing else.** `evidence_holds` runs `rev-parse`-class reads
+    and `merge-base --is-ancestor` against local checkouts, plus two path probes; it opens no
+    socket, so the preview keeps §11.5's promise that a resume's reconciliation makes no network
+    call. The SQL write is the only thing `dry_run` suppresses.
+
+    **Every repo lands in exactly one of four buckets, and none of them is a bare count** (D44).
+    `demoted` carries the floor, the phases and the evidence that produced them; `unchanged`
+    carries the reason nothing moved, which is a different fact from "no repo needed to move";
+    and `unresolved` carries the repos step 5 could not judge at all — a refused destination, a
+    Git call that failed, or a `phases` row that moved under the floor computation. Collapsing
+    any two of them is how an operator reads a fleet as reconciled when a quarter of it was
+    skipped.
+    """
+    report: dict[str, object] = {
+        "candidates": 0,
+        "demoted": [],
+        "unchanged": [],
+        "unresolved": [],
+        "applied": False,
+    }
+
+    conn = await connect_ro(path)
+    try:
+        rows = await _rows(conn, _FLOOR_ROWS_SQL, (run_id,))
+        dests = await _dest_paths(conn, settings.config.build.monorepo_dir_overrides)
+        verified = set(await _verifications(conn, run_id))
+    finally:
+        await conn.close()
+
+    by_repo: dict[str, dict[Phase, EvidenceRow]] = {}
+    for repo_id, phase, status, post_commit_sha in rows:
+        by_repo.setdefault(str(repo_id), {})[Phase(int(phase))] = EvidenceRow(
+            status=RepoStatus(str(status)),
+            post_commit_sha=None if post_commit_sha is None else str(post_commit_sha),
+        )
+    report["candidates"] = len(by_repo)
+    if not by_repo:
+        return report
+
+    git_cache_dir = (settings.root / settings.config.run.cache_dir / "git").resolve()
+    work_dir = (settings.root / settings.config.run.work_dir).resolve()
+    plans: list[tuple[str, Phase, tuple[Phase, ...], dict[Phase, RepoStatus], str]] = []
+
+    for repo_id, repo_rows in by_repo.items():
+        statuses = {phase: row.status for phase, row in repo_rows.items()}
+        dest = dests.get(repo_id)
+        if dest is None:
+            # `layout()` refused this repo's destination (the reserved `_scc/` namespace, or a
+            # `dest:` that escapes the root). Phase 3's evidence is `<worktree>/<dest>/BUILD.bazel`
+            # and there is no dest, so this repo cannot be judged — reported, never guessed.
+            _unresolved(report, {"repo_id": repo_id}, "no destination resolves for this repo")
+            continue
+        repo = RepoEvidence.for_repo(
+            repo_id,
+            git_cache_dir=git_cache_dir,
+            work_dir=work_dir,
+            dest=dest,
+            has_verification_report=repo_id in verified,
+        )
+
+        async def probe(phase: Phase, *, rows: Mapping[Phase, EvidenceRow] = repo_rows,
+                        repo: RepoEvidence = repo) -> bool:
+            return await evidence_holds(phase, rows=rows, repo=repo)
+
+        try:
+            floor, evidence = await resume_floor(repo_rows, probe)
+        except (GitError, OSError) as exc:
+            # Rule 11: a Git call that failed is carried out verbatim. The repo's rows are
+            # untouched and the next resume asks again.
+            _unresolved(report, {"repo_id": repo_id}, f"{type(exc).__name__}: {exc}")
+            continue
+        if floor is None:
+            reason = (
+                "a phase requires human intervention"
+                if RepoStatus.REQUIRES_HUMAN_INTERVENTION in statuses.values()
+                else "every phase has already settled"
+            )
+            cast(list[object], report["unchanged"]).append({"repo_id": repo_id, "reason": reason})
+            continue
+        plan = demotable_phases(statuses, floor)
+        if not plan:
+            cast(list[object], report["unchanged"]).append(
+                {
+                    "repo_id": repo_id,
+                    "reason": f"floor is {floor.name} and no phase at or above it is SUCCEEDED",
+                }
+            )
+            continue
+        plans.append((repo_id, floor, plan, statuses, _floor_reason(floor, evidence)))
+        cast(list[object], report["demoted"]).append(
+            {
+                "repo_id": repo_id,
+                "floor": floor.name,
+                "phases": [phase.name for phase in plan],
+                "evidence": {phase.name: holds for phase, holds in sorted(evidence.items())},
+            }
+        )
+
+    if dry_run or not plans:
+        return report
+    await _apply_floor_demotions(path, run_id, plans, report, now=now)
+    return report
+
+
+def _floor_reason(floor: Phase, evidence: Mapping[Phase, bool]) -> str:
+    """The one `PhaseDemotion.reason` stamped on EVERY phase in the span, so it is worded as a
+    repo-level cause.
+
+    `demote_to_floor` writes one `PhaseDemoted` finding per demoted phase and all of them carry
+    this single string. A reason phrased as "the evidence for THIS phase does not hold" would be
+    true only of the floor itself and false of every phase above it, which is a finding row
+    asserting something untrue about work it just discarded.
+    """
+    read = ", ".join(f"{phase.name}={holds}" for phase, holds in sorted(evidence.items()))
+    return (
+        f"§11.5 step 5: this repo's re-entry floor recomputed to {floor.name}, so every SUCCEEDED "
+        f"phase at or above it is re-entry territory and returns to PENDING with its attempts "
+        f"retained. Durable evidence read below the frontier: {read or 'none consulted'}."
+    )
+
+
+async def _apply_floor_demotions(
+    path: Path,
+    run_id: str,
+    plans: Sequence[tuple[str, Phase, tuple[Phase, ...], dict[Phase, RepoStatus], str]],
+    report: dict[str, object],
+    *,
+    now: datetime,
+) -> None:
+    """One `StateWriter` for the whole fleet, one `BEGIN IMMEDIATE` per repo (ADR-0077).
+
+    The writer is opened and closed HERE rather than around the whole of `_resume_impl` because
+    `state/db.py`'s write slot is process-wide module state and steps 3 and 4 each open and close
+    their own; a fourth one nested inside either would raise `SingleWriterViolationError`.
+
+    `observed` is what makes the floor a property of the write: the statuses this run computed the
+    floor from are handed to `demote_to_floor`, which refuses if the rows moved underneath them.
+    That repo is then reported `unresolved` rather than silently skipped, because "nothing was
+    demotable" and "the snapshot went stale" send the operator to opposite places.
+    """
+    demoted = cast(list[dict[str, object]], report["demoted"])
+    kept: list[dict[str, object]] = []
+    async with StateWriter(path, owner="fleet-resume-step5") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            for entry, (repo_id, floor, plan, statuses, reason) in zip(demoted, plans, strict=True):
+                try:
+                    records = await repository.demote_to_floor(
+                        run_id, repo_id, floor=floor, reason=reason, now=now, observed=statuses
+                    )
+                except FloorSnapshotStaleError as exc:
+                    _unresolved(report, {"repo_id": repo_id}, str(exc))
+                    continue
+                applied = tuple(record.phase for record in records)
+                if applied != plan:
+                    # The only way in: the repo acquired a `REQUIRES_HUMAN_INTERVENTION` row
+                    # between the two reads, which `demote_to_floor` short-circuits to `()`
+                    # rather than refusing. Reported, never printed as a demotion that happened.
+                    _unresolved(
+                        report,
+                        {"repo_id": repo_id},
+                        f"planned {[p.name for p in plan]} but the transaction applied "
+                        f"{[p.name for p in applied]}; nothing is claimed for this repo",
+                    )
+                    continue
+                kept.append(entry)
+        finally:
+            await read_conn.close()
+    report["demoted"] = kept
+    report["applied"] = bool(kept)
 
 
 # --------------------------------------------------------------------------------------

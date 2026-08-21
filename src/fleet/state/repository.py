@@ -61,7 +61,7 @@ fields are returned as stored (`str`).
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Final, Protocol, runtime_checkable
@@ -77,6 +77,7 @@ from fleet.models.enums import (
     demote,
 )
 from fleet.obs.redact import redact_text
+from fleet.orchestrator.reentry import demotable_phases
 from fleet.state import checkpoints
 from fleet.state.db import StateWriter
 from fleet.util.hashing import sha256_text
@@ -89,6 +90,7 @@ __all__ = [
     "ClaimedTask",
     "EdgeRow",
     "EventRow",
+    "FloorSnapshotStaleError",
     "LeaseStolenError",
     "PhaseRow",
     "ReadOnlyRepository",
@@ -163,6 +165,20 @@ class ReservationRefusedError(BudgetRefusedError):
     A `BudgetRefusedError` but deliberately NOT a `RepoBudgetRefusedError`: no ceiling refused
     here, so `CostLedger.reserve`'s backpressure interpretation must not treat it as headroom
     that waiting could free.
+    """
+
+
+class FloorSnapshotStaleError(RepositoryError):
+    """`demote_to_floor` was handed a `floor` computed from `phases` rows that have since moved.
+
+    Raised, never returned as an empty tuple, because "nothing was demotable" and "the snapshot
+    the floor rests on is stale" are opposite facts about the same repo and an operator's next
+    action differs: the first is a healthy no-op, the second means re-run `fleet resume` (ADR-0076
+    already states that the verb is safe and idempotent to re-run). Collapsing the two into `()`
+    is the D44 shape this module refuses everywhere else.
+
+    Nothing has been written when this is raised: the check runs before the first `UPDATE` in the
+    unit, so the transaction rolls back over an empty write set.
     """
 
 
@@ -458,6 +474,7 @@ class StateRepository(ReadOnlyRepository, Protocol):
         floor: Phase,
         reason: str,
         now: datetime,
+        observed: Mapping[Phase, RepoStatus] | None = None,
     ) -> tuple[PhaseDemotion, ...]: ...
 
     # -- primitive 4: the ledger CAS ---------------------------------------------------
@@ -1345,6 +1362,7 @@ class SqliteStateRepository:
         floor: Phase,
         reason: str,
         now: datetime,
+        observed: Mapping[Phase, RepoStatus] | None = None,
     ) -> tuple[PhaseDemotion, ...]:
         """Apply the §11.5 step-5 demotion for one repo, in ONE transaction (ADR-0077).
 
@@ -1353,7 +1371,11 @@ class SqliteStateRepository:
         `Phase.VERIFY` is re-entry territory, so for each phase in that span it does two things
         and one thing conditionally:
 
-        * every `SUCCEEDED` row in the span goes to `PENDING` through **`demote()`** — never
+        * every `SUCCEEDED` row in the span goes to `PENDING` — the membership rule itself is
+          `orchestrator.reentry.demotable_phases`, called here on the rows this transaction read
+          and called by `cli._demote_to_floors` on the rows its `--dry-run` preview read, so the
+          preview and the write cannot state different rules (defect D74's shape) — through
+          **`demote()`** — never
           through `transition(..., resume=True)`. `transition()` returns a bare status and emits
           nothing, so a demotion made through it is invisible to whoever reads the run;
           `demote()` returns the status *and* the `PhaseDemotion` the caller owes, and this
@@ -1412,6 +1434,33 @@ class SqliteStateRepository:
         re-opened. `test_a_skipped_phase_keeps_its_status_but_still_loses_its_checkpoint` turns
         red if `SKIPPED` is added to the filter below.
 
+        **`observed` closes the window between the floor's computation and this write (V1's
+        review finding I4).** `floor` is derived from a `phases` read the caller made through a
+        `mode=ro` handle, outside this transaction; `BEGIN IMMEDIATE` serialises transactions but
+        carries no snapshot across from that handle, and `state/db.py`'s single-writer slot is
+        **process-wide module state**, so a second process is not excluded at all. The reachable
+        interleaving is not adversarial: `_resume_impl` deliberately spares a non-stale `RUNNING`
+        phase, so that phase is the unsettled frontier when the floor is computed; its worker
+        completes during the caller's Git reads; and this method then finds the row `SUCCEEDED`
+        in-transaction, demotes legitimately-landed work and deletes the span's checkpoints, with
+        a `PhaseDemoted` finding whose reason describes evidence that never failed. A lease-based
+        guard cannot see it — `complete_phase` NULLs `lease_owner`/`lease_expires_at` in the same
+        statement that sets the status, so by the time the race matters the row has no lease.
+        Passing the statuses the floor was computed from and refusing on any difference makes the
+        floor a property of the write, which is the same argument the `REQUIRES_HUMAN_INTERVENTION`
+        paragraph above already wins. The cost when it fires is one no-op repo and one more
+        `fleet resume`, which ADR-0076's refusal text already states is safe and idempotent.
+
+        **The boundary this leaves, stated rather than implied:** `observed` defaults to `None`,
+        which means "the caller observed no snapshot" and skips the check — today's behaviour, and
+        what every test that predates this parameter still exercises. It is not a mechanism
+        against a caller that simply omits it. What *is* mechanical is that the sole production
+        caller passes it: `cli._demote_to_floors` builds `observed` from the same read it feeds
+        `resume_floor`, and `tests/test_cli.py` binds that by moving a row under a resume and
+        asserting the repo is reported unresolved with nothing written. This is orthogonal to
+        ADR-0082 §4, which discloses a different hazard — an *unvalidated* `floor` from a caller
+        that never ran `phase_floor` at all — and deliberately leaves it unpatched.
+
         `attempts` is retained for every phase, on every path: the SET list does not name the
         column and this method does not call `complete_phase`, which is the only writer of
         `phases.attempts` in `src/`. No lease fence is carried, deliberately — resume holds no
@@ -1428,13 +1477,33 @@ class SqliteStateRepository:
                 }
             if RepoStatus.REQUIRES_HUMAN_INTERVENTION in rows.values():
                 return ()
+            if observed is not None:
+                # Every phase, not only the span: the frontier the floor was derived from is
+                # found by scanning from `SCAN` upward, so a row BELOW the floor moving would
+                # have produced a different floor too. A missing row is `PENDING` on both sides.
+                stale = tuple(
+                    phase
+                    for phase in Phase
+                    if rows.get(phase, RepoStatus.PENDING)
+                    is not observed.get(phase, RepoStatus.PENDING)
+                )
+                if stale:
+                    raise FloorSnapshotStaleError(
+                        f"run {run_id} repo {repo_id}: the `phases` rows the re-entry floor "
+                        f"{floor.name} was computed from moved before this write — "
+                        + ", ".join(
+                            f"{phase.name} was "
+                            f"{observed.get(phase, RepoStatus.PENDING)}, is now "
+                            f"{rows.get(phase, RepoStatus.PENDING)}"
+                            for phase in stale
+                        )
+                        + ". Nothing was written for this repo. Re-run `fleet resume`: it is "
+                        "safe and idempotent (ADR-0076), and the next run computes the floor "
+                        "from the rows as they now stand."
+                    )
 
             demotions: list[PhaseDemotion] = []
-            for phase in span:
-                # A missing row is the schema default, PENDING — nothing landed, nothing to
-                # discard. `demote()` would refuse it, so it is filtered here rather than caught.
-                if rows.get(phase) is not RepoStatus.SUCCEEDED:
-                    continue
+            for phase in demotable_phases(rows, floor):
                 new_status, record = demote(
                     RepoStatus.SUCCEEDED, repo_id=repo_id, phase=phase, reason=reason
                 )

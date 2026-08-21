@@ -126,6 +126,36 @@ def phase_floor(
     return floor
 
 
+def demotable_phases(statuses: Mapping[Phase, RepoStatus], floor: Phase) -> tuple[Phase, ...]:
+    """Which phases at or above `floor` a §11.5 step-5 demotion would actually write.
+
+    THE membership rule of the step-5 write, in ONE place, called by both routes that need it:
+    `state.repository.SqliteStateRepository.demote_to_floor`'s in-transaction unit applies it to
+    the rows it read under `BEGIN IMMEDIATE`, and `cli._demote_to_floors`' `--dry-run` preview
+    applies it to the rows it read through `mode=ro`. The two routes differ only in *which
+    snapshot* they are handed, never in the rule. Written out twice -- once as a preview and once
+    as a write, in two files -- they would be defect **D74**'s shape exactly: nothing fails when
+    they drift, every test stays green, and the preview quietly becomes a lie about what the real
+    run will do.
+
+    `SUCCEEDED` is the whole filter, and it is `models.enums.RESUME_DEMOTE`'s domain restated over
+    a span: `demote()` raises on every other status, so `PENDING`, `RUNNING` and `BLOCKED` have no
+    landed work to discard, and `DEGRADED`/`SKIPPED` are the two statuses ADR-0077 §5 forbids
+    demoting at all. A phase with no persisted row is the schema default `PENDING` and is likewise
+    not demotable -- which is why this reads `.get` rather than indexing, and why a caller may
+    hand it a mapping covering only the rows that exist.
+
+    Pure, with no I/O, so it is callable from inside a `StateWriter` unit (`state/db.py` forbids
+    network, git and LLM work there). It deliberately does **not** answer which `checkpoints` rows
+    a demotion sweeps: that span is wider than this set by construction (`demote_to_floor` sweeps
+    the whole span minus `DEGRADED`, not only the phases it demoted), and it belongs with the
+    write rather than with the preview.
+    """
+    return tuple(
+        phase for phase in Phase if phase >= floor and statuses.get(phase) is RepoStatus.SUCCEEDED
+    )
+
+
 # --------------------------------------------------------------------------------------
 # §11.5 step 5 — `evidence_holds`: the four per-phase DURABLE evidence predicates
 # --------------------------------------------------------------------------------------
