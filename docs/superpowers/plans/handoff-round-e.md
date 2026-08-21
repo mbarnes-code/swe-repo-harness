@@ -352,8 +352,18 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
    the R2 brief's §4.1 split), not its prose. **[corrected 2026-08-21, lane W12]**
 4. **Subtask 10**, gated on 9. It must discharge ADR-0076's annotated deferral of the
    `ResumeIncompleteError` deletion.
-5. **Re-audit §38's thirteen carried open items** rather than inheriting them (§40 open item 4,
-   untouched). Round B's audit of a comparable carried set found roughly four in five stale.
+5. **Re-audit §38's** ~~thirteen~~ **corrected 2026-08-21, lane W6 (re-verifying lane W1's
+   measurement): fourteen** **carried open items** rather than inheriting them (§40 open item 4,
+   untouched). §39's own mid-section amendment reinstated item 8 into the carried set ("on the same
+   footing as the other thirteen") and no later checkpoint updated the label — §39 next-task 10, §40
+   open item 4, §40 next-task 4, and this handoff all copied "thirteen" forward; the real carried set
+   is **14: {1,2,3,4,5,6,8,9,10,11,12,15,16,17}**. Lane W1 audited all 14 at `47df73d`
+   (`.superpowers/sdd/round-e/lanes/W1/report.md`): **1 landed / 12 open / 1 superseded / 0
+   never-true.** ~~Round B's audit of a comparable carried set found roughly four in five stale.~~ —
+   **corrected 2026-08-21, lane W6: that framing prior is not supported here — 13 of the 14 items
+   reproduced their exact documented substance (12 STILL OPEN + 1 verified-LANDED-correct); only
+   item 8's wording was stale, and it had already been corrected in-tree (`c135c42`) before this
+   audit ran.** **[ledger, corrected]**
 6. **One live item, and two that were fixed underneath this handoff — read the correction, not the
    original.** *(Corrected 2026-08-21, lane W9, at `0ea771e`: two of the three items this section
    originally listed as "still live at HEAD" had already been fixed when I measured them. My basis
@@ -383,10 +393,17 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
      predicate, gives the class result, and prints **both** variant totals rather than presenting
      either as *the* number. **[probe @ `ab3aaad`: `grep -n 'After it' docs/DECISIONS.md` returns
      nothing.]** Do not re-open it.
-7. **A pre-existing `mypy` note, carried and not fixed:** 9 errors measured in `tests/`, identical in
-   code and message at two round-D anchors, in a name-shadowing artifact; `mypy` does not gate
-   `tests/` here (`pyproject.toml` sets `packages = ["fleet"]`). The fix is renaming the `JoinedStr`
-   branch's `out`. **[ledger]**
+7. **A pre-existing `mypy` note, carried and not fixed:** ~~9 errors measured in `tests/`~~ —
+   **corrected 2026-08-21, lane W6 (re-verifying lane W2's measurement): `.venv/bin/python -m mypy
+   tests/` measured 265 errors in 31 files across 21 codes at `47df73d`, not 9.** The name-shadowing
+   artifact itself was a **3**-error class (`test_findings_kinds.py::_resolve`, a `JoinedStr`/`Name`
+   branch type merge cascading `no-redef` into `operator` + `return-value`), identical in code and
+   message at two round-D anchors; `mypy` does not gate `tests/` here (`pyproject.toml` sets
+   `packages = ["fleet"]`). **The prescription was correct and was already acted on** — do not strike
+   it: lane W2 renamed the `JoinedStr` branch's `out` -> `joined` at `3388d16`, clearing the class
+   (265 -> 262 errors, 31 files unchanged; re-measured here at HEAD: `.venv/bin/python -m mypy tests/`
+   -> **262 errors in 31 files across 20 codes**). 262 unrelated `tests/` mypy errors remain, not this
+   item's scope. **[ledger, corrected]**
 
 ---
 
@@ -408,9 +425,13 @@ originals after a two-line provenance banner:
   history.** Subtask 7 has landed, so §§1–3 record a question already answered; but §4 is the
   **subtask-9** brief — the `--from-phase` refusal split verified against
   `_refuse_unbuilt_resume_flags`, ~~a defect subtask 9 inherits in the same function~~ —
-  **corrected 2026-08-21, lane W12: that defect (§4.2) was FIXED at `c135c42`, and §4.2 itself is
-  still unmarked**, because W12 did not own that file; read §4.2 as history and mark it before
-  dispatching anyone at it — and ambiguity 4's three options costed and deliberately unpicked.
+  **corrected 2026-08-21, lane W12: that defect (§4.2) was FIXED at `c135c42`, and** ~~§4.2 itself is
+  still unmarked~~, ~~because W12 did not own that file; read §4.2 as history and mark it before
+  dispatching anyone at it~~ — **corrected again 2026-08-21, lane W6 (re-verifying lane CR1's
+  measurement): §4.2 was marked at `a9e9640`** ("docs/research §4.2: mark the live citation of the
+  docstring sentence deleted at `c135c42`", +22 lines to exactly this file — `git show --stat
+  a9e9640`). **Do not dispatch a lane to mark §4.2; it is already marked.** — and ambiguity 4's
+  three options costed and deliberately unpicked.
   That is exactly what **ADR-0079** has to settle,
   and ADR-0079 is still unwritten. A brief whose live half gates an unwritten ADR is not history.
 
