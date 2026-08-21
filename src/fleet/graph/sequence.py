@@ -291,12 +291,15 @@ def _materialize_waves(
 def append_synthetic_waves(
     plan: WavePlan, graph: FleetGraph, node_refs: Sequence[NodeRef]
 ) -> WavePlan:
-    """§3.5: repos freed by a late resolution are **appended** at `wave_index = max(waves) + 1`.
+    """§3.5: the `node_refs` that carry no wave index yet are **appended** as new waves, the
+    first at `wave_index = max(waves) + 1`.
 
     A closed wave is never re-opened — a repo that has already migrated cannot learn about a new
-    peer — so the freed set gets its own layer(s), internally ordered by the same longest-path
-    rule ("across four synthetic waves if needed"). `waves.synthetic = 1` is what lets the
-    projection say *why* a repo migrated outside its original layer.
+    peer — so the appended set gets its own layer(s), internally ordered by the same longest-path
+    rule ("across four synthetic waves if needed"). `waves.synthetic = 1` records that a wave was
+    appended to an already-sequenced plan rather than produced by the sequencing pass; it names no
+    cause, so the projection can say a repo migrated outside its original layer but not what
+    freed it.
     """
     fresh = [ref for ref in sorted(set(node_refs)) if ref not in plan.wave_index_by_node]
     if not fresh:

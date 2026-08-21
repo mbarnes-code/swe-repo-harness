@@ -386,9 +386,11 @@ class MigrationWave(FleetModel):
     )
     synthetic: bool = Field(
         default=False,
-        description="Appended after sequencing to re-admit repos freed by a late resolution "
-        "(§3.5): `wave_index = max(waves) + 1`. Mirrors `waves.synthetic`; it is what lets the "
-        "projection say WHY a repo migrated out of its original layer.",
+        description="APPENDED to an already-sequenced plan rather than produced by the sequencing "
+        "pass (§3.5), so `wave_index` is above every wave the plan then held — the first appended "
+        "layer is `max(waves) + 1`. Mirrors `waves.synthetic`. Records HOW the wave was allocated, "
+        "not why: the flag names no cause, so the projection can say a repo migrated outside its "
+        "original layer but not what freed it.",
     )
     wave_started_at: datetime | None = Field(
         default=None,

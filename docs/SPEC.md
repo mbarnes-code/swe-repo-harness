@@ -2862,9 +2862,11 @@ class MigrationWave(FleetModel):
     )
     synthetic: bool = Field(
         default=False,
-        description="Appended after sequencing to re-admit repos freed by a late resolution "
-        "(§3.5): `wave_index = max(waves) + 1`. Mirrors `waves.synthetic`; it is what lets the "
-        "projection say WHY a repo migrated out of its original layer.",
+        description="APPENDED to an already-sequenced plan rather than produced by the sequencing "
+        "pass (§3.5), so `wave_index` is above every wave the plan then held — the first appended "
+        "layer is `max(waves) + 1`. Mirrors `waves.synthetic`. Records HOW the wave was allocated, "
+        "not why: the flag names no cause, so the projection can say a repo migrated outside its "
+        "original layer but not what freed it.",
     )
     wave_started_at: datetime | None = Field(
         default=None,
@@ -4061,8 +4063,13 @@ CREATE TABLE IF NOT EXISTS waves (
     wave_started_at TEXT,                         -- first admission into this wave. PERSISTED, so
                                                   --   `wave_max_wallclock_s` (§3.6) is cumulative
                                                   --   across resumes rather than restarted by one
-    synthetic   INTEGER NOT NULL DEFAULT 0,       -- 1 => appended by stub resolution (§3.5),
-                                                  --   wave_index = max(waves) + 1
+    synthetic   INTEGER NOT NULL DEFAULT 0,       -- 1 => this wave was APPENDED to an
+                                                  --   already-sequenced plan (§3.5), not produced
+                                                  --   by the sequencing pass; wave_index is above
+                                                  --   every wave the plan then held (first
+                                                  --   appended layer = max(waves) + 1). Records
+                                                  --   HOW the wave was allocated, not why: the
+                                                  --   flag names no cause
     max_usd     REAL NOT NULL DEFAULT 0.0         -- §11.2: the wave ceiling is DERIVED —
                 CHECK (max_usd >= 0.0),           --   `budgets.wave_max_cost_usd_per_repo` ×
                                                   --   COUNT(wave_members) — and FROZEN here at the

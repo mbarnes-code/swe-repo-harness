@@ -222,8 +222,13 @@ CREATE TABLE IF NOT EXISTS waves (
     wave_started_at TEXT,                         -- first admission into this wave. PERSISTED, so
                                                   --   `wave_max_wallclock_s` (§3.6) is cumulative
                                                   --   across resumes rather than restarted by one
-    synthetic   INTEGER NOT NULL DEFAULT 0,       -- 1 => appended by stub resolution (§3.5),
-                                                  --   wave_index = max(waves) + 1
+    synthetic   INTEGER NOT NULL DEFAULT 0,       -- 1 => this wave was APPENDED to an
+                                                  --   already-sequenced plan (§3.5), not produced
+                                                  --   by the sequencing pass; wave_index is above
+                                                  --   every wave the plan then held (first
+                                                  --   appended layer = max(waves) + 1). Records
+                                                  --   HOW the wave was allocated, not why: the
+                                                  --   flag names no cause
     max_usd     REAL NOT NULL DEFAULT 0.0         -- §11.2: the wave ceiling is DERIVED —
                 CHECK (max_usd >= 0.0),           --   `budgets.wave_max_cost_usd_per_repo` ×
                                                   --   COUNT(wave_members) — and FROZEN here at the

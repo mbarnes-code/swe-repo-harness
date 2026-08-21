@@ -526,10 +526,11 @@ def test_check_criteria_reports_all_four_in_spec_order() -> None:
 
 
 def test_a_freed_repo_is_appended_at_max_wave_plus_one() -> None:
-    """§3.5: a repo freed by a late resolution is appended as a **synthetic wave** at
+    """§3.5: a repo carrying no wave index is appended as a **synthetic wave** at
     `wave_index = max(waves) + 1`. A closed wave is never re-opened — a repo that already migrated
-    cannot learn about a new peer — so the freed set gets its own layer, marked `synthetic` so the
-    projection can say *why* it migrated outside its original one."""
+    cannot learn about a new peer — so the appended set gets its own layer, marked `synthetic`,
+    which records that the wave was appended to an already-sequenced plan rather than produced by
+    the sequencing pass — it names no cause."""
     report = chain_report()
     plan = assign_waves(report, gated_repo_ids=["acme-a"])
     assert "acme-a" not in plan.repo_wave_index
