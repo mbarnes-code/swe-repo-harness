@@ -249,7 +249,14 @@ class RepoEvidence:
         directory no worker ever wrote.
 
         `cache_dir` is `<root>/<run.cache_dir>` — the **unsuffixed** value, which is what every
-        other `cache_dir` in `cli.py` means (`_gc_impl`, and the gazelle / resolve / ingest roots).
+        other reader of that setting in `cli.py` means. Measured at `1ce1901`, by walking the
+        module's own AST rather than grepping: `_gc_disk`, `_gazelle_files`,
+        `_fleet_support_files`, `_ingest_build_source` and `_demote_to_floors` all spell it
+        `(settings.root / settings.config.run.cache_dir).resolve()` and append their own segment
+        afterwards; `_scan_payloads` is the one site that folds `/ "git"` into the expression, and
+        that is the mirror root. (An earlier draft of this sentence named `_gc_impl`; the
+        `run.cache_dir` read is in `_gc_disk`.)
+
         This method appends `MIRROR_CACHE_SUBDIR` itself, so the one place that knows git mirrors
         live one level down is this expression rather than every caller. That is not tidiness: a
         caller that passed the unsuffixed path to a parameter expecting the suffixed one would
@@ -258,7 +265,8 @@ class RepoEvidence:
         no fixture able to express it, because the mistake is on the caller's side of the
         boundary. `test_the_mirror_cache_subdir_is_the_one_cli_writes`
         (`tests/test_reentry_evidence.py`) parses the segment out of `cli._scan_payloads`'s own
-        source and checks it against the constant.
+        source and checks it against the constant — the **segment**, and nothing about what a
+        caller passes. See that test's docstring for what the binding therefore cannot catch.
 
         The mirror is then `<slug(repo_id)>.git` — `workers/clone.CloneWorker._mirror_path`
         restated with the same `sandbox.worktree.slug` this imports rather than a second
@@ -553,11 +561,37 @@ async def resume_floor(
     `_require_settled`, which raises `GitCommandError` when a probe never started or was killed at
     its deadline (D42, deliberate and correct there). So a single `rev-parse` that hits the wave
     deadline raises here, and a caller that drives the fleet in one `try` gets exactly the outcome
-    ADR-0088 §4 argues against: one repo stops the other 249 being reconciled. Subtask 7 must wrap
-    the call **per repo** and record the failure as an unresolved repo, the way
-    `cli._reconcile_tasks_with_git` already does for step 4 (`_unresolved`, with the reason
-    carried verbatim rather than collapsed to a name — D44). Stated here, and in ADR-0088 §7,
-    because an obligation that lives only in a report is not an obligation.
+    ADR-0088 §4 argues against: one repo stops the other 249 being reconciled.
+
+    **DISCHARGED (2026-08-21) by `cli._demote_to_floors` (`2f0db34`), which wraps
+    `await resume_floor(...)` in `except (GitError, OSError)` and reports the repo through
+    `_unresolved(...)` with the reason
+    carried verbatim rather than collapsed to a name (D44) — `GitCommandError` subclasses
+    `GitError`, so the deadline case is covered.** Verified by reading that function, not
+    inherited from a report. The obligation is recorded here anyway because it is a property of
+    *this* function's interface that survives its current caller: anything else that drives
+    `resume_floor` over a fleet owns the same per-repo isolation.
+
+    **And the fix could not have lived here.** Containing the exception inside `resume_floor`
+    would mean returning a floor computed from evidence that was never established — a demotion
+    on a clock reading, which is strictly worse than a loud failure and is the same
+    "unsettled probe reported as a verdict" collapse D42 exists to refuse one layer down. The
+    only place that can answer "this repo could not be asked" without inventing a verdict for it
+    is the per-repo loop.
+
+    **DISCHARGED 2026-08-21 at `42a4369` (lane W7) — the paragraph above is kept in its original
+    tense as the statement of the obligation, and this is the record that it was met.**
+    `cli._demote_to_floors` wraps `await resume_floor(...)` per repo in
+    `except (GitError, OSError)` and routes the failure to `_unresolved(report, {"repo_id": ...},
+    f"{type(exc).__name__}: {exc}")`, so the reason reaches the operator verbatim and the other
+    repos are still reconciled. `GitCommandError` subclasses `GitError`
+    (`vcs/git.py`), so the D42 deadline case the paragraph above names is inside that clause and
+    not beside it — verified by construction rather than by reading the class line:
+    `tests/test_cli.py::test_resume_step_5_contains_a_git_failure_to_the_one_repo_it_happened_to`
+    raises a real `GitCommandError` from one of two repos' probes and asserts the other is still
+    demoted, that the failing repo appears in `unresolved` with its message, and that the rendered
+    report says so. Mutation M5 of that suite narrows the clause to `except OSError` and the test
+    goes red, so this is not a claim resting on the sentence you are reading.
     """
     known: dict[Phase, bool] = {}
     while True:

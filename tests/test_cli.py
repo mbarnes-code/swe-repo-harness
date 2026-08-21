@@ -4234,9 +4234,9 @@ def test_resume_step_5_dry_run_previews_the_same_plan_and_leaves_the_database_by
     assert written["applied"] is True
     assert [
         (entry["repo_id"], entry["floor"], entry["phases"]) for entry in written["demoted"]
-    ] == [
-        (entry["repo_id"], entry["floor"], entry["phases"]) for entry in planned["demoted"]
-    ], "the preview and the write disagree about what step 5 demotes"
+    ] == [(entry["repo_id"], entry["floor"], entry["phases"]) for entry in planned["demoted"]], (
+        "the preview and the write disagree about what step 5 demotes"
+    )
 
 
 def test_resume_step_5_dry_run_says_it_would_demote_and_the_real_run_says_it_did(
@@ -4398,7 +4398,10 @@ def test_resume_step_5_demotes_a_repo_whose_worktree_the_reaper_removed_all_the_
     assert entry["phases"] == ["SCAN", "TRANSFORM", "BUILD"]
     assert entry["evidence"] == {"SCAN": False, "TRANSFORM": False, "BUILD": False}
     assert [status for status, _attempts in _step5_rows(db).values()] == [
-        "PENDING", "PENDING", "PENDING", "PENDING"
+        "PENDING",
+        "PENDING",
+        "PENDING",
+        "PENDING",
     ]
 
 
@@ -4601,7 +4604,7 @@ def test_resume_step_5_re_opens_the_closed_wave_it_demotes_a_member_out_of(
 def test_resume_step_5_leaves_a_repo_at_its_floor_alone_and_says_which(
     workspace: Path,
 ) -> None:
-    """"Nothing to demote" and "3 repos demoted" are not degrees of one thing (D44).
+    """`unchanged` and `demoted` are not degrees of one thing (D44).
 
     A run where every repo already sits at its floor writes nothing, and `applied` must be
     `False` on that path even without `--dry-run` — the payload reports what HAPPENED, not what

@@ -8707,11 +8707,43 @@ answers `None` for a settled "no such rev". It does not contain the case one lay
 when a probe never started or was killed at its deadline (D42 — deliberate and correct in
 `vcs/git.py`). A single `rev-parse` that hits the wave deadline therefore raises out of
 `resume_floor`, and a subtask-7 caller that drives the fleet inside one `try` gets exactly the
-outcome §4 argues against: one repo stops the other 249 being reconciled. Subtask 7 **must** wrap
-the call per repo and record the failure the way `cli._reconcile_tasks_with_git` already does for
-step 4 (`_unresolved`, reason carried verbatim rather than collapsed to a name — D44). Stated in
-`resume_floor`'s own docstring as well as here, because an obligation that lives only in a report
-is not an obligation.
+outcome §4 argues against: one repo stops the other 249 being reconciled.
+
+> **DISCHARGED (2026-08-21) — not outstanding, and this paragraph's original future tense outlived
+> its own fix.** `cli._demote_to_floors` (subtask 7, `2f0db34`) wraps `await resume_floor(...)` in
+> `except (GitError, OSError)` and reports the repo through `_unresolved(...)` with the reason
+> carried verbatim rather than collapsed to a name (D44); `GitCommandError` subclasses `GitError`,
+> so the deadline case is covered. Verified by reading `cli.py` at `1ce1901`, not inherited from a
+> report. The obligation stays recorded because it is a property of `resume_floor`'s *interface*
+> that outlives its current caller: anything else driving it over a fleet owns the same isolation.
+>
+> **And the fix could not have lived in `resume_floor`.** Containing there would mean returning a
+> floor computed from evidence that was never established — a demotion on a clock reading, which
+> is strictly worse than a loud failure and is the same "unsettled probe reported as a verdict"
+> collapse D42 refuses one layer down. Only the per-repo loop can say "this repo could not be
+> asked" without inventing a verdict for it. So the unsettled-probe deadline was a real defect
+> (accidentally reachable, not adversarial) *and* the right place to fix it was the caller.
+
+> **DISCHARGED 2026-08-21 at `42a4369` (lane W7). The paragraph above is left in its original
+> unmet tense — it is the statement of the obligation, and rewriting it would erase what was true
+> when ADR-0088 was written (CLAUDE.md Guardrail 7).** `cli._demote_to_floors` wraps
+> `await resume_floor(...)` **per repo** in `except (GitError, OSError)` and records the failure
+> through `_unresolved` with the reason carried verbatim, exactly as this paragraph specifies;
+> `GitCommandError` subclasses `GitError`, so the D42 deadline-hit case is inside that clause.
+> Bound by `tests/test_cli.py::test_resume_step_5_contains_a_git_failure_to_the_one_repo_it_
+> happened_to`, which raises a real `GitCommandError` from one of two repos' probes and asserts
+> the other repo is still demoted — and by that suite's mutation M5, which narrows the clause to
+> `except OSError` and turns the test red. **The obligation is met; nothing here is outstanding.**
+>
+> One thing worth recording rather than smoothing over, because it is this round's recurring
+> shape: the containment and a hard `TypeError` on the same unconditional path lived **eleven
+> lines apart in one function** for four commits. `7b2d48e` inverted `RepoEvidence.for_repo`'s
+> cache-boundary contract six minutes after `2f0db34` landed the caller, the inverting lane's
+> caller sweep did not see a caller that had not existed when it formed its picture of the tree,
+> and this lane did not re-read before trusting its own earlier verification. Neither premise was
+> wrong when formed. The same unperformed re-read produced both the break (`main` red, 17 resume
+> tests, repaired at `42a4369`) and the four commits during which this paragraph described as
+> future work something already done.
 
 ### 6. Validation
 
@@ -8798,6 +8830,39 @@ ancestry asymmetry is now disclosed in `_build_evidence`'s docstring as design �
 consequence stated). m2 (the tail import block) stands with its stated reason. m5 is recorded as
 discipline, and I5 above is what that gap looks like when it matters.
 
+### 6b. Fix round 2 (V4 re-review): two corrections, and the sweep lesson behind the Critical
+
+Two documentation defects, both of the same shape — **a claim that was true when written and was
+not re-measured when the tree moved under it.**
+
+1. **The `MIRROR_CACHE_SUBDIR` binding's rationale named sites that do not match its own regex.**
+   `test_the_mirror_cache_subdir_is_the_one_cli_writes` scopes to `cli._scan_payloads`, and its
+   docstring justified that by claiming an unscoped sweep would also match `_gc_disk` and the
+   gazelle / resolve / ingest roots. It would not: those spell
+   `(settings.root / settings.config.run.cache_dir).resolve()` with no literal adjacent, so the
+   regex cannot see them. Re-measured by running the regex over `git show <sha>:src/fleet/cli.py`
+   at three commits: `7b2d48e` → `['git', 'git']` (the second was `cli._demote_to_floors`, which
+   then built the mirror root itself), `42a4369` → `['git']`, `1ce1901` → `['git']`. So the
+   scoping *was* load-bearing when written, is not today, and becomes so again at the next caller
+   that folds a segment in. Both docstrings now carry the measurement rather than the story, and
+   `for_repo`'s site list is re-derived by walking `cli.py`'s AST (it had also named `_gc_impl`
+   where the `run.cache_dir` read is in `_gc_disk`).
+
+2. **§5's containment paragraph outlived its own fix** — see the DISCHARGED block there.
+
+**The sweep lesson, recorded because it caused a Critical and it is not a lesson about care.**
+Inverting `for_repo`'s `cache_dir` contract (§6a, I2) was correct, and the caller set was empty
+when the change was designed. `cli._demote_to_floors` landed at `2f0db34`, **five minutes and 42 seconds
+before** `7b2d48e` (12:32:25 vs 12:38:07 UTC, measured from the commit dates), and still passed
+the old keyword-only `git_cache_dir=` — a hard `TypeError` on the unconditional `fleet resume`
+path, repaired at `42a4369`. Nothing in subtask 5's own suite could see it: the binding asserts the
+*segment* `cli._scan_payloads` writes, and says nothing about what any caller passes, which is the
+other half of the contract and lives on the caller's side of the boundary. That limit is now
+stated in the test's own docstring rather than left to be discovered. The general rule: **when a
+change inverts a contract, re-derive the caller set at the moment of the change, not from a
+reading taken earlier in the session** — in a round with four live lanes, "no callers" has a
+shelf life measured in minutes.
+
 ### 7. What this ADR does not do
 
 - It does not implement §11.5 step 4's parenthetical selector (§4), does not wire step 5 into
@@ -8810,8 +8875,11 @@ discipline, and I5 above is what that gap looks like when it matters.
   the whole file.
 - It does not resolve final-review findings I4, M1–M5. I3 is resolved, by §5 above.
 - **It does not contain exceptions on the caller's behalf.** See §5's containment paragraph:
-  subtask 7 owns per-repo isolation, and a deadline-hit `rev-parse` is the case §4's ruling does
-  not reach.
+  the caller owns per-repo isolation, and a deadline-hit `rev-parse` is the case §4's ruling does
+  not reach. Discharged for the one caller that exists (`cli._demote_to_floors`, `2f0db34`); the
+  obligation is an interface property, so it stands for the next one.
+  *(Still true of this ADR's own change; the obligation it hands to subtask 7 was **discharged**
+  at `42a4369` — see the dated marker in §5. ADR-0089 §7 carries the verification.)*
 - It does not tighten Phase 3 to an ancestry check. The asymmetry with Phase 2 is design §3's and
   is disclosed rather than silently inherited; changing it would be a divergence with no
   implementation behind it to arbitrate, unlike the three this ADR records.
@@ -9092,10 +9160,24 @@ performs and documents.
   table nobody predicted trips it too. Its fixture's plan is non-empty, so `if dry_run or not plans`
   is decided by `dry_run` alone — the guard is genuinely reached, which is exactly how step 4's
   first dry-run test failed.
-- `ruff check`, `ruff format --check` and `mypy` clean on `src/fleet/cli.py`,
-  `src/fleet/orchestrator/reentry.py` and `tests/test_cli.py`. (`src/fleet/state/repository.py` has
-  two **pre-existing** `ruff format` deviations at unrelated lines, present at `690a825` before this
-  lane touched the file; no hunk of this change adds one.)
+- **Lint and types, with the scope stated rather than implied** — the first draft of this bullet
+  claimed `ruff format --check` clean on `src/fleet/cli.py`, which is **false and was corrected by
+  re-running the check rather than by being careful**:
+  - `mypy` **unscoped** — `python -m mypy` with no path arguments, so `pyproject.toml`'s
+    `packages = ["fleet"]` + `strict` decides the scope: **115 source files, no issues**. A
+    path-scoped invocation would have been a narrower claim wearing the same words.
+  - `ruff check`: clean on `src/fleet/cli.py`, `src/fleet/orchestrator/reentry.py`,
+    `src/fleet/state/repository.py` and `tests/test_cli.py`.
+  - `ruff format --check`: **`src/fleet/cli.py`, `src/fleet/state/repository.py` and
+    `tests/test_cli.py` all fail it, and all three failed it at `690a825` before this lane touched
+    them** — measured by piping each file's pre-lane blob through `--stdin-filename`. The formatter
+    is evidently not enforced on them, so "clean" was never available to claim. What IS claimed, and
+    was measured by filtering `ruff format --diff` to the hunks overlapping this lane's own
+    additions: **zero deviations inside them** — the three that existed were fixed rather than
+    excused. `src/fleet/orchestrator/reentry.py` is genuinely clean, before and after.
+  - `pytest tests/test_cli.py` **with no `-k` filter**: 126 passed. The earlier `-k resume`
+    scoping is disclosed here because an undisclosed scoping is how a green claim outlives the
+    thing it claimed about.
 - **A cross-lane break found and repaired here, reported rather than absorbed silently.** `7b2d48e`
   inverted `RepoEvidence.for_repo`'s cache boundary — the parameter became an unsuffixed `cache_dir`
   and the method now appends `reentry.MIRROR_CACHE_SUBDIR` itself — and left this ADR's caller
