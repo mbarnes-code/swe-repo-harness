@@ -35,6 +35,8 @@ from the same dict.
 
 from __future__ import annotations
 
+import ast
+import re
 import subprocess
 from collections.abc import Iterator, Mapping
 from pathlib import Path
@@ -45,6 +47,7 @@ import pytest
 from fleet.models.enums import Phase, RepoStatus
 from fleet.orchestrator import reentry
 from fleet.orchestrator.reentry import (
+    MIRROR_CACHE_SUBDIR,
     EvidenceRow,
     RepoEvidence,
     evidence_holds,
@@ -118,10 +121,10 @@ class _Fleet:
         """The four `phases` rows of a repo that has finished 1-3 and not started 4. Overrides
         are named by `Phase` member name (`BUILD=...`), which keeps the call sites readable."""
         rows: dict[Phase, EvidenceRow | None] = {
-            Phase.SCAN: EvidenceRow(RepoStatus.SUCCEEDED),
+            Phase.SCAN: EvidenceRow(RepoStatus.SUCCEEDED, None),
             Phase.TRANSFORM: EvidenceRow(RepoStatus.SUCCEEDED, self.transform_sha),
             Phase.BUILD: EvidenceRow(RepoStatus.SUCCEEDED, self.build_sha),
-            Phase.VERIFY: EvidenceRow(RepoStatus.PENDING),
+            Phase.VERIFY: EvidenceRow(RepoStatus.PENDING, None),
         }
         rows.update({Phase[name]: row for name, row in overrides.items()})
         return rows
@@ -451,7 +454,7 @@ class _RecordingEvidence(Mapping[Phase, bool]):
 
 
 def _rows(*statuses: RepoStatus) -> dict[Phase, EvidenceRow | None]:
-    return {phase: EvidenceRow(status) for phase, status in zip(Phase, statuses, strict=True)}
+    return {phase: EvidenceRow(status, None) for phase, status in zip(Phase, statuses, strict=True)}
 
 
 S = RepoStatus.SUCCEEDED
@@ -604,14 +607,103 @@ async def test_an_unregistered_phase_raises_rather_than_defaulting_to_false() ->
         )
 
 
+async def test_build_evidence_fails_for_a_reaped_worktree_that_still_has_its_pointer(
+    fleet: _Fleet, tmp_path: Path
+) -> None:
+    """**The reaped-worktree repo this whole subtask is written about, at Phase 3.**
+
+    `phases(r,3).post_commit_sha` is populated and real — the run got that far — and the worktree
+    is gone, which is what a reaper or an operator's `rm -rf` leaves. Every other Phase-3 test runs
+    against a fixture that *has* a worktree, and the fresh-repo test short-circuits at `if not
+    sha` before Git is reached, so until this fixture existed `_build_evidence`'s worktree guard
+    was correct, present, and held there by nothing: no test and no mutation could express the one
+    state it exists for.
+
+    Without the guard this raises `FileNotFoundError` rather than returning `False` —
+    `util.proc._run_locked` wraps `create_subprocess_exec(..., cwd=str(cwd))` in a `try:` whose
+    only handler is `finally:`, with no `except OSError`, so the OS error propagates out of
+    `Git.exec`. A raise is the outcome ADR-0088 §4 argues against at length: it would abort the
+    whole resume rather than lower this one repo's floor.
+    """
+    reaped = tmp_path / "reaped"
+    assert not reaped.exists(), "fixture: the worktree must be genuinely absent, not empty"
+    rows = fleet.rows()
+    assert rows[Phase.BUILD] is not None and rows[Phase.BUILD].post_commit_sha
+    assert await _holds(fleet, Phase.BUILD, rows=rows, worktree=reaped) is False
+
+
+def test_evidence_row_refuses_to_be_constructed_without_the_pointer_column() -> None:
+    """**The mechanism for the one mistake no fixture can express.**
+
+    `state.repository.PhaseRow` does not carry `post_commit_sha` and `state/repository.py` has no
+    reader that returns it, so the natural projection from the row a subtask-7 caller already
+    holds is `EvidenceRow(status=row.status)`. With a default on the field that expression
+    constructs, type-checks and runs — and answers `False` at Phases 2 and 3 for every repo, so
+    the walk never stops and the whole fleet is demoted to `SCAN` on every resume, silently.
+
+    A test cannot catch that, because any fixture reaching this class has already answered the
+    question. The signature is the only place the mistake is visible, so the field is required and
+    omission is a `TypeError` at construction. Passing `None` explicitly stays legal: a phase that
+    genuinely has no pointer is a real state, and this asserts both halves.
+    """
+    with pytest.raises(TypeError):
+        EvidenceRow(RepoStatus.SUCCEEDED)  # type: ignore[call-arg]
+    assert EvidenceRow(RepoStatus.SUCCEEDED, None).post_commit_sha is None
+
+
+def test_the_mirror_cache_subdir_is_the_one_cli_writes() -> None:
+    """`MIRROR_CACHE_SUBDIR` parsed out of `cli._scan_payloads`'s own source, not restated.
+
+    `for_repo` appends this segment so no caller has to remember it, which is only safe while the
+    segment is the one production writes. A caller passing the wrong root probes a directory no
+    worker ever wrote, `_mirror_is_initialized` answers `False` for every repo, and the fleet's
+    floor is `SCAN` — the same silent failure as I1, one layer out.
+
+    The claim is parsed **out of** the source rather than compared text-to-text, so editing
+    `cli.py`'s expression changes what this asserts. The segment is extracted from
+    `_scan_payloads`'s body only — a whole-file grep would also match `_gc_impl` and the
+    gazelle / resolve / ingest roots, which are different directories that are not this one — and
+    the body is whitespace-normalised first, because a line-oriented search certifies a class as
+    fixed when a wrapped match defeats it.
+    """
+    source = (Path(__file__).resolve().parents[1] / "src" / "fleet" / "cli.py").read_text()
+    tree = ast.parse(source)
+    bodies = [
+        ast.get_source_segment(source, node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and node.name == "_scan_payloads"
+    ]
+    assert len(bodies) == 1, f"expected exactly one `_scan_payloads`, found {len(bodies)}"
+
+    normalised = re.sub(r"\s+", " ", bodies[0])
+    segments = re.findall(r'settings\.config\.run\.cache_dir\s*/\s*"([^"]+)"', normalised)
+    assert segments == [MIRROR_CACHE_SUBDIR], (
+        f"`cli._scan_payloads` builds the git mirror root as "
+        f"`run.cache_dir / {segments}`, but `reentry.MIRROR_CACHE_SUBDIR` is "
+        f"{MIRROR_CACHE_SUBDIR!r}. `RepoEvidence.for_repo` would probe a directory no worker "
+        f"writes and every repo's floor would be SCAN."
+    )
+
+
+def test_a_membership_test_on_the_lazy_evidence_answers_instead_of_raising() -> None:
+    """`_EvidenceWanted` is not a `KeyError`, which is what makes the laziness work — and which
+    would also let an internal control-flow exception out of `phase in evidence`, since
+    `Mapping.__contains__` catches only `KeyError`. Inert while `phase_floor` uses `.get`
+    exclusively; asserted so the next edit to either side does not have to know that."""
+    lazy = reentry._LazyEvidence({Phase.SCAN: True})
+    assert Phase.SCAN in lazy
+    assert Phase.BUILD not in lazy
+
+
 def test_for_repo_derives_the_paths_production_writes(tmp_path: Path) -> None:
     """The derivations are `clone.CloneWorker._mirror_path` (`<cache>/<slug(repo_id)>.git`) and
     `RunContext.worktree` (`<work_dir>/<repo_id>`). A step 5 that probed a directory no worker
     ever wrote would answer `False` for every repo and demote the whole fleet to `SCAN`."""
     repo = RepoEvidence.for_repo(
-        REPO_ID, git_cache_dir=tmp_path / "cache" / "git", work_dir=tmp_path / "work", dest=DEST
+        REPO_ID, cache_dir=tmp_path / "cache", work_dir=tmp_path / "work", dest=DEST
     )
-    assert repo.mirror == tmp_path / "cache" / "git" / "acme-widget.git"
+    assert repo.mirror == tmp_path / "cache" / MIRROR_CACHE_SUBDIR / "acme-widget.git"
     assert repo.worktree == tmp_path / "work" / REPO_ID
     assert repo.migrate_branch() == BRANCH
     assert repo.has_verification_report is False

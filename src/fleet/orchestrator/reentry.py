@@ -91,10 +91,11 @@ def phase_floor(
     evaluation would spend Git reads on phases this walk never consults, and re-deriving the
     frontier in the caller so it could pre-compute only the needed span would put the
     settled-for-demotion classification in two modules with nothing binding them (defect D74's
-    shape). The guarantee is not a convention: `tests/test_reentry_evidence.py::
-    test_phase_floor_asks_evidence_only_for_phases_strictly_below_the_frontier` records every
-    lookup and fails on one above. The "absent from `evidence`" sentence above still governs a
-    plain mapping; a computing mapping simply never has an absent key.
+    shape). The guarantee is not a convention:
+    `test_phase_floor_asks_evidence_only_for_phases_strictly_below_the_frontier`
+    (`tests/test_reentry_evidence.py`) records every lookup and fails on one above. The "absent
+    from `evidence`" sentence above still governs a plain mapping; a computing mapping simply
+    never has an absent key.
 
     Returns `None` when there is nothing to compute: any phase is
     `REQUIRES_HUMAN_INTERVENTION` (mechanically terminal — resume never touches it), or every
@@ -181,10 +182,22 @@ class EvidenceRow:
     drags the whole Pydantic row in. So step 5 declares the two columns it needs and the caller
     projects its own read onto them — `resume_floor` then feeds the same mapping to `phase_floor`,
     which reads only `.status`, so one read serves both halves of the algorithm.
+
+    **`post_commit_sha` is REQUIRED, deliberately, and it is the only defence against a silent
+    fleet-wide demotion.** `PhaseRow` does not carry the column and `state/repository.py` contains
+    no reader that returns it (measured: zero occurrences of the name in that module), so the
+    obvious projection from the row a caller already holds is `EvidenceRow(status=row.status)`.
+    With a default that expression constructs, type-checks, runs, and answers `False` at Phases 2
+    and 3 for **every** repo — the walk never stops and the whole fleet is demoted to `SCAN` on
+    every resume. No fixture can express that mistake, because a fixture that reaches this class
+    has already answered the question. So the signature is the mechanism: omission is a
+    `TypeError` at construction, not a wrong answer at scale. Pass `None` explicitly for a phase
+    that genuinely has no pointer. The read that already returns the column is step 4's
+    `cli._ARBITRATED_TASKS_SQL` (`SELECT … p.base_ref, p.pre_commit_sha, p.post_commit_sha`).
     """
 
     status: RepoStatus
-    post_commit_sha: str | None = None
+    post_commit_sha: str | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -207,9 +220,19 @@ class RepoEvidence:
     branch: str = ""
 
     def migrate_branch(self) -> str:
-        """`migrate/<repo>` unless the caller named a branch. THE format is fixed by
-        `models.tasks.PullRequestDraft.branch`'s pattern (`^migrate/[a-z0-9._-]+$`) and built the
-        same way by `cli._reconcile_tasks_with_git` and `workers/prwriter`."""
+        """`migrate/<repo>` unless the caller named a branch.
+
+        Anchored on the CONSTRUCTION, not on a pattern: `cli.py` builds `f"migrate/{repo_id}"` at
+        three sites — task reconciliation, the ingest clone, and step 4's
+        `_reconcile_tasks_with_git` — and this restates them exactly.
+        `models.tasks.PullRequestDraft.branch`'s `^migrate/[a-z0-9._-]+$` is deliberately NOT the
+        authority here: a hierarchical repo id
+        yields `migrate/acme/widget`, whose `/` that character class rejects. A reader who
+        "reconciled" this method to the pattern by slugging the id would break Phase-2 evidence for
+        every repo with a `/` in its name, because the branch git actually holds is the unslugged
+        one. That tension is `cli.py`'s and pre-exists this method; it is named so it is not
+        inherited by accident.
+        """
         return self.branch or f"migrate/{self.repo_id}"
 
     @classmethod
@@ -217,7 +240,7 @@ class RepoEvidence:
         cls,
         repo_id: str,
         *,
-        git_cache_dir: Path,
+        cache_dir: Path,
         work_dir: Path,
         dest: str,
         has_verification_report: bool = False,
@@ -225,20 +248,38 @@ class RepoEvidence:
         """Derive the two paths the way production derives them, so step 5 cannot point at a
         directory no worker ever wrote.
 
-        `git_cache_dir` is `<root>/<run.cache_dir>/git` — the value `cli._scan_payloads` puts on
-        `CloneInput.cache_dir` — and the mirror under it is `<slug(repo_id)>.git`, which is
-        `workers/clone.CloneWorker._mirror_path` restated with the same `sandbox.worktree.slug`
-        this imports rather than a second slugifier. `work_dir` is `<root>/<run.work_dir>`, and
-        the worktree under it is `work_dir / repo_id` — `orchestrator.context.RunContext.worktree`
-        and `cli._reconcile_tasks_with_git`'s `work_root / repo_id`.
+        `cache_dir` is `<root>/<run.cache_dir>` — the **unsuffixed** value, which is what every
+        other `cache_dir` in `cli.py` means (`_gc_impl`, and the gazelle / resolve / ingest roots).
+        This method appends `MIRROR_CACHE_SUBDIR` itself, so the one place that knows git mirrors
+        live one level down is this expression rather than every caller. That is not tidiness: a
+        caller that passed the unsuffixed path to a parameter expecting the suffixed one would
+        probe a directory no worker ever wrote, `_mirror_is_initialized` would answer `False` for
+        every repo, and the whole fleet's floor would be `SCAN` on every resume — silently, with
+        no fixture able to express it, because the mistake is on the caller's side of the
+        boundary. `test_the_mirror_cache_subdir_is_the_one_cli_writes`
+        (`tests/test_reentry_evidence.py`) parses the segment out of `cli._scan_payloads`'s own
+        source and checks it against the constant.
+
+        The mirror is then `<slug(repo_id)>.git` — `workers/clone.CloneWorker._mirror_path`
+        restated with the same `sandbox.worktree.slug` this imports rather than a second
+        slugifier. `work_dir` is `<root>/<run.work_dir>`, and the worktree under it is
+        `work_dir / repo_id` — `orchestrator.context.RunContext.worktree` and
+        `cli._reconcile_tasks_with_git`'s `work_root / repo_id`.
         """
         return cls(
             repo_id=repo_id,
-            mirror=git_cache_dir / f"{slug(repo_id)}.git",
+            mirror=cache_dir / MIRROR_CACHE_SUBDIR / f"{slug(repo_id)}.git",
             worktree=work_dir / repo_id,
             dest=dest,
             has_verification_report=has_verification_report,
         )
+
+
+#: The directory under `<root>/<run.cache_dir>` that holds the per-repo git mirrors. `cli.py`'s
+#: scan-payload prologue is the authority — `cache_dir = str((settings.root /
+#: settings.config.run.cache_dir / "git").resolve())` — and `RepoEvidence.for_repo` appends this
+#: rather than making every caller remember it.
+MIRROR_CACHE_SUBDIR: Final = "git"
 
 
 #: A `Git` bound to one path. Injected (CLAUDE.md guardrail 3) so a test can supply a recording
@@ -333,7 +374,18 @@ async def _transform_evidence(
 async def _build_evidence(
     rows: Mapping[Phase, EvidenceRow | None], repo: RepoEvidence, git: GitFactory
 ) -> bool:
-    """Phase 3: `phases(r,3).post_commit_sha` resolves ∧ `<dest>/BUILD.bazel` is present."""
+    """Phase 3: `phases(r,3).post_commit_sha` resolves ∧ `<dest>/BUILD.bazel` is present.
+
+    **Resolvability, where Phase 2 checks ancestry — and that asymmetry is design §3's, not an
+    oversight.** Row 2 of its table says "resolves *on it*", row 3 says only "resolves", and this
+    follows the table. The consequence is real and is recorded rather than silently inherited: a
+    `build_sha` that a rollback or force-reset took off `migrate/<repo>` still yields `True` here
+    whenever `<dest>/BUILD.bazel` happens to be on disk, and because the walk stops at the
+    *highest* holder, `TRANSFORM`'s broken pointer is then never examined at all. Tightening this
+    to `is_ancestor` is defensible and is deliberately NOT done in subtask 5: it would be a
+    divergence from the design with no implementation behind it to arbitrate, unlike the three
+    ADR-0088 records. It belongs in a change that can measure the cost against a real fleet.
+    """
     if not _worktree_present(repo):
         return False
     row = rows.get(Phase.BUILD)
@@ -453,6 +505,17 @@ class _LazyEvidence(Mapping[Phase, bool]):
         except KeyError:
             raise _EvidenceWanted(phase) from None
 
+    def __contains__(self, phase: object) -> bool:
+        """Overridden so a membership test answers instead of raising.
+
+        `Mapping.__contains__` is `try: self[key] / except KeyError: return False`, and
+        `_EvidenceWanted` is deliberately not a `KeyError` — so the inherited version would let an
+        internal control-flow exception out of `phase in evidence`. Inert today (`phase_floor`
+        uses `.get` exclusively), but the next `phase_floor` edit or a subtask-7 caller must not
+        have to know that.
+        """
+        return phase in self._known
+
     def __iter__(self) -> Iterator[Phase]:
         return iter(self._known)
 
@@ -482,18 +545,37 @@ async def resume_floor(
     reads and a tree probe per repo per resume on phases the walk never consults, and re-deriving
     the frontier in the caller to avoid that would put the settled-for-demotion classification in
     two modules with nothing binding them — defect D74's shape.
+
+    **THIS FUNCTION ISOLATES NOTHING, AND THE CALLER OWNS PER-REPO CONTAINMENT.** Every exception
+    from `probe` propagates. That is not only the dangling-pointer case ADR-0088 §4 ruled on —
+    which is contained *inside* `evidence_holds`, where `Git.resolve` answers `None` for a settled
+    "no such rev" — but the case one layer below it: `Git.resolve` and `Git.is_ancestor` both call
+    `_require_settled`, which raises `GitCommandError` when a probe never started or was killed at
+    its deadline (D42, deliberate and correct there). So a single `rev-parse` that hits the wave
+    deadline raises here, and a caller that drives the fleet in one `try` gets exactly the outcome
+    ADR-0088 §4 argues against: one repo stops the other 249 being reconciled. Subtask 7 must wrap
+    the call **per repo** and record the failure as an unresolved repo, the way
+    `cli._reconcile_tasks_with_git` already does for step 4 (`_unresolved`, with the reason
+    carried verbatim rather than collapsed to a name — D44). Stated here, and in ADR-0088 §7,
+    because an obligation that lives only in a report is not an obligation.
     """
     known: dict[Phase, bool] = {}
     while True:
+        wanted: Phase | None = None
         try:
             # `phase_floor` reads only `.status` off each row, which `EvidenceRow` supplies; its
             # annotation names `PhaseRow` because that is what its own caller had. One cast here
             # rather than a second row read in every caller — fold it away by widening
             # `phase_floor`'s annotation to a status-only Protocol once this file is quiet.
             floor = phase_floor(cast("Mapping[Phase, PhaseRow | None]", rows), _LazyEvidence(known))
-        except _EvidenceWanted as wanted:
-            if wanted.phase in known:  # pragma: no cover - `_LazyEvidence` returns known phases
-                raise RuntimeError(f"step-5 evidence re-requested for {wanted.phase!r}") from None
-            known[wanted.phase] = await probe(wanted.phase)
-            continue
-        return floor, known
+        except _EvidenceWanted as exc:
+            if exc.phase in known:  # pragma: no cover - `_LazyEvidence` returns known phases
+                raise RuntimeError(f"step-5 evidence re-requested for {exc.phase!r}") from None
+            wanted = exc.phase
+        if wanted is None:
+            return floor, known
+        # Awaited OUTSIDE the `except` block on purpose: a `GitCommandError` raised in here would
+        # otherwise surface chained behind "During handling of the above exception", and the first
+        # thing an operator would read in the traceback is `_EvidenceWanted` — an internal
+        # control-flow signal that has nothing to do with why their resume stopped.
+        known[wanted] = await probe(wanted)

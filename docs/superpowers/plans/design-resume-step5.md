@@ -300,6 +300,35 @@ already checks, so the two cannot disagree:
 | 3 | `phases(r,3).post_commit_sha` resolves ∧ `<dest>/BUILD.bazel` present on the integration ref | `buildverify.py:688` |
 | 4 | `phases(r,3).status is SUCCEEDED` ∧ a persisted `VerificationReport` for `r` | `rdepverify.py:183`, `prwriter.py:209` |
 
+> **SETTLED (2026-08-21), lane W4 — the table's preamble is FALSE for row 4, and row 3's clause is
+> wrong. Both are implemented deliberately otherwise; do not reconcile the code to this table.**
+> True as a proposal at this document's declared anchor `7a8bfbb`; falsified by reading the
+> implementations it cites, and landed at `abd009b` with **ADR-0088 §2–§3** as the record.
+>
+> * **The preamble — "so the two cannot disagree" — does not hold for row 4.**
+>   `workers/rdepverify.preconditions_hold` returns `True` when the BUILD row is *missing*, with
+>   its own comment giving the reason ("No BUILD row at all is a first admission by the runner,
+>   not evidence of a failure"). That is right for an admission gate and catastrophic for
+>   evidence: a missing BUILD row is the state of every repo that has never built, so copying it
+>   would let the backward walk stop at Phase 4 — §3(b)'s promotion inversion, arriving by the one
+>   route this section believed it had closed. `evidence_holds(r, 4)` reads a missing row as
+>   `PENDING` and answers `False`. `docs/SPEC.md` §11.5 step 5 is affirmatively on the
+>   implementation's side here, naming the same inversion and citing ADR-0077 §6.
+> * **Row 3's "present on the integration ref" is wrong.** The method it cites checks
+>   `files_present(worktree / payload.dest / "BUILD.bazel")` — the worktree. §6 option C below is
+>   written about a Phase-3 repo *whose `BUILD.bazel` was reaped*, and a ref read cannot observe a
+>   deletion from disk: the blob stays reachable from `post_commit_sha`. Reading the ref would
+>   answer `True` for exactly the repo step 5 exists to demote.
+> * **Row 3 also transcribes only the third of `buildverify.preconditions_hold`'s three
+>   refusals.** The second, `dirs_present(worktree)`, is load-bearing, not defensive:
+>   `util.proc._run_locked` has no `except OSError`, so a `Git` call bound to a directory that is
+>   not there raises `FileNotFoundError` instead of answering. Both Git-reading predicates check
+>   the worktree first.
+> * **Rows 2 and 3 differ on ancestry, and that is inherited from this table rather than argued.**
+>   Row 2 says "resolves *on it*" (implemented as `Git.is_ancestor`); row 3 says only "resolves".
+>   The implementation follows the table and discloses the consequence in `_build_evidence`'s
+>   docstring; a subtask that wants them symmetric must decide it, not assume it.
+
 It reads `phases` + git and needs no payload, no `WorkerContext`, and no worker instance — which is
 what makes step 5 implementable at all without solving §1.
 

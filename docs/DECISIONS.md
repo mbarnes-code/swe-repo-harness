@@ -8528,10 +8528,22 @@ ref read cannot see a deletion from disk — the blob is still reachable from `p
 reading the ref answers `True` for exactly the repo step 5 exists to demote.
 
 `buildverify`'s **second** refusal (`dirs_present(worktree)`) turned out to be load-bearing rather
-than defensive and is mirrored too: `Git` shells out with its bound path as `cwd`, so a
-`resolve()` against a worktree that does not exist raises `FileNotFoundError`. The first draft
-omitted it and `test_a_fresh_repo_has_no_evidence_at_any_phase` — §5 row 5's own criterion —
-failed with that error instead of a verdict.
+than defensive and is mirrored in **both** Git-reading predicates: `util.proc._run_locked` wraps
+`create_subprocess_exec(..., cwd=str(cwd))` in a `try:` whose only handler is `finally:` — there is
+no `except OSError` — so a `Git` call bound to a directory that does not exist propagates
+`FileNotFoundError` out of `Git.exec` rather than returning a `ProcResult`.
+
+*Scope, corrected in fix round 1 (V4 finding I3).* The first draft omitted the guard and
+`test_a_fresh_repo_has_no_evidence_at_any_phase` — §5 row 5's own criterion — failed with that
+error instead of a verdict. That failure was `_transform_evidence`'s alone: it resolves the branch
+*before* it looks at the column, so a fresh repo reaches Git with no worktree.
+`_build_evidence` tests `if not sha` first, and a fresh repo has no pointer, so its own copy of the
+guard was correct, present, and **held there by nothing** — no fixture combined a populated
+`phases(r,3).post_commit_sha` with an absent worktree, which is precisely the reaped-worktree repo
+§6 option C and this whole subtask are about. The original wording of this paragraph read as
+though one failure covered both predicates; it did not.
+`test_build_evidence_fails_for_a_reaped_worktree_that_still_has_its_pointer` and mutation **M9**
+now bind the Phase-3 guard separately.
 
 ### 4. A dangling `post_commit_sha` is `False`, never a raise
 
@@ -8583,6 +8595,19 @@ than a convention:
   members. It returns the verdicts it actually gathered, so a `--dry-run` report can say *why* a
   repo was demoted without a second pass over Git.
 
+**`resume_floor` isolates nothing, and the caller owns per-repo containment (V4 finding I5).**
+§4's ruling contains the *dangling-pointer* case inside `evidence_holds`, where `Git.resolve`
+answers `None` for a settled "no such rev". It does not contain the case one layer below it:
+`Git.resolve` and `Git.is_ancestor` both call `_require_settled`, which raises `GitCommandError`
+when a probe never started or was killed at its deadline (D42 — deliberate and correct in
+`vcs/git.py`). A single `rev-parse` that hits the wave deadline therefore raises out of
+`resume_floor`, and a subtask-7 caller that drives the fleet inside one `try` gets exactly the
+outcome §4 argues against: one repo stops the other 249 being reconciled. Subtask 7 **must** wrap
+the call per repo and record the failure the way `cli._reconcile_tasks_with_git` already does for
+step 4 (`_unresolved`, reason carried verbatim rather than collapsed to a name — D44). Stated in
+`resume_floor`'s own docstring as well as here, because an obligation that lives only in a report
+is not an obligation.
+
 ### 6. Validation
 
 Nine checks, by a harness that asserts each anchor matches **exactly once**, reads
@@ -8615,6 +8640,59 @@ waiting to drift, so `test_the_restated_filesystem_facts_agree_with_the_worker_h
 calls both sides over a matrix whose HEAD-only and objects-only rows are the only rows on which a
 one-operator drift is visible.
 
+### 6a. Fix round 1 (V4 review): six more mutations, and what they close
+
+V4 returned 0 Critical / 6 Important / 6 Minor, with the spec verdict **MET on all four clauses**
+of design §5 row 5 and — on §2's divergence — `docs/SPEC.md` affirmatively on the implementation's
+side, naming the same promotion inversion and citing ADR-0077 §6. All three divergences were
+verified real and correct, including that `util.proc._run_locked` has no `except OSError`. What
+the review found was not wrong code but **claims held by nothing**, in three shapes: a guard no
+fixture could express (I3), a contract stated in a docstring where only a signature can enforce it
+(I1, I2), and a certification asserting more than its harness held (I6).
+
+Clean tree after the fixes: `tests/test_reentry_evidence.py` **31 passed** (was 27),
+`tests/test_reentry_floor.py` 42 passed.
+
+| Mutation | Δ | Result | Closes |
+|---|---|---|---|
+| **M9** — drop `_build_evidence`'s worktree guard | 2 | `…for_a_reaped_worktree_that_still_has_its_pointer` failed | I3 |
+| **M10** — `class _EvidenceWanted(KeyError)` | 2 | `…probes_each_asked_phase_exactly_once…` failed; **`tests/test_reentry_floor.py` still 42 passed** | I6 |
+| **M11** — `MIRROR_CACHE_SUBDIR = "mirrors"` | 2 | `…is_the_one_cli_writes` failed | I2 |
+| **M12** — restore `post_commit_sha`'s default | 2 | `…refuses_to_be_constructed_without_the_pointer_column` failed | I1 |
+| **M13** — inherit `Mapping.__contains__` | 2 | `…answers_instead_of_raising` failed | m4 |
+| **M14** — raise on a dangling sha in the BUILD branch | 2 | `…is_false_and_never_raises` failed | M6's noted narrowing |
+| **C1** — cosmetic reflow (control) | 3 | **31 passed** | — |
+
+**15/15 held**, same harness, same zero-line abort read before any pytest result.
+
+**M10 is the second Rule 12 discriminator, and the discrimination is INSIDE one test function.**
+`Mapping.get` catches `KeyError` and only `KeyError`, so a `KeyError` base makes every unknown
+phase answer `False` silently: nothing is probed and `gathered` stays empty — while the returned
+floor is unchanged. Measured rather than argued: under the mutation,
+`assert floor is Phase.SCAN` passes and `assert calls == [BUILD, TRANSFORM, SCAN]` is the line that
+fails. Before this row the "deliberately not a `KeyError`" claim — asserted in the class docstring,
+in §5 above and in the commit message — was bound by inspection while §6 certified it by harness.
+
+**I1 and I2 are answered with signatures, not sentences, because no fixture can express either.**
+`EvidenceRow(status=row.status)` is the obvious projection from the row a caller already holds
+(`PhaseRow` omits `post_commit_sha`; `state/repository.py` contains zero occurrences of the name),
+and with a default it constructs, type-checks, runs, and demotes the entire fleet to `SCAN` on
+every resume. The field is now required, so omission is a `TypeError`. Likewise `for_repo` took an
+already-`/git`-suffixed path while every other `cache_dir` in `cli.py` means the unsuffixed one; it
+now takes the unsuffixed value and appends `MIRROR_CACHE_SUBDIR` itself, and
+`test_the_mirror_cache_subdir_is_the_one_cli_writes` parses that segment **out of**
+`cli._scan_payloads`'s own source — scoped to that function, whitespace-normalised first — so
+editing `cli.py`'s expression changes what the test asserts.
+
+**Minors closed:** m1 (`migrate_branch` now anchors on `cli.py`'s construction, and names why
+`PullRequestDraft.branch`'s pattern is *not* the authority — a hierarchical repo id yields
+`migrate/acme/widget`, whose `/` the pattern rejects, so "reconciling" the method to it would break
+Phase-2 evidence for every repo with a `/`), m3 (the wrapped citation is joined so a line-oriented
+grep can see it), m4 (`__contains__` overridden, M13), m6 (the Phase-3 resolvability / Phase-2
+ancestry asymmetry is now disclosed in `_build_evidence`'s docstring as design §3's, with its
+consequence stated). m2 (the tail import block) stands with its stated reason. m5 is recorded as
+discipline, and I5 above is what that gap looks like when it matters.
+
 ### 7. What this ADR does not do
 
 - It does not implement §11.5 step 4's parenthetical selector (§4), does not wire step 5 into
@@ -8626,6 +8704,13 @@ one-operator drift is visible.
   annotation to a status-only `Protocol` is the right end state and belongs to a lane that owns
   the whole file.
 - It does not resolve final-review findings I4, M1–M5. I3 is resolved, by §5 above.
-- It allocates no D-number: §2, §3 and §4 correct the plan document's claims in this ADR and in
-  the code that supersedes them, so there is no residual defect for
-  `docs/INTEGRATION_HONESTY.md` to carry.
+- **It does not contain exceptions on the caller's behalf.** See §5's containment paragraph:
+  subtask 7 owns per-repo isolation, and a deadline-hit `rev-parse` is the case §4's ruling does
+  not reach.
+- It does not tighten Phase 3 to an ancestry check. The asymmetry with Phase 2 is design §3's and
+  is disclosed rather than silently inherited; changing it would be a divergence with no
+  implementation behind it to arbitrate, unlike the three this ADR records.
+- It allocates no D-number: §2, §3 and §4 correct the plan document's claims in this ADR, in the
+  code that supersedes them, and — as of fix round 1 — beside the claims themselves in
+  `docs/superpowers/plans/design-resume-step5.md` §3, using that file's own dated-marker
+  convention. So there is no residual defect for `docs/INTEGRATION_HONESTY.md` to carry.
