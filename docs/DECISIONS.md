@@ -8385,9 +8385,8 @@ two distinct inputs into one: coinciding anchors, then a heartbeat that could on
   been deleted from git while `phases.base_ref` still names it, so a real run would take both
   paths; M8 and M9 below are the two guards' discriminating mutations.
 * **`_persist_arbitration`'s `attempts` row selection.** `revalidation_round DESC` added to the
-  `ORDER BY` — `schema.sql` puts it in the uniqueness key because "a REVALIDATE re-run reuses
-  1..max_attempts, so without it round 2 overwrites round 1's evidence", and without it here
-  round 2's attempt 1 and round 1's attempt 1 tie and the winner is arbitrary. And an empty
+  `ORDER BY` — **and see §5d: the justification first published here for that term was false, the
+  term is inert, and the load-bearing half of this bullet is the sentence that follows.** An empty
   subquery makes `attempt_id = NULL`, which matches zero rows **silently** while
   `phases.post_commit_sha` is written in the same unit — the two pointers §11.5's authority table
   pairs, diverging with nothing saying so, and §11.5 step 5's `evidence_holds` reads one of them.
@@ -8466,6 +8465,62 @@ detector in both rounds. Every row was re-measured under the corrected gate; the
 M7 through M10 are the four that could not have fired against `fe743e6`'s test set at all: M7
 because no fixture could express a live lease, M8 and M9 because neither git-write guard was
 reachable, M10 because every fixture seeded an `attempts` row.
+
+### 5d. Fix round 2 — editorial correction: the `revalidation_round` justification was false
+
+**Dated 2026-08-21, lane W1, after V5's scoped re-review of `7d8f916`.** The correction is to the
+*argument*, not the code. `ORDER BY … revalidation_round DESC …` stays; what is retracted is the
+reason published for it at `7d8f916` in three places: `_persist_arbitration`'s docstring, §5b of
+this ADR, and `7d8f916`'s own commit message.
+
+**The retracted claim, quoted verbatim from §5b as it read at `7d8f916`:**
+
+> `revalidation_round DESC` added to the `ORDER BY` — `schema.sql` puts it in the uniqueness key
+> because "a REVALIDATE re-run reuses 1..max_attempts, so without it round 2 overwrites round 1's
+> evidence", and without it here round 2's attempt 1 and round 1's attempt 1 tie and the winner is
+> arbitrary.
+
+**Why it is false.** The subquery is scoped `WHERE run_id = ? AND task_id = ?`. Each revalidation
+round is its **own `tasks` row**: `tasks.revalidation_key` is `'r{round}:{sha256(providers)}'`
+(`schema.sql`, set iff `kind='REVALIDATE'`) and `ux_tasks_ident` keys `tasks` on
+`(run_id, repo_id, phase, kind, IFNULL(contract_id,''), IFNULL(revalidation_key,''))`. Two rounds
+therefore never share a `task_id`, so this subquery never sees more than one round and the tie
+described is **unreachable**. `schema.sql`'s reason for the column being in the `attempts`
+uniqueness key is real — but that key is not scoped by `task_id`, and the reason does not transfer
+to a sort that is. `record_attempt` (`state/repository.py`) confirms the write end: it inserts
+`task_id` and `revalidation_round` together from one `AttemptRow`.
+
+The term is retained and is now documented as **inert**: named so the sort lists the same
+components the declared key does, and pointing the right way if a future writer ever puts two
+rounds under one `task_id`. It is not what makes the query correct. What is: `attempt` and
+`retry_ordinal`, the only two columns that can distinguish rows inside the `task_id` scope.
+
+**The commit message of `7d8f916` carries the false claim and is NOT rewritten** — it recorded
+what its author believed at its own commit, and a rewritten message is a rewritten record
+(Guardrail 7's history rule). This section is its annotation; a reader who greps that message for
+the `revalidation_round` rationale should land here.
+
+**The cause, named because it is the failure mode every brief this round warned about.** The
+premise came from the review's own filing and was implemented rather than checked. Item 2 of the
+same finding *was* checked against `schema.sql` and correctly refused (§5b); item 1's **rationale**
+was not given the same treatment, and it was wrong for a different reason than item 2 was — so
+refusing one item of a finding is not evidence that the rest of it was verified. A review finding
+is a hypothesis in every part, including the parts one agrees with, and agreement is exactly where
+the check gets skipped.
+
+**V5's ruling on the contest, recorded for the ledger.** The item-2 contest was **upheld**:
+`attempts` declares `finished_at TEXT NOT NULL` beside `started_at TEXT NOT NULL`, the nullable
+`finished_at` in the same file belongs to `runs`, and the real crash shape is *no row at all* —
+which is item 3, fixed at `7d8f916`. §5b's account of that contest stands as written.
+
+**Deferred, recorded, not fixed here (V5).** Two minors, neither a state-corruption risk:
+`unwritten` is appended from inside the unit `StateWriter._run_with_busy_retry` re-invokes on
+`SQLITE_BUSY`, so a contended write can report a `provenance_missing` entry more than once; and
+`_arbitration_lines`'s step-4 header always renders "; N spared as live" even when `N` is 0.
+V5 also surfaced three "rolled back" sites (`docs/SPEC.md:6097`, `:7226`, `:7347`) under a broader
+vocabulary than either sweep in §2 used, all adjudicated **correct as written** — not a fourth
+member of the wrong-anchor class, but a live confirmation that §2's "what still escapes both
+vocabularies" disclosure names a real category rather than a hypothetical one.
 
 ### 6. What this ADR does not do
 

@@ -198,19 +198,23 @@ def claims(live_name: str, container_name: str) -> bool:
     `HEAD` named `ContainerSandbox.run()`'s `finally` (`:330-331`) — a path that CANNOT fire for
     these containers. That method has zero callers in `src/`, and `BuildverifyWorker`, which
     starts every container this predicate spares, does not go through it: it builds the argv
-    itself with `docker_run_argv` (`workers/buildverify.py:792`, `:1133`) and runs it on its own
-    `CommandRunner`, using the `ContainerSandbox` it constructs (`:1050`) only for
-    `list_with_verdict`/`remove`. The paths that do reach one of these containers are:
+    itself with `docker_run_argv` — called from `BuildverifyWorker._argv` for the build/test step
+    and from `BuildverifyWorker._c_toolchain_gate` for the probe — and runs it on its own
+    `CommandRunner`, using the `ContainerSandbox` that `BuildverifyWorker._sweep_containers`
+    constructs only for `list_with_verdict`/`remove`. The paths that do reach one of these
+    containers are:
 
     * **General** — the next idempotent `reap()`, once the rung stops being live. Real since
       `cli._reap_orphan_containers` gained the call in `e915b93` — the symbol is the anchor, and
       an earlier line citation here rotted when that function's docstring grew above the call.
       Before that it was a mechanism with no caller.
-    * **Conditional, deadline kill only** — `BuildverifyWorker.run()`'s two `_sweep_containers`
-      calls (`workers/buildverify.py:829`, `:958`), both guarded by `result.timed_out and
-      result.started`.
-    * **Conditional, explicit cancellation only** — `on_cancel`'s prefix sweep
-      (`workers/buildverify.py:1038`), reached from `_run_one`'s watchdog.
+    * **Conditional, deadline kill only** — two `_sweep_containers` calls, one in
+      `BuildverifyWorker._c_toolchain_gate` (guarded by `result.started`, inside its own timeout
+      branch) and one in `BuildverifyWorker.run` (guarded by `result.timed_out and
+      result.started`). They are **not** two calls in `run()` and they do **not** share a guard;
+      an earlier version of this sentence said both, and cited them by line.
+    * **Conditional, explicit cancellation only** — `BuildverifyWorker.on_cancel`'s prefix sweep,
+      reached from `_run_one`'s watchdog.
 
     `--rm` (`docker_run_argv`, `:133`) is why a cleanly-exiting invocation leaves nothing at all,
     but it is not a backstop for an orphan whose client was killed.

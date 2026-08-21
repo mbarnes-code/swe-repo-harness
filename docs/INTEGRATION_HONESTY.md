@@ -1593,9 +1593,12 @@ deadline shorter than the command, and `docker ps --all` afterwards.
 > unaffected. The entry stands as written; only this premise has moved.** `e915b93` landed §11.5
 > step 2's orphan sweep, and `cli._reap_orphan_containers` calls `ContainerSandbox.reap()` on every
 > `fleet resume`. Re-measured this session: `grep -rn '\.reap(' src/fleet/ | grep -v test` returns
-> two call sites (`cli._reap_orphan_worktrees`'s `manager.reap`, `cli._reap_orphan_containers`'s
-> `sandbox.reap`), not zero — cited by symbol because that file is another lane's and its line
-> numbers moved twice while this was being written. **What this does and does not change:** D32's
+> **three** lines, not zero: two of them are call sites (`cli._reap_orphan_worktrees`'s
+> `manager.reap` and `cli._reap_orphan_containers`'s `sandbox.reap`) and the third is a docstring
+> mention of `` `ContainerSandbox.reap()` `` in `sandbox/container.py`. Cited by symbol because
+> `cli.py` is another lane's file and its line numbers moved twice while this was being written.
+> (The predicate is a text grep, so it counts the mention; the claim that matters — `reap()` has
+> production callers, so "zero" is false — needs only the two.) **What this does and does not change:** D32's
 > defect is unchanged and still OPEN — the containerising path still bypasses `ContainerSandbox.run`
 > and still leaks on every timeout. What changes is the "would a test catch it?" reasoning above,
 > which rested on the reaper's *absence*: the leaked container is now swept by the next `fleet
@@ -3264,7 +3267,9 @@ is out of this docs-only lane (Rule 3).
 > false at `main`, so this defect is LIVE, not latent. The defect itself is unchanged and still
 > OPEN.** `e915b93` landed §11.5 step 2's orphan sweep; `cli._reap_orphan_containers` calls
 > `ContainerSandbox.reap()` on every `fleet resume`, and `grep -rn '\.reap(' src/fleet/ | grep -v
-> test` re-measured this session returns two call sites, not empty. Cited by symbol: `cli.py` is
+> test` re-measured this session returns **three** lines, not empty — two real call sites
+> (`cli._reap_orphan_worktrees`, `cli._reap_orphan_containers`) and one docstring mention in
+> `sandbox/container.py` that the text predicate cannot exclude. Cited by symbol: `cli.py` is
 > another lane's file and had uncommitted edits in the tree while this was written. **Consequences,
 > stated rather than implied:** (1) the severity line above — "low while unreached, and it inherits
 > D32's own 'medium' once `reap()` is wired up" — has had its condition met, so read it as medium;
@@ -4275,9 +4280,11 @@ is the one this whole class has: a reconciler follows the prose.
 > wrong predicate. The durable anchor is **`phase_floor`'s `break` on
 > `orchestrator/reentry._HARD_STOPS`**, which is still tested before `evidence` is consulted. (b)
 > The same paragraph's `src/fleet/orchestrator/reentry.py:80-81` for the docstring sentence stating
-> the rule is likewise moved; the anchor is the sentence in **`phase_floor`'s docstring** that
-> states where the backward search stops on a hard-stop row — named, not quoted, because nothing
-> enforces a copy. Editorial point 4 above cites the
+> the rule was moved by the **same commit, `1e857f3`** — named rather than inherited by adjacency:
+> the sentence sat at `:80` at `431b02f` and at `:89` after `1e857f3`, and a later docstring growth
+> has since carried it to `:103`, so it has now rotted twice. The anchor is the sentence in
+> **`phase_floor`'s docstring** that states where the backward search stops on a hard-stop row —
+> named, not quoted, because nothing enforces a copy. Editorial point 4 above cites the
 > same `:80-81` **at `431b02f`**, where it is correct and was measured — that citation is anchored to
 > its ref and is **not** corrected here. Nothing in this entry's measured table or its verdict
 > depends on either line number.
@@ -4287,9 +4294,7 @@ is the one this whole class has: a reconciler follows the prose.
 ### D71 — UNUSED. Allocated in error and never written; the number is free for allocation
 
 Not a defect record: no code, no test, and no failed run is filed under D71. The number is
-mentioned four times above — each one an occurrence of the sentence **"D71 remains/is the next free
-number"**, which is the durable anchor for them; at `b4567a5` those four sentences are at `:3323`,
-`:4119`, `:4163` and `:4254` — every time as "the next free
+mentioned four times above (`:3267`, `:4008`, `:4052`, `:4139`), every time as "the next free
 number," never as a heading that opens an entry — this document's convention for a real record is
 a line beginning `**D<n> —` or `### D<n> —`. Before this placeholder existed, `grep -n
 '^\*\*D71\b\|^### D71\b'` returned nothing; **it does not return nothing now.** This entry's own
@@ -4308,20 +4313,34 @@ today: a short, clearly-marked placeholder rather than a silent renumber (`docs/
 ADR-0079–0081, `f76da41`). It marks the distinction a reader cannot otherwise make from a bare gap:
 **free is not deleted.** D71 remains open for the next lane that needs a number.
 
-> **Editorial correction (2026-08-21), lane W2 — this placeholder's own four citations had rotted,
-> and the high-water mark beside the fourth was stale. The entry's verdict is unchanged: D71 is
-> free.** The citations read `:3267`, `:4008`, `:4052`, `:4139`; re-measured this session with a
+> **Editorial correction (2026-08-21), lane W2 — this placeholder's own four citations have rotted,
+> and the high-water mark beside the fourth is stale. The entry above is left exactly as its author
+> wrote it, including the four numbers; its verdict is unchanged and correct: D71 is free.** The
+> body cites `:3267`, `:4008`, `:4052`, `:4139`. Re-measured this session with a
 > whitespace-normalised whole-file scan and an offset-to-line map, the four sentences are at
-> `:3323`, `:4119`, `:4163`, `:4254` — off by +56, +111, +111, +115. All four texts still exist and
-> still say what this entry says they say; only the anchors moved, under section growth in this same
-> file. They are now given **by their sentence** as well as by line, because a register mention has
-> no symbol to name and a sentence is the nearest thing to one. Separately, the fourth site says
-> *"(highest allocated: D70)"*. That was true when written and is not now: counted by this file's own
-> entry syntax (`^\*\*D<n> —` / `^### D<n> —`), every number D1–D75 is present, so the highest
-> allocated is **D75** — this session's own new entry, below. **That parenthetical is a hand-asserted
-> high-water mark and it has now rotted once; re-measure it with the predicate above rather than
-> inheriting it.** The `(highest allocated: D70)` sentence itself is left as written: it sits inside
-> a dated editorial correction of its own and is a record of what was true at that commit.
+> `:3323`, `:4119`, `:4163`, `:4254` at `b4567a5` — off by +56, +111, +111, +115. All four texts
+> still exist and still say what the entry says they say; only the anchors moved, under section
+> growth in this same file. **The durable anchor for them is their own sentence**, "D71 remains/is
+> the next free number", because a register mention has no symbol to name and a sentence is the
+> nearest thing to one; read the body's four numbers as the measurement its author took, and this
+> sentence as the way to find them again.
+>
+> *(An earlier version of this marker edited those four numbers **out of the entry body** and put
+> the correction here — a rewrite, not an annotation, and inconsistent with the very next paragraph,
+> which declines to touch the neighbouring sentence on the opposite reasoning. The body is restored
+> verbatim. One convention, applied one way: an entry records what was true at its own commit; a
+> dated marker beside it records what changed.)*
+>
+> Separately, the fourth site says *"(highest allocated: D70)"*. That was true when written and is
+> not now. Counted by this file's own entry syntax (`^\*\*D<n> —` / `^### D<n> —`), headings exist
+> for every number D1–D75 with no gaps — but **"present" is not "allocated"**, and D71 is precisely
+> the case that separates them: its heading matches the syntax while its body disclaims any
+> allocation. So the highest number **allocated to a defect** is **D75**, this session's own new
+> entry below, and D71 remains free. **That parenthetical is a hand-asserted high-water mark and it
+> has now rotted once; re-measure it with the predicate above, and subtract placeholders by reading
+> them, rather than inheriting the figure.** The `(highest allocated: D70)` sentence itself is left
+> as written: it sits inside a dated editorial correction of its own and is a record of what was
+> true at that commit.
 
 ---
 
@@ -4464,6 +4483,18 @@ hazard belongs to the code under test, not to the tests that remember to opt out
 because "a test suite that reaches a real daemon" is a hazard that outlives the defect that
 exposed it, and because the seam functions (`_reap_container_sandbox`, `_reap_worktree_manager`)
 exist for exactly this and a future sweep added outside them re-opens it silently.
+
+> **Annotation (2026-08-21), lane W2 on behalf of lane W6 — two of D72's seven design tasks have
+> landed. D72 itself is NOT closed and this entry needs no correction; every claim in it is still
+> true as written.** `eaa112f` landed tasks 1 and 2 of the seven in
+> `docs/superpowers/plans/design-worktree-namespace.md`: ADR-0085 decides the two worktree name
+> forms, and `sandbox/worktree.py` gains `checkout_name`. Verified here rather than inherited from
+> the lane report — `grep -rn checkout_name src/fleet/` at `eaa112f` returns the definition, the
+> `sandbox/__init__.py` re-export and four docstring mentions, and **no production call site**. So
+> the claim this entry rests on — that step 2's worktree half sweeps a namespace nothing writes to —
+> is unchanged, and **tasks 3–7 remain open**. ADR-0085 §3 adds one fact this entry did not have:
+> **neither name form is injective over `RepoId`**, so once task 3a lands, `live_names` can spare
+> the wrong directory. That is a new hazard for the fix, not a change to this defect.
 
 ---
 

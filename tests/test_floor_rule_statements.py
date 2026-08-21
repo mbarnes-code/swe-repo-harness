@@ -191,6 +191,20 @@ _RESIDUAL = """Not bound, stated rather than implied:
    / nothing-left-unsettled sentence — which remains bound by nothing. Measured on a scratch copy:
    rewriting it so a terminal repo is "demoted to `SCAN`" rather than returning `None` — false
    against the code — leaves every case green.
+
+9. Layer G is scoped to **one file**, `docs/superpowers/plans/design-resume-step5.md`, by the
+   stated reason in its module comment: it is the only `docs/superpowers/plans/` document a live
+   task brief routes subtask implementers at. Measured at `19d7fb0^` with the predicate stated
+   there, the retracted quantifier occurs 21 times across 8 tracked `docs/**/*.md` files; the other
+   seven carry it only as history and are **outside this layer**, disclosed rather than exempted,
+   because a directory-wide rule would flag correct prose in seven of eight files and would need
+   the hand-maintained exemption list guardrail 6 says rots. Three further gaps, stated rather than
+   implied: the layer asserts a supersession marker is **present in the section**, never that the
+   marker is **true**; marker and quote need only share a section, so a marker at the foot of a
+   long section still vouches for a quote at its head; and re-wording the retracted phrase itself
+   makes every occurrence invisible, which is residual 3 in a third place. What it *is* proof
+   against, measured: deleting the quotes and leaving the markers fails in all three marked
+   sections, and a quotation re-wrapped across a `> ` line boundary is still seen.
 """
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -593,14 +607,39 @@ def test_the_floor_is_above_the_highest_holder_not_the_earliest_as_all_four_stat
 _ORDERING = re.compile(r"tested \*(before|after)\* evidence")
 
 
+class _RecordingEvidence(dict):  # type: ignore[type-arg]
+    """An `evidence` mapping that records which phases were asked about, in order.
+
+    `phase_floor` reads `evidence` only through `.get`, so overriding it observes the probe rather
+    than the answer.
+    """
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+        self.asked: list[Phase] = []
+
+    def get(self, key, default=None):  # type: ignore[no-untyped-def, override]
+        self.asked.append(key)
+        return super().get(key, default)
+
+
 def _observed_hard_stop_order() -> str:
     """`"before"` or `"after"`: which test `phase_floor` really applies first, measured.
 
-    Measured on the one state that separates them. `BUILD` is `DEGRADED` and its evidence does not
-    hold, `SCAN`'s does. Testing `_HARD_STOPS` first ends the walk at `BUILD` without the floor
-    moving onto or below it, so the floor is `VERIFY`. Consulting evidence first moves the floor
-    down at least one rung, whichever way the two tests are then arranged -- so every non-`VERIFY`
-    result means evidence was consulted at the hard-stop row, which is what "after" asserts.
+    **This reads the LOOKUPS, not the returned floor, and the difference is the whole instrument.**
+    The obvious probe -- run the walk over a `DEGRADED` `BUILD` whose evidence does not hold and
+    look at the floor -- is *blind to the property in this function's name*. Measured: under both
+    orderings the floor is `VERIFY`, because both branches are a bare `break`, so the row ends the
+    walk either way and no number of row shapes can move that quantity. An earlier version of this
+    function returned `"before" if floor is Phase.VERIFY else "after"` and therefore detected
+    **deletion** of the hard-stop test while reporting itself as an ordering detector; the swap
+    mutation left it green. That is CLAUDE.md guardrail 6's rule verbatim -- name the quantity the
+    instrument watches and ask whether the defect could leave it unchanged.
+
+    The quantity that *does* move is whether `evidence` is consulted at the hard-stop row at all.
+    Testing `_HARD_STOPS` first breaks before the lookup, so `BUILD` is never asked about; testing
+    evidence first asks and then breaks on the hard stop. Measured on this state: floor `VERIFY`
+    both ways, lookups `[]` versus `[BUILD]`.
     """
     rows = {
         Phase.SCAN: _row(Phase.SCAN, RepoStatus.SUCCEEDED),
@@ -608,8 +647,15 @@ def _observed_hard_stop_order() -> str:
         Phase.BUILD: _row(Phase.BUILD, RepoStatus.DEGRADED),
         Phase.VERIFY: _row(Phase.VERIFY, RepoStatus.PENDING),
     }
-    floor = phase_floor(rows, {Phase.SCAN: True, Phase.BUILD: False})
-    return "before" if floor is Phase.VERIFY else "after"
+    evidence = _RecordingEvidence({Phase.SCAN: True, Phase.BUILD: False})
+    floor = phase_floor(rows, evidence)
+    assert floor is Phase.VERIFY, (
+        "the ordering probe assumes the hard stop ends the walk at `BUILD` under either order, so "
+        f"the floor is `VERIFY` either way; it returned {floor!r}. The hard-stop test has been "
+        "deleted or the walk no longer stops on `_HARD_STOPS` -- a bigger defect than the ordering "
+        "this function measures, so it is raised here rather than folded into a direction."
+    )
+    return "after" if Phase.BUILD in evidence.asked else "before"
 
 
 def test_a_hard_stop_below_the_frontier_ends_the_walk_before_evidence_is_consulted() -> None:
@@ -965,18 +1011,27 @@ def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks
 
 #: **Why one file and not the directory.** `docs/superpowers/plans/design-resume-step5.md` is the
 #: document §5 of itself routes subtask authors at, and the only `plans/` file any live task brief
-#: names as an authority. It quotes the RETRACTED "earliest phase whose precondition holds" wording
-#: three times, attributed to live `docs/SPEC.md` line anchors, and nothing in this module's census
-#: reaches `docs/superpowers/plans/` -- so a subtask-4/5/7 author reading it was being handed the
-#: sentence `60d400b`/`f466287` removed, as if it were current.
+#: names as an authority. It quotes the RETRACTED "earliest phase whose precondition holds" wording,
+#: attributed to live `docs/SPEC.md` line anchors, and nothing in this module's census reaches
+#: `docs/superpowers/plans/` -- so a subtask-4/5/7 author reading it was being handed the sentence
+#: `60d400b`/`f466287` removed, as if it were current.
 #:
-#: **Extending the census to the whole directory was measured and rejected.** The retracted phrase
-#: occurs 38 times across 13 files under `docs/` (whole-file whitespace normalisation with an
-#: offset-to-line map), and all but these are legitimate history: review reports, ledger entries and
-#: `PROGRESS.md` checkpoints quoting the phrase precisely because it was retracted. A directory-wide
-#: rule would need a hand-maintained exemption list, which is the instrument CLAUDE.md guardrail 6
-#: says rots. So the scope is one file, chosen by a stated reason rather than by convenience, and
-#: the rest is disclosed in `_RESIDUAL` item 9 instead of being silently exempted.
+#: **Extending the census to the whole directory was measured and rejected. The measurement, with
+#: its predicate, because the first version of this comment carried a number that did not
+#: reproduce** (it said "38 times across 13 files", reached with a looser regex than the one stated
+#: beside it -- corrected here rather than softened). Predicate:
+#: `earliest\s+phase\s+whose\s+precondition\s+holds`, case-insensitive. Normaliser: whole-file
+#: whitespace collapse after stripping leading `>` blockquote and `#:` continuation markers, so a
+#: quotation that wraps across a line boundary is still one phrase. Measured over tracked
+#: `docs/**/*.md` at `19d7fb0^`: **21 occurrences across 8 files**.
+#:
+#: The **class result** is what the decision rests on, not the total: of those 8 files, **7 carry
+#: the phrase only as history** -- review reports, ledger entries, `PROGRESS.md` checkpoints and
+#: decision records that quote it *because* it was retracted -- and exactly **1** is a live design
+#: authority a task brief routes implementers at. A directory-wide rule would therefore flag correct
+#: prose in 7 of 8 files and need a hand-maintained exemption list, which is the instrument CLAUDE.md
+#: guardrail 6 says rots. So the scope is one file, chosen by a stated reason rather than by
+#: convenience, and the rest is disclosed in `_RESIDUAL` item 9 instead of being silently exempted.
 _STEP5_PLAN = _ROOT / "docs" / "superpowers" / "plans" / "design-resume-step5.md"
 
 #: The retracted quantifier itself -- text far older than the markers this layer requires, so a
@@ -990,18 +1045,78 @@ _RETRACTED_QUANTIFIER = re.compile(r"earliest\s+phase\s+whose\s+precondition\s+h
 _SUPERSESSION_MARKER = re.compile(r"\*\*SUPERSEDED\b")
 
 #: Markdown heading, any depth -- the section boundary this layer scopes to.
-_HEADING = re.compile(r"^#{1,6} .*$", re.MULTILINE)
+_HEADING = re.compile(r"^#{1,6} ")
+
+#: A blockquote line, indented or not. Marker *blocks* are contiguous runs of these.
+_BLOCKQUOTE = re.compile(r"^[ \t]*>[ \t]?")
 
 
-def _step5_plan_sections() -> list[tuple[int, str]]:
-    """`[(first_line_number, section_text)]`, split on markdown headings."""
-    text = _STEP5_PLAN.read_text(encoding="utf-8")
-    starts = [0] + [m.start() for m in _HEADING.finditer(text)]
-    bounds = starts + [len(text)]
-    return [
-        (text.count("\n", 0, bounds[i]) + 1, text[bounds[i] : bounds[i + 1]])
-        for i in range(len(bounds) - 1)
-    ]
+def _plan_lines() -> list[tuple[int, str, bool]]:
+    """`(1-based line number, text, is_inside_a_supersession_marker)` for every line of the plan.
+
+    A marker block is a contiguous run of blockquote lines, at least one of which matches
+    `_SUPERSESSION_MARKER`. **Marking the whole block matters and is the fix for a real defect in
+    the first version of this layer**: two of the three markers written in `19d7fb0` restate the
+    retracted phrase inside themselves, so a census that could not tell a marker's mention from a
+    quotation was satisfied by the marker alone -- measured, the orphan direction held for 1 of 3
+    marked sections while the test docstring claimed all of them. A detector whose recognition step
+    counts its own remedy as its quarry is the recognition-vs-resolver split CLAUDE.md guardrail 6
+    names; the resolver was fine.
+    """
+    lines = _STEP5_PLAN.read_text(encoding="utf-8").split("\n")
+    inside = [False] * len(lines)
+    i = 0
+    while i < len(lines):
+        if _BLOCKQUOTE.match(lines[i]):
+            j = i
+            while j < len(lines) and _BLOCKQUOTE.match(lines[j]):
+                j += 1
+            if any(_SUPERSESSION_MARKER.search(lines[k]) for k in range(i, j)):
+                for k in range(i, j):
+                    inside[k] = True
+            i = j
+        else:
+            i += 1
+    return [(n + 1, text, flag) for n, (text, flag) in enumerate(zip(lines, inside))]
+
+
+def _step5_plan_sections() -> list[tuple[int, list[tuple[int, str, bool]]]]:
+    """`[(first_line_number, lines)]`, split on markdown headings."""
+    out: list[tuple[int, list[tuple[int, str, bool]]]] = []
+    start = 1
+    current: list[tuple[int, str, bool]] = []
+    for line_number, text, flag in _plan_lines():
+        if _HEADING.match(text) and current:
+            out.append((start, current))
+            current = []
+            start = line_number
+        current.append((line_number, text, flag))
+    if current:
+        out.append((start, current))
+    return out
+
+
+def _plan_body(rows: list[tuple[int, str, bool]]) -> tuple[str, list[int]]:
+    """A section's NON-marker text, whitespace-normalised, with a character-to-line map.
+
+    Blockquote markers are stripped before the collapse, because the retracted phrase is quoted
+    inside `> ` blocks and one of the two originals **wraps across a `> ` line boundary** -- the
+    first version of this layer matched raw text and never saw it (measured: 5 raw matches, 6
+    normalised). That is the wrapped-match miss CLAUDE.md records five times over, reproduced inside
+    the instrument written to stop this class.
+    """
+    buffer = ""
+    line_of: list[int] = []
+    for line_number, text, flag in rows:
+        if flag:
+            continue
+        for token in _BLOCKQUOTE.sub("", text).split():
+            if buffer:
+                buffer += " "
+                line_of.append(line_number)
+            buffer += token
+            line_of.extend([line_number] * len(token))
+    return buffer, line_of
 
 
 def test_the_step5_design_plan_marks_its_retracted_spec_quotes_as_superseded() -> None:
@@ -1016,32 +1131,35 @@ def test_the_step5_design_plan_marks_its_retracted_spec_quotes_as_superseded() -
     what this asserts, section by section.
 
     **Both directions, and neither by count.** A retracted quote in a section with no marker fails
-    by `file:line`; a marker in a section with no quote fails the same way, so deleting the quotes
-    and leaving the markers is a failure rather than a silent pass.
+    by `file:line`; a marker in a section whose *body* no longer quotes anything fails the same way,
+    so deleting the quotes and leaving the markers is a failure rather than a silent pass. That
+    second direction is only real because `_plan_body` excludes the marker blocks themselves: two
+    of the three markers quote the phrase they supersede, and before `_plan_body` existed they
+    vouched for their own sections -- 1 of 3 held, while this paragraph claimed 3 of 3.
 
     **What it cannot catch** (`_RESIDUAL` item 9): it is scoped to one file by a stated reason, so
-    the other twelve files carrying the phrase are outside it; it asserts a marker is *present in
-    the section*, not that the marker is *true*; and re-wording the retracted phrase itself makes
-    every occurrence invisible to it, the same anchor residual the census carries.
+    the seven other files carrying the phrase are outside it; it asserts a marker is *present in the
+    section*, not that the marker is *true*; a marker and the quote it supersedes need only share a
+    section, not be adjacent; and re-wording the retracted phrase itself makes every occurrence
+    invisible to it, the same anchor residual the census carries.
     """
     unmarked: list[str] = []
     orphaned: list[str] = []
     quoted = 0
-    for first_line, section in _step5_plan_sections():
-        hits = list(_RETRACTED_QUANTIFIER.finditer(section))
-        marked = _SUPERSESSION_MARKER.search(section) is not None
+    for first_line, rows in _step5_plan_sections():
+        body, line_of = _plan_body(rows)
+        hits = list(_RETRACTED_QUANTIFIER.finditer(body))
+        marked = any(flag for _, _, flag in rows)
         quoted += len(hits)
         if hits and not marked:
-            unmarked += [
-                f"{_STEP5_PLAN.name}:{first_line + section.count(chr(10), 0, m.start())}"
-                for m in hits
-            ]
+            unmarked += [f"{_STEP5_PLAN.name}:{line_of[m.start()]}" for m in hits]
         if marked and not hits:
             orphaned.append(f"{_STEP5_PLAN.name}:{first_line}")
 
     assert quoted, (
-        f"{_STEP5_PLAN.name} no longer quotes the retracted quantifier anywhere. If the quotes were "
-        "deleted deliberately, delete this layer in the same change -- it is anchored on them."
+        f"{_STEP5_PLAN.name} no longer quotes the retracted quantifier anywhere outside a "
+        "supersession marker. If the quotes were deleted deliberately, delete this layer in the "
+        "same change -- it is anchored on them."
     )
     assert not unmarked, (
         "these sections of the step-5 design plan quote the RETRACTED 'earliest phase whose "
@@ -1204,6 +1322,20 @@ def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
         "`cli.py` restatements this census still cannot reach -- have been deleted. Without them "
         "the census reads as covering every site that states the rule, and it does not."
     )
+    assert "\n8. " in _RESIDUAL and "\n9. " in _RESIDUAL, (
+        "`_RESIDUAL` items 8 and 9 -- the item-1 span's residual and Layer G's scope -- have been "
+        "deleted. This pin was not extended when items 7 and 8 were added, and the gap let a "
+        "dangling `_RESIDUAL` item 9 reference ship in two places and a commit message: an item "
+        "referenced but never written is exactly what this test exists to make loud, and it was "
+        "silent because it enumerated by hand up to 7."
+    )
+    for item in range(1, 10):
+        assert f"\n{item}. " in _RESIDUAL, (
+            f"`_RESIDUAL` item {item} has been deleted. The explicit assertions above enumerate by "
+            "hand and have twice fallen behind the list they pin; this loop is the part that does "
+            "not need updating when an item is added -- but a NEW item still needs its own "
+            "sentence above saying what is lost when it goes."
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience for a scoped manual run

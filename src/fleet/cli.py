@@ -10864,16 +10864,30 @@ async def _persist_arbitration(
     partial commit would leave `tasks` reconciled against a `phases.post_commit_sha` that is not,
     which is the disagreement this step exists to remove.
 
-    **The `attempts` row updated is the newest rung this task produced, ordered by the key
-    `schema.sql` itself declares** — of which the three components that order a *rung* are the
-    three in the `ORDER BY`. `revalidation_round` is not decoration: `schema.sql` puts it in the
-    uniqueness key because "a REVALIDATE re-run reuses 1..max_attempts, so without it round 2
-    overwrites round 1's evidence" (§3.5.1), and without it here round 2's attempt 1 and round 1's
-    attempt 1 tie and the winner is arbitrary. `finished_at` is deliberately NOT a tiebreak:
-    `schema.sql` declares it `TEXT NOT NULL`, so an "unfinished" row is not a state this table can
-    hold and a sort on it would be ordering by a wall clock (§11.5's clock rule) for nothing.
-    `commit_sha IS NULL` keeps a row that already recorded its own commit from being overwritten
-    with another's.
+    **The `attempts` row updated is the newest rung this task produced.** Inside the subquery's
+    `task_id = ?` scope, the only two columns that can distinguish rows are `attempt` (the ladder
+    rung) and `retry_ordinal` (a re-execution of that same rung, which `schema.sql` makes append
+    rather than collide); both are in the `ORDER BY`, newest first. `commit_sha IS NULL` keeps a
+    row that already recorded its own commit from being overwritten with another's.
+
+    **`revalidation_round` is in the `ORDER BY` and CANNOT change the answer — it is named, not
+    load-bearing, and an earlier version of this docstring claimed the opposite.** That claim was
+    that "round 2's attempt 1 and round 1's attempt 1 tie" here without it. They cannot: each
+    round is its own `tasks` row, because `revalidation_key` is `'r{round}:{hash}'` and
+    `ux_tasks_ident` keys `tasks` on `IFNULL(revalidation_key, '')` — so two rounds never share a
+    `task_id`, and this subquery never sees more than one round. `schema.sql`'s reason for putting
+    the column in the `attempts` uniqueness key ("round 2 overwrites round 1's evidence") is real,
+    and it is about a key that is NOT scoped by `task_id`; it does not transfer to this sort. The
+    term is retained only so the sort names the same components the declared key does, and because
+    newest-round-first is the right direction if a future writer ever does put two rounds under one
+    `task_id`. It is not what makes this query correct.
+
+    **`finished_at` is deliberately NOT a tiebreak.** `schema.sql` declares it `TEXT NOT NULL` on
+    `attempts` (the nullable `finished_at` in that file belongs to `runs`), and `record_attempt`
+    inserts both timestamps at completion — so a started-but-unfinished row is not a state this
+    table can hold, and a sort on it would be ordering by a wall clock (§11.5's clock rule) for
+    nothing. The shape a crash really leaves is **no row at all**, which is what the return value
+    below exists for.
 
     **Returns the landed entries whose `attempts` row could not be found**, and that return value
     is not a courtesy. `attempt_id = (SELECT … LIMIT 1)` over an empty subquery is
