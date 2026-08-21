@@ -30,7 +30,11 @@ edge case; the last two cases in this file are the only ones that take the defau
 
 from __future__ import annotations
 
+import ast
+import inspect
 import itertools
+import re
+import textwrap
 
 import pytest
 
@@ -316,3 +320,83 @@ def test_a_present_true_stops_the_walk_but_an_absent_key_one_rung_above_it_does_
         }
     )
     assert phase_floor(rows, {Phase.TRANSFORM: True}) == Phase.BUILD
+
+
+# ----------------------------------------------------------------------------------------
+# the ordering clause: prose that describes structure, bound to the structure
+# ----------------------------------------------------------------------------------------
+
+#: The clause in `phase_floor`'s own docstring that says which of the two `break` tests runs
+#: first. Whitespace-flexed, because the clause wraps and a reflow must not move it: `8ea1881`
+#: re-wrapped a false clause in `models/enums.py` onto its own line without reading it, which is
+#: how the round's worst surviving falsehood got there.
+_ORDER_CLAUSE = re.compile(r"tested\s+\*(before|after)\*\s+evidence")
+
+
+def _loop_test_order() -> tuple[str, ...]:
+    """The order the two `break` conditions really appear in `phase_floor`'s backward walk.
+
+    Read from the AST of the live function, not from a line number and not from a text match, so
+    that reindenting, rewrapping or renaming a local cannot move the answer.
+    """
+    tree = ast.parse(textwrap.dedent(inspect.getsource(phase_floor)))
+    for loop in (n for n in ast.walk(tree) if isinstance(n, ast.For)):
+        order = []
+        for statement in loop.body:
+            if not isinstance(statement, ast.If):
+                continue
+            test = ast.unparse(statement.test)
+            if "_HARD_STOPS" in test:
+                order.append("hard-stop")
+            elif "evidence" in test:
+                order.append("evidence")
+        if sorted(order) == ["evidence", "hard-stop"]:
+            return tuple(order)
+    raise AssertionError(  # loud, never a skip: an unresolvable structure is a failure
+        "no loop in `phase_floor` holds exactly one `_HARD_STOPS` test and exactly one `evidence` "
+        "test at the top level of its body. The backward walk was restructured; re-derive this "
+        "check against the new shape rather than deleting it."
+    )
+
+
+def test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims() -> None:
+    """`phase_floor`'s docstring says the hard-stop test runs *before* the evidence test. Nothing
+    checked that it does, and the word is the kind that survives a reflow: the review that raised
+    this rewrote the canonical clause to "tested *after* evidence" and **all 12 cases of
+    `tests/test_floor_rule_statements.py` still passed**, because that file parses the hard-stop
+    *set* out of the prose and never the ordering. So the word is parsed out of the docstring here
+    and checked against the AST of the function it describes -- editing the prose changes what is
+    asserted, per CLAUDE.md guardrail 7.
+
+    **What this is worth, stated rather than implied: the order is behaviourally inert today.**
+    Both branches are a bare `break` with no other effect, so swapping them changes nothing.
+    Measured exhaustively at `0e945b8` -- all 7 `RepoStatus` values across all 4 `Phase` positions
+    (2,401 row states) x all 16 subsets of `evidence` = **38,416 inputs, 0 differing returns**
+    between `phase_floor` and a copy with the two tests swapped. The review's stated failure
+    scenario for this half (a reconciler moves the evidence test first, `floor` lands on a
+    `DEGRADED` phase) does not follow from a reorder; it needs the hard-stop test *deleted*, which
+    `test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it` and
+    `test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds` already catch.
+
+    This is therefore a binding on a *description*, not on a behaviour, and it is worth having for
+    one reason: the moment either `break` becomes anything else -- a `continue`, a `return`, an
+    audit write -- the order stops being inert, and a reader who reached for the docstring first
+    would then be acting on it. A false description is cheap to write and expensive exactly then.
+    """
+    clause = _ORDER_CLAUSE.search(" ".join((phase_floor.__doc__ or "").split()))
+    assert clause is not None, (
+        "`phase_floor`'s docstring no longer says which of the two `break` tests runs first. "
+        "That clause is what this test binds; restore it or re-derive this check."
+    )
+    first, second = ("hard-stop", "evidence") if clause.group(1) == "before" else (
+        "evidence",
+        "hard-stop",
+    )
+    claimed = (first, second)
+    assert _loop_test_order() == claimed, (
+        f"`phase_floor`'s docstring says the hard stop is tested *{clause.group(1)}* evidence, "
+        f"so the loop should test {claimed[0]} then {claimed[1]}; it tests "
+        f"{_loop_test_order()[0]} then {_loop_test_order()[1]}. One of the two is wrong -- fix "
+        "the one that does not match `orchestrator/reentry.py`'s behaviour, not whichever is "
+        "easier to edit."
+    )
