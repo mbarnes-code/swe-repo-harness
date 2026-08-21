@@ -468,13 +468,13 @@ def _resolve(expr: ast.expr, src: _Src, scope: tuple[ast.AST, ...]) -> set[str] 
     if isinstance(expr, ast.Constant):
         return {expr.value} if isinstance(expr.value, str) else None
     if isinstance(expr, ast.JoinedStr):
-        out = ""
+        joined = ""
         for part in expr.values:
             if isinstance(part, ast.Constant) and isinstance(part.value, str):
-                out += part.value
+                joined += part.value
             else:
-                out += "<>"
-        return {out}
+                joined += "<>"
+        return {joined}
     if isinstance(expr, ast.IfExp):
         left = _resolve(expr.body, src, scope)
         right = _resolve(expr.orelse, src, scope)
