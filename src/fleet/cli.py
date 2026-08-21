@@ -209,6 +209,7 @@ from fleet.util.hashing import sha256_text
 from fleet.util.proc import CommandRunner
 from fleet.util.proc import run as proc_run
 from fleet.vcs import build_forge
+from fleet.vcs.commits import discard_task, find_task_commit
 from fleet.vcs.filter_repo import (
     FilterRepoUnavailableError,
     IngestError,
@@ -10030,12 +10031,15 @@ def resume(
     **What is built today**, and it is not the whole verb. §11.5 steps 1 (its config-digest
     half only — nothing here reads `runs.harness_version`, the other half step 1 names), 2
     (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
-    → `PENDING`, retaining `attempts`) and 7 (regenerate `migration_state.json`) run, plus
-    `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. Steps 4, 5, 6 and 8 do not
+    → `PENDING`, retaining `attempts`), 4 (ask Git whether each `RUNNING` task's commit landed
+    and correct the row to match, charging no attempt either way) and 7 (regenerate
+    `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and
+    `--raise-wave-budget`. Steps 5, 6 and 8 do not
     exist, so the verb reconciles the ledger and then refuses to continue with **exit 2**
     (`ResumeIncompleteError`, ADR-0076 — nothing failed, so it is deliberately not exit 1)
     naming what is absent. `--dry-run` is the free health check §11.5 promises: it makes no
-    network call, writes nothing, and previews both the step-3 sweep and the step-2 reap.
+    network call, writes nothing, and previews the step-3 sweep, the step-4 arbitration (every
+    git READ, no git or SQL write) and the step-2 reap.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -10086,13 +10090,14 @@ def resume(
             "already computes that floor and `state/repository.demote_to_floor` already writes "
             "it; what is missing is the resume-time evidence check that feeds them and the "
             "per-phase `PhaseRunner` assembly that walks Phases 1–4 in order, which cli.py "
-            "today only hand-wires per verb. Steps 4 (ask Git whether the commit landed), 6 "
+            "today only hand-wires per verb. Steps 6 "
             "(recompute `blocked_by`) and 8 (continue into the phase runners) are absent too. "
-            "Step 2, the orphan reap, is NOT: it ran, and this run's report above carries its "
-            "result — the `step 2:` lines, or `reaped_worktrees`/`reaped_containers` under "
+            "Steps 2 and 4 are NOT: the orphan reap and the Git-as-arbiter task reconciliation "
+            "both ran, and this run's report above carries their results — the `step 2:` and "
+            "`step 4:` lines, or `reaped_worktrees`/`reaped_containers`/`git_arbitration` under "
             "`--json`. The work reported above IS durable — the drift audit, any budget "
-            "raise, the PR re-poll, the orphan reap, the stale-lease sweep and "
-            "`migration_state.json` are all written "
+            "raise, the PR re-poll, the orphan reap, the stale-lease sweep, the task "
+            "reconciliation and `migration_state.json` are all written "
             "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
             "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
             "forge call per open PR for a refusal that cannot change until step 5 is written "
@@ -10210,9 +10215,23 @@ async def _resume_impl(
 
     if dry_run:
         stale = await _with_ro(path, lambda conn: _count_stale_running(conn, run_id, horizons))
-        projection: str | None = None
     else:
         stale = await _reset_stale_running(path, run_id, horizons)
+
+    # §11.5 step 4 — ask Git, per ambiguous task, whether its commit landed, and correct the row
+    # to match. It runs BELOW the step-3 sweep because the sweep is what hands the phase lease
+    # back: reconciling a task whose worker is still alive would race that worker's own commit.
+    # It runs ABOVE step 7 because the projection is regenerated from SQLite, and a projection
+    # taken before the corrections would ship a `migration_state.json` that disagrees with
+    # `tasks`/`phases` — the drift class §11.5's preamble says a resume removes.
+    arbitration = await _reconcile_tasks_with_git(settings, path, run_id, dry_run=dry_run)
+
+    # §11.5 step 5 — the demotion to each repo's re-entry floor — goes HERE, between step 4 and
+    # the projection: it reads the `phases.post_commit_sha` pointers step 4 has just reconciled
+    # against Git, and step 7 must publish the result of the demotion, not the state before it.
+
+    projection: str | None = None
+    if not dry_run:
         # §11.5 step 7 — the projection is an OUTPUT regenerated from SQLite, never an input.
         projection = str(
             await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
@@ -10254,6 +10273,10 @@ async def _resume_impl(
         "raise_wave_budget": raise_wave_budget,
         "raise_wave_budget_applied": raise_wave_budget is not None and not dry_run,
         "stale_running_reset": stale,
+        # §11.5 step 4. The whole report, not a count: "2 tasks reconciled" cannot tell an
+        # operator whether landed work was adopted or a worktree was discarded, and those are
+        # opposite facts about the same run.
+        "git_arbitration": arbitration,
         # §11.5 step 2. `live_sandbox_names` is in the payload because it is the input an
         # operator has to see to trust the other two keys: "0 orphans reaped" and "every orphan
         # was spared as live" are the same output with opposite meanings.
@@ -10282,12 +10305,62 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
         lines.append(
             f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)"
         )
+    lines.extend(_arbitration_lines(result, dry=dry))
     lines.extend(_reap_lines(result, dry=dry))
     lines.extend(_budget_lines(result))
     lines.extend(_repoll_lines(result))
     if not dry:
         lines.append(f"  projection at {result['projection']}")
     return lines
+
+
+def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
+    """§11.5 step 4, reported so the two verdicts can never read as each other.
+
+    "reconciled 2 tasks" is the line this function refuses to print. Adopting landed work and
+    discarding an unlanded worktree are opposite corrections, and an operator reading the second
+    as the first goes looking for commits that were deliberately thrown away. Every `unresolved`
+    entry is printed with its reason for the same reason `_reap_lines` prints every `failed`
+    entry (docs/INTEGRATION_HONESTY.md D44): a candidate Git could not be asked about is still
+    open work, and a silent count would let a partial reconciliation read as a complete one.
+    """
+    report = result["git_arbitration"]
+    if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries it
+        return []
+    candidates = int(cast(int, report["candidates"]))
+    if not candidates:
+        return []
+    landed = cast(Sequence[Mapping[str, object]], report["landed"])
+    discarded = cast(Sequence[Mapping[str, object]], report["discarded"])
+    unresolved = cast(Sequence[Mapping[str, object]], report["unresolved"])
+    recreated = cast(Sequence[Mapping[str, object]], report["anchors_recreated"])
+    verb = "would ask" if dry else "asked"
+    out = [f"  step 4: {verb} Git about {candidates} RUNNING task(s)"]
+    for entry in landed:
+        adopted = "would adopt" if dry else "adopted"
+        out.append(
+            f"  step 4: {entry['repo_id']} phase {entry['phase']} task {entry['task_id']} landed "
+            f"as {str(entry['commit_sha'])[:12]} — {adopted} as DONE, no attempt charged"
+        )
+    for entry in discarded:
+        thrown = "would discard" if dry else "discarded"
+        out.append(
+            f"  step 4: {entry['repo_id']} phase {entry['phase']} task {entry['task_id']} did "
+            f"NOT land — {thrown} the worktree back to its task anchor, row PENDING, no attempt "
+            "charged"
+        )
+    for entry in recreated:
+        made = "would re-create" if dry else "re-created"
+        out.append(
+            f"  step 4: {made} the missing anchor {entry['ref']} at "
+            f"{str(entry['commit_sha'])[:12]}"
+        )
+    out.extend(
+        f"  step 4: UNRESOLVED {entry['repo_id']} phase {entry['phase']} task "
+        f"{entry['task_id']} — {entry['reason']}"
+        for entry in unresolved
+    )
+    return out
 
 
 def _reap_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
@@ -10441,6 +10514,237 @@ async def _reset_stale_running(path: Path, run_id: str, horizons: tuple[str, str
             return int(cursor.rowcount)
 
         return await writer.submit(unit)
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 4 — Git is the arbiter: did this task's commit land, or did it not?
+# --------------------------------------------------------------------------------------
+
+
+#: The tasks step 4 asks Git about. `RUNNING` and nothing else, because `RUNNING` is exactly the
+#: status §3.2 step 6.5 writes in the same transaction that records `tasks.pre_commit_sha` — so a
+#: `RUNNING` row is the one state in which BOTH questions this step asks have an anchor to be
+#: asked against. A `CLAIMED` row has no `pre_commit_sha` yet and has therefore touched neither
+#: the branch nor the worktree; `PENDING`, `DONE` and `FAILED` are settled. §11.5 step 4 names
+#: `RUNNING` and `schema.sql`'s `ix_mutations_open` note ("asking git whether a RUNNING task's
+#: commit is on the branch") names it again.
+_ARBITRATED_TASKS_SQL: Final = (
+    "SELECT t.task_id, t.repo_id, t.phase, t.pre_commit_sha, "
+    "       p.base_ref, p.pre_commit_sha, p.post_commit_sha "
+    "  FROM tasks t "
+    "  LEFT JOIN phases p "
+    "    ON p.run_id = t.run_id AND p.repo_id = t.repo_id AND p.phase = t.phase "
+    " WHERE t.run_id = ? AND t.status = 'RUNNING' "
+    " ORDER BY t.created_at, t.task_id"
+)
+
+
+async def _reconcile_tasks_with_git(
+    settings: FleetSettings, path: Path, run_id: str, *, dry_run: bool
+) -> dict[str, object]:
+    """§11.5 step 4: for every `RUNNING` task, copy Git's answer down onto the row.
+
+    **A driver over `vcs/commits.py`, not new machinery.** The three primitives already exist and
+    already carry this step's contract in their own docstrings — `find_task_commit` ("Resume's
+    ONLY question … There is no third answer"), `discard_task` (the no-branch) and
+    `scoped_range` (the anchor the query may search from). Nothing here re-implements a git read.
+
+    **Two branches, because Git has two answers**, and the SPEC's "there is no third branch and no
+    tree-SHA comparison" is about the *verdict*, not about the ask:
+
+    * a SHA came back ⇒ the work is durable in Git. The task row goes `DONE`, the SHA is copied
+      onto `attempts.commit_sha` and `phases.post_commit_sha`, and nothing re-runs.
+    * nothing came back ⇒ nothing landed. `discard_task` resets the worktree to **the task's own
+      anchor**, the row goes back to `PENDING`, and the rung re-runs.
+
+    A candidate Git could not be *asked* about at all — no worktree on disk, no anchor to scope
+    the range to, an unsettled probe — is reported in `unresolved` and left exactly as it was.
+    That is not a third verdict; it is the absence of one, and collapsing it into either branch is
+    the four-state collapse `RollbackIndeterminateError` exists to refuse one layer down. It would
+    be a `DONE` row claiming a commit nobody found, or a discarded worktree on a hunch.
+
+    **`phases.attempts` is never written by this function, in either branch.** §11.5 step 4 says
+    so twice ("do not increment `attempts`" / "again without incrementing `attempts`"): a crash is
+    not an attempt the repo made, and charging one here would spend ADR-0014's ladder on work that
+    either already landed or never ran. The constraint is satisfied by *not writing the column* —
+    no statement below names it — and `tests/test_cli.py` asserts on the column either side.
+
+    **`tasks.pre_commit_sha` survives the discard branch deliberately.** After `discard_task` the
+    branch tip *is* that anchor, so the value is still true; clearing it would leave a second
+    crash — before the row is re-claimed and `record_task_anchor` re-reads the tip — with no
+    anchor at all, and `discard_task` refuses to guess one. Whole-phase rollback is the call that
+    clears it (`vcs/commits.rollback_phase`'s contract), and this is not that.
+
+    `--dry-run` runs every git READ and no git or SQL write: the verdicts are computed and
+    reported, `discard_task` is not called, and the anchor is not re-created.
+    """
+    candidates = await _with_ro(path, lambda conn: _rows(conn, _ARBITRATED_TASKS_SQL, (run_id,)))
+    report: dict[str, object] = {
+        "candidates": len(candidates),
+        "landed": [],
+        "discarded": [],
+        "anchors_recreated": [],
+        "unresolved": [],
+        "applied": not dry_run and bool(candidates),
+    }
+    if not candidates:
+        return report
+
+    work_root = (settings.root / settings.config.run.work_dir).resolve()
+    landed: list[tuple[str, str, int, str]] = []
+    discarded: list[tuple[str, str, int]] = []
+
+    for task_id, repo_id, phase, task_anchor, base_ref, phase_anchor, _post in candidates:
+        target = {"task_id": str(task_id), "repo_id": str(repo_id), "phase": int(phase)}
+        worktree = work_root / str(repo_id)
+        if not await asyncio.to_thread((worktree / ".git").exists):
+            _unresolved(report, target, f"no worktree at {worktree}")
+            continue
+        git = Git(worktree)
+        branch = f"migrate/{repo_id}"
+        try:
+            anchor = await _recreate_phase_anchor(
+                git,
+                report,
+                run_id=run_id,
+                repo_id=str(repo_id),
+                phase=int(phase),
+                base_ref=None if base_ref is None else str(base_ref),
+                pre_commit_sha=None if phase_anchor is None else str(phase_anchor),
+                dry_run=dry_run,
+            )
+            if anchor is None:
+                _unresolved(report, target, "no phase anchor to scope the trailer search to")
+                continue
+            if await git.resolve(branch) is None:
+                _unresolved(report, target, f"{branch} does not exist in {worktree}")
+                continue
+            sha = await find_task_commit(
+                git, branch=branch, pre_commit_sha=anchor, task_id=str(task_id)
+            )
+            if sha is not None:
+                landed.append((str(task_id), str(repo_id), int(phase), sha))
+                cast(list[object], report["landed"]).append({**target, "commit_sha": sha})
+                continue
+            if task_anchor is None:
+                _unresolved(report, target, "the task row carries no `pre_commit_sha` to reset to")
+                continue
+            if not dry_run:
+                await discard_task(git, task_pre_commit_sha=str(task_anchor), branch=branch)
+            discarded.append((str(task_id), str(repo_id), int(phase)))
+            cast(list[object], report["discarded"]).append(dict(target))
+        except (GitError, OSError) as exc:
+            # Rule 11: a git call that failed or never settled is carried out verbatim, never
+            # swallowed and never turned into a verdict. The row is untouched, so the next
+            # resume asks again.
+            _unresolved(report, target, f"{type(exc).__name__}: {exc}")
+
+    if dry_run or not (landed or discarded):
+        report["applied"] = False
+        return report
+    await _persist_arbitration(path, run_id, landed=landed, discarded=discarded)
+    return report
+
+
+def _unresolved(report: dict[str, object], target: Mapping[str, object], reason: str) -> None:
+    """One place to append to `unresolved`, so no branch can forget the `reason`.
+
+    A name and no reason is the D44 collapse: the operator's next action depends entirely on
+    whether the worktree is missing, the anchor is gone, or git refused.
+    """
+    cast(list[object], report["unresolved"]).append({**target, "reason": redact_text(reason)})
+
+
+async def _recreate_phase_anchor(
+    git: Git,
+    report: dict[str, object],
+    *,
+    run_id: str,
+    repo_id: str,
+    phase: int,
+    base_ref: str | None,
+    pre_commit_sha: str | None,
+    dry_run: bool,
+) -> str | None:
+    """"The anchor ref itself is re-created from `phases.base_ref` if it is missing" (§11.5 step 4).
+
+    `phases.base_ref` is the ref's NAME and `phases.pre_commit_sha` is the commit it named — the
+    §11.5 authority table's "the ref lives in Git, the *name* lives here". So a missing anchor is
+    recoverable exactly when the cached SHA still resolves, and the recreation is a `update-ref`
+    back to it, never a fresh cut at the current tip: cutting a new anchor at the tip would move
+    the scoped range's floor above commits this very step is about to search for, and every task
+    whose commit sits between the two would be arbitrated as "nothing landed" and discarded.
+
+    Returns the SHA the trailer search must be scoped to, or `None` when there is nothing to
+    recover from — a phase that never cut an anchor has no mutation to reconcile.
+    """
+    ref = base_ref or f"refs/fleet/{run_id}/{repo_id}/phase-{phase}/base"
+    existing = await git.resolve(ref)
+    if existing is not None:
+        return existing
+    if pre_commit_sha is None or await git.resolve(pre_commit_sha) is None:
+        return None
+    if not dry_run:
+        await git.update_ref(ref, pre_commit_sha, message="fleet resume step 4 anchor recreate")
+    cast(list[object], report["anchors_recreated"]).append(
+        {"repo_id": repo_id, "phase": phase, "ref": ref, "commit_sha": pre_commit_sha}
+    )
+    return pre_commit_sha
+
+
+async def _persist_arbitration(
+    path: Path,
+    run_id: str,
+    *,
+    landed: Sequence[tuple[str, str, int, str]],
+    discarded: Sequence[tuple[str, str, int]],
+) -> None:
+    """Copy Git's answers down, for the whole run, in ONE `StateWriter` unit (§11.5).
+
+    One unit rather than one per task because the corrections are a single reconciliation: a
+    partial commit would leave `tasks` reconciled against a `phases.post_commit_sha` that is not,
+    which is the disagreement this step exists to remove.
+
+    The `attempts` row updated is the newest one this task produced. `attempts` is append-only and
+    a re-executed rung appends rather than collides (`schema.sql`'s `retry_ordinal`), so the last
+    row is the one whose command produced the commit Git found; `commit_sha IS NULL` keeps a row
+    that already recorded its own commit from being overwritten with another's.
+    """
+    stamp = _iso(_now())
+    async with StateWriter(path, owner="fleet-resume") as writer:
+
+        async def unit(db: aiosqlite.Connection) -> None:
+            for task_id, repo_id, phase, sha in landed:
+                await db.execute(
+                    "UPDATE tasks SET status = 'DONE', claimed_by = NULL, "
+                    "    lease_expires_at = NULL WHERE run_id = ? AND task_id = ?",
+                    (run_id, task_id),
+                )
+                await db.execute(
+                    "UPDATE attempts SET commit_sha = ? WHERE attempt_id = ("
+                    "    SELECT attempt_id FROM attempts "
+                    "     WHERE run_id = ? AND task_id = ? AND commit_sha IS NULL "
+                    "     ORDER BY attempt DESC, retry_ordinal DESC, finished_at DESC LIMIT 1)",
+                    (sha, run_id, task_id),
+                )
+                await db.execute(
+                    "UPDATE phases SET post_commit_sha = ?, updated_at = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    (sha, stamp, run_id, repo_id, phase),
+                )
+            for task_id, _repo_id, _phase in discarded:
+                # The fence bump is the half that makes this safe, exactly as it is in step 3's
+                # `_RESET_RUNNING_TO_PENDING_SQL`: a killed worker that is somehow still alive
+                # carries the old `fence_token` on every write, and only the bump makes its next
+                # one match zero rows. `attempts` is not named here, in any table.
+                await db.execute(
+                    "UPDATE tasks SET status = 'PENDING', claimed_by = NULL, "
+                    "    lease_expires_at = NULL, fence_token = fence_token + 1 "
+                    " WHERE run_id = ? AND task_id = ?",
+                    (run_id, task_id),
+                )
+
+        await writer.submit(unit)
 
 
 # --------------------------------------------------------------------------------------

@@ -2404,6 +2404,289 @@ def test_pr_ready_refuses_while_a_stub_is_unresolved(workspace: Path) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# §11.5 step 4 — Git is the arbiter of whether a RUNNING task's commit landed
+# --------------------------------------------------------------------------------------
+
+ARB_TASK = "22222222-2222-4222-8222-222222222222"
+ARB_ATTEMPT = "33333333-3333-4333-8333-333333333333"
+ARB_PHASE = 2
+ARB_ANCHOR_REF = f"refs/fleet/{RUN_ID}/acme-commons/phase-2/base"
+
+
+def _git_out(repo: Path, *args: str) -> str:
+    """The read half of `_git_in`, kept beside it for the same reason: one fixed-argv site."""
+    return subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+        ["git", "-C", str(repo), *args],  # noqa: S607 - `git` from PATH, as every suite does
+        check=True, capture_output=True, text=True,
+    ).stdout.strip()
+
+
+def _arbitration_worktree(workspace: Path, repo_id: str = "acme-commons") -> tuple[Path, str]:
+    """A REAL `work/<repo>` checkout on `migrate/<repo>` with a REAL phase anchor ref.
+
+    Real git, not a scripted runner: step 4's whole claim is that Git — not a row, not a fake —
+    decides whether the work landed, and a fixture that answered the trailer query itself would
+    be asserting that the harness believes its own mock.
+    """
+    worktree = workspace / "work" / repo_id
+    worktree.mkdir(parents=True)
+    _git_in(worktree, "init", "--initial-branch=main", ".")
+    _git_in(worktree, "config", "user.email", "fleet@example.invalid")
+    _git_in(worktree, "config", "user.name", "Fleet Test")
+    (worktree / "src.java").write_text("class A {}\n", encoding="utf-8")
+    _git_in(worktree, "add", "-A")
+    _git_in(worktree, "commit", "-m", "phase 1 checkout")
+    _git_in(worktree, "checkout", "-B", f"migrate/{repo_id}")
+    anchor = _git_out(worktree, "rev-parse", "HEAD")
+    _git_in(worktree, "update-ref", f"refs/fleet/{RUN_ID}/{repo_id}/phase-2/base", anchor)
+    return worktree, anchor
+
+
+def _land_task_commit(worktree: Path, task_id: str = ARB_TASK) -> str:
+    """The commit §3.2 step 6 would have made: a real commit carrying a real `Fleet-Task-Id`."""
+    (worktree / "dest.java").write_text("class B {}\n", encoding="utf-8")
+    _git_in(worktree, "add", "-A")
+    _git_in(worktree, "commit", "-m", f"relocate acme-commons\n\nFleet-Task-Id: {task_id}")
+    return _git_out(worktree, "rev-parse", "HEAD")
+
+
+def _seed_running_task(
+    db: Path,
+    *,
+    repo_id: str = "acme-commons",
+    task_anchor: str,
+    phase_anchor: str,
+    base_ref: str | None = ARB_ANCHOR_REF,
+    attempts: int = 2,
+) -> None:
+    """A crash caught mid-task: `phases` RUNNING with an anchor, `tasks` RUNNING with its own
+    anchor, and the `attempts` row whose command was interrupted before its SHA was recorded.
+
+    `heartbeat_at` is NULL on purpose, so §11.5 step 3's sweep — which requires
+    `heartbeat_at IS NOT NULL` — leaves this row alone and every change to it is step 4's.
+    Without that, a `phases` assertion could not tell the two steps' writes apart.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, attempts, base_ref, "
+            "                    pre_commit_sha, updated_at) "
+            "VALUES (?, ?, ?, 'RUNNING', ?, ?, ?, ?)",
+            (RUN_ID, repo_id, ARB_PHASE, attempts, base_ref, phase_anchor,
+             "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, dest_path, status, "
+            "                   pre_commit_sha, fence_token, created_at) "
+            "VALUES (?, ?, ?, ?, 'RELOCATE', 'java/acme-commons', 'RUNNING', ?, 4, ?)",
+            (ARB_TASK, RUN_ID, repo_id, ARB_PHASE, task_anchor, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, "
+            "                      command, exit_code, started_at, finished_at) "
+            'VALUES (?, ?, ?, ?, ?, 1, \'["git","apply"]\', 0, ?, ?)',
+            (ARB_ATTEMPT, RUN_ID, repo_id, ARB_TASK, ARB_PHASE,
+             "2026-08-08T12:00:00+00:00", "2026-08-08T12:00:01+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+def _arbitration_state(db: Path) -> tuple[Any, ...]:
+    """(task status, task fence, attempts.commit_sha, phases.attempts, phases.post_commit_sha)."""
+    conn = sqlite3.connect(db)
+    try:
+        task = conn.execute(
+            "SELECT status, fence_token FROM tasks WHERE task_id = ?", (ARB_TASK,)
+        ).fetchone()
+        attempt = conn.execute(
+            "SELECT commit_sha FROM attempts WHERE attempt_id = ?", (ARB_ATTEMPT,)
+        ).fetchone()
+        phase = conn.execute(
+            "SELECT attempts, post_commit_sha FROM phases WHERE run_id = ? AND repo_id = ? "
+            "  AND phase = ?",
+            (RUN_ID, "acme-commons", ARB_PHASE),
+        ).fetchone()
+    finally:
+        conn.close()
+    return (*task, *attempt, *phase)
+
+
+def test_resume_step4_adopts_the_commit_git_says_landed_without_charging_an_attempt(
+    workspace: Path,
+) -> None:
+    """§11.5 step 4's YES branch: Git found the trailer, so the row is corrected to match it.
+
+    Why each half matters:
+
+    * **The row is corrected, never Git.** §11.5's authority rule is one-directional — "on any
+      disagreement about whether a change landed, Git is authoritative and the SQLite row is
+      corrected. Never the reverse." A resume that re-ran this task would re-apply a patch whose
+      effect is already on `migrate/<repo>`, and the §3.2 step 6.1 guard would then skip it and
+      report `already_applied` for work this very command decided had not happened.
+    * **`phases.attempts` is untouched, and that is asserted on the column.** The crash is not an
+      attempt the repo made. Charging one here spends ADR-0014's three-rung ladder on work that
+      *succeeded*, and three crashed resumes would send a repo whose transform landed cleanly to
+      REQUIRES_HUMAN_INTERVENTION.
+    * **The SHA reaches BOTH pointers.** `attempts.commit_sha` is the provenance of the rung and
+      `phases.post_commit_sha` is what §11.5 step 5's evidence check reads; writing one and not
+      the other leaves the next step arbitrating against a pointer nobody reconciled.
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    sha = _land_task_commit(worktree)
+    _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    report = json.loads(result.stdout)["git_arbitration"]
+    assert report["candidates"] == 1
+    assert [entry["task_id"] for entry in report["landed"]] == [ARB_TASK]
+    assert report["discarded"] == [] and report["unresolved"] == []
+
+    status, fence, attempt_sha, attempts, post = _arbitration_state(db)
+    assert status == "DONE", "Git said the commit landed and the row still claims it is running"
+    assert (attempt_sha, post) == (sha, sha), "the commit SHA did not reach both pointers"
+    assert attempts == 2, "step 4 charged an attempt for work that had already landed"
+    assert fence == 4, "an adopted task's fence was bumped; nothing was handed back"
+    assert (worktree / "dest.java").exists(), "landed work was discarded from the worktree"
+
+
+def test_resume_step4_discards_the_worktree_of_a_task_whose_commit_never_landed(
+    workspace: Path,
+) -> None:
+    """§11.5 step 4's NO branch: nothing on the branch, so the debris goes and the rung re-runs.
+
+    Why the discard is not optional: a killed `git apply` leaves the worktree dirty and nothing
+    on the branch (§3.2 step 6.4). Re-entering the phase against that tree re-applies a patch on
+    top of a half-applied one, and `git apply --check` then refuses a patch that is in fact
+    perfectly good — the repo is failed for a defect the resume created.
+
+    **The reset goes to `tasks.pre_commit_sha`, not to `phases.base_ref`**, and
+    `vcs/commits.discard_task` refuses to express the other one. Resetting to the phase anchor
+    would delete the commits of earlier tasks in the same phase whose rows are already `DONE` and
+    will never re-run, leaving the phase's success criterion to pass on a tree missing most of
+    its rewrites. §11.5 step 4's own `git reset --hard <base_ref>` sketch is wrong on exactly
+    this point; ADR-0087 adjudicates it and the SPEC sentence was corrected in the same change.
+
+    `attempts` is retained here too, and for a stronger reason than in the YES branch: nothing
+    ran, so there is nothing to charge (`FailureClass.TRANSIENT_INFRA`, §11.5 step 4's own
+    wording).
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    debris = worktree / "half-applied.java"
+    debris.write_text("class Broken {\n", encoding="utf-8")
+    _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    report = json.loads(result.stdout)["git_arbitration"]
+    assert [entry["task_id"] for entry in report["discarded"]] == [ARB_TASK]
+    assert report["landed"] == [] and report["unresolved"] == []
+
+    status, fence, attempt_sha, attempts, post = _arbitration_state(db)
+    assert status == "PENDING", "a task Git says never landed was not returned to the queue"
+    assert fence == 5, "the row was handed back without invalidating the old holder's writes"
+    assert attempts == 2, "step 4 charged an attempt for a rung that never ran"
+    assert (attempt_sha, post) == (None, None), (
+        "a SHA was recorded for a commit that is not on the branch"
+    )
+    assert not debris.exists(), "the half-applied tree survived the discard"
+    assert _git_out(worktree, "rev-parse", "HEAD") == anchor, "the branch moved off the anchor"
+    assert (worktree / "src.java").exists(), "the discard reached past this task's own anchor"
+
+
+def test_resume_step4_recreates_the_missing_anchor_at_the_sha_it_named_not_at_the_tip(
+    workspace: Path,
+) -> None:
+    """"The anchor ref itself is re-created from `phases.base_ref` if it is missing" (§11.5 step 4).
+
+    The ref lives in Git and its NAME lives in SQLite (§11.5's authority table), so a lost ref is
+    recoverable from `phases.pre_commit_sha` — and only from there. **Re-cutting it at the branch
+    tip instead is the failure this test exists for**: the tip is *above* the commits step 4 is
+    about to search for, so `<tip>..migrate/<repo>` is empty, every landed task arbitrates as
+    "nothing landed", and the resume discards a phase's worth of green work while reporting a
+    successful reconciliation. The assertion that separates the two is `landed`, not the mere
+    existence of the ref: both recreations produce a ref.
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    sha = _land_task_commit(worktree)
+    _git_in(worktree, "update-ref", "-d", ARB_ANCHOR_REF)
+    assert _git_out(worktree, "for-each-ref", "--format=%(refname)", ARB_ANCHOR_REF) == ""
+    _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    report = json.loads(result.stdout)["git_arbitration"]
+    assert [entry["ref"] for entry in report["anchors_recreated"]] == [ARB_ANCHOR_REF]
+    assert _git_out(worktree, "rev-parse", ARB_ANCHOR_REF) == anchor, (
+        "the anchor was re-cut somewhere other than the commit `phases.pre_commit_sha` names"
+    )
+    # The DISCRIMINATING assertion: an anchor re-cut at the tip yields an empty scoped range,
+    # which reads as "nothing landed" and discards the very commit that did.
+    assert [entry["commit_sha"] for entry in report["landed"]] == [sha]
+    assert _arbitration_state(db)[0] == "DONE"
+
+
+def test_resume_step4_dry_run_reports_both_verdicts_and_writes_neither(workspace: Path) -> None:
+    """`--dry-run` is the free health check §11.5 promises: every git READ, no git or SQL write.
+
+    Why the verdicts must still be *computed*: a preview that reported nothing about open tasks
+    is indistinguishable from a run with none, and "one task's work is on the branch and one
+    task's worktree is about to be thrown away" is precisely what an operator runs the health
+    check to learn before committing to it.
+
+    Two repos, one per branch, so the preview is shown to reach both and to stop short of both.
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    sha = _land_task_commit(worktree)
+    debris = worktree / "half-applied.java"
+    debris.write_text("class Broken {\n", encoding="utf-8")
+    _seed_running_task(db, task_anchor=sha, phase_anchor=anchor)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    report = json.loads(result.stdout)["git_arbitration"]
+    assert [entry["commit_sha"] for entry in report["landed"]] == [sha]
+    assert report["applied"] is False
+    assert _arbitration_state(db) == ("RUNNING", 4, None, 2, None), (
+        "a --dry-run wrote the reconciliation it was only asked to preview"
+    )
+    assert debris.exists(), "a --dry-run discarded a worktree"
+
+
+def test_resume_step4_reports_a_candidate_it_could_not_ask_git_about_instead_of_a_verdict(
+    workspace: Path,
+) -> None:
+    """A question Git could not be asked is not an answer, and must not be collapsed into one.
+
+    §11.5 step 4 says "there is no third branch", and that is a statement about Git's *verdict*:
+    a commit is on the branch or it is not. It is not licence to invent a verdict when the
+    question could not be put — here, a `RUNNING` task whose worktree is gone. Collapsing to the
+    YES branch marks a task `DONE` with a SHA nobody found; collapsing to the NO branch calls
+    `discard_task` on a tree that may hold the only copy of the work. The row is therefore left
+    exactly as it was, and the operator is told why by name.
+    """
+    db = workspace / "state" / "fleet.db"
+    _seed_running_task(db, task_anchor="a" * 40, phase_anchor="b" * 40)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    assert f"step 4: UNRESOLVED acme-commons phase 2 task {ARB_TASK}" in result.output
+    assert "no worktree at" in result.output, "the reason was reduced to a bare name"
+    assert _arbitration_state(db) == ("RUNNING", 4, None, 2, None), (
+        "a candidate Git was never asked about was reconciled anyway"
+    )
+
+# --------------------------------------------------------------------------------------
 # exit 9 — the disk ceiling the spec declared and nothing enforced
 # --------------------------------------------------------------------------------------
 IMPOSSIBLE_FLOOR = 2**62
