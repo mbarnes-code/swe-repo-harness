@@ -9049,9 +9049,11 @@ appended at `wave_index = max(waves) + 1`. §11.5 step 5 does not mention waves 
 no committed sentence this behaviour violates, and none that permits it either.
 
 **No fix is attempted here and none is promised.** `graph.sequence.append_synthetic_waves` is not
-the mechanism: it filters to `ref not in plan.wave_index_by_node`
-(`src/fleet/graph/sequence.py:301`), and every repo a resume demotes already has a wave index, so
-the freed set is empty and the call is a no-op. Making step 5 append synthetic waves would be a
+the mechanism: its first statement filters to `ref not in plan.wave_index_by_node`
+(`graph.sequence.append_synthetic_waves`, cited by symbol — a sibling lane measured one correct
+citation in this file rot through `:1589` → `:1590` → `:1597` inside a single round, so a line
+number here would not survive round E), and every repo a resume demotes already has a wave index,
+so the freed set is empty and the call is a no-op. Making step 5 append synthetic waves would be a
 scheduling decision with its own cost model — a demoted repo's Phase 4 would then run against the
 *current* integration tip rather than its original wave's, per §3.5 — and it is not a decision this
 ADR is in a position to take.
