@@ -11015,7 +11015,12 @@ async def _demote_to_floors(
     if not by_repo:
         return report
 
-    git_cache_dir = (settings.root / settings.config.run.cache_dir / "git").resolve()
+    # UNSUFFIXED, and that is the contract: `RepoEvidence.for_repo` appends
+    # `reentry.MIRROR_CACHE_SUBDIR` itself so the one expression that knows git mirrors live a
+    # level down is over there rather than here. Passing the suffixed path would probe
+    # `<cache_dir>/git/git/<slug>.git`, `_mirror_is_initialized` would answer False for every
+    # repo, and the whole fleet's floor would silently be SCAN on every resume.
+    cache_dir = (settings.root / settings.config.run.cache_dir).resolve()
     work_dir = (settings.root / settings.config.run.work_dir).resolve()
     plans: list[tuple[str, Phase, tuple[Phase, ...], dict[Phase, RepoStatus], str]] = []
 
@@ -11030,7 +11035,7 @@ async def _demote_to_floors(
             continue
         repo = RepoEvidence.for_repo(
             repo_id,
-            git_cache_dir=git_cache_dir,
+            cache_dir=cache_dir,
             work_dir=work_dir,
             dest=dest,
             has_verification_report=repo_id in verified,

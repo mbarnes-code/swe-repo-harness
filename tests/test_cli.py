@@ -35,6 +35,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 import pytest
@@ -4031,3 +4032,605 @@ async def test_a_genuinely_absent_branch_still_takes_the_checkout_b_path(
         f"a genuinely absent branch must still take the `checkout -B` path and land on it: "
         f"{current!r}"
     )
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 5 — the demotion to each repo's re-entry floor, wired into `_resume_impl`
+# --------------------------------------------------------------------------------------
+
+STEP5_REPO = "acme-commons"
+
+
+def _step5_mirror(workspace: Path, repo_id: str = STEP5_REPO, *, suffix: str = "git") -> Path:
+    """The bare mirror Phase 1's evidence looks for, at the path production writes it to.
+
+    `cli._scan_payloads` builds `CloneInput.cache_dir` as `<root>/<run.cache_dir>/git` and
+    `workers/clone.CloneWorker._mirror_path` appends `<slug(repo_id)>.git`. `suffix` exists so a
+    test can put the mirror one directory ABOVE the real location — `<root>/<cache_dir>/<slug>.git`
+    — which is what a caller that forgot the `/git` component would look at.
+    """
+    from fleet.sandbox.worktree import slug
+
+    mirror = workspace / "cache" / suffix / f"{slug(repo_id)}.git"
+    mirror.mkdir(parents=True)
+    (mirror / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (mirror / "objects").mkdir()
+    return mirror
+
+
+def _step5_seed(
+    db: Path,
+    *,
+    repo_id: str = STEP5_REPO,
+    statuses: Mapping[int, str],
+    post_commit_sha: Mapping[int, str | None] = MappingProxyType({}),
+    attempts: int = 2,
+) -> None:
+    """`phases` rows for one repo, exactly as the columns step 5 reads them.
+
+    Written as raw SQL rather than through the repository so the fixture can express states the
+    repository's own transitions would refuse to produce — which is the whole point of a resume
+    fixture: it reproduces what a crash left behind, not what a healthy run would write.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase, status in statuses.items():
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, attempts, post_commit_sha, "
+                "                    updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (RUN_ID, repo_id, phase, status, attempts,
+                 post_commit_sha.get(phase), "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+
+def _step5_landed_fleet(workspace: Path) -> str:
+    """A repo whose SCAN, TRANSFORM and BUILD all landed and whose VERIFY has not started.
+
+    Returns the commit both `phases.post_commit_sha` pointers name. There is no `BUILD.bazel` on
+    disk, so Phase 3's evidence fails and Phase 2's holds — which puts the floor at BUILD and
+    makes the fixture distinguish "demote the frontier" from "demote everything".
+    """
+    _step5_mirror(workspace)
+    worktree, anchor = _arbitration_worktree(workspace)
+    _step5_seed(
+        workspace / "state" / "fleet.db",
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "PENDING"},
+        post_commit_sha={2: anchor, 3: anchor},
+    )
+    assert not (worktree / "java" / STEP5_REPO / "BUILD.bazel").exists()
+    return anchor
+
+
+def _step5_rows(db: Path, repo_id: str = STEP5_REPO) -> dict[int, tuple[str, int]]:
+    conn = sqlite3.connect(db)
+    try:
+        return {
+            int(phase): (str(status), int(attempts))
+            for phase, status, attempts in conn.execute(
+                "SELECT phase, status, attempts FROM phases WHERE run_id = ? AND repo_id = ?",
+                (RUN_ID, repo_id),
+            )
+        }
+    finally:
+        conn.close()
+
+
+def _db_dump(db: Path) -> str:
+    """Every row of every table, as SQL. Used instead of an enumeration of forbidden sinks.
+
+    A `--dry-run` test that lists the tables it believes a write would touch is a blacklist, and
+    the third escape defeats it (CLAUDE.md Rule 12). This asserts what the database MAY be after
+    the command: exactly what it was. A write to a table nobody predicted trips it too.
+    """
+    conn = sqlite3.connect(db)
+    try:
+        return "\n".join(conn.iterdump())
+    finally:
+        conn.close()
+
+
+def test_resume_step_5_demotes_the_span_above_the_floor_and_reports_what_it_discarded(
+    workspace: Path,
+) -> None:
+    """§11.5 step 5's write, end to end through `fleet resume` — and the report beside it.
+
+    The fixture is chosen so the floor is neither of the two answers a broken implementation
+    lands on by accident. Phase 2's evidence HOLDS (the pointer resolves and is an ancestor of
+    `migrate/<repo>`) and Phase 3's does NOT (no `<dest>/BUILD.bazel` on disk), so the floor is
+    BUILD: not SCAN, which is what dropping the pointer read or mislocating the mirror produces,
+    and not VERIFY, which is what an implementation that never walks backward produces.
+
+    **`attempts` is asserted on the column, not inferred.** §11.5 step 5 demotes to re-run work
+    whose evidence is gone; charging the repo an attempt for it would spend a rung of ADR-0014's
+    ladder on a crash the repo did not cause, and three resumes would send a healthy repo to
+    REQUIRES_HUMAN_INTERVENTION. `demote_to_floor` satisfies this by not naming the column, which
+    is invisible from the outside — hence the assertion.
+
+    **The finding is asserted because a silent demotion is the defect ADR-0077 §5 names.** A
+    demotion made through `transition(..., resume=True)` would leave every status assertion in
+    this test passing and emit nothing, so the run's audit trail would not record that landed
+    work was discarded.
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_landed_fleet(workspace)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+
+    report = json.loads(result.stdout)["reentry_floors"]
+    assert report["applied"] is True
+    assert report["unresolved"] == [] and report["unchanged"] == []
+    assert [entry["repo_id"] for entry in report["demoted"]] == [STEP5_REPO]
+    entry = report["demoted"][0]
+    assert entry["floor"] == "BUILD", (
+        "the floor is not the phase ABOVE the highest holder below the frontier"
+    )
+    assert entry["phases"] == ["BUILD"], "the demoted span is not `phase >= floor and SUCCEEDED`"
+    assert entry["evidence"] == {"BUILD": False, "TRANSFORM": True}, (
+        "the walk consulted phases it should not have, or answered them wrongly"
+    )
+
+    rows = _step5_rows(db)
+    assert rows[3][0] == "PENDING", "the phase above the floor kept its SUCCEEDED status"
+    assert rows[2][0] == "SUCCEEDED", "a phase BELOW the floor was demoted"
+    assert all(attempts == 2 for _status, attempts in rows.values()), (
+        "step 5 charged an attempt; ADR-0014's ladder is spent on work the repo did not fail"
+    )
+
+    conn = sqlite3.connect(db)
+    try:
+        findings = conn.execute(
+            "SELECT severity, payload FROM findings WHERE run_id = ? AND kind = 'PhaseDemoted'",
+            (RUN_ID,),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert len(findings) == 1, "the demotion is invisible to whoever reads this run"
+    assert findings[0][0] == "warn"
+    assert "BUILD" in json.loads(findings[0][1])["reason"] or "BUILD" in str(findings[0][1])
+
+
+def test_resume_step_5_dry_run_previews_the_same_plan_and_leaves_the_database_byte_identical(
+    workspace: Path,
+) -> None:
+    """`--dry-run` computes the plan the real run applies, and writes nothing at all.
+
+    **The fixture reaches the guard.** `if dry_run or not plans` is only decided by `dry_run`
+    when `plans` is non-empty, so a fixture with nothing to demote would exercise the `not plans`
+    arm and prove nothing about `--dry-run` — which is exactly how step 4's first dry-run test
+    passed while leaving half its claim untested. The plan asserted below is non-empty.
+
+    **"Writes nothing" is asserted as a whitelist, not as a list of forbidden sinks.** The whole
+    database is dumped before and after and compared. An enumeration of `phases`, `findings` and
+    `checkpoints` is a blacklist that a fourth table defeats silently; this fails on any write to
+    any table, predicted or not. `migration_state.json` — the one sink outside SQLite — is
+    asserted separately, because step 7 is skipped under `--dry-run` for its own reason.
+
+    **The round trip is what binds the two routes to one rule.** The preview and the write both
+    call `orchestrator.reentry.demotable_phases`; running both against the same fixture and
+    asserting the plans are EQUAL is what would go red if a future edit gave either route a
+    membership rule of its own (defect D74's shape).
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_landed_fleet(workspace)
+    before = _db_dump(db)
+
+    preview = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert preview.exit_code == ExitCode.SUCCESS, preview.output
+    planned = json.loads(preview.stdout)["reentry_floors"]
+
+    assert planned["applied"] is False
+    assert [entry["phases"] for entry in planned["demoted"]] == [["BUILD"]], (
+        "the preview has nothing to plan, so this test cannot reach the guarded write"
+    )
+    assert _db_dump(db) == before, "--dry-run wrote to the database"
+    assert not (workspace / "migration_state.json").exists()
+
+    applied = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert applied.exit_code == ExitCode.USAGE, applied.output
+    written = json.loads(applied.stdout)["reentry_floors"]
+    assert written["applied"] is True
+    assert [
+        (entry["repo_id"], entry["floor"], entry["phases"]) for entry in written["demoted"]
+    ] == [
+        (entry["repo_id"], entry["floor"], entry["phases"]) for entry in planned["demoted"]
+    ], "the preview and the write disagree about what step 5 demotes"
+
+
+def test_resume_step_5_dry_run_says_it_would_demote_and_the_real_run_says_it_did(
+    workspace: Path,
+) -> None:
+    """The two renderings differ in the VERB and in nothing else (`_arbitration_lines`' rule).
+
+    A preview that printed "demoted acme-commons" would be a report of a state change that did
+    not happen — the defect `raise_budget_applied` was added to the payload to kill one key over.
+    """
+    _step5_landed_fleet(workspace)
+    preview = runner.invoke(app, [*base_args(workspace), "resume", "--dry-run"])
+    assert preview.exit_code == ExitCode.SUCCESS, preview.output
+    assert "step 5: would demote acme-commons to floor BUILD" in preview.output
+    assert "step 5: demoted" not in preview.output
+
+    applied = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert applied.exit_code == ExitCode.USAGE, applied.output
+    assert "step 5: demoted acme-commons to floor BUILD" in applied.output
+    assert "would demote" not in applied.output
+
+
+def test_resume_step_5_reads_the_post_commit_sha_pointer_and_not_only_the_status(
+    workspace: Path,
+) -> None:
+    """The `phases.post_commit_sha` column is DECISIVE, so a projection that drops it fails here.
+
+    `EvidenceRow.post_commit_sha` defaults to `None` and `state.repository.PhaseRow` does not
+    carry the column at all, so `EvidenceRow(status=row.status)` type-checks, reviews clean, and
+    silently answers `False` for Phases 2 and 3 across the entire fleet — demoting every repo
+    further than its evidence warrants. No fixture inside `orchestrator/reentry.py` can express
+    that: it is reachable only from the caller, which is `cli._demote_to_floors`.
+
+    Two arms over one fixture, differing only in the column: with the pointer the floor is BUILD,
+    and with it NULL the floor drops to TRANSFORM and one more phase of landed work is discarded.
+    A caller that never read the column gives the second answer in both arms.
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_landed_fleet(workspace)
+    with_pointer = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert with_pointer.exit_code == ExitCode.SUCCESS, with_pointer.output
+    kept = json.loads(with_pointer.stdout)["reentry_floors"]["demoted"][0]
+
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET post_commit_sha = NULL WHERE run_id = ? AND phase = 2", (RUN_ID,)
+        )
+    finally:
+        conn.close()
+    without = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert without.exit_code == ExitCode.SUCCESS, without.output
+    dropped = json.loads(without.stdout)["reentry_floors"]["demoted"][0]
+
+    assert (kept["floor"], kept["phases"]) == ("BUILD", ["BUILD"])
+    assert (dropped["floor"], dropped["phases"]) == ("TRANSFORM", ["TRANSFORM", "BUILD"]), (
+        "clearing `phases.post_commit_sha` did not change the floor, so the caller is not "
+        "projecting the column onto `EvidenceRow` at all"
+    )
+    assert kept["evidence"]["TRANSFORM"] is True and dropped["evidence"]["TRANSFORM"] is False
+
+
+def test_resume_step_5_finds_the_mirror_under_the_configured_cache_dir_plus_git(
+    workspace: Path,
+) -> None:
+    """The mirror this caller actually probes must resolve to `<root>/<cache_dir>/git/<slug>.git`.
+
+    **Where the `git` segment comes from has moved once already, which is why this test asserts
+    the RESOLVED path rather than either side of the boundary.** At `2f0db34` `cli` appended it
+    and `RepoEvidence.for_repo` took a `git_cache_dir`; at `7b2d48e` a sibling inverted that —
+    `for_repo` now takes an unsuffixed `cache_dir` and appends `reentry.MIRROR_CACHE_SUBDIR`
+    itself — and left this caller passing the old suffixed value under the old keyword, which is
+    how `main` came to be red. A test written against either signature would have gone green
+    again on the rename while the fleet probed `cache/git/git/<slug>.git`.
+
+    So: move the mirror, run the command, and read the floor. With the mirror at
+    `cache/git/<slug>.git` the walk stops at SCAN and the floor is TRANSFORM; with the identical
+    mirror one directory up at `cache/<slug>.git` — where a caller that double-appended or forgot
+    the segment would look — SCAN fails and the floor drops to SCAN itself. The consequence that
+    makes it worth a test is silent and fleet-wide: every repo's Phase-1 evidence fails and the
+    whole fleet is demoted to SCAN on every resume.
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    # Phase 2's pointer is a commit that is NOT on `migrate/<repo>`: the branch was force-reset
+    # off it, which is exactly the state §11.5's authority table says the column must not be
+    # trusted for. So Phase 2 fails, Phase 3 fails (no BUILD.bazel), and the walk reaches SCAN.
+    _git_in(worktree, "checkout", "-B", "detached-work")
+    (worktree / "extra.java").write_text("class C {}\n", encoding="utf-8")
+    _git_in(worktree, "add", "-A")
+    _git_in(worktree, "commit", "-m", "work off the migrate branch")
+    off_branch = _git_out(worktree, "rev-parse", "HEAD")
+    _git_in(worktree, "checkout", f"migrate/{STEP5_REPO}")
+    _step5_seed(
+        db,
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "PENDING"},
+        post_commit_sha={2: off_branch, 3: off_branch},
+    )
+    assert anchor != off_branch
+
+    _step5_mirror(workspace, suffix="git")
+    found = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert found.exit_code == ExitCode.SUCCESS, found.output
+    at_git = json.loads(found.stdout)["reentry_floors"]["demoted"][0]
+
+    shutil.rmtree(workspace / "cache" / "git")
+    _step5_mirror(workspace, suffix=".")
+    missed = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--dry-run"])
+    assert missed.exit_code == ExitCode.SUCCESS, missed.output
+    at_cache = json.loads(missed.stdout)["reentry_floors"]["demoted"][0]
+
+    assert at_git["floor"] == "TRANSFORM", (
+        "SCAN's evidence did not hold with the mirror at `<cache_dir>/git/<slug>.git`, so the "
+        "caller is not deriving `git_cache_dir` the way `cli._scan_payloads` does"
+    )
+    assert at_git["evidence"]["SCAN"] is True
+    assert at_cache["floor"] == "SCAN" and at_cache["evidence"]["SCAN"] is False, (
+        "a mirror one directory ABOVE the real location satisfied Phase 1, so the `/git` "
+        "component is not being applied and this test cannot see its omission"
+    )
+
+
+def test_resume_step_5_demotes_a_repo_whose_worktree_the_reaper_removed_all_the_way_to_scan(
+    workspace: Path,
+) -> None:
+    """The reaped-worktree state step 5 exists to detect, driven through the real command.
+
+    `reentry._worktree_present` guards `_build_evidence` and `_transform_evidence` before either
+    touches Git, because `Git` shells out with the worktree as `cwd` and a `resolve()` against a
+    directory that is not there raises `FileNotFoundError` rather than answering. Subtask 5 could
+    not bind that guard: from inside `reentry.py` there is no way to distinguish "returned False"
+    from "raised and something upstream swallowed it". From here there is — a raise reaches
+    `_demote_to_floors`' `except (GitError, OSError)` and the repo lands in `unresolved` with a
+    reason, instead of being demoted.
+
+    So the assertion is BOTH halves: the repo is demoted to SCAN (its Git-backed evidence is all
+    gone, which is the correct answer), and `unresolved` is empty (the guard answered rather than
+    raised).
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_mirror(workspace)
+    worktree, anchor = _arbitration_worktree(workspace)
+    _step5_seed(
+        db,
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "PENDING"},
+        post_commit_sha={2: anchor, 3: anchor},
+    )
+    shutil.rmtree(worktree)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    report = json.loads(result.stdout)["reentry_floors"]
+
+    assert report["unresolved"] == [], (
+        "a missing worktree raised out of the evidence predicates instead of answering False"
+    )
+    entry = report["demoted"][0]
+    assert entry["floor"] == "SCAN"
+    assert entry["phases"] == ["SCAN", "TRANSFORM", "BUILD"]
+    assert entry["evidence"] == {"SCAN": False, "TRANSFORM": False, "BUILD": False}
+    assert [status for status, _attempts in _step5_rows(db).values()] == [
+        "PENDING", "PENDING", "PENDING", "PENDING"
+    ]
+
+
+def test_resume_step_5_contains_a_git_failure_to_the_one_repo_it_happened_to(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A probe that raises lowers one repo out of the report; it does not abort the resume.
+
+    `resume_floor` propagates every exception its probe raises, and `Git.resolve` /
+    `Git.is_ancestor` raise `GitCommandError` on an unsettled probe (defect D42 — a deadline hit
+    is not a verdict). Containment is the caller's job: an abort here would take down the whole
+    command, so one repo's expired deadline would stop the other 249 being reconciled at all,
+    which is the asymmetry `evidence_holds`' own docstring argues about one level down.
+
+    The assertions are the containment AND its visibility. A `try/except: pass` would satisfy the
+    first alone and hand the operator a fleet that reads as fully reconciled.
+    """
+    db = workspace / "state" / "fleet.db"
+    anchor = _step5_landed_fleet(workspace)
+    _step5_seed(
+        db,
+        repo_id="acme-billing",
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "PENDING"},
+        post_commit_sha={2: anchor, 3: anchor},
+    )
+    from fleet import cli as fleet_cli
+
+    real = fleet_cli.evidence_holds
+
+    async def exploding(phase: Phase, *, rows: object, repo: object, **kw: object) -> bool:
+        if getattr(repo, "repo_id", "") == "acme-billing":
+            # The D42 shape verbatim: `util.proc.run` reports a deadline hit as `timed_out`
+            # with `started=True`, and `Git.is_ancestor` turns that into this exception rather
+            # than into a verdict. Constructed with the real fields so the reason the operator
+            # reads is the one production would print.
+            raise GitCommandError(
+                ["git", "merge-base", "--is-ancestor"],
+                124,
+                "deadline exceeded before `git merge-base` settled",
+                timed_out=True,
+                started=True,
+            )
+        return await real(phase, rows=rows, repo=repo, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("fleet.cli.evidence_holds", exploding)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    report = json.loads(result.stdout)["reentry_floors"]
+
+    assert [entry["repo_id"] for entry in report["demoted"]] == [STEP5_REPO], (
+        "the repo whose probe failed took the healthy repo's reconciliation down with it"
+    )
+    assert [entry["repo_id"] for entry in report["unresolved"]] == ["acme-billing"]
+    assert "deadline exceeded" in report["unresolved"][0]["reason"], (
+        "the failure was contained but not reported, so the fleet reads as fully reconciled"
+    )
+    rendered = runner.invoke(app, [*base_args(workspace), "resume", "--dry-run"])
+    assert "step 5: UNRESOLVED for acme-billing" in rendered.output, (
+        "the failure was contained but the operator's own report does not say so"
+    )
+    assert _step5_rows(db, "acme-billing")[3][0] == "SUCCEEDED", (
+        "a repo step 5 could not judge was demoted anyway"
+    )
+
+
+def test_resume_step_5_refuses_a_floor_whose_phase_rows_moved_under_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Review finding I4: the floor is computed outside the transaction that applies it.
+
+    The interleaving is not adversarial and needs no second process to be real. `_resume_impl`
+    deliberately spares a non-stale `RUNNING` phase, so that phase is the unsettled frontier when
+    `phase_floor` runs; `evidence_holds` then does Git I/O over the whole fleet, seconds to
+    minutes; and in that window the live worker's `complete_phase` writes the row `SUCCEEDED`. The
+    transaction re-reads, finds it `SUCCEEDED` **in-transaction**, and demotes work that landed
+    while the resume was looking away — deleting the span's checkpoints and minting a warn
+    finding whose reason describes evidence that never failed.
+
+    Nothing that already existed closes it: `state/db.py`'s single-writer slot is process-wide
+    module state, `BEGIN IMMEDIATE` carries no snapshot across from the `mode=ro` handle, and a
+    lease guard is blind to precisely this case because `complete_phase` NULLs
+    `lease_owner`/`lease_expires_at` in the same statement that sets the status.
+
+    The fixture writes the row from inside the evidence probe, which is the same window the live
+    worker writes in. The assertion is that NOTHING was written for that repo and that the
+    operator is told — a silent `()` would report a healthy no-op for a race.
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_landed_fleet(workspace)
+    from fleet import cli as fleet_cli
+
+    real = fleet_cli.evidence_holds
+
+    async def racing(phase: Phase, *, rows: object, repo: object, **kw: object) -> bool:
+        conn = sqlite3.connect(db, isolation_level=None)
+        try:
+            conn.execute(
+                "UPDATE phases SET status = 'SUCCEEDED' WHERE run_id = ? AND phase = 4", (RUN_ID,)
+            )
+        finally:
+            conn.close()
+        return await real(phase, rows=rows, repo=repo, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr("fleet.cli.evidence_holds", racing)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    report = json.loads(result.stdout)["reentry_floors"]
+
+    assert report["demoted"] == [] and report["applied"] is False
+    assert [entry["repo_id"] for entry in report["unresolved"]] == [STEP5_REPO]
+    assert "moved before this write" in report["unresolved"][0]["reason"]
+    assert _step5_rows(db)[3][0] == "SUCCEEDED", (
+        "the transaction applied a floor computed from rows that had already moved"
+    )
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE kind = 'PhaseDemoted'"
+        ).fetchone()[0] == 0, "a PhaseDemoted finding was minted for a demotion that was refused"
+    finally:
+        conn.close()
+
+
+def test_resume_step_5_re_opens_the_closed_wave_it_demotes_a_member_out_of(
+    workspace: Path,
+) -> None:
+    """A PINNED CONSEQUENCE, not a desired behaviour. Recorded so subtask 8 inherits a measurement.
+
+    `WaveState` is COMPUTED, never stored: `orchestrator.scheduler.Admission.wave_state` reads
+    every `wave_members` row's `phases` status and answers `CLOSED` iff all of them are in
+    `SETTLED_STATUSES`. No column holds it and `demote_to_floor` writes no `waves` or
+    `wave_members` row. So `SUCCEEDED → PENDING` on a member of a closed wave re-opens that wave,
+    by construction and with nothing to observe it.
+
+    **This is neither authorised nor forbidden by the SPEC.** `docs/SPEC.md` §3.5's rule "closed
+    waves are never re-opened" sits in the *Wave re-entry — un-blocking* paragraph and governs
+    the `blocked_by` → `PENDING` path, whose remedy is a synthetic wave; §11.5 step 5 does not
+    mention waves at all. The design assigns "no closed wave is re-opened" to subtask 8, which
+    cannot honour it: this commit breaches it upstream of everything subtask 8 measures.
+
+    No fix is attempted here and none is promised. `graph.sequence.append_synthetic_waves` is not
+    the mechanism either — it filters to `ref not in plan.wave_index_by_node`, and every repo in
+    this population already has a wave index. ADR-0089 §4 dates the disclosure.
+    """
+    from fleet.orchestrator.scheduler import SqliteSchedulerStore, WaveScheduler, WaveState
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+    from fleet.state.repository import SqliteStateRepository
+
+    db = workspace / "state" / "fleet.db"
+    _step5_landed_fleet(workspace)
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            # `max_usd` is non-zero because `_refuse_exhausted_wave` runs long before step 5
+            # and a zero ceiling is an exhausted wave (§11.2) — the resume would exit 10 and this
+            # test would never reach the demotion it exists to observe.
+            "INSERT INTO waves (run_id, wave_index, computed_at, max_usd) VALUES (?, 0, ?, 8.0)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, 0, 'REPO', ?)",
+            (RUN_ID, STEP5_REPO),
+        )
+    finally:
+        conn.close()
+
+    async def _wave_state() -> WaveState:
+        async with StateWriter(db, owner="w7-wave-state") as writer:
+            read_conn = await connect_ro(db)
+            try:
+                return await WaveScheduler(
+                    run_id=RUN_ID,
+                    phase=Phase.BUILD,
+                    store=SqliteSchedulerStore(writer=writer, read_conn=read_conn),
+                    db=SqliteStateRepository(writer=writer, read_conn=read_conn),
+                    budgets=FleetSettings.load(workspace / "config").config.budgets,
+                    clock=lambda: datetime(2026, 8, 8, 12, tzinfo=UTC),
+                ).wave_state(0)
+            finally:
+                await read_conn.close()
+
+    wave_state = lambda: asyncio.run(_wave_state())  # noqa: E731
+
+    assert wave_state() is WaveState.CLOSED, (
+        "the fixture's wave is not closed to begin with, so this test cannot see the re-opening"
+    )
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert _step5_rows(db)[3][0] == "PENDING"
+    assert wave_state() is WaveState.OPEN, (
+        "the measured consequence this test exists to pin has changed; ADR-0089 §4 records it "
+        "as OPEN at `2f0db34`, and a change here needs a decision, not an edited constant"
+    )
+
+
+def test_resume_step_5_leaves_a_repo_at_its_floor_alone_and_says_which(
+    workspace: Path,
+) -> None:
+    """"Nothing to demote" and "3 repos demoted" are not degrees of one thing (D44).
+
+    A run where every repo already sits at its floor writes nothing, and `applied` must be
+    `False` on that path even without `--dry-run` — the payload reports what HAPPENED, not what
+    was asked, which is the defect `raise_budget_applied` exists for one key over. The reason is
+    printed per repo because "every phase settled" and "a phase needs a human" send the operator
+    to opposite places.
+    """
+    db = workspace / "state" / "fleet.db"
+    _step5_seed(db, statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED", 4: "SUCCEEDED"})
+    _step5_seed(
+        db,
+        repo_id="acme-billing",
+        statuses={1: "SUCCEEDED", 2: "REQUIRES_HUMAN_INTERVENTION", 3: "PENDING", 4: "PENDING"},
+    )
+    before = _db_dump(db)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "step 5: acme-commons unchanged — every phase has already settled" in result.output
+    assert (
+        "step 5: acme-billing unchanged — a phase requires human intervention" in result.output
+    )
+    assert "step 5: demoted" not in result.output
+    assert "would demote" not in result.output
+    conn = sqlite3.connect(db)
+    try:
+        rows = conn.execute("SELECT phase, status FROM phases WHERE repo_id = 'acme-billing'")
+        assert dict(rows) == {1: "SUCCEEDED", 2: "REQUIRES_HUMAN_INTERVENTION", 3: "PENDING",
+                              4: "PENDING"}, "§12 item 46 (ii): a sweep moved an RHI repo"
+    finally:
+        conn.close()
+    assert _db_dump(db) == before, "a run with nothing to demote still wrote to the database"
