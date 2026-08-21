@@ -4626,3 +4626,154 @@ author measured at `d123035`; the superset half of I1 was measured and is true, 
 half was reasoned rather than measured, which the finding does not distinguish. Guardrail 7 governs:
 a dated in-file marker is placed beside I1 in the review, and the finding itself is not rewritten.
 **Status: correction recorded, no code defect, nothing to fix in `src/`.**
+
+
+---
+
+## D76 — OPEN, recorded only. SPEC §3.5's "current integration tip" clause has no binding
+
+`docs/SPEC.md` §3.5, the wave re-entry paragraph:
+
+> *"Their Phase 4 runs against the **current** integration tip — a fresh snapshot ref per §3.3
+> step 1, not the tip their original wave saw — and any Phase 3 merge is rebased onto it, because
+> everything that closed in between has already landed."*
+
+**Correcting a symbol name that reached this entry's originating brief.** The brief named the
+Phase 4 builder `cli._verify_plan`. That name has **zero** definitions anywhere in `src/`
+(`grep -rn 'def _verify_plan' src/` empty). The sole builder of `_VerifyPlan` is
+**`cli._prepare_verify`** (`src/fleet/cli.py:7427`; `_VerifyPlan` itself at `:5921`), verified
+directly here before writing — a research lane's name was wrong, and the correction is due to
+lane W7 (`.superpowers/sdd/round-e/lanes/W7/report.md`, its §0 "Correction to R1's symbol name").
+
+**The behaviour the clause describes is real, at two different confidence levels — and the split
+is the entry's whole content, not a detail:**
+
+* **Function-level: CONFIRMED BY EXECUTION.** Cited from lane W7's report (§2, "Fact 2"), which
+  drove both halves against real local git repos and real production methods, not a source read:
+  `cli._prepare_verify`, called three times with a stale ref deliberately made available first and
+  the branch tip moved between calls — **including a repeat call for a repo that already had
+  one** — cut a **new** snapshot at the **live** tip every time (`VERDICT_PHASE4:
+  UNCONDITIONALLY-FRESH`); `BuildgenWorker._ingest`, called twice with the tip advanced in
+  between, merged with `first_parent == tip_before` both times (`VERDICT_PHASE3:
+  MERGED-ONTO-CURRENT-TIP`). W7 also validated its own instruments against known-bad mutations and
+  a cosmetic-reflow control (four checks per fact) — see that report for the full battery.
+  **Rot check performed here, not inherited:** `git diff --numstat 698f750 34d6f82 --
+  src/fleet/cli.py src/fleet/workers/buildgen.py` (`34d6f82` is `HEAD` at the time this entry was
+  written) returns **empty** — zero changed lines in either file since W7's anchor commit, so the
+  citation has not rotted.
+* **Caller-level: SOURCE-READ, NOT EXECUTED — stated at exactly W7's own confidence, not
+  upgraded.** `_verify_impl` memoises `plans: dict[str, _VerifyPlan]` **outside** the wave loop; a
+  repo already in the dict is skipped (`if repo_id in plans: continue`), so within one `fleet
+  verify` process a repo planned while an earlier wave ran keeps that wave's ref if a later wave
+  touches it again. W7 named a mitigation and did not exercise it either: `wave_members`'s
+  `PRIMARY KEY (run_id, node_kind, node_id)` gives a repo exactly one `wave_index`, so the memo
+  cannot hand a later wave's member an earlier wave's ref — but nobody has driven `_verify_impl`
+  over a real multi-wave fleet to confirm it. Recorded as unexercised, not as confirmed.
+
+**The defect is not that the behaviour is missing.** It is that **nothing binds this clause to the
+code that satisfies it.** Measured here: `grep -rn "current integration tip\|fresh snapshot ref
+per §3.3\|SPEC §3.5\|SPEC 3.5" src/ tests/` (excluding `docs/`) returns **zero** hits anywhere near
+`_prepare_verify` or `_ingest` — no docstring, no comment, no test name ties the clause to either
+symbol. `docs/superpowers/plans/handoff-round-e.md` §"T — the orphaned §3.5 'current integration
+tip' clause" says the same thing independently: **"Currently owned by nobody."**
+
+**Would a test catch it? No.** Measured: `grep -n "^async def test_\|^def test_" tests/*.py |
+grep -iE "verify|snapshot"` under `_prepare_verify`/`_ingest`-adjacent files, and a direct name
+search for `_prepare_verify`, `"fresh snapshot"`, `"rebased onto"` across `tests/*.py`, all return
+**zero** matches. If a future edit to `_prepare_verify` or `_ingest` silently reused a stale
+snapshot or merged onto a stale tip, no test in the tree would fail.
+
+**Severity: low.** The behaviour is correct today at the function level; the gap is that nothing
+would notice if it stopped being, and the caller-level property is unexercised rather than known
+to be safe. **Deliberately not fixed here** — this is a binding/ownership gap, not a code change;
+ADR-0090 (referenced in W7's report as in progress) is the natural place to either assign the
+clause a home (subtask 8, subtask 10, or a documented gap) or bind it with a test.
+
+---
+
+## D77 — OPEN, recorded only. `append_blocked_by` takes a DEGRADED phase to BLOCKED via raw SQL, bypassing `ALLOWED_TRANSITIONS`
+
+**Re-measured from the primary source, not inherited from R1's one-line summary.** There are four
+textual definitions of `append_blocked_by`; two (`cli.py:1419`, `cli.py:3622`) are pass-through
+wrappers (`return await self._inner.append_blocked_by(...)`), one (`scheduler.py:125`) is the
+`SchedulerStore` Protocol's signature, and the **only real implementation** is
+`SqliteSchedulerStore.append_blocked_by` (`src/fleet/orchestrator/scheduler.py:255`). Its own
+docstring: *"Set-union `blocker` into every non-`SUCCEEDED` phase of `repo_id` and mark it
+BLOCKED."* Read directly: the guard is
+
+```python
+if current is RepoStatus.SUCCEEDED or current in TERMINAL_STATUSES:
+    continue
+```
+
+`TERMINAL_STATUSES` (`models/enums.py:25-28`) is `{SUCCEEDED, REQUIRES_HUMAN_INTERVENTION,
+SKIPPED}` **by the module's own comment, deliberately excluding BLOCKED and DEGRADED because both
+are "RESOLVABLE"**. So a `DEGRADED` phase is not skipped: the function falls through to
+`UPDATE phases SET blocked_by = ?, status = 'BLOCKED', updated_at = ? WHERE ...` — raw SQL, with
+**no call to `transition()` and no reference to `ALLOWED_TRANSITIONS` anywhere on this path**.
+
+**`ALLOWED_TRANSITIONS[DEGRADED]` does not contain `BLOCKED`.** `models/enums.py:42-45`:
+`DEGRADED -> {RUNNING, SUCCEEDED, REQUIRES_HUMAN_INTERVENTION}` only. Confirmed by calling the
+gate function itself, not by reading the dict: `transition(RepoStatus.DEGRADED,
+RepoStatus.BLOCKED)` raises `ValueError: illegal status transition DEGRADED -> BLOCKED`.
+
+**Executed against a real temp SQLite database, through the real writer/CAS pair — not a source
+read.** Probe run in an isolated detached worktree at `34d6f82` (`.venv/bin/python`, module
+`__file__` printed and confirmed to resolve inside the worktree, per COMMON.md rule 9/11):
+
+1. `acme-degraded`'s BUILD phase driven to `DEGRADED` through `acquire_phase_lease` +
+   `complete_phase` — the same production CAS pair `tests/test_scheduler.py`'s `_set_status`
+   helper uses, never a hand-edited row.
+2. A real `stubs` row inserted for it, `state='ACTIVE'` (genuinely unresolved), provider
+   `acme-blocker`.
+3. `SqliteSchedulerStore.append_blocked_by(RUN, "acme-degraded", "acme-blocker", now=...)` called
+   directly.
+
+Result: `touched=1`; the phase row's `status` column reads `DEGRADED` before the call and
+`BLOCKED` after, with `blocked_by=["acme-blocker"]`. The `stubs` row is untouched — this method
+never writes that table.
+
+**Real consequence, also executed — the actual `state.projection.build_state`, not a synthetic
+`RepoState`.** With the ACTIVE stub row present throughout, `build_state()` after the bypass
+reports: `state.repos["acme-degraded"].status == BLOCKED`, `.stubbed_deps == []`,
+`state.degraded == []`, `state.unresolved_stubs == {}`. The mechanism is `_fold_repos`
+(`state/projection.py:241-277`), which derives `stubbed_deps`/`stub_states` **conditionally on the
+phase row's own `status` being `DEGRADED`** (`degraded_stubs = dict(stub_states[repo_id]) if
+status is RepoStatus.DEGRADED else {}`) — so the invariant `RepoState._stub_invariants`
+(`models/state.py:188-193`, `stubbed_deps is non-empty iff status is DEGRADED`) is never violated;
+the projection just silently stops describing this repo as degraded at all. `unresolved_stubs`'s
+own docstring calls this **"the 'Degraded and unresolved' section of the final report (§3.5.1
+reconciliation)... Non-empty at end of run means the fleet has work it must NOT ship."** A repo
+with a genuinely unresolved, ACTIVE stub row disappears from both operator-facing lists the moment
+one of its ordering-subgraph ancestors is abandoned, with nothing else changing about the stub.
+
+**Honest limit — deliberately not claimed further.** Whether this currently changes the run's
+*exit code* was not established and is not asserted here. `cli.py`'s own in-tree comment at the
+`stub_reconcile` insertion point (§13 row 45, near `cli.py:10236`) states that the mechanism which
+would independently gate exit 7 by walking `stubs` directly — *"`stub_reconcile`... walks
+`ix_stubs_open` and writes one `UnresolvedStub` finding per open row, which is what makes the run
+exit 7"* — **"does not exist on `main` yet."** So the measured consequence is the projection-level
+one above; whether any exit-code path in the current tree reads `degraded`/`unresolved_stubs` for
+this exact scenario was not traced further, and is left unknown rather than assumed either way.
+
+**Second-order, from the gate itself.** Once the row reads `BLOCKED`, `ALLOWED_TRANSITIONS[BLOCKED]
+= {PENDING, SKIPPED}` — `DEGRADED`'s own legal exits (`RUNNING` for a revalidation round,
+`SUCCEEDED` on resolution, `REQUIRES_HUMAN_INTERVENTION` on stub rot, §3.5.1) are no longer
+reachable through the gate for this phase; its only legal next moves are step 6's un-blocking to
+`PENDING` or an operator `SKIPPED`.
+
+**Would a test catch it? No — measured, not assumed.** Three files call `append_blocked_by`:
+`tests/test_blocked_by_writer_statements.py`, `tests/test_scheduler.py`, `tests/test_runner.py`.
+`grep -c DEGRADED` on each returns **0, 0, 0**. No test anywhere drives a DEGRADED phase into
+`append_blocked_by`.
+
+**Severity: medium.** A state-machine transition the gate explicitly rejects happens anyway by
+construction on every abandoned-ancestor propagation that reaches a DEGRADED dependent, and a
+genuinely unresolved stub becomes invisible to both operator triage lists with nothing else
+changing. Not rated high only because the current exit-code consequence was not traced end-to-end
+(see the honest limit above) and the writer's own docstring frames the union as deliberately broad
+("mark it BLOCKED") rather than as an oversight. **Deliberately not fixed here** — R1 recommended
+recording rather than fixing inside the next subtask, and the fix (excluding `DEGRADED` from the
+fall-through, or routing through `transition()`) touches the same file a sibling round-E lane just
+changed (`50ad1e4`, `WaveScheduler.propagate_blocked` / `append_blocked_by` caller-naming); a
+future lane should re-measure before touching `scheduler.py` again.
