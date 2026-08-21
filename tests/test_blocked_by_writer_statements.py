@@ -30,7 +30,12 @@ Six claims are parsed and six are checked:
    set derived independently from the AST — **in both directions**, failing by `file:line`. A
    one-directional check is how this class regrows: prose naming a writer the code lacks and code
    writing `blocked_by` from a site the prose does not name are different defects and `9b34497`
-   shipped the second.
+   shipped the second. "Both directions" is only worth what the derived writer set is worth, and
+   review lane CR4 measured two constructions in which that set did **not** move while the real
+   writer set did — both because membership of the *append machinery* was inferred from a
+   function's **file** and **name** rather than from its **body**. W20 repaired the derivation
+   (`_qualname`, `_forwarded_name`, and the one-front cap in `_append_machinery`); the escapes it
+   leaves are in the residual list below, not in this sentence.
 2. **The definition of "non-delegating".** Review lane CR2 found the term was defined **nowhere in
    the tree**, and that under both of its natural readings the named pair is wrong: the
    non-delegating callers of `append_blocked_by` are `WaveScheduler.propagate_blocked` and
@@ -68,6 +73,24 @@ that was **deleted**: the anchors below (`LIVE`, `non-delegating caller`, `Non-d
 loudly, but the failure says "the description no longer states this", never "it states it
 elsewhere in different words". Both residuals are the price of binding prose at all; neither is
 closed here, and a reader must not mistake six bound claims for closure.
+
+**Four further residuals, three of them W20's own.** (a) A *second* function in the sink file that
+calls the append is refused, not classified: `_append_machinery` asserts rather than guessing which
+of two identical-looking bodies is "the rule that fronts" and which is a writer of it, so a
+legitimate second front cannot ship without a deliberate, reviewed edit to this module. That is a
+worse day than silence and the only alternative to CR4's C1, where the guess was made silently and
+wrongly. (b) `_forwarded_name` recognises only a *bare* pass-through; a wrapper that does one line
+of bookkeeping before forwarding is reported as a writer. That direction is loud (the closure test
+demands it be named) rather than silent, which is the direction to be wrong in. (c) The
+contract-trigger requirement no longer lifts itself when `docs/SPEC.md` §3.5 stops mandating it —
+it fails instead, because the self-lifting form was silenceable by one meaning-preserving word (see
+that test's own docstring). (d) the producer-count test asserts "the description must say 0"; the
+two closure tests pin `beyond_live` to 0, so it is not an independent producer measurement, and it
+will block the correct prose edit on the day a SPEC-mandated trigger gains a producer. (e)
+Pre-existing and not W20's, but measured while validating (d): `_code_writers` keys on
+`<module>.<function>`, so two writers sharing a module and a name collapse to one entry — a second
+one is invisible once the first is named. None of these is closed. This module binds six claims; it
+does not certify the sentence.
 """
 
 from __future__ import annotations
@@ -101,8 +124,15 @@ _MIRRORS: tuple[Path, ...] = (_STATE, _SPEC)
 #: terminator does not stop at the site it started in: `docs/SPEC.md` reproduces several models and
 #: every one of them ends in a line that is exactly four spaces and a paren, so an unbounded match
 #: starting at a missing terminator runs forward into the *next* model's and reports a block that
-#: straddles two listings. The real block measures ~1.5 KB in both mirrors, so 3000 admits any
-#: plausible reflow while excluding any reach into a neighbour.
+#: straddles two listings.
+#:
+#: **Measured, both mirrors, `704099c`: 2398 characters** — so the bound leaves **602 characters
+#: (25% of the block)** of headroom, and the last two edits to this block spent +782 and +77. The
+#: figure this comment carried until W20 ("~1.5 KB") was the size of the block `50ad1e4`
+#: *replaced* (`a69fba8`: 1539); `50ad1e4` shipped 2321 and `68e539a` shipped 2398, so it was
+#: false in the commit that wrote it and staler in the next — an unmeasured number inside the
+#: module built to stop unmeasured numbers (CR4's I1). Overrun is loud, not silent: the
+#: `match is not None` assert in `_prose` fires.
 _FIELD_BLOCK = re.compile(
     r"^[ \t]*blocked_by:\s*list\[RepoId\]\s*=\s*Field\(\n[\s\S]{0,3000}?^[ \t]*\)$",
     re.MULTILINE,
@@ -117,16 +147,6 @@ def _normalise(text: str) -> str:
     reason: an instrument that fails on a cosmetic edit is asserting layout, not meaning.
     """
     return " ".join(text.split())
-
-
-def _flex(literal: str) -> str:
-    """`literal` as a regex whose inter-word gaps match any run of whitespace.
-
-    `docs/SPEC.md` is hard-wrapped prose, so any phrase quoted out of it wraps somewhere. Matching
-    it literally makes the probe fail on a reflow — asserting layout instead of meaning, the exact
-    thing the reflow control below exists to forbid.
-    """
-    return r"\s+".join(re.escape(word) for word in literal.split())
 
 
 def _line_of(text: str, offset: int) -> int:
@@ -248,8 +268,56 @@ def _outermost(items: list[_Func]) -> list[_Func]:
     ]
 
 
-def _append_machinery() -> tuple[set[str], set[Path]]:
-    """`(append_names, files)` — the names that ARE the §3.5 append, derived from the SQL sink.
+def _qualname(chain: tuple[str, ...]) -> str:
+    """`Class.method` for a method, the bare name for a module-level function.
+
+    The dotted form is what the description uses (`SqliteSchedulerStore.append_blocked_by`), and it
+    is what turns the machinery exclusion below from a *name* match into an *identity* match. CR4's
+    I4: a module-level `async def append_blocked_by(store, ...)` appended to `cli.py`, whose body
+    called `store.propagate_blocked(...)` — an independent writer that merely shares a name, and
+    explicitly not a wrapper — was excluded by the old bare-name filter and the suite stayed
+    **18/18 green** over a closure sentence its existence falsified.
+    """
+    return ".".join(chain[-2:]) if len(chain) >= 2 else chain[-1]
+
+
+def _forwarded_name(func: ast.FunctionDef | ast.AsyncFunctionDef) -> str | None:
+    """The attribute a bare pass-through forwards to, or `None` if this body is not one.
+
+    Body-derived, which is the point. The description's exclusion clause says a caller is not a
+    writer when it is "a same-named wrapper **forwarding to an inner store**"; until W20 the code
+    said `name not in append_names`, which is a different rule, and
+    `test_the_definition_the_prose_gives_is_the_one_derived_from_the_code` — the test named for
+    exactly this drift — compared only the two entry-point names and so could not see it.
+
+    A pass-through is: one statement after any docstring, and that statement is a call on an
+    attribute, bare or awaited or returned. Deliberately strict — a wrapper that does one line of
+    bookkeeping before forwarding is classified as a *writer*, which fails loudly (the closure test
+    demands it be named) rather than silently widening the machinery.
+    """
+    body = list(func.body)
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+    if len(body) != 1:
+        return None
+    statement = body[0]
+    if not isinstance(statement, (ast.Return, ast.Expr)):
+        return None
+    value = statement.value
+    if isinstance(value, ast.Await):
+        value = value.value
+    if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Attribute):
+        return None
+    return value.func.attr
+
+
+def _append_machinery() -> tuple[dict[str, str], set[Path]]:
+    """`({qualname: site}, files)` — what IS the §3.5 append, keyed by QUALIFIED name.
 
     Two members today: the store primitive carrying the `UPDATE`, and the rule that fronts it in
     the primitive's own module. Both are *derived*; neither is listed here. The field description
@@ -258,6 +326,17 @@ def _append_machinery() -> tuple[set[str], set[Path]]:
     this set — which is the whole of CR2's I1: before that, "non-delegating caller of the §3.5
     append" was a term defined nowhere in the tree, and under either of its two natural readings
     the pair the description names is wrong in both directions.
+
+    **The fronting rule is capped at one, and the cap is the repair for CR4's C1.** The old
+    derivation promoted into the machinery *every* function in a sink file that calls a sink name.
+    That rule is filename-derived, and it composes into: a new caller of `append_blocked_by` that
+    happens to live in `scheduler.py` is classified as part of the append rather than as a caller
+    of it, so the closure test never sees it. CR4 demonstrated the consequence — a real
+    `WaveScheduler.propagate_contract_blocked` writer plus the one repair the single failing test's
+    own message recommends yields **18/18 green over a false closure sentence** — and W20
+    reproduced it at `704099c` (16/2 for the writer alone, 18/0 once the definition sentence names
+    it). Two sink-file callers have identical bodies, so nothing in the AST says which is "the
+    rule that fronts" and which is a writer of it. This function therefore refuses to guess.
     """
     parsed = {
         path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(_SRC.rglob("*.py"))
@@ -271,26 +350,55 @@ def _append_machinery() -> tuple[set[str], set[Path]]:
     )
     sink_names = {func.name for _, func, _ in sinks}
     sink_files = {path for path, _, _ in sinks}
-    append_names = set(sink_names)
-    for path, func, _ in every:
-        if path in sink_files and func.name not in sink_names and _callee_names(func) & sink_names:
-            append_names.add(func.name)
-    return append_names, sink_files
+    entry_points = {
+        _qualname(chain): f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
+        for path, func, chain in sinks
+    }
+    fronts = _outermost(
+        [
+            item
+            for item in every
+            if item[0] in sink_files
+            and item[1].name not in sink_names
+            and _callee_names(item[1]) & sink_names
+        ]
+    )
+    assert len(fronts) <= 1, (
+        f"{len(fronts)} functions in "
+        f"{sorted(p.relative_to(_ROOT).as_posix() for p in sink_files)} call the `blocked_by` "
+        f"append sink without being it: "
+        f"{', '.join(sorted(_qualname(chain) for _p, _f, chain in fronts))}. At most one of them "
+        f"is 'the rule that fronts the append'; the rest are non-delegating CALLERS of it, and "
+        f"their bodies are indistinguishable, so this module will not guess. Adjudicate it HERE, "
+        f"in this file, with your reason. Do NOT resolve it by adding the new name to the "
+        f"description's definition sentence: that is CR4's C1 exactly — a function promoted into "
+        f"the machinery is thereafter invisible to "
+        f"`test_every_code_site_that_writes_blocked_by_is_named_by_the_prose`, and the measured "
+        f"result of that repair is 18/18 green over a closure claim the new writer makes false."
+    )
+    for path, func, chain in fronts:
+        entry_points[_qualname(chain)] = f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
+    return entry_points, sink_files
 
 
 def _code_writers() -> dict[str, str]:
     """`{"<module>.<function>": "<relpath>:<line>"}` for every site in `src/` that writes the field.
 
-    Two by-rule exclusions, both necessary and neither a list of names:
+    Three by-rule exclusions, none of them a list of names, and the first two are the two halves
+    of the description's own definition rather than one filter standing in for both:
 
-    * **The append itself is not a caller of the append.** A function whose own name is one of the
-      append's names is that append — the `Protocol` declaration, the store implementation, the two
-      `_ScanWaveStore`/`_ScopedWaveStore` wrappers that forward to `self._inner`, and the §3.5 rule
-      `WaveScheduler.propagate_blocked` that fronts it. This is what "non-delegating caller" means,
-      derived rather than enumerated.
+    * **The append itself is not a caller of the append** — matched by QUALIFIED name, so it
+      excludes `SqliteSchedulerStore.append_blocked_by` and `WaveScheduler.propagate_blocked` and
+      nothing else. A bare-name match here was CR4's I4: any function anywhere called
+      `append_blocked_by` was excluded whatever its body did.
+    * **A same-named wrapper forwarding to an inner store is not a caller either** — matched by
+      BODY, via `_forwarded_name`, so the `_ScanWaveStore`/`_ScopedWaveStore` pass-throughs are
+      excluded because of what they do, not because of what they are called. The `Protocol`
+      declaration never reaches either rule: its body calls nothing.
     * **A nested closure is not a separate site**, per `_outermost`.
     """
-    append_names, _ = _append_machinery()
+    entry_points, _ = _append_machinery()
+    call_names = {qualname.rpartition(".")[2] for qualname in entry_points}
     parsed = {
         path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(_SRC.rglob("*.py"))
     }
@@ -299,7 +407,9 @@ def _code_writers() -> dict[str, str]:
         [
             item
             for item in every
-            if _callee_names(item[1]) & append_names and item[1].name not in append_names
+            if _callee_names(item[1]) & call_names
+            and _qualname(item[2]) not in entry_points
+            and not (item[1].name in call_names and _forwarded_name(item[1]) == item[1].name)
         ]
     )
     return {
@@ -383,14 +493,68 @@ _CITED_TEST = re.compile(r"`(tests/[A-Za-z0-9_./-]+\.py)`")
 #: `Class.method` in the definition sentence: the entry points that ARE the §3.5 append.
 _ENTRY_POINT = re.compile(r"`([A-Z][A-Za-z0-9_]*)\.([a-z_][A-Za-z0-9_]*)`")
 
-#: `docs/SPEC.md` §3.5's contract paragraph, in the SPEC's own words. Its presence is what MAKES
-#: the contract case a trigger reaching the rule, so the requirement below is derived from the
-#: primary source rather than hard-coded: if §3.5 ever stops routing contracts through the same
-#: rule, the requirement lifts by itself instead of becoming a stale expectation.
-_SPEC_CONTRACT_RULE = re.compile(_flex("the scheduler applies the same propagation rule"))
+#: `docs/SPEC.md` §3.5's own heading. The contract mandate is read out of THAT section rather
+#: than out of the whole file, so a sentence about contracts somewhere else cannot supply it.
+_SPEC_SECTION = re.compile(r"^###[ \t]+3\.5[ \t]", re.MULTILINE)
+
+#: Any ATX heading, used only to find where §3.5 ends.
+_SPEC_HEADING = re.compile(r"^#{1,6}[ \t]", re.MULTILINE)
 
 #: How the description must identify that trigger, if §3.5 mandates it.
 _CONTRACT_TRIGGER = re.compile(r"contracts\.status='FAILED'")
+
+#: The column §3.5's contract paragraph says the `contract_id` is appended to. Paired with
+#: `_CONTRACT_TRIGGER` because the trigger token ALONE is not specific enough: §3.5 states it twice
+#: — once in the ADR-0019 rollback paragraph, which says nothing about propagation. W20 measured
+#: that: removing the trigger token from the mandate sentence and searching §3.5 for the trigger
+#: alone still passes 18/18, because the rollback paragraph supplies it. Both anchors are
+#: code-quoted identifiers, so the pair survives any rewording of the sentence carrying them.
+_SPEC_BLOCKED_BY_COLUMN = re.compile(r"phases\.blocked_by")
+
+
+def _spec_section_3_5() -> str:
+    """`docs/SPEC.md` §3.5's text, or a loud failure — never an empty string.
+
+    Slicing by heading rather than searching the whole file keeps "§3.5 mandates this" honest, and
+    a heading that no longer resolves fails here instead of quietly yielding "" — the difference
+    `_sentence_with` states below, applied to the SPEC side, which is where CR4's I2 found it
+    missing.
+    """
+    spec = _SPEC.read_text(encoding="utf-8")
+    heads = _SPEC_SECTION.findall(spec)
+    assert len(heads) == 1, (
+        f"docs/SPEC.md has {len(heads)} `### 3.5 ` heading(s), expected exactly 1. The contract "
+        f"mandate this module reads is section-scoped; if §3.5 was renumbered or split, move "
+        f"_SPEC_SECTION in the same change rather than letting the scope silently become the "
+        f"whole file or nothing."
+    )
+    start = _SPEC_SECTION.search(spec)
+    assert start is not None
+    following = _SPEC_HEADING.search(spec, start.end())
+    return spec[start.start() : following.start() if following else len(spec)]
+
+
+def _spec_contract_mandate() -> str | None:
+    """§3.5's paragraph mandating the contract propagation, or `None` if §3.5 no longer states it.
+
+    Identified by the two code tokens the mandate is made of — the trigger and the column it writes
+    — inside one blank-line-separated paragraph of §3.5, rather than by the prose sentence that
+    joins them. That is the repair for CR4's I2: the old anchor was the phrase "the scheduler
+    applies the same propagation rule", so inserting one meaning-preserving word ("the **very**
+    same") took the whole check to a silent skip.
+    """
+    paragraphs = [
+        block
+        for block in _spec_section_3_5().split("\n\n")
+        if _CONTRACT_TRIGGER.search(block) and _SPEC_BLOCKED_BY_COLUMN.search(block)
+    ]
+    assert len(paragraphs) <= 1, (
+        f"docs/SPEC.md §3.5 has {len(paragraphs)} paragraphs naming both "
+        f"`contracts.status='FAILED'` and `phases.blocked_by`, so 'the' contract mandate is "
+        f"ambiguous. Narrow the anchors in the same change rather than letting this test read one "
+        f"paragraph and a reader read another."
+    )
+    return paragraphs[0] if paragraphs else None
 
 
 def _sentence_with(prose: _Prose, marker: re.Pattern[str], what: str) -> str:
@@ -599,12 +763,14 @@ def test_the_definition_the_prose_gives_is_the_one_derived_from_the_code(prose: 
     without the prose failing.
     """
     sentence = _sentence_with(prose, _DEFINITION_MARKER, "what 'non-delegating' means")
-    named = {method for _cls, method in _ENTRY_POINT.findall(sentence)}
+    named = {f"{cls}.{method}" for cls, method in _ENTRY_POINT.findall(sentence)}
     derived, sink_files = _append_machinery()
-    assert named == derived, (
+    assert named == set(derived), (
         f"{prose.site}: defines 'non-delegating' against {sorted(named)}, but the append machinery "
         f"derived from the `phases.blocked_by` write sink is {sorted(derived)}. The term and "
-        f"the code have drifted; whichever moved, they must move together."
+        f"the code have drifted; whichever moved, they must move together. The comparison is on "
+        f"`Class.method`, not on the method name alone: a bare-name comparison passes when the "
+        f"prose attributes the append to the wrong class."
     )
     for cls, method in _ENTRY_POINT.findall(sentence):
         resolved = any(
@@ -647,12 +813,37 @@ def test_the_contract_trigger_spec_3_5_mandates_is_in_the_enumeration(prose: _Pr
     hand-maintained expectation that rots the moment the SPEC changes, and this module exists
     because hand-maintained agreement already failed twice on this sentence.
 
-    What it cannot do: it checks the trigger is *named in the zero-producer clause*, not that the
-    clause's description of it is true. That is residual 1 of the module docstring in a new place.
+    **This check used to `pytest.skip` when its SPEC-side anchor did not match, and the anchor was
+    the prose phrase "the scheduler applies the same propagation rule".** CR4 measured what that
+    costs: dropping the trigger from the description in both mirrors AND inserting one
+    meaning-preserving word into §3.5 ("the **very** same propagation rule") reports
+    **16 pass / 2 skip / 0 fail** — `a69fba8`'s exact defect, green in CI, because nobody reads a
+    skip. So the anchor is now the pair of code tokens the mandate is made of,
+    `contracts.status='FAILED'` and `phases.blocked_by`, required in **one paragraph of §3.5** —
+    they survive any rewording of the sentence joining them — and their absence **fails**. The
+    trigger token alone was measured insufficient: §3.5 states it twice, and the other occurrence
+    (the ADR-0019 rollback paragraph) is not about propagation at all, so removing the token from
+    the mandate sentence still left a single-token anchor passing 18/18.
+
+    The trade that buys, stated rather than implied: the requirement no longer lifts by itself. If
+    §3.5 genuinely stops mandating the contract trigger, this test fails and someone must delete it
+    and the description's clause together. That is a worse day than a skip and a better one than
+    `a69fba8` shipping twice; a requirement that can lift itself is a requirement one word can
+    silence.
+
+    What it still cannot do: it checks the trigger is *named in the zero-producer clause*, not that
+    the clause's description of it is true. That is residual 1 of the module docstring in a new
+    place.
     """
-    spec = _SPEC.read_text(encoding="utf-8")
-    if not _SPEC_CONTRACT_RULE.search(spec):
-        pytest.skip("docs/SPEC.md §3.5 no longer routes a failed contract through the same rule")
+    assert _spec_contract_mandate() is not None, (
+        f"docs/SPEC.md §3.5 has no paragraph naming both `contracts.status='FAILED'` and "
+        f"`phases.blocked_by` (anchors {_CONTRACT_TRIGGER.pattern!r} and "
+        f"{_SPEC_BLOCKED_BY_COLUMN.pattern!r}), so the mandate this test derives from the primary "
+        f"source cannot be read there. Either the SPEC dropped the mandate — in which case delete "
+        f"this test AND the description's contract clause in the same change, in both mirrors — "
+        f"or it moved out of §3.5 and _SPEC_SECTION must move with it. This is deliberately not a "
+        f"skip: the skip it replaces was reachable by one meaning-preserving word."
+    )
     sentence = _sentence_with(prose, _ZERO_PRODUCER, "which writers have no producers")
     assert _CONTRACT_TRIGGER.search(sentence), (
         f"{prose.site}: `docs/SPEC.md` §3.5 states the scheduler applies the same propagation rule "
@@ -666,12 +857,33 @@ def test_the_contract_trigger_spec_3_5_mandates_is_in_the_enumeration(prose: _Pr
 def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     prose: _Prose, code_writers: dict[str, str]
 ) -> None:
-    """The zero-producer half of the split, checked rather than assumed.
+    """The zero-producer half of the split: **the description must state 0, and 0 is measured.**
 
     A check that demanded a live producer for every enumerated writer would call these two absent
     and push the description back to a flat four — so the split is what makes the binding possible
-    at all. The producer count is *parsed*, not expected: if the description ever says "1 producer",
-    that must show up as a code writer beyond the ones it marks LIVE.
+    at all. The producer count is *parsed*, not expected, and it is compared against a measurement:
+    the writers the AST finds, minus the ones the description marks LIVE.
+
+    **What that comparison can and cannot do, corrected.** This docstring used to say "if the
+    description ever says '1 producer', that must show up as a code writer beyond the ones it marks
+    LIVE". CR4 showed that capability is unreachable in any tree state, and W20 reproduced it at
+    `704099c`. The two closure tests above make `code_writers` and the named symbol set equal
+    whenever they are green, so `beyond_live` is pinned at 0 and only `stated_producers == 0` can
+    pass. Injecting a real third writer and stating "1 producer" satisfies neither configuration:
+    leave it unnamed and this test passes (1 == 3-2) while the closure test fails; name it and this
+    test fails (0 != 1) alongside the LIVE-count test. So the assertion is
+    **"the description must say 0"** — true, load-bearing and independently reachable (stating "1"
+    with the code untouched fails here and nowhere else; W20 measured that as the only failure),
+    but it is not the independent producer measurement the old wording promised, and Rule 12's
+    redundancy question is what settled keeping it rather than deleting it.
+
+    **The cost, disclosed.** On the day one of the three SPEC-mandated triggers gains a real
+    producer, the *correct* prose edit is blocked by this test rather than validated by it: the
+    closure test will require the new writer to be named in the "non-delegating callers" sentence,
+    and `_prose_live_symbols` reads that same sentence, so the new writer counts as LIVE and
+    `beyond_live` returns to 0. Fixing that needs the description to separate "named as a caller"
+    from "marked LIVE" — today one sentence carries both anchors — which is a prose change, not a
+    change here.
     """
     sentence = _sentence_with(prose, _ZERO_PRODUCER, "which writers have no producers")
     stated_producers = int(_ZERO_PRODUCER.search(sentence).group(1))  # type: ignore[union-attr]
