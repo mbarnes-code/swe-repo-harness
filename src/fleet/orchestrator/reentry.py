@@ -82,6 +82,20 @@ def phase_floor(
     `evidence_holds(repo, phase)` for phases below the frontier; a phase absent from `evidence` is
     treated as not holding (the conservative default: search further back rather than stop early).
 
+    **`evidence` is READ LAZILY, and a mapping that computes on demand is a supported argument.**
+    This function asks `evidence` only for phases **strictly below** the frontier — never at it,
+    never above it — and the backward walk stops at the first phase that holds or that is a hard
+    stop, so it does not ask about anything below that either. A caller may therefore pass a
+    `Mapping` whose lookup performs the work rather than a dict of four pre-computed verdicts, and
+    `orchestrator.reentry.resume_floor` is the supplied driver that does exactly that: eager
+    evaluation would spend Git reads on phases this walk never consults, and re-deriving the
+    frontier in the caller so it could pre-compute only the needed span would put the
+    settled-for-demotion classification in two modules with nothing binding them (defect D74's
+    shape). The guarantee is not a convention: `tests/test_reentry_evidence.py::
+    test_phase_floor_asks_evidence_only_for_phases_strictly_below_the_frontier` records every
+    lookup and fails on one above. The "absent from `evidence`" sentence above still governs a
+    plain mapping; a computing mapping simply never has an absent key.
+
     Returns `None` when there is nothing to compute: any phase is
     `REQUIRES_HUMAN_INTERVENTION` (mechanically terminal — resume never touches it), or every
     phase has already settled (nothing left to re-enter). Otherwise returns the `Phase` re-entry
@@ -110,3 +124,346 @@ def phase_floor(
             break  # evidence holds here -- everything earlier is covered by this phase
         floor = phase
     return floor
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 5 — `evidence_holds`: the four per-phase DURABLE evidence predicates
+# --------------------------------------------------------------------------------------
+# These imports sit here rather than in the header block above because this section was appended
+# to a file a sibling lane was editing in the same round, and one contiguous tail keeps the two
+# edits independent. Fold them into the header block on the next pass over this file.
+from collections.abc import Awaitable, Callable, Iterator  # noqa: E402
+from dataclasses import dataclass  # noqa: E402
+from pathlib import Path  # noqa: E402
+from typing import Final, cast  # noqa: E402
+
+from fleet.sandbox.worktree import slug  # noqa: E402
+from fleet.vcs.git import Git  # noqa: E402
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceRow:
+    """The two `phases` columns step 5 reads, and nothing else (Rule 2).
+
+    Deliberately NOT `state.repository.PhaseRow`: that dataclass is "the subset of `phases` the
+    orchestrator reads" and it does **not** carry `post_commit_sha`, which two of the four
+    predicates below are defined in terms of. `models.state.PhaseRecord` does carry the column but
+    drags the whole Pydantic row in. So step 5 declares the two columns it needs and the caller
+    projects its own read onto them — `resume_floor` then feeds the same mapping to `phase_floor`,
+    which reads only `.status`, so one read serves both halves of the algorithm.
+    """
+
+    status: RepoStatus
+    post_commit_sha: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RepoEvidence:
+    """Everything `evidence_holds` needs about one repo that is not a `phases` row.
+
+    Two filesystem paths, the migrate branch, the repo's destination inside the monorepo, and one
+    durable DB fact. `has_verification_report` is passed in rather than queried here because the
+    report is persisted as a `findings` row with `kind = 'VerificationReport'` by `cli.py`
+    (`cli._record_verification` / `cli._verifications`, `cli.VERIFICATION_KIND`), and importing
+    `fleet.cli` from `fleet.orchestrator` would close an import cycle. The predicate stays a
+    function of `phases` + Git + this one supplied bool.
+    """
+
+    repo_id: str
+    mirror: Path
+    worktree: Path
+    dest: str
+    has_verification_report: bool = False
+    branch: str = ""
+
+    def migrate_branch(self) -> str:
+        """`migrate/<repo>` unless the caller named a branch. THE format is fixed by
+        `models.tasks.PullRequestDraft.branch`'s pattern (`^migrate/[a-z0-9._-]+$`) and built the
+        same way by `cli._reconcile_tasks_with_git` and `workers/prwriter`."""
+        return self.branch or f"migrate/{self.repo_id}"
+
+    @classmethod
+    def for_repo(
+        cls,
+        repo_id: str,
+        *,
+        git_cache_dir: Path,
+        work_dir: Path,
+        dest: str,
+        has_verification_report: bool = False,
+    ) -> RepoEvidence:
+        """Derive the two paths the way production derives them, so step 5 cannot point at a
+        directory no worker ever wrote.
+
+        `git_cache_dir` is `<root>/<run.cache_dir>/git` — the value `cli._scan_payloads` puts on
+        `CloneInput.cache_dir` — and the mirror under it is `<slug(repo_id)>.git`, which is
+        `workers/clone.CloneWorker._mirror_path` restated with the same `sandbox.worktree.slug`
+        this imports rather than a second slugifier. `work_dir` is `<root>/<run.work_dir>`, and
+        the worktree under it is `work_dir / repo_id` — `orchestrator.context.RunContext.worktree`
+        and `cli._reconcile_tasks_with_git`'s `work_root / repo_id`.
+        """
+        return cls(
+            repo_id=repo_id,
+            mirror=git_cache_dir / f"{slug(repo_id)}.git",
+            worktree=work_dir / repo_id,
+            dest=dest,
+            has_verification_report=has_verification_report,
+        )
+
+
+#: A `Git` bound to one path. Injected (CLAUDE.md guardrail 3) so a test can supply a recording
+#: runner without a subprocess, and so a caller can pass its own deadline down.
+GitFactory = Callable[[Path], Git]
+
+
+def _mirror_is_initialized(mirror: Path) -> bool:
+    """`workers/clone._mirror_is_initialized`, restated: a directory git would recognise as a bare
+    repository, not merely a directory that exists. Restated rather than imported because
+    importing `fleet.workers.clone` would execute its `@register_worker` side effect and pull the
+    LLM and sandbox stacks into a module the resume driver wants cheap;
+    `tests/test_reentry_evidence.py::test_the_clone_facts_agree_with_the_clone_worker_s_own_helpers`
+    calls both over the same fixture matrix so the two cannot silently diverge."""
+    return (mirror / "HEAD").is_file() and (mirror / "objects").is_dir()
+
+
+def _worktree_is_initialized(worktree: Path) -> bool:
+    """`workers/clone._worktree_is_initialized`, restated (see `_mirror_is_initialized`): a linked
+    worktree carries a `.git` FILE pointing at the mirror's admin directory."""
+    return (worktree / ".git").exists()
+
+
+def _worktree_present(repo: RepoEvidence) -> bool:
+    """`workers/buildverify.preconditions_hold`'s SECOND refusal, restated over
+    `buildverify.dirs_present`: "a missing worktree means the reaper already removed what the
+    checkpoint describes".
+
+    Load-bearing rather than defensive, and it must run **before** any Git read: `Git` binds a
+    path and shells out with it as `cwd`, so a `resolve()` against a directory that is not there
+    raises `FileNotFoundError` instead of answering. A fresh repo has no worktree, and "a fresh
+    repo yields `False` at every phase" (§5 row 5) is only true if the phases that read Git check
+    this first — without it, `evidence_holds` raises on exactly the input the criterion names.
+    """
+    return repo.worktree.is_dir()
+
+
+def _build_file_present(repo: RepoEvidence) -> bool:
+    """`workers/buildverify.preconditions_hold`'s third refusal, restated over the same path
+    expression: `<worktree>/<dest>/BUILD.bazel`.
+
+    **On the filesystem, not on the integration ref** — which is where this diverges from
+    `design-resume-step5.md` §3's table, and deliberately. That table says "present on the
+    integration ref"; the implementation it cites checks the worktree, and the scenario §6 option
+    C is written for is a `BUILD.bazel` the *reaper removed from disk*. A ref read cannot see that
+    deletion — the blob is still reachable from the commit — so reading the ref would answer
+    `True` for exactly the repo step 5 exists to demote.
+    """
+    return (repo.worktree / repo.dest / "BUILD.bazel").exists()
+
+
+async def _scan_evidence(
+    rows: Mapping[Phase, EvidenceRow | None], repo: RepoEvidence, git: GitFactory
+) -> bool:
+    """Phase 1: the mirror is a git dir, the worktree is a git worktree, and the worktree resolves
+    `HEAD` — `workers/clone.CloneWorker.preconditions_hold`'s three facts, in its cost order."""
+    _ = rows
+    if not _mirror_is_initialized(repo.mirror):
+        return False
+    if not _worktree_is_initialized(repo.worktree):
+        return False
+    return await git(repo.worktree).resolve("HEAD") is not None
+
+
+async def _transform_evidence(
+    rows: Mapping[Phase, EvidenceRow | None], repo: RepoEvidence, git: GitFactory
+) -> bool:
+    """Phase 2: `migrate/<repo>` exists and `phases(r,2).post_commit_sha` resolves **on it**.
+
+    "On it" is an ancestry question, not a resolvability one, and the difference is the whole
+    value of the clause: a SHA that resolves in the repo but is not reachable from the branch is a
+    commit `vcs/commits.rollback_phase` or a force-reset already took off `migrate/<repo>`, which
+    is precisely the state whose Phase-2 result must not be trusted. §11.5's authority table says
+    the column is "a **pointer** into Git … never trusted over Git", so the pointer is checked
+    against the branch rather than read as the answer.
+    """
+    if not _worktree_present(repo):
+        return False
+    branch = repo.migrate_branch()
+    handle = git(repo.worktree)
+    if await handle.resolve(branch) is None:
+        return False
+    row = rows.get(Phase.TRANSFORM)
+    sha = None if row is None else row.post_commit_sha
+    if not sha:
+        return False
+    if await handle.resolve(sha) is None:
+        return False
+    return await handle.is_ancestor(sha, branch)
+
+
+async def _build_evidence(
+    rows: Mapping[Phase, EvidenceRow | None], repo: RepoEvidence, git: GitFactory
+) -> bool:
+    """Phase 3: `phases(r,3).post_commit_sha` resolves ∧ `<dest>/BUILD.bazel` is present."""
+    if not _worktree_present(repo):
+        return False
+    row = rows.get(Phase.BUILD)
+    sha = None if row is None else row.post_commit_sha
+    if not sha:
+        return False
+    if await git(repo.worktree).resolve(sha) is None:
+        return False
+    return _build_file_present(repo)
+
+
+async def _verify_evidence(
+    rows: Mapping[Phase, EvidenceRow | None], repo: RepoEvidence, git: GitFactory
+) -> bool:
+    """Phase 4: `phases(r,3).status is SUCCEEDED` ∧ a persisted `VerificationReport` for the repo.
+
+    **This is the one predicate that must NOT agree with the implementation it mirrors.**
+    `workers/rdepverify.preconditions_hold` answers `True` when the BUILD row is *missing*, and
+    says why: "No BUILD row at all is a first admission by the runner, not evidence of a failure".
+    That reading is correct for an admission gate and catastrophic for evidence — a missing BUILD
+    row is the state of every repo that has never built, and answering `True` here would let the
+    backward walk stop at Phase 4 and leave a never-cloned repo's floor there. So a missing row is
+    `PENDING` (`_status_of`) and `PENDING is not SUCCEEDED` — `False`. The design table's claim
+    that each clause "duplicates a fact … so the two cannot disagree" does not hold for this row,
+    and the divergence is the point rather than an oversight.
+    """
+    _ = git
+    # `_status_of` — which is what makes "a missing row is `PENDING`" one rule and not two — is
+    # annotated for `PhaseRow` because that is the row shape its own caller had. It reads only
+    # `.status`, which `EvidenceRow` supplies; the cast is the same one `resume_floor` documents.
+    build = cast("PhaseRow | None", rows.get(Phase.BUILD))
+    return _status_of(build) is RepoStatus.SUCCEEDED and repo.has_verification_report
+
+
+_EvidencePredicate = Callable[
+    [Mapping[Phase, "EvidenceRow | None"], RepoEvidence, GitFactory], Awaitable[bool]
+]
+
+_PREDICATES: Final[Mapping[Phase, _EvidencePredicate]] = {
+    Phase.SCAN: _scan_evidence,
+    Phase.TRANSFORM: _transform_evidence,
+    Phase.BUILD: _build_evidence,
+    Phase.VERIFY: _verify_evidence,
+}
+
+
+async def evidence_holds(
+    phase: Phase,
+    *,
+    rows: Mapping[Phase, EvidenceRow | None],
+    repo: RepoEvidence,
+    git: GitFactory = Git,
+) -> bool:
+    """Does this repo's DURABLE evidence for `phase` still hold? (`docs/SPEC.md` Constraint 7.)
+
+    This is **not** `BaseWorker.preconditions_hold` and must never be confused with it. That
+    method takes a typed payload and a live `WorkerContext`, exists only inside a dispatch, and
+    its `False` means "re-run the phase whole" — never "skip". `evidence_holds` reads `phases` and
+    Git only, needs no payload, no `WorkerContext` and no worker instance, and its `False` means
+    "the durable artefact this phase claims to have produced is not there any more". Constraint
+    7's own wording is "the phase's declared preconditions … **against SQLite**", and this is what
+    that means; `preconditions_hold` keeps its single call site in `runner._re_entry`, so the two
+    predicates cannot disagree because they are never asked the same question.
+
+    A fresh repo answers `False` at every phase. That is the correct answer and it has **no
+    promotion effect**: `phase_floor` only ever asks about phases strictly *below* the settled
+    frontier, and a fresh repo's frontier is `SCAN`, so the walk asks nothing at all.
+
+    **A `post_commit_sha` that does not resolve is `False`, never an exception.** §11.5 step 4's
+    second selector — reconcile "any `phases` row whose `post_commit_sha` does not resolve on its
+    branch" — is NOT implemented, and ADR-0087 §4 discloses it: a phase row with a dangling
+    pointer and no `RUNNING` task is never reconciled, so step 4 is a satisfied prerequisite for
+    the reconciled class only and the Phase-2 and Phase-3 predicates below will meet unresolvable
+    SHAs in production. Both possible mistakes are asymmetric and one is much worse: a false
+    `False` costs one repo a re-run of work that had in fact landed, while a false `True` leaves a
+    repo's floor above work nothing verified. And a raise is worse than either — it would abort
+    the whole resume rather than lower one repo's floor, so a dangling pointer for one repo would
+    stop the other 249 being reconciled at all. Hence: resolve, and answer `False` on a miss.
+
+    `git` is a factory rather than a `Git` so each predicate can bind the handle it needs; the
+    default is the real class.
+    """
+    try:
+        predicate = _PREDICATES[phase]
+    except KeyError as exc:  # a fifth phase must fail loudly, not default to False (Rule 11)
+        raise ValueError(f"no step-5 evidence predicate for {phase!r}") from exc
+    return await predicate(rows, repo, git)
+
+
+# --------------------------------------------------------------------------------------
+# Feeding `evidence_holds` to `phase_floor` lazily
+# --------------------------------------------------------------------------------------
+
+
+class _EvidenceWanted(Exception):
+    """`_LazyEvidence` asks for a phase it has not been given yet.
+
+    Deliberately **not** a `KeyError`: `Mapping.get` catches `KeyError` and returns its default,
+    so a `KeyError` here would be silently answered `False` and the laziness would degrade into a
+    wrong answer instead of a request.
+    """
+
+    def __init__(self, phase: Phase) -> None:
+        super().__init__(phase)
+        self.phase = phase
+
+
+class _LazyEvidence(Mapping[Phase, bool]):
+    """A `Mapping[Phase, bool]` that raises `_EvidenceWanted` for anything it does not hold."""
+
+    def __init__(self, known: Mapping[Phase, bool]) -> None:
+        self._known = known
+
+    def __getitem__(self, phase: Phase) -> bool:
+        try:
+            return self._known[phase]
+        except KeyError:
+            raise _EvidenceWanted(phase) from None
+
+    def __iter__(self) -> Iterator[Phase]:
+        return iter(self._known)
+
+    def __len__(self) -> int:
+        return len(self._known)
+
+
+async def resume_floor(
+    rows: Mapping[Phase, EvidenceRow | None],
+    probe: Callable[[Phase], Awaitable[bool]],
+) -> tuple[Phase | None, dict[Phase, bool]]:
+    """`phase_floor`, driven with evidence computed **on demand**, one phase at a time.
+
+    Returns the floor and the evidence that was actually gathered — the second half so a
+    `--dry-run` report can say *why* a repo was demoted without a second pass over Git, and so a
+    test can assert which phases were asked about at all.
+
+    **Why a replay loop rather than a lazy `__getitem__` that computes.** `phase_floor` is sync
+    and `evidence_holds` is async, so a mapping cannot await inside `__getitem__`. Instead
+    `phase_floor` — a pure function with no side effects, which is what makes this sound — is
+    called with a mapping that *raises* for an unknown phase; the raise is caught here, that one
+    phase is awaited, and the pure function is re-run. It terminates because every iteration adds
+    a key and `Phase` has four members, so `phase_floor` runs at most five times.
+
+    The point is the one `phase_floor` documents: evidence is computed only for the phases the
+    backward walk actually reaches. Evaluating all four eagerly would spend two `rev-parse`-class
+    reads and a tree probe per repo per resume on phases the walk never consults, and re-deriving
+    the frontier in the caller to avoid that would put the settled-for-demotion classification in
+    two modules with nothing binding them — defect D74's shape.
+    """
+    known: dict[Phase, bool] = {}
+    while True:
+        try:
+            # `phase_floor` reads only `.status` off each row, which `EvidenceRow` supplies; its
+            # annotation names `PhaseRow` because that is what its own caller had. One cast here
+            # rather than a second row read in every caller — fold it away by widening
+            # `phase_floor`'s annotation to a status-only Protocol once this file is quiet.
+            floor = phase_floor(cast("Mapping[Phase, PhaseRow | None]", rows), _LazyEvidence(known))
+        except _EvidenceWanted as wanted:
+            if wanted.phase in known:  # pragma: no cover - `_LazyEvidence` returns known phases
+                raise RuntimeError(f"step-5 evidence re-requested for {wanted.phase!r}") from None
+            known[wanted.phase] = await probe(wanted.phase)
+            continue
+        return floor, known

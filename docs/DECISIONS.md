@@ -8168,3 +8168,150 @@ assertion's discriminating mutation, and the two pre-existing assertions pass un
   contradiction that no longer exists is a reader's second source of truth, not a record.
 - It does not re-open ADR-0081's step-2/step-3 ordering, whose reasoning step 4 inherits and cites
   rather than restates.
+
+---
+
+## ADR-0088 — `evidence_holds` is a resume-owned predicate that must **disagree** with the implementation it mirrors at Phase 4; and `phase_floor`'s `evidence` is read lazily, bound by a recorder rather than by a docstring
+
+**Status:** Accepted · **Date:** 2026-08-21 · **Scope:** `src/fleet/orchestrator/reentry.py`
+(appended), `tests/test_reentry_evidence.py` (new). §11.5 step 5 subtask 5 of
+`docs/superpowers/plans/design-resume-step5.md` §5.
+
+### 1. Context
+
+Design §3's table specifies four per-phase durable predicates and says each clause was "chosen
+because it duplicates a fact some Family-B implementation already checks, **so the two cannot
+disagree**". Implementing them against the real workers falsified that claim in one row and
+sharpened it in two others. This ADR records the four decisions that came out of that, because
+each is a place where a later reader would otherwise "restore consistency" and reintroduce a
+defect the design was written to prevent.
+
+### 2. Phase 4 must disagree with `rdepverify`, and the disagreement is the design
+
+`workers/rdepverify.preconditions_hold` answers `True` when the BUILD row is **missing**, and its
+own comment says why: *"No BUILD row at all is a first admission by the runner, not evidence of a
+failure; refusing here would deadlock a fresh run on a row nothing has written yet."* That is
+correct for an admission gate and catastrophic for evidence. A missing BUILD row is the state of
+every repo that has never built, so an `evidence_holds(r, 4)` that copied the carve-out would let
+the backward walk stop at Phase 4 and leave a never-built repo's floor there — design §3(b)'s
+promotion inversion, arriving by the one route §3 believed it had closed.
+
+**Decision.** `evidence_holds(r, 4)` is "`phases(r,3).status` is `SUCCEEDED` **and** a
+persisted `VerificationReport` exists for the repo", with a missing row read as `PENDING` through
+the module's existing
+`_status_of` and therefore `False`. The design table's "cannot disagree" claim is **false for this
+row** and is corrected here rather than in the plan file, which is a historical record.
+`test_verify_evidence_refuses_the_missing_build_row_that_rdepverify_admits` names the divergence so
+it cannot be quietly reconciled; the mutation that copies the carve-out across kills it.
+
+### 3. Phase 3 reads the filesystem, not the integration ref
+
+Design §3 says Phase 3's evidence is `<dest>/BUILD.bazel` "present **on the integration ref**",
+citing `workers/buildverify.preconditions_hold` — which checks `files_present(worktree / dest /
+"BUILD.bazel")`, the worktree. The implementation wins, and here it is also the only one that
+works: design §6 option C is written about a Phase-3 repo *whose `BUILD.bazel` was reaped*, and a
+ref read cannot see a deletion from disk — the blob is still reachable from `post_commit_sha`, so
+reading the ref answers `True` for exactly the repo step 5 exists to demote.
+
+`buildverify`'s **second** refusal (`dirs_present(worktree)`) turned out to be load-bearing rather
+than defensive and is mirrored too: `Git` shells out with its bound path as `cwd`, so a
+`resolve()` against a worktree that does not exist raises `FileNotFoundError`. The first draft
+omitted it and `test_a_fresh_repo_has_no_evidence_at_any_phase` — §5 row 5's own criterion —
+failed with that error instead of a verdict.
+
+### 4. A dangling `post_commit_sha` is `False`, never a raise
+
+ADR-0087 §4 discloses that §11.5 step 4's parenthetical second selector — reconcile "any `phases`
+row whose `post_commit_sha` does not resolve on its branch" — is **not implemented**. Step 4 is
+therefore a satisfied prerequisite for the *reconciled* class only: a phase row with a dangling
+pointer and no `RUNNING` task reaches step 5 unreconciled, so the Phase-2 and Phase-3 predicates
+meet unresolvable SHAs in production.
+
+ADR-0087 §4 says the correction "belongs with §11.5 step 5's `evidence_holds`, which is the
+consumer that reads the column". It does not: correcting the column is a **write** (recompute from
+`commits_in_range`, or clear it), and `evidence_holds` is a read with no `StateWriter` and no
+transaction. The consumer is the right place to *notice* the dangling pointer; the fix belongs
+with subtask 4's driver or with the demotion writer.
+
+**Decision.** Answer `False`; do not implement the missing selector here (it is subtask 4's
+scope), and do not raise. The three outcomes are not symmetric: a false `False` costs one repo a
+re-run of work that had landed; a false `True` leaves a repo's floor above work nothing verified;
+and a raise aborts the **whole** resume, so one repo's dangling pointer would stop the other 249
+being reconciled at all. `test_a_dangling_post_commit_sha_is_false_and_never_raises` binds both
+phases, and by returning at all it asserts the absence of the raise.
+
+Phase 2 additionally checks **ancestry**, not resolvability: "`post_commit_sha` resolves *on*
+`migrate/<repo>`" is an ancestry question, and a SHA that resolves but is not reachable from the
+branch is a commit a rollback or force-reset already took off it — §11.5's authority table calls
+the column "a **pointer** into Git … never trusted over Git", so the pointer is checked against
+the branch rather than read as the answer.
+
+### 5. `evidence` is read lazily, and the laziness is a mechanism
+
+`phase_floor(rows, evidence)` documents `evidence` as supplying verdicts "for phases below the
+frontier", but computes the frontier internally and never exposes it. That left three options
+(final review finding I3): evaluate all four eagerly (Git I/O on phases the walk never consults),
+re-derive the frontier in the caller (two independent expressions of the settled-for-demotion
+classification in two modules with nothing binding them — **defect D74**'s shape, already open),
+or pass a mapping that computes on demand.
+
+**Decision — the third**, with `phase_floor`'s signature unchanged. Two things make it real rather
+than a convention:
+
+* **The contract is stated in `phase_floor`'s own docstring**, which now says evidence is asked
+  for only for phases *strictly below* the frontier — never at it, never above it — and that a
+  computing `Mapping` is a supported argument.
+* **`reentry.resume_floor` is the supplied driver**, because `phase_floor` is sync and
+  `evidence_holds` is async, so a mapping cannot `await` inside `__getitem__`. It calls the pure
+  `phase_floor` with a mapping that *raises* `_EvidenceWanted` for an unknown phase (deliberately
+  **not** a `KeyError`, which `Mapping.get` would swallow into a silent `False`), awaits that one
+  phase, and re-runs. It terminates because every iteration adds a key and `Phase` has four
+  members. It returns the verdicts it actually gathered, so a `--dry-run` report can say *why* a
+  repo was demoted without a second pass over Git.
+
+### 6. Validation
+
+Nine checks, by a harness that asserts each anchor matches **exactly once**, reads
+`git diff --numstat` and **aborts on zero changed lines before the pytest result is collected**,
+and restores from the index between mutations. Clean tree: `tests/test_reentry_evidence.py`
+27 passed, `tests/test_reentry_floor.py` 42 passed.
+
+| Mutation | Δ | Result |
+|---|---|---|
+| **M1** — `phase_floor` pre-reads all four verdicts (eager) | 1 | `…asks_evidence_only_for_phases_strictly_below_the_frontier` failed; **`tests/test_reentry_floor.py` still 42 passed** |
+| **M2** — drop the `<dest>/BUILD.bazel` clause | 2 | `…build_evidence_fails_when_the_dest_build_file_is_deleted` failed |
+| **M3** — copy `rdepverify`'s missing-BUILD-row carve-out across | 2 | `…refuses_the_missing_build_row_that_rdepverify_admits` failed |
+| **M4** — ancestry degraded to resolvability | 2 | `…for_a_sha_that_resolves_but_is_not_on_the_branch` failed |
+| **M5** — drop the worktree-presence guard | 2 | `…a_fresh_repo_has_no_evidence_at_any_phase` failed |
+| **M6** — raise on a dangling `post_commit_sha` | 2 | `…is_false_and_never_raises` failed |
+| **M7** — `clone`'s HEAD+objects fact degraded to `exists()` | 2 | `…for_a_directory_that_is_not_a_bare_repo` failed |
+| **M8** — synthetic fault: the restated mirror predicate drifts by one operator | 2 | `…agree_with_the_worker_helpers_they_mirror` failed |
+| **C1** — cosmetic reflow (control) | 3 | **27 passed** — the suite asserts meaning, not layout |
+
+**M1 is the Rule 12 discriminator and the reason §5's mechanism claim is not self-certifying.**
+It changes no floor for any input, so every landed floor-result test stays green — the old
+assertion passes, the new one fails, on the same code. Without it, "lazy" would be a docstring
+sentence with no way to tell it from a lie.
+
+**M8 is Guardrail 6's third check** (a synthetic fault injected into a clean instance). The
+Phase-1 and Phase-3 filesystem facts are *restated* in `reentry.py` rather than imported, because
+importing `workers/clone.py` or `workers/buildverify.py` fires `@register_worker` and pulls the
+LLM and sandbox stacks into the resume driver. A restatement with nothing binding it is a copy
+waiting to drift, so `test_the_restated_filesystem_facts_agree_with_the_worker_helpers_they_mirror`
+calls both sides over a matrix whose HEAD-only and objects-only rows are the only rows on which a
+one-operator drift is visible.
+
+### 7. What this ADR does not do
+
+- It does not implement §11.5 step 4's parenthetical selector (§4), does not wire step 5 into
+  `_resume_impl` (subtask 7), and does not call `demote_to_floor`.
+- It does not widen `phase_floor`'s signature or annotation. `resume_floor` carries **one**
+  documented `cast` from the two-column `EvidenceRow` this module declares to the `PhaseRow`
+  annotation `phase_floor` inherited from its own caller — `state.repository.PhaseRow` does not
+  carry `post_commit_sha`, which two of the four predicates are defined in terms of. Widening the
+  annotation to a status-only `Protocol` is the right end state and belongs to a lane that owns
+  the whole file.
+- It does not resolve final-review findings I4, M1–M5. I3 is resolved, by §5 above.
+- It allocates no D-number: §2, §3 and §4 correct the plan document's claims in this ADR and in
+  the code that supersedes them, so there is no residual defect for
+  `docs/INTEGRATION_HONESTY.md` to carry.
