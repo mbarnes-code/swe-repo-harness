@@ -8064,19 +8064,46 @@ corrected in the same change** (CLAUDE.md Guardrail 7: adjudicating the implemen
 job — leaving the sentence regenerates the defect at the next reconciliation, and this one
 regenerates it as *data loss*, not as a wrong comment).
 
-**The correction was swept as a class, not applied to the reported site** (Guardrail 7 again). A
-whitespace-normalised sweep for `reset --hard` across `docs/`, `src/` and `tests/` found the wrong
-anchor named at **two** SPEC sites, not one:
+**The correction was swept as a class, not applied to the reported site** (Guardrail 7 again) —
+and the first sweep's predicate was wrong, which is the part of this section worth reading.
+
+**The predicate, stated so it can be re-run and disagreed with.** Whitespace-normalised over each
+whole file with offsets mapped back to line numbers, across `docs/`, `src/`, `tests/`, `config/`:
+an operation word — `discard|reset --hard|rewind|rollback|clean -fdx` — within 160 characters of
+`base_ref`, **with `.` permitted inside the gap**. Sites are reported by `file:line` and each is
+adjudicated individually; a raw hit count is not the result, the per-site verdict is.
 
 | Site | Was | Now |
 |---|---|---|
 | §11.5 step 4 | `git reset --hard <base_ref> && git clean -fdx` | `git reset --hard <tasks.pre_commit_sha> && git clean -fdx`, with the reason and the §3.2 step 6.5 back-reference inline |
 | §13 row 10 ("Crash mid-mutation") | `commit absent → git reset --hard <phases.base_ref>` | `commit absent → git reset --hard <tasks.pre_commit_sha>`, and the row's "Where" column now names `tasks.pre_commit_sha` and `vcs/commits.py`'s two entry points |
+| §12.15 criterion 15(i) | "resume **discards the worktree onto `phases.base_ref`**" — the acceptance criterion an implementer of §12.15 builds a fixture against | "resume discards the worktree onto **`tasks.pre_commit_sha`** — this task's own anchor, never `phases.base_ref` …" |
 
-A line-oriented grep found the §11.5 site and **not** the §13 one: row 10 is a single very long
-table row and the phrase sits mid-line, which is the wrapped-match failure Guardrail 7 names. The
-detector was re-run against the fix: every surviving `reset --hard` in `docs/SPEC.md` either names
-`tasks.pre_commit_sha` or is about whole-phase rollback, where `phases.base_ref` is correct.
+**Two predicate failures, recorded because each one is a reusable lesson.**
+
+1. *A line-oriented grep missed §13 row 10.* That row is one very long table row and the phrase
+   sits mid-line — the wrapped-match failure Guardrail 7 names, hit again.
+2. *A **phrase**-keyed predicate missed §12.15 entirely, and this ADR's own re-run paragraph
+   certified the class closed while it was open.* The original sentence read: "the detector was
+   re-run against the fix: every surviving `reset --hard` in `docs/SPEC.md` either names
+   `tasks.pre_commit_sha` or is about whole-phase rollback." Literally true, materially false —
+   the detector was keyed on the string `reset --hard`, and §12.15 phrases the identical operation
+   as "discards the worktree onto". **A scope line that excludes the exact claim it exists to
+   neutralise** is the named failure mode in CLAUDE.md Guardrail 6, and this was a textbook
+   instance: the remedy inherited the *phrasing* of the sites it was written from. The fix is at
+   the predicate, above, not a third row appended under the old sentence. Reviewer V2 re-derived
+   the list independently and reports that **its own first predicate used `[^.]{0,140}`, which
+   cannot span the `.` in `phases.base_ref`, and reproduced this ADR's count of two exactly** —
+   two independent sweeps agreeing is worth nothing when they share a blind spot.
+
+**Re-run against the fix, under two independently-keyed predicates, and what neither can catch.**
+The predicate above now returns every `docs/SPEC.md` site either naming `tasks.pre_commit_sha` or
+speaking about whole-phase rollback, where `phases.base_ref` is right. A **second** sweep keyed on
+a disjoint vocabulary — an operation word within 120 characters of the phrase *"phase anchor"*,
+which shares no token with the first predicate's `base_ref` — returns no further wrong site in
+`docs/`, `src/` or `tests/`. What still escapes both: a site that names the operation *and* the
+wrong anchor without using either vocabulary (e.g. "rewinds to where the phase started"). No such
+site is known; none is claimed to be impossible.
 
 ### 3. The second adjudication: "there is no third branch" is about the verdict
 
@@ -8099,6 +8126,13 @@ row is left byte-for-byte as it was.** The next resume asks again; nothing is lo
 operator is told by name and reason, in the `step 4: UNRESOLVED …` line, rather than by a count
 (the D44 discipline `_reap_lines` already applies to `ReapResult.failed`). This is an *Agent
 Recommendation* extending an existing decision, not a new mechanism (Guardrail 1).
+
+**The SPEC sentence is annotated in the same change, and the first version of this ADR failed to
+do that** — it annotated the reset-anchor sentence and left this one bare, which is half of
+Guardrail 7's "two edits, not one" applied inconsistently inside one ADR. `docs/SPEC.md` §11.5
+step 4's "there is no third branch" clause now carries the verdict/question distinction and the
+two harms inline, so a reconciler meeting the literal sentence is not led to delete the
+`unresolved` channel to make code match spec.
 
 ### 4. Scope, stated rather than implied
 
@@ -8156,6 +8190,147 @@ step 2's stale "absent" clause and its docstring still enumerated "4, 6 and 8". 
 it the second instance of its own class. It gained a `"4 (" not in absent` assertion; M6 is that
 assertion's discriminating mutation, and the two pre-existing assertions pass under it.
 
+### 5a. Fix round 1 (V2 review): the liveness gate step 4 did not have
+
+`fe743e6` shipped `_reconcile_tasks_with_git` with **no liveness predicate**, and a call-site
+comment asserting that the step-3 sweep supplied one. It does not, and the gap is the data-loss
+shape this whole ADR is about, reached by a second route.
+
+**The defect.** §11.5 step 3 (`_reset_stale_running`) resets `phases` rows and only those stale by
+**both** clocks; it touches no `tasks` row in either case. `_ARBITRATED_TASKS_SQL` filtered on
+`t.status = 'RUNNING'` alone. So the set step 4 acted on was precisely the complement of what step
+3 protects: a worker demonstrably alive by both clocks still has `RUNNING` task rows after the
+sweep, and step 4 would ask Git about them, get "nothing landed" — which is exactly what a healthy
+worker between `git apply` and `git commit` presents — and `reset --hard` + `clean -fdx` its live
+checkout. That is the two-writer collision the lease exists to prevent, with the worktree destroyed
+instead of doubly written.
+
+**The remedy.** `_ARBITRATED_TASKS_SQL` now carries a `lease_live` column **composed from**
+`_LIVE_SANDBOX_PREDICATE` (an uncorrelated row-value `IN` over `phases`), never restated beside it
+— the same construction, for the same stated reason, that ADR-0081 gives for step 2's live set: a
+second copy that drifted looser would arbitrate a worker step 3 calls alive. Composing it inherits
+two properties a hand-rolled lease check gets wrong:
+
+* **`lease_owner`/`lease_expires_at` are not consulted.** `state/repository.complete_phase` NULLs
+  both — and `heartbeat_at` — in the same `UPDATE` that writes the terminal status, so a
+  lease-column guard cannot tell a finished phase from an unclaimed one. Verified by reading the
+  statement, not inferred. `_LIVE_SANDBOX_PREDICATE` already excludes `lease_owner` deliberately.
+* **The negated staleness test, not `status = 'RUNNING'` alone**, is what makes `--dry-run`
+  correct: the preview does not run the step-3 sweep, so it meets unswept rows and must reach the
+  same verdict the real run does. A stale-but-unswept `RUNNING` row is arbitrated under both.
+
+A spared task is reported in `spared_live`, not dropped: "0 tasks reconciled" and "every open task
+was spared as live" are the same output with opposite meanings, and step 2 already puts
+`live_sandbox_names` in its payload for that reason.
+
+**The fixture blindness that hid it, which is the same lesson as §5's M2 in a second form.**
+`_seed_running_task` wrote `heartbeat_at = NULL` "so step 3's sweep leaves this row alone and every
+change to it is step 4's". That made the fixture *tidy* and made every test in the section
+**incapable of presenting step 4 with a live lease** — the defect could not be expressed, so no
+mutation could fire on it. The helper now defaults to `STALE_HEARTBEAT`, the real crashed shape
+(step 3 reclaims the phase row, step 4 then meets a row nobody claims), and takes `heartbeat_at`
+so one test can pass a fresh one. Twice in two rounds the blind spot was a fixture that collapsed
+two distinct inputs into one: coinciding anchors, then a heartbeat that could only be dead.
+
+### 5b. Fix round 1: the other five findings
+
+* **`docs/SPEC.md` §12.15 criterion 15(i)** — the third site of the wrong-anchor class, and the
+  correction to this ADR's own closure claim. Both in §2 above.
+* **`_refuse_unbuilt_resume_flags`'s `UsageError`** still read "steps 2, 3 and 7". Third
+  stale-absence site of the round, one function from the two already fixed, and the worst
+  placement of the three: `--repo` is the flag an operator types immediately after reading that
+  step 4 ran. Now "steps 2, 3, 4 and 7", pinned by an assertion that reads the whole parenthetical
+  rather than a substring, so a successor who builds step 6 and forgets trips too.
+* **`--dry-run` "writes nothing" was proven for the SQL half only.** The old dry-run test seeded
+  one landed task in one repo with its anchor present, so *neither* `if not dry_run:` guarding a
+  **git** write was reachable at all: the landed branch `continue`s before `discard_task`, and an
+  existing anchor returns from `_recreate_phase_anchor` before its `update_ref`. Deleting either
+  guard left it green. It now seeds a second repo that did **not** land and whose anchor ref has
+  been deleted from git while `phases.base_ref` still names it, so a real run would take both
+  paths; M8 and M9 below are the two guards' discriminating mutations.
+* **`_persist_arbitration`'s `attempts` row selection.** `revalidation_round DESC` added to the
+  `ORDER BY` — `schema.sql` puts it in the uniqueness key because "a REVALIDATE re-run reuses
+  1..max_attempts, so without it round 2 overwrites round 1's evidence", and without it here
+  round 2's attempt 1 and round 1's attempt 1 tie and the winner is arbitrary. And an empty
+  subquery makes `attempt_id = NULL`, which matches zero rows **silently** while
+  `phases.post_commit_sha` is written in the same unit — the two pointers §11.5's authority table
+  pairs, diverging with nothing saying so, and §11.5 step 5's `evidence_holds` reads one of them.
+  `_persist_arbitration` now returns those entries and the driver reports each by name in
+  `provenance_missing` and in a `step 4: PROVENANCE …` line. The `phases` write is still made:
+  the commit really is on the branch, and that column points at Git.
+* **`_ARBITRATED_TASKS_SQL`'s docstring argued its own completeness** while citing §11.5 step 4
+  selectively — it named the sentence's `RUNNING` clause and not the same sentence's second
+  selector. It now carries the NOT-IMPLEMENTED disclosure in full, at the artifact a step-5
+  implementer actually opens before editing this SQL, rather than only in §4 of this ADR. The
+  unused `p.post_commit_sha` binding — which invited the inference that the column *is* consulted
+  — is gone.
+
+**One review finding is contested, with its source.** V2's I4 item 2 states that
+`finished_at DESC` "sorts the interrupted row LAST … The row a crash actually leaves — started,
+never finished — is the one this tiebreak deprioritises." `src/fleet/state/schema.sql` declares
+`finished_at TEXT NOT NULL` on `attempts`, so a started-but-unfinished row is not a state this
+table can hold and the NULL-ordering argument has no subject. The column is dropped from the
+`ORDER BY` anyway — as a wall clock it could not be an ordering key (§11.5's clock rule) and the
+declared uniqueness key is the right basis — but it is dropped for that reason, not the one filed.
+Items 1 and 3 of I4 are correct and are implemented above.
+
+**Disclosed, not fixed (V2 M1 — a non-error `None` that can reach the discard arm).**
+`find_task_commit` → `Git.find_trailer_commit` → `Git.log` → `Git.text` returns `result.stdout_tail`
+and discards the `ProcResult`, so `stdout_truncated` is never consulted; `util/proc` elides the
+**middle** of a large capture. `git log` is newest-first, so for a phase whose scoped range is
+large enough a task whose commit sits in the elided middle reads as "nothing landed". Every
+*error* path raises and is caught into `unresolved`; this is the one non-error `None`. It is
+pre-existing in `vcs/git.py` and is not patched here (Rule 3 — it is not this change's mess, and
+the fix belongs where the truncation is decided), but this driver is the first caller to act
+**destructively** on that result, so it is disclosed rather than left silent. Harm is bounded: the
+reset goes to the task's own anchor, so only that task's commit is lost and the re-run re-applies
+it under the `Fleet-Patch-Id` guard. §11.5 step 5's `evidence_holds` will read the same primitive.
+
+**Recorded as a stated boundary (V2 M3).** The landed branch does not bump `tasks.fence_token`,
+and `test_…adopts_…` pins that. With the liveness gate in place the premise it rested on is now
+enforced rather than assumed: a task whose phase lease is live is never arbitrated at all, so
+neither branch can race a live holder. It stays a boundary rather than a patch because a fence
+bump on the landed path would invalidate nothing that exists.
+
+**Named for the subtask-5 brief, not fixed here (V2 M2, the D74 shape).** Three values are
+recomputed inline with nothing binding the copies: `work_dir/<repo_id>` (four sites in `cli.py`
+plus `orchestrator/context.OrchestratorContext.worktree`, the canonical accessor — and
+`sandbox/worktree.WorktreeManager.path_for`, which uses a *different* layout that the step-2 reap
+docstring already documents as a known namespace mismatch); `f"migrate/{repo_id}"` (four inline
+literals); and `refs/fleet/<run>/<repo>/phase-<n>/base` (built inline here, built inline at
+`_prepare_repo` hardcoded to Phase 2, and built by SQL concatenation in
+`migrations/v006_mutations_deleted.py`). The third is the one to name: step 5's `evidence_holds`
+needs the same ref format for phases other than 2.
+
+### 5c. Fix round 1: the mutation table, re-run in full
+
+The harness's zero-change gate was **wrong for a fix round and was corrected before any result
+below was read**: it diffed the mutated file against `HEAD`, which is non-empty whatever the
+mutation did once the working tree already differs from `HEAD`. It now diffs against the
+byte-for-byte pre-mutation backup (`git diff --no-index BACKUP MUTATED`), which is a zero-change
+detector in both rounds. Every row was re-measured under the corrected gate; the restore check
+(`residual vs backup`) read `''` on all twelve. Selector:
+`-k "step4 or step_5_refusal or refuses_the_flags"`, 11 tests.
+
+| Mutation | numstat | Result |
+|---|---|---|
+| **M1** — `UPDATE phases … , attempts = attempts + 1` (landed branch) | `2/1` | **2 failed** — the adopt test and the provenance test |
+| **M2** — `discard_task(task_pre_commit_sha=<phase anchor>)`, i.e. the old SPEC sentence implemented | `1/1` | 1 failed — the discard test |
+| **M3** — re-cut the missing anchor at the branch tip | `1/0` | 1 failed — the anchor test |
+| **M4** — collapse "no worktree" into the discard branch | `2/1` | 1 failed — the unresolved test |
+| **M5** — let `--dry-run` reach `_persist_arbitration` (the SQL write) | `1/1` | 1 failed — the dry-run test |
+| **M6** — refusal message lists step 4 as absent again | `1/1` | 1 failed — the step-5 refusal test |
+| **M7** — the liveness gate removed (C1's defect, restored) | `1/1` | 1 failed — the live-lease test |
+| **M8** — let `--dry-run` run `discard_task` (git write #1) | `1/1` | 1 failed — the dry-run test |
+| **M9** — let `--dry-run` re-create the anchor ref (git write #2) | `1/1` | 1 failed — the dry-run test |
+| **M10** — drop the empty-subquery detection (the silent no-op, restored) | `0/2` | 1 failed — the provenance test |
+| **M11** — the built-steps enumeration goes stale again | `1/1` | 1 failed — the refuse-flags test |
+| **C** — cosmetic reflow of `_persist_arbitration`'s prologue (control) | `5/2` | **11 passed** |
+
+M7 through M10 are the four that could not have fired against `fe743e6`'s test set at all: M7
+because no fixture could express a live lease, M8 and M9 because neither git-write guard was
+reachable, M10 because every fixture seeded an `attempts` row.
+
 ### 6. What this ADR does not do
 
 - It does not touch `src/fleet/vcs/commits.py`, `src/fleet/orchestrator/reentry.py` or
@@ -8163,9 +8338,12 @@ assertion's discriminating mutation, and the two pre-existing assertions pass un
 - It does not decide §11.5 step 5. The insertion slot between step 4 and `project_once` is
   reserved by a comment and left empty.
 - It does not implement §11.5 step 4's parenthetical `phases.post_commit_sha` selector (§4 above).
-- It allocates no D-number. The SPEC sentence it corrects is fixed in the same change, so there is
-  no residual defect for `docs/INTEGRATION_HONESTY.md` to carry; a ledger entry recording a
-  contradiction that no longer exists is a reader's second source of truth, not a record.
+- It allocates no D-number. The three SPEC sentences it corrects are fixed in the same change,
+  so there is no residual defect for `docs/INTEGRATION_HONESTY.md` to carry; a ledger entry
+  recording a contradiction that no longer exists is a reader's second source of truth, not a
+  record. The one live gap it does leave — `Git.text`'s silent truncation, §5b — is pre-existing
+  in `vcs/git.py`, is disclosed there rather than claimed closed, and belongs to whoever fixes
+  the truncation.
 - It does not re-open ADR-0081's step-2/step-3 ordering, whose reasoning step 4 inherits and cites
   rather than restates.
 
