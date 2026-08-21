@@ -17,8 +17,10 @@ temp database rather than against the source:
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -334,3 +336,259 @@ async def test_replanning_preserves_wave_started_at(
     await store.record_plan(RUN, _plan(), now=clock(), max_usd_per_repo=8.0)
 
     assert await store.wave_started_at(RUN, 0) == NOW
+
+
+# --------------------------------------------------------------------------------------
+# step 6 — the wave that admits the repos a `blocked_by` recompute has freed
+# --------------------------------------------------------------------------------------
+#
+# `append_unblocked_wave` MOVES members that already carry a `wave_index`, which is why the
+# obvious reuse (`graph.sequence.append_synthetic_waves`) cannot serve: it filters to refs
+# carrying no index, so on this population it returns its input unchanged (ADR-0090 ruling W).
+#
+# Its load-bearing property is an ABSENCE — "no pre-existing `waves` row is touched" — and an
+# absence is proved here by ENUMERATING what was written, observed from the database two
+# genuinely different ways:
+#
+#   Instrument V (value dump) — every row of every user table before and after, compared as
+#   sets. Quantity watched: the rows that appear and disappear. Declared blind spot: a write
+#   that stores the value already present (`UPDATE waves SET max_usd = max_usd`) moves no row,
+#   so V cannot see it — precisely the shape the defect can take.
+#
+#   Instrument T (row-write triggers) — an `AFTER INSERT` / `AFTER UPDATE` / `AFTER DELETE`
+#   trigger on every user table, appending `(table, op)` to an audit table. Quantity watched:
+#   the ordered log of row-write events during the call. A trigger fires on a value-preserving
+#   UPDATE, so T sees exactly what V cannot. Declared blind spot: T cannot see a read, nor a
+#   write through a connection that bypasses SQLite triggers — nothing here has one, every
+#   write goes through the run's single `StateWriter` (§11.5).
+#
+# The fixture seeds THREE waves with pairwise-distinct `max_usd`, two of them carrying a
+# `wave_started_at` and one not, and one of them CLOSED. With a single pre-existing wave the
+# absence claim is nearly vacuous: there is no row a cross-row write could land on.
+
+UNBLOCK_PLAN = {
+    0: ("u-alpha", "u-beta", "u-gamma"),
+    1: ("u-delta", "u-freed"),
+    2: ("u-epsilon",),
+}
+UNBLOCK_MAX_USD_PER_REPO = 8.0
+_AUDIT = "w17_row_write_audit"
+
+# repo, scheduler store, read connection, writer, clock
+UnblockWired = tuple[
+    SqliteStateRepository, SqliteSchedulerStore, aiosqlite.Connection, StateWriter, SteppableClock
+]
+
+
+async def _user_tables(conn: aiosqlite.Connection) -> tuple[str, ...]:
+    sql = (
+        "SELECT name FROM sqlite_master WHERE type = 'table' "
+        " AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    )
+    async with conn.execute(sql) as cursor:
+        return tuple(str(row[0]) for row in await cursor.fetchall() if str(row[0]) != _AUDIT)
+
+
+async def _dump(
+    conn: aiosqlite.Connection, tables: Sequence[str]
+) -> dict[str, set[tuple[object, ...]]]:
+    """Instrument V: every row of every user table, as comparable value tuples."""
+    out: dict[str, set[tuple[object, ...]]] = {}
+    for table in tables:
+        async with conn.execute(f"SELECT * FROM {table}") as cursor:  # noqa: S608 - fixed names
+            out[table] = {tuple(row) for row in await cursor.fetchall()}
+    return out
+
+
+async def _install_row_write_audit(writer: StateWriter, tables: Sequence[str]) -> None:
+    """Instrument T: an AFTER INSERT/UPDATE/DELETE trigger on EVERY user table."""
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            f"CREATE TABLE {_AUDIT} (seq INTEGER PRIMARY KEY, tbl TEXT NOT NULL, op TEXT NOT NULL)"
+        )
+        for table in tables:
+            for op in ("INSERT", "UPDATE", "DELETE"):
+                sql = (
+                    f"CREATE TRIGGER {_AUDIT}_{table}_{op.lower()} AFTER {op} ON {table} "  # noqa: S608
+                    f"BEGIN INSERT INTO {_AUDIT} (tbl, op) VALUES ('{table}', '{op}'); END"
+                )
+                await conn.execute(sql)
+
+    await writer.submit(unit)
+
+
+async def _row_writes(conn: aiosqlite.Connection) -> tuple[tuple[str, str], ...]:
+    sql = f"SELECT tbl, op FROM {_AUDIT} ORDER BY seq"  # noqa: S608 - fixed literal name
+    async with conn.execute(sql) as cursor:
+        return tuple((str(row[0]), str(row[1])) for row in await cursor.fetchall())
+
+
+@asynccontextmanager
+async def _unblock_wiring(path: Path) -> AsyncIterator[UnblockWired]:
+    """Three planned waves, one of them CLOSED, and `u-freed` BLOCKED by the real §3.5 writer.
+
+    A plain context manager rather than only a fixture so the same wiring can be driven outside
+    a pytest session — the mutation battery for these tests runs as a standalone probe.
+    """
+    await initialize_database(path)
+    async with StateWriter(path, owner="test-scheduler-unblock") as writer:
+        read_conn = await connect_ro(path)
+        clock = SteppableClock()
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            store = SqliteSchedulerStore(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN, started_at=NOW, config_sha256="b" * 64, harness_version="0.1.0"
+            )
+            for members in UNBLOCK_PLAN.values():
+                for repo_id in members:
+                    await repo.upsert_repo(
+                        repo_id,
+                        name=repo_id,
+                        url=f"https://example.invalid/{repo_id}.git",
+                        now=NOW,
+                    )
+                    await repo.upsert_phase(RUN, repo_id, PHASE, now=NOW)
+            plan = WavePlan(
+                waves=tuple(
+                    MigrationWave(
+                        wave_index=index,
+                        repo_ids=list(members),
+                        depends_on_waves=[index - 1] if index else [],
+                    )
+                    for index, members in UNBLOCK_PLAN.items()
+                ),
+                wave_index_by_node={},
+                cycle_findings=(),
+                excluded_repo_ids=(),
+            )
+            await store.record_plan(
+                RUN, plan, now=NOW, max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+            )
+            # Wave 0 closes; wave 1 holds the repo the recompute will free; wave 2 is untouched.
+            for repo_id in UNBLOCK_PLAN[0]:
+                await _set_status(repo, repo_id, RepoStatus.SUCCEEDED, clock)
+            await _set_status(repo, "u-delta", RepoStatus.SUCCEEDED, clock)
+            await store.append_blocked_by(RUN, "u-freed", "u-alpha", now=clock())
+            # Two waves carry a persisted start stamp and one does not, and the two stamps
+            # differ — so a write that copied one wave's row over another's would show.
+            await store.begin_wave(RUN, 0, now=clock())
+            clock.advance(600)
+            await store.begin_wave(RUN, 1, now=clock())
+            clock.advance(600)
+            yield repo, store, read_conn, writer, clock
+        finally:
+            await read_conn.close()
+
+
+@pytest.fixture
+async def unblock_wired(tmp_path: Path) -> AsyncIterator[UnblockWired]:
+    async with _unblock_wiring(tmp_path / "state" / "fleet.db") as wiring:
+        yield wiring
+
+
+async def test_the_appended_wave_writes_only_its_own_row_and_the_members_it_moves(
+    unblock_wired: UnblockWired,
+) -> None:
+    """The complete write set of `append_unblocked_wave`, enumerated from the database.
+
+    "Touches no existing `waves` row" is an absence, so it is not asserted — it is READ OFF an
+    enumeration of everything that WAS written, by two instruments that do not share a blind
+    spot (see the section header). The pre-existing `waves` rows are then byte-identical by
+    construction: they are absent from both the added and the removed set.
+    """
+    repo, store, read_conn, writer, clock = unblock_wired
+    tables = await _user_tables(read_conn)
+    assert "waves" in tables and "wave_members" in tables
+    assert await _scheduler(repo, store, clock).wave_state(0) is WaveState.CLOSED
+    before = await _dump(read_conn, tables)
+    assert len(before["waves"]) == 3, "the absence claim needs several rows to be about"
+
+    await _install_row_write_audit(writer, tables)
+    appended = await store.append_unblocked_wave(
+        RUN, ["u-freed"], now=clock(), max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+    )
+
+    after = await _dump(read_conn, tables)
+    writes = await _row_writes(read_conn)
+
+    # Instrument V — the rows that appeared and disappeared, table by table. Asserted FIRST so
+    # that a failure further down is evidence V stayed silent while T fired, which is the whole
+    # reason there are two of them.
+    added = {t: after[t] - before[t] for t in tables}
+    removed = {t: before[t] - after[t] for t in tables}
+    assert appended == 3, "the appended index sits above every existing wave"
+    assert added["waves"] == {
+        (RUN, 3, _iso_stamp(clock), None, 1, UNBLOCK_MAX_USD_PER_REPO * 1)
+    }, "one new row, synthetic=1, its own derived ceiling, no start stamp inherited"
+    assert removed["waves"] == set(), "no pre-existing `waves` row was rewritten or deleted"
+    assert removed["wave_members"] == {(RUN, 1, "REPO", "u-freed")}
+    assert added["wave_members"] == {(RUN, 3, "REPO", "u-freed")}
+    untouched = sorted(t for t in tables if t not in {"waves", "wave_members"})
+    assert [t for t in untouched if added[t] or removed[t]] == []
+
+    # Instrument T — the ordered log of every row-write event during the call. This is the
+    # complete write set, and it is what makes the absence above a reading rather than a claim:
+    # a value-preserving `UPDATE waves SET c = c` moves no row and is invisible to V.
+    assert writes == (("waves", "INSERT"), ("wave_members", "UPDATE"))
+
+
+async def test_two_concurrent_appends_do_not_allocate_the_same_wave_index(
+    unblock_wired: UnblockWired,
+) -> None:
+    """The index is allocated INSIDE the write transaction, not read into Python first.
+
+    A `MAX(wave_index) + 1` read outside the unit is a read-then-write race: both callers read
+    the same maximum and the second `INSERT` collides on `PRIMARY KEY (run_id, wave_index)`.
+    Two appends are driven concurrently precisely so that form cannot pass — under it this
+    raises `IntegrityError` while every other test in this module still passes.
+    """
+    _repo, store, _read_conn, _writer, clock = unblock_wired
+
+    first, second = await asyncio.gather(
+        store.append_unblocked_wave(
+            RUN, ["u-freed"], now=clock(), max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+        ),
+        store.append_unblocked_wave(
+            RUN, ["u-delta"], now=clock(), max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+        ),
+    )
+
+    assert sorted([first, second]) == [3, 4]
+
+
+async def test_appending_no_repos_writes_no_wave_row_at_all(
+    unblock_wired: UnblockWired,
+) -> None:
+    """An empty appended wave would be a row that closes on sight and claims a membership it
+    has not got, so the method declines rather than inserting one."""
+    _repo, store, _read_conn, _writer, clock = unblock_wired
+
+    appended = await store.append_unblocked_wave(
+        RUN, [], now=clock(), max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+    )
+
+    assert appended is None
+    assert await store.wave_indices(RUN) == (0, 1, 2)
+
+
+async def test_a_repo_no_wave_holds_is_refused_rather_than_admitted(
+    unblock_wired: UnblockWired,
+) -> None:
+    """This method MOVES members. A repo with no `wave_members` row is one the sequencer never
+    planned, and silently appending a wave that does not contain it is the failure — the wave
+    would open, admit nothing, and close, with the repo still parked in no wave at all."""
+    _repo, store, _read_conn, _writer, clock = unblock_wired
+
+    with pytest.raises(WaveNotReadyError, match="u-ghost"):
+        await store.append_unblocked_wave(
+            RUN, ["u-freed", "u-ghost"], now=clock(), max_usd_per_repo=UNBLOCK_MAX_USD_PER_REPO
+        )
+
+    assert await store.wave_indices(RUN) == (0, 1, 2)
+
+
+def _iso_stamp(clock: SteppableClock) -> str:
+    """The exact text `_iso` persists, so the expected `waves` row is a value, not a wildcard."""
+    return clock().astimezone(UTC).isoformat(timespec="microseconds")

@@ -1426,6 +1426,18 @@ class _ScanWaveStore:
     ) -> int:
         return await self._inner.append_blocked_by(run_id, repo_id, blocker, now=now)
 
+    async def append_unblocked_wave(
+        self,
+        run_id: str,
+        repo_ids: Sequence[str],
+        *,
+        now: datetime,
+        max_usd_per_repo: float,
+    ) -> int | None:
+        return await self._inner.append_unblocked_wave(
+            run_id, repo_ids, now=now, max_usd_per_repo=max_usd_per_repo
+        )
+
 
 @dataclass(slots=True)
 class _ScanEvidence:
@@ -3628,6 +3640,18 @@ class _ScopedWaveStore:
         self, run_id: str, repo_id: str, blocker: str, *, now: datetime
     ) -> int:
         return await self._inner.append_blocked_by(run_id, repo_id, blocker, now=now)
+
+    async def append_unblocked_wave(
+        self,
+        run_id: str,
+        repo_ids: Sequence[str],
+        *,
+        now: datetime,
+        max_usd_per_repo: float,
+    ) -> int | None:
+        return await self._inner.append_unblocked_wave(
+            run_id, repo_ids, now=now, max_usd_per_repo=max_usd_per_repo
+        )
 
 
 class _TransformSink:

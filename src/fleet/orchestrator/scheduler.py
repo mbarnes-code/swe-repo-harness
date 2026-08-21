@@ -126,6 +126,15 @@ class SchedulerStore(Protocol):
         self, run_id: str, repo_id: str, blocker: str, *, now: datetime
     ) -> int: ...
 
+    async def append_unblocked_wave(
+        self,
+        run_id: str,
+        repo_ids: Sequence[str],
+        *,
+        now: datetime,
+        max_usd_per_repo: float,
+    ) -> int | None: ...
+
 
 def _iso(moment: datetime) -> str:
     if moment.tzinfo is None:
@@ -283,6 +292,85 @@ class SqliteSchedulerStore:
                 )
                 touched += 1
             return touched
+
+        return await self._writer.submit(unit)
+
+    async def append_unblocked_wave(
+        self,
+        run_id: str,
+        repo_ids: Sequence[str],
+        *,
+        now: datetime,
+        max_usd_per_repo: float,
+    ) -> int | None:
+        """Append ONE synthetic wave above every existing index and MOVE `repo_ids` into it.
+
+        Step 6's writer (§11.5): the repos a `blocked_by` recompute has freed already carry a
+        `wave_index`, so they are moved, never inserted fresh. That is why this is not
+        `graph.sequence.append_synthetic_waves` — that function filters to refs carrying no
+        wave index, so on this population it returns its input unchanged (SPEC §3.5's scope
+        note; ADR-0090 ruling W).
+
+        Two properties it exists to hold structurally rather than by convention:
+
+        * **The index is allocated INSIDE the write transaction.** `MAX(wave_index) + 1` is
+          read in the same `BEGIN IMMEDIATE` that inserts the row, never read into Python and
+          passed back down — the read-then-write form is what makes a second resume compute
+          the offset the first one already took and collide with the row it wrote.
+        * **No existing `waves` row is read, modified or upserted.** The only `waves` statement
+          is an INSERT of the new index, so a closed wave's frozen `max_usd` and its
+          `wave_started_at` cannot be re-budgeted or restarted as a side effect of moving one
+          member — the hazard `record_plan`'s `DO UPDATE` carries, and the reason step 6 is not
+          routed through it.
+
+        `max_usd` is derived exactly as `record_plan` derives it (§11.2:
+        `budgets.wave_max_cost_usd_per_repo` × member count), because a wave inserted at the
+        column default would carry a zero ceiling and halt on its first admission.
+
+        Returns the appended `wave_index`, or `None` when `repo_ids` is empty — an empty
+        appended wave is a row that closes on sight and claims a membership it has not got.
+        Raises `WaveNotReadyError` if any named repo has no `wave_members` row: this method
+        moves members, and admitting a repo the sequencer never planned is not its job.
+        """
+        stamp = _iso(now)
+        targets = tuple(sorted(set(repo_ids)))
+        if not targets:
+            return None
+        placeholders = ",".join("?" for _ in targets)
+        ceiling = max_usd_per_repo * len(targets)
+
+        async def unit(conn: aiosqlite.Connection) -> int:
+            async with conn.execute(
+                "SELECT node_id FROM wave_members "  # noqa: S608 - placeholders are '?' only
+                f" WHERE run_id = ? AND node_kind = 'REPO' AND node_id IN ({placeholders})",
+                (run_id, *targets),
+            ) as cursor:
+                present = {str(row[0]) for row in await cursor.fetchall()}
+            missing = sorted(set(targets) - present)
+            if missing:
+                raise WaveNotReadyError(
+                    f"run {run_id} has no `wave_members` row for {missing}: an appended wave "
+                    "MOVES repos an earlier wave already holds, so a repo the sequencer never "
+                    "planned cannot be admitted by un-blocking it"
+                )
+            async with conn.execute(
+                "SELECT COALESCE(MAX(wave_index), -1) + 1 FROM waves WHERE run_id = ?",
+                (run_id,),
+            ) as cursor:
+                row = await cursor.fetchone()
+            assert row is not None  # noqa: S101 - an aggregate returns exactly one row
+            wave_index = int(row[0])
+            await conn.execute(
+                "INSERT INTO waves (run_id, wave_index, computed_at, synthetic, max_usd) "
+                "VALUES (?, ?, ?, 1, ?)",
+                (run_id, wave_index, stamp, ceiling),
+            )
+            await conn.execute(
+                "UPDATE wave_members SET wave_index = ? "  # noqa: S608 - as above
+                f" WHERE run_id = ? AND node_kind = 'REPO' AND node_id IN ({placeholders})",
+                (wave_index, run_id, *targets),
+            )
+            return wave_index
 
         return await self._writer.submit(unit)
 
