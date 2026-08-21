@@ -4670,7 +4670,7 @@ def test_state_repository_imports_first_in_a_fresh_interpreter(tmp_path: Path) -
     interpreter's module table, and this session's is already populated by this module's own
     imports.
     """
-    probe = subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+    probe = subprocess.run(  # fixed argv built here, never a shell, no test input
         [sys.executable, "-c", "import fleet.state.repository as r; r.SqliteStateRepository"],
         cwd=tmp_path,
         capture_output=True,
@@ -4683,7 +4683,7 @@ def test_state_repository_imports_first_in_a_fresh_interpreter(tmp_path: Path) -
     )
     assert "partially initialized module" not in probe.stderr, probe.stderr
 
-    reverse = subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+    reverse = subprocess.run(  # fixed argv built here, never a shell, no test input
         [sys.executable, "-c", "import fleet.cli; import fleet.state.repository"],
         cwd=tmp_path,
         capture_output=True,

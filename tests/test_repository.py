@@ -39,6 +39,7 @@ from fleet.state.repository import (
     BudgetRefusedError,
     EdgeRow,
     EventRow,
+    FloorSnapshotStaleError,
     LeaseStolenError,
     ReadOnlyRepository,
     RepoBudgetRefusedError,
@@ -1623,3 +1624,119 @@ async def test_a_resume_that_demotes_nothing_leaves_the_frontiers_checkpoint_alo
     assert await _phase_state(read_conn, REPO) == before
     assert await _checkpoint_phases(read_conn, REPO) == {1, 4}
     assert await _demotion_findings(read_conn, REPO) == []
+
+
+# --------------------------------------------------------------------------------------
+# `observed=` — the floor as a property of the write (ADR-0089 §3)
+# --------------------------------------------------------------------------------------
+
+
+async def test_a_floor_snapshot_that_still_holds_demotes_exactly_as_an_unguarded_call_would(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """The control for the refusal below: a matching `observed` changes nothing.
+
+    Every one of the fourteen demotion tests above this section predates `observed` and passes
+    `None`, so the whole guard is exercised only on its default. A guard that refused every call
+    would leave all fourteen green while `fleet resume` demoted nothing in production, which is
+    why the passing case has to be asserted on the same fixture as the failing one rather than
+    inferred from the fourteen.
+
+    `observed` is stated for all four phases including the one *below* the floor, which is the
+    shape `cli._demote_to_floors` builds it in.
+    """
+    store, writer = demotion_bed
+    await _four_succeeded(store, writer, REPO)
+    observed = dict.fromkeys(Phase, RepoStatus.SUCCEEDED)
+
+    demotions = await store.demote_to_floor(
+        RUN, REPO, floor=Phase.TRANSFORM, reason="evidence gone", now=NOW, observed=observed
+    )
+
+    assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY]
+    assert {phase: state[0] for phase, state in (await _phase_state(read_conn, REPO)).items()} == {
+        1: "SUCCEEDED",
+        2: "PENDING",
+        3: "PENDING",
+        4: "PENDING",
+    }
+
+
+async def test_a_row_below_the_floor_moving_refuses_the_write_and_leaves_the_repo_untouched(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """The staleness check spans EVERY phase, not the demotion's span.
+
+    This is the half of the guard that a span-scoped comparison would silently drop, and the
+    reason `demote_to_floor` iterates `Phase` rather than `span`: the floor is the output of a
+    backward walk that starts at the frontier and reads *downward*, so a row below the floor
+    moving means the walk would have stopped somewhere else and the floor handed to this call is
+    an answer to a question about a database that no longer exists. Writing it anyway demotes a
+    span nobody computed.
+
+    Phase 1 sits below floor `TRANSFORM` and is not itself demotable, so a check that only looked
+    at the span would see four identical statuses and proceed — demoting 2-4 and deleting their
+    checkpoints on a stale floor, with no refusal and no operator-visible trace.
+
+    The refusal must also be *total*: no status moved, no checkpoint deleted, no `PhaseDemoted`
+    finding minted. A partial refusal would be worse than none, because the operator is told the
+    repo was skipped while some of it was rewritten.
+    """
+    store, writer = demotion_bed
+    await _four_succeeded(store, writer, REPO)
+    before_state = await _phase_state(read_conn, REPO)
+    before_checkpoints = await _checkpoint_phases(read_conn, REPO)
+
+    # The caller looked when phase 1 was still PENDING; it has since landed. Phases 2-4 — the
+    # entire span the write would touch — are identical in both readings.
+    stale_observation = {
+        Phase.SCAN: RepoStatus.PENDING,
+        Phase.TRANSFORM: RepoStatus.SUCCEEDED,
+        Phase.BUILD: RepoStatus.SUCCEEDED,
+        Phase.VERIFY: RepoStatus.SUCCEEDED,
+    }
+
+    with pytest.raises(FloorSnapshotStaleError) as caught:
+        await store.demote_to_floor(
+            RUN,
+            REPO,
+            floor=Phase.TRANSFORM,
+            reason="evidence gone",
+            now=NOW,
+            observed=stale_observation,
+        )
+
+    assert "SCAN was" in str(caught.value), (
+        "the message must name the phase that moved — an operator who cannot tell which row "
+        "changed cannot tell a race from a bug"
+    )
+    assert await _phase_state(read_conn, REPO) == before_state
+    assert await _checkpoint_phases(read_conn, REPO) == before_checkpoints
+    assert await _demotion_findings(read_conn, REPO) == []
+
+
+async def test_a_phase_with_no_row_reads_as_pending_on_both_sides_of_the_snapshot(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], read_conn: aiosqlite.Connection
+) -> None:
+    """An absent `phases` row is the schema default, so omitting it from `observed` is not a move.
+
+    `_frontier_at_verify` leaves phase 4 upserted but unsettled; a caller that built `observed`
+    from a `SELECT` returning only settled rows would omit it. Both sides default to `PENDING`,
+    so this must proceed — otherwise the guard refuses the single most ordinary resume shape
+    there is, and does it *after* the fleet-wide Git reads have already been paid for.
+    """
+    store, writer = demotion_bed
+    await _frontier_at_verify(store, writer)
+
+    demotions = await store.demote_to_floor(
+        RUN,
+        REPO,
+        floor=Phase.TRANSFORM,
+        reason="evidence gone",
+        now=NOW,
+        observed={Phase.SCAN: RepoStatus.SUCCEEDED, Phase.TRANSFORM: RepoStatus.SUCCEEDED,
+                  Phase.BUILD: RepoStatus.SUCCEEDED},
+    )
+
+    assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.BUILD]
+    assert (await _phase_state(read_conn, REPO))[4][0] == "PENDING"
