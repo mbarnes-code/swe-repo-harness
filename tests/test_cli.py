@@ -877,19 +877,27 @@ def test_unknown_run_id_names_the_run(workspace: Path) -> None:
     assert "does-not-exist" in result.output
 
 
-def test_unimplemented_verb_names_the_stub_module(workspace: Path) -> None:
-    """A verb whose worker is still a stub exits 1 with the module named — never a bare
-    `NotImplementedError` traceback. Rule 11: fail loud, and say which file to open.
+def test_unavailable_verb_names_a_module_without_calling_it_a_stub(workspace: Path) -> None:
+    """A verb with no implementation exits 1 naming a module — never a bare traceback, and never
+    a claim that the named module is a `NotImplementedError` stub. Rule 11: fail loud, say where.
 
-    Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers: the
-    property under test is "a stubbed verb names its stub", not "scan is stubbed", so it has to
-    follow the stubs rather than pin the harness to its own incompleteness.
+    Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers.
+
+    **The inverted assertion is the point.** This test previously required the word
+    `NotImplementedError` to be PRESENT in the output, which is why D63 survived: the message
+    told the operator `workers/relocate.py` "still raises NotImplementedError", that module has
+    never raised it, `RelocateWorker` is dispatched by `fleet transform` on every run, and the
+    only test over the message certified the false word. An instrument that asserts a claim
+    cannot also falsify it.
     """
     result = runner.invoke(app, [*base_args(workspace), "plan"], catch_exceptions=False)
     assert result.exit_code == ExitCode.UNEXPECTED_ERROR
-    assert "NotImplementedError" in result.output
     assert "workers/relocate.py" in result.output
     assert "Traceback" not in result.output
+    assert "NotImplementedError" not in result.output, (
+        "D63: the message must not tell an operator that a live, dispatched module is a stub"
+    )
+    assert "no implementation in the CLI" in result.output
 
 
 # --------------------------------------------------------------------------------------

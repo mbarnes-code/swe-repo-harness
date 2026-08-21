@@ -359,10 +359,19 @@ class SequenceRefusedError(FleetCliError):
 
 
 class CommandUnavailableError(FleetCliError):
-    """The verb's implementation is a `NotImplementedError` stub elsewhere in the package.
+    """The verb has no implementation in this CLI: it validates its preconditions and stops.
 
-    Exit 1 with the module named, rather than a `NotImplementedError` traceback: exit 1 IS "an
-    unexpected error", and an operator who is told which file is a stub can act on it.
+    Exit 1 with a module named, rather than a silent no-op: exit 1 IS "an unexpected error", and
+    an operator who is told where the gap is can act on it. The name is a POINTER, never a verdict
+    on that module. `_unavailable`'s text used to assert the named module "still raises
+    `NotImplementedError`" — false for every module it named, and D63 in
+    `docs/INTEGRATION_HONESTY.md` is the ledger entry for it.
+
+    The first sentence holds because `_unavailable` is this class's ONLY raise site: an `ast`
+    sweep of `src/` for an `ast.Raise` of this name returns exactly one, `_unavailable` itself.
+    The predicate is the AST one and not a `grep -c`, which also counts prose. A second raiser,
+    for a verb that IS implemented but stops part-way, would falsify the first sentence; that
+    case is `ResumeIncompleteError`, a separate class for exactly that reason.
     """
 
     exit_code = ExitCode.UNEXPECTED_ERROR
@@ -917,10 +926,22 @@ def _safe_user_version(path: Path) -> int:
 
 
 def _unavailable(verb: str, module: str) -> NoReturn:
+    """The verb has no code path: `_phase_preflight` ran, and there is nothing after it.
+
+    **The message's own precondition: every caller runs `_phase_preflight` first**, which is what
+    licenses the list of validated checks. All three call sites (`plan`, `migrate`, `stubs
+    resolve`) do; a future caller that does not must not use this helper.
+
+    It deliberately asserts NOTHING about the named module. The two modules the call sites name,
+    `workers/relocate.py` and `workers/buildverify.py`, are implemented — `RelocateWorker` is
+    dispatched by `fleet transform` and `BuildverifyWorker` by `fleet build` — so the gap is a
+    missing driver in this file, not a missing worker body (D63).
+    """
     raise CommandUnavailableError(
-        f"`fleet {verb}` cannot run: {module} still raises NotImplementedError. The command's "
-        "preconditions (config, schema version, run identity, budgets) validated — only the "
-        "worker body is missing. Implement it and re-run; nothing was written."
+        f"`fleet {verb}` cannot run: this verb has no implementation in the CLI. Its "
+        "preconditions validated (§9 config, §6 schema version, the run identity, §10 mirror "
+        "mutex) and it then stopped without dispatching any work. Nothing was written. "
+        f"Related module: {module}."
     )
 
 
@@ -2531,8 +2552,9 @@ def migrate_repos(
         opts, settings, run_id = _phase_preflight(ctx)
         _check_wave_budget(opts, settings, run_id, wave)
         _ = (repo, dry_run)
-        # Phase 1 is wired (`fleet scan` + `fleet sequence`); Phase 2 is where the end-to-end
-        # run still stops, so that is the module this names.
+        # Every phase has a verb of its own today (`scan`/`sequence`, `transform`, `build`,
+        # `verify`); what `migrate` lacks is the driver that chains them into one run. The module
+        # below is Phase 2's worker — a pointer, not a claim that it is unwritten.
         _unavailable("migrate", "src/fleet/workers/relocate.py (Phase 2 of the end-to-end run)")
 
 

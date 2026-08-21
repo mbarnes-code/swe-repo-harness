@@ -3835,6 +3835,34 @@ definition at `:910` and the three surviving calls at `:2415`, `:2527` and `:112
 this rather than rewording it — correctly, since the rewording is a `cli.py` edit three lanes were
 contending for. **It needs an owner.**
 
+**FIXED (round E, lane W5) — the heading above still reads OPEN because it records what was true
+when it was written; this paragraph carries the status, as the `c45db53` paragraph above it does.**
+Re-measured at `a69fba8` before the fix: three `_unavailable(` call sites (`plan` and `migrate`
+naming `workers/relocate.py`, `stubs resolve` naming `workers/buildverify.py`), two distinct
+modules — unchanged from the `6a41840` re-measurement, so nothing had rotted. `git grep -n
+NotImplementedError -- src/` still returns the same four raises in the same three non-`workers/`
+files (`manifests/base.py`, `rewrite/libcst_py.py`, `rewrite/tsmorph.py` ×2). The helper no longer
+claims anything about the module it names: it says the verb has no implementation in the CLI, lists
+the checks `_phase_preflight` actually ran (§9 config, §6 schema version, the run identity, §10
+mirror mutex — the old text also claimed "budgets", which only `migrate` validates), and names the
+module as a pointer.
+
+**The entry's "Would a test catch it? No" was too kind, and that is the durable finding.** A test
+did exist over the message — `tests/test_cli.py`, then named
+`test_unimplemented_verb_names_the_stub_module` — and it asserted `"NotImplementedError" in
+result.output`. It did not merely fail to catch the false claim; it *required* it, so the defect was
+load-bearing for a green suite. The assertion is now inverted (`not in`) under the renamed
+`test_unavailable_verb_names_a_module_without_calling_it_a_stub`.
+
+**Residual, NOT fixed here (reported, not rewritten).** Two adjacent stale claims found by the same
+sweep, both outside this entry's class: (1) `src/fleet/cli.py::_build_impl`'s docstring and
+`src/fleet/workers/buildverify.py::on_cancel`'s docstring both state that `fleet resume` is
+`_unavailable` and cite `cli.py:9792`; at `a69fba8` `resume` is a real command driving
+`_resume_impl` and is not an `_unavailable` call site at all. (2) the `stubs resolve` call site
+passes `"src/fleet/workers/buildverify.py (revalidation round)"`, and `grep -c revalidat
+src/fleet/workers/buildverify.py` returns **0** — the parenthetical points at a round that file does
+not implement. Both need an owner and a decision this lane could not settle from a primary source.
+
 ---
 
 **D64 — FIXED, LANDED (`433dd55`). The required-target-field gate tested `is None`, so `base_url: ''`,
