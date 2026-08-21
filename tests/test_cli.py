@@ -416,9 +416,9 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
     assert preview.exit_code == ExitCode.SUCCESS, preview.output
 
     # `--dry-run` previewed the clearance and wrote nothing; the real resume writes the audit
-    # BEFORE it stops on the unbuilt §11.5 step 5 (exit 2, ADR-0076 — a reconciliation that
-    # succeeded, not a crash) — the ordering that matters, since a raise recorded only on success
-    # is a raise lost to the next crash.
+    # BEFORE it stops on the unbuilt §11.5 steps 6 and 8 (exit 2, ADR-0076 — a reconciliation
+    # that succeeded, not a crash) — the ordering that matters, since a raise recorded only on
+    # success is a raise lost to the next crash.
     real = runner.invoke(app, [*base_args(workspace), "resume", "--raise-wave-budget", "50"])
     assert real.exit_code == ExitCode.USAGE, real.output
 
@@ -768,9 +768,9 @@ def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: P
         app,
         [*base_args(workspace), "resume", "--accept-drift", "budgets", "--accept-drift", "gc"],
     )
-    # The resume itself cannot complete (§11.5 step 5 is unbuilt) but the audit is written
-    # before it stops, which is the ordering that matters: an accepted drift that is only
-    # recorded on success is an accepted drift lost to the next crash.
+    # The resume itself cannot complete (§11.5 steps 6 and 8 are unbuilt) but the audit is
+    # written before it stops, which is the ordering that matters: an accepted drift that is
+    # only recorded on success is an accepted drift lost to the next crash.
     assert result.exit_code in {ExitCode.SUCCESS, ExitCode.USAGE}, result.output
     conn = sqlite3.connect(workspace / "state" / "fleet.db")
     try:
@@ -1192,7 +1192,8 @@ def test_resume_reclaims_a_stale_lease_without_charging_an_attempt(workspace: Pa
     _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
 
     result = runner.invoke(app, [*base_args(workspace), "resume"])
-    # Step 5 is not built, so the verb still refuses — but AFTER the reconciliation is durable,
+    # Steps 6 and 8 are not built, so the verb still refuses — but AFTER the reconciliation is
+    # durable,
     # and with exit 2, which is "retrying unchanged is futile", not "the harness crashed".
     assert result.exit_code == ExitCode.USAGE, result.output
 
@@ -1247,8 +1248,10 @@ def test_resume_dry_run_previews_the_sweep_and_writes_nothing(workspace: Path) -
 def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path) -> None:
     """`--from-phase` is exit 2, not a silently discarded argument.
 
-    Why: every flag refused here scopes or re-drives §11.5 step 5, which has no implementation.
-    A parser that accepted `--from-phase 2` and then resumed from wherever it liked leaves the
+    Why: every flag refused here scopes or re-drives a CONTINUATION that has no implementation.
+    It is NOT §11.5 step 5 — that is built and runs on every `fleet resume` this refusal does not
+    stop; steps 6 and 8 are the absent ones. A parser that accepted `--from-phase 2` and then
+    resumed from wherever it liked leaves the
     operator believing they scoped the resume — and nothing anywhere tells them otherwise.
 
     The last two assertions pin the RULE the refusal states, not just that it refuses. Both
@@ -1277,9 +1280,10 @@ def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path
     built = " ".join(result.output.split())
     built = built[built.index("reconciliation that IS built (") :]
     built = built[: built.index(")")]
-    assert "steps 2, 3, 4 and 7" in built, (
+    assert "steps 2, 3, 4, 5 and 7" in built, (
         f"the refusal's built-steps list is stale: {built!r} — step 4 (Git-as-arbiter task "
-        "reconciliation) runs on every plain `fleet resume`"
+        "reconciliation) and step 5 (the re-entry demotion, wired in at `2f0db34`) both run on "
+        "every plain `fleet resume`"
     )
     assert "precondition" not in result.output, (
         "the refusal names a predicate step 5 does not use, and cannot use"
@@ -2148,7 +2152,7 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
     Retrying `fleet resume --repoll-prs` costs one `gh pr view` per open PR per iteration, so a
     250-PR fleet burns 250 forge calls per retry and trips GitHub's secondary rate limit — at
     which point the re-poll starts failing and the operator is debugging a rate limit instead of
-    reading "step 5 is not implemented". Exit 2 is §10's "the operator must edit a file, a flag
+    reading which §11.5 steps are absent. Exit 2 is §10's "the operator must edit a file, a flag
     or a stub before retrying", which is exactly true here and is the signal not to loop.
 
     The last two assertions pin what the refusal SAYS step 5 is, for the reason given at

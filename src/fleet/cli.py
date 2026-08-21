@@ -10554,7 +10554,12 @@ def _refuse_unbuilt_resume_flags(
 ) -> None:
     """Exit 2 rather than accept a flag whose behaviour does not exist (Rule 11, "fail loud").
 
-    Every flag below narrows or re-drives §11.5 step 5, the phase re-entry that is not built. A
+    Every flag below scopes or re-drives the CONTINUATION this verb cannot perform — NOT
+    §11.5 step 5, which is built and runs unconditionally on every `fleet resume` this function
+    does not refuse (`_resume_impl` calls `_demote_to_floors` with no flag guard). What is
+    absent is steps 6 and 8, which is the same absence `ResumeIncompleteError` names. **This
+    docstring and the message below both said step 5 "is not built"; that was true when written
+    and was falsified at `2f0db34`, which wired step 5 into `_resume_impl`.** A
     parser that accepted `--from-phase 2` and then resumed from wherever it liked is worse than
     one that refuses: the operator believes they scoped the resume, and nothing tells them
     otherwise. `--raise-budget`, `--raise-wave-budget`, `--accept-drift`, `--repoll-prs` and
@@ -10570,15 +10575,19 @@ def _refuse_unbuilt_resume_flags(
     named = sorted(flag for flag, given in unbuilt.items() if given)
     if named:
         raise UsageError(
-            f"{', '.join(named)} cannot be honoured: each one scopes or re-drives §11.5 step 5 "
+            f"{', '.join(named)} cannot be honoured: each one scopes or re-drives the "
+            "CONTINUATION this verb cannot perform. §11.5 step 5 itself "
             "(re-check each phase's durable evidence and demote to the re-entry floor — the "
             "phase ABOVE the HIGHEST phase below the settled frontier whose evidence still "
             "holds or which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN "
-            "if there is no such phase), "
-            "which has no implementation — cli.py hand-wires a `PhaseRunner` per verb and no "
-            "assembly walks Phases 1–4 in order. Accepting the flag and ignoring it would let an "
+            "if there is no such phase) "
+            "IS built and runs on every `fleet resume` this refusal does not stop. What has no "
+            "implementation is step 6 (recompute `blocked_by`) and step 8 (continue into the "
+            "phase runners) — cli.py hand-wires a `PhaseRunner` per verb and no "
+            "assembly walks Phases 1–4 in order, so there is no continuation for these flags to "
+            "scope. Accepting the flag and ignoring it would let an "
             "operator believe they had scoped the resume. Re-run without it to get the "
-            "reconciliation that IS built (step 1's config digests, steps 2, 3, 4 and 7, "
+            "reconciliation that IS built (step 1's config digests, steps 2, 3, 4, 5 and 7, "
             "`--repoll-prs`, the budget raises)."
         )
 
