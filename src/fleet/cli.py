@@ -371,7 +371,12 @@ class CommandUnavailableError(FleetCliError):
     sweep of `src/` for an `ast.Raise` of this name returns exactly one, `_unavailable` itself.
     The predicate is the AST one and not a `grep -c`, which also counts prose. A second raiser,
     for a verb that IS implemented but stops part-way, would falsify the first sentence; that
-    case is `ResumeIncompleteError`, a separate class for exactly that reason.
+    case is carried by separate classes rather than by a second raise here, and by more than one
+    of them — `ScanStepUnavailableError`, `TransformStepUnavailableError` and
+    `BuildStepUnavailableError` for a step of a verb that ran, and `ResumeIncompleteError` for
+    `fleet resume` stopping on a step of its own. This sentence used to name only the last as
+    "that case"; a definite article over four is false, and it pointed at the one member whose
+    exit code differs from this class's (2, because that stop is a refusal, not a fault).
     """
 
     exit_code = ExitCode.UNEXPECTED_ERROR

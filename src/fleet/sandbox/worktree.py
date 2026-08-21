@@ -61,7 +61,14 @@ def slug(value: str) -> str:
 
 
 def run_prefix(run_id: UUID | str) -> str:
-    """`fleet-<run_id>-` — the glob `fleet resume` and `fleet gc` reap by (SPEC §11.5)."""
+    """`fleet-<run_id>-` — the glob `fleet resume` reaps by (SPEC §11.5 step 2).
+
+    **`fleet gc` does not**, and this line used to say it did. `_gc_impl` calls no `reap()` and
+    never builds this prefix: it evicts `llm_cache`/`events`/`attempts` rows and LRU-evicts the
+    Bazel disk cache, which is all SPEC §10's `fleet gc` row claims for it. An operator who read
+    the old sentence would leave a crashed run's worktrees and containers on the host expecting
+    `gc` to take them.
+    """
     return f"{NAME_PREFIX}-{slug(str(run_id))}-"
 
 
