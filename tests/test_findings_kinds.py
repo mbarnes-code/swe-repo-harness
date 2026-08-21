@@ -131,13 +131,19 @@ _PLACEHOLDER: Final = re.compile(r"<[^>]*>")
 #: directions — one site too many is an undeclared site riding a declared one's exemption, one too
 #: few is an entry that has outlived the code it was written for. The count is a *measured*
 #: property of the tree, not a budget; when a site is legitimately added or removed, re-measure it
-#: in the same change. Measured **2** at `0e945b8` and again at `eaa112f`, and anchored by SYMBOL
-#: rather than by line: the `executemany` inside `cli.py`'s `_scan_rows` (the scan persist) and the
-#: `execute` inside its `_gate_empty_repos` (the §3.1 gate). This comment first cited those two as
-#: `cli.py:1589` and `:2034`. Both were **correct at `0e945b8`** and had rotted to `:1590`/`:2035`
-#: by `eaa112f` — under a day — which is why they are named rather than numbered here: a symbol
-#: anchor survives a line growing above it, a line anchor cannot, and this pair proves how fast
-#: that happens in `cli.py`.
+#: in the same change. Measured **2** at `0e945b8`, `eaa112f` and `42a4369`, and anchored by SYMBOL
+#: rather than by line: the `executemany` **into `findings`** inside `cli.py`'s `_scan_rows` (the
+#: scan persist), and the one inside its `_gate_empty_repos` (the §3.1 gate). The table is the
+#: disambiguator, not the verb — an earlier wording here said "the `executemany`" and "the
+#: `execute`", and both articles were wrong: `_scan_rows` makes five `execute`/`executemany` calls
+#: and `_gate_empty_repos` two, while `_gate_empty_repos` has no `execute` at all. Each function
+#: does hold exactly **one** findings INSERT (measured by AST at `42a4369`), so naming the table
+#: makes the anchor unique.
+#:
+#: Why symbols and not lines, with the receipts: this comment first cited these two as
+#: `cli.py:1589` and `:2034`. Both were **correct at `0e945b8`**, were `:1590`/`:2035` at
+#: `eaa112f` a day later, and are `:1597`/`:2042` at `42a4369` — three values in one round, no
+#: author having erred. A symbol anchor survives a line growing above it; a line anchor cannot.
 _WORKER_FINDINGS: Final = "worker-findings"
 _INDIRECT_SITES: Final = {
     ("cli.py", "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "

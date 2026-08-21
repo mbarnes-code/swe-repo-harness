@@ -376,49 +376,67 @@ def test_the_hard_stop_test_runs_in_the_order_phase_floors_own_docstring_claims(
     counts (`pytest --collect-only -q`): that file had **13** cases at `0e945b8` and **15** at
     `eaa112f`; the 12 is `d123035`'s, as that file's own docstring records.
 
-    **What the sibling check can and cannot see -- measured, because the correction above would
-    otherwise make this test look redundant.** At `eaa112f`, with the two `if` blocks in
-    `phase_floor`'s backward walk **swapped** and the prose untouched
-    (`git diff --numstat` 2/2), `tests/test_floor_rule_statements.py` reports **15 passed** --
-    including its ordering case -- while this test **fails**. `_observed_hard_stop_order` probes
-    one state (`BUILD` `DEGRADED`, `BUILD` evidence `False`, `SCAN` evidence `True`) and reads the
-    returned floor; that state yields `VERIFY` under *both* orders, because both branches are a
-    bare `break`. It moves only when the hard-stop test is **deleted**. It is a deletion detector
-    under an ordering name -- which is the fourth question CLAUDE.md guardrail 6 asks, answered:
-    name the quantity the instrument watches and ask whether the defect could leave it unchanged.
-    A **returned floor** cannot move under a reorder, so no probe that reads only the return value
-    can see one.
+    **Superseded 2026-08-21 (`42a4369`): the trigger this docstring set has fired, and the
+    justification-by-absence below it is retired.** What was true at `eaa112f`, kept because it is
+    why the sibling was fixed: `_observed_hard_stop_order` then probed one state (`BUILD`
+    `DEGRADED`, `BUILD` evidence `False`, `SCAN` evidence `True`) and read the **returned floor**,
+    which is `VERIFY` under *both* orders -- so under the swap that file reported **15 passed**
+    while this test failed. It was a deletion detector under an ordering name. This docstring named
+    the fix (an `evidence` mapping recording its lookups: `[]` versus `[BUILD]`, measured at
+    `570bcb5`) and asked for a re-measurement if it were ever built.
 
-    Narrower than the sentence this paragraph replaced, which said no *behavioural* probe could:
-    one can. Hand `phase_floor` an `evidence` mapping whose `get` records the phases it is asked
-    about. Measured at `570bcb5` on the sibling's own probe state: the returned floor is `VERIFY`
-    either way, while the recorded lookups are `[]` under "hard stop first" and `['BUILD']` under
-    "evidence first". That is a behavioural probe of a side channel rather than of the return value,
-    and it would make the sibling's check real. This test does not build it, because the AST is a
-    cheaper and more direct witness of a claim that is *about* source order -- but the option is
-    written down here so "impossible" is not banked when what was measured is "not with this
-    probe".
+    It was built. `tests/test_floor_rule_statements.py` now has `_RecordingEvidence`, overriding
+    `.get` -- the only channel `phase_floor` reads `evidence` through. **Re-measured at `42a4369`**,
+    two `if` blocks swapped, prose untouched (`git diff --numstat` 2/2, read before the results):
+    that file reports **1 failed, 14 passed**, this file **1 failed, 41 passed**. Both catch the
+    reorder now. So this test is no longer the only witness, and does not claim to be.
 
-    **So the order is behaviourally inert, and this binding is on a *description*.** Measured
-    exhaustively at `0e945b8` -- all 7 `RepoStatus` values across all 4 `Phase` positions (2,401
-    row states) x all 16 subsets of `evidence` = **38,416 inputs, 0 differing returns** between
-    `phase_floor` and a copy with the two tests swapped; re-confirmed at `eaa112f` by the 15-passed
-    result above. The review's failure scenario for this half (a reconciler moves the evidence test
-    first, `floor` lands on a `DEGRADED` phase) does not follow from a reorder; it needs the
-    hard-stop test *deleted*, which **four** existing cases in this file catch --
-    `test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it`,
+    **What each still binds that the other does not -- measured at `42a4369`, four mutations:**
+
+    ==========================================  =====================  ====================
+    mutation                                    `_RecordingEvidence`   this test (AST)
+    ==========================================  =====================  ====================
+    control (clean tree)                        15 passed              42 passed
+    the two `if` tests swapped                  1 failed, 14 passed    1 failed, 41 passed
+    merged into one short-circuiting `or`       15 passed              1 failed, 41 passed
+    an evidence lookup added, order kept        1 failed, 14 passed    42 passed
+    ==========================================  =====================  ====================
+
+    They are complementary, not redundant. The sibling binds a **runtime** property -- evidence is
+    not consulted at a hard-stop row -- and is blind to a source restructure that preserves it.
+    This one binds a **source** property against `phase_floor.__doc__`'s own word, and is blind to
+    a lookup added anywhere else in the loop. A docstring-only flip of the ordering word is caught
+    by both (measured: 1/1, both files fail).
+
+    **The cost of that third row, stated rather than buried: it is this test firing on correct
+    code.** Merging the two tests into `if ... in _HARD_STOPS or evidence.get(phase, False)`
+    preserves the documented semantics exactly -- `or` short-circuits, so a hard-stop row still
+    ends the walk without evidence being consulted. This test fails there anyway, through the
+    deliberate unresolvable-structure branch (verified: that is the branch taken, not the
+    order-mismatch one). It is a **tripwire on the loop's shape**, not a verdict that the code is
+    wrong, and its message says so -- "re-derive this check against the new shape rather than
+    deleting it". CLAUDE.md's stop rule says a detector that fires on correct code is worse than
+    the gap it closes; the judgement here is that a loud, self-describing request to re-derive is
+    a different thing from a false verdict, and it is disclosed rather than argued away.
+
+    **The order is behaviourally inert in the return value, and that is a proof rather than a
+    sample.** Both loop exits are bare `break`s that never write `floor`, so the exit condition is
+    a commutative disjunction and the returned floor is invariant under the swap for *every* input,
+    not merely the ones tried. Corroborated exhaustively at `0e945b8` -- all 7 `RepoStatus` values
+    across all 4 `Phase` positions (2,401 row states) x all 16 subsets of `evidence` = **38,416
+    inputs, 0 differing returns**. The review's failure scenario for this half (a reconciler moves
+    the evidence test first, `floor` lands on a `DEGRADED` phase) therefore does not follow from a
+    reorder; it needs the hard-stop test *deleted*, which **four** existing cases in this file
+    catch -- `test_degraded_phase_is_a_hard_stop_it_is_not_demoted_and_search_does_not_pass_it`,
     `test_skipped_phase_is_never_the_floor_the_walk_stops_at_it_exactly_as_for_degraded`,
     `test_search_does_not_pass_a_skipped_phase_when_evidence_below_it_holds` and
     `test_search_does_not_pass_a_skipped_phase_even_when_nothing_earlier_holds` (measured under the
     deletion: 5 failed, 37 passed; the fifth failure is this test's own unresolvable-structure
     branch). An earlier version of this sentence said "two"; the count was low.
 
-    Worth having for one reason: the moment either `break` becomes anything else -- a `continue`, a
-    `return`, an audit write -- the order stops being inert, and a reader who reached for the
-    docstring first would then be acting on it. A false description is cheap to write and expensive
-    exactly then. If `_observed_hard_stop_order` is ever given a probe that really separates the two
-    orders, re-measure the swap: this test becomes a second, structural witness rather than the
-    only one, and that is a fine thing to say here instead.
+    Worth having for the reason the third row names: the moment either `break` becomes anything
+    else -- a `continue`, a `return`, an audit write -- the order stops being inert in the return
+    value too, and a reader who reached for the docstring first would be acting on it.
     """
     clause = _ORDER_CLAUSE.search(" ".join((phase_floor.__doc__ or "").split()))
     assert clause is not None, (

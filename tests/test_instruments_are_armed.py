@@ -70,6 +70,17 @@ never raises, so it is exactly the silent kind this module excludes) and accepts
 `monkeypatch.setattr("module.attr", value)` in the *string* form, and any patch reached through an
 alias this file's `ast.unparse` does not spell as ending in `setattr`.
 
+**Builtin bases.** An unresolvable base is a hard failure, not a skip -- a base this cannot see
+is a class it is not checking, and saying so loudly is the right default. But a *builtin* base is
+not unseeable. `class _RecordingEvidence(dict)`, landed at `42a4369`, made this file **red on
+`main`**: `dict` is in no import table, so the class went to the unresolved list and its methods
+were never examined. Name resolution now ends where Python's does -- imports, then module-local
+classes, then `builtins` -- with `local` deliberately ahead of `builtins` so a module-local class
+named `dict` still shadows the builtin here as it does at runtime. Class result: unresolved bases
+**1 -> 0**, methods examined **34 -> 35** (measured at `1ce1901`). Not a widening: a method the
+builtin does not carry is still an orphan, and on a synthetic `_RecordingEvidence.kyes` this file
+now names it, where the previous version could only say it could not resolve `dict`.
+
 **Duplicate class names.** Two classes of one name in one file used to mean the last one `ast.walk`
 reached answered for both — so a sibling fake's method set could vouch for a real orphan, and one
 `NOT_OVERRIDES` line could exempt two different classes. Both are now loud rather than latent, and
@@ -82,6 +93,7 @@ load-bearing.
 from __future__ import annotations
 
 import ast
+import builtins
 import importlib
 from collections.abc import Iterator
 from pathlib import Path
@@ -267,6 +279,18 @@ def _attribute_names(
                 return None
             names |= inherited
         return names
+    # Last: builtins, which is where Python's own name lookup ends too, and deliberately AFTER
+    # `local` so a module-local class named `dict` still shadows the builtin here as it does at
+    # runtime. Without this a subclass of a builtin -- `class _RecordingEvidence(dict)`, landed at
+    # `42a4369` -- made the base unresolvable, and an unresolvable base is a hard failure by
+    # design. That is the right default (a base this cannot see is a class it is not checking),
+    # but a builtin base is not unseeable: it is fully introspectable, so refusing it reported a
+    # gap that did not exist and left the class genuinely unchecked. Resolving it is completing
+    # the lookup path, not widening an exemption -- a method the builtin does not carry is still
+    # an orphan, and is now reported as one instead of being lost in the unresolved list.
+    builtin = getattr(builtins, expr, None)
+    if isinstance(builtin, type):
+        return set(dir(builtin))
     return None
 
 
