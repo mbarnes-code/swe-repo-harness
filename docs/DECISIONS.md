@@ -6801,6 +6801,26 @@ Rejected alternatives, each for a specific reason:
   below the `raise` makes it fail on empty stdout — checked by mutation, not assumed.
 - **This ADR is temporary by construction.** When §11.5 step 5 lands, `ResumeIncompleteError`
   should be deleted, not repurposed. If it is still here after step 5 exists, that is a defect.
+
+  > **AMENDED 2026-08-21 (round D, lane W7) — deletion is DEFERRED to subtask 10, and the bullet
+  > above is left standing rather than rewritten.** §11.5 step 5 landed at `2f0db34`
+  > (`cli._demote_to_floors`, wired into `_resume_impl` between step 4 and the projection), so the
+  > condition this bullet names — "step 5 lands" — is now met and `ResumeIncompleteError` was NOT
+  > deleted. That is a deliberate ruling, recorded beside the bullet so the contradiction is
+  > visible here rather than discovered by the next reader of the code.
+  >
+  > **Why exit 2 is still honest at subtask 7.** This bullet's implicit premise is that once step 5
+  > exists the verb can continue. It cannot: §11.5 steps **6** (recompute `blocked_by`) and **8**
+  > (continue into the phase runners) are still absent, so `fleet resume` still reconciles the
+  > ledger and stops. Deleting the error here would ship a command exiting 0 on a resume that
+  > continued nothing — a success it has not earned, and a worse defect than the documentary one
+  > the deletion would resolve. The message was rewritten in the same commit so it no longer
+  > asserts step 5 is unimplemented and now names 6 and 8 as the gaps; **ADR-0089 §5** carries the
+  > full reasoning, including why that may fairly be read as the "repurposed" this bullet forbids.
+  >
+  > **The obligation survives.** Design `docs/superpowers/plans/design-resume-step5.md` §5 row 10
+  > carries the deletion. If `ResumeIncompleteError` is still raised once steps 6 and 8 both exist,
+  > the bullet above applies unamended and that IS the defect it names.
 ---
 
 ## ADR-0077 — `SUCCEEDED` stays terminal for every automatic path and becomes demotable for exactly one: `RESUME_DEMOTE` gated on a keyword-only `resume=True`, mirroring `OPERATOR_REOPEN`, with a `PhaseDemoted` finding the caller cannot decline to take
@@ -8799,3 +8819,288 @@ discipline, and I5 above is what that gap looks like when it matters.
   code that supersedes them, and — as of fix round 1 — beside the claims themselves in
   `docs/superpowers/plans/design-resume-step5.md` §3, using that file's own dated-marker
   convention. So there is no residual defect for `docs/INTEGRATION_HONESTY.md` to carry.
+---
+
+## ADR-0089 — Wiring §11.5 step 5 into `_resume_impl`: the membership rule is **extracted** so the preview and the write cannot state different rules, the floor becomes a **property of the write** via an observed-status snapshot, `ResumeIncompleteError` is **rewritten rather than deleted** because steps 6 and 8 are still absent — and the demotion **re-opens any closed wave it demotes a member out of**, which is disclosed here and not fixed
+
+**Status: DECIDED AND IMPLEMENTED.** Code at `2f0db34`; tests and the cross-lane caller repair at
+`42a4369`. Subtask 7 of `docs/superpowers/plans/design-resume-step5.md`. `phase_floor` (ADR-0077,
+ADR-0082) and `evidence_holds` / `resume_floor` (ADR-0088) get their first production caller here;
+`demote_to_floor` gets its first caller of any kind.
+
+### 1. What landed, and where
+
+`cli._demote_to_floors` runs between §11.5 step 4 and step 7's projection, in the slot the marker
+comment at `fe743e6` reserved. Three ordering properties hold, and the third is the tight one:
+
+1. **Below step 3.** A `RUNNING` row is not settled, so it is the frontier the backward search
+   starts from; step 3 is what turns a dead worker's row back into one. This is what makes the
+   *floor* right, not merely what avoids a collision — `_DEMOTE_PHASE_SQL` carries
+   `AND status = 'SUCCEEDED'` and `demote()` raises outside `RESUME_DEMOTE`, so a `RUNNING` row is
+   unreachable by the write in either direction regardless of order.
+2. **Above step 7.** The projection is regenerated from SQLite and must publish the result of the
+   demotion, not the state before it.
+3. **Below step 4.** `evidence_holds` at Phases 2 and 3 resolves `phases.post_commit_sha`, and step
+   4 is what reconciles that column against Git. Step 5 above step 4 would demote on a pointer
+   nobody has validated. (ADR-0087 §4's disclosure still narrows this: step 4's second selector —
+   rows whose `post_commit_sha` does not resolve, with no `RUNNING` task — is unimplemented, so
+   step 4 is a satisfied prerequisite for the *reconciled class* only. `evidence_holds` answers
+   `False` rather than raising on such a row, per ADR-0088, so an unreconciled pointer lowers one
+   repo's floor instead of aborting the fleet's resume.)
+
+**One route, not two.** `--dry-run` and the real run compute the identical plan from the identical
+read; the branch is the terminal persist and nothing above it. That is step 4's shape
+(`_reconcile_tasks_with_git(..., dry_run=)`, one function, branched at its last statement), not step
+3's (`_count_stale_running` / `_reset_stale_running`, two functions kept in agreement by a shared
+predicate constant). Step 3 needs the shared constant *because* it is two routes; step 5 has one
+computation — `phase_floor` is pure, `evidence_holds` is read-only, and only `demote_to_floor`
+writes — so there is nothing to keep in agreement. The payload carries an explicit `"applied"`
+boolean rather than leaving the reader to infer it from `"dry_run"`, for the reason
+`raise_budget_applied` exists one key over: the two can disagree, because a real run whose every
+repo already sits at its floor writes nothing.
+
+### 2. `demotable_phases` is extracted, and this is the D74 seam it closes
+
+**The seam.** `demote_to_floor` returns the demotions it actually applied, derived from its own
+in-transaction rows. Under `--dry-run` it is never called, so the printed plan must come from
+somewhere else — and the obvious somewhere else is a comprehension in `cli.py` re-implementing
+`phase >= floor ∧ SUCCEEDED`. That is two implementations of one rule in two files with nothing
+that fails when they drift. Any future change to the membership rule (a new key in `RESUME_DEMOTE`,
+an abort path like §3's) would silently make the preview a lie about what the real run does, while
+every test stayed green because no test compared the two. This is defect **D74**'s shape exactly,
+and CLAUDE.md records that it has recurred twice this round.
+
+**The decision: a mechanism, not a test.** `orchestrator.reentry.demotable_phases(statuses, floor)`
+is the rule, once. `demote_to_floor`'s unit calls it on the rows it read under `BEGIN IMMEDIATE`;
+`cli._demote_to_floors` calls it on the rows it read through `mode=ro`. The two routes differ only
+in *which snapshot* each is handed. CLAUDE.md Rule 12's stop rule is explicit that the alternative —
+keeping two routes and adding a round-trip test — is "a convention wearing a mechanism's clothes";
+the round-trip assertion is kept anyway (`tests/test_cli.py::test_resume_step_5_dry_run_previews_
+the_same_plan_and_leaves_the_database_byte_identical`) as a second layer, not as the closure.
+
+**Costs taken deliberately.** It puts the edit in `state/repository.py`, which design §5 row 7 does
+not list. And it makes `fleet.state.repository` import `fleet.orchestrator.reentry` — an upward
+import across a layer boundary, since `reentry` imports `state.repository` only under
+`TYPE_CHECKING`. That was **measured, not assumed**: the import was added and
+`import fleet.state.repository` and `import fleet.cli` were each run in the `.venv` interpreter
+that runs the code, both clean, before any of this was written. The alternative home is
+`models/enums.py`, beside `demote()` and `RESUME_DEMOTE`, which is the better layering; it is not
+taken here only because the extraction was ruled into `reentry.py`, and moving it later is a
+rename with two call sites.
+
+`demotable_phases` deliberately does **not** answer which `checkpoints` rows a demotion sweeps.
+That span is wider than this set by construction — `demote_to_floor` sweeps the whole span minus
+`DEGRADED`, not only the phases it demoted (ADR-0082 §2) — and it belongs with the write, not with
+the preview.
+
+### 3. `observed`: the floor becomes a property of the write (review finding I4)
+
+**The hazard, and it is reachable by an ordinary resume rather than adversarially.** `floor` is
+computed from a `phases` read the caller made through a `mode=ro` handle, outside the transaction
+that applies it. `_resume_impl` deliberately spares a non-stale `RUNNING` phase — step 3 resets only
+rows past both horizons, and `_LIVE_SANDBOX_PREDICATE`'s own comment calls such a row live — so that
+phase is the unsettled frontier when `phase_floor` runs. `evidence_holds` then does Git I/O across
+the fleet, seconds to minutes. In that window the live worker's `complete_phase` writes the row
+`SUCCEEDED`. `demote_to_floor` re-reads, finds it `SUCCEEDED` **in-transaction**, and demotes it:
+the status goes to `PENDING`, the span's `checkpoints` rows are deleted, and a `PhaseDemoted` warn
+finding is minted whose `reason` describes evidence that never failed. Nothing in the method is
+wrong on its own terms — the row *was* `SUCCEEDED` in the span. The span is wrong.
+
+Blast radius, stated rather than implied: one BUILD or VERIFY phase re-runs from its anchor;
+`attempts` is retained (`_DEMOTE_PHASE_SQL` does not name the column and `complete_phase` is the
+only writer of `phases.attempts` in `src/`), so no rung of ADR-0014's ladder is spent; and the audit
+record misattributes the cause. Not corruption — the single most expensive unit of work in the
+harness discarded, with a finding saying it was discarded for a reason that was false.
+
+**Nothing that already existed closes it, measured rather than assumed.** `state/db.py`'s module
+docstring says in terms that the write slot "is process-wide module state", so
+`SingleWriterViolationError` excludes a second writer *in this process only*, and the hazard needs
+two. `BEGIN IMMEDIATE` serialises transactions and carries no snapshot from the earlier `connect_ro`
+handle, which is a different connection. There is no file lock and no advisory lock. **And the
+obvious lease guard is blind to precisely this case:** `complete_phase` sets
+`lease_owner = NULL, lease_expires_at = NULL` in the same statement that sets the status, so the
+moment the racing worker succeeds the row has no lease, and `AND lease_owner IS NULL` on the
+demotion would wave it straight through.
+
+**The decision.** `demote_to_floor` takes a keyword-only `observed: Mapping[Phase, RepoStatus] |
+None`, the statuses the floor was computed from, and compares it against the in-transaction rows
+before the first `UPDATE`. **Over every `Phase`, not only the span**: the frontier is found by
+scanning upward from `SCAN`, so a row below the floor moving would have produced a different floor
+too. A missing row is `PENDING` on both sides. This is the same argument the method's
+`REQUIRES_HUMAN_INTERVENTION` paragraph already makes and wins — "a refusal that lives only in the
+caller is a refusal the next caller can forget" — applied to the one value that crosses the
+boundary. It adds no I/O inside `BEGIN IMMEDIATE`, which `state/db.py` forbids; recomputing the
+evidence inside the unit would have.
+
+**Raised, not returned as `()`.** The research recommendation was to return an empty tuple. That is
+rejected: "nothing was demotable" and "the snapshot the floor rests on is stale" are opposite facts
+about the same repo, and collapsing them into one value is the **D44** shape this codebase refuses
+everywhere else — the operator's next action differs (a healthy no-op versus re-run `fleet resume`).
+`FloorSnapshotStaleError` names the phases that moved and what they moved from and to;
+`cli._demote_to_floors` catches it and reports that repo in `unresolved` with the reason, so the
+fleet never reads as fully reconciled when part of it was not judged.
+
+**Cost when it fires:** that repo is a no-op and the operator runs `fleet resume` again, which
+ADR-0076's own refusal text already states is safe and idempotent, and which costs nothing but
+local reads (plus one forge call per open PR *only* under `--repoll-prs`). The failure mode of this
+decision is a spurious retry; the failure mode of not taking it is a discarded BUILD phase with a
+false audit record.
+
+**Orthogonal to ADR-0082, and this ADR closes neither of its disclosures.** ADR-0082 §4 is the
+residual **`DEGRADED` stale-anchor** hazard — a `DEGRADED` phase inside the span keeps a checkpoint
+built on output the demotion regenerates — ruled adversarial-only on an induction and deliberately
+not patched. ADR-0082 §5's second bullet is the separate *provenance* disclosure: the coupling of
+`demote_to_floor`'s `floor` to `phase_floor` is a docstring sentence and not a check, and "if
+subtask 7's floor ever comes from anywhere but `phase_floor`, §4's premises must be re-derived, not
+re-read." **Subtask 7's floor does come from `phase_floor`** — through `resume_floor`, which calls
+it — so those premises stand un-re-derived, and nothing here validates provenance. What §3 closes is
+the *staleness* of a floor that was correctly computed. `observed` is checked only when it is
+supplied; a caller that omits it gets the pre-existing behaviour, which is a real boundary and is
+stated in the method's docstring rather than dressed up as enforcement. What makes it mechanical in
+practice is that the sole production caller passes it, bound by
+`tests/test_cli.py::test_resume_step_5_refuses_a_floor_whose_phase_rows_moved_under_it`, which moves
+a `phases` row from inside the evidence probe — the same window a live worker writes in.
+
+### 4. DISCLOSURE (2026-08-21, `2f0db34`) — step 5 **re-opens any closed wave it demotes a member out of**
+
+**The mechanism, measured.** `WaveState` is **computed, never stored**:
+`orchestrator.scheduler.WaveScheduler.wave_state` reads every `wave_members` row's `phases` status
+through `status_of` and answers `CLOSED` iff all of them are in `SETTLED_STATUSES`
+(`{*TERMINAL_STATUSES, BLOCKED, DEGRADED}`). The `waves` table has no status column — verified
+against `src/fleet/state/schema.sql`'s DDL, which carries `computed_at`, `wave_started_at`,
+`synthetic` and `max_usd` and nothing else — and `demote_to_floor` writes no `waves` or
+`wave_members` row. So `SUCCEEDED → PENDING` on a member of a closed wave takes that member out of
+`SETTLED_STATUSES` and the wave answers `OPEN` on the next read, by construction and with nothing
+in the system observing that it happened.
+
+**This is neither authorised nor forbidden by the SPEC, and the distinction is the whole point of
+recording it.** `docs/SPEC.md` §3.5 does say "**closed waves are never re-opened**" — but that
+sentence sits inside the paragraph headed *"Wave re-entry — un-blocking never re-opens a closed
+wave"*, and it governs the `blocked_by` → `PENDING` path, whose remedy is the synthetic wave
+appended at `wave_index = max(waves) + 1`. §11.5 step 5 does not mention waves at all. So there is
+no committed sentence this behaviour violates, and none that permits it either.
+
+**No fix is attempted here and none is promised.** `graph.sequence.append_synthetic_waves` is not
+the mechanism: it filters to `ref not in plan.wave_index_by_node`
+(`src/fleet/graph/sequence.py:301`), and every repo a resume demotes already has a wave index, so
+the freed set is empty and the call is a no-op. Making step 5 append synthetic waves would be a
+scheduling decision with its own cost model — a demoted repo's Phase 4 would then run against the
+*current* integration tip rather than its original wave's, per §3.5 — and it is not a decision this
+ADR is in a position to take.
+
+**Pinned rather than described.** `tests/test_cli.py::test_resume_step_5_re_opens_the_closed_wave_
+it_demotes_a_member_out_of` seeds a one-member wave, asserts `WaveState.CLOSED` **before** the
+resume as its control (without which the test could not see the re-opening at all), runs the real
+command, and asserts `WaveState.OPEN` after. It is written as a measurement of a consequence, not as
+a statement that the consequence is desired: if a later change makes it `CLOSED` again that needs a
+decision, not an edited constant.
+
+### 5. `ResumeIncompleteError` is **rewritten**, not deleted — and ADR-0076 is annotated in the same change
+
+ADR-0076's final bullet reads: *"This ADR is temporary by construction. When §11.5 step 5 lands,
+`ResumeIncompleteError` should be deleted, not repurposed. If it is still here after step 5 exists,
+that is a defect."* Design §5 row 10 puts that deletion at **subtask 10**. As literally written the
+two conflict the moment subtask 7 lands.
+
+**The ruling: keep the error, keep exit 2, rewrite the message.** The bullet's implicit premise is
+that once step 5 exists the verb can continue. It cannot — steps **6** (recompute `blocked_by`) and
+**8** (continue into the phase runners) are still absent — so the resume genuinely *is* incomplete
+and exit 2 is still the honest outcome. Deleting the error here would ship a command exiting 0 on a
+resume that continued nothing, which is a worse defect than the documentary one it would resolve.
+The message no longer says step 5 "has no implementation"; it says step 5 **ran**, points at the
+report (`step 5:` lines, or `reentry_floors` under `--json`), and names 6 and 8 as what is left.
+
+Whether that counts as the "repurposed" the bullet forbids is a fair reading, which is why the
+bullet is **annotated beside itself rather than rewritten** (CLAUDE.md Guardrail 7: a record of what
+was true then is history — annotate it, never rewrite it). The annotation records the deferral, the
+reason, and that the obligation survives: if `ResumeIncompleteError` is still raised once 6 and 8
+both exist, ADR-0076's bullet applies unamended and that is the defect it names.
+
+**Two constraints the rewrite had to satisfy, both measured rather than reasoned about.**
+
+- **The floor-rule restatement inside the message is left VERBATIM.** A normalised sweep — strip
+  `"`, `'` and `\`, collapse every whitespace run over the whole file, map offsets back to lines —
+  finds the rule stated at exactly **2 sites, both in `src/fleet/cli.py`, 0 elsewhere in the tracked
+  tree**, and the canonical clause (through "there is no such phase") is **byte-identical, 185
+  normalised characters, at both sites** before and after this change. A line-oriented grep finds
+  **1** of the 2, because one copy is split across adjacent string literals — the failure mode
+  CLAUDE.md warns about, reproduced here on the first attempt. (The research brief predicted a
+  line-oriented grep would find **0**; it finds 1. Corrected here rather than inherited.) The two
+  sites are bound by `tests/test_cli.py` at `test_resume_refuses_the_flags_whose_behaviour_does_not_
+  exist` and `test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash`, which assert
+  `"HIGHEST phase below the settled frontier"` and `"DEGRADED/SKIPPED hard stop"` in rendered
+  output; neither test was touched.
+- **The rewrite stays out of Layer D's register.** `tests/test_floor_rule_statements.py` asserts
+  `_EXPECTED_STOP_CONDITION_SENTENCES` **before** its semantic check so a re-wording cannot empty
+  the layer vacuously, and `src/fleet/cli.py` is in `_GOVERNED`. A replacement message that stated
+  *where the walk stops* — matching `_WALK_SUBJECT` and `_STOP_CONDITION` in one sentence — would
+  have made `cli.py` start contributing considered sentences and fired that count. The message
+  states the floor without stating the stop condition, so `cli.py`'s contribution stays **0** and
+  the census constant was **not** touched. A census constant bound to landed text may not be
+  pre-adjusted, and must never be tuned until green.
+
+`resume()`'s docstring is corrected in the same change — step 5 moves into the "what is built
+today" list, "Steps 5, 6 and 8 do not exist" becomes "Steps 6 and 8", and `--dry-run`'s promise now
+names the step-5 preview. `--dry-run` reaching Git is consistent with that promise as `HEAD` states
+it: `evidence_holds` runs `rev-parse`-class reads, `merge-base --is-ancestor` and two path probes
+against local checkouts and opens no socket, which is the same category step 4's dry-run already
+performs and documents.
+
+### 6. What this ADR does **not** do
+
+- It does not delete `ResumeIncompleteError`. That is subtask 10's, and ADR-0076's bullet stands.
+- It does not close ADR-0082 §4 (the `DEGRADED` stale-anchor boundary) or §5's provenance
+  disclosure. §3 above closes the *staleness* of a correctly-provenanced floor and nothing else.
+- It does not fix the wave re-opening in §4, and it does not assign the fix to subtask 8.
+- It does not correct `_refuse_unbuilt_resume_flags`' docstring, which opens *"Every flag below
+  narrows or re-drives §11.5 step 5, the phase re-entry that is not built."* That sentence is now
+  false for a second reason (step 5 **is** built; it was already false for `--revalidation` and
+  `--raise-revalidation-rounds`, which are §3.5.1 stub-lifecycle knobs, not floor knobs). The
+  function is subtask 9's and was being edited by another lane during this one; the site is
+  reported to the orchestrator rather than edited from two places at once.
+- It allocates no D-number. Every claim it corrects is corrected in the code and here in the same
+  change, so there is no residual contradiction for `docs/INTEGRATION_HONESTY.md` to carry. **D78
+  remains free.**
+
+### 7. Verification
+
+- `tests/test_cli.py`, 13 new tests, all driven through `runner.invoke(app, [... "resume"])` rather
+  than against `_demote_to_floors`, because every defect in this class lives on the **caller's**
+  side of a boundary the unit tests either side of it cannot see.
+- **Rule 12: 9 mutations, 9 held.** The harness diffs `BACKUP → MUTATED` with `git diff --numstat
+  --no-index` — never against `HEAD`, which detects nothing once the working tree already differs
+  from `HEAD`, as it does with four lanes live — prints the changed-line count **before** collecting
+  the pytest result, and aborts on zero. It aborted on **three** stale anchors this round (a
+  sibling's `_build_evidence` docstring rewrite, and two anchors that matched 2× and 4×); all three
+  were re-derived rather than waved through.
+- **The discriminating measurement.** Under M1 (dry-run suppresses the write), M3 (the projection
+  drops `post_commit_sha`), M4 (the caller double-appends the mirror subdir), M6 (the I4 guard
+  disarmed) and M7 (the worktree-presence guard removed), the **222-test pre-lane suite stays fully
+  green** while the new tests go red — old assertion passes, new one fails, same code.
+- **Guardrail 6's four checks.** Fires on known-bad: M4 is the defect `main` actually shipped at
+  `b1de826`, restored verbatim; M7 is the guard whose removal makes `Git` shell out with a missing
+  cwd. Silent on an already-clean instance: the clean baseline, 13 passed. Fires on a synthetic
+  fault injected into a clean instance: M8, where the write's loop is emptied. Control: C1, a
+  reindent of the same statement, stays green.
+- **Expressibility was audited per mutation, not just pass/fail.** M2 is only expressible because
+  the floor phase is itself `SUCCEEDED` in the fixture (`>=` and `>` differ); a fixture whose floor
+  sat on a `PENDING` row could not express it at all. M3 is only expressible because Phase 2's
+  pointer is a real commit that *is* an ancestor of `migrate/<repo>`. M6 is only expressible because
+  the fixture writes a `phases` row from **inside** the evidence probe.
+- **"Writes nothing" is asserted as a whitelist, not an enumeration of sinks.** The `--dry-run` test
+  dumps the entire database with `sqlite3.iterdump()` before and after and compares, so a write to a
+  table nobody predicted trips it too. Its fixture's plan is non-empty, so `if dry_run or not plans`
+  is decided by `dry_run` alone — the guard is genuinely reached, which is exactly how step 4's
+  first dry-run test failed.
+- `ruff check`, `ruff format --check` and `mypy` clean on `src/fleet/cli.py`,
+  `src/fleet/orchestrator/reentry.py` and `tests/test_cli.py`. (`src/fleet/state/repository.py` has
+  two **pre-existing** `ruff format` deviations at unrelated lines, present at `690a825` before this
+  lane touched the file; no hunk of this change adds one.)
+- **A cross-lane break found and repaired here, reported rather than absorbed silently.** `7b2d48e`
+  inverted `RepoEvidence.for_repo`'s cache boundary — the parameter became an unsuffixed `cache_dir`
+  and the method now appends `reentry.MIRROR_CACHE_SUBDIR` itself — and left this ADR's caller
+  passing the old suffixed value under the old keyword. `main` was **red**: 17 resume tests failed
+  on the resulting `TypeError`, measured on a clean checkout with none of this lane's tests applied.
+  Repaired at `42a4369`, and the test that would have caught it asserts the **resolved** mirror path
+  by moving the mirror on disk, so it binds neither side of the parameter boundary and survives the
+  next inversion.
