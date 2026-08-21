@@ -10258,9 +10258,18 @@ async def _resume_impl(
     # §11.5 step 5 — the demotion to each repo's re-entry floor — sits HERE, between step 4 and
     # the projection: it reads the `phases.post_commit_sha` pointers step 4 has just reconciled
     # against Git, and step 7 must publish the result of the demotion, not the state before it.
-    # It also runs BELOW the step-3 sweep, which is what makes the FLOOR right rather than merely
-    # avoiding a collision: a `RUNNING` row is not settled, so it is the frontier the backward
-    # search starts from, and step 3 is what turns a dead worker's row back into one.
+    # It also runs BELOW the step-3 sweep. **That ordering is not what makes the FLOOR right, and
+    # an earlier draft of this comment claimed it was** — the same retraction the step-4 comment
+    # eleven statements above already carries, for the same claim shape. `RUNNING` and `PENDING`
+    # are BOTH outside `reentry._SETTLED_FOR_DEMOTION` (`{SUCCEEDED, SKIPPED, DEGRADED}`), so a
+    # stale row is the backward search's frontier before step 3 as well as after; step 3 moves it
+    # from one non-settled status to another. Measured over 17,680 inputs — every assignment of
+    # `RepoStatus` to the four phases containing at least one `RUNNING` (7^4 - 6^4 = 1,105 row
+    # states) x all 16 evidence subsets — the `RUNNING -> PENDING` rewrite changes `phase_floor`
+    # in 0 and `demotable_phases` in 0. Both columns were validated against synthetic faults on
+    # the same inputs: counting `RUNNING` as settled moves the floor in 5,312, and a membership
+    # rule admitting `RUNNING` moves the plan in 10,736. The ordering STAYS — the two reasons
+    # above it are the load-bearing ones — but nothing about the floor may be re-derived from it.
     floors = await _demote_to_floors(settings, path, run_id, dry_run=dry_run, now=now)
 
     projection: str | None = None

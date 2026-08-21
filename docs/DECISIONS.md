@@ -8923,11 +8923,31 @@ ADR-0082) and `evidence_holds` / `resume_floor` (ADR-0088) get their first produ
 `cli._demote_to_floors` runs between §11.5 step 4 and step 7's projection, in the slot the marker
 comment at `fe743e6` reserved. Three ordering properties hold, and the third is the tight one:
 
-1. **Below step 3.** A `RUNNING` row is not settled, so it is the frontier the backward search
+1. ~~**Below step 3.** A `RUNNING` row is not settled, so it is the frontier the backward search
    starts from; step 3 is what turns a dead worker's row back into one. This is what makes the
-   *floor* right, not merely what avoids a collision — `_DEMOTE_PHASE_SQL` carries
+   *floor* right, not merely what avoids a collision~~ — `_DEMOTE_PHASE_SQL` carries
    `AND status = 'SUCCEEDED'` and `demote()` raises outside `RESUME_DEMOTE`, so a `RUNNING` row is
    unreachable by the write in either direction regardless of order.
+
+   > **Correction (2026-08-21, final-review finding I2, re-measured by the fix lane) — the struck
+   > clause is FALSE, and the em-dash clause left standing is what was true all along.** `RUNNING`
+   > and `PENDING` are **both** outside `reentry._SETTLED_FOR_DEMOTION` (`{SUCCEEDED, SKIPPED,
+   > DEGRADED}`), so a stale row is the backward search's frontier *before* step 3 as much as
+   > after it; step 3 moves it from one non-settled status to another. Measured in the `.venv`
+   > interpreter over **17,680 inputs** — every assignment of `RepoStatus` to the four phases
+   > containing at least one `RUNNING` (7⁴ − 6⁴ = 1,105 row states) × all 16 evidence subsets —
+   > the `RUNNING → PENDING` rewrite changes `phase_floor` in **0** cases and `demotable_phases`
+   > in **0** cases. Both columns are validated against a synthetic fault on the same inputs, so
+   > that neither zero is an instrument that cannot move: `_SETTLED_FOR_DEMOTION |= {RUNNING}` —
+   > the world the struck clause describes — moves the floor in **5,312 / 17,680**, and a
+   > membership rule admitting `RUNNING` moves the plan in **10,736 / 17,680**.
+   >
+   > **Nothing in the code changes.** Items 2 and 3 are load-bearing and untouched, and the
+   > ordering is kept; what is retracted is only the stated *reason*, so that a successor does not
+   > re-derive a floor property from a placement that cannot carry one. This is the same claim
+   > shape `_resume_impl`'s step-4 placement comment already retracts eleven statements above the
+   > step-5 one, which is why the step-5 comment now carries an explicit retraction rather than a
+   > silent rewrite.
 2. **Above step 7.** The projection is regenerated from SQLite and must publish the result of the
    demotion, not the state before it.
 3. **Below step 4.** `evidence_holds` at Phases 2 and 3 resolves `phases.post_commit_sha`, and step
