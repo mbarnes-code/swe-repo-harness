@@ -660,11 +660,33 @@ def test_the_mirror_cache_subdir_is_the_one_cli_writes() -> None:
     floor is `SCAN` — the same silent failure as I1, one layer out.
 
     The claim is parsed **out of** the source rather than compared text-to-text, so editing
-    `cli.py`'s expression changes what this asserts. The segment is extracted from
-    `_scan_payloads`'s body only — a whole-file grep would also match `_gc_impl` and the
-    gazelle / resolve / ingest roots, which are different directories that are not this one — and
-    the body is whitespace-normalised first, because a line-oriented search certifies a class as
-    fixed when a wrapped match defeats it.
+    `cli.py`'s expression changes what this asserts, and the body is whitespace-normalised first
+    because a line-oriented search certifies a class as fixed when a wrapped match defeats it.
+
+    **Why the scoping to `_scan_payloads`, corrected — an earlier version of this docstring named
+    the wrong sites.** It claimed an unscoped sweep would also match `_gc_disk` and the
+    gazelle / resolve / ingest roots. It would not: those all spell
+    `(settings.root / settings.config.run.cache_dir).resolve()` and append their segment
+    afterwards, so no literal is adjacent to `run.cache_dir` and the regex cannot see them. What
+    the scoping actually buys is that the assertion names **one** site rather than aggregating
+    whatever else in `cli.py` folds a literal into that expression — and that this has been a
+    live, not hypothetical, condition. Measured across three commits by running the same regex
+    over `git show <sha>:src/fleet/cli.py`: at `7b2d48e` an unscoped sweep returned
+    `['git', 'git']`, because `cli._demote_to_floors` then built the mirror root itself; the
+    caller repair at `42a4369` moved it to the unsuffixed contract, and at `1ce1901` the unscoped
+    sweep returns `['git']`. So the scoping was load-bearing when written, is not today, and the
+    next caller that folds a segment in makes it load-bearing again — which is the reason to keep
+    it rather than to relax it.
+
+    **What this cannot catch, stated rather than implied.** It binds the *segment* — that
+    `MIRROR_CACHE_SUBDIR` is the directory `cli._scan_payloads` writes mirrors into. It says
+    nothing about whether any caller passes `for_repo` the unsuffixed root, which is the other
+    half of the contract and lives on the caller's side of the boundary. That gap is not
+    theoretical: the commit that inverted this parameter (`7b2d48e`) left
+    `cli._demote_to_floors` — landed at `2f0db34`, five minutes and 42 seconds earlier — still
+    passing the old keyword-only `git_cache_dir=`, a hard `TypeError` on the unconditional
+    `fleet resume` path, and this test was green throughout. `tests/test_cli.py` is where the
+    caller side is bound.
     """
     source = (Path(__file__).resolve().parents[1] / "src" / "fleet" / "cli.py").read_text()
     tree = ast.parse(source)
