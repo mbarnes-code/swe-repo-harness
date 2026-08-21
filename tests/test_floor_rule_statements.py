@@ -424,7 +424,7 @@ def test_every_sentence_stating_the_walks_stop_condition_names_the_hard_stop() -
     """The layer the census could not be: it anchors on the *shape of the claim*, not the phrase.
 
     `docs/SPEC.md:6969` and `docs/DECISIONS.md:7333` each stated where `phase_floor`'s backward
-    walk stops and omitted the `_HARD_STOPS` break that `reentry.py:98-99` tests *first*. Neither
+    walk stops and omitted the `_HARD_STOPS` break that `reentry.phase_floor` tests *first*. Neither
     shared a word with the corrected clause seventeen lines above, so neither was in the census,
     and no amount of whitespace normalisation would have found them -- normalising answers "the
     text is split", never "the claim is paraphrased". A reconciler implementing the walk from
@@ -445,7 +445,7 @@ def test_every_sentence_stating_the_walks_stop_condition_names_the_hard_stop() -
     silent = [(site, text) for site, text in sentences if not _HARD_STOP_NAMED.search(text)]
     assert not silent, (
         "these sentences say where the backward walk stops without naming the `_HARD_STOPS` break "
-        "that `reentry.py:98-99` tests BEFORE evidence -- a reconciler following them rebuilds the "
+        "that `reentry.phase_floor` tests BEFORE evidence -- a reconciler following them rebuilds the "
         "walk that demotes every repo with an excluded middle phase to `SCAN` on every resume:\n"
         + "\n".join(f"  {site}: {text}" for site, text in silent)
     )

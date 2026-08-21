@@ -1589,6 +1589,20 @@ is disk and memory, not a correctness or security failure, but it accumulates on
 no reaper behind it. **Would a test catch it? Only an integration one:** a real container, a
 deadline shorter than the command, and `docker ps --all` afterwards.
 
+> **Editorial correction (2026-08-21), lane W2 — the reaper IS invoked now; the leak above is
+> unaffected. The entry stands as written; only this premise has moved.** `e915b93` landed §11.5
+> step 2's orphan sweep, and `cli._reap_orphan_containers` calls `ContainerSandbox.reap()` on every
+> `fleet resume`. Re-measured this session: `grep -rn '\.reap(' src/fleet/ | grep -v test` returns
+> two call sites (`cli._reap_orphan_worktrees`'s `manager.reap`, `cli._reap_orphan_containers`'s
+> `sandbox.reap`), not zero — cited by symbol because that file is another lane's and its line
+> numbers moved twice while this was being written. **What this does and does not change:** D32's
+> defect is unchanged and still OPEN — the containerising path still bypasses `ContainerSandbox.run`
+> and still leaks on every timeout. What changes is the "would a test catch it?" reasoning above,
+> which rested on the reaper's *absence*: the leaked container is now swept by the next `fleet
+> resume`, so the residue is bounded rather than permanent, and the sweep is reachable code a test
+> can drive. D53 records the separate defect that this backstop reports a failed `docker rm` as
+> reaped, so "swept" is not yet "gone".
+
 **D33 — OPEN, and it is a defect in a CLAIM rather than in behaviour.
 `_check_root_file_domain`'s coverage half cannot currently fail.** The half reads
 `covered = {repo_id: plans[repo_id].dest for repo_id in plans}` and raises unless
@@ -3246,6 +3260,19 @@ was given in `4a421a3` for the identical honesty problem — the fix here is not
 is threading that same already-landed pattern one file over. **Not fixed here**: `sandbox/*.py`
 is out of this docs-only lane (Rule 3).
 
+> **Editorial correction (2026-08-21), lane W2 — "`reap()` has zero production callers today" is
+> false at `main`, so this defect is LIVE, not latent. The defect itself is unchanged and still
+> OPEN.** `e915b93` landed §11.5 step 2's orphan sweep; `cli._reap_orphan_containers` calls
+> `ContainerSandbox.reap()` on every `fleet resume`, and `grep -rn '\.reap(' src/fleet/ | grep -v
+> test` re-measured this session returns two call sites, not empty. Cited by symbol: `cli.py` is
+> another lane's file and had uncommitted edits in the tree while this was written. **Consequences,
+> stated rather than implied:** (1) the severity line above — "low while unreached, and it inherits
+> D32's own 'medium' once `reap()` is wired up" — has had its condition met, so read it as medium;
+> (2) the caller that "trusts `reaped` as 'these are gone'" is no longer hypothetical, it is the
+> resume sweep; (3) D32's cross-reference to this method as "the unreached backstop" is corrected in
+> its own entry. The "would a test catch it?" answer above is unaffected: `tests/test_sandbox.py`
+> still has no case scripting a failing `remove()` inside a sweep.
+
 ### `run.stale_after_s` leaves `KNOWN_INERT` — half of the defect it recorded, closed
 
 `tests/test_config_keys_are_read.py`'s ratchet fired on the RS1 landing: `fleet.yaml:run.stale_after_s`
@@ -4238,6 +4265,22 @@ is the one this whole class has: a reconciler follows the prose.
 > `ResumeIncompleteError` message — the clause naming step 2 as "absent too", now false because the
 > orphan reap it describes runs before the refusal — is not addressed by `da70221` and is not
 > claimed fixed here; it is a separate, currently open defect in the same message.
+
+> **Editorial correction (2026-08-21), lane W2 — two `reentry.py` line citations in this entry no
+> longer resolve; the symbols they meant are given here. The entry's history and its verdict stand
+> unamended.** (a) The paragraph beginning "**The fallback clause is false…**" cites
+> `src/fleet/orchestrator/reentry.py:96-103` for the `_HARD_STOPS` break. That range was correct
+> when written; `1e857f3` then grew `phase_floor`'s docstring by nine lines, and at `main` it lands
+> on the *frontier* loop (`_SETTLED_FOR_DEMOTION`) instead — a reconciler following it reads the
+> wrong predicate. The durable anchor is **`phase_floor`'s `break` on
+> `orchestrator/reentry._HARD_STOPS`**, which is still tested before `evidence` is consulted. (b)
+> The same paragraph's `src/fleet/orchestrator/reentry.py:80-81` for the docstring sentence stating
+> the rule is likewise moved; the anchor is the sentence in **`phase_floor`'s docstring** that
+> states where the backward search stops on a hard-stop row — named, not quoted, because nothing
+> enforces a copy. Editorial point 4 above cites the
+> same `:80-81` **at `431b02f`**, where it is correct and was measured — that citation is anchored to
+> its ref and is **not** corrected here. Nothing in this entry's measured table or its verdict
+> depends on either line number.
 
 ---
 

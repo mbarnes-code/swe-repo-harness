@@ -203,8 +203,9 @@ def claims(live_name: str, container_name: str) -> bool:
     `list_with_verdict`/`remove`. The paths that do reach one of these containers are:
 
     * **General** — the next idempotent `reap()`, once the rung stops being live. Real since
-      `cli._reap_orphan_containers` gained the call (`cli.py:10608`); before that it was a
-      mechanism with no caller.
+      `cli._reap_orphan_containers` gained the call in `e915b93` — the symbol is the anchor, and
+      an earlier line citation here rotted when that function's docstring grew above the call.
+      Before that it was a mechanism with no caller.
     * **Conditional, deadline kill only** — `BuildverifyWorker.run()`'s two `_sweep_containers`
       calls (`workers/buildverify.py:829`, `:958`), both guarded by `result.timed_out and
       result.started`.

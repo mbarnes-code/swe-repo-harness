@@ -7498,6 +7498,28 @@ which decided all three non-demotable statuses for the *status* write and said n
 (`docs/superpowers/plans/design-resume-step5-task6-demotion-writer-report.md`
 §3 and §6 item 1).
 
+> **Editorial correction (2026-08-21), lane W2 — the citations into
+> `src/fleet/orchestrator/reentry.py` and `src/fleet/state/repository.py` are now **symbol** anchors,
+> not `file:line` ones. Nothing this ADR claims has changed.** Re-measured at `0e945b8` with a
+> whitespace-normalised whole-file scan and an offset-to-line map: this ADR carried **20**
+> line-anchored citations into those two files — 11 naming the file, 9 bare `` `:N` `` companions —
+> and every one of them resolved **correctly** at the declared anchor `8c00971`. None was ever
+> false. **12 of the 20 no longer resolve to the same text at `main`**, and the eight that still do
+> are coincidence rather than durability: `1e857f3` grew `phase_floor`'s docstring by nine lines and
+> `704e52f` grew `demote_to_floor`'s by twelve ("behaviour unchanged — docstring only"), pushing the
+> `_HARD_STOPS` break, `span`, the `if demotions:` guard and the `DEGRADED` carve-out down by nine
+> and twelve lines respectively. **What the normaliser bought, stated rather than assumed:** none of
+> the 11 file-naming citations wraps across a newline, so a line-oriented `grep` would have found
+> all 11 — but **8 of the 9 bare companions sit on a different physical line from the file name they
+> attach to**, and a line-oriented sweep cannot associate them at all. That is where the count 11
+> becomes 20. An anchored-but-unresolvable citation is still a reconciler pointed at the wrong code
+> — §6's table sent a reader checking "carve-out names `DEGRADED` only" onto the *demotion* loop's
+> `is not RepoStatus.SUCCEEDED` filter a few lines above it, inside the same method. A symbol anchor
+> is true at every ref, so the numbers are removed rather than re-measured. The remaining
+> `file:line` citations in this ADR (into `models/enums.py`, `state/checkpoints.py`, `cli.py`,
+> `tests/`) are untouched and still read at `8c00971` unless another ref is named beside them.
+
+
 **Provenance (CLAUDE.md Guardrail 1).** Nothing here is a SPEC requirement that pre-existed it.
 `docs/SPEC.md:6907-6909` **as of `8c00971`, before this change** stated the *demoted-rows-only*
 reading, and `docs/superpowers/plans/design-resume-step5.md:234` at `b7fc5ec` stated the
@@ -7515,15 +7537,17 @@ pseudocode at `8c00971:…:235-237`). `docs/SPEC.md` §11.5 step 5 tied the drop
 demoted row**. Verified against the code, each alone fails in the opposite direction:
 
 - ***Demoted rows only.*** The span's top phase is frequently not demoted — `phase_floor` selects
-  the frontier as the first phase *not* settled (`src/fleet/orchestrator/reentry.py:88-91`), so on
+  the frontier as the first phase *not* settled (the `_SETTLED_FOR_DEMOTION` loop in
+  `orchestrator/reentry.phase_floor`), so on
   the ordinary interrupted resume the frontier is `PENDING` or `RUNNING`, i.e. not `SUCCEEDED`, i.e.
-  not demoted (`src/fleet/state/repository.py:1424`). Its partial payload therefore survives while
+  not demoted (`demote_to_floor`'s `is not RepoStatus.SUCCEEDED` filter). Its partial payload
+  therefore survives while
   every phase beneath it is rewritten, and `checkpoints.load()` hands that payload back reporting it
   usable — a VERIFY that resumes against a BUILD output the same transaction discarded.
 - ***Unconditional.*** `phase_floor` legitimately returns the frontier itself with nothing below it
   to demote: the backward walk breaks at the first phase in `orchestrator/reentry._HARD_STOPS`
-  (`src/fleet/orchestrator/reentry.py:98-99`, tested **before** `evidence` is read) or, failing
-  that, at the first phase whose evidence holds (`:100-101`). The second, met immediately below
+  (`phase_floor`'s `break` on that set, tested **before** `evidence` is read) or, failing
+  that, at the first phase whose evidence holds (the same loop's `evidence.get` `break`). The second, met immediately below
   the frontier, is what a healthy interrupted run looks like; the first returns the frontier for a
   different reason, and either way there is nothing below to demote.
   Sweeping there deletes the in-progress checkpoint on **every** `fleet resume`, with nothing
@@ -7532,8 +7556,8 @@ demoted row**. Verified against the code, each alone fails in the opposite direc
 ### 2. The decision
 
 The sweep is **span-wide, conditional on at least one phase actually having been demoted, and
-excludes `DEGRADED` rows**. In code: `src/fleet/state/repository.py:1435-1441` — the `if demotions:`
-guard is the conditionality, `span` (built at `:1410` as every `Phase >= floor`) is the width, and
+excludes `DEGRADED` rows**. In code: `demote_to_floor`'s `checkpoints.delete_in_unit` call — the `if demotions:`
+guard is the conditionality, `span` (built as every `Phase >= floor`) is the width, and
 the list comprehension's `is not RepoStatus.DEGRADED` filter is the carve-out. The deletion runs
 through `checkpoints.delete_in_unit`, which takes a **connection** rather than a `StateWriter`
 precisely so the status write and the checkpoint drop cannot become two transactions
@@ -7541,17 +7565,18 @@ precisely so the status write and the checkpoint drop cannot become two transact
 
 A demotion invalidates everything above it; a no-op stays a no-op. The rest of the unit is
 unchanged by this ADR and was verified against the code rather than the report:
-`attempts` is absent from the demotion `UPDATE`'s SET list (`src/fleet/state/repository.py:822-825`),
-the `REQUIRES_HUMAN_INTERVENTION` refusal is re-read inside the transaction (`:1413-1418`), and the
-`PhaseDemoted` finding is fingerprinted per **phase**, not per repo (`:840-842`, `:832-837`).
+`attempts` is absent from the demotion `UPDATE`'s SET list (`state/repository._DEMOTE_PHASE_SQL`),
+the `REQUIRES_HUMAN_INTERVENTION` refusal is re-read inside the transaction (the `_DEMOTE_SELECT_SQL`
+read that opens `demote_to_floor`'s `unit`), and the `PhaseDemoted` finding is fingerprinted per
+**phase**, not per repo (`_demotion_fingerprint`, `_DEMOTE_FINDING_SQL`).
 
 ### 3. `SKIPPED` stops the walk and still loses its checkpoint, and the asymmetry is the point
 
 `4a1a184` made `SKIPPED` a hard stop beside `DEGRADED` in the backward walk
-(`src/fleet/orchestrator/reentry.py:54`), on the two-sided reading of ADR-0077 §5. That lane's
+(`orchestrator/reentry._HARD_STOPS`), on the two-sided reading of ADR-0077 §5. That lane's
 reasoning is confirmed by reading the loop rather than inherited: an excluded phase never ran, so
 `evidence.get(phase, False)` is `False` for it, so without the stop the walk falls through
-`:100-102` and sets the floor one phase lower every iteration — every repo with an excluded middle
+both `break`s and sets the floor one phase lower every iteration — every repo with an excluded middle
 phase demoted to phase 1 on every resume.
 
 The sweep's carve-out names `DEGRADED` only, and that is **correct, not an oversight the walk
@@ -7578,8 +7603,7 @@ above.
 below it regenerates, so the revalidation round that eventually re-runs it resumes from a stale
 anchor. ADR-0077 §5 forecloses the obvious fix (dropping that checkpoint forces the budgeted round
 to start from nothing, which is the cost the budget was sized against), so this is a real tension
-that is recorded rather than resolved. It is stated in the method docstring at
-`src/fleet/state/repository.py:1392-1401`.
+that is recorded rather than resolved. It is stated in `demote_to_floor`'s own docstring.
 
 **Ruling under CLAUDE.md Rule 12's stop rule: adversarial-only — a stated boundary, deliberately not
 patched.** The state the hazard needs is a `DEGRADED` row *strictly above the frontier*, and that is
@@ -7594,7 +7618,7 @@ not a state the machine produces:
    required a `DEGRADED` row above its own frontier. The induction has no base case.
 
 A `DEGRADED` row *below* the frontier is common and harmless: the backward walk breaks on it without
-moving the floor onto it (`src/fleet/orchestrator/reentry.py:98-99`), so it lands below the floor and
+moving the floor onto it (`phase_floor`'s `break` on `_HARD_STOPS`), so it lands below the floor and
 outside the span entirely. The same induction disposes of `SKIPPED`: its only entry edges are from
 `PENDING` and `BLOCKED`, never from a completed phase (`src/fleet/models/enums.py:33-34` and `:41`,
 and the driver's own gate records the same at `src/fleet/cli.py:2007-2010` at `8ea1881` — cite the
@@ -7626,9 +7650,10 @@ phase rows yet.
 mechanism's clothes.** That induction is spread across three modules — the ladder's ordering in
 `orchestrator/runner.py`, `ALLOWED_TRANSITIONS` in `models/enums.py`, and the hard stop in
 `orchestrator/reentry.py` — and **nothing binds any of it to `demote_to_floor`'s signature**, which
-accepts any `Phase` as `floor` from any caller (`src/fleet/state/repository.py:453-461`). The
+accepts any `Phase` as `floor` from any caller (`StateRepository.demote_to_floor`'s Protocol
+declaration in `src/fleet/state/repository.py`). The
 carve-out list is computed from the rows as read, not from a validated floor. The coupling
-"`floor` is what `phase_floor` computed" is a **docstring sentence** (`:1351-1352`), not a check.
+"`floor` is what `phase_floor` computed" is a **docstring sentence** in `demote_to_floor`, not a check.
 `demote_to_floor` has no production caller yet — subtask 7 is the first — and the tests that exercise
 the carve-out hand in floors directly (`tests/test_repository.py:1384-1386` builds a `BUILD`-DEGRADED
 repo and passes `floor=Phase.TRANSFORM`, a floor `phase_floor` would never return for those rows,
@@ -7654,13 +7679,13 @@ before it was written, against `8c00971` rather than against the implementer's r
 
 | Claim | Checked at |
 |---|---|
-| sweep is conditional on a demotion | `src/fleet/state/repository.py:1435` (`if demotions:`) |
-| sweep is span-wide, not demoted-rows | `:1440` iterates `span`, not `demotions` |
-| carve-out names `DEGRADED` only | `:1440` — `SKIPPED` is absent from the filter |
-| `attempts` retained on every path | `:822-825`; `complete_phase` is the only other writer |
+| sweep is conditional on a demotion | `demote_to_floor`'s `if demotions:` guard |
+| sweep is span-wide, not demoted-rows | `checkpoints.delete_in_unit`'s `phases=` argument iterates `span`, not `demotions` |
+| carve-out names `DEGRADED` only | that same comprehension's `is not RepoStatus.DEGRADED` filter — `SKIPPED` is absent from it |
+| `attempts` retained on every path | `_DEMOTE_PHASE_SQL`'s SET list; `complete_phase` is the only other writer |
 | `SKIPPED` is mechanically terminal | `src/fleet/models/enums.py:25-26`, `:49` (empty set) |
 | `DEGRADED` is not terminal and reaches `RUNNING` | `src/fleet/models/enums.py:25-29`, `:42-46` |
-| walk stops on both, floor never lands on either | `src/fleet/orchestrator/reentry.py:54`, `:98-99` |
+| walk stops on both, floor never lands on either | `orchestrator/reentry._HARD_STOPS` and `phase_floor`'s `break` on it |
 | `demote_to_floor` has no production caller | `grep -rn demote_to_floor src/` → the definition and the Protocol only |
 
 The behaviour itself is bound by mutations M10 (unconditional sweep → the no-op test fails) and M11
