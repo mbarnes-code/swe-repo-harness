@@ -77,7 +77,6 @@ from fleet.models.enums import (
     demote,
 )
 from fleet.obs.redact import redact_text
-from fleet.orchestrator.reentry import demotable_phases
 from fleet.state import checkpoints
 from fleet.state.db import StateWriter
 from fleet.util.hashing import sha256_text
@@ -1466,7 +1465,21 @@ class SqliteStateRepository:
         `phases.attempts` in `src/`. No lease fence is carried, deliberately — resume holds no
         lease, and step 3 has already reclaimed every stale one and bumped its fence, so a fence
         nobody granted would be a fence in name only.
+
+        **Why `demotable_phases` is imported here and not at module scope.** The import is upward
+        across a layer boundary, and `fleet.orchestrator.__init__` re-exports `context`, which
+        imports `orchestrator.findings`, which imports `EventRow` from *this* module. At module
+        scope that cycle closes: importing `fleet.state.repository` before any other `fleet`
+        module raises `ImportError: cannot import name 'EventRow' from partially initialized
+        module`. It was reachable, not hypothetical — `pytest tests/test_repository.py` failed at
+        collection for exactly this reason (W11, round D). Deferring it to call time breaks the
+        cycle without moving the rule: by the time a demotion is applied, both modules are fully
+        initialised. `tests/test_cli.py::test_state_repository_imports_first_in_a_fresh_interpreter`
+        is the regression bound to it, and lives there rather than in `tests/test_repository.py`
+        because a module-scope import takes that whole module out at collection.
         """
+        from fleet.orchestrator.reentry import demotable_phases
+
         stamp = _iso(now)
         span = tuple(phase for phase in Phase if phase >= floor)
 

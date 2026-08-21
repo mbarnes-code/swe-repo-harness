@@ -31,6 +31,7 @@ import re
 import shutil
 import sqlite3
 import subprocess
+import sys
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -4637,3 +4638,59 @@ def test_resume_step_5_leaves_a_repo_at_its_floor_alone_and_says_which(
     finally:
         conn.close()
     assert _db_dump(db) == before, "a run with nothing to demote still wrote to the database"
+
+
+# --------------------------------------------------------------------------------------
+# The layer cycle `demotable_phases` opened — import order, not behaviour
+# --------------------------------------------------------------------------------------
+
+
+def test_state_repository_imports_first_in_a_fresh_interpreter(tmp_path: Path) -> None:
+    """`import fleet.state.repository` must work when it is the FIRST `fleet` module imported.
+
+    ADR-0089 §2 took an upward import — `state.repository` → `orchestrator.reentry` — as a
+    deliberate cost, and recorded that `import fleet.state.repository` and `import fleet.cli`
+    were each run clean before the decision was written. The second half was true; the first was
+    not, and was not true at `2f0db34` either. `fleet.orchestrator.__init__` re-exports
+    `context`, which imports `orchestrator.findings`, which imports `EventRow` back out of
+    `state.repository` — so whichever of the two is imported first decides whether the cycle
+    closes. `fleet.cli` reaches `orchestrator` first and is fine; anything reaching
+    `state.repository` first got `ImportError: cannot import name 'EventRow' from partially
+    initialized module`. `pytest tests/test_repository.py` was such a caller and had been failing
+    at collection since `2f0db34` (W11, round D).
+
+    This lives in `test_cli.py` and not in `test_repository.py` on purpose: restoring the
+    module-scope import takes that whole module out at *collection*, so no assertion inside it
+    can discriminate — every test there fails together, which proves nothing about any one of
+    them. Every assertion in this module, by contrast, still passes under that mutation, because
+    `from fleet.cli import ...` at the top imports `orchestrator` first. That is what makes this
+    test the one that fails.
+
+    A subprocess is the fixture, not an implementation detail: the property is about a cold
+    interpreter's module table, and this session's is already populated by this module's own
+    imports.
+    """
+    probe = subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+        [sys.executable, "-c", "import fleet.state.repository as r; r.SqliteStateRepository"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert probe.returncode == 0, (
+        "importing `fleet.state.repository` before any other `fleet` module failed — the "
+        f"layer cycle is closed again:\n{probe.stderr}"
+    )
+    assert "partially initialized module" not in probe.stderr, probe.stderr
+
+    reverse = subprocess.run(  # noqa: S603 - fixed argv built here, never a shell, no test input
+        [sys.executable, "-c", "import fleet.cli; import fleet.state.repository"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert reverse.returncode == 0, (
+        "the order that always worked stopped working, so the deferral broke something other "
+        f"than the cycle:\n{reverse.stderr}"
+    )
