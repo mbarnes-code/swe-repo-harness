@@ -117,8 +117,15 @@ only as good as the SHA beside it, and a reader who finds none should assume it 
 **Two obligations subtask 10 inherits, both already written down rather than promised:**
 `ADR-0089` **rewrote** `ResumeIncompleteError`'s message rather than deleting the class, and
 annotated ADR-0076's "should be deleted, not repurposed" bullet beside itself recording the deferral
-to subtask 10 and why. And `_refuse_unbuilt_resume_flags`' docstring is now false for a **second**
-reason (step 5 *is* built) — correctly left for subtask 9, whose scope it is. **[decision]**
+to subtask 10 and why. And ~~`_refuse_unbuilt_resume_flags`' docstring is now false for a
+**second** reason (step 5 *is* built) — correctly left for subtask 9, whose scope it is.~~
+**FIXED at `c135c42`**, later in round D and after this ruling was written: that commit rewrote
+both the docstring and the `UsageError` message, which now say step 5 **is** built and that steps 6
+and 8 are what is absent. **Subtask 9 inherits no docstring correction here — do not send a lane at
+that prose, it is correct.** What subtask 9 still owns in that function is the refusal itself,
+including the R2 brief's §4.1 question of whether `--revalidation` and
+`--raise-revalidation-rounds` belong in it at all, which `c135c42` did not settle.
+**[decision, superseded 2026-08-21 by lane W12; see ADR-0089 §6's CORRECTED bullets]**
 
 ### Other landed work
 
@@ -337,8 +344,11 @@ reconstructs a `WavePlan` from the DB, and `record_plan` — the whole-plan writ
 2. **Rule on §5's five decisions and allocate the ADR number centrally**, then dispatch **subtask 8**
    with the §6 facts re-measured at dispatch. Whichever reading of step 6 loses, its SPEC sentence is
    corrected in the same change.
-3. **Subtask 9**, gated on 8. **`ADR-0079` must be written before it.** Its scope includes
-   `_refuse_unbuilt_resume_flags`' docstring, now false for a second reason.
+3. **Subtask 9**, gated on 8. **`ADR-0079` must be written before it.** ~~Its scope includes
+   `_refuse_unbuilt_resume_flags`' docstring, now false for a second reason.~~ **FIXED at
+   `c135c42`** — the docstring now states that step 5 *is* built. Do not dispatch a lane at it; it
+   would edit correct text. What remains in scope is the refusal's *behaviour* (the five flags, and
+   the R2 brief's §4.1 split), not its prose. **[corrected 2026-08-21, lane W12]**
 4. **Subtask 10**, gated on 9. It must discharge ADR-0076's annotated deferral of the
    `ResumeIncompleteError` deletion.
 5. **Re-audit §38's thirteen carried open items** rather than inheriting them (§40 open item 4,
@@ -395,8 +405,11 @@ originals after a two-line provenance banner:
 * `resume-step5-subtask-7-research.md` (was `r2-research.md`) — promoted **because its §4 is not
   history.** Subtask 7 has landed, so §§1–3 record a question already answered; but §4 is the
   **subtask-9** brief — the `--from-phase` refusal split verified against
-  `_refuse_unbuilt_resume_flags`, a defect subtask 9 inherits in the same function, and ambiguity 4's
-  three options costed and deliberately unpicked. That is exactly what **ADR-0079** has to settle,
+  `_refuse_unbuilt_resume_flags`, ~~a defect subtask 9 inherits in the same function~~ —
+  **corrected 2026-08-21, lane W12: that defect (§4.2) was FIXED at `c135c42`, and §4.2 itself is
+  still unmarked**, because W12 did not own that file; read §4.2 as history and mark it before
+  dispatching anyone at it — and ambiguity 4's three options costed and deliberately unpicked.
+  That is exactly what **ADR-0079** has to settle,
   and ADR-0079 is still unwritten. A brief whose live half gates an unwritten ADR is not history.
 
 **The rest of `.superpowers/sdd/round-d/` was NOT promoted, and that is a judgement, not an

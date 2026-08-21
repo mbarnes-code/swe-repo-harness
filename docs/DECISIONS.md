@@ -9009,6 +9009,36 @@ that runs the code, both clean, before any of this was written. The alternative 
 taken here only because the extraction was ruled into `reentry.py`, and moving it later is a
 rename with two call sites.
 
+> **Correction (2026-08-21, lane W12) — the first of the two probes the paragraph above reports
+> was never clean, and the import that paragraph describes is no longer at module scope.** The
+> certification sentence is left standing, unedited, because it records what its author believed at
+> `2f0db34`; it is history, not a statement that was ever true. Re-measured twice independently
+> (lane W11, then this lane) against a `git archive 2f0db34` export imported by `.venv/bin/python`,
+> with `find_spec('fleet').origin` checked to resolve **into the export** before any result was
+> trusted: `import fleet.state.repository`, as the first `fleet` module in a fresh interpreter,
+> raises `ImportError: cannot import name 'EventRow' from partially initialized module`, because
+> `fleet.orchestrator.__init__` re-exports `context`, `context` imports `orchestrator.findings`,
+> and `findings` imports `EventRow` back out of `state.repository`. `import fleet.cli` — the second
+> probe — was clean at `2f0db34` and is clean now, which is why the failure survived a round.
+> **There was never a window in which "both clean" was true.** The `findings` half of the cycle
+> entered at `d1ed2be`, an *ancestor* of `2f0db34`: `git merge-base --is-ancestor d1ed2be 2f0db34`
+> succeeds, and `git log -S'from fleet.state.repository import EventRow' --
+> src/fleet/orchestrator/findings.py` returns `d1ed2be` and nothing else — while `2f0db34^` imports
+> `fleet.state.repository` clean. The reachable symptom — `pytest tests/test_repository.py` failing
+> at collection, `collected 0 items / 1 error`, from `2f0db34` until the fix — is W11's measurement
+> and `e7c586d`'s commit message, **not this lane's: W12 ran no pytest session**, only the two
+> import probes above.
+>
+> **`e7c586d` is the commit that falsified this section in the tree**, by moving the import off
+> module scope. So read *"And it makes `fleet.state.repository` import
+> `fleet.orchestrator.reentry`"* above as history too: the upward dependency and the layer-boundary
+> cost this paragraph is about are both still real, but since `e7c586d` the import is paid at
+> **call time**, inside `SqliteStateRepository.demote_to_floor` — cited by symbol, because line
+> numbers for this function have already moved in this repository — whose docstring gives the
+> reason, with `tests/test_cli.py::test_state_repository_imports_first_in_a_fresh_interpreter` as
+> the regression bound to it. **The decision this section records is unaffected**: the rule still
+> lives once, in `orchestrator.reentry.demotable_phases`, and both routes still call it.
+
 `demotable_phases` deliberately does **not** answer which `checkpoints` rows a demotion sweeps.
 That span is wider than this set by construction — `demote_to_floor` sweeps the whole span minus
 `DEGRADED`, not only the phases it demoted (ADR-0082 §2) — and it belongs with the write, not with
@@ -9181,6 +9211,39 @@ performs and documents.
   `--raise-revalidation-rounds`, which are §3.5.1 stub-lifecycle knobs, not floor knobs). The
   function is subtask 9's and was being edited by another lane during this one; the site is
   reported to the orchestrator rather than edited from two places at once.
+  - **CORRECTED (2026-08-21, lane W12) — the site the bullet above reports as uncorrected was
+    fixed at `c135c42`, later in the same round.** `c135c42` replaced both the quoted docstring
+    sentence and the `UsageError` message that repeated it; `_refuse_unbuilt_resume_flags`'
+    docstring now states that step 5 **is** built and that what is absent is steps 6 and 8. The
+    quotation in the bullet above is therefore a **retraction quotation** from here on, not a live
+    citation of text in `src/`.
+  - **The measurement, with its predicate and normaliser stated.** The quoted sentence, matched
+    after collapsing every run of whitespace in the **whole file** to a single space and mapping
+    match offsets back to original line numbers, occurs **twice** in the tracked tree — here, and
+    in `docs/superpowers/plans/resume-step5-subtask-7-research.md` §4.2, which is **unmarked** and
+    is the subtask-9 brief a round-E lane reads (reported by W12, which does not own that file) —
+    and **zero** times in `src/`. The predicate has an axis, so both variants were run: the
+    narrower one — the assertion alone, without the *"Every flag below"* lead-in — selects the same
+    two sites. A **line-oriented** `git grep -F` returns **zero** for every one of them, because
+    each copy wraps across a line break; that is precisely why deleting the sentence left its
+    citers standing. Stated limit of the normaliser: it rejoins a sentence wrapped across lines,
+    but **not** a word split by a hyphenated line break.
+  - **Prefer the class result to the raw total, and subtract retraction quotations by rule.** The
+    class *"live citations of the deleted sentence"* had **2** members and now has **1** — the
+    unowned research brief. The raw totals do not agree with that and must not be read as if they
+    did: a retraction and its quarry are textually indistinguishable to a counting detector, and
+    the bullet above is itself a retraction quotation, so a raw count over this file will keep
+    returning it long after the claim it quotes is dead — and a marker that re-quotes the sentence
+    it retracts raises the raw total further (this one deliberately does not, which is why the two
+    variants still agree). Subtract by the rule *"a dated correction marker stands within the same
+    passage"* — never by a hand-maintained list of exempt sites, which is the part that rots.
+  - **An asymmetry worth recording, because both lanes were in this round.** `02dba0a` — the
+    `sandbox_name` → `checkout_name` fix, same class — swept for its citers and marked them.
+    `c135c42` deleted its sentence without grepping for citers, which is how the bullet above came
+    to certify as uncorrected a site that was already corrected. What `c135c42` did **not** settle
+    is the *other* reason that sentence was false, raised in the R2 brief's §4.1: whether
+    `--revalidation` and `--raise-revalidation-rounds` belong in this refusal at all. That is
+    still subtask 9's question, and ADR-0079's.
 - It allocates no D-number. Every claim it corrects is corrected in the code and here in the same
   change, so there is no residual contradiction for `docs/INTEGRATION_HONESTY.md` to carry. **D78
   remains free.**
