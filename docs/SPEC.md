@@ -1599,6 +1599,16 @@ repo migrated late. Their Phase 4 runs against the **current** integration tip �
 ref per §3.3 step 1, not the tip their original wave saw — and any Phase 3 merge is rebased onto
 it, because everything that closed in between has already landed.
 
+**Scope of that rule, stated because the sentence reads wider than it governs.** "Closed waves are
+never re-opened" governs *this* path — `blocked_by` → `PENDING` — and no other. §11.5 step 5's
+demotion to a re-entry floor takes a member of a closed wave out of `SETTLED_STATUSES`, and because
+`orchestrator.scheduler.WaveScheduler.wave_state` **computes** wave status on every read rather than
+storing it (the `waves` DDL has no status column), that wave answers `OPEN` on the next read.
+Step 5 never mentions waves, so this is neither authorised nor forbidden by any sentence here: it is
+disclosed, and deliberately not fixed, in **ADR-0089 §4** — which also measures why
+`graph.sequence.append_synthetic_waves` is **not** the remedy for it (that function filters to refs
+carrying no wave index, and every repo a resume demotes already has one).
+
 **The stub/shim escape hatch — how the fleet keeps moving.** `--stub-blocked` (default off; on
 under `fleet transform|build --stub-blocked`) lets a dependent migrate against a generated
 placeholder instead of waiting for a human:
