@@ -25,7 +25,7 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 
 from fleet.llm.cache import (
     EMPTY_SHA256,
@@ -35,6 +35,7 @@ from fleet.llm.cache import (
     CachingModelClient,
     MemoryLlmCacheStore,
     SqliteLlmCacheStore,
+    _target_for,
 )
 from fleet.llm.calls import prompt_sha256, render_prompt
 from fleet.llm.client import (
@@ -44,6 +45,7 @@ from fleet.llm.client import (
     ModelCapabilities,
     ModelResponse,
     StreamEvent,
+    TierRoute,
 )
 from fleet.llm.roles import LlmRouter, Role
 from fleet.llm.schemas import PrTitle, RepoClassification, response_schema_sha256
@@ -70,6 +72,21 @@ def target(backend: str, model_id: str, *, effort: str = "low") -> BackendTarget
 
 PRIMARY = target("anthropic", "cheap-a")
 STANDBY = target("openai_compatible", "local-cheap", effort="medium")
+
+# The degrade-on-failover pair: ONE model declared twice, differing in `effort` and in NOTHING
+# else. Built independently rather than copied from one another, so the assertion in
+# `test_a_route_cannot_send_one_model_at_two_efforts` that `effort` is their only difference is a
+# real check on these objects and not a tautology of how they were written.
+ENDPOINT = "http://localhost:8000/v1"
+DEGRADE_HIGH = target("openai_compatible", "local-degrade", effort="high").model_copy(
+    update={"base_url": ENDPOINT}
+)
+DEGRADE_LOW = target("openai_compatible", "local-degrade", effort="low").model_copy(
+    update={"base_url": ENDPOINT}
+)
+# The same model behind a SECOND endpoint: the same `(backend, model_id)` twice, AGREEING on
+# `effort`. Legal, and the control that keeps the rule about `effort` and not about duplication.
+DEGRADE_TWIN = DEGRADE_HIGH.model_copy(update={"base_url": "http://elsewhere:8000/v1"})
 
 
 def router() -> LlmRouter:
@@ -351,6 +368,82 @@ def test_a_failover_answer_is_stored_under_the_target_that_actually_answered() -
     stored = asyncio.run(store.get(key))
     assert stored is not None
     assert stored.record.backend == STANDBY.backend
+
+
+def test_a_route_cannot_send_one_model_at_two_efforts() -> None:
+    """The failover attribution above works because `(backend, model_id)` identifies the target
+    that answered. It stops working the moment a route declares that pair twice at two `effort`
+    levels: `TokenUsage` has no `effort` field, so `_target_for` cannot tell the two apart and
+    returns whichever iterates first. Measured before the fix, through the real config loader —
+    a `degrade the same model on failover` profile (`effort: high`, then `effort: low`) resolved,
+    the standby answered, and its answer was stored under the primary's `effort: high` key; the
+    next primary-routed call HIT and was served it. That is §13 row 39 poisoning arriving through
+    the one door `_store_response` does not guard.
+
+    So the route refuses the ambiguity instead. Two assertions, and the second is the one that
+    keeps this rule honest: the same `(backend, model_id)` declared twice while AGREEING on
+    `effort` stays legal, because one model behind two endpoints is a legitimate failover pair
+    and the recovered `effort` is right whichever answered. The rule is about `effort`, not
+    about duplication.
+    """
+    # Expressibility, asserted rather than assumed: if these two shared an `effort` the defect
+    # would be a semantic no-op and this test would pass with it present.
+    assert DEGRADE_HIGH.effort != DEGRADE_LOW.effort, "the two targets must differ in `effort`"
+    assert DEGRADE_HIGH.model_copy(update={"effort": None}) == DEGRADE_LOW.model_copy(
+        update={"effort": None}
+    ), "`effort` must be the ONLY difference, or the pair does not isolate this defect"
+
+    with pytest.raises(ValidationError) as ambiguous:
+        TierRoute(tier=ModelTier.CHEAP, targets=(DEGRADE_HIGH, DEGRADE_LOW))
+    message = str(ambiguous.value)
+    named = f"{DEGRADE_HIGH.backend}:{DEGRADE_HIGH.model_id}"
+    assert named in message, "name the pair the operator wrote"
+    assert "'high'" in message and "'low'" in message, "name both efforts, not just the clash"
+
+    with pytest.raises(ValidationError):
+        LlmRouter(
+            {ROLE: ModelTier.CHEAP},
+            {ModelTier.CHEAP: (DEGRADE_HIGH, DEGRADE_LOW)},
+            required_roles=(),
+        )
+
+    legal = TierRoute(tier=ModelTier.CHEAP, targets=(DEGRADE_HIGH, DEGRADE_TWIN))
+    assert len(legal.targets) == 2, "one model behind two endpoints is not the defect"
+
+
+def test_every_route_that_resolves_recovers_the_answering_targets_own_effort() -> None:
+    """The property, stated over routes rather than over the remedy: for every target of every
+    route the harness will accept, `_target_for` must return THAT target's `effort` — the value
+    that becomes the cache write key. A route that cannot satisfy it must not resolve at all.
+
+    The quantity watched is `answered.effort`, and it is the quantity the defect moves: with the
+    ambiguity accepted, asking for the standby's `(backend, model_id)` returns `'high'` where the
+    standby declared `'low'`. It would be invariant — and this test worthless — only if the two
+    targets shared an `effort`, which the fixture assertion above forbids.
+
+    Deliberately written as "refused OR resolved correctly", so it also passes for a future
+    remedy that carries the answering `effort` back on the call and accepts the route.
+    """
+    checked = 0
+    for spec in (
+        (PRIMARY, STANDBY),
+        (DEGRADE_HIGH, DEGRADE_LOW),
+        (DEGRADE_LOW, DEGRADE_HIGH),
+        (DEGRADE_HIGH, DEGRADE_TWIN),
+    ):
+        try:
+            route = TierRoute(tier=ModelTier.CHEAP, targets=spec)
+        except ValidationError:
+            continue  # refused, so nothing can be mis-attributed through it
+        for answering in route.targets:
+            answered = _target_for(route, answering.backend, answering.model_id)
+            assert answered is not None, "a target of this route must match itself"
+            assert answered.effort == answering.effort, (
+                f"{answering.backend}:{answering.model_id} answered at effort "
+                f"{answering.effort!r} but the cache would key it at {answered.effort!r}"
+            )
+            checked += 1
+    assert checked >= 4, "no route resolved — the loop proved nothing"
 
 
 # ---------------------------------------------------------------------------------------------

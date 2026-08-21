@@ -145,6 +145,10 @@ class LlmRouter:
         for role, tier in self._roles.items():
             if not self._targets.get(tier):
                 raise TierNotConfigured(profile, tier, role=role)
+            # Build the route now, so `TierRoute`'s own validation (one `effort` per
+            # `(backend, model_id)`, which the LLM cache's failover attribution depends on)
+            # fails HERE and not at the first model call, halfway through a run.
+            self.resolve(role)
 
     @classmethod
     def from_models_config(

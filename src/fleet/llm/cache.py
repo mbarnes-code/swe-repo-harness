@@ -621,7 +621,14 @@ class CachingModelClient:
 def _target_for(route: TierRoute, backend: str, model_id: str) -> BackendTarget | None:
     """The `BackendTarget` that answered, so its `effort` — a key component — is the answering
     target's and not the primary's. `None` when the usage names a target outside this route, which
-    a caller treats as "keep what the primary declared" rather than as an error."""
+    a caller treats as "keep what the primary declared" rather than as an error.
+
+    `(backend, model_id)` is a sufficient key here ONLY because `TierRoute` refuses a route that
+    declares that pair twice with different `effort` (its `_one_effort_per_backend_and_model_id`
+    validator, `llm/client.py`). `TokenUsage` carries no `effort`, so without that refusal the
+    first match would win whatever actually answered and this function would silently hand
+    `_store_response` a standby's answer under the primary's key.
+    """
     for target in route.targets:
         if (target.backend, target.model_id) == (backend, model_id):
             return target

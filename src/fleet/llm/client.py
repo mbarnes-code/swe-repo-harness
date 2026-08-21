@@ -23,7 +23,7 @@ from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from importlib import import_module
 from typing import ClassVar, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, model_validator
 
 from fleet.models.enums import FailureClass, ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
@@ -323,6 +323,41 @@ class TierRoute(BaseModel):
 
     tier: ModelTier
     targets: tuple[BackendTarget, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def _one_effort_per_backend_and_model_id(self) -> TierRoute:
+        """`(backend, model_id)` must name ONE `effort` within a route, because that pair is the
+        whole of the identity a call carries back.
+
+        `llm/cache.py`'s `_target_for` recovers the target that ANSWERED — and with it that
+        target's `effort`, a cache-KEY component — by matching `(usage.backend, usage.model_id)`
+        against these targets. `TokenUsage` has no `effort` field, so two targets sharing that
+        pair and declaring different `effort` are indistinguishable to it: whichever iterates
+        first wins regardless of which one answered. A standby's answer is then stored under the
+        primary's key, and the next call with a healthy primary HITS and is served it — the exact
+        §13 row 39 poisoning `_store_response` exists to prevent, silent because the served row
+        looks like a legitimate hit. Nothing in the loader rejected such a profile, so a `degrade
+        the same model on failover` config (`effort: high` then `effort: low`) reproduced it.
+
+        Declaring the same `(backend, model_id)` TWICE stays legal when the two agree on
+        `effort` — the same model behind two `base_url`s is a legitimate failover pair, and the
+        recovered `effort` is correct whichever of them answered. It is the disagreement, and
+        only the disagreement, that is unrecoverable. Making it representable again needs the
+        answering `effort` carried back on the call, which is a `TokenUsage` field and a write
+        path this validator deliberately does not invent.
+        """
+        seen: dict[tuple[str, str], str | None] = {}
+        for target in self.targets:
+            identity = (target.backend, target.model_id)
+            if identity in seen and seen[identity] != target.effort:
+                raise ValueError(
+                    f"tier {self.tier.value} routes {target.backend}:{target.model_id} twice "
+                    f"with different effort ({seen[identity]!r} then {target.effort!r}): the "
+                    "answering target would not be recoverable, so the LLM cache would store "
+                    "one target's answer under the other's key"
+                )
+            seen[identity] = target.effort
+        return self
 
 
 class RoleRouter(Protocol):
