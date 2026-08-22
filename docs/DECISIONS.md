@@ -7315,13 +7315,318 @@ and no code path in this ADR reaches it.
 
 ---
 
-## ADR-0079 — RESERVED, not yet written
+## ADR-0079 — `--from-phase` is a **repo filter** (option C(i)): the computed floor is never overridden, clamped or capped, and a repo whose floor sits below the flag is skipped rather than re-aimed; `--repo` is a **consistency ruling** against six sibling verbs, scoping §11.5 steps 5, 6 and (later) 8 and never the run-wide 2, 3, 4 and 7; and the un-refusal itself ships with **subtask 10**, not subtask 9 — with step 8 the sole remaining absence, no flag has a continuation to scope yet, so subtask 9 settles and records the semantics rather than removing anything from the refusal set
 
-Allocated to §11.5 step-5 subtask 9, "Un-refuse the step-5 flags"
-(`docs/superpowers/plans/design-resume-step5.md` row 9): the `--from-phase` / `--repo` /
-`--reset-attempts` semantics in `src/fleet/cli.py`'s `_refuse_unbuilt_resume_flags`. Subtask 9 has
-not started — it depends on subtasks 7 and 8, neither of which has landed. This number is reserved
-and not available for reuse; its absence from this file is not a deletion.
+**Status:** accepted. **Decided by the round-E orchestrator; this entry records four rulings and
+their evidence and decides nothing itself.** Anchored at `f4eade0` (`main`) — every claim below is
+measured at that ref unless another is named, and every `src/` claim is read from a
+`git show f4eade0:<path>` blob rather than from the working tree, which carried three modified
+files and one untracked test file belonging to other lanes when this was written. **Cited by
+symbol, never by line:** `docs/superpowers/plans/resume-step5-subtask-7-research.md` §4.4's line
+citations are already dead, and this ADR does not add more of them.
+
+**Replaces this file's own `## ADR-0079 — RESERVED, not yet written` placeholder**, whose closing
+premise said: *"Subtask 9 has not started — it depends on subtasks 7 and 8, neither of which has
+landed."* **That sentence was already false when this entry replaced it** (§1). It is quoted here
+deliberately, so that a count-based sweep for it finds this quotation — that hit is the retraction,
+not a survival; subtract it by the rule *"a dated correction stands within the same passage"*, never
+by a hand-maintained exemption list.
+
+**Provenance (CLAUDE.md Guardrail 1).** §§2–6 are **orchestrator rulings**, not SPEC requirements
+and not this lane's recommendations. §7 records two **disclosures** — defects measured while
+recording the rulings, owned elsewhere, deliberately not fixed here. §8 states what this ADR
+does **not** decide. The research is `.superpowers/sdd/round-e/lanes/R2/report.md` (round E, lane
+R2); every figure R2 supplied was **re-measured before being repeated**, and §9 records the four
+places the re-measurement disagreed with it.
+
+### 1. The dependency state the placeholder got wrong
+
+- **Subtask 7 — "wire step 5 into `_resume_impl`" — landed at `2f0db34`.**
+- **Subtask 8 — step 6 — is partly landed**: its pure half at `4902938` and `227db4c`
+  (`orchestrator/reentry.plan_unblocking`, `still_blocking`), its durable half at `da45a43`
+  (`orchestrator/scheduler.SchedulerStore.append_unblocked_wave`).
+- **Step 6 is NOT wired into `_resume_impl` on `main`.** Measured at `f4eade0` by parsing the
+  `src/fleet/cli.py` blob with `ast`, extracting `_resume_impl`'s source segment (212 lines) and
+  counting each of `unblock`, `blocked_by`, `step 6`, `Step 6`, `plan_unblocking`,
+  `append_unblocked_wave`: **0 occurrences of every one**. The wiring existed only as an
+  uncommitted working-tree edit at the time of writing and therefore has **no SHA this entry may
+  cite**.
+
+So the placeholder was false outright for subtask 7 and false in the sense its sentence intends for
+subtask 8. **§6 turns on the wiring, not on the placeholder's sentence**, and states its own
+premise accordingly.
+
+### 2. Ruling — `--from-phase` is Option C(i), the repo filter
+
+The three options are `resume-step5-subtask-7-research.md` §4.3's, verbatim: **A — override**,
+*"`floor := Phase(from_phase)`, ignoring the computed floor"*; **B — clamp**,
+*"`floor := min(computed_floor, Phase(from_phase))`"*; **C — filter**, *"the floor is untouched;
+`--from-phase` restricts what is acted on"*, read either as **(i) a repo filter** — *"act only on
+repos whose computed floor is ≥ `from_phase`"* — or **(ii) a span cap** — *"demote no phase below
+`from_phase`"*.
+
+**Ruled: C(i).** `orchestrator.reentry.phase_floor` remains the sole source of the floor. A repo
+whose computed floor is below `from_phase` is **skipped**, and its floor is neither recomputed,
+clamped, capped nor overridden. A repo for which `phase_floor` returns `None` — any phase
+`REQUIRES_HUMAN_INTERVENTION`, or everything already settled — is out before the filter is
+consulted, because there is no floor to compare.
+
+**Why: it is the only option that can neither move the floor nor edit a committed SPEC sentence.**
+Measured at `f4eade0` by driving the shipped `reentry.phase_floor` and `reentry.demotable_phases`
+under `.venv/bin/python` over five repo states × `--from-phase ∈ {2, 4}`; cells read
+`floor -> [phases the write would touch]`, phases numbered `SCAN`=1 … `VERIFY`=4:
+
+| fixture (phase 1..4 statuses; evidence) | fp | no-flag base | A | B | **C(i)** | C(ii) |
+|---|---|---|---|---|---|---|
+| S,S,PEND,PEND; evidence holds at 1 | 2 | `2 -> [2]` | `2 -> [2]` | `2 -> [2]` | `2 -> [2]` | `2 -> [2]` |
+| S,S,PEND,PEND; evidence holds at 1 | 4 | `2 -> [2]` | **`4 -> []`** | `2 -> [2]` | *skipped* | **`4 -> []`** |
+| S,S,PEND,PEND; no evidence | 2 | `1 -> [1,2]` | `2 -> [2]` | `1 -> [1,2]` | *skipped* | `2 -> [2]` |
+| S,S,PEND,PEND; no evidence | 4 | `1 -> [1,2]` | **`4 -> []`** | `1 -> [1,2]` | *skipped* | **`4 -> []`** |
+| S,**DEGRADED**,S,PEND | 2 | `3 -> [3]` | **floor 2 = ON the hard stop** `-> [3]` | **floor 2 = ON the hard stop** `-> [3]` | `3 -> [3]` | `3 -> [3]` |
+| S,**DEGRADED**,S,PEND | 4 | `3 -> [3]` | **`4 -> []`** | `3 -> [3]` | *skipped* | **`4 -> []`** |
+| S,**SKIPPED**,S,PEND | 2 | `3 -> [3]` | **floor 2 = ON the hard stop** `-> [3]` | **floor 2 = ON the hard stop** `-> [3]` | `3 -> [3]` | `3 -> [3]` |
+| S,**SKIPPED**,S,PEND | 4 | `3 -> [3]` | **`4 -> []`** | `3 -> [3]` | *skipped* | **`4 -> []`** |
+| RHI at phase 3 | 2, 4 | `None` | `None` | `None` | *skipped* | `None` |
+
+**The class result, which is what this ruling rests on** (the raw cells above are the evidence, but
+a class result is what reproduces): across every fixture and both `from_phase` values, **C(i)'s
+write set is either identical to the no-flag run's or empty — never a third value**, and its
+floor is always the one `phase_floor` returned. No other option has that property.
+
+`RHI at phase 3` returns `None` under A, B and C(ii) **only because the measuring harness
+short-circuits when `phase_floor` returns `None`** — that is a property of the harness, not of
+those options. A bare `floor = Phase(from_phase)` that never consults `phase_floor` has no `None`
+to short-circuit on, which is what makes §3's cost 4 mandatory rather than optional. C(i) cannot
+express that mistake at all, because it has no floor arithmetic to put ahead of the call.
+
+**C(i)'s cost, stated rather than minimised.** §4.3's C.2 is accepted as ruled-and-known: a repo the
+filter skips is left **un-reconciled while the run reports success**, which is the drift class §11.5
+exists to remove, deferred to subtask 10 rather than prevented. §4.3's C.3 — that C carries the
+largest documentation burden — is **not verifiable**: it is a judgement about operator expectation,
+not a measurable property, and it is recorded as a judgement. **No mechanism in this ADR forces the
+skipped set to be reported**; that a payload must distinguish "0 demoted" from "not looked at" is
+stated in §8 as undecided-here, not promised.
+
+### 3. Why A, B and C(ii) lost
+
+**Option A (override) — rejected.** Four costs, each re-measured:
+
+1. **A silent zero-write resume.** At `--from-phase 4`, A writes **nothing at all** in **4 of 4**
+   fixtures whose computed floor is not `None` — predicate: `demotable_phases(statuses, Phase(4))`
+   returns the empty tuple. (What such a run *prints* is not measured here; what is measured is
+   that it writes nothing. R2 reported the same class as 3/3, and its printed matrix carries two
+   `fp=4` cells with a non-`None` floor, so the two denominators are not comparable — the **class**
+   result is what reproduces, at 4/4 under the predicate stated.)
+2. **It lands the *reported* floor ON a `DEGRADED`/`SKIPPED` row.** The **write** is safe —
+   `demotable_phases` filters to `SUCCEEDED`, so the fixtures above yield `[3]`, not `[2,3]` — but
+   the floor reported is `2`, the hard-stop row itself, **a rung `phase_floor` can never return**
+   (its walk tests `_HARD_STOPS` before evidence and `break`s without moving the floor onto the
+   stop; `_HARD_STOPS` is a `frozenset[RepoStatus]` of `DEGRADED` and `SKIPPED`). ADR-0082 §4
+   disclosed its provenance hazard **on the stated premise that the floor comes from `phase_floor`**,
+   and ADR-0082 §5 says in terms that if that floor ever comes from anywhere else, §4's premises
+   *"must be re-derived, not re-read"*. **A's true cost therefore includes reopening ADR-0082 §4.**
+3. **It contradicts a committed SPEC sentence**, so A alone would force an edit to `docs/SPEC.md`
+   §10's `fleet resume` row — the sentence saying the verb continues from each repo's re-entry
+   floor (§11.5 step 5) and never from the earliest phase left incomplete. Measured over the whole
+   `docs/SPEC.md` blob at `f4eade0` under the predicate `never the earliest incomplete phase`, with
+   every whitespace run collapsed to one space across the whole file and offsets mapped back to
+   line numbers: **2 sites** — the §10 row, and a §3.5 propagation-block sentence about
+   un-blocking. **Only the §10 one is about this flag** — a sweep that edited both would corrupt an
+   unrelated rule. Under the ruling, **neither moves**. *(The full SPEC sentence is deliberately
+   **not** reproduced here. `tests/test_floor_rule_statements.py` pins the exact site count of that
+   summary phrase per file, with `docs/DECISIONS.md` expected to hold **zero**; quoting it in this
+   ADR would add a site and fail that instrument. Checked before this entry was written, not
+   after.)*
+4. **It needs an RHI carve-out or it breaches a committed acceptance criterion.** `phase_floor`
+   returns `None` when any phase is `REQUIRES_HUMAN_INTERVENTION`; `docs/SPEC.md` §12 item 46 (ii)
+   requires a test driving *"the reaper, `fleet resume`, `stub_reconcile`, `blocked_by`
+   recomputation"* to find **none of them** able to move a repo out of
+   `REQUIRES_HUMAN_INTERVENTION`. A that skips `phase_floor` breaches it. (Predicate note: the
+   literal string `46(ii)` occurs **zero** times in `docs/SPEC.md`; the criterion is item 46's
+   clause (ii), and SPEC's own cross-reference spelling is `§12 item 46 (ii)`, with a space.)
+
+**Option B (clamp) — viable, not chosen.** Safe by construction — the evidence-derived floor becomes
+a ceiling, SPEC §10 survives, and ADR-0082 §4's premise survives — but **it is not one line**:
+
+- **The accurate statement of §4.3's B.1, which §4.3 states imprecisely and R2's correction states
+  incompletely.** §4.3 says naive `min` can push the floor *below* a hard stop. Measured on the
+  `S,DEGRADED,S,PEND` fixture (computed floor 3): at `--from-phase 2` the floor lands **ON** the stop
+  (floor 2, `DEGRADED`) and the write set is **unchanged at `[3]`** — the damage is a reported floor
+  the walk can never produce, i.e. A.2's shape, not a bad write. Reaching **below** the stop needs
+  `--from-phase 1`: floor 1, and the write set **grows from `[3]` to `[1,3]`** — that is the
+  re-running-of-excluded-work B.1 describes, and it is real, one rung lower than §4.3 implies. R2's
+  correction ("at `fp=2` the floor lands on the hard stop, not below") is right about `fp=2` and
+  incomplete: it does not record that `fp=1` reaches below **and changes the write**.
+- **The structural half of B.1 is exactly right and is B's real price.** `phase_floor` `break`s at
+  the hard stop and **discards where it stopped** — its return type is `Phase | None`, carrying no
+  boundary — so B must either extend that return or re-derive the boundary in the caller, and then
+  state and test a clamp-within-the-interval rule.
+- **B.2 is understated, measured.** At `--from-phase 4` B yields the **identical floor and the
+  identical write set** to the no-flag run in **4 of 4** non-`None` fixtures: a silent no-op, which
+  is the very defect `_refuse_unbuilt_resume_flags` exists to prevent, unless per-repo reporting
+  says which bound won.
+- **B.3 is true as written**: `--from-phase 2` on a repo whose computed floor is 1 resumes from 1
+  (fixture 3: base `1 -> [1,2]`, B `1 -> [1,2]`).
+
+**Option C(ii) (span cap) — rejected as dominated.** Measured **identical to A in 4 of 4** non-`None`
+fixtures at `--from-phase 4` (both `4 -> []`), so it inherits A.1's zero-write resume whole while
+buying none of A's simplicity; it differs from A only at `--from-phase 2` on the hard-stop fixtures,
+where it happens to keep the computed floor.
+
+### 4. Ruling — `--repo` is a consistency ruling, and it scopes steps 5, 6 and (later) 8 only
+
+**`--repo NAME` on `fleet resume` means what it already means on every sibling verb: act on this one
+repo.** Measured at `f4eade0` by walking the `src/fleet/cli.py` blob's AST for a parameter named
+`repo` whose annotation carries the Typer option string `"--repo"`: **7 declarations, 6 of them not
+`resume`** — `plan`, `build`, `verify`, `migrate_repos`, `transform`, `pr` — every one typed
+`str | None`. (A raw count of the literal `"--repo"` in the same blob returns **9**; the two extras
+are not declarations — one is inside a `json.dumps([...])` argv, one is the refusal dict's own key.
+The raw total and the class result disagree, which is why the class result is the one stated.)
+
+**Scope, ruled: `--repo` scopes §11.5 steps 5, 6 and — when it exists — 8. It does not scope the
+run-wide steps 2, 3, 4 and 7.** Steps 2 (orphan reap) and 3 (stale-lease sweep) are run-scoped by
+construction: a repo-scoped reap would leave every other repo's orphans standing, which is the
+opposite of what the step is for. Step 7's projection is regenerated whole from SQLite. **The same
+scope governs `--from-phase`**, per §2.
+
+### 5. Recital — the two revalidation flags stay refused
+
+`--revalidation` and `--raise-revalidation-rounds` **stay refused**: three primary sources concur and
+none dissents — `docs/SPEC.md` §10 gives `--revalidation eager|batched|manual` on **`fleet stubs
+resolve`** as well, making it a §3.5.1 stub-lifecycle knob; `docs/SPEC.md` §13 **row 34** is
+*"Revalidation storm"*, a cost class whose controls are `max_revalidation_rounds` /
+`revalidation_max_cost_usd` / `repo_ledger.revalidation_usd` / `tasks.revalidation_key` and which
+contains no re-entry floor; and `docs/superpowers/plans/design-resume-step5.md` **row 9 as it
+stood at `f4eade0`** already stated it as the row's own criterion. That third source is anchored
+deliberately: **the same commit that adds this ADR rewrites row 9**, so from that commit on the row
+restates this ruling rather than concurring with it independently, and a later reader must not count
+it twice. This settles the question ADR-0089 §6 left as *"still subtask 9's question, and
+ADR-0079's"*.
+
+### 6. Ruling — the un-refusal ships with subtask 10, not subtask 9
+
+**Subtask 9 is "settle and record the semantics". It removes nothing from
+`_refuse_unbuilt_resume_flags`' `unbuilt` dict.** Step 8 ("continue into the phase runners") is the
+sole remaining absence once step 6's wiring lands, so **no flag ruled above has a continuation to
+scope until subtask 10 exists**: un-refusing now would admit flags whose entire observable effect is
+which rows a demotion touched, under names that promise an operator they scoped a resume. That is
+the defect the refusal exists to prevent, re-introduced by the commit that removes the refusal.
+
+**The premise, stated with its status rather than assumed.** On `main` at `f4eade0` step 6 is *not*
+wired (§1), so at this ref **two** absences remain, not one. The ruling holds either way and more
+strongly at `f4eade0`: with two steps absent there is even less for a scoping flag to scope. What
+this ADR must not do is assert step 6 is built on `main` — it is not, at the ref this entry is
+anchored to.
+
+### 7. Disclosures — measured here, owned elsewhere, deliberately not fixed by this ADR
+
+**7a. The refusal's *message* is false for two of the five flags, in a way distinct from its
+docstring's earlier defect.** Exercised at `f4eade0`, not read: `_refuse_unbuilt_resume_flags`
+raises **one** `UsageError` body, identical for all five flags (the only per-flag content is the
+joined list of flag names). Probing that body: it **names** `step 6`, `step 8`, `CONTINUATION`,
+`PhaseRunner` and `Phases 1–4`, and is **silent on** `stub`, `revalidation`, `3.5.1`, `storm` and
+`row 34`. So an operator who types only `--revalidation batched` is told the flag scopes a
+Phases 1–4 continuation and that `PhaseRunner` assembly is what is missing; **both are false for
+that flag.** Its real reason is §5's: `orchestrator/stubs.reconcile` is unwired — measured at
+`f4eade0` by walking every one of the 115 `.py` blobs under `src/` for a call named `reconcile`
+(**0**) and for any import of the `stubs` module (**0**). **Class result, at `f4eade0`: the defect
+*"a surface of `fleet resume` states a reason for refusing `--revalidation` /
+`--raise-revalidation-rounds` that is false for them"* has **2 sites, both inside
+`_refuse_unbuilt_resume_flags` in `src/fleet/cli.py`** — its docstring and its `UsageError`. The two
+other surfaces that could carry it do not: `resume.__doc__` names which §11.5 steps are absent but
+offers no reason for refusing any flag and never names the refusal set, and
+`ResumeIncompleteError`'s message contains no occurrence of `revalidation`.** **The docstring's and the message's step-5/step-6 statements are
+CORRECT and must not be edited** (`c135c42` fixed the step-5 clause; a later handoff routed a lane at
+that correct prose and had to be rescinded). What is false is the *reason offered for two flags*, and
+it is subtask 9d's, not this ADR's.
+
+**7b. Both prose instruments guarding that message FAIL OPEN on step 6, and one is INVERTED.**
+Measured at `f4eade0` by extracting each test's assertion and the message's built-steps clause with
+`ast` and evaluating the assertion mechanically:
+
+- `tests/test_cli.py::test_resume_refuses_the_flags_whose_behaviour_does_not_exist` asserts the
+  **fixed substring** `"steps 2, 3, 4, 5 and 7" in built`. Against the message with step 6 built and
+  the prose unchanged — the defect — it evaluates **True: it passes**. Against the corrected message
+  (`"steps 2, 3, 4, 5, 6 and 7"`) it evaluates **False: it fails**. **It is a tripwire on the fix,
+  not on the defect.** Its own docstring says *"The assertion reads the parenthetical as a whole
+  rather than a fixed substring, so a successor that builds step 6 and forgets to add it trips
+  too"* — and **its operative half is measurably false**: the successor it describes does **not**
+  trip. (Precisely: the test slices the parenthetical out of the output as a whole and then asserts
+  a **fixed substring** inside that slice, so the property the sentence claims for it does not
+  follow from how it reads the output.)
+- `tests/test_cli.py::test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines`
+  parses the absent-step list out of `ResumeIncompleteError` and asserts `"2 (" not in absent`,
+  `"4 (" not in absent`, `"8 (" in absent`. There is **no step-6 clause at all**, so a message that
+  keeps naming step 6 absent stays green forever. **Fail-open.**
+
+Recorded so this ADR does not imply a guard that is not there: **nothing in the tree binds the
+refusal's prose to the steps `_resume_impl` actually runs.** Repairing these two instruments is
+owned by a separate lane.
+
+### 8. What this ADR does not decide
+
+- **`--reset-attempts`' semantics.** Not ruled here. What is measured and offered as input, not as a
+  decision: `docs/SPEC.md` §10 marks the flag *"(explicit, audited)"*, and the audited-flag precedent
+  in the same row (`--raise-budget` / `--raise-wave-budget` → `RunBudgetRaised` / `WaveBudgetRaised`)
+  implies a `findings.kind` that does not yet exist. Which rows a reset covers, and what the kind is
+  called, are open.
+- **How a C(i)-skipped repo is reported.** §2 records the un-reconciled-but-reported-successful
+  hazard as a known cost; it does not mandate a payload key, and no mechanism here enforces one.
+- **The refusal set's membership in the tree.** §6 defers the edit to subtask 10; this ADR changes no
+  code.
+- **The two disclosures in §7.** Recorded, not fixed, and not assigned by this entry.
+- **`docs/SPEC.md` is not edited by this ADR**, and under §2's ruling it does not need to be: §3's
+  cost 3 is A's alone.
+
+### 9. Verification, and where the research it rests on was corrected
+
+Interpreter: `.venv/bin/python` (3.12) at `/home/redmage/swe repo harness/.venv`. `src/` claims read
+from `git show f4eade0:<path>` blobs, never the working tree. Sweeps over `docs/SPEC.md` normalise
+whitespace across the **whole file** and map offsets back to 1-based lines, because a line-oriented
+`grep` misses a wrapped match. **No `pytest` session was run (suite lock).** Three checks in
+`tests/test_floor_rule_statements.py` *were* exercised, by importing that module and calling its
+helpers directly against a candidate copy of this file rather than through `pytest`: Layer A's
+per-file census of the floor-rule statement (`docs/DECISIONS.md` expected 1 — unchanged, 4
+statements, 1 distinct), Layer D's stop-condition sentence count (3 expected, 3 found, none silent
+about `_HARD_STOPS`), and Layer G's supersession-marker check over the step-5 design plan (pass
+before and after the row-9 edit). Each was run against the file **before** and **after** the change,
+so a green result means unchanged rather than merely green. The suite a later lane must run for the
+*code* half of subtask 9 — no `-k` filter — is recorded in
+`.superpowers/sdd/round-e/lanes/R2/report.md` §5; this entry changes no code and asserts no test
+result of its own.
+
+Four corrections to lane R2's report, made while re-measuring rather than repeating it:
+
+1. **The "does not decide ambiguity 4" sentence is in ADR-0077 §7, not ADR-0078 §7.** Measured over
+   this file **at `f4eade0`, i.e. before this entry was inserted**, whitespace-normalised
+   whole-file: the string `ambiguity 4` occurred at exactly **one** site, inside ADR-0077's §7
+   (*"It does not decide … `--from-phase` semantics (ambiguity 4, subtask 9)"*). ADR-0078 carried
+   no such sentence. **This entry itself raises that raw total to 5**, all four added occurrences
+   being inside this item — which is why the anchor is stated: the number is a fact about `f4eade0`, not a
+   standing property of the file, and a later reader re-measuring at `HEAD` must not read the
+   difference as a new statement of the ambiguity. The claim R2 drew from the sentence — that no
+   primary source settles ambiguity 4 — is unaffected and holds.
+2. **A sweep of `docs/SPEC.md` for `from.phase` returns 3, not 1.** Under R2's regex predicate
+   `from.phase` over the whitespace-normalised whole file at `f4eade0` there are **3** hits, because
+   `.` matches the space in the SQL `FROM phases` — 2 of the 3 are that SQL. Under the literal
+   predicate `--from-phase` there is **1**, the §10 flag list. The class result R2 drew (SPEC lists
+   the flag and gives it no semantics) reproduces; the raw total does not.
+3. **R2 spells `_HARD_STOPS` as `['DEGRADED','SKIPPED']`; it is a `frozenset[RepoStatus]`.** No
+   consequence for any ruling — recorded because a reader re-deriving the check from that spelling
+   would look for a list of strings that does not exist.
+4. **B.1's correction needed its own correction** — see §3: `fp=2` lands on the stop with the write
+   unchanged, `fp=1` reaches below it and changes the write.
+
+Re-read after writing (CLAUDE.md's *"a correction is the most dangerous text you will write"*).
+Every count above carries its predicate and its anchor; every class result (§2's write-set property,
+§3's 4-of-4 counts, §7a's 2-site class) is labelled as one rather than leaning on a raw total; and §6
+states the status of its own premise instead of inheriting the brief's phrasing that step 6 is built.
+**Two self-falsifications were caught by that re-read and fixed before this entry landed**, both of
+the shape CLAUDE.md names — a correction that quotes what it retires: the first draft reproduced
+`docs/SPEC.md` §10's re-entry summary sentence verbatim, which would have added a
+`docs/DECISIONS.md` site to a phrase whose per-file count `tests/test_floor_rule_statements.py`
+pins at zero for this file and **failed that instrument**; and §9 item 1's *"occurs once"* was
+true only before this entry, which itself raises the total to 5.
 
 ---
 
