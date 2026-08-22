@@ -5112,3 +5112,159 @@ built, tested, and one boundary field away from being reachable.
 **Related:** D55 (throttling vs outage), D59 (the sink itself; its aside is the prior record of this
 claim), D60 (why `failover_triggers_recorded` can never read `"complete"`), D62
 (`attempts.llm_failovers`, the paired unwritten field), D56/D57 (the defect class and its precedent).
+
+---
+
+## D79 — OPEN, recorded only. SPEC §11.6's LLM response cache is entirely inert: no `LlmCacheStore` implementation is constructed anywhere in `src/`, so every production call is billed and no `llm_cache` row is ever written
+
+**Measured by lane W30 (round E) at `1698de3`; found by lane R3, whose every figure repeated below
+was re-measured here before being repeated, and whose figures that were *not* re-measured are
+labelled as R3's.** Interpreter for every number: `.venv/bin/python` (the binary, not the PATH
+name). **No `pytest` session was run — suite lock.** The full research, including the C1–C7
+decomposition this entry deliberately does not restate, is promoted to
+`docs/superpowers/plans/llm-cache-inert-research.md`.
+
+### The defect, as exercised rather than inferred
+
+A `RunContext` built with **exactly the kwarg set every `RunContext(` site in `cli.py` passes**
+assembles a `LadderModelClient`. A second arm — the same construction plus an injected
+`llm_cache=` store — assembles a `CachingModelClient`. The second arm is a **positive control**: it
+exists so that "no cache was consulted" in the first arm cannot be an instrument that simply cannot
+see a cache. Both arms driven by W30 in a per-lane detached worktree with `PYTHONPATH` pinned to
+that worktree's `src/`:
+
+| | shipped (`cli.py`'s kwarg set) | control (`llm_cache=` injected) |
+|---|---|---|
+| `type(ctx.model_client)` | **`LadderModelClient`** | `CachingModelClient` |
+
+R3 drove the same two arms through two identical `complete()` calls against a scripted offline
+backend and reports **2 backend invocations and 0 `llm_cache` rows** on the shipped arm against
+**1 and 1** on the control — *R3's numbers, promoted at
+`docs/superpowers/plans/llm-cache-inert-research.md` §1, not re-measured by W30.* The type result
+above is W30's own and is sufficient for the entry: the cache client is the only thing that could
+consult or write the table, and it is never assembled.
+
+### The static class results behind it, W30's own predicate
+
+Instrument: `ast.Call` nodes resolved by dotted name over every `*.py` under `src/` (115 files) and
+`tests/` (62 files), so a wrapped or multi-line call counts identically to a one-liner. Class
+results, at `1698de3`:
+
+* **0 of the 2 `LlmCacheStore` implementations are constructed in `src/`.** `SqliteLlmCacheStore(`
+  and `MemoryLlmCacheStore(` have **0** call sites in `src/`; in `tests/` they have 2 and 13.
+* **`llm_cache` and `llm_cache_mode` are passed at 0 of the 5 `src/` `RunContext(` sites** (all five
+  in `cli.py`, in `_run_scan_wave`, `_run_transform_wave`, `_run_build_wave`, `_run_verify_wave` and
+  `_emit_prs`), and at 0 of the 3 sites in `tests/`.
+* **`cli.caching_client` has 0 callers in `src/`** and exactly 1 in `tests/`
+  (`tests/test_cli.py::test_llm_cache_flag_reaches_the_caching_client`).
+* `CachingModelClient(` has 3 call sites in `src/`, and **every one is unreachable in production**:
+  `CachingModelClient.scoped`, which returns a per-rung view of an already-constructed client; the
+  `self.llm_cache is not None` branch of
+  `RunContext.__post_init__`, dead because the field is `None` at all five sites; and
+  `cli.caching_client`, dead because nothing calls it.
+
+**`llm_cache_mode` is never assigned and never derived.** `RunContext.llm_cache_mode` carries the
+default `"read-write"`, is read at exactly one place — the dead `__post_init__` branch — and is
+never constructed from `config.llm.cache_mode`. `LlmSection.cache_mode` and `LlmSection.cache_path`
+in `settings.py` have **zero readers in `src/`**, so the config leaf is inert on its own account as
+well as through the field.
+
+What follows, and was checked: `--llm-cache {read-write,read-only,off}` is parsed and echoed by
+`fleet models list --json` and installs nothing; `--llm-cache read-only` — §11.6's replay mode, in
+which a miss must be a hard error — cannot raise on any shipped path, because nothing constructs
+the client that raises (the only `raise CacheMiss` in `src/` is inside
+`CachingModelClient.complete`); and `cli._gc_impl` executes
+`DELETE FROM llm_cache WHERE last_hit_at < ?` for `fleet gc --cache-max-age` against a table no
+production path has ever written a row to. SPEC §12 item **21** (Determinism), §12.36 and §12.44, and §13 rows 11 and 39 all
+rest on this cache and are unsatisfiable as written.
+
+### Would a test catch it? MEASURED — no, and the instructive part is *why*
+
+`tests/test_cli.py::test_llm_cache_flag_reaches_the_caching_client` is the only test in the suite
+whose name claims the flag reaches the cache. It does not catch this, and W30 measured that rather
+than arguing it. Every mutation below was applied in a per-lane detached worktree against a **file
+backup, not `HEAD`**; the zero-change gate is `git diff --numstat --no-index BACKUP MUTATED` and was
+**read before** the test result; and the interpreter's import path was pinned to the mutated tree
+and verified by asserting the mutation marker's presence or absence in
+`inspect.getsource(RunContext.__post_init__)` — without that pin the `.venv` editable install
+resolves `fleet` to the primary checkout and the mutation is never imported at all (R3 recorded
+that trap after producing one clean-looking wrong answer with it).
+
+| check | mutation | gate (lines) | did it change behaviour? | the test |
+|---|---|---|---|---|
+| baseline | none | — | — | **PASS** |
+| **known-bad** | **M1** — delete the `if self.llm_cache is not None:` branch from `RunContext.__post_init__`, i.e. §11.6's only production consumption point | +1 / −8 | **yes, measured**: the control arm goes `CachingModelClient` → `LadderModelClient` | **PASS** |
+| discriminating control | **M2** — `caching_client` hardcodes `mode="read-write"` instead of `opts.cache_mode` | +1 / −1 | yes | **FAIL** |
+| cosmetic control | reflow `caching_client`'s `CachingModelClient(` call onto fewer lines, no semantic change | +2 / −5 | no | **PASS** |
+
+M2 and the reflow are there so the finding is not "the test is vacuous" and not "the test asserts
+layout": it really does hold the helper's flag→`_mode` mapping, and it is not disturbed by
+formatting. **M1 is the finding. Deleting the entire production cache path leaves it green.** The
+reason is that the test never constructs a `RunContext` at all — it calls `cli.caching_client`
+directly, and that helper has zero callers in `src/`. **Its name is true of a helper nothing calls
+and false of any run**, which is CLAUDE.md's *"a test can pass, and pass under mutation, while the
+property in its name is false"* in its purest available form. The test's first half is weaker still:
+it asserts `fleet models list --json` echoes `llm_cache: "off"`, which is a **report** of the flag's
+value, not an installation of anything.
+
+**The detector for this entry must therefore be behavioural, not a `grep`** — the D58 shape applies
+here. After a fix, `git grep "llm_cache=" -- src/` still returns zero, because the intended remedy
+derives the store inside `__post_init__` rather than passing it at a call site. The detector is the
+two-arm probe above: a `RunContext` built with `cli.py`'s kwarg set must yield a
+`CachingModelClient`, and two identical calls must bill once and leave one row.
+
+### Precedent and relations
+
+* **D56 — FIXED, LANDED (`c36160e`) — is the landed precedent for the identical shape**:
+  `llm.client.discover()` had zero call sites in `src/`, so the backend registry could never be
+  populated. A dependency-injection parameter that exists, is documented, and is never supplied is a
+  defect class this register has already adjudicated, and never by deletion. D57 is the same class.
+* **D61 — FIXED, LANDED.** Its subject is a read/write key disagreement **inside**
+  `CachingModelClient` — a component no shipped run constructs. D61 was true and correctly fixed at
+  its own commit; this entry only adds the layer under it.
+* **D62 — OPEN.** `record_attempt`'s `INSERT` omits `llm_cache_hit`. This entry adds that the column
+  would read 0 even once written, because there is no cache to hit.
+* **D50 — OPEN.** `tests/test_config_keys_are_read.py`'s `KNOWN_INERT` already holds
+  `fleet.yaml:llm.cache_mode` and `fleet.yaml:llm.cache_path`, so the tree half-knows this. That
+  allowlist is **not** a D58-shaped detector: the moment `config.llm.cache_mode` is genuinely read,
+  `test_known_inert_keys_are_still_inert` fails loudly and correctly, and a fix must retire those
+  two entries in the same commit.
+
+### Disclosure — recorded here, deliberately NOT acted on, and it must reach round F
+
+**Four statements of the `llm_cache` cache key exist in the tree and `docs/SPEC.md` §11.6 is the
+only dissenter.** Class result, W30's own, at `1698de3`: `llm/cache.py::CacheKeyParts.compute`,
+`state/schema.sql`'s `llm_cache.cache_key` column comment and
+`models/tasks.py::LlmCallRecord.cache_key`'s `description` all name
+`… | prompt_sha256 | prompt_template_version | response_schema_sha256 | adapter_versions` and all
+three state that `harness_version` is deliberately excluded because it changes every patch release
+and would re-pay for the whole fleet. **§11.6 carries `harness_version` and omits
+`prompt_template_version`** — wrong in exactly two slots, 3 agree / 1 dissents.
+
+**This is the "SPEC says X but the code cannot do X" shape and the direction of the fix matters: a
+reconciler making the code match §11.6 would re-key the entire corpus and invalidate every cached
+answer the harness ever writes.** §11.6 is the sentence that must move, not the three code
+statements. It is one SPEC edit, it is **not** part of the wiring fix, and it is C6 of the promoted
+brief. Separately, §11.6's cross-reference to "§12.20" is off by one — Determinism is §12 item
+**21**; item 20 is "Secrets never leak". Both are reported, not edited, by this entry.
+
+### The ruling
+
+**Recorded, not fixed, in round E.** Wiring the cache is a new workstream off the resume-step-5
+critical path; starting it in this round would displace subtask 10 and the round-close verification.
+Round F takes it, from `docs/superpowers/plans/llm-cache-inert-research.md` §7 (C1–C7) — which also
+carries the trap that `--llm-cache` is declared with a **non-optional default**, so an unconditional
+override would substitute `read-write` over an operator's `cache_mode: off`, character-for-character
+the `effort: low` failure CLAUDE.md records.
+
+### What this entry does not establish
+
+* **No suite run** (round-E suite lock). Every runtime number here is from standalone
+  `.venv/bin/python` scripts driving library code and one test callable directly. The pytest command
+  a later lane must run, with no `-k` filter, is in the promoted brief's §7.
+* **The `src/`-caller results are static sweeps.** A cache installed through `importlib`/`getattr`
+  with a computed name would be invisible to them. The two-arm exercise is the answer to that
+  objection: whatever the static picture, the shipped assembly demonstrably assembles no cache.
+* **The billing and row-count figures are R3's**, cited above as R3's and not re-measured by W30.
+* **§11.6's reading is R3's and W30's**, not a third party's; §11.6 and §12 items 21/36/44 are
+  quoted at length in the promoted brief precisely so a reader can check the reading.

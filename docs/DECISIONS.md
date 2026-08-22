@@ -7335,7 +7335,7 @@ by a hand-maintained exemption list.
 **Provenance (CLAUDE.md Guardrail 1).** §§2–6 are **orchestrator rulings**, not SPEC requirements
 and not this lane's recommendations. §7 records two **disclosures** — defects measured while
 recording the rulings, owned elsewhere, deliberately not fixed here. §8 states what this ADR
-does **not** decide. The research is `.superpowers/sdd/round-e/lanes/R2/report.md` (round E, lane
+does **not** decide. The research is `docs/superpowers/plans/resume-step5-subtask-9-research.md` (round E, lane
 R2); every figure R2 supplied was **re-measured before being repeated**, and §9 records the four
 places the re-measurement disagreed with it.
 
@@ -7607,7 +7607,7 @@ about `_HARD_STOPS`), and Layer G's supersession-marker check over the step-5 de
 before and after the row-9 edit). Each was run against the file **before** and **after** the change,
 so a green result means unchanged rather than merely green. The suite a later lane must run for the
 *code* half of subtask 9 — no `-k` filter — is recorded in
-`.superpowers/sdd/round-e/lanes/R2/report.md` §5; this entry changes no code and asserts no test
+`docs/superpowers/plans/resume-step5-subtask-9-research.md` §5; this entry changes no code and asserts no test
 result of its own.
 
 Four corrections to lane R2's report, made while re-measuring rather than repeating it:
