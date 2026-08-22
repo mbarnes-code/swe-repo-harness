@@ -7578,6 +7578,60 @@ Recorded so this ADR does not imply a guard that is not there: **nothing in the 
 refusal's prose to the steps `_resume_impl` actually runs.** Repairing these two instruments is
 owned by a separate lane.
 
+> **ANNOTATION (2026-08-22, lane W31) — §7b was ALREADY FALSIFIED at this entry's own tree, and
+> `2a5a007` did not sweep it.** `bd35a54`'s parent is `1d0c8f6`, the commit §1's and §6's annotations
+> record as wiring step 6 in. That one commit changed **both messages and instrument 1's literal**
+> — instrument 2's own code is byte-identical at all four refs below; what moved under it is the
+> sentence shape it partitions on — so both bullets above are wrong about the tree this entry was
+> committed onto. Re-measured by the method §7b
+> itself states — extracting each assertion and each message with `ast` and evaluating it — from
+> `git show <ref>:<path>` blobs under `.venv/bin/python`, at `f4eade0`, `1d0c8f6`, `bd35a54` and
+> `f36c9ad`. **No `pytest` was run for this annotation either; the suite lock still holds.**
+>
+> - **Instrument 1's literal moved with the message.** At `1d0c8f6`, at `bd35a54` and at `f36c9ad`
+>   the assertion reads `"steps 2, 3, 4, 5, 6 and 7" in built` and the message's built-steps clause
+>   reads *"…steps 2, 3, 4, 5, 6 and 7…"*. **The assertion quoted above,
+>   `"steps 2, 3, 4, 5 and 7" in built`, is not in `tests/test_cli.py` at any of the three refs from
+>   `1d0c8f6` on** — that pairing existed only at `f4eade0`. So the polarity inverts: at `f36c9ad`
+>   that assertion evaluates **True** against the shipped message and **False** against a reversion
+>   to the stale prose, which is the opposite of *"a tripwire on the fix, not on the defect"*. What
+>   survives of the bullet is only its parenthetical mechanism — the test still slices the
+>   parenthetical out and then matches a **fixed substring** inside the slice, so its docstring's
+>   *"reads the parenthetical as a whole"* remains the wrong description of how it reads; the
+>   substring is simply current now.
+> - **Instrument 2 is RED, not fail-open.** It partitions the output on the literal
+>   `" are absent too"` and asserts the separator was found before it derives `absent` at all. The
+>   `ResumeIncompleteError` message raised in `_resume_impl` carried *"Steps 6 (recompute
+>   `blocked_by`) and 8 (continue into the phase runners) are absent too"* at `f4eade0`; from
+>   `1d0c8f6` it reads *"Step 8 (continue into the phase runners) is absent. Steps 2, 4 and 6 are
+>   NOT: …"*, in which that literal does not occur. `sep` is therefore empty and the test **cannot
+>   reach** any of its three discriminating assertions at `1d0c8f6`, `bd35a54` or `f36c9ad`. It did
+>   not stay green forever; it went red at `1d0c8f6`.
+>
+> **So the closing sentence understates the tree rather than overstating it:** something in the
+> tree *does* go red when the refusal's prose and the steps `_resume_impl` runs disagree — but
+> through a shape assertion nobody designed as that binding, and only for the one sentence shape it
+> partitions on. Nothing above is edited: §7b records what was measured at `f4eade0`, the ref it
+> names. **This annotation adds no mechanism and assigns nothing new** — §7b already assigns the
+> repair — and every state claim in it is at one of the four refs it names, never at a later one.
+>
+> **The retired assertion is quoted above on purpose**, so that a count-based sweep for
+> `"steps 2, 3, 4, 5 and 7"` finds this annotation: that hit is the record of what was retired, not a
+> survival in `tests/`.
+>
+> **Class result for this premise change, swept rather than inferred.** Whole-file
+> whitespace-normalised sweep of this ADR (offsets mapped back to lines) under the union predicate
+> `f4eade0|step 6|not wired|unwired|absent|sole remaining absence`, case-insensitive: hits fall in
+> the title and in **eight of this ADR's nine numbered sections**. Reading each hit in place, the
+> claims that *rest on* the pre-`1d0c8f6` step-6 state are **four — §1's bullet, §6's premise
+> paragraph, §7a's probe and §7b's two bullets**; the rest are `f4eade0` anchors on unrelated
+> measurements. `2a5a007` annotated §1 and §6. **§7a
+> re-measures identically at `f36c9ad`** and needs nothing: its probe of the `UsageError` body still
+> finds `step 6`, `step 8`, `CONTINUATION`, `PhaseRunner` and `Phases 1–4` present and `stub`,
+> `revalidation`, `3.5.1`, `storm` and `row 34` absent, because that is a claim about the two
+> revalidation flags and not about step 6's wiring. **§7b was the one unswept member: 4 sections
+> checked, 1 live, 0 left.**
+
 ### 8. What this ADR does not decide
 
 - **`--reset-attempts`' semantics.** Not ruled here. What is measured and offered as input, not as a
@@ -7592,6 +7646,56 @@ owned by a separate lane.
 - **The two disclosures in §7.** Recorded, not fixed, and not assigned by this entry.
 - **`docs/SPEC.md` is not edited by this ADR**, and under §2's ruling it does not need to be: §3's
   cost 3 is A's alone.
+
+> **ADDENDUM (2026-08-22, lane W31) — the first bullet above, `--reset-attempts`: no plan row owns
+> un-refusing it either, and that is written down here rather than left to be inferred.** Nothing
+> above is retracted; this is an addition, and it decides nothing.
+>
+> **What is true at `f36c9ad`.** The flag is declared on `cli.resume` as
+> `reset_attempts: Annotated[bool, typer.Option("--reset-attempts")] = False` and passed to
+> `cli._refuse_unbuilt_resume_flags`, whose `unbuilt` dict holds it as
+> `"--reset-attempts": reset_attempts` — one of that dict's five keys. **It is refused whenever it is
+> given, and it stays refused.** In `docs/superpowers/plans/design-resume-step5.md`, rows 9 and 10 are
+> the only rows whose criterion names that function: row 9, rewritten at `bd35a54`, removes nothing
+> from the dict; row 10, extended at `e2ec4f1`, removes `--from-phase` and `--repo` only and cites
+> this section as the reason `--reset-attempts` is not among them. **Between those two commits the
+> plan therefore contains no row that would ever remove this key.** Nor does any ADR rule its
+> semantics: a whole-file whitespace-normalised sweep of `docs/DECISIONS.md` under the predicate
+> `reset.attempts`, **at `f36c9ad`, before this addendum**, returns **exactly one** site in the whole
+> file — this bullet — which is also why the record is placed here rather than in the plan. (This
+> addendum adds further occurrences; they are this record, not new rulings.)
+>
+> **This is an open question, not an oversight.** §6 moved the un-refusal from row 9 to row 10 on a
+> sequencing argument that says nothing about *which* flags move; this section declined the semantics
+> on the merits. Both were deliberate. What follows from the two of them jointly — that one key is
+> left with no owner — is what had not been stated anywhere, and stating it changes nothing on its
+> own.
+>
+> **What would have to be decided before it could be un-refused, by symbol** — sharpening this
+> bullet's *"which rows a reset covers, and what the kind is called"* rather than answering it:
+>
+> 1. **Which rows a reset writes.** Two populations carry the name in `src/fleet/state/schema.sql`:
+>    the counter column **`phases.attempts`**, and the append-only **`attempts` table**, keyed per
+>    rung. Resetting the first re-arms a repo's ladder; resetting the second discards audited
+>    per-attempt history. The declaration is a bare boolean, so the flag carries no scope of its own
+>    with which to answer this.
+> 2. **What the audit record is.** The precedent this bullet already names implies a `findings.kind`,
+>    and at `f36c9ad` it does not exist: a whole-file whitespace-normalised sweep of every `.py` blob
+>    under `src/fleet` for a quoted identifier containing `Reset` returns **0**, while the two audited
+>    siblings' kinds occur only as literal text inside `INSERT` statements in `cli.py`.
+> 3. **Whether a reset may touch a row the counter has already abandoned.** `phases.attempts` has no
+>    upper bound, and by that column's own comment in `schema.sql` the increment that reaches
+>    `max_attempts` writes `REQUIRES_HUMAN_INTERVENTION` in the same statement.
+>    Of the three transition maps in `src/fleet/models/enums.py` at `f36c9ad`, `OPERATOR_REOPEN` is
+>    the only one with a non-empty entry for that status — `LEGAL_TRANSITIONS` maps it to the empty
+>    set and `RESUME_DEMOTE` is keyed only on `SUCCEEDED` — and `models.enums.transition` opens that
+>    map only under `operator=True`, so a reset that re-arms such a row either passes through that
+>    door or must exclude those rows — and `docs/SPEC.md` §12 item 46(ii) already constrains
+>    that door.
+>
+> **No commitment is made here that any of the three will be answered, and this addendum adds no
+> mechanism.** They are recorded so that a later reader meets a stated question rather than an
+> unexplained refusal.
 
 ### 9. Verification, and where the research it rests on was corrected
 
@@ -9681,6 +9785,13 @@ next reconciliation.
 **This ADR records rulings. It does not make them, and it does not promise that a later subtask will
 fix anything.** Where a ruling leaves a sub-question open, it is written down as open (§2.4).
 
+> **ANNOTATION (2026-08-22, lane W31).** The sub-question this sentence points at is no longer open:
+> §2.4 is headed *"RULED (round-E orchestrator): **R2-CLOSED**"* and states **RULED: R2-CLOSED** in
+> its body, both added at `0d7c8b8` — this entry's own child commit. The sentence is
+> left as written, because §2.4 is still where that sub-question is written down and the discipline
+> stated here is what the ruling was then given under; what changed is that the section now ends in a
+> ruling. §9's third bullet states the same thing in the summary and is marked there.
+
 ### 0. Evidence lineage — stated because two rulings rest on behaviour that was executed, not read
 
 | lane | role | anchor | what it produced |
@@ -10094,6 +10205,25 @@ RHI to make code match spec and 46(ii) certifies the result green. **This ADR do
 that belongs to subtask 8's implementation, and §13 row 13 and §3.5's propagation block stay
 untouched (both were read and both are correctly scoped as written).
 
+> **ANNOTATION (2026-08-22, lane W31) — the widening this section assigns HAS LANDED, and it honoured
+> the shipping requirement.** Subtask 8's implementation made the §12 item 46(ii) edit in the same
+> commits as the predicate it constrains, which is the part this section said mattered: `4902938`
+> (`orchestrator.reentry.plan_unblocking` and the blocker predicate) and `227db4c` (the bare-`SKIPPED`
+> case). What shipped is **wider** than the draft quoted above — at `f36c9ad`, 46(ii) also refuses
+> clearing an entry naming a repo *"`SKIPPED` for any other reason"*, and one naming *"a string it
+> cannot resolve to a repo at all"*; it names the three zero-producer triggers, cites
+> `orchestrator.reentry.still_blocking` and §2.4's R2-CLOSED, and closes by requiring that the
+> criterion *"must not be narrowed back to the RHI question"* — the reconciler hazard this section
+> named. **The obligation is discharged, not pending**, and §9's second bullet is marked to the same
+> effect. Two further claims above are correspondingly history rather than current: 46(ii)'s
+> `blocked_by`-recomputation clause is no longer vacuous — the recompute landed at `1d0c8f6` as
+> `SqliteStateRepository.clear_blocked_by`, reached from `resume` through `_resume_impl` →
+> `_unblock_dependents` → `_apply_unblocking` (AST call graph over the `src/fleet/cli.py` blob at
+> `f36c9ad`) — and *"subtask 8 is the change that makes that clause testable for the first time"* is
+> fulfilled, not outstanding. Nothing above is edited; both were true at this entry's stated anchors.
+> **This annotation adds no mechanism**: nothing in the tree binds §6's text to what §12 item 46(ii)
+> says.
+
 ---
 
 ### 7. What bounds every test of all of this: nothing writes `waves.synthetic = 1` today
@@ -10132,6 +10262,31 @@ phrasings *"freed by a late resolution"* / *"appended by stub resolution"*:
 **The class has 6 sites → 0.** `34d6f82` closed it; the DDL comment now reads *"Records HOW the wave
 was allocated, not why: the flag names no cause"*. Nothing here is owed. The sweep's stated residue:
 it is keyed to those two phrasings, so a seventh site spelling the claim a third way would escape it.
+
+> **ANNOTATION (2026-08-22, lane W31) — the first producer this section predicted has landed, and
+> §7's own three instruments cannot see it.** `SqliteSchedulerStore.append_unblocked_wave` — the
+> narrow writer §1 ruled as option W2 — landed at **`da45a43`** and sets the flag as a **literal
+> inside an SQL column list**: `INSERT INTO waves (run_id, wave_index, computed_at, synthetic,
+> max_usd) VALUES (?, ?, ?, 1, ?)`. It became a **shipped path** at **`1d0c8f6`**, which wired step 6
+> into `_resume_impl`: `resume` → `_resume_impl` → `_unblock_dependents` → `_apply_unblocking` →
+> `append_unblocked_wave`, derived by an AST call graph over the `src/fleet/cli.py` blob at
+> `f36c9ad`. **So this section's heading and its "no shipped path writes `waves.synthetic = 1` today"
+> sentence are false at `f36c9ad`**, though both were true at the two anchors the section names. The
+> table and the sweep above are left as written.
+>
+> **Why this needed a marker where §2.3's overtaken class result did not.** Not one of the three
+> instruments above matches the new site, re-run against the `src/fleet` blobs at `f36c9ad`: the AST
+> probe keys on a **call** to `append_synthetic_waves` (**0** in `src/`), the text probe on
+> `append_synthetic_waves\s*\(` (**1**, still the `def` itself), and the producer sweep on
+> `synthetic=True` / `synthetic = True` / `synthetic=1` (**4** hits, none in
+> `orchestrator/scheduler.py` — the SQL literal is a bare `1` in a `VALUES` list). Re-running §7 today
+> reproduces §7's answer exactly, which is what makes the claim survive unexamined. §2.3's falsifier
+> is loud to §2.3's own predicate by contrast — `blocked_by\s*=\s*\?` over `src/**/*.py` +
+> `src/**/*.sql` returns **2** at `f36c9ad`, not the 1 §2.3 measured — and the remover's own docstring
+> (`SqliteStateRepository.clear_blocked_by`) cites ADR-0090 §2.3 and records the change at the code
+> site, so §2.3 carries no marker here. This is the residue §9's sixth bullet describes for two
+> **other** sweeps, arriving at a third predicate that bullet does not name. **This annotation adds no
+> mechanism**, and it does not repair any instrument above.
 
 ---
 
@@ -10201,6 +10356,38 @@ not read the count as a survival.
   dynamically-constructed SQL, is invisible to them.
 - **The SPEC readings in §2.1 are a reading.** The six sentences are quoted at length precisely so a
   later reader can check the logic — *"if P then Q"* is not *"only if P"* — rather than inherit it.
+
+> **ANNOTATION (2026-08-22, lane W31) — two of these seven bullets are overtaken; the whole list was
+> checked, not only the reported one.**
+>
+> - *"The removal-predicate polarity (§2.4) is open"* — **ruled.** §2.4 is headed *"RULED (round-E
+>   orchestrator): **R2-CLOSED**"* and rules it in its body, added at `0d7c8b8`, this entry's own
+>   child commit. The bullet was true when written, and this is
+>   the summary contradicting a later section of its own document. The preamble's *"Where a ruling
+>   leaves a sub-question open, it is written down as open (§2.4)"* is the same claim and is marked
+>   there.
+> - *"It does not edit `docs/SPEC.md` … belongs to subtask 8's implementation"* — the first half still
+>   holds, and this ADR has edited no SPEC file since. The obligation in the second half is
+>   **discharged, not pending**; where and how it landed is recorded once, at §6's own marker, rather
+>   than copied here.
+> - **The other five were checked against the sections they summarise and stand at `f36c9ad`:**
+>   bullet 1 (`ae58e18` and `0d7c8b8` each touch `docs/` only, by `git show --stat`); bullet 4 (a
+>   record of what this ADR's lane could not run — the obligation is unchanged and this lane could not
+>   discharge it either, the suite lock still holding); bullet 5 (all seven symbols it names resolve
+>   in `src/` at `f36c9ad`, by AST over the blobs); bullet 6 (both sweeps it names still exist and
+>   still carry the residue it states — but see §7's marker for a claim now escaping a **third**
+>   predicate this bullet does not name); and bullet 7 (§2.1's table quotes six sentences).
+>
+> **Class result: 7 bullets checked, 2 overtaken, 2 marked, 0 overtaken bullets left unmarked.**
+> Beyond §9, a whole-file whitespace-normalised sweep of this ADR **at `f36c9ad`, before this
+> annotation** — union predicate
+> `is open|remains open|left open|as open|still open|undecided|not ruled|not settled|unresolved`,
+> offsets mapped back to lines — returns **3** sites: this bullet, the preamble sentence above, and
+> §2.4's own account of the sub-question it then rules. The first two are marked; the third is
+> self-consistent and is not. **Re-measuring after this annotation returns more raw matches**, because
+> this marker and the preamble's quote the two marked sentences verbatim so a reader can see what was
+> marked; subtract every hit falling inside a dated W31 blockquote and the site count is unchanged at
+> **3**.
 
 ### 10. AMENDMENT (2026-08-22, lane W27) — `LANDED_STATUSES = {SUCCEEDED}` is **not** option R1
 
