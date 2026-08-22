@@ -3588,7 +3588,7 @@ suite is green on `main`.
 
 ---
 
-**D58 — CLOSED IN PART, FIXED in round E (2026-08-22, lane W22); see Status at the end of this
+**D58 — PARTLY ADDRESSED (`1963ca9`); see Status at the end of this
 entry. `RunContext.llm_policy` is never assigned, so no `llm.failover.*` config key reaches
 the model client — and the repo's own test suite already documented this in a comment.** Verified
 against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**, where `orchestrator/context.py:141`
@@ -3657,6 +3657,28 @@ true when it was written and is left standing. What changed:
   construct a `RunContext` with no `llm_policy=` and a config whose
   `llm.failover.max_targets_per_call` is 1, and count the targets the backend is asked for.
   `tests/test_run_context_llm_policy.py` is that check.
+
+> **Editorial correction (2026-08-22), lane W26 — the heading above now reads `PARTLY ADDRESSED
+> (`1963ca9`)`, not `CLOSED IN PART`.** The Status paragraph above is left exactly as lane W22
+> wrote it, per this file's own convention (an entry's body records what was true when it was
+> written; a dated marker beside it records what changed) — it correctly describes the fix and
+> correctly warns that this entry's own detector reads a fixed defect as still open. "CLOSED IN
+> PART" is not one of this file's three defined statuses (`OPEN` / `FIXED, LANDED (`<sha>`)` /
+> `PARTLY ADDRESSED`); the heading is a status **field**, governed by that vocabulary and updated
+> on fix, per the ruling at `39862ec` that corrected D63's heading the same way. `PARTLY
+> ADDRESSED` is used rather than `FIXED, LANDED` because this entry's own title sentence — "no
+> `llm.failover.*` config key reaches the model client" — is not fully resolved: three of the five
+> `llm.failover.*` leaves (`open_after_failures`, `cooldown_s`, `on_tier_exhausted`) are unchanged
+> and still `KNOWN_INERT` in `tests/test_config_keys_are_read.py`, re-verified by this lane. That
+> is not a residual leg of `1963ca9`'s own fix — this entry's measured claim, both in its body and
+> in the `KNOWN_INERT` comment it quotes, only ever named three leaves (`llm.failover.enabled`,
+> `llm.failover.max_targets_per_call`, `llm.max_schema_repairs`), all now wired — but the title's
+> broader wording keeps the entry's own claim partly open, and `CallPolicy` structurally cannot
+> express the other three (§11.8's per-target `BackendHealth`, which `llm/failover.py` would
+> implement and does not exist; the same gap D55 already tracks). Marking that inertness as false
+> would be the mirror-image error this project names: it is still true, and stays recorded as
+> such. The behavioural check that replaces this entry's rotted `git grep` detector is
+> `tests/test_run_context_llm_policy.py`, already named in the Status paragraph above.
 
 ---
 

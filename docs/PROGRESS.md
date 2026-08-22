@@ -5692,7 +5692,16 @@ is a duplicate and now says so.
    -- src/` finds no assignment, so `CallPolicy()` is always built with all defaults. The repo's own
    `tests/test_config_keys_are_read.py` already says so, in a `KNOWN_INERT` comment. Closing it needs
    a `CallPolicy.from_config` builder, `cli.py` edits, invented `failover.enabled` semantics and
-   three `KNOWN_INERT` deletions — none of which happened. (D58.)
+   three `KNOWN_INERT` deletions — none of which happened. (D58.) **Editorial correction
+   (2026-08-22), lane W26:** `RunContext.__post_init__` now derives the policy from
+   `self.config.llm` at `1963ca9` (round E, lane W22) — no `cli.py` edit, so `git grep
+   "llm_policy=" -- src/` still finds no assignment and does **not** show the fix (D58's own entry
+   in `docs/INTEGRATION_HONESTY.md` now carries the same caveat). `llm.failover.enabled`,
+   `llm.failover.max_targets_per_call` and `llm.max_schema_repairs` reach the client; the three
+   `KNOWN_INERT` deletions landed. **Not closed in full:** `llm.failover.open_after_failures`,
+   `.cooldown_s` and `.on_tier_exhausted` remain deliberately `KNOWN_INERT` — `CallPolicy` cannot
+   express §11.8's per-target circuit breaker and `llm/failover.py` does not exist — re-verified by
+   this lane, unchanged from when this item was written.
 3. **`attempts.llm_failovers` and four sibling columns still have no writer** (defect 8 above;
    `repository.py:1677-1690` re-read on `main`). Attribution is impossible from a wave-shared client
    without changing `WorkerError` or `TierUnavailable`'s raise sites. (D62.) **Editorial correction (2026-08-21), lane W5:** re-anchor on **`SqliteStateRepository.record_attempt`**; `repository.py:1677-1690` is history and does not resolve at `7275adb`. Same site as defect 8 above, same anchor.
@@ -5835,7 +5844,13 @@ but they are not tasks, and counting them as open debt overstates it.
    same change. Until then §13 rows 35 and 45 are unclosed regardless of the module's test count.
 4. **Wire `RunContext.llm_policy`** (open item 2): a `CallPolicy.from_config` builder, the `cli.py`
    edits, a decision on `failover.enabled` semantics, and the three `KNOWN_INERT` deletions. No
-   `llm.failover.*` config reaches the client until this exists.
+   `llm.failover.*` config reaches the client until this exists. **Editorial correction
+   (2026-08-22), lane W26:** discharged, differently shaped than proposed here — `1963ca9` (round
+   E, lane W22) derives the policy inside `RunContext.__post_init__` instead of a
+   `CallPolicy.from_config` builder or any `cli.py` edit, deciding `failover.enabled`'s semantics
+   from §9's own comment rather than by ADR, and the three `KNOWN_INERT` deletions landed. See open
+   item 2's own correction above for what remains open (`open_after_failures`, `cooldown_s`,
+   `on_tier_exhausted` — a different, structurally unwireable leg, not part of this task).
 5. **Wire the `tier=` arm and `attempts.llm_failovers` together** — both need the same cross-lane
    change to `WorkerError` or `TierUnavailable`'s raise sites, and doing them separately pays that
    cost twice. Landing the tier arm also makes FD1's already-written tier-scoped caveat live.
@@ -6375,3 +6390,35 @@ carried into round E's handoff (`docs/superpowers/plans/handoff-round-e.md`) wit
 
 **Round D is closed at `1d0e39c`.** The entry document for round E is
 `docs/superpowers/plans/handoff-round-e.md`, written in the same session as this amendment.
+
+### Addendum — W26, 2026-08-22 (round E; docs-only, recording `1963ca9`)
+
+Lane W22 fixed **D58** at `1963ca9`: `RunContext.__post_init__` now derives `CallPolicy` from
+`self.config.llm` (`orchestrator/context.py::call_policy_for`) whenever `llm_policy=` is not
+injected, so `llm.failover.enabled`, `llm.failover.max_targets_per_call` and
+`llm.max_schema_repairs` now reach the model client. Four `KNOWN_INERT` entries were deleted in the
+same commit (those three leaves plus the `fleet.yaml:llm.failover` section key). W22 deliberately
+wrote no `PROGRESS.md` entry, to avoid a tail-append conflict while other lanes were live, and left
+it to a later lane.
+
+**Deliberately still open:** `llm.failover.open_after_failures`, `.cooldown_s` and
+`.on_tier_exhausted` remain `KNOWN_INERT` — measured still inert after the fix. `CallPolicy` cannot
+express §11.8's per-target `BackendHealth` circuit breaker, and `llm/failover.py` does not exist;
+this is a different, structurally unwireable leg, not a residual piece of D58's fix, and is already
+tracked by **D55**.
+
+**A detector rotted by its own fix.** D58's own recorded probe, `git grep "llm_policy=" -- src/`,
+still returns zero after `1963ca9` as well as before, because the wiring landed inside
+`__post_init__` rather than at a `cli.py` construction site. A reader who re-runs that grep will
+misread a fixed defect as still open. `docs/INTEGRATION_HONESTY.md`'s D58 entry now carries this
+caveat and names the replacement behavioural check, `tests/test_run_context_llm_policy.py`. Its
+heading is corrected to `PARTLY ADDRESSED (`1963ca9`)` (this file's vocabulary block has no
+`CLOSED IN PART` status; `PARTLY ADDRESSED` because the entry's own title sentence, spanning all of
+`llm.failover.*`, is not fully resolved by the fix — see the dated marker in that entry for the
+full reasoning). This round's §38 open item 2 and next-task item 4, both of which describe the
+pre-fix state, are annotated in place above with the same commit.
+
+Tests NOT run — suite lock (COMMON.md rule 1). A later lane should run, no `-k` filter:
+`.venv/bin/python -m pytest tests/test_run_context_llm_policy.py tests/test_config_keys_are_read.py
+tests/test_llm_findings.py tests/test_llm_client.py tests/test_settings.py` (W22's own list, not
+re-run by this lane).
