@@ -300,8 +300,9 @@ def _mirror_is_initialized(mirror: Path) -> bool:
     repository, not merely a directory that exists. Restated rather than imported because
     importing `fleet.workers.clone` would execute its `@register_worker` side effect and pull the
     LLM and sandbox stacks into a module the resume driver wants cheap;
-    `tests/test_reentry_evidence.py::test_the_clone_facts_agree_with_the_clone_worker_s_own_helpers`
-    calls both over the same fixture matrix so the two cannot silently diverge."""
+    `test_the_restated_filesystem_facts_agree_with_the_worker_helpers_they_mirror`
+    (`tests/test_reentry_evidence.py`) calls both over the same fixture matrix so the two cannot
+    silently diverge."""
     return (mirror / "HEAD").is_file() and (mirror / "objects").is_dir()
 
 
