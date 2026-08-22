@@ -9881,3 +9881,179 @@ not read the count as a survival.
   dynamically-constructed SQL, is invisible to them.
 - **The SPEC readings in §2.1 are a reading.** The six sentences are quoted at length precisely so a
   later reader can check the logic — *"if P then Q"* is not *"only if P"* — rather than inherit it.
+
+---
+
+## ADR-0091 — A route may not name one `(backend, model_id)` at two `effort` levels: that pair is the whole of the identity a call carries back, so the ambiguity is refused at **router construction** — and this **removes a previously-legal configuration**, `degrade-the-same-model-on-failover`, which never worked, because it served the standby's answer out of the primary's cache key
+
+**Status:** accepted, and **implemented** — the code landed at `9555346`; this ADR is written after
+it, at `704099c`, and exists for one reason: **`9555346` deletes a configuration the loader used to
+accept.** Without this entry a future author reads
+`TierRoute._one_effort_per_backend_and_model_id` as an over-restriction, re-permits the config, and
+restores a silent cache-poisoning defect. Supersedes nothing. Related: **ADR-0075**
+(`BackendTarget.effort` is optional, and is a cache-key component), SPEC **§13 row 39**
+(cross-backend cache poisoning), **D61** in `docs/INTEGRATION_HONESTY.md` (whose *second-order* leg
+this ADR does **not** close — §8).
+
+### 0. Method, lineage, and what was re-measured here
+
+The defect, the reproduction and the fix are lane **W12**'s
+(`.superpowers/sdd/round-e/lanes/W12/report.md`, commit `9555346`, anchored at `75636cd`). This ADR
+is lane **W19**'s recording of the decision, and **every fact below was re-measured at `704099c`
+before it entered this file** — attributed, not inherited. Interpreter for every number:
+`/home/redmage/swe repo harness/.venv/bin/python` (never a bare `python`). Locations are given **by
+symbol**; the line anchors this round rotted are recorded in the ledger, not repeated here. `main`
+moved to `69ff1d2` while this ADR was being written; the two commits in `704099c..69ff1d2` touch
+`tests/test_blocked_by_writer_statements.py` and `tests/test_cli.py` and **nothing else**
+(`git diff --name-only`), so every `704099c` anchor below holds unchanged at `69ff1d2`. **No
+`pytest` was run — suite lock**. This change touches only `docs/`, so **no `pytest` and no `mypy`
+run is owed by it**; the code it records was covered by `9555346`'s own run of
+`tests/test_llm_cache.py tests/test_llm_client.py tests/test_llm_roles.py` (64 passed), cited from
+W12's report and not re-run here.
+
+### 1. The defect — **reproduced end to end, not inferred**
+
+`llm/cache.py::CachingModelClient._store_response` writes the cache row under the identity of the
+target that **actually answered**, recovering it with `cache._target_for(route, usage.backend,
+usage.model_id)`. `effort` is part of the key (`CacheKeyParts`, ADR-0075 consequence 2). When a
+route declared the same `(backend, model_id)` twice at two `effort` levels, `_target_for` returned
+the **first** match whatever answered.
+
+W12 drove this through the **real** loader (`yaml.safe_load` → `ModelsConfig.model_validate` →
+`LlmRouter.from_models_config` → `resolve`), then a real `CachingModelClient` over
+`MemoryLlmCacheStore`, with a `degrade the same model on failover` profile
+(`anthropic:claude-haiku-4-5` at `effort: high`, then the same pair at `effort: low`):
+
+1. the route **resolved** — nothing in `ModelsConfig`, `LlmRouter` or `TierRoute` rejected it;
+2. the standby (`effort: low`) answered;
+3. its answer was stored under the **primary's** `effort: high` key;
+4. the next primary-routed call **hit** and was served it.
+
+Step 4 is the harm, and it is precisely the §13 row 39 poisoning that `_store_response`'s own
+docstring exists to prevent — arriving through the one door that docstring does not guard, and
+invisible because the served row looks like a legitimate hit.
+
+**Re-verified here, at `704099c`:** W12's own reproduction script
+(`.superpowers/sdd/round-e/lanes/W12/repro.py`), re-run unmodified against the landed tree, no
+longer reaches step 1 — it dies inside `LlmRouter.__init__` → `resolve` → `TierRoute` with
+`ValidationError: … tier CHEAP routes anthropic:claude-haiku-4-5 twice with different effort
+('high' then 'low') …`. The *pre-fix* behaviour is W12's measurement and is cited as such; what this
+lane re-ran is the post-fix half.
+
+**No shipped profile was ever affected.** Re-measured at `704099c` from `config/models.yaml`: **6**
+targets across both profiles, **6** distinct `model_id`s, and a maximum of **1** target in any one
+tier — so no shipped route can fail over at all. This was a latent code defect reachable only by an
+operator-written profile, and a plausible one to write: *retry the same model cheaper when the
+expensive attempt fails.*
+
+### 2. Why `effort` could not simply join the match key — **`TokenUsage` has no `effort` field**
+
+Verified at `704099c` by constructing the model, not by reading the manifest or the source:
+`TokenUsage.model_fields` is exactly
+`['backend', 'cache_read_tokens', 'cost_usd', 'input_tokens', 'model_id', 'output_tokens', 'role',
+'tier']` — **`'effort' in TokenUsage.model_fields` is `False`**.
+
+So `_target_for` is not using an *incomplete* key that could be completed. With the inputs it is
+given there is **no** key that disambiguates, because the answering `effort` never travels back from
+the call. Recovering it needs a new persisted field on `TokenUsage`, set in `llm/client.py::_stamp`
+and consumed by `_target_for` and `_store_response` — a persisted-model change, and one more field
+every backend adapter can silently populate wrongly, which is exactly the **D61** shape this defect
+is the second order of. That is a feature, not a bug fix, and it is deliberately not attempted here.
+
+### 3. Why the obvious narrow fix is a **measured no-op**, not a smaller version of this one
+
+The narrow variant is "make `_target_for` return `None` when the match is ambiguous". It changes
+nothing, and this was verified at `704099c` rather than argued, in three steps against the source of
+the running code:
+
+| step | verified | at |
+|---|---|---|
+| the caller's `None` branch keeps `parts.effort` | `"effort": parts.effort if answered is None else answered.effort,` | `cache.py::CachingModelClient._store_response` |
+| `parts` is built from `route.targets[0]` | `self._key_parts(role, route.tier, route.targets[0], messages, schema_sha)` | `cache.py::CachingModelClient.complete` |
+| `_key_parts` takes the effort off that target | `effort=target.effort,` | `cache.py::CachingModelClient._key_parts` |
+
+Therefore `parts.effort` **is** `route.targets[0].effort`. When the ambiguous pair contains the
+primary — the canonical case, and the one reproduced in §1 — that is the same value the first match
+already returned. Same stored key, same poisoning. **Any test written against that "remedy" would
+watch a quantity the change cannot move**, which is the CLAUDE.md Rule 12 failure shape, reached
+before writing the test rather than after.
+
+### 4. Decision — make the key a key, and fail at startup
+
+**Orchestrator's decision, recorded per Guardrail 1; not an agent recommendation.**
+
+1. **`llm/client.py::TierRoute._one_effort_per_backend_and_model_id`** — a `@model_validator(mode="after")`
+   refusing a route that declares one `(backend, model_id)` at two different `effort` levels. It
+   follows `BackendTarget._free_is_declared_not_derived`'s precedent: a §9 rule-5 config error is a
+   model validator surfaced as exit 2. The `ValueError` names **the tier, the pair and both
+   efforts** — verified at `704099c` by triggering it: *"tier CHEAP routes anthropic:m twice with
+   different effort ('high' then 'low'): the answering target would not be recoverable, so the LLM
+   cache would store one target's answer under the other's key"*.
+2. **`llm/roles.py::LlmRouter.__init__`** — `self.resolve(role)` inside the existing per-role loop,
+   so the refusal lands at **router construction**. Verified at `704099c` by calling
+   `LlmRouter(...)` directly on an ambiguous route: the raising frames are
+   `llm/roles.py:__init__` → `llm/roles.py:resolve`. Without this the failure moves to the first
+   model call, halfway through a run, and `__init__`'s own docstring — *"Resolve and validate the
+   whole surface now, so nothing can fail later"* — would have become false.
+3. **`llm/cache.py::_target_for`** — its docstring now states the invariant it relies on and names
+   where that invariant is enforced, so the next reader of the two-tuple comparison does not read it
+   as an oversight.
+
+Both shipped profiles still resolve — re-measured at `704099c`: `default` **12** roles, `local`
+**12** roles.
+
+### 5. What stays legal, deliberately
+
+**The same `(backend, model_id)` declared twice while *agreeing* on `effort`.** One model behind two
+`base_url`s is a legitimate failover pair, and the recovered `effort` is correct whichever of them
+answered. Verified at `704099c`: such a `TierRoute` is accepted, with both targets retained. It is
+the **disagreement**, and only the disagreement, that is unrecoverable — so that, and only that, is
+what the validator refuses.
+
+### 6. The capability this removes — stated plainly, not softened
+
+**`degrade-the-same-model-on-failover` is no longer expressible, and is now refused at startup.** A
+profile that names one model at a high effort and then the same model at a low effort — the
+cheaper-retry pattern — was legal before `9555346` and is rejected now. That is a removal of a
+previously-legal configuration, and it is recorded here in those words so that nobody has to
+rediscover it from a validator.
+
+**Orchestrator's ruling: it was never a working capability.** Configuring it did not produce a
+cheaper retry; it produced **wrong answers served from cache**, per §1 step 4 — a standby's
+low-effort answer returned to later calls that routed to the healthy primary. Refusing it loudly is
+therefore CLAUDE.md **Rule 11 (Fail Loud)**: a loud refusal replacing a silent wrong answer, not a
+working feature taken away. Supporting it *properly* means the §2 work — a persisted `effort` on
+`TokenUsage`, stamped by every adapter — which is a feature, not a bug fix, and is not in scope of
+`9555346` or of this ADR.
+
+### 7. Cost if this ruling is wrong
+
+Bounded, immediate and legible. An operator who genuinely wants that profile is **blocked at
+startup** by a message naming the tier, the pair and both efforts (§4 item 1), instead of getting a
+run that completes and serves silently wrong results. The failure is at router construction, before
+any work or spend; the message tells the operator exactly which two lines of their `models.yaml` to
+change; and the two workarounds are ordinary config — make the two targets agree on `effort`, or
+give the cheaper rung a distinct `model_id`. Nothing shipped is affected (§1). If the ruling is
+later reversed, the reversal is the §2 feature and this ADR is the record of what it must restore.
+
+### 8. What this ADR does not do, and the leg it does **not** close
+
+- **It implements nothing.** No `src/` file changes with this ADR; `9555346` already landed the
+  code. This entry records the decision and the removal.
+- **It does not close D61's second-order leg, and a reader coming from `9555346` will be tempted to
+  think it does — two already were.** D61 records that a `usage.model_id` carrying the id the
+  *server reported* rather than the id the config declared **loses the `_target_for` match
+  entirely**, so `effort` falls back to the primary's. That is a **different door** onto the same
+  symptom, and it is **re-measured live at `704099c`**: `_target_for(route, backend,
+  <served-name-not-in-the-route>)` returns `None`, and `_store_response`'s `None` branch keeps
+  `parts.effort` — `route.targets[0].effort`, the primary's. `TierRoute`'s validator cannot see that
+  case: there is no ambiguity inside the route to refuse. **D61's "that second-order leg is still
+  OPEN" sentence is still true and was deliberately left standing.**
+- **It changes no `docs/SPEC.md` sentence.** No §9 rule number was allocated to this lane; whether
+  the refusal earns a §9 rule line is left to the orchestrator rather than taken.
+- **It does not claim the validator is the only guard the cache needs.** It guards the route's own
+  ambiguity. `_store_response`'s key still depends on adapters honouring the `TokenUsage.model_id`
+  contract (D61), and nothing in this change enforces that.
+- **The §1 pre-fix reproduction is W12's, cited not re-run.** Re-running it would require backing
+  the validator out of the working tree, which this lane did not do; what was re-run here is the
+  post-fix half, and it is reported as such.

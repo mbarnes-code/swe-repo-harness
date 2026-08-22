@@ -5634,7 +5634,7 @@ each fix is recorded per entry.
    `llm_cache_hit`. Re-verified on `main`; **open**. **Editorial correction (2026-08-21), lane W5 — SYMBOL anchor added, the line range kept as history.** At `7275adb` the statement is in **`SqliteStateRepository.record_attempt`** (`INSERT INTO attempts (…)`); `:1677-1690` does not resolve to it. The `StateRepository` Protocol declares a `record_attempt` of the same name separately, so cite the **class-qualified** symbol, not the bare one — a bare-name anchor lands on the Protocol stub, which writes nothing and would read as refuting the defect.
 9. **`llm/cache.py:621-628` (`_target_for`) matches on `(backend, model_id)`** (D61, second order),
    so a served name silently falls back to the **primary** target's `effort` — itself a cache-key
-   component. Documented by CLEAN1's rewritten docstring; **not fixed**.
+   component. Documented by CLEAN1's rewritten docstring; **not fixed**. **Editorial correction (2026-08-21), lane W19 — SYMBOL anchor added; the range `llm/cache.py:621-628` is kept as history and no longer bounds that function.** `9555346` grew its docstring by seven lines, so the function now runs to `:635` and `:628` lands inside the docstring; cite **`cache._target_for`**. **This item is NOT falsified and is deliberately not marked as such.** Re-measured at `704099c` with `.venv/bin/python`: a `usage.model_id` carrying a *served* name the route does not declare still yields `_target_for(...) is None`, and `_store_response`'s `None` branch still keeps `parts.effort`, which `CachingModelClient.complete` builds from `route.targets[0]` — the primary's. What `9555346` closed is the **adjacent** door: a route naming one `(backend, model_id)` at two `effort` levels is now refused at router construction (`TierRoute._one_effort_per_backend_and_model_id`, **ADR-0091**). A reader arriving from that commit should not read this item as closed; it was twice reported as closed by it in round E before this marker was written, once by the lane that wrote the commit and once by the brief that routed the marker.
 10. **`llm/client.py:540-542` never emits the last target's failover trigger** (D60)
     (`if index + 1 < len(targets)` at `:540`, `raise TierUnavailable` at `:542`), and a single-target tier emits none — which is why no consumer
     can ever reconstruct a complete trigger set. **Open**; no lane modified `llm/client.py`.
@@ -5701,7 +5701,7 @@ is a duplicate and now says so.
    `findings.py:337` declares `tier: ModelTier | None = None`, and the single caller at
    `runner.py:625-628` passes no `tier=`; `WorkerError` carries no tier field. Disclosed in three
    channels — a block-capital docstring, the operator-facing caveat, and the test names — **and not
-   wired.**
+   wired.** **Editorial correction (2026-08-21), lane W19 — this item now has its own ledger entry, `D78` in `docs/INTEGRATION_HONESTY.md` (appended at `704099c`, measured in round E by lane W18 at `da45a43`); read them as one item, not two.** Symbol anchors added under COMMON.md rule 5: cite **`LlmFindingSink.record_backend_unavailable`** (`src/fleet/orchestrator/findings.py`) for the `tier: ModelTier | None = None` parameter, and the `record_backend_unavailable` call inside **`PhaseRunner._drive`** (`src/fleet/orchestrator/runner.py`) for the sole caller, which passes `repo_id=`, `phase=`, `observed=` and no `tier=`. Unlike the citations lane W5 re-anchored on 2026-08-21, which had rotted, **both line citations here still resolved when this marker was written** — measured at `704099c`: `findings.py:337` is that method's `async def` line (the `tier=` parameter is the line below it) and `runner.py:625-628` is exactly that four-line call. They are re-anchored because rule 5 requires a symbol, **not** because they had rotted.
 5. **The halt strings still assert `DOWN`, and the underlying 429 misclassification is untouched.**
    The *finding* no longer uses that vocabulary, but `runner.py:640`, `orchestrator/retry.py:196` and
    `models/enums.py:383` still do, and `DOWN` has no representation in `src/`. Left with a comment,
@@ -5839,6 +5839,10 @@ but they are not tasks, and counting them as open debt overstates it.
 5. **Wire the `tier=` arm and `attempts.llm_failovers` together** — both need the same cross-lane
    change to `WorkerError` or `TierUnavailable`'s raise sites, and doing them separately pays that
    cost twice. Landing the tier arm also makes FD1's already-written tier-scoped caveat live.
+   *(2026-08-21, lane W19 — the `tier=` half is now recorded as **`D78`** in
+   `docs/INTEGRATION_HONESTY.md`, appended at `704099c` from lane W18's measurement at `da45a43`;
+   the `attempts.llm_failovers` half remains **D62**. The task is unchanged — the pointer is added
+   so a reader of the ledger and a reader of this list do not count them as two pieces of work.)*
 6. **§13 row 43 — rate limiting (LARGE).** The only fix for open item 5, which is live on `main`
    today. Scoping must confront what §11.8 does not: the 429 signal is in `llm/`, the semaphore is in
    `budgets.py`, only 1 of 12 workers acquires it, and `asyncio.Semaphore` cannot be resized.

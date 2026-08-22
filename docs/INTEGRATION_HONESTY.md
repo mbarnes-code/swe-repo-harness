@@ -3764,6 +3764,31 @@ comment-only plus BK1's two quotations, and the pre-land audit measured CLEAN1's
 edited** — editing a correct sentence because it matches a grep is the mirror-image error, and this
 round saw both.
 
+> **Editorial correction (2026-08-21), lane W19 — the second-order leg above is RE-VERIFIED OPEN,
+> not closed by `9555346`; only its line anchor has rotted.** That commit grew `_target_for`'s
+> docstring by seven lines, so the range `llm/cache.py:621-628` no longer bounds that function —
+> it now runs to `:635`, and `:628` falls inside the docstring. Cite **`cache._target_for`**
+> (`src/fleet/llm/cache.py`). The sentence *"That second-order leg is still OPEN on `main`"* is left
+> exactly as its author wrote it because it is **still true**, re-measured at `704099c` with
+> `.venv/bin/python`: a `usage.model_id` carrying the id the *server reported* rather than the id the
+> config declared still yields `_target_for(...) is None`, and
+> `CachingModelClient._store_response`'s `None` branch still keeps `parts.effort`, which
+> `CachingModelClient.complete` builds from `route.targets[0]` — the primary's. What `9555346`
+> closed is a **different door onto the same symptom**: a route declaring one `(backend, model_id)`
+> at two `effort` levels, now refused at router construction by
+> `TierRoute._one_effort_per_backend_and_model_id` (**ADR-0091**; the record `9555346` *does*
+> falsify is item 11 of `docs/superpowers/plans/open-items-audit-round-b.md`, marked there). The validator cannot reach
+> this leg — there is no ambiguity inside the route for it to refuse. **This marker exists because
+> `9555346` was twice reported in round E as having closed this sentence — once by the lane that
+> wrote that commit and once by the brief that routed this marker. It had not.**
+> **The heading is unchanged, and that is the ruling, not an omission.** By the "Status vocabulary,
+> used strictly" block above — and by the ruling recorded at `39862ec`, that a heading is a status
+> **field** governed by that vocabulary and updated on fix — the heading states the disposition of
+> **this entry's own defect**, the four copied comments, which is `FIXED, LANDED`. The second-order
+> leg is a *consequence* recorded in the body; a body is annotated, never rewritten, and it does not
+> govern the heading. Nothing in the vocabulary block permits a `FIXED, LANDED` heading to be
+> reopened for a consequence the entry itself scopes as second-order.
+
 ---
 
 **D62 — OPEN. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
@@ -4712,6 +4737,17 @@ to be safe. **Deliberately not fixed here** — this is a binding/ownership gap,
 ADR-0090 (referenced in W7's report as in progress) is the natural place to either assign the
 clause a home (subtask 8, subtask 10, or a documented gap) or bind it with a test.
 
+> **Editorial correction (2026-08-21), lane W19 — SYMBOL anchors added; both `cli.py` line numbers
+> above are kept as history and no longer resolve.** Cite **`cli._prepare_verify`** (a module-level
+> `async def` in `src/fleet/cli.py`) and the **`cli._VerifyPlan`** class in the same file. Both
+> citations were **correct when this entry was written** — measured: at `8cf4958`, the commit that
+> appended this entry, and at `34d6f82`, the anchor the entry names, `cli.py:7427` is
+> `async def _prepare_verify(` and `cli.py:5921` is `class _VerifyPlan:`. They rotted at `f865eed`;
+> at `704099c` `:7427` is an `adapter_name=` keyword argument and `:5921` is a docstring line inside
+> **`cli._BuildPlan`** — a different class. This is rot **after** writing, so the entry is annotated rather than
+> rewritten. Nothing else in the entry is disturbed: the rot check it performed
+> (`698f750..34d6f82` empty over `cli.py` and `buildgen.py`) was correct at its own anchor.
+
 ---
 
 ## D77 — OPEN, recorded only. `append_blocked_by` takes a DEGRADED phase to BLOCKED via raw SQL, bypassing `ALLOWED_TRANSITIONS`
@@ -4797,9 +4833,46 @@ changing. Not rated high only because the current exit-code consequence was not 
 (see the honest limit above) and the writer's own docstring frames the union as deliberately broad
 ("mark it BLOCKED") rather than as an oversight. **Deliberately not fixed here** — R1 recommended
 recording rather than fixing inside the next subtask, and the fix (excluding `DEGRADED` from the
-fall-through, or routing through `transition()`) touches the same file a sibling round-E lane just
-changed (`50ad1e4`, `WaveScheduler.propagate_blocked` / `append_blocked_by` caller-naming); a
+fall-through, or routing through `transition()`) touches `src/fleet/orchestrator/scheduler.py`,
+which round E has since changed at `da45a43` (`SchedulerStore.append_unblocked_wave`); a
 future lane should re-measure before touching `scheduler.py` again.
+
+> **Editorial correction (2026-08-21), lane W19 — the sentence above is CORRECTED IN PLACE, because
+> it was false when it was written, and there is no "what was true then" for a writing-time error to
+> preserve.** It read: *"touches the same file a sibling round-E lane just changed (`50ad1e4`,
+> `WaveScheduler.propagate_blocked` / `append_blocked_by` caller-naming)"*. Found by lane CR4 and
+> re-measured here: **`50ad1e4` does not touch `src/fleet/orchestrator/scheduler.py` at all** —
+> `git show --stat 50ad1e4` is `docs/SPEC.md`, `src/fleet/models/state.py` and
+> `tests/test_blocked_by_writer_statements.py`, three files. Nor did any other commit: `git log
+> --oneline 47df73d..8cf4958 -- src/fleet/orchestrator/scheduler.py` is **empty**, so at the moment
+> this entry was appended (`8cf4958`) no round-E commit had touched that file. `50ad1e4`'s *subject*
+> was adjacent — it defines "non-delegating caller" and does name `propagate_blocked` — but the
+> file claim was wrong, and the clause's whole force was the file. The replacement states what is
+> true at `704099c`: `git log --oneline 47df73d..704099c -- src/fleet/orchestrator/scheduler.py`
+> returns exactly one commit, **`da45a43`**, which added `SchedulerStore.append_unblocked_wave`
+> (+88 lines in that file). The "re-measure before touching `scheduler.py`" advice is unchanged and
+> is now, unlike before, actually earned.
+>
+> **Separately — SYMBOL anchors added; the `cli.py` line numbers above are kept as history and no
+> longer resolve.** The two pass-through wrappers are **`cli._ScanWaveStore.append_blocked_by`** and
+> **`cli._ScopedWaveStore.append_blocked_by`**; the §13 row 45 in-tree comment is the
+> **`stub_reconcile`** comment block inside **`cli._resume_impl`** (`src/fleet/cli.py`), which is
+> also the function `:10236` falls inside at `704099c` — the comment moved within it. All three were **correct when written**
+> (at `8cf4958` and at the entry's own `34d6f82` anchor, `cli.py:1419` and `:3622` are both
+> `async def append_blocked_by(` and `cli.py:10236` is the `UnresolvedStub`/exit-7 sentence) and
+> rotted at `f865eed` — so they are annotated, not rewritten. **One of them is now actively
+> misleading and is the reason this marker is not optional:** at `704099c`, `cli.py:3622` lands on
+> `return await self._inner.wave_indices(run_id)` — a **different** pass-through wrapper, so the
+> citation silently points at the wrong method rather than at nothing.
+>
+> **The non-`cli.py` anchors were re-measured too, and most of them still hold at `704099c`** —
+> reported rather than edited, since editing a correct citation because it matched a sweep is the
+> mirror-image error: `scheduler.py:125` is still the `SchedulerStore` Protocol's
+> `async def append_blocked_by(`; `models/enums.py:25-28` is still `TERMINAL_STATUSES`;
+> `models/enums.py:42-45` is still `ALLOWED_TRANSITIONS[DEGRADED]`; `state/projection.py:241-277`
+> still opens on `def _fold_repos(`; `models/state.py:188-193` still covers
+> `RepoState._stub_invariants`. The one that has rotted is **`scheduler.py:255`**: cite
+> **`SqliteSchedulerStore.append_blocked_by`**, which `da45a43` moved further down the file.
 
 ---
 
