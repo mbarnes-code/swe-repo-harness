@@ -7352,6 +7352,14 @@ places the re-measurement disagreed with it.
   uncommitted working-tree edit at the time of writing and therefore has **no SHA this entry may
   cite**.
 
+> **ANNOTATION (2026-08-22, lane W24, added one commit after this entry's own).** The wiring landed
+> at **`1d0c8f6`**, which is **this entry's own parent commit** — it went from uncommitted to landed
+> between the measurement above and this ADR being committed. The measurement itself is unchanged
+> and remains true **at `f4eade0`**, the anchor it states. What was **already false at this entry's
+> own commit** is the clause *"has no SHA this entry may cite"*: it had one, `1d0c8f6`. From
+> `1d0c8f6` on, step 8 is the sole remaining absence — which is the premise §6's ruling was given
+> under. The ruling is unaffected either way; see §6's own annotation.
+
 So the placeholder was false outright for subtask 7 and false in the sense its sentence intends for
 subtask 8. **§6 turns on the wiring, not on the placeholder's sentence**, and states its own
 premise accordingly.
@@ -7517,6 +7525,13 @@ wired (§1), so at this ref **two** absences remain, not one. The ruling holds e
 strongly at `f4eade0`: with two steps absent there is even less for a scoping flag to scope. What
 this ADR must not do is assert step 6 is built on `main` — it is not, at the ref this entry is
 anchored to.
+
+> **ANNOTATION (2026-08-22, lane W24, added one commit after this entry's own).** The factual half of
+> the paragraph above was overtaken by **`1d0c8f6`** (this entry's parent; see §1's annotation):
+> step 6 **is** wired from that commit on, so at `HEAD` **one** absence remains, not two. The
+> paragraph is left as written — it records what was true at the anchor it names, `f4eade0`. **The
+> ruling is unchanged**, and it is the one-absence case that it was actually given for; the
+> two-absence reading was the *a fortiori* one, not the premise.
 
 ### 7. Disclosures — measured here, owned elsewhere, deliberately not fixed by this ADR
 
