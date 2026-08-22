@@ -10202,6 +10202,58 @@ not read the count as a survival.
 - **The SPEC readings in §2.1 are a reading.** The six sentences are quoted at length precisely so a
   later reader can check the logic — *"if P then Q"* is not *"only if P"* — rather than inherit it.
 
+### 10. AMENDMENT (2026-08-22, lane W27) — `LANDED_STATUSES = {SUCCEEDED}` is **not** option R1
+
+**Why this section exists at all.** §2 above eliminated option R1, *"remove `r` only when `r` is
+`SUCCEEDED`"*. Subtask 8's implementation then landed
+`orchestrator.reentry.LANDED_STATUSES = frozenset({RepoStatus.SUCCEEDED})` at **`227e7ba`** — a set
+whose sole member is `SUCCEEDED`. The two **look identical**, and the reader who asks *"didn't we
+eliminate R1?"* comes to this ADR, not to a docstring. The distinction is therefore recorded where
+the question gets asked. **This section decides nothing**; it records a distinction between a ruling
+already made and code already landed.
+
+**The ruling of the round-E orchestrator, recorded verbatim:**
+
+> R1 as posed made *"the blocker is `SUCCEEDED`"* the **complete semantics of `blocked_by`
+> removal**, which is why §3.4's `pr_merged` counterexample killed it — under R1 an entry cleared by
+> that event could never be cleared at all. The whitelist is the resume-time recompute's floor and
+> makes no claim to be the only path out of `blocked_by`. **Same set, different scope of claim.**
+
+`LANDED_STATUSES`' own docstring in `src/fleet/orchestrator/reentry.py` states the same distinction:
+that §3.4's reversal is **event-driven** — the event clears the entry when it fires — that the
+whitelist is the resume-time **recompute's** floor, and that it *"does not claim to be the only path
+by which a name leaves `blocked_by`"*. The two texts were compared clause by clause at `bac5069`
+before this section was written: **they agree in substance and differ only in emphasis**, the ruling
+above being the sharper statement of *why* the same set is not the same claim. **This amendment does
+not edit that docstring** — a sibling lane owns that file — and it deliberately does not copy more of
+it than the one clause quoted, because a copy is a second site that has to be kept in step.
+
+**What is NOT measured about this, stated rather than implied.** **No test distinguishes the two
+readings, and none can today.** The §3.4 trigger — a `pr.merge_wait_timeout_s` breach — has **zero
+producers**; it is one of the three-of-five triggers reaching the §3.5 propagation rule that §2.4's
+reason 2 measures as SPEC-mandated and unimplemented, the other two being §3.1's SCC members and
+§3.5's failed-contract descendants. **Re-derived at `bac5069` by a different route than §2.4's**,
+under `.venv/bin/python`, and reported as a class rather than as a raw total. Route one, a
+whole-file-normalised sweep of every `.py` file under `src/fleet` for `merge_wait_timeout_s`:
+**5 sites** — one `settings.py` field default, and four prose mentions in `models/state.py`,
+`workers/prwriter.py`, `cli.py` and `orchestrator/reentry.py`. Route two, an `ast` call-graph over
+the same tree for the three `blocked_by` sinks, reporting each call's enclosing symbol: the writers
+are `PhaseRunner._contain` (through `WaveScheduler.propagate_blocked`) and `cli._quarantine_impl`,
+the sole remover is `cli._apply_unblocking`, and the remaining three hits are the sink itself plus
+two same-named delegating wrappers in `cli.py`. **The class result the two routes agree on: no
+control path carries a `merge_wait_timeout_s` breach into a `blocked_by` write.** So nothing in the
+tree can be blocked by that trigger, nothing can be cleared by its reversal, and **the two readings
+have identical observable behaviour until someone implements it**. That is exactly why the
+distinction was recorded rather than settled in passing: an unforced reading that nothing exercises
+survives unexamined until an implementer inherits it.
+
+**What this amendment changes, and what it does not.** §2's ruling R and §2.4's R2-CLOSED are
+unchanged, and option R1 stays eliminated. What is added is the statement that the shipped set is
+**not** that option — so that a later reader does not "re-discover" R1 in `LANDED_STATUSES` and
+widen or delete a set that is correct, the mirror-image error §2.1 already guards against for the
+SPEC sentence. It adds no mechanism: nothing in the tree binds this section's text to that
+docstring's, and a rewrite of either alone would not be caught.
+
 ---
 
 ## ADR-0091 — A route may not name one `(backend, model_id)` at two `effort` levels: that pair is the whole of the identity a call carries back, so the ambiguity is refused at **router construction** — and this **removes a previously-legal configuration**, `degrade-the-same-model-on-failover`, which never worked, because it served the standby's answer out of the primary's cache key

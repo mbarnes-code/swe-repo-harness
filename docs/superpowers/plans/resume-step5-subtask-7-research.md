@@ -363,6 +363,22 @@ source, not from the design doc:
   raise. Nothing in row 34 is a re-entry floor.
 - `--from-phase` / `--repo` / `--reset-attempts` genuinely scope or re-drive the floor computation.
 
+> **SETTLED IN PART (2026-08-22), lane W27 — ADR-0079 (`bd35a54`) confirms the `STAYS` half of this
+> split as a ruling and falsifies the `REMOVES` half.** The two `STAYS` rows are ruled: **ADR-0079
+> §5** keeps `--revalidation` and `--raise-revalidation-rounds` refused, resting on the same three
+> primary sources this section names (SPEC §10's `fleet stubs resolve`, SPEC §13 row 34, and the
+> step-5 design plan's row 9). The three `-> subtask 9 REMOVES` annotations are falsified twice
+> over. **As to which subtask: all three are wrong.** ADR-0079 §6 rules that subtask 9 removes
+> **nothing** from the `unbuilt` dict and that the un-refusal ships with **subtask 10**. **As to
+> ownership, the three then split.** ADR-0079 §2 and §4 rule `--from-phase` and `--repo`, so those
+> two belong to subtask 10 and the step-5 design plan's row 10 now names them. **§8 expressly
+> declines to rule `--reset-attempts`' semantics**, so that flag stays refused and **no subtask owns
+> removing it** until an ADR rules it. **The dict itself is unchanged** — measured at `bac5069` by
+> parsing `cli._refuse_unbuilt_resume_flags`' `unbuilt` assignment out of the
+> `git show HEAD:src/fleet/cli.py` blob with `ast`: all five keys are still there, and ADR-0079
+> changes no code. The split above is left exactly as written; it records what this brief measured
+> at its own anchors (`6bf198f`, re-anchored at `7275adb` in §7), both of which predate `bd35a54`.
+
 ### 4.2 One defect subtask 9 inherits, in the same function
 
 `_refuse_unbuilt_resume_flags`'s **docstring** opens: *"Every flag below narrows or re-drives §11.5
@@ -394,7 +410,47 @@ inherit it as a premise.
 > the quotation above. (A *cue*-based sweep does gain a match here, on the substring `unbuilt`
 > inside the symbol name `_refuse_unbuilt_resume_flags` — a name, not a claim.)
 
+> **THE FIRST REASON IS NOW CLOSED (2026-08-22), lane W27.** The marker above says that reason
+> *"remains OPEN and is **ADR-0079's** to settle"*; `bd35a54` settled it. **ADR-0079 §5** rules that
+> `--revalidation` and `--raise-revalidation-rounds` **stay refused**, so the question *"do those
+> two belong in `_refuse_unbuilt_resume_flags` at all?"* is answered **yes**, on three concurring
+> primary sources and no dissent. **The marker above is left exactly as written** — it recorded what
+> was true at its own commit, `a9e9640` — and this is an annotation beside it, never a correction to
+> it. Of the four things it lists as *"all still stand"*: **§4.1's split** and **§4.3's three
+> unpicked options** are settled by ADR-0079 and are marked in this file, above and below; **§4.4
+> still stands** as to its subject matter, which is not ADR-0079's; and **§4.5's open conflict was
+> settled separately by ADR-0089 §5** (`ResumeIncompleteError` is **rewritten, not deleted**,
+> because steps 6 and 8 are still absent) — a different ADR, outside this lane's routed class, so it
+> is **reported to the dispatcher rather than marked here**. Guardrail 7's *"same change"*
+> obligation stated above now binds **subtask 10**, not subtask 9 (ADR-0079 §6).
+
+
 ### 4.3 Ambiguity 4 — the three `--from-phase` options, with costs. **I am not picking one.**
+
+> **SETTLED (2026-08-22), lane W27 — ambiguity 4 is ruled. `bd35a54`, ADR-0079 §2: Option C(i), the
+> repo filter.** `orchestrator.reentry.phase_floor` stays the sole source of the floor, which is
+> never overridden, clamped or capped; a repo whose computed floor sits below `--from-phase` is
+> **skipped** rather than re-aimed, and a repo for which `phase_floor` returns `None` is out before
+> the filter is consulted. A, B and C(ii) are rejected in ADR-0079 §3, with the costs this section
+> lists re-measured there rather than inherited. The semantics are **cited, not restated here**:
+> this section is the record of the question, ADR-0079 is the record of the answer, and a second
+> copy is a second site to keep in step.
+>
+> **Two of this section's three binding constraints are discharged by that ruling; one is not.** The
+> `int | None` → `Phase(from_phase)` conversion constraint **stands unchanged**. The "observable
+> only as different demotion sets until subtask 10" constraint **stands, and ADR-0079 §6 sharpens
+> it**: the un-refusal itself now ships with **subtask 10**, so under a subtask-7+9 tree the flag is
+> not accepted at all rather than accepted-and-narrow. The SPEC-reconciliation constraint is
+> **discharged**: ADR-0079 §3 measures the contradicting `docs/SPEC.md` §10 sentence as Option
+> **A's** cost alone, and ADR-0079 §8 records that the ADR does not edit `docs/SPEC.md` and that
+> under C(i) it does not need to.
+>
+> **What ADR-0079 did NOT settle — this marker does not close the whole section.** Option C's **cost
+> 2** above is accepted as a known cost, **not prevented**: ADR-0079 §8 states in terms that *how* a
+> C(i)-skipped repo is reported is **undecided there**, and that no mechanism in that ADR forces the
+> skipped set into any payload. Option C's **cost 3** is recorded in ADR-0079 §2 as a judgement
+> about operator expectation rather than a measurable property, and is verified neither way.
+
 
 First, three constraints that bind **all three** options, measured:
 
