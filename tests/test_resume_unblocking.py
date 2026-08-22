@@ -16,6 +16,18 @@ that empties a **quarantined** blocker's dependents never touches the quarantine
 quantity reads **identically** before and after the defect. Every assertion below therefore names
 the quantity it watches, and `test_the_original_rhi_clause_alone_cannot_see_the_quarantine_undo`
 *measures* the blindness rather than asserting it.
+
+**One of the four clauses was claimed and not driven, and this is the correction.** The clause
+*"nor one naming a repo that is `SKIPPED` for any other reason"* had no case: both `SKIPPED`
+blockers in the fixture carried an audited `OperatorQuarantine` row, so every assertion that
+looked like clause (c) was in fact clause (b) again. `SHELVED`/`RETAINED_S` is the missing shape.
+It closes the *expressibility* gap — the property is now driven through the real sweep — and it
+does not, on its own, make clause (c) independently **discriminable** from clause (b) at this
+tree: `reentry.still_blocking` sees only `phases.status`, `BlockerState.finding_kinds` was
+deleted at `227e7ba`, and no code on the step-6 path reads `findings` at all, so the two clauses
+share one code path and any status-only mutation that breaks one breaks both. What `SHELVED`
+does buy is a case that reddens under a re-narrowing that consults `findings` again — the exact
+regression 46(ii)'s widened text forbids — which nothing in this file could previously see.
 """
 
 from __future__ import annotations
@@ -53,6 +65,24 @@ while a later admission can complete a phase ABOVE it. The shape exists to pin t
 here and re-admits an audited quarantine's dependents on every resume.
 """
 
+SHELVED = "acme-shelved"
+"""`SKIPPED` at every phase with **NO** `OperatorQuarantine` finding — 46(ii)'s clause (c).
+
+**Why it had to be added, and what its absence meant.** 46(ii)'s clauses (b) and (c) are
+*different* claims: (b) is "a repo `fleet quarantine` set to `SKIPPED` under an audited
+`OperatorQuarantine`", (c) is "a repo that is `SKIPPED` for **any other reason** — a `SKIPPED`
+repo has not landed, so what excluded it does not bear on whether its dependents may migrate".
+Until this case existed, every `SKIPPED` blocker in this fixture (`QUARANTINED`,
+`QUARANTINED_MID`) carried an audit row, so (c) was **not expressible against the fixture** and
+this file's "all four clauses, through the real sweep" claim was true of three. The audit-row
+assertion in the acceptance test below is what keeps this case *bare*: `SHELVED` is absent from
+the `OperatorQuarantine` set, so an edit that quietly audits it collapses (c) back into (b) and
+reddens that assertion rather than passing silently.
+
+Reachable, not contrived: `_quarantine_impl` is not the only route to a `SKIPPED` row —
+`docs/SPEC.md`'s `SKIPPED` is any repo excluded from the run, and nothing requires a finding.
+"""
+
 CONTAINED = "acme-broken"
 """Still `REQUIRES_HUMAN_INTERVENTION`. The population 46(ii)'s ORIGINAL clause watches."""
 
@@ -79,10 +109,11 @@ RETAINED_C = "dep-contract"
 MIXED = "dep-mixed"
 RETAINED_RHI = "dep-contained"
 RETAINED_MID = "dep-halfgated"
+RETAINED_S = "dep-shelved"
 
 REPOS = (
-    QUARANTINED, QUARANTINED_MID, REOPENED, CONTAINED,
-    FREED, RETAINED_Q, RETAINED_C, MIXED, RETAINED_RHI, RETAINED_MID,
+    QUARANTINED, QUARANTINED_MID, SHELVED, REOPENED, CONTAINED,
+    FREED, RETAINED_Q, RETAINED_C, MIXED, RETAINED_RHI, RETAINED_MID, RETAINED_S,
 )
 
 
@@ -115,7 +146,11 @@ def _blocked(conn: sqlite3.Connection, repo: str, names: Sequence[str]) -> None:
 
 @pytest.fixture
 def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
-    """Four blocker shapes, five dependents, three waves — two of them `CLOSED`.
+    """Five seeded blocker shapes plus one unresolvable name, seven dependents, three waves.
+
+    Waves 0 and 1 hold only settled members and are therefore `CLOSED`; the counts here are the
+    `_phase`-seeded blockers (`QUARANTINED`, `QUARANTINED_MID`, `SHELVED`, `REOPENED`,
+    `CONTAINED`), `UNRESOLVABLE`, which is seeded nowhere on purpose, and the `_blocked` calls.
 
     **Why each blocker shape is here, and what it can and cannot express**, is the audit in this
     module's docstring made concrete; `test_every_fixture_case_can_express_its_own_defect`
@@ -160,6 +195,13 @@ def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
             (RUN_ID, QUARANTINED_MID,
              json.dumps({"repo_id": QUARANTINED_MID, "operator": True}), STAMP),
         )
+        # `SKIPPED` for some OTHER reason — clause (c). Same statuses as `QUARANTINED`, and
+        # DELIBERATELY no `findings` row: the two cases are indistinguishable to
+        # `reentry.still_blocking` (which sees only statuses) and distinguishable only here, so
+        # a re-narrowing that consults `findings` again removes THIS entry and keeps the audited
+        # ones — see `SHELVED`.
+        for phase in (1, 2, 3, 4):
+            _phase(conn, SHELVED, phase, "SKIPPED")
         # Re-run past its old frontier: `runner._contain` blocked from a TRANSFORM row that read
         # RHI; the operator fixed it, `fleet retry` re-opened it and it has since SUCCEEDED, so
         # the HIGHEST row this repo carries is BUILD/SUCCEEDED. The two anchors — the phase the
@@ -177,6 +219,7 @@ def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
         _blocked(conn, RETAINED_C, [UNRESOLVABLE])
         _blocked(conn, RETAINED_RHI, [CONTAINED])
         _blocked(conn, RETAINED_MID, [QUARANTINED_MID])
+        _blocked(conn, RETAINED_S, [SHELVED])
         _blocked(conn, MIXED, [QUARANTINED, REOPENED, UNRESOLVABLE])
 
         # --- the waves --------------------------------------------------------------
@@ -190,9 +233,9 @@ def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
                 (RUN_ID, index, STAMP, started, ceiling),
             )
         members = {
-            0: (QUARANTINED, QUARANTINED_MID, REOPENED),
+            0: (QUARANTINED, QUARANTINED_MID, SHELVED, REOPENED),
             1: (CONTAINED,),
-            2: (FREED, RETAINED_Q, RETAINED_C, MIXED, RETAINED_RHI, RETAINED_MID),
+            2: (FREED, RETAINED_Q, RETAINED_C, MIXED, RETAINED_RHI, RETAINED_MID, RETAINED_S),
         }
         for index, ids in members.items():
             for node_id in ids:
@@ -288,6 +331,10 @@ def test_the_blocked_by_recompute_clears_only_what_it_can_show_is_no_longer_bloc
       so this assertion is the one that fails on an inert step 6, and the ONLY one that does.
     * `RETAINED_Q` — the quarantine clause. A fail-open recompute moves this pair; 46(ii)'s
       original RHI clause does not, which is the point of the addition.
+    * `RETAINED_S` — the "`SKIPPED` for any other reason" clause, added because it was the one
+      clause of the four this file claimed and did not drive: every `SKIPPED` blocker here used
+      to carry an `OperatorQuarantine` row, so the clause was inexpressible rather than
+      unasserted. `SHELVED` is bare, and the `OperatorQuarantine` enumeration below keeps it bare.
     * `RETAINED_C` — the unresolvable clause. The name is in no `repos` row, so it can only be
       retained by the fail-closed polarity, never re-derived.
     * `RETAINED_RHI` — the original clause, still asserted: a blocker that is still RHI holds.
@@ -321,6 +368,13 @@ def test_the_blocked_by_recompute_clears_only_what_it_can_show_is_no_longer_bloc
         "states` carried: rows {SCAN: SKIPPED, TRANSFORM+: SUCCEEDED} project SUCCEEDED under it"
     )
     assert _statuses(db, RETAINED_MID) == {"PENDING", "BLOCKED"}
+    assert _blocked_by(db, RETAINED_S) == [SHELVED], (
+        "a repo `SKIPPED` for a reason OTHER than an audited quarantine was read as landed and "
+        "its dependent re-admitted — 46(ii) clause (c), which no case in this fixture could "
+        "express until `SHELVED` was added: a `SKIPPED` repo has not landed, and what excluded "
+        "it does not bear on whether its dependents may migrate"
+    )
+    assert _statuses(db, RETAINED_S) == {"PENDING", "BLOCKED"}
     assert _blocked_by(db, MIXED) == [QUARANTINED, UNRESOLVABLE], (
         "the union lost the wrong names: only the planned removal may leave the row"
     )
@@ -331,6 +385,7 @@ def test_the_blocked_by_recompute_clears_only_what_it_can_show_is_no_longer_bloc
     assert _statuses(db, CONTAINED) == {"SUCCEEDED", "REQUIRES_HUMAN_INTERVENTION"}
     assert _statuses(db, QUARANTINED) == {"SKIPPED"}
     assert _statuses(db, QUARANTINED_MID) == {"SKIPPED", "SUCCEEDED"}
+    assert _statuses(db, SHELVED) == {"SKIPPED"}
     conn = sqlite3.connect(db)
     try:
         audited = sorted(
@@ -343,7 +398,8 @@ def test_the_blocked_by_recompute_clears_only_what_it_can_show_is_no_longer_bloc
     finally:
         conn.close()
     assert audited == sorted((QUARANTINED, QUARANTINED_MID)), (
-        "the audit rows the quarantines rest on are not intact after the sweep"
+        "the audit rows the quarantines rest on are not intact after the sweep — and `SHELVED` "
+        "must NOT appear here: an audited `SHELVED` is clause (b) again, not clause (c)"
     )
 
     # **A class result, not a spot check.** Step 5 writes nothing against this fixture (every
@@ -640,7 +696,7 @@ def test_a_blocker_the_repos_table_knows_but_the_status_lookup_misses_is_loud(
 def test_every_fixture_case_can_express_its_own_defect(fleet: Path) -> None:
     """The anchors-that-coincide audit, re-derived from the fixture rather than restated.
 
-    Four properties, each of which a hurried fixture loses:
+    Five properties, each of which a hurried fixture loses:
 
     1. **The reversal's two anchors differ.** `REOPENED`'s highest phase is not the phase the
        block was propagated from. A fixture whose blocker carries one row cannot distinguish
@@ -652,6 +708,15 @@ def test_every_fixture_case_can_express_its_own_defect(fleet: Path) -> None:
     4. **The waves are pairwise distinct and two are CLOSED.** A cross-row `waves` write has
        somewhere to land and something to move; with one seeded wave the absence claim would be
        near-vacuous.
+    5. **`SHELVED` is `SKIPPED` and UNAUDITED.** It carries `QUARANTINED`'s exact status set, so
+       the `OperatorQuarantine` row is the only thing that distinguishes 46(ii)'s clause (c) from
+       clause (b) here. An edit that audits it turns two clauses into one and would otherwise
+       leave every assertion in this file green.
+
+    Property 2's wording is inherited and is *narrower than it reads*: `QUARANTINED` and
+    `SHELVED` both project `SKIPPED`, as do `QUARANTINED_MID`'s lowest row and `REOPENED`'s top
+    row against `QUARANTINED_MID`'s top row. The `tops` assertion below is over three blockers
+    only and is stated as such rather than as "no two blockers share a status".
     """
     db = fleet / "state" / "fleet.db"
     rows = _rows(db)
@@ -679,11 +744,29 @@ def test_every_fixture_case_can_express_its_own_defect(fleet: Path) -> None:
         for repo in (QUARANTINED, REOPENED, CONTAINED)
     }
     assert sorted(tops.values()) == ["REQUIRES_HUMAN_INTERVENTION", "SKIPPED", "SUCCEEDED"]
+    # Clause (c) is only clause (c) while its blocker is BARE. `SHELVED` and `QUARANTINED` carry
+    # the identical status set, so the audit row is the ONLY thing separating the two clauses in
+    # this fixture; audit `SHELVED` and the case silently becomes a duplicate of `QUARANTINED`.
+    shelved = {phase: status for (repo, phase), (status, _n) in rows.items() if repo == SHELVED}
+    assert set(shelved.values()) == {"SKIPPED"}, (
+        f"`SHELVED` must be SKIPPED at every phase to stand for clause (c): {shelved}"
+    )
     conn = sqlite3.connect(db)
     try:
         known = {str(row[0]) for row in conn.execute("SELECT repo_id FROM repos")}
+        quarantined = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT repo_id FROM findings WHERE run_id = ? AND kind = 'OperatorQuarantine'",
+                (RUN_ID,),
+            )
+        }
     finally:
         conn.close()
+    assert quarantined == {QUARANTINED, QUARANTINED_MID}, (
+        f"the audited set is not the two quarantines: {sorted(quarantined)} — if `SHELVED` is in "
+        "it, clause (c) has collapsed into clause (b) and this fixture drives three clauses"
+    )
     assert UNRESOLVABLE not in known and UNRESOLVABLE not in {repo for repo, _p in rows}, (
         "the unresolvable case is only unresolvable while nothing resolves it"
     )

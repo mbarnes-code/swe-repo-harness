@@ -2329,7 +2329,7 @@ def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
 def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines(
     workspace: Path,
 ) -> None:
-    """The refusal may only name the §11.5 steps that are genuinely unbuilt: 6 and 8.
+    """The refusal may only name the §11.5 steps that are genuinely unbuilt: step 8 alone.
 
     Why this is a defect and not a wording quibble: the same stdout that carried the claim
     "Steps 2 (orphan reap) … are absent too" also carries the `step 2:` lines `_reap_lines`
@@ -2351,6 +2351,20 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
     quieter than step 2's and the stale clause survives longer; the payload key `git_arbitration`
     is unconditional and is what an operator reading `--json` sees beside the claim. The
     landed/discarded/unresolved behaviour itself is pinned by the `test_resume_step4_*` cases.
+
+    **Step 6 is the third instance, and it is the one that broke this test's own locator.** When
+    the `blocked_by` recompute landed (`1d0c8f6`) the enumeration went from plural to singular —
+    *"Steps 6 (…) and 8 (…) **are absent too**"* became *"Step 8 (…) **is absent.**"* — and the
+    fixed phrase this test used to `partition` on (`" are absent too"`) ceased to exist, so the
+    shape guard fired and this file was RED on `main` from `1d0c8f6` until this commit. The guard
+    was right to fire and the message was right to change: only step 8 is unbuilt now. What was
+    wrong was the *locator*, which was itself the fixed substring the paragraph above objects to.
+    It now matches any `Step(s) <n> (<gloss>)[, …] is/are absent` claim and reads the step
+    NUMBERS out of it, so the singular and the plural shape are both covered, a reworded gloss
+    does not disarm it, and a successor that re-adds 2, 4 or 6 to the enumeration still trips the
+    discriminating assertions. The shape guard is preserved rather than relaxed: an enumeration
+    that stops matching the *rule* — not merely one phrase of it — still fails, loudly, before
+    any discriminating assertion runs.
     """
     result = runner.invoke(app, [*base_args(workspace), "resume"])
     assert result.exit_code == ExitCode.USAGE, result.output
@@ -2362,20 +2376,34 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
         "the reap did not report at all, so this test is not exercising the contradiction"
     )
 
-    head, sep, _ = output.partition(" are absent too")
-    assert sep, "the refusal no longer enumerates the absent steps in the expected shape"
-    absent = head[head.rindex("Steps ") :]
+    # The SHAPE GUARD, by rule rather than by a fixed phrase: one `Step(s) <n> (<gloss>)[, …]
+    # is/are absent` claim, whose items are step numbers each carrying a parenthesised gloss.
+    # Singular and plural both match, so the enumeration may shrink to one step (as `1d0c8f6`
+    # made it) or grow back without this locator needing an edit.
+    enumeration = re.compile(r"Steps? ((?:\d+ \([^()]*\)(?:, | and )?)+) (?:is|are) absent")
+    claims = enumeration.findall(output)
+    assert len(claims) == 1, (
+        "the refusal no longer enumerates the absent steps in a shape this test can read — "
+        f"expected exactly one `Step(s) N (gloss) … is/are absent` claim, found {claims!r}"
+    )
+    absent = claims[0]
+    absent_steps = {int(number) for number in re.findall(r"(\d+) \(", absent)}
 
-    # The DISCRIMINATING assertions.
-    assert "2 (" not in absent, (
+    # The DISCRIMINATING assertions. Each names a step `_resume_impl` RUNS, so listing it as
+    # absent contradicts this same stdout.
+    assert 2 not in absent_steps, (
         f"the refusal lists step 2 among the absent steps: {absent!r} — `_resume_impl` runs the "
         "reap and this very output reports it"
     )
-    assert "4 (" not in absent, (
+    assert 4 not in absent_steps, (
         f"the refusal lists step 4 among the absent steps: {absent!r} — `_resume_impl` runs the "
         "Git-as-arbiter reconciliation and reports it under `git_arbitration`"
     )
-    assert "8 (" in absent, (
+    assert 6 not in absent_steps, (
+        f"the refusal lists step 6 among the absent steps: {absent!r} — `_resume_impl` runs the "
+        "`blocked_by` recompute and reports it under `unblocked_dependents`"
+    )
+    assert 8 in absent_steps, (
         f"step 8 (continue) is unbuilt and unnamed: {absent!r} — the refusal enumerates what is "
         "missing, and an enumeration that stops short is how the next reader concludes the verb "
         "is closer to done than it is"

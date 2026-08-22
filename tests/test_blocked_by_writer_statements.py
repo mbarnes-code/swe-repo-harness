@@ -1112,7 +1112,17 @@ def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     counts every non-delegating caller of a `blocked_by` write sink, and since §11.5 step 6 landed
     that includes `cli._apply_unblocking`, which REMOVES. A remover is not a producer of a
     SPEC-mandated trigger, so leaving it in `beyond_live` made this test read 1 where the truth is
-    0 — measured on the round-E tree at `f4eade0`: 3 writers, 2 LIVE appenders, 1 remover. The
+    0 — measured on the round-E tree at `1d0c8f6`, the commit that landed the remover, and still
+    the reading at `f36c9ad`: 3 writers, 2 LIVE appenders, 1 remover.
+
+    **That anchor is a correction.** It read `f4eade0`, where the figure cannot have been true:
+    `1d0c8f6` is the commit that lands the first remover in `src/`, which is that commit's own
+    thesis. Re-measured by importing this module in a detached worktree per ref and calling its
+    own `_code_writers`, `_prose_live_symbols` and `_prose_removers`: at `f4eade0`, **2** writers
+    (`cli._quarantine_impl`, `runner.PhaseRunner._contain`), **2** LIVE appenders, and no
+    `_prose_removers` at all — the function did not exist; at `1d0c8f6` and at `f36c9ad`,
+    **3 / 2 / 1** on both mirrors. Only the anchor moved; the three numbers are unchanged and
+    are the ones this test still asserts against. The
     remover set is parsed from its own clause (`_prose_removers`), so subtracting it cannot be used
     to hide an appender: an appender named in the removal clause fails
     `test_the_remover_is_not_laundered_into_the_append_enumeration` instead.

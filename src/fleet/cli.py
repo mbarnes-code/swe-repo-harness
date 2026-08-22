@@ -10347,9 +10347,10 @@ async def _resume_impl(
     # `blocked_by` edits, its `BLOCKED -> PENDING` writes and its appended `waves` row would all
     # be invisible in the `migration_state.json` this same command publishes — the operator would
     # read a fleet still blocked by a dependency the run had already cleared, which is precisely
-    # the drift class §11.5's preamble says a resume REMOVES. `tests/test_cli.py`'s
-    # `test_step_6_runs_between_step_5_and_the_projection_it_must_precede` asserts it against the
-    # published file rather than against this comment.
+    # the drift class §11.5's preamble says a resume REMOVES.
+    # `test_step_6_runs_between_step_5_and_the_projection_it_must_precede`, in
+    # `tests/test_resume_unblocking.py`, asserts it against the published file rather than
+    # against this comment.
     unblocked = await _unblock_dependents(
         settings, path, run_id, floors=computed_floors, dry_run=dry_run, now=now
     )
