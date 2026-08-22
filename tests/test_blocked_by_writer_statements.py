@@ -87,10 +87,15 @@ it fails instead, because the self-lifting form was silenceable by one meaning-p
 that test's own docstring). (d) the producer-count test asserts "the description must say 0"; the
 two closure tests pin `beyond_live` to 0, so it is not an independent producer measurement, and it
 will block the correct prose edit on the day a SPEC-mandated trigger gains a producer. (e)
-Pre-existing and not W20's, but measured while validating (d): `_code_writers` keys on
-`<module>.<function>`, so two writers sharing a module and a name collapse to one entry — a second
-one is invisible once the first is named. None of these is closed. This module binds six claims; it
-does not certify the sentence.
+`_code_writers` keys writers on the qualified `<module>[.<Class>].<function>`, so two sharing a
+module and a name are distinct entries — the collapse W20 found and closed; `src/fleet/cli.py`
+already holds that collision in `_ScanWaveStore.append_blocked_by` and
+`_ScopedWaveStore.append_blocked_by`, harmless only because both currently delegate. What remains
+is that the description can name **two**-part symbols only, so keys are matched through
+`_prose_symbol`, and two writers reducing to the same two-part symbol are **refused** rather than
+resolved. That state is loud, not silent, but it is a repair this module will demand and cannot yet
+accept: `_SYMBOL` and the description have to be extended together. None of these is closed. This
+module binds six claims; it does not certify the sentence.
 """
 
 from __future__ import annotations
@@ -381,8 +386,31 @@ def _append_machinery() -> tuple[dict[str, str], set[Path]]:
     return entry_points, sink_files
 
 
+def _prose_symbol(key: str) -> str:
+    """A writer key reduced to the two-part `module.function` form the description can name.
+
+    `_SYMBOL` parses **two**-part dotted symbols out of the prose, so `runner.PhaseRunner._contain`
+    is addressed there as `runner._contain`. Keying writers on the qualified name without this
+    would make every method writer unnameable — measured: it takes the clean tree to 14/4, and no
+    prose edit repairs it. Ambiguity introduced by the reduction is refused, not resolved, by the
+    clash assert in `_code_writers`.
+    """
+    module, _, tail = key.partition(".")
+    return f"{module}.{tail.rpartition('.')[2]}"
+
+
 def _code_writers() -> dict[str, str]:
-    """`{"<module>.<function>": "<relpath>:<line>"}` for every site in `src/` that writes the field.
+    """`{"<module>[.<Class>].<function>": "<relpath>:<line>"}` for every `src/` site writing it.
+
+    **The key carries the class.** It used to be `<module>.<function>`, which collapses two writers
+    that share a module and a name into one entry — and `src/fleet/cli.py` contains that collision
+    **today**: `_ScanWaveStore.append_blocked_by` and `_ScopedWaveStore.append_blocked_by`. Both
+    delegate, so both are excluded and nothing is hidden right now; that is luck, not design, and
+    the moment one stops delegating the collapse hides exactly the writer this module exists to
+    surface. Measured directly rather than argued: with both wrappers made non-delegating, the
+    closure test named **one** site under the old key and names **both** under this one. A
+    module-level function keeps its old two-part key, so the description's `runner._contain` and
+    `cli._quarantine_impl` are unaffected.
 
     Three by-rule exclusions, none of them a list of names, and the first two are the two halves
     of the description's own definition rather than one filter standing in for both:
@@ -412,10 +440,26 @@ def _code_writers() -> dict[str, str]:
             and not (item[1].name in call_names and _forwarded_name(item[1]) == item[1].name)
         ]
     )
-    return {
-        f"{path.stem}.{func.name}": f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
-        for path, func, _ in writers
+    sites = {
+        f"{path.stem}.{_qualname(chain)}": f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
+        for path, func, chain in writers
     }
+    by_symbol: dict[str, list[str]] = {}
+    for key in sites:
+        by_symbol.setdefault(_prose_symbol(key), []).append(key)
+    clashes = {sym: keys for sym, keys in by_symbol.items() if len(keys) > 1}
+    assert not clashes, (
+        "these writers share the two-part symbol the description would have to name them by, so "
+        "naming one would silently cover the other: "
+        + "; ".join(
+            f"{sym} <- " + ", ".join(f"{k} at {sites[k]}" for k in sorted(keys))
+            for sym, keys in sorted(clashes.items())
+        )
+        + ". Refused rather than resolved: `_SYMBOL` parses two-part symbols only, so the prose "
+        "cannot tell them apart, and a closure claim nobody can state precisely must not pass. "
+        "Extend `_SYMBOL` and the description together, or give the writers distinct names."
+    )
+    return sites
 
 
 # ---------------------------------------------------------------------------------------------
@@ -673,7 +717,7 @@ def test_every_live_writer_the_prose_names_resolves_and_actually_writes_blocked_
             f"{prose.site}: names `{symbol}` as a live writer, but no function `{function}` is "
             f"defined in {[str(p.relative_to(_ROOT)) for p in candidates]}"
         )
-        assert symbol in code_writers, (
+        assert symbol in {_prose_symbol(key) for key in code_writers}, (
             f"{prose.site}: names `{symbol}` as a non-delegating caller of the §3.5 append, "
             f"but the AST finds no call to that append in it. Writers measured: "
             f"{sorted(code_writers.items())}"
@@ -691,7 +735,9 @@ def test_every_code_site_that_writes_blocked_by_is_named_by_the_prose(
     lands. Reported by the *code* site's `file:line`, because that is the thing to go and look at.
     """
     named = _prose_live_symbols(prose)
-    unnamed = {symbol: site for symbol, site in code_writers.items() if symbol not in named}
+    unnamed = {
+        symbol: site for symbol, site in code_writers.items() if _prose_symbol(symbol) not in named
+    }
     assert not unnamed, (
         f"{prose.site} claims to name every non-delegating caller of the §3.5 `blocked_by` append, "
         f"but these write it and are not named: "
