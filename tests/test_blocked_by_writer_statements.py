@@ -74,28 +74,40 @@ loudly, but the failure says "the description no longer states this", never "it 
 elsewhere in different words". Both residuals are the price of binding prose at all; neither is
 closed here, and a reader must not mistake six bound claims for closure.
 
-**Four further residuals, three of them W20's own.** (a) A *second* function in the sink file that
-calls the append is refused, not classified: `_append_machinery` asserts rather than guessing which
-of two identical-looking bodies is "the rule that fronts" and which is a writer of it, so a
-legitimate second front cannot ship without a deliberate, reviewed edit to this module. That is a
-worse day than silence and the only alternative to CR4's C1, where the guess was made silently and
-wrongly. (b) `_forwarded_name` recognises only a *bare* pass-through; a wrapper that does one line
-of bookkeeping before forwarding is reported as a writer. That direction is loud (the closure test
-demands it be named) rather than silent, which is the direction to be wrong in. (c) The
-contract-trigger requirement no longer lifts itself when `docs/SPEC.md` §3.5 stops mandating it —
-it fails instead, because the self-lifting form was silenceable by one meaning-preserving word (see
-that test's own docstring). (d) the producer-count test asserts "the description must say 0"; the
-two closure tests pin `beyond_live` to 0, so it is not an independent producer measurement, and it
-will block the correct prose edit on the day a SPEC-mandated trigger gains a producer. (e)
-`_code_writers` keys writers on the qualified `<module>[.<Class>].<function>`, so two sharing a
-module and a name are distinct entries — the collapse W20 found and closed; `src/fleet/cli.py`
-already holds that collision in `_ScanWaveStore.append_blocked_by` and
-`_ScopedWaveStore.append_blocked_by`, harmless only because both currently delegate. What remains
-is that the description can name **two**-part symbols only, so keys are matched through
-`_prose_symbol`, and two writers reducing to the same two-part symbol are **refused** rather than
-resolved. That state is loud, not silent, but it is a repair this module will demand and cannot yet
-accept: `_SYMBOL` and the description have to be extended together. None of these is closed. This
-module binds six claims; it does not certify the sentence.
+**Seven further residuals, all W20's own; two earlier ones are gone because the fixes closed
+them.** (a) A second function in a sink file that calls **that file's own** sink is refused, not
+classified: `_append_machinery` asserts rather than guessing which of two identical-looking bodies
+is "the rule that fronts" and which is a writer of it, so a legitimate second front cannot ship
+without a deliberate, reviewed edit to this module. That is a worse day than silence and the only
+alternative to CR4's C1, where the guess was made silently and wrongly. The cap is per sink file,
+so a writer living in an unrelated sink's module is no longer swept in — the over-trigger a second
+sink exposed. (b) `_forwarded_name` recognises only a *bare* pass-through; a wrapper that does one
+line of bookkeeping before forwarding is reported as a writer. Loud (the closure test demands it be
+named) rather than silent, which is the direction to be wrong in. (c) The contract-trigger
+requirement no longer lifts itself when `docs/SPEC.md` §3.5 stops mandating it — it fails instead,
+because the self-lifting form was silenceable by one meaning-preserving word (see that test's own
+docstring). (d) The producer-count test asserts "the description must say 0"; the closure tests pin
+`beyond_live` to 0, so it is not an independent producer measurement, and it will block the correct
+prose edit on the day a SPEC-mandated trigger gains a producer. (e) Writers are keyed on the
+qualified `<module>[.<Class>].<function>`, so two sharing a module and a name are distinct entries
+— the collapse W20 found and closed; `src/fleet/cli.py` already holds that collision in
+`_ScanWaveStore.append_blocked_by` and `_ScopedWaveStore.append_blocked_by`, harmless only because
+both currently delegate. What remains is that the description can name **two**-part symbols only,
+so keys are matched through `_prose_symbol` and two writers reducing to the same two-part symbol
+are **refused** rather than resolved — loud, but a repair this module will demand and cannot yet
+accept: `_SYMBOL` and the description have to be extended together. (f) `_sql_text` follows a SQL
+constant named in the same module; a constant **imported from another module**, and any statement
+assembled at run time, are still invisible to the sink detector. That direction is silent, and it
+is the one to watch: the measured cost of the narrower version of this same hole was 3 entry points
+and 3 writers collapsing to 1 and 1. (g) A markdown mirror is read from its fenced blocks, and a
+fence that does not parse as Python is skipped. The skip is counted and printed in the not-found
+failure, so recognition and resolution can be told apart — but a mirror inside a fence that stops
+parsing still presents as "the field is missing" first and as the real cause only to a reader of
+the message. What is NO LONGER a residual, because these fixes closed it: the `{0,N}` length bound
+on the field block, whose breach took the whole module off the air rather than producing a finding
+(measured: 2398 characters at `704099c`, 3814 at `1d0c8f6`), and the sink detector's blindness to
+SQL spelled anywhere but inline. None of the seven is closed. This module binds six claims; it does
+not certify the sentence.
 """
 
 from __future__ import annotations
@@ -104,7 +116,6 @@ import ast
 import enum
 import inspect
 import re
-import textwrap
 from pathlib import Path
 
 import pytest
@@ -123,33 +134,14 @@ _SRC = _ROOT / "src" / "fleet"
 #: CLAUDE.md records as "a multi-site correction split across authors or commits".
 _MIRRORS: tuple[Path, ...] = (_STATE, _SPEC)
 
-#: The field block, located by its annotated assignment rather than by line number.
-#:
-#: The `{0,3000}` bound is load-bearing, not decorative. An unbounded `[\s\S]*?` under this
-#: terminator does not stop at the site it started in: `docs/SPEC.md` reproduces several models and
-#: every one of them ends in a line that is exactly four spaces and a paren, so an unbounded match
-#: starting at a missing terminator runs forward into the *next* model's and reports a block that
-#: straddles two listings.
-#:
-#: **Raised 3000 -> 4500 in round E, and the number is measured rather than padded.** The block was
-#: 3820 characters once §11.5 step 6's remover clause landed, so the old bound silently stopped
-#: matching and every check in this module failed at import with "no longer contains a `blocked_by`
-#: block" — a bound that rots into a total outage rather than a finding. The straddle protection is
-#: NOT this number: it is the `"\n\n" not in match` assert below, which fires on any match that
-#: crosses a blank line and therefore catches a run into the next listing at any bound. The bound
-#: is a backstop, so it is set with headroom over the measured size instead of at it.
-#:
-#: **Measured, both mirrors, `704099c`: 2398 characters** — so the bound leaves **602 characters
-#: (25% of the block)** of headroom, and the last two edits to this block spent +782 and +77. The
-#: figure this comment carried until W20 ("~1.5 KB") was the size of the block `50ad1e4`
-#: *replaced* (`a69fba8`: 1539); `50ad1e4` shipped 2321 and `68e539a` shipped 2398, so it was
-#: false in the commit that wrote it and staler in the next — an unmeasured number inside the
-#: module built to stop unmeasured numbers (CR4's I1). Overrun is loud, not silent: the
-#: `match is not None` assert in `_prose` fires.
-_FIELD_BLOCK = re.compile(
-    r"^[ \t]*blocked_by:\s*list\[RepoId\]\s*=\s*Field\(\n[\s\S]{0,4500}?^[ \t]*\)$",
-    re.MULTILINE,
-)
+#: The model and field the two mirrors both carry. This module locates the block by **parsing**,
+#: never by a length-bounded regex — see `_python_regions` for why that changed and what it cost.
+_MODEL = "RepoState"
+_FIELD = "blocked_by"
+
+#: A fenced block in a markdown mirror. Any fence is tried as Python; the info string is not
+#: trusted, because a mirror retagged ```py or left bare would otherwise be skipped in silence.
+_FENCE = re.compile(r"^```[^\n]*\n([\s\S]*?)^```$", re.MULTILINE)
 
 
 def _normalise(text: str) -> str:
@@ -160,10 +152,6 @@ def _normalise(text: str) -> str:
     reason: an instrument that fails on a cosmetic edit is asserting layout, not meaning.
     """
     return " ".join(text.split())
-
-
-def _line_of(text: str, offset: int) -> int:
-    return text.count("\n", 0, offset) + 1
 
 
 class _Prose:
@@ -182,34 +170,91 @@ class _Prose:
         return self.path.relative_to(_ROOT).as_posix()
 
 
+def _python_regions(path: Path) -> tuple[list[tuple[str, int]], int]:
+    """`(regions, unparseable)` — every Python source region in `path`, with its 1-based start line.
+
+    A `.py` file is one region starting at line 1; a markdown mirror is its fenced blocks, each
+    *tried* as Python and kept if it parses. The count of fences that did not parse is returned so
+    a "field not found" failure can say whether recognition or resolution is at fault: a detector's
+    recognition step is a separate attack surface from its resolver, and a pre-filter that drops a
+    site in silence is a failure mode this project has already paid for.
+    """
+    text = path.read_text(encoding="utf-8")
+    if path.suffix == ".py":
+        return [(text, 1)], 0
+    regions: list[tuple[str, int]] = []
+    unparseable = 0
+    for match in _FENCE.finditer(text):
+        body = match.group(1)
+        try:
+            ast.parse(body)
+        except SyntaxError:
+            unparseable += 1
+            continue
+        regions.append((body, text.count("\n", 0, match.start(1)) + 1))
+    return regions, unparseable
+
+
 def _prose(path: Path) -> _Prose:
     """The `blocked_by` description as a single normalised string, parsed out of `path`.
 
     Parsed with `ast`, never by string-slicing the source: the description is a run of adjacent
     string literals, so a re-wrap moves every seam. Parsing gives the *concatenated value* — the
     thing a reader of the model actually sees — and makes a reflow a no-op by construction.
+
+    **The field is now LOCATED by parsing too, and that is a repair, not a tidy-up.** Until round E
+    the block was cut out with a length-bounded regex — a lazy `[.newline]{0,N}?` between the
+    field's `= Field(` header and the next line that is only whitespace and a closing paren —
+    and `N` was a hand-set 3000 whose stated job was to stop an unbounded match running out of one
+    listing and into the next one in `docs/SPEC.md`. Two things were wrong with it. The block grew
+    past it (measured: 2398 at `704099c`, **3814** at `1d0c8f6` once §11.5 step 6's remover clause
+    landed), and the way a breach presents is not a finding but a **collection error** — every
+    check in the file stops running, under a message that blames a rename. An instrument whose
+    failure mode is "the instrument stops existing" is the class
+    `tests/test_instruments_are_armed.py` was itself caught in on `main`, and this is the second
+    time this project has hit it. Raising the number to 4500 restarted the module and left the
+    class intact.
+
+    So the number is gone rather than larger. An `ast` node cannot straddle two class bodies, so
+    the hazard the bound existed for is closed **by construction** rather than by a length that has
+    to stay ahead of the prose; and the field's own growth can no longer take the module off the
+    air. Every remaining failure here names the file and says which of the two steps failed.
     """
-    source = path.read_text(encoding="utf-8")
-    match = _FIELD_BLOCK.search(source)
-    assert match is not None, (
-        f"{path.relative_to(_ROOT).as_posix()} no longer contains a "
-        f"`blocked_by: list[RepoId] = Field(...)` block. If the field was renamed or moved, update "
-        f"_MIRRORS and _FIELD_BLOCK in the same change; if a mirror was deleted deliberately, say "
-        f"so here rather than deleting this assertion."
+    regions, unparseable = _python_regions(path)
+    found: list[tuple[ast.AnnAssign, int]] = []
+    for source, offset in regions:
+        for cls in ast.walk(ast.parse(source)):
+            if not (isinstance(cls, ast.ClassDef) and cls.name == _MODEL):
+                continue
+            found += [
+                (node, offset)
+                for node in cls.body
+                if isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == _FIELD
+            ]
+    assert len(found) == 1, (
+        f"{path.relative_to(_ROOT).as_posix()}: found {len(found)} `{_MODEL}.{_FIELD}` field "
+        f"declarations, expected exactly 1, across {len(regions)} parseable Python region(s) "
+        f"({unparseable} fenced block(s) in this file did not parse and were skipped). If the "
+        f"field or the model was renamed, update _MODEL/_FIELD and the description in the same "
+        f"change; if a mirror was deleted deliberately, say so here rather than deleting this "
+        f"assertion; if the count is 0 and `unparseable` is not, the mirror is present and the "
+        f"recognition step is what broke."
     )
-    assert "\n\n" not in match.group(0), (
-        f"{path.relative_to(_ROOT).as_posix()}'s `blocked_by` block match spans a blank "
-        f"line, so it has run past its own site and is describing something else"
+    node, offset = found[0]
+    assert isinstance(node.value, ast.Call), (
+        f"{path.relative_to(_ROOT).as_posix()}'s `{_FIELD}` is no longer a `Field(...)` call, so "
+        f"it carries no description for this module to bind."
     )
-    node = ast.parse(textwrap.dedent(match.group(0))).body[0]
-    assert isinstance(node, ast.AnnAssign) and isinstance(node.value, ast.Call)
     keyword = next((k for k in node.value.keywords if k.arg == "description"), None)
     assert keyword is not None, (
-        f"{path.relative_to(_ROOT).as_posix()}'s `blocked_by` Field no longer carries a "
+        f"{path.relative_to(_ROOT).as_posix()}'s `{_FIELD}` Field no longer carries a "
         f"`description=`. The claim this module binds would then be stated nowhere."
     )
-    line = _line_of(source, match.start()) + keyword.value.lineno - 1
-    return _Prose(path, _normalise(ast.literal_eval(keyword.value)), line)
+    return _Prose(
+        path, _normalise(ast.literal_eval(keyword.value)), offset + keyword.value.lineno - 1
+    )
 
 
 def _mirrors() -> list[_Prose]:
@@ -251,6 +296,65 @@ def _string_literals(func: ast.AST) -> str:
         for node in ast.walk(func)
         if isinstance(node, ast.Constant) and isinstance(node.value, str)
     )
+
+
+def _static_text(node: ast.expr | None) -> str | None:
+    """The text of a string expression the reader can see without running anything, or `None`.
+
+    A constant, or any `+` tree of them. Adjacent literals are already one `Constant` after
+    parsing, so this only has to add explicit concatenation.
+    """
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left, right = _static_text(node.left), _static_text(node.right)
+        return None if left is None or right is None else left + right
+    return None
+
+
+def _named_constants(tree: ast.AST) -> dict[str, str]:
+    """`{NAME: text}` for every string constant a module assigns to a plain name.
+
+    Module level or class level, both, because `_SQL = "..."` beside a method is as ordinary as one
+    at the top of the file.
+    """
+    constants: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign):
+            targets: list[ast.expr] = list(node.targets)
+        elif isinstance(node, ast.AnnAssign):
+            targets = [node.target]
+        else:
+            continue
+        text = _static_text(node.value)
+        if text is None:
+            continue
+        for target in targets:
+            if isinstance(target, ast.Name):
+                constants[target.id] = text
+    return constants
+
+
+def _sql_text(func: ast.AST, constants: dict[str, str]) -> str:
+    """Every SQL string this function can be reading: its own literals, plus the constants it names.
+
+    **This is `_forwarded_name`'s repair one layer down, and it is the same root cause.** The sink
+    detector used to read a function's own literals only, so a statement spelled inline was seen
+    and the *identical* statement behind `_APPEND_SQL = "..."` was not — recognition keyed on where
+    the text sits rather than on what the code does. Not hypothetical and not a near miss:
+    measured on the round-E tree, moving `scheduler.py`'s own `UPDATE phases SET blocked_by` into a
+    module constant and referencing it took the derived sets from **3 entry points and 3 writers to
+    1 and 1** — deleting both entry points the description names, and both of the writers it names,
+    from a refactor that changes no behaviour at all.
+
+    A name is followed whether it is used bare or as an attribute, since a class-level constant is
+    reached as `self.NAME`. What is NOT followed, and is a real residual: a constant **imported
+    from another module**, and any text assembled at run time.
+    """
+    names = {node.id for node in ast.walk(func) if isinstance(node, ast.Name)}
+    names |= {node.attr for node in ast.walk(func) if isinstance(node, ast.Attribute)}
+    referenced = " ".join(_normalise(constants[name]) for name in sorted(names & set(constants)))
+    return f"{_string_literals(func)} {referenced}"
 
 
 def _callee_names(func: ast.AST) -> set[str]:
@@ -340,8 +444,9 @@ def _append_machinery() -> tuple[dict[str, str], set[Path]]:
     append" was a term defined nowhere in the tree, and under either of its two natural readings
     the pair the description names is wrong in both directions.
 
-    **The fronting rule is capped at one, and the cap is the repair for CR4's C1.** The old
-    derivation promoted into the machinery *every* function in a sink file that calls a sink name.
+    **The fronting rule is capped at one PER SINK FILE, and the cap is the repair for CR4's C1.**
+    The old derivation promoted into the machinery *every* function in a sink file that calls a
+    sink name.
     That rule is filename-derived, and it composes into: a new caller of `append_blocked_by` that
     happens to live in `scheduler.py` is classified as part of the append rather than as a caller
     of it, so the closure test never sees it. CR4 demonstrated the consequence — a real
@@ -350,47 +455,58 @@ def _append_machinery() -> tuple[dict[str, str], set[Path]]:
     reproduced it at `704099c` (16/2 for the writer alone, 18/0 once the definition sentence names
     it). Two sink-file callers have identical bodies, so nothing in the AST says which is "the
     rule that fronts" and which is a writer of it. This function therefore refuses to guess.
+
+    **The cap is per SINK FILE, not per tree** — measured, not assumed. The description says the
+    front is the rule fronting the primitive "in the primitive's own module", and a whole-tree cap
+    does not say that: once a *second* `UPDATE phases SET blocked_by` sink exists in another module
+    — which round E landed, `SqliteStateRepository.clear_blocked_by` — every caller of the *first*
+    sink that happens to live in the second sink's file is swept into the candidate set, turning a
+    precise unnamed-writer failure into an ambiguity abort. Scoping each cap to the sink file whose
+    own sinks are being called restores the precise failure and loses nothing: C1's escape is a
+    second caller of the *scheduler* sink inside `scheduler.py`, so it still trips the cap.
     """
     parsed = {
         path: ast.parse(path.read_text(encoding="utf-8")) for path in sorted(_SRC.rglob("*.py"))
     }
+    constants = {path: _named_constants(tree) for path, tree in parsed.items()}
     every = [item for path, tree in parsed.items() for item in _functions(path, tree)]
-    sinks = _outermost([item for item in every if _SINK_SQL.search(_string_literals(item[1]))])
+    sinks = _outermost(
+        [item for item in every if _SINK_SQL.search(_sql_text(item[1], constants[item[0]]))]
+    )
     assert sinks, (
         "no function in `src/fleet` contains an `UPDATE phases SET blocked_by` statement. Either "
         "the write moved to a form this pattern cannot see — in which case this module is silently "
         "asserting nothing and must be repaired, not deleted — or the field is no longer written."
     )
-    sink_names = {func.name for _, func, _ in sinks}
     sink_files = {path for path, _, _ in sinks}
     entry_points = {
         _qualname(chain): f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
         for path, func, chain in sinks
     }
-    fronts = _outermost(
-        [
-            item
-            for item in every
-            if item[0] in sink_files
-            and item[1].name not in sink_names
-            and _callee_names(item[1]) & sink_names
-        ]
-    )
-    assert len(fronts) <= 1, (
-        f"{len(fronts)} functions in "
-        f"{sorted(p.relative_to(_ROOT).as_posix() for p in sink_files)} call the `blocked_by` "
-        f"append sink without being it: "
-        f"{', '.join(sorted(_qualname(chain) for _p, _f, chain in fronts))}. At most one of them "
-        f"is 'the rule that fronts the append'; the rest are non-delegating CALLERS of it, and "
-        f"their bodies are indistinguishable, so this module will not guess. Adjudicate it HERE, "
-        f"in this file, with your reason. Do NOT resolve it by adding the new name to the "
-        f"description's definition sentence: that is CR4's C1 exactly — a function promoted into "
-        f"the machinery is thereafter invisible to "
-        f"`test_every_code_site_that_writes_blocked_by_is_named_by_the_prose`, and the measured "
-        f"result of that repair is 18/18 green over a closure claim the new writer makes false."
-    )
-    for path, func, chain in fronts:
-        entry_points[_qualname(chain)] = f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
+    for sink_file in sorted(sink_files):
+        own = {func.name for path, func, _ in sinks if path == sink_file}
+        fronts = _outermost(
+            [
+                item
+                for item in every
+                if item[0] == sink_file and item[1].name not in own and _callee_names(item[1]) & own
+            ]
+        )
+        assert len(fronts) <= 1, (
+            f"{len(fronts)} functions in {sink_file.relative_to(_ROOT).as_posix()} call the "
+            f"`blocked_by` write sink(s) {sorted(own)} defined in that same file without being "
+            f"one: {', '.join(sorted(_qualname(chain) for _p, _f, chain in fronts))}. At most one "
+            f"of them is 'the rule that fronts' that sink; the rest are non-delegating CALLERS of "
+            f"it, and their bodies are indistinguishable, so this module will not guess. "
+            f"Adjudicate it HERE, in this file, with your reason. Do NOT resolve it by adding the "
+            f"new name to the description's definition sentence: that is CR4's C1 exactly — a "
+            f"function promoted into the machinery is thereafter invisible to "
+            f"`test_every_code_site_that_writes_blocked_by_is_named_by_the_prose`, and the "
+            f"measured result of that repair is a fully green suite over a closure claim the new "
+            f"writer makes false."
+        )
+        for path, func, chain in fronts:
+            entry_points[_qualname(chain)] = f"{path.relative_to(_ROOT).as_posix()}:{func.lineno}"
     return entry_points, sink_files
 
 
