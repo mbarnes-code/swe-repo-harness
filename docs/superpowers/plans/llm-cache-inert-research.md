@@ -83,6 +83,17 @@ has 3 call sites in `src/`: its own `for_run` classmethod inside `llm/cache.py`,
 `None` at all 5 sites), and `cli.caching_client` (dead, no callers). **Every route to the cache in
 `src/` is unreachable, and there is no store to reach it with.**
 
+> **Editorial correction (2026-08-22), lane W34 — the `for_run` classmethod name above is wrong,
+> measured at `81b3b55`.** By AST (`ast.Call` nodes resolved by dotted name) over
+> `src/fleet/llm/cache.py`, the `CachingModelClient(` call inside that file is in method
+> **`scoped`**, not `for_run` — there is no `for_run` method anywhere in the class. `scoped` is
+> exactly what the surrounding sentence already describes (a per-rung view of an
+> already-constructed client), so the conclusion is unaffected. This body is a promoted scratch
+> report, byte-identical apart from the provenance banner (`f36c9ad`); the wrong name was already
+> there while it was still untracked (`.superpowers/sdd/round-e/lanes/R3/report.md`).
+> Independently confirms lane W30's `f36c9ad`-era correction of the same site
+> (`.superpowers/sdd/round-e/lanes/W30/report.md` §3 item 1).
+
 Consequences that follow directly and were checked: `--llm-cache {read-write,read-only,off}` is
 parsed, is echoed by `fleet models list --json` (the `llm_cache` field of its payload), and
 installs nothing; `--llm-cache read-only`, §11.6's *replay mode where a miss is a hard error*,
@@ -201,6 +212,24 @@ the `LlmCacheMode` CLI flag on an unrelated class — and `WorkerContext(lease_o
 | `llm_cache` | `None` | **inert-and-a-defect — the subject of this report.** See §1–§3. |
 | `llm_cache_mode` | `"read-write"` | **inert-and-a-defect, consequentially.** Never assigned, and its default is never consulted because the branch that reads it is dead. It is also never derived from `config.llm.cache_mode`, so the config leaf is inert twice over. |
 
+> **Editorial correction (2026-08-22), lane W34 — two counts in the `projector` row above are
+> wrong, measured at `81b3b55`.** **(1)** `Projector(` has **0** construction call sites in `src/`
+> by AST, not "exactly one" — the cited "site" inside `state/projection.py` is a **code example
+> inside `class Projector`'s own docstring** (a string literal), which a text sweep matches and an
+> AST probe does not; an AST probe for `Call` nodes named `Projector` over every `*.py` under
+> `src/` returns zero. **(2)** `cli.py` calls `project_once(...)` at **7** sites, not 6 (confirmed
+> by both AST and `grep -n "project_once(" src/fleet/cli.py`) — the 7th, inside `fleet resume`'s
+> §11.5-step-7 call, was added by `c45db53` (2026-08-19), which predates this report's own anchors
+> (`1d0c8f6`/`227e7ba`, both 2026-08-22), so this is a miscount, not rot from a moving `main`.
+> Neither correction changes the row's verdict: `ctx.project()` is still a permanent no-op on every
+> shipped run, and the projection is still written by `project_once`, just from one more call site
+> than stated. This body is a promoted scratch report, byte-identical apart from the provenance
+> banner (`f36c9ad`); both errors were already present while it was still untracked scratch
+> (`.superpowers/sdd/round-e/lanes/R3/report.md`). The "exactly one site" half of this was already
+> flagged, unannotated, in lane W30's report (`.superpowers/sdd/round-e/lanes/W30/report.md` §7
+> concern 1); the "6 sites" count is a new finding, not previously flagged. Same claim recurs in
+> §7's C7 row below, annotated there too.
+
 ## 6. Relation to the register — and does a record here have D58's detector shape?
 
 **Nothing in `docs/INTEGRATION_HONESTY.md` records that the cache is never installed.** Sweeping
@@ -284,6 +313,15 @@ read.**
 | **C5** | The ledger. Annotate **D61** (its subject is a component no shipped run constructs) and **D62** (`llm_cache_hit` would read 0 even once written, because there is no cache to hit) with dated in-file markers naming this finding's commit; add a **new D-number, allocated centrally by the orchestrator**, for the cache being uninstalled — citing **D56** as the landed precedent for the identical zero-`src`-caller shape. **Annotate, never rewrite**: both entries were true at their own commits. | `docs/INTEGRATION_HONESTY.md` | Both annotations name a commit and a date; the new entry's detector is **behavioural** (the §1 two-call/row-count probe), explicitly **not** a `grep` — D58's detector-shape failure applies here too, since after C1 a `grep "llm_cache=" -- src/` still returns zero. | n/a |
 | **C6** | **Separate, SPEC-only, do not fold into C1.** Correct `docs/SPEC.md` §11.6's `cache_key` list to match the three agreeing statements in the tree (drop `harness_version`, add `prompt_template_version`) and carry §11.6's own stated reason for the exclusion. Fix §11.6's "§12.20" cross-reference — the criterion is **item 21**. | `docs/SPEC.md` | Class result re-measured **against the artefact the fix produced**: 4 statements of the cache key in the tree, **4 of 4 agreeing**, 0 dissenting. Anchor the census on text older than the correction and fail by `file:line`. | consider extending `tests/test_llm_cache.py`'s existing `test_the_effort_column_carries_its_adr_0075_annotation_in_both_copies` pattern to the key list |
 | **C7** | **`projector` — separate lane, separate call, do not fold in.** Decide whether §6's ≤1 Hz debounced projection is wanted at all, given `cli.py` already calls `project_once` at 6 sites. Either construct a `Projector` in the wave commands and pass it, or **document `ctx.project()` as a stated boundary** and say in `RunContext.projector`'s docstring that production uses `project_once`. | `src/fleet/cli.py` **or** `src/fleet/orchestrator/context.py` (not both) | Whichever arm: `grep`-independent evidence that a wave's transitions do or do not refresh `migration_state.json` mid-wave. **Do not close this with a convention wearing a mechanism's clothes** — an honest disclosure beats a fake debounce. | `tests/test_projection.py` |
+
+> **Editorial correction (2026-08-22), lane W34 — the "6 sites" count in the C7 row above is
+> wrong, measured at `81b3b55`.** By AST and by `grep -n "project_once(" src/fleet/cli.py`,
+> `project_once(...)` is called at **7** sites in `cli.py`, not 6 — see the identical correction
+> after §5's table for the full measurement and the 7th site's location and history. C7's success
+> criterion is unaffected: it asks for `grep`-independent evidence that a wave's transitions refresh
+> `migration_state.json` mid-wave, not a specific site count. This body is a promoted scratch
+> report, byte-identical apart from the provenance banner (`f36c9ad`); the miscount predates
+> promotion.
 
 **Ordering.** C1 → C2 → C3/C4 (C4 will fail the suite until C1 lands, so they must be one commit or
 strictly sequenced) → C5. C6 and C7 are independent of all of the above and of each other.
