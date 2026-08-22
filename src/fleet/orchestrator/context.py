@@ -41,12 +41,12 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 from fleet.llm.cache import CachingModelClient
-from fleet.llm.client import LadderModelClient
+from fleet.llm.client import CallPolicy, LadderModelClient
 from fleet.models.base import utcnow
 from fleet.models.enums import Phase, TransformTier
 from fleet.obs.log import get_logger
 from fleet.orchestrator.findings import LlmFindingSink
-from fleet.settings import FleetConfig
+from fleet.settings import FleetConfig, LlmSection
 from fleet.workers.base import WorkerContext
 
 if TYPE_CHECKING:  # types only — none of these is needed to import this module
@@ -54,7 +54,7 @@ if TYPE_CHECKING:  # types only — none of these is needed to import this modul
     from structlog.stdlib import BoundLogger
 
     from fleet.llm.cache import CacheMode, LlmCacheStore
-    from fleet.llm.client import CallBudget, CallPolicy, ModelBackend, ModelClient
+    from fleet.llm.client import CallBudget, ModelBackend, ModelClient
     from fleet.llm.roles import LlmRouter
     from fleet.orchestrator.budgets import CostLedger, Limits
     from fleet.state.db import StateWriter
@@ -63,6 +63,7 @@ if TYPE_CHECKING:  # types only — none of these is needed to import this modul
 
 __all__ = [
     "RunContext",
+    "call_policy_for",
     "default_logger",
     "lease_owner_id",
 ]
@@ -103,6 +104,37 @@ def _loop_time() -> float:
     return asyncio.get_running_loop().time()
 
 
+def call_policy_for(llm: LlmSection) -> CallPolicy:
+    """The §9 `llm:` knobs `CallPolicy` can express, resolved FROM CONFIG.
+
+    `CallPolicy`'s own docstring says it is injected "so a test does not have to load
+    config" — which is right, and is why the mapping lives here rather than in
+    `llm/client.py`. What was missing is the other half: nothing ever performed the
+    injection, so `llm.max_schema_repairs` and the whole `llm.failover.*` block reached
+    the client at no `RunContext(` site and an operator who set them changed the run not
+    at all.
+
+    Two §9 leaves map onto this object and no more:
+
+    * `llm.max_schema_repairs` — §11.8 failover trigger 4 is "the negotiation ladder (§7.7)
+      plus `llm.max_schema_repairs` failed to get a response that validates";
+    * `llm.failover.max_targets_per_call` — §9: "a single call never walks more than this
+      many targets", and §11.8 fails closed when it "is reached without a validated
+      response". `failover.enabled: false` is §9's "a tier uses only its first target; a
+      dead target is fatal", which is exactly one target walked and then `TierUnavailable`.
+
+    §11.8's `open_after_failures` and `cooldown_s` are deliberately NOT mapped: they
+    describe the per-target three-state `BackendHealth` that `llm/failover.py` does not
+    exist to hold yet, and `CallPolicy` cannot express a circuit breaker. Faking them onto
+    a field that means something else would be worse than leaving them visibly unwired.
+    `on_tier_exhausted` has one value, `halt`, which is what the client already does.
+    """
+    return CallPolicy(
+        max_schema_repairs=llm.max_schema_repairs,
+        max_targets_per_call=(llm.failover.max_targets_per_call if llm.failover.enabled else 1),
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class RunContext:
     """Process-wide run handle. Constructed once by the CLI, passed into the `PhaseRunner`.
@@ -139,6 +171,12 @@ class RunContext:
     which is the whole of `--llm-cache off`."""
     llm_cache_mode: CacheMode = "read-write"
     llm_policy: CallPolicy | None = None
+    """An EXPLICIT override of the §9 `llm:` knobs the client reads. `None` — which is what
+    every `RunContext(` site in `cli.py` passes, by passing nothing — means *derive them
+    from `config.llm`* (`call_policy_for`), NOT "take `CallPolicy`'s own defaults". The
+    distinction is the whole of this field's history: it was declared and consumed and
+    never once assigned, so every `llm.failover.*` value an operator wrote was echoed back
+    by `fleet config` and read by nothing."""
     harness_version: str = ""
 
     model_client: ModelClient = field(init=False, repr=False, compare=False)
@@ -166,10 +204,11 @@ class RunContext:
             clock=self.clock,
         )
         object.__setattr__(self, "llm_findings", sink)
+        policy = call_policy_for(self.config.llm) if self.llm_policy is None else self.llm_policy
         client: ModelClient = LadderModelClient(
             self.llm,
             self.backends,
-            policy=self.llm_policy,
+            policy=policy,
             on_drift=sink.on_drift,
             on_failover=sink.on_failover,
         )

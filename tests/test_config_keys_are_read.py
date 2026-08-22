@@ -43,7 +43,14 @@ consequences remain worth knowing before trusting a pass:
    (`llm.max_schema_repairs`, `llm.failover.enabled`, `llm.failover.max_targets_per_call` collide
    with real, unrelated fields of `llm/client.py`'s `CallPolicy` — injected precisely so a run does
    not have to load config, per its own docstring — and, for `enabled`, with the genuinely-wired
-   `scan.contracts.enabled`). All five are true inert keys once qualified, live in `KNOWN_INERT`.
+   `scan.contracts.enabled`). The collisions are all still there, so all five still need the
+   qualified check; their **verdicts** now differ. Two (`transform.ladder.role`,
+   `.context_policy`) remain inert and stay in `KNOWN_INERT`. The three `llm.` ones are
+   **read** as of 2026-08-22: `orchestrator/context.py::call_policy_for` maps them onto the
+   `CallPolicy` that `RunContext.__post_init__` now injects, so the qualified pair occurs for
+   real and the `KNOWN_INERT` lines were deleted. They stay in `QUALIFIED_MATCH_KEYS`
+   deliberately: the bare-name collision with `CallPolicy` is what would let a *revert* of
+   that wiring pass `test_every_config_key_is_read` unnoticed.
 2. `UNVERIFIABLE` is what is left when even the qualified match cannot decide it:
    `transform.ladder.tier` stays undecidable because `orchestrator/runner.py:655` calls
    `ladder.tier(attempt)` where `ladder` is `orchestrator/retry.py`'s `LadderState` — a *different*
@@ -123,8 +130,11 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:llm.rate_limit.aimd.floor",             # settings.py:644
         #
         # --- §11.8 failover: the circuit breaker's three tuning keys ----------------------
-        # `llm/client.py` walks `max_targets_per_call` targets and honours `failover.enabled`,
-        # but opens no circuit: nothing counts failures, nothing cools down, nothing halts.
+        # `orchestrator/context.py::call_policy_for` maps `failover.enabled` and
+        # `failover.max_targets_per_call` onto the `CallPolicy` the client walks (2026-08-22),
+        # but that opens no circuit: nothing counts failures, nothing cools down, nothing
+        # halts. `CallPolicy` cannot express a per-target `BackendHealth`, and §11.8's
+        # `llm/failover.py` does not exist, so these three stay inert.
         "fleet.yaml:llm.failover.open_after_failures",     # settings.py:661
         "fleet.yaml:llm.failover.cooldown_s",              # settings.py:662
         "fleet.yaml:llm.failover.on_tier_exhausted",       # settings.py:664
@@ -178,11 +188,6 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # `settings.py:1253`'s `llm_concurrency` accessor DOES apply it correctly — but nothing
         # outside `settings.py` calls `llm_concurrency` either (only `tests/test_settings.py`).
         "fleet.yaml:llm.concurrency_overrides",             # settings.py:683
-        # The section name itself: every real (non-comment) occurrence of "failover" in the tree
-        # is `llm/client.py`'s own module reference to a sibling file that does not exist as such
-        # (`failover.py`, named in a comment). `.enabled` and `.max_targets_per_call` below are
-        # true leaves of this same section, decided separately via qualified match.
-        "fleet.yaml:llm.failover",                          # settings.py:682
         # `validate_memory_budget` (settings.py:1272) is the only reader and is never called —
         # `memory_commitment_mb`'s own docstring says the caller "decides"; none does.
         "fleet.yaml:budgets.max_host_rss_mb",               # settings.py:265
@@ -215,18 +220,15 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # `ladder.context_policy` occur nowhere for real once qualified.
         "fleet.yaml:transform.ladder.role",                 # settings.py:419
         "fleet.yaml:transform.ladder.context_policy",       # settings.py:420
-        # `llm/client.py`'s `CallPolicy` (its own docstring: "Injected, so a test does not have to
-        # load config and a run does not have to hard-code a default") declares fields with the
-        # SAME names as these three config leaves. `CallPolicy()` is constructed with no override
-        # at its one call site (`client.py:478`): `RunContext.llm_policy` is declared and consumed
-        # (`orchestrator/context.py:140,152`) but never assigned by any of the five `RunContext(`
-        # sites in `cli.py` (1806, 4074, 7496, 7568, 9115). The bare names pass the plain scan on
-        # `self._policy.max_schema_repairs` / `.max_targets_per_call` — real code, wrong object.
-        "fleet.yaml:llm.max_schema_repairs",                # settings.py:680
-        "fleet.yaml:llm.failover.enabled",                  # settings.py:660 — also collides
-        #                                                      with the genuinely-wired
-        #                                                      `scan.contracts.enabled`
-        "fleet.yaml:llm.failover.max_targets_per_call",     # settings.py:663
+        # (`llm.max_schema_repairs`, `llm.failover.enabled` and `llm.failover.max_targets_per_call`
+        # used to sit here, with the mechanism spelled out: `RunContext.llm_policy` was declared
+        # and consumed but never assigned, so `CallPolicy()` was always all-defaults and the bare
+        # names passed the plain scan on `self._policy.max_schema_repairs` /
+        # `.max_targets_per_call` — real code, wrong object. They left on 2026-08-22 when
+        # `RunContext.__post_init__` began deriving the policy from `config.llm` through
+        # `orchestrator/context.py::call_policy_for`. They keep their `QUALIFIED_MATCH_KEYS`
+        # membership: the wrong-object collision is unchanged, and it is the only thing that
+        # would hide a revert. Their three still-inert siblings are above, under §11.8.)
         # `cli.py` declares a `--stub-blocked` flag / local named `stub_blocked` at five
         # sites (2377, 3046, 3120, 4770, 9536) — never `config.transform.stub_blocked`. The
         # refusal block `cli.py:3156-3158`/`4772-4774` even says so: "--stub-blocked is not
@@ -247,8 +249,13 @@ QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
         # nothing to do with the config: a common English word, or a same-named field/flag/local
         # on an unrelated object. `_inert_keys()` decides them with `_qualified_readers` instead —
         # the immediate parent field name plus the leaf (`failover.enabled`,
-        # `llm.max_schema_repairs`) — which does not occur for real in any of them. See the
-        # `KNOWN_INERT` comments above for the specific collision each one resolves.
+        # `llm.max_schema_repairs`). Membership says only *which scan decides the key*, never
+        # what the verdict is: for most of these the qualified pair occurs nowhere and the
+        # verdict is inert, while the three `llm.` ones are genuinely READ through it since
+        # 2026-08-22 (`orchestrator/context.py::call_policy_for`) and are no longer in
+        # `KNOWN_INERT`. They stay here because the bare-name collision that made the plain
+        # scan useless for them is unchanged, and it is what would let a revert of that wiring
+        # go unnoticed. See the `KNOWN_INERT` comments above for each specific collision.
         "fleet.yaml:transform.ladder.role",
         "fleet.yaml:transform.ladder.context_policy",
         "fleet.yaml:llm.max_schema_repairs",
@@ -462,7 +469,7 @@ def _qualified_readers(parent: str, field_name: str) -> list[str]:
     """Like `_readers`, but requires the immediate parent field name immediately before the leaf
     (`failover.enabled`, `llm.max_schema_repairs`) rather than the bare leaf alone. Used only for
     `QUALIFIED_MATCH_KEYS`, where the bare name collides with a common word or an unrelated
-    same-named field and the qualified pair does not."""
+    same-named field, so a hit on the bare name proves nothing either way."""
     pattern = re.compile(rf"\b{re.escape(parent)}\s*\.\s*{re.escape(field_name)}\b")
     return [
         str(path.relative_to(SRC)) for path, text in _sources() if pattern.search(text)
@@ -608,8 +615,33 @@ def test_the_allowlists_are_disjoint() -> None:
     assert not (DECLARATIVE & UNVERIFIABLE)
 
 
-def test_qualified_match_keys_are_a_subset_of_known_inert() -> None:
-    """`QUALIFIED_MATCH_KEYS` is an implementation detail of `_inert_keys()`, not its own verdict
-    — every member must resolve to a real classification (here, `KNOWN_INERT`; none currently
-    resolve to a plain read) or this set is silently steering keys nowhere."""
-    assert QUALIFIED_MATCH_KEYS <= KNOWN_INERT
+def test_qualified_match_keys_resolve_to_a_verdict() -> None:
+    """`QUALIFIED_MATCH_KEYS` is an implementation detail of `_inert_keys()`, not its own
+    verdict — every member must resolve to a real classification or this set is silently
+    steering keys nowhere.
+
+    There are exactly two ways to resolve. Either the qualified pair occurs nowhere, the key
+    is inert, and it is in `KNOWN_INERT`; or the qualified pair occurs for real, the key is
+    read, and this test demands the **evidence** — a non-empty reader list — rather than
+    membership in a hand-maintained set. The predecessor of this test asserted
+    `QUALIFIED_MATCH_KEYS <= KNOWN_INERT`, which was true while no member had ever been
+    wired; it would have forced the first member that *was* wired out of
+    `QUALIFIED_MATCH_KEYS` and back onto the bare scan — the scan that is useless for these
+    keys by construction — silently retiring the ratchet for exactly the key that had just
+    stopped being a defect.
+    """
+    for key in sorted(QUALIFIED_MATCH_KEYS):
+        name = _config_keys()[key]
+        readers = _qualified_readers(_parent_field(key), name)
+        if key in KNOWN_INERT:
+            assert not readers, (
+                f"{key} is in KNOWN_INERT but its qualified pair is read by {readers} — "
+                "`test_known_inert_keys_are_still_inert` should already have caught this"
+            )
+            continue
+        assert readers, (
+            f"{key} is not in KNOWN_INERT, so it is claimed to be READ — but the qualified "
+            f"`{_parent_field(key)}.{name}` pair occurs nowhere in src/fleet/. It resolves to "
+            "no verdict at all: put it back in KNOWN_INERT, or drop it from "
+            "QUALIFIED_MATCH_KEYS if the bare-name collision is gone."
+        )

@@ -3588,7 +3588,8 @@ suite is green on `main`.
 
 ---
 
-**D58 — OPEN. `RunContext.llm_policy` is never assigned, so no `llm.failover.*` config key reaches
+**D58 — CLOSED IN PART, FIXED in round E (2026-08-22, lane W22); see Status at the end of this
+entry. `RunContext.llm_policy` is never assigned, so no `llm.failover.*` config key reaches
 the model client — and the repo's own test suite already documented this in a comment.** Verified
 against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**, where `orchestrator/context.py:141`
 declares it and `:172` consumes it.
@@ -3621,6 +3622,41 @@ semantics for `failover.enabled` that no ADR decides, and three `KNOWN_INERT` de
 decision for an ADR, not a drive-by. **This is a config-surface sibling of D50** — a live code
 consumer correctly gated but never wired to the key that should drive it — and the same relationship
 D49's second correction describes from the opposite end.
+
+**Status — CLOSED IN PART, 2026-08-22 (round E, lane W22).** Everything above records what was
+true when it was written and is left standing. What changed:
+
+* `RunContext.__post_init__` now derives the policy — `policy = call_policy_for(self.config.llm)
+  if self.llm_policy is None else self.llm_policy` — so `None`, which is what every
+  `RunContext(` site in `cli.py` still passes, means *from config* instead of *all defaults*.
+  (Five sites, AST-counted over the `f4eade0` blob of `cli.py` and again over the working
+  tree; `llm_policy` is passed at none of them, then or now.)
+  `orchestrator/context.py::call_policy_for` maps exactly two §9 leaves onto `CallPolicy`:
+  `llm.max_schema_repairs`, and `llm.failover.max_targets_per_call` gated by
+  `llm.failover.enabled` (§9: *"false ⇒ a tier uses only its first target; a dead target is
+  fatal"* — one target walked, then `TierUnavailable`).
+* **Exercised, not read.** Real `FleetSettings.load("config", cli_overrides={...})`, real
+  `RunContext`, scripted offline backend, tier of three dead targets, config asking for one:
+  before, the client walked `['t1','t2','t3']` and `client._policy == CallPolicy()`; after, it
+  walks `['t1']`. FD1's "invented semantics for `failover.enabled`" concern is answered by §9's
+  own comment, quoted above, rather than by an ADR.
+* The three `KNOWN_INERT` lines this entry names are deleted, and so is a fourth it does
+  not name: the section key `fleet.yaml:llm.failover`, inert only because no real (non-
+  comment) code spelled the word. The three leaves keep their
+  `QUALIFIED_MATCH_KEYS` membership, because the `CallPolicy` bare-name collision that made the
+  plain scan useless for them is unchanged and is the only thing that would hide a revert.
+* **Still open, and deliberately not faked:** `llm.failover.open_after_failures`,
+  `llm.failover.cooldown_s` and `llm.failover.on_tier_exhausted` remain in `KNOWN_INERT`.
+  They describe §11.8's three-state per-target `BackendHealth` in an `llm/failover.py` that
+  does not exist; `CallPolicy` cannot express a circuit breaker. Measured after the fix, with
+  the same scan the test file uses: those three still report inert.
+* **This entry's own detector no longer detects it.** `git grep "llm_policy=" -- src/` returns
+  **zero** hits *after* the fix as well as before — measured both ways — because the wiring
+  landed at the consumption point rather than at a call site. A re-audit that reruns the grep
+  quoted above will read a fixed defect as still open. The falsifiable check is behavioural:
+  construct a `RunContext` with no `llm_policy=` and a config whose
+  `llm.failover.max_targets_per_call` is 1, and count the targets the backend is asked for.
+  `tests/test_run_context_llm_policy.py` is that check.
 
 ---
 
