@@ -365,9 +365,15 @@ source, not from the design doc:
 
 > **SETTLED IN PART (2026-08-22), lane W27 — ADR-0079 (`bd35a54`) confirms the `STAYS` half of this
 > split as a ruling and falsifies the `REMOVES` half.** The two `STAYS` rows are ruled: **ADR-0079
-> §5** keeps `--revalidation` and `--raise-revalidation-rounds` refused, resting on the same three
-> primary sources this section names (SPEC §10's `fleet stubs resolve`, SPEC §13 row 34, and the
-> step-5 design plan's row 9). The three `-> subtask 9 REMOVES` annotations are falsified twice
+> §5** keeps `--revalidation` and `--raise-revalidation-rounds` refused, resting on three concurring
+> primary sources with no dissent, **two** of which are the ones this section names below (SPEC
+> §10's `fleet stubs resolve`, and SPEC §13 row 34); the third is the step-5 design plan's **row 9
+> as it stood at `f4eade0`**, which ADR-0079 §5 anchors deliberately, because the same commit
+> rewrites that row and a later reader must not count it twice. *(Corrected 2026-08-22 by W27, the
+> lane that wrote this marker one commit earlier at `e2ec4f1`. It read "resting on the same three
+> primary sources this section names", and §4.1 names two of ADR-0079 §5's three, not three. The
+> retired words are quoted here on purpose, so a count-based sweep for them finds this retraction
+> and not a survival.)* The three `-> subtask 9 REMOVES` annotations are falsified twice
 > over. **As to which subtask: all three are wrong.** ADR-0079 §6 rules that subtask 9 removes
 > **nothing** from the `unbuilt` dict and that the un-refusal ships with **subtask 10**. **As to
 > ownership, the three then split.** ADR-0079 §2 and §4 rule `--from-phase` and `--repo`, so those
@@ -375,7 +381,7 @@ source, not from the design doc:
 > declines to rule `--reset-attempts`' semantics**, so that flag stays refused and **no subtask owns
 > removing it** until an ADR rules it. **The dict itself is unchanged** — measured at `bac5069` by
 > parsing `cli._refuse_unbuilt_resume_flags`' `unbuilt` assignment out of the
-> `git show HEAD:src/fleet/cli.py` blob with `ast`: all five keys are still there, and ADR-0079
+> `git show bac5069:src/fleet/cli.py` blob with `ast`: all five keys are still there, and ADR-0079
 > changes no code. The split above is left exactly as written; it records what this brief measured
 > at its own anchors (`6bf198f`, re-anchored at `7275adb` in §7), both of which predate `bd35a54`.
 
@@ -436,7 +442,12 @@ inherit it as a premise.
 > this section is the record of the question, ADR-0079 is the record of the answer, and a second
 > copy is a second site to keep in step.
 >
-> **Two of this section's three binding constraints are discharged by that ruling; one is not.** The
+> **One of this section's three binding constraints is discharged by that ruling; the other two
+> stand.** *(Corrected 2026-08-22 by W27, the lane that wrote this marker one commit earlier at
+> `e2ec4f1`. It read "Two of this section's three binding constraints are discharged by that ruling;
+> one is not", which inverts the tally its own next three sentences give. The retired words are
+> quoted here on purpose, so a count-based sweep for them finds this retraction and not a
+> survival.)* The
 > `int | None` → `Phase(from_phase)` conversion constraint **stands unchanged**. The "observable
 > only as different demotion sets until subtask 10" constraint **stands, and ADR-0079 §6 sharpens
 > it**: the un-refusal itself now ships with **subtask 10**, so under a subtask-7+9 tree the flag is

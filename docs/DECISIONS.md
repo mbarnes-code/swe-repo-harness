@@ -10237,10 +10237,18 @@ under `.venv/bin/python`, and reported as a class rather than as a raw total. Ro
 whole-file-normalised sweep of every `.py` file under `src/fleet` for `merge_wait_timeout_s`:
 **5 sites** — one `settings.py` field default, and four prose mentions in `models/state.py`,
 `workers/prwriter.py`, `cli.py` and `orchestrator/reentry.py`. Route two, an `ast` call-graph over
-the same tree for the three `blocked_by` sinks, reporting each call's enclosing symbol: the writers
-are `PhaseRunner._contain` (through `WaveScheduler.propagate_blocked`) and `cli._quarantine_impl`,
-the sole remover is `cli._apply_unblocking`, and the remaining three hits are the sink itself plus
-two same-named delegating wrappers in `cli.py`. **The class result the two routes agree on: no
+the same tree for the append sink, the removal sink and the propagation rule that fronts the append,
+reporting each call's enclosing symbol — **6 call sites**: the writers are `PhaseRunner._contain`
+(through `WaveScheduler.propagate_blocked`) and `cli._quarantine_impl`, the sole remover is
+`cli._apply_unblocking`, and the remaining three are `WaveScheduler.propagate_blocked`'s own call to
+the append plus two same-named delegating wrappers in `cli.py`. *(Corrected 2026-08-22 by W27, the
+lane that wrote this section one commit earlier at `e2ec4f1`. It read "the three `blocked_by` sinks"
+and "the remaining three hits are the sink itself plus two same-named delegating wrappers": there
+are **two** sinks, not three — `propagate_blocked` is the rule that fronts the append, which is why
+the field description in `models/state.py` enumerates it separately — and a sink's own `def` is not
+a call site, so the third remaining hit is `propagate_blocked`'s call, not the sink. Neither error
+moves the class result stated next. The retired words are quoted here on purpose, so a count-based
+sweep for them finds this retraction and not a survival.)* **The class result the two routes agree on: no
 control path carries a `merge_wait_timeout_s` breach into a `blocked_by` write.** So nothing in the
 tree can be blocked by that trigger, nothing can be cleared by its reversal, and **the two readings
 have identical observable behaviour until someone implements it**. That is exactly why the
