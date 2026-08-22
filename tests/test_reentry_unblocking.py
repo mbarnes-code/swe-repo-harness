@@ -5,34 +5,27 @@ unit was built for, not an accident of the fixtures. The store method and the `_
 wiring are other lanes' work; if anything in this file ever needs a `tmp_path`, the separation
 has been lost.
 
-**What each test watches, and whether the defect could leave it unchanged.** The defect this
-module exists to prevent is the *fail-open* recompute: erasing a `blocked_by` entry the predicate
-could not positively resolve, which silently undoes an audited `OperatorQuarantine` and
-permanently erases every entry written by one of SPEC §3.5's three zero-producer triggers
-(ADR-0090 §2.4, ruling R2-CLOSED). The quantity that moves under it is **the membership of an
-unresolvable name in `Unblocking.remaining` vs `Unblocking.removed`** — and it moves for
-*unresolvable* names only. So:
+**Each fixture case discriminates a different defect, and the mapping is stated rather than
+implied.** The previous version of this file had two cases (a quarantined blocker and a bare
+`SKIPPED` one) that were *input-identical* to the unit — the predicate read only one field and
+both fixtures set it the same way — so one of them discriminated nothing and was green under
+every mutation anyone ran. That is the two-anchor collapse CLAUDE.md records; it is fixed here by
+making the anchors differ in what the predicate actually reads, not in what the fixture is called.
 
-* `test_a_quarantined_blockers_dependent_keeps_its_entry` and
-  `test_an_rhi_blocker_re_run_to_succeeded_loses_its_entry` are the two obvious cases and
-  **neither discriminates**: both of their blockers resolve, so a fail-open predicate answers them
-  identically. They are here because they pin the predicate's two live producers, not because they
-  catch the defect. Stating that is the point — a fixture set of those two alone is exactly the
-  hurried version that certifies a fail-open recompute green.
-* `test_an_entry_naming_a_string_that_resolves_to_no_repo_survives_untouched` is the
-  **discriminating** one. Its blocker is absent from `blocker_statuses` entirely, so it is the only
-  fixture whose verdict differs between the two polarities.
-* `test_a_bare_skipped_blocker_is_retained_because_a_skipped_repo_has_not_landed` is case 4, and
-  it discriminates a **different** defect: not the fail-open polarity but the narrowing of
-  `BLOCKING_STATUSES` back to `{REQUIRES_HUMAN_INTERVENTION}` plus a quarantine-finding check,
-  which is precisely the shape a reconciler reaches for. It is measured-unreachable in the shipped
-  tree — no writer produces a `SKIPPED` blocker without an `OperatorQuarantine` finding — so this
-  test is what keeps the branch from being deleted as dead logic.
+1. `quarantined-dep` → `acme-gated` = `{SKIPPED, SUCCEEDED}` — reddens **C3**: a lossy reduction
+   of the vector to one status, or `any` where the predicate says `all`.
+2. `abandoned-dep` → `acme-fixed` = `{SUCCEEDED}` — reddens a predicate that never removes
+   anything.
+3. `orphan-dep` → `contract:…`, **absent** from the mapping — reddens fail-**open** on a name that
+   cannot be resolved.
+4. `live-dep` → `acme-running` = `{SUCCEEDED, PENDING}` — reddens the **deny-list**: neither member
+   is a "blocking" status, so *remove what is not shown to be blocking* clears this entry.
+5. `norows-dep` → `acme-norows` = `frozenset()` — reddens `all(())` being `True`, which removes a
+   blocker whose rows could not be found.
 
-**Anchors are kept distinct on purpose.** No two fixtures share a blocker name, and no fixture's
-blocker appears in `blocker_statuses` under a second status — a fixture whose "resolvable" and
-"unresolvable" anchors coincided could not express the defect at all, which is how eight tests in
-this project once passed under the exact defect they existed to catch.
+Cases 1 and 4 are the two that were missing when the deny-list shipped, and they are the two that
+correspond to the review's Criticals. Case 4 also separates this predicate from the weaker fix of
+"retain if **any** row is in a blocking set": under that rule `{SUCCEEDED, PENDING}` is removed.
 """
 
 from __future__ import annotations
@@ -41,43 +34,44 @@ import pytest
 
 from fleet.models.enums import Phase, RepoStatus
 from fleet.orchestrator.reentry import (
-    BLOCKING_STATUSES,
-    QUARANTINE_FINDING_KIND,
+    LANDED_STATUSES,
     BlockerState,
     Unblocking,
     plan_unblocking,
     still_blocking,
 )
 
-# The three cases the fixture must contain, built once so every test names the same anchors.
-#
-# `quarantined-dep` is blocked by a repo `fleet quarantine` SKIPPED under an audited finding;
-# `abandoned-dep` is blocked by a repo that was RHI and has since been re-run to SUCCEEDED;
-# `orphan-dep` is blocked by a string that resolves to no repo at all -- SPEC §3.5 mandates a
-# `contract_id` in `phases.blocked_by` on `contracts.status='FAILED'`, and no code writes one, so
-# this is the shape of an entry a live recompute can never re-derive.
 _ROWS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("quarantined-dep", ("acme-gated",)),
     ("abandoned-dep", ("acme-fixed",)),
     ("orphan-dep", ("contract:acme.protos:1.4",)),
-    ("excluded-dep", ("acme-excluded",)),
+    ("live-dep", ("acme-running",)),
+    ("norows-dep", ("acme-norows",)),
 )
 
 _STATUSES: dict[str, BlockerState] = {
+    # Case 1 -- the C3 vector, taken from an EXECUTED run of the shipped `cli._quarantine_impl`
+    # against a temp DB: a repo that finished SCAN and TRANSFORM and is then quarantined between
+    # phases ends at `[(1, 'SKIPPED'), (2, 'SUCCEEDED')]`, with the `OperatorQuarantine` finding
+    # written and its dependent `BLOCKED`. Not a hypothetical shape.
     "acme-gated": BlockerState(
-        status=RepoStatus.SKIPPED, finding_kinds=frozenset({QUARANTINE_FINDING_KIND})
+        phase_statuses=frozenset({RepoStatus.SKIPPED, RepoStatus.SUCCEEDED})
     ),
-    "acme-fixed": BlockerState(status=RepoStatus.SUCCEEDED, finding_kinds=frozenset()),
-    # case 4: `SKIPPED` with NO quarantine finding. Measured-unreachable in the shipped tree, and
-    # deliberately built as a *distinct* input from `acme-gated` so the retention is expressible.
-    "acme-excluded": BlockerState(status=RepoStatus.SKIPPED, finding_kinds=frozenset()),
+    "acme-fixed": BlockerState(phase_statuses=frozenset({RepoStatus.SUCCEEDED})),
+    # Case 4 -- nothing here is terminal-and-blocking; a deny-list of blocking statuses removes it.
+    "acme-running": BlockerState(
+        phase_statuses=frozenset({RepoStatus.SUCCEEDED, RepoStatus.PENDING})
+    ),
+    # Case 5 -- resolved, but the repo carries no `phases` rows at all.
+    "acme-norows": BlockerState(phase_statuses=frozenset()),
 }
 
 _FLOORS: dict[str, Phase] = {
     "quarantined-dep": Phase.TRANSFORM,
     "abandoned-dep": Phase.BUILD,
     "orphan-dep": Phase.SCAN,
-    "excluded-dep": Phase.TRANSFORM,
+    "live-dep": Phase.TRANSFORM,
+    "norows-dep": Phase.SCAN,
 }
 
 
@@ -91,27 +85,40 @@ def _plan() -> dict[str, Unblocking]:
 
 
 # ---------------------------------------------------------------------------------------
-# the three fixture cases the fail-closed ruling requires
+# the five fixture cases
 # ---------------------------------------------------------------------------------------
 
 
-def test_a_quarantined_blockers_dependent_keeps_its_entry() -> None:
-    """Case 1. Watches: `acme-gated`'s membership in `remaining`.
+def test_a_quarantine_between_phases_keeps_its_dependents_blocked() -> None:
+    """**Case 1 — the reachable silent undo of an audited `OperatorQuarantine`.**
 
-    Does NOT discriminate a fail-open predicate — `acme-gated` resolves, so both polarities answer
-    it the same way. It pins the `SKIPPED` + `OperatorQuarantine` half of the predicate instead:
-    without it, narrowing the predicate to `BLOCKING_STATUSES` alone would go green.
+    Watches: whether `acme-gated`'s entry survives when the blocker's phase vector holds a
+    `SKIPPED` row *below* a `SUCCEEDED` one.
+
+    The sequence, every step shipped code and the vector executed rather than assumed:
+    `dep` finishes SCAN and TRANSFORM; its BUILD and VERIFY rows do not exist yet (the phase row
+    is created on admission). The operator runs `fleet quarantine dep --reason …` between phases.
+    `_quarantine_impl`'s `movable` list excludes rows already in `TERMINAL_STATUSES`, and
+    `SUCCEEDED` is one, so nothing is movable and the `else` branch stamps `SKIPPED` onto phase 1
+    alone; dependents are blocked unconditionally, outside both branches. The result is
+    `[(1, 'SKIPPED'), (2, 'SUCCEEDED')]` with the finding written and the dependent `BLOCKED`.
+
+    Any reduction of that vector to one status by highest phase — the reduction
+    `state/projection._fold_repos` uses — yields `SUCCEEDED`, and the entry is cleared on the next
+    `fleet resume`. The audited quarantine is silently undone. Retaining the whole vector is what
+    makes that unrepresentable here; `any`-instead-of-`all` re-opens it and reddens this test.
     """
     entry = _plan()["quarantined-dep"]
     assert entry.remaining == ("acme-gated",)
     assert entry.removed == ()
+    assert still_blocking("acme-gated", _STATUSES) is True
 
 
-def test_an_rhi_blocker_re_run_to_succeeded_loses_its_entry() -> None:
+def test_a_blocker_whose_every_phase_landed_loses_its_entry() -> None:
     """Case 2. Watches: `acme-fixed`'s membership in `removed`, and the list emptying.
 
-    Also does not discriminate. It is the direction that stops the ruling being implemented as
-    "retain everything": a predicate that never removes anything would fail here.
+    The direction that stops the fail-closed ruling being implemented as "retain everything": a
+    predicate that never removes anything fails here, and it is the only case that fails on it.
     """
     entry = _plan()["abandoned-dep"]
     assert entry.removed == ("acme-fixed",)
@@ -119,12 +126,13 @@ def test_an_rhi_blocker_re_run_to_succeeded_loses_its_entry() -> None:
 
 
 def test_an_entry_naming_a_string_that_resolves_to_no_repo_survives_untouched() -> None:
-    """Case 3 -- **the discriminating one**. Watches: an unresolvable name's side of the split.
+    """Case 3. Watches: an unresolvable name's side of the `removed`/`remaining` split.
 
-    `contract:acme.protos:1.4` is absent from `blocker_statuses` altogether. Under the fail-closed
-    ruling it stays in `remaining` and `orphan-dep` is NOT admitted; under a fail-open predicate it
-    moves to `removed`, `remaining` empties, and `orphan-dep` is admitted against a blocker nobody
-    ever cleared. Both assertions below flip, and the two tests above stay green either way.
+    `contract:acme.protos:1.4` is absent from `blocker_statuses` altogether — SPEC §3.5 mandates a
+    `contract_id` in `phases.blocked_by` on `contracts.status='FAILED'` and no code writes one, so
+    this is the shape of an entry a live recompute can never re-derive. Under the fail-closed
+    ruling it stays; under a fail-open predicate `orphan-dep` is admitted against a blocker nobody
+    cleared. This is the only case whose verdict differs between the two polarities.
     """
     entry = _plan()["orphan-dep"]
     assert entry.remaining == ("contract:acme.protos:1.4",)
@@ -134,88 +142,117 @@ def test_an_entry_naming_a_string_that_resolves_to_no_repo_survives_untouched() 
 def test_an_unresolvable_repo_name_is_retained_for_the_same_reason_as_a_contract_id() -> None:
     """Case 3's second shape: a name that looks like a repo but was written by a trigger with no
     producer (§3.1 SCC members, §3.4 merge-timeout, §3.5 failed-contract descendants -- three of
-    the five triggers `RepoState.blocked_by` enumerates). It is unresolvable for the same reason
-    and gets the same answer, so the retention is not keyed to the `contract:` spelling.
+    the five triggers `RepoState.blocked_by` enumerates). Unresolvable for the same reason, same
+    answer, so the retention is not keyed to the `contract:` spelling.
     """
     assert still_blocking("acme-never-scanned", _STATUSES) is True
 
 
-def test_a_bare_skipped_blocker_is_retained_because_a_skipped_repo_has_not_landed() -> None:
-    """Case 4. Watches: `acme-excluded`'s side of the split, and `excluded-dep`'s admissibility.
+def test_a_blocker_with_an_unlanded_phase_is_retained_though_no_phase_is_blocking() -> None:
+    """**Case 4 — the case a deny-list gets wrong.**
 
-    `acme-excluded` is `SKIPPED` with **no** `QUARANTINE_FINDING_KIND`. It resolves, so the
-    fail-open polarity answers it exactly as fail-closed does and **M1 cannot express this case** —
-    it discriminates a different mutation: narrowing `BLOCKING_STATUSES` back to
-    `{REQUIRES_HUMAN_INTERVENTION}` and re-adding a quarantine-finding check, which is the change a
-    reconciler makes to satisfy a criterion phrased only about RHI and quarantine.
+    Watches: `acme-running`, whose vector is `{SUCCEEDED, PENDING}`. Neither member is in any
+    plausible set of "blocking" statuses, so a deny-list — *remove anything not positively shown
+    to be blocking* — clears this entry and admits `live-dep` against a dependency that has not
+    finished. Measured on the deny-list this replaced: **5 of 7 `RepoStatus` members were
+    removable**, `PENDING` among them.
 
-    Why it is retained rather than removed: a `SKIPPED` repo **has not landed**, whatever excluded
-    it, so clearing the entry admits `excluded-dep` to migrate against a dependency that never ran.
-    The reason for the exclusion is not the question this predicate asks.
-
-    Measured-unreachable today, which is why the assertion is what keeps the branch alive: the only
-    non-delegating writers of `blocked_by` are `runner._contain` (`REQUIRES_HUMAN_INTERVENTION`)
-    and `cli._quarantine_impl`, and the latter writes its `OperatorQuarantine` finding in the same
-    command, so nothing in the shipped tree produces this shape. Without this test the branch reads
-    as dead logic to the next author.
+    It also separates this predicate from the weaker repair of "retain if **any** row is in a
+    blocking set", which removes this entry too. Only *every row landed* keeps it.
     """
-    entry = _plan()["excluded-dep"]
-    assert entry.remaining == ("acme-excluded",)
+    entry = _plan()["live-dep"]
+    assert entry.remaining == ("acme-running",)
     assert entry.removed == ()
-    assert still_blocking("acme-excluded", _STATUSES) is True
+
+
+def test_a_blocker_resolved_to_zero_phase_rows_is_retained() -> None:
+    """**Case 5 — the `all(())` trap.**
+
+    Watches: `acme-norows`, resolved to an empty vector. `all(status in LANDED_STATUSES for …)`
+    over an empty set is `True`, so the natural spelling of this predicate *removes* a blocker
+    whose rows could not be found. "No rows" is the absence of evidence, not evidence of landing:
+    deleting the explicit guard reddens this and nothing else.
+    """
+    entry = _plan()["norows-dep"]
+    assert entry.remaining == ("acme-norows",)
+    assert entry.removed == ()
+    assert still_blocking("acme-norows", _STATUSES) is True
 
 
 # ---------------------------------------------------------------------------------------
-# the predicate itself
+# the whitelist itself
 # ---------------------------------------------------------------------------------------
 
 
-def test_the_predicate_retains_every_skipped_shape_and_rhi_and_nothing_else() -> None:
-    """Watches: the whole verdict table, all five shapes at once.
+def test_removal_requires_every_phase_to_be_landed_not_merely_one() -> None:
+    """Watches: `all` versus `any`, over the four vectors that separate them.
 
-    Every `SKIPPED` shape is retained -- audited quarantine, config exclusion, some other finding
-    -- because none of them has landed and the *reason* is not what this predicate asks about.
-    `SUCCEEDED` is the one shape that resolves to removable. Narrowing `BLOCKING_STATUSES` back to
-    `{REQUIRES_HUMAN_INTERVENTION}` flips three of these five verdicts.
+    This is the C3 mechanism stated as a rule rather than as one fixture: a blocker with a landed
+    row and an unlanded row has not landed.
     """
-    rhi = BlockerState(status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, finding_kinds=frozenset())
-    quarantined = BlockerState(
-        status=RepoStatus.SKIPPED, finding_kinds=frozenset({QUARANTINE_FINDING_KIND})
-    )
-    config_skipped = BlockerState(status=RepoStatus.SKIPPED, finding_kinds=frozenset())
-    other_finding = BlockerState(
-        status=RepoStatus.SKIPPED, finding_kinds=frozenset({"BaselineRed"})
-    )
-    resolved = {
-        "a": rhi,
-        "b": quarantined,
-        "c": config_skipped,
-        "d": other_finding,
-        "e": BlockerState(status=RepoStatus.SUCCEEDED, finding_kinds=frozenset()),
+    verdicts = {
+        "all-landed": still_blocking(
+            "x", {"x": BlockerState(phase_statuses=frozenset({RepoStatus.SUCCEEDED}))}
+        ),
+        "landed-plus-skipped": still_blocking(
+            "x",
+            {
+                "x": BlockerState(
+                    phase_statuses=frozenset({RepoStatus.SUCCEEDED, RepoStatus.SKIPPED})
+                )
+            },
+        ),
+        "landed-plus-pending": still_blocking(
+            "x",
+            {
+                "x": BlockerState(
+                    phase_statuses=frozenset({RepoStatus.SUCCEEDED, RepoStatus.PENDING})
+                )
+            },
+        ),
+        "none-landed": still_blocking(
+            "x", {"x": BlockerState(phase_statuses=frozenset({RepoStatus.PENDING}))}
+        ),
     }
-    verdicts = {name: still_blocking(name, resolved) for name in resolved}
-    assert verdicts == {"a": True, "b": True, "c": True, "d": True, "e": False}
-    assert set(BLOCKING_STATUSES) == {
-        RepoStatus.REQUIRES_HUMAN_INTERVENTION,
-        RepoStatus.SKIPPED,
+    assert verdicts == {
+        "all-landed": False,
+        "landed-plus-skipped": True,
+        "landed-plus-pending": True,
+        "none-landed": True,
     }
 
 
-def test_blocker_state_has_no_default_for_its_finding_kinds() -> None:
-    """Watches: whether `finding_kinds` can be omitted at construction.
+def test_the_landed_whitelist_is_exactly_succeeded_and_every_other_status_is_retained() -> None:
+    """Watches: the verdict for **every** `RepoStatus` member, derived from the enum.
 
-    **The rationale this test used to carry is retired and is written out here rather than left
-    standing.** It was: with a default of `frozenset()`, a caller that forgot to read `findings`
-    would hand every quarantined blocker in as an ordinary `SKIPPED` and un-quarantine it. Since
-    `BLOCKING_STATUSES` holds `SKIPPED` outright that mistake changes no verdict, so this is no
-    longer a guard against a silent audit reversal and must not be cited as one.
+    This is the whitelist as an instrument rather than as a claim. The removable set is computed
+    over `RepoStatus` itself, so a member added to the enum tomorrow lands on the **retained**
+    side with nobody editing an expectation — which is what "fail-closed by default" has to mean
+    to be worth anything. Widening `LANDED_STATUSES` is the deliberate act, and it reddens the
+    second assertion.
 
-    What it still holds is that the two `SKIPPED` shapes stay distinct inputs: a defaulted field
-    no verdict reads would be passed nowhere, and case 4's fixture -- the only place the bare shape
-    is expressible -- would stop being distinguishable from the audited one.
+    Under the deny-list this replaced, this test's first assertion read
+    `{PENDING, RUNNING, SUCCEEDED, BLOCKED, DEGRADED}` — five of seven, including the `BLOCKED`
+    that `WaveScheduler.admit` refuses to dispatch.
     """
-    with pytest.raises(TypeError):
-        BlockerState(status=RepoStatus.SKIPPED)  # type: ignore[call-arg]
+    removable = {
+        status
+        for status in RepoStatus
+        if not still_blocking("x", {"x": BlockerState(phase_statuses=frozenset({status}))})
+    }
+    assert removable == set(LANDED_STATUSES)
+    assert set(LANDED_STATUSES) == {RepoStatus.SUCCEEDED}
+
+
+def test_an_unresolvable_name_is_retained_whatever_the_whitelist_says() -> None:
+    """Watches: that the absent-name branch is independent of `LANDED_STATUSES`.
+
+    Widening the whitelist to every status must still not make an unresolvable name removable --
+    the two fail-closed reasons are separate and a future edit to one must not silently take the
+    other with it.
+    """
+    assert still_blocking("nobody", {}) is True
+    assert still_blocking("nobody", dict(_STATUSES)) is True
 
 
 # ---------------------------------------------------------------------------------------
@@ -226,16 +263,21 @@ def test_blocker_state_has_no_default_for_its_finding_kinds() -> None:
 def test_the_dry_run_route_and_the_write_route_get_the_identical_tuple() -> None:
     """The success criterion, as a test rather than an aspiration.
 
-    Watches: equality of two `plan_unblocking` results over the same inputs. There is one
-    computation, called twice; a second comprehension written beside it for the preview is D74's
-    shape exactly, and this is what would still be green if someone added one -- so the assertion
-    is deliberately paired with the ordering assertion below, which pins the *determinism* the
-    equality rests on (a set-ordered result compares equal to itself and not to a re-run in
-    another process).
+    Watches: equality of two `plan_unblocking` results over the same inputs. One computation
+    called twice; a second comprehension written beside it for the preview is D74's shape, and
+    this is paired with the ordering assertion below, which pins the determinism the equality
+    rests on.
     """
     dry_run = plan_unblocking(blocked_by_rows=_ROWS, blocker_statuses=_STATUSES, floors=_FLOORS)
     write = plan_unblocking(blocked_by_rows=_ROWS, blocker_statuses=_STATUSES, floors=_FLOORS)
     assert dry_run == write
+    # The two routes do not read `phases` in the same order -- one is a `mode=ro` preview, the
+    # other a re-read inside the write transaction -- so equality must survive a reordered input
+    # or it is only asserting that a function is deterministic within one call.
+    reordered = plan_unblocking(
+        blocked_by_rows=tuple(reversed(_ROWS)), blocker_statuses=_STATUSES, floors=_FLOORS
+    )
+    assert reordered == write
 
 
 def test_the_result_is_sorted_by_repo_and_by_name_so_it_is_reproducible() -> None:
@@ -299,10 +341,15 @@ def test_a_repo_with_nothing_removed_is_still_reported() -> None:
     """Watches: whether the result is a change-list or a per-repo report (D44).
 
     A count of removals cannot carry "this repo is still blocked, by these names", which is what
-    an operator needs to know why a resume did not admit it.
+    an operator needs in order to know why a resume did not admit it.
     """
-    plan = _plan()
-    assert set(plan) == {"quarantined-dep", "abandoned-dep", "orphan-dep", "excluded-dep"}
+    assert set(_plan()) == {
+        "quarantined-dep",
+        "abandoned-dep",
+        "orphan-dep",
+        "live-dep",
+        "norows-dep",
+    }
 
 
 def test_unblocking_is_frozen_so_a_caller_cannot_edit_the_plan_it_was_handed() -> None:

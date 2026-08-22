@@ -3584,13 +3584,17 @@ class RepoState(FleetModel):
         "by orchestrator.reentry.plan_unblocking and nothing else, at the "
         "retain-what-cannot-be-resolved polarity ADR-0090 §2.4 rules R2-CLOSED. Naming a remover "
         "in the trigger enumeration above would be a category error and is refused by "
-        "`tests/test_blocked_by_writer_statements.py`. Three defects of that predicate are OPEN "
-        "at `f4eade0` and are recorded here rather than implied fixed: it is a deny-list, so a "
-        "blocker projected PENDING, RUNNING, BLOCKED or DEGRADED is removed although none of "
-        "those has landed; BlockerState carries one status for a quantity that is per (repo, "
-        "phase); and the reduction that projects the second onto the first is "
-        "`cli._blocker_states`, whose lowest-phase-that-has-not-landed rule retains a repo "
-        "quarantined between phases but is lossy by construction. Reversible (§3.5, §12.14).",
+        "`tests/test_blocked_by_writer_statements.py`. Three defects of that predicate were "
+        "open at `f4eade0` and are CLOSED by the reshape shipping with this sentence: it was "
+        "a deny-list that removed a blocker projected PENDING, RUNNING, BLOCKED or DEGRADED, "
+        "none of which has landed, and is now a whitelist of landed statuses, so an "
+        "unrecognised or newly added status is retained by default; BlockerState carried one "
+        "status for a quantity that is per (repo, phase) and now carries the whole set of a "
+        "blocker's phase statuses, every member of which a removal requires to be landed, so "
+        "no caller-side reduction can lose the row that blocks; and the between-phases "
+        "silent undo those two produced is therefore closed at the predicate and not only at "
+        "`cli._blocker_states`, which now groups rows and no longer reduces. Reversible "
+        "(§3.5, §12.14).",
     )
     depends_on: list[RepoId] = Field(default_factory=list)
     depends_on_contracts: list[str] = Field(

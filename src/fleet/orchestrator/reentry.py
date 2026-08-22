@@ -622,107 +622,113 @@ async def resume_floor(
 # sibling lanes held the header, and one contiguous tail keeps the edits independent.
 from collections.abc import Iterable, Sequence  # noqa: E402
 
-QUARANTINE_FINDING_KIND: Final = "OperatorQuarantine"
-"""The `findings.kind` `fleet quarantine` writes beside the `SKIPPED` it sets (SPEC §10, §3.1(c)).
+LANDED_STATUSES: Final[frozenset[RepoStatus]] = frozenset({RepoStatus.SUCCEEDED})
+"""**A whitelist**: the `phases.status` values that positively show a blocker's work landed.
 
-Spelled here rather than imported from `graph.sequence.PREFLIGHT_FINDING_KINDS` on purpose: that
-frozenset is §3.1 criterion (c)'s *exemption* lookup — four kinds that explain why a repo has no
-wave — and it is free to gain or lose a member for reasons that have nothing to do with what
-blocks a dependent. Sharing it would couple this predicate to that one.
+This is an allow-list, not a deny-list of blocking statuses, and the inversion is the whole
+mechanism. ADR-0090 §2.4 (R2-CLOSED) and `docs/SPEC.md` §12 item 46(ii) both say *remove only what
+is positively shown to be no longer blocking*; a deny-list says the complement — *remove anything
+not positively shown to be blocking* — and the two differ on every status neither list mentions.
+Measured on the deny-list this replaced: **5 of the 7 `RepoStatus` members were removable**,
+`PENDING`, `RUNNING`, `SUCCEEDED`, `BLOCKED` and `DEGRADED`, so a dependent could be admitted
+against a blocker that `WaveScheduler.admit` itself refuses to dispatch (`BLOCKED`), and every
+`RepoStatus` member added in future would have been silently removable the day it was added.
+Under a whitelist an unrecognised or newly-added status is **retained by default**, which is what
+fail-closed means. This is CLAUDE.md's *"invert an enumeration of escapes into a whitelist"*
+applied to the status set.
 
-**It does not decide a verdict.** `BLOCKING_STATUSES` holds `SKIPPED` outright, so a quarantined
-blocker and a `SKIPPED`-for-any-other-reason blocker are retained alike and `still_blocking` never
-reads this name. It is here because it is the one live producer of a `SKIPPED` entry in
-`blocked_by` (`cli._quarantine_impl`), because `docs/SPEC.md` §12 item 46(ii) names that case by
-name, and because it is what lets a fixture build the audited shape and the bare shape as two
-distinguishable inputs — which is the only way the bare-`SKIPPED` retention can be tested at all.
-"""
+**Widening this set is a deliberate act and reddens a test** — `LANDED_STATUSES`' membership is
+asserted directly, and the whole-enum verdict table is derived from `RepoStatus` so a new member
+appears on the retained side without anyone editing an expectation.
 
-BLOCKING_STATUSES: Final[frozenset[RepoStatus]] = frozenset(
-    {RepoStatus.REQUIRES_HUMAN_INTERVENTION, RepoStatus.SKIPPED}
-)
-"""The statuses of a blocker that hold its dependents in `blocked_by`.
-
-`SKIPPED` is a member for a semantic reason, not a cautious one: **a `SKIPPED` repo has not
-landed.** Clearing its dependent's entry admits that dependent to migrate against a dependency
-that never ran, which is a silent correctness failure; leaving the entry in place leaves the
-dependent blocked, which an operator can see and clear by hand. That is the same asymmetry
-ADR-0090 §2.4 weighs, applied to the same question one level down.
-
-So the *reason* a repo is `SKIPPED` — an audited `QUARANTINE_FINDING_KIND` row, a config
-exclusion, an `EmptyRepo` gate — does not change the verdict, and `still_blocking` does not
-consult it.
+**It is NOT option R1.** ADR-0090 §2 eliminated *"remove `r` only when `r` is `SUCCEEDED`"* as THE
+removal rule, because SPEC §3.4 supplies a reversal that is not `SUCCEEDED` (*"a later `pr_merged`
+event clears it and re-admits the dependents"*). That reversal is **event-driven**: the event
+clears the entry when it fires. This whitelist is the resume-time **recompute's** floor, and it
+does not claim to be the only path by which a name leaves `blocked_by`. A recompute that is
+conservative about what it can re-derive takes nothing away from a writer that clears an entry
+directly.
 """
 
 
 @dataclass(frozen=True, slots=True)
 class BlockerState:
-    """What a resume managed to look up about one name appearing in some repo's `blocked_by`.
+    """One blocker's **complete set of `phases.status` values** — every row, never a projection.
 
-    `finding_kinds` has **no default**, but the reason has changed and the old one is retired
-    here rather than left standing. It used to be load-bearing: while a bare `SKIPPED` was
-    removable, a caller that forgot to read `findings` would have handed every quarantined blocker
-    in as an ordinary `SKIPPED` and un-quarantined it, and a `TypeError` at construction was the
-    only thing standing between that mistake and a silent audit reversal. **`BLOCKING_STATUSES`
-    now holds `SKIPPED` outright, so that mistake changes no verdict and the guard no longer
-    guards anything.**
+    **This carries a set because carrying one status was a reachable silent undo of an audited
+    `OperatorQuarantine`, executed and measured, not theorised.** There is no repo-level status
+    column and no repo-level status accessor in this codebase: `state/schema.sql` puts `status` on
+    `phases`, keyed `(run_id, repo_id, phase)`. Any caller handed a single-`RepoStatus` parameter
+    therefore has to invent a projection, and the natural ones lose the very row that blocks:
 
-    What the field still does is carry a fact the verdict does not depend on: which `SKIPPED`
-    blockers an operator quarantined on purpose. It stays required so that the two `SKIPPED`
-    shapes are distinct inputs a fixture can construct — a defaulted field that no verdict reads
-    would quickly be passed nowhere and the audited case would stop being expressible.
+        `fleet quarantine dep` run between phases, all shipped code, executed against a temp DB:
+        `_quarantine_impl`'s `movable` filter excludes rows already in `TERMINAL_STATUSES`, and
+        `SUCCEEDED` is one, so a repo that finished SCAN and TRANSFORM has NO movable row; the
+        `else` branch stamps `SKIPPED` onto phase 1 alone; dependents are blocked unconditionally.
+        Observed vector: `[(1, 'SKIPPED'), (2, 'SUCCEEDED')]`, with the `OperatorQuarantine`
+        finding written and the dependent `BLOCKED`. Highest-phase-wins — the reduction
+        `state/projection._fold_repos` already uses — yields `SUCCEEDED`, and the entry is removed
+        on the next `fleet resume`.
+
+    So the contract is stated in the type rather than in a caller's comment: `phase_statuses` is
+    **every** `phases` row the blocker has, and a caller that reduces before calling has already
+    lost the guarantee. A blocker resolved to **zero** rows is a legitimate value and is retained
+    (`still_blocking`), because "no rows" is not evidence that anything landed.
+
+    `finding_kinds` was **deleted** rather than carried: it had zero readers (measured — one
+    `.finding_kinds` attribute load exists in the tracked tree and it belongs to an unrelated
+    object in `tests/test_graph_sequence.py`), and the rationale that kept it — that it was the
+    only thing making the audited and bare `SKIPPED` shapes distinguishable — was measured false.
+    A blocker is retained on the strength of its statuses; the reason for a `SKIPPED` row is not a
+    fact this predicate needs, so the field was write-only data with a false justification.
     """
 
-    status: RepoStatus
-    finding_kinds: frozenset[str]
+    phase_statuses: frozenset[RepoStatus]
 
 
 def still_blocking(name: str, blocker_statuses: Mapping[str, BlockerState]) -> bool:
-    """Is `name` still a reason to hold a dependent in `blocked_by`? **Fail-closed.**
+    """Is `name` still a reason to hold a dependent in `blocked_by`? **Fail-closed, three ways.**
 
-    The blocking population is `BLOCKING_STATUSES` — `REQUIRES_HUMAN_INTERVENTION` and `SKIPPED`.
-    Neither has landed, and the two of them are what the two live producers of a `blocked_by`
-    entry write (`runner._contain` via `WaveScheduler.propagate_blocked` writes the first,
-    `cli._quarantine_impl` the second).
+    Removal requires a positive showing that the blocker's work landed, and the only such showing
+    is that **every one of its `phases` rows** is in `LANDED_STATUSES`. Everything else is
+    retained:
 
-    **An entry this function cannot resolve is RETAINED, never removed** — a name absent from
-    `blocker_statuses` answers `True`. That polarity is ADR-0090 §2.4's ruling (R2-CLOSED),
-    "remove only what is positively shown to be no longer blocking", and it rests on three
-    measured facts rather than on caution:
+    1. **A name absent from `blocker_statuses` is retained.** It cannot be resolved at all, and
+       ADR-0090 §2.4's ruling (R2-CLOSED) is that an unresolvable entry is never removed.
+    2. **A name resolved to zero `phases` rows is retained.** `all()` over an empty set is `True`,
+       so the natural spelling of this predicate would *remove* such a blocker; "the repo has no
+       rows" is the absence of evidence, not evidence of landing.
+    3. **A name with any non-landed row is retained** — including the row a lossy projection would
+       have dropped, which is the whole of `BlockerState`'s reason to exist.
 
-    1. `models.state.RepoState.blocked_by`'s own field description says *"a recompute must not
-       treat the writer set as closed"*, and since `50ad1e4` that sentence is bound to the code by
-       `tests/test_blocked_by_writer_statements.py` — so R2-open would violate a mechanism, not
-       merely contradict a convention.
-    2. **Three of the five** triggers that field enumerates as reaching SPEC §3.5's propagation
-       rule are SPEC-mandated with **zero** producers today (an SCC's failed members §3.1, a
-       `pr.merge_wait_timeout_s` breach §3.4, and a failed contract's non-terminal descendants
-       §3.5 — the last of which §3.5 mandates as a `contract_id`, a string that resolves to no
-       repo at all). An entry from any of those paths **cannot be re-derived from live state**, so
-       erasing "whatever was not re-derived" would erase it permanently on every `fleet resume`
-       from the moment any one of them is implemented.
-    3. The failure modes are asymmetric. Retaining too long leaves a dependent blocked — visible
-       to an operator and recoverable by hand. Removing too eagerly silently undoes an audited
-       `OperatorQuarantine`: invisible, unrecoverable, and **not** detectable by SPEC §12 item
-       46(ii) as it stood before this change, which watched only whether a sweep moves a repo
-       *out of* `REQUIRES_HUMAN_INTERVENTION` — a quantity that defect leaves unchanged.
+    Why that polarity, on three measured facts rather than on caution:
 
-    **A bare `SKIPPED` blocker — one with no `QUARANTINE_FINDING_KIND` — is retained too, and it
-    is measured-unreachable today.** Measured at `4902938` by AST call-graph over `src/**/*.py`:
-    the only non-delegating writers of `blocked_by` are `runner._contain` (writes
-    `REQUIRES_HUMAN_INTERVENTION`) and `cli._quarantine_impl`, and the latter writes its
-    `OperatorQuarantine` finding in the same command, so no shipped path produces a `SKIPPED`
-    blocker without that finding. Retaining it therefore changes no live behaviour. It is retained
-    because the *reason* a repo is `SKIPPED` does not bear on the question this predicate asks: a
-    `SKIPPED` repo has not landed, whatever excluded it, and a dependent admitted against it
-    migrates against a dependency that never ran. This branch is not dead logic to be tidied away
-    — `tests/test_reentry_unblocking.py` asserts it, and narrowing `BLOCKING_STATUSES` back to
-    `{REQUIRES_HUMAN_INTERVENTION}` plus a quarantine-finding check reddens that test.
+    * `models.state.RepoState.blocked_by`'s own field description says *"a recompute must not
+      treat the writer set as closed"*, and since `50ad1e4` that sentence is bound to the code by
+      `tests/test_blocked_by_writer_statements.py` — a mechanism this would violate, not a
+      convention it would contradict.
+    * **Three of the five** triggers that field enumerates as reaching SPEC §3.5's propagation
+      rule are SPEC-mandated with **zero** producers today (an SCC's failed members §3.1, a
+      `pr.merge_wait_timeout_s` breach §3.4, and a failed contract's non-terminal descendants
+      §3.5 — the last of which §3.5 mandates as a `contract_id`, a string that resolves to no repo
+      at all). Entries from those paths cannot be re-derived from live state, so erasing "whatever
+      was not re-derived" would erase them permanently on every `fleet resume`.
+    * The failure modes are asymmetric. Retaining too long leaves a dependent blocked — visible to
+      an operator and recoverable by hand. Removing too eagerly silently undoes an audited
+      `OperatorQuarantine`, or admits a dependent against a dependency that never ran: invisible,
+      unrecoverable, and not detectable by the quantity SPEC §12 item 46(ii) watched before this
+      work widened it.
+
+    **`all`, not `any`.** A blocker with one landed row and one that is not has not landed. The
+    `any` spelling is exactly the executed defect recorded on `BlockerState`, and
+    `tests/test_reentry_unblocking.py` reddens on it.
     """
     state = blocker_statuses.get(name)
     if state is None:
         return True  # unresolvable -> RETAINED (ADR-0090 §2.4, R2-CLOSED)
-    return state.status in BLOCKING_STATUSES
+    if not state.phase_statuses:
+        return True  # resolved, but to no rows at all -> RETAINED; `all(())` would remove it
+    return not all(status in LANDED_STATUSES for status in state.phase_statuses)
 
 
 @dataclass(frozen=True, slots=True)

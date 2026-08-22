@@ -11292,59 +11292,46 @@ class UnblockLookupError(StateDbError):
     """
 
 
-def _blocker_states(
-    phase_rows: Sequence[tuple[str, int, str]], finding_kinds: Mapping[str, frozenset[str]]
-) -> dict[str, BlockerState]:
-    """Project each blocker's `phases` rows onto the ONE status `BlockerState` can carry today.
+def _blocker_states(phase_rows: Sequence[tuple[str, int, str]]) -> dict[str, BlockerState]:
+    """Group each blocker's `phases` rows into the SET of statuses `BlockerState` carries.
 
-    **The rule: the LOWEST phase whose status is not `SUCCEEDED`, and `SUCCEEDED` only when every
-    phase is.** A repo has landed exactly when all of its phases have; this surfaces the first one
-    that has not, so a blocker is never reported as landed on the strength of a later row.
+    **This function no longer projects, and the loss of the projection is the point.** Until the
+    predicate reshape it reduced a blocker's rows to the one `RepoStatus` `BlockerState` could
+    hold, and the choice of reduction was load-bearing and easy to get wrong. `BlockerState` now
+    carries `frozenset[RepoStatus]` — every row — so there is nothing here to choose and no
+    caller-side rule for a reader to check. What is left is a group-by.
 
-    **The obvious rule — "the highest phase reached wins", `state/projection._fold_repos`' fold —
-    was here until this commit and was FALSE for this question. Measured, not argued** (round E,
-    lane W21, against this function): a repo `fleet quarantine` abandoned *between phases* has
-    rows `{SCAN: SKIPPED, TRANSFORM: SUCCEEDED}` — `cli._quarantine_impl` moves only the
-    non-`TERMINAL_STATUSES` rows, so a later admission can complete a phase above a `SKIPPED` one.
-    Under the highest-phase fold that projects `SUCCEEDED`, `still_blocking` answers `False`, and
-    the dependents of an audited `OperatorQuarantine` are re-admitted on every `fleet resume` —
-    exactly the silent undo `docs/SPEC.md` §12 item 46(ii) was widened to forbid, and exactly the
-    quantity that criterion's original RHI clause leaves unchanged. `_fold_repos`' fold answers a
-    different question (which phase is this repo *at*, for the projection) and does not transfer.
+    **The reasoning that rule embodied is carried forward here rather than deleted with it,
+    because it is the reason the reshape was needed** — measured by lane **W21** (round E,
+    `1d0c8f6`) against this function, and reproduced by lane W16 by executing the shipped
+    `cli._quarantine_impl` against a temp database rather than by reading it:
 
-    **This projection is a STAND-IN and is lossy, stated rather than implied.** The quantity is
-    per `(repo, phase)`; `BlockerState.status` is one `RepoStatus`. Only the first non-`SUCCEEDED`
-    status survives, so a repo that is `SKIPPED` at one phase and `REQUIRES_HUMAN_INTERVENTION` at
-    another is reported by one of them. It is chosen so that the loss is always toward RETAINING
-    (the fail-closed direction of ADR-0090 §2.4), never toward removing.
+        A repo `fleet quarantine` removes *between phases* ends at `{SCAN: SKIPPED,
+        TRANSFORM: SUCCEEDED}` — `_quarantine_impl` moves only rows outside `TERMINAL_STATUSES`,
+        and `SUCCEEDED` is inside it, so a landed phase survives above the `SKIPPED` one. The
+        observed vector was `[(1, 'SKIPPED'), (2, 'SUCCEEDED')]`, with the `OperatorQuarantine`
+        finding written and the dependent `BLOCKED`. Under `state/projection._fold_repos`'
+        highest-phase-wins fold that projects `SUCCEEDED`, and the dependents of an audited
+        quarantine are re-admitted on every `fleet resume`.
 
-    **What this does NOT close, and must not be read as closing.** `still_blocking` is a
-    deny-list — `BLOCKING_STATUSES` at `f4eade0` is `{REQUIRES_HUMAN_INTERVENTION, SKIPPED}` — so a
-    blocker projected `PENDING`, `RUNNING`, `BLOCKED` or `DEGRADED` is still removed by it, and
-    none of those has landed. That is a defect of the predicate, owned by the predicate; this
-    function cannot fix it without re-deriving the verdict, which is defect D74's shape and the
-    one thing `plan_unblocking` exists to prevent. Recorded here as open at `f4eade0`.
+    W21's repair was to reduce by *the lowest phase whose status is not `SUCCEEDED`, and
+    `SUCCEEDED` only when every phase is*. That rule is **correct**, and it is the same predicate
+    `reentry.still_blocking` now applies directly — "every row landed, or the blocker has not" —
+    which is why the reshape could delete the reduction without losing the guarantee rather than
+    by overruling it. The difference is only where it lives: as a caller-side rule it was a lossy
+    stand-in that W21 correctly labelled as one, and a second caller reducing differently would
+    have been unconstrained; as `LANDED_STATUSES` plus `all(...)` it is a property of the unit and
+    a caller cannot express the loss at all.
 
-    `finding_kinds` defaults to the empty set for a repo with no `findings` row, and that is a
-    real answer rather than an omission: the caller reads the whole run's findings in one query,
-    so "absent from the mapping" means "this repo has no findings", not "the lookup failed". The
-    lookup that *can* fail is the status one, and `_refuse_unresolved_blockers` makes it loud.
+    `_fold_repos`' fold is not wrong where it lives — it answers "which phase is this repo *at*",
+    for the projection — it simply does not transfer to "has this blocker landed".
     """
-    worst: dict[str, tuple[int, RepoStatus]] = {}
-    for repo_id, phase, status in phase_rows:
-        current = RepoStatus(status)
-        seen = worst.get(repo_id)
-        if seen is None:
-            worst[repo_id] = (phase, current)
-            continue
-        seen_phase, seen_status = seen
-        if seen_status is RepoStatus.SUCCEEDED and current is not RepoStatus.SUCCEEDED:
-            worst[repo_id] = (phase, current)  # the first row that has not landed wins outright
-        elif current is not RepoStatus.SUCCEEDED and phase < seen_phase:
-            worst[repo_id] = (phase, current)  # ties broken low, so the rule is deterministic
+    grouped: dict[str, set[RepoStatus]] = {}
+    for repo_id, _phase, status in phase_rows:
+        grouped.setdefault(repo_id, set()).add(RepoStatus(status))
     return {
-        repo_id: BlockerState(status=status, finding_kinds=finding_kinds.get(repo_id, frozenset()))
-        for repo_id, (_phase, status) in worst.items()
+        repo_id: BlockerState(phase_statuses=frozenset(statuses))
+        for repo_id, statuses in grouped.items()
     }
 
 
@@ -11369,15 +11356,7 @@ async def _read_blocker_states(
             (run_id, *ordered),
         )
     ]
-    kinds: dict[str, set[str]] = {}
-    for repo_id, kind in await _rows(
-        conn,
-        "SELECT DISTINCT repo_id, kind FROM findings "  # noqa: S608 - as above
-        f" WHERE run_id = ? AND repo_id IN ({marks})",
-        (run_id, *ordered),
-    ):
-        kinds.setdefault(str(repo_id), set()).add(str(kind))
-    return _blocker_states(phase_rows, {k: frozenset(v) for k, v in kinds.items()})
+    return _blocker_states(phase_rows)
 
 
 async def _resolvable_repo_ids(conn: aiosqlite.Connection, names: set[str]) -> set[str]:
