@@ -1,5 +1,5 @@
 > Round-E research artifact, produced by lane **R2**, promoted unchanged from untracked scratch
-> `.superpowers/sdd/round-e/lanes/R2/report.md` by lane **W30**. **§5 is the live brief for subtask 9** (tasks 9a–9f), which is unimplemented at `1698de3`. Body below is byte-identical to the source; this header prepends 3 lines, so a citation of scratch `report.md:N` is line `N+3` here.
+> `.superpowers/sdd/round-e/lanes/R2/report.md` by lane **W30**. **§5 is the live brief for subtask 9** (tasks 9a–9f), which is unimplemented at `1698de3`. Body below was byte-identical to the source at promotion; **two dated `[SCOPED … W35]` brackets were added in place on 2026-08-22 (see `D80`), each appended to an existing line so that no line was added or removed** — this header still prepends 3 lines, so a citation of scratch `report.md:N` is line `N+3` here.
 
 # R2 (research, read-only) — costing ADR-0079 so subtask 9 can be dispatched
 
@@ -32,7 +32,7 @@ four sub-questions is now a different question than the one reserved.
 | `--repo` semantics | **Narrowed to a consistency ruling** by a five-verb precedent, with one genuinely open sub-question (does it scope the run-wide steps?). |
 | `--reset-attempts` semantics | **Live but small**: one audit `findings.kind` to allocate and one row-set to name. |
 | Do `--revalidation` / `--raise-revalidation-rounds` stay refused? | **DISSOLVED into a recital.** Three primary sources concur, none dissents. But the *reason the code gives* for refusing them is **false**, and that is a real edit ADR-0079 must order. |
-| **NEW, created by subtask 8 landing** | **Should subtask 9 land at all before subtask 10?** With step 6 built, step 8 is the only absence left, and none of the three flags has a continuation to scope. This is a live sequencing decision that did not exist when §4.3 was written. |
+| **NEW, created by subtask 8 landing** | **Should subtask 9 land at all before subtask 10?** With step 6 built, step 8 is the only absence left, and none of the three flags has a continuation to scope. This is a live sequencing decision that did not exist when §4.3 was written. **[SCOPED 2026-08-22, W35: "the only absence left" is true of `docs/SPEC.md` §11.5's numbered list and false of §10's `fleet resume` row, which names a ninth — `stub_reconcile`, recorded as `D80`. The sequencing question this row raises was answered by ADR-0079 §6 and that answer is unaffected: a second absence makes deferring the un-refusal more right, not less.]** |
 
 ---
 
@@ -311,7 +311,7 @@ Not a manufactured decision. Three independent tests:
 > **landing the un-refusal with subtask 10** rather than before it, or landing subtask 9 with the
 > flags accepted and their scoping asserted **only** over the demotion set, with the `--help` text
 > saying so explicitly. Do not ship a flag that reads as "resume from here" while nothing resumes.
-> This is a ruling, not a research finding — I flag it rather than resolve it.
+> This is a ruling, not a research finding — I flag it rather than resolve it. **[SCOPED 2026-08-22, W35: "step 8 is now the *sole* remaining absence" above is true of `docs/SPEC.md` §11.5's numbered list and false of §10's `fleet resume` row, which names `stub_reconcile` as a ninth — recorded as `D80`. ADR-0079 §6 took this recommendation (land the un-refusal with subtask 10) and the second absence strengthens it.]**
 
 ---
 

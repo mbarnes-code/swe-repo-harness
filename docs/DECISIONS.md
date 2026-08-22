@@ -7315,7 +7315,7 @@ and no code path in this ADR reaches it.
 
 ---
 
-## ADR-0079 — `--from-phase` is a **repo filter** (option C(i)): the computed floor is never overridden, clamped or capped, and a repo whose floor sits below the flag is skipped rather than re-aimed; `--repo` is a **consistency ruling** against six sibling verbs, scoping §11.5 steps 5, 6 and (later) 8 and never the run-wide 2, 3, 4 and 7; and the un-refusal itself ships with **subtask 10**, not subtask 9 — with step 8 the sole remaining absence, no flag has a continuation to scope yet, so subtask 9 settles and records the semantics rather than removing anything from the refusal set
+## ADR-0079 — `--from-phase` is a **repo filter** (option C(i)): the computed floor is never overridden, clamped or capped, and a repo whose floor sits below the flag is skipped rather than re-aimed; `--repo` is a **consistency ruling** against six sibling verbs, scoping §11.5 steps 5, 6 and (later) 8 and never the run-wide 2, 3, 4 and 7; and the un-refusal itself ships with **subtask 10**, not subtask 9 — with step 8 the sole remaining absence **in `docs/SPEC.md` §11.5's numbered list** (§10's `fleet resume` row names a ninth, `stub_reconcile` — **D80** — which makes this conclusion stronger, not weaker), no flag has a continuation to scope yet, so subtask 9 settles and records the semantics rather than removing anything from the refusal set
 
 **Status:** accepted. **Decided by the round-E orchestrator; this entry records four rulings and
 their evidence and decides nothing itself.** Anchored at `f4eade0` (`main`) — every claim below is
@@ -7339,6 +7339,29 @@ does **not** decide. The research is `docs/superpowers/plans/resume-step5-subtas
 R2); every figure R2 supplied was **re-measured before being repeated**, and §9 records the four
 places the re-measurement disagreed with it.
 
+> **SCOPING ANNOTATION (2026-08-22, lane W35, measured at `9bf15bb`) — the title above and §6
+> said *"step 8 the sole remaining absence"* with no scope. That is true of `docs/SPEC.md`
+> §11.5's numbered list and FALSE of §10's `fleet resume` row. The title is scoped in place by
+> this commit; §6 carries its own marker.** §10's row orders **`stub_reconcile`** between the
+> `blocked_by` recompute and the projection; §13 **row 35** says it *"runs before the final
+> checkpoint and again in `fleet resume`"*; §3.5.1 calls it *"also part of `fleet resume`'s
+> reconciliation, §11.5"*. Nothing performs it: measured at `9bf15bb`, and again at `f36c9ad`,
+> by `ast` over all **115** `.py` blobs under `src/`, read from `git show <ref>:<path>` blobs and
+> never from the working tree — calls named `reconcile` or `stub_reconcile` = **0**, imports of any
+> module whose name contains `stubs` = **0**.
+> `cli._resume_impl` carries a committed comment marking the insertion point and saying *"It does
+> not exist on `main` yet"*. **So `fleet resume` is missing TWO steps, not one.** The second is
+> recorded as **D80** in `docs/INTEGRATION_HONESTY.md`, which also records that it is **unowned**
+> and leaves open which of §11.5's list and §10's row is authoritative for what the verb owes.
+>
+> **§6's RULING is unaffected and holds *a fortiori*. Do not reopen it on this correction.** §6
+> turns on there being *nothing for a scoping flag to scope* until subtask 10 exists, so a second
+> absence makes its conclusion **stronger**, not weaker — which is the argument §6's own premise
+> paragraph already makes for the two-absence case at `f4eade0`. What this marker changes is the
+> *statement*, never the decision. The retired unscoped wording is quoted inside this marker on
+> purpose, so that a count-based sweep for the phrase finds the quotation; subtract it by the rule
+> *"a dated correction stands within the same passage"*, never by a hand-maintained exemption list.
+
 ### 1. The dependency state the placeholder got wrong
 
 - **Subtask 7 — "wire step 5 into `_resume_impl`" — landed at `2f0db34`.**
@@ -7359,6 +7382,11 @@ places the re-measurement disagreed with it.
 > own commit** is the clause *"has no SHA this entry may cite"*: it had one, `1d0c8f6`. From
 > `1d0c8f6` on, step 8 is the sole remaining absence — which is the premise §6's ruling was given
 > under. The ruling is unaffected either way; see §6's own annotation.
+>
+> **[SCOPED 2026-08-22, lane W35 — read "the sole remaining absence" in the sentence above as "the
+> sole remaining absence *in §11.5's numbered list*". §10's `fleet resume` row names a further
+> absent step, `stub_reconcile`, recorded as **D80**; see the scoping annotation above §1. W24's
+> closing sentence — that the ruling is unaffected — is unchanged and correct.]**
 
 So the placeholder was false outright for subtask 7 and false in the sense its sentence intends for
 subtask 8. **§6 turns on the wiring, not on the placeholder's sentence**, and states its own
@@ -7532,6 +7560,14 @@ anchored to.
 > paragraph is left as written — it records what was true at the anchor it names, `f4eade0`. **The
 > ruling is unchanged**, and it is the one-absence case that it was actually given for; the
 > two-absence reading was the *a fortiori* one, not the premise.
+>
+> **[SCOPED 2026-08-22, lane W35, measured at `9bf15bb`.** Both the paragraph above and W24's
+> marker count absences against **§11.5's numbered list only**. Against `docs/SPEC.md` §10's
+> `fleet resume` row one more step is absent — **`stub_reconcile`**, recorded as **D80** — so at
+> `9bf15bb` the count is **two**, not one. **The ruling is unchanged, and it now holds on exactly
+> the two-absence reading the paragraph above calls the *a fortiori* one.** A reader who takes
+> this correction as grounds to reopen the un-refusal has read it backwards: less for a flag to
+> scope is more reason to defer the un-refusal, not less.]**
 
 ### 7. Disclosures — measured here, owned elsewhere, deliberately not fixed by this ADR
 
@@ -7554,6 +7590,27 @@ offers no reason for refusing any flag and never names the refusal set, and
 CORRECT and must not be edited** (`c135c42` fixed the step-5 clause; a later handoff routed a lane at
 that correct prose and had to be rescinded). What is false is the *reason offered for two flags*, and
 it is subtask 9d's, not this ADR's.
+
+> **ANNOTATION (2026-08-22, lane W35, measured at `9bf15bb`) — "subtask 9d" does not exist, and
+> this class now has a named owner: design row 10.** The commit that added this entry also
+> rewrote `docs/superpowers/plans/design-resume-step5.md` row 9 — §5 above says so in terms, and
+> the row's own `*(Corrected 2026-08-22, W24 at ADR-0079's own commit)*` marker attributes it — and
+> the rewritten row leaves no sub-item `9d`. Measured at `9bf15bb`, this commit's parent:
+> occurrences of the token `9d` in that file = **0**, so the pointer above was orphaned from the
+> moment it was written. *(This commit's own row-10 extension re-introduces exactly one occurrence,
+> quoting the dead pointer so a sweep finds the retraction; subtract it by rule, not by a list.)* **Re-measured before re-homing**,
+> from the `git show HEAD:src/fleet/cli.py` blob rather than the working tree: the class is
+> **still 2 sites**, `_refuse_unbuilt_resume_flags`' docstring and its single `UsageError` body,
+> each naming `step 6`, `step 8` and `CONTINUATION` and neither naming `stub`, `revalidation`,
+> `3.5.1`, `storm` or `row 34` — so an operator typing only `--revalidation batched` is still
+> given a reason that is false for that flag. **Home: design row 10**, chosen because row 10
+> already rewrites this exact function to un-refuse `--from-phase` and `--repo`, so both sites lie
+> inside one function that one author edits in one commit — no new row, no new file set, and no
+> multi-site correction split across authors. Row 10's criterion names the class as of this
+> commit. **§7b's own rot is not restated here**: lane W31's annotation below already measures it
+> at four refs, and this lane independently reproduced its load-bearing figure — at `9bf15bb` both
+> `test_resume_refuses_the_flags_whose_behaviour_does_not_exist`' assertion and the `UsageError`
+> clause it reads say `"steps 2, 3, 4, 5, 6 and 7"`, not §7b's `"steps 2, 3, 4, 5 and 7"`.
 
 **7b. Both prose instruments guarding that message FAIL OPEN on step 6, and one is INVERTED.**
 Measured at `f4eade0` by extracting each test's assertion and the message's built-steps clause with

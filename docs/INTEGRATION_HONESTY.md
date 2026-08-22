@@ -5268,3 +5268,158 @@ the `effort: low` failure CLAUDE.md records.
 * **The billing and row-count figures are R3's**, cited above as R3's and not re-measured by W30.
 * **§11.6's reading is R3's and W30's**, not a third party's; §11.6 and §12 items 21/36/44 are
   quoted at length in the promoted brief precisely so a reader can check the reading.
+
+## D80 — OPEN, recorded only, and **UNOWNED**. `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
+
+**Found by lane R4 (round E) while costing subtask 10; recorded by lane W35, which re-measured
+every figure below before repeating it and labels the two it did not.** Interpreter for every
+number: `.venv/bin/python` (the binary, never the PATH name). Anchor **`9bf15bb`**, with every
+`src/` figure re-measured at **`f36c9ad`** as an independent second ref. All `src/` and `tests/`
+figures are read from `git show <ref>:<path>` blobs and never from the working tree. **Five commits
+landed on `main` while this entry was being written** — `81b3b55` → `9bf15bb`, two of them touching
+`src/fleet/cli.py` and `tests/` — so **every figure below was re-measured at `9bf15bb` after they
+landed**, and every one reproduced unchanged. **No `pytest` session was run — round-E suite lock.**
+
+### The three SPEC sites that mandate it, quoted rather than summarised
+
+* **§10's CLI-surface table, the `fleet resume` row** — the verb's positive specification. Its
+  activity list reads *"… recompute `blocked_by`, **re-run `stub_reconcile`** (§3.5.1: re-derive
+  every `stubs` row's state from `repos`/`phases`/PR state and re-enqueue any revalidation round
+  lost to the crash under its `revalidation_key` — idempotent, so a resume never doubles the
+  rework), regenerate `migration_state.json`, continue from each repo's re-entry floor …"*. The
+  step sits **between** §11.5's step 6 and step 7.
+* **§13 row 35** (*"A stub is never resolved and the fleet ships it anyway"*): *"`stub_reconcile`
+  runs before the final checkpoint **and again in `fleet resume`**"*.
+* **§3.5.1**, the end-of-run reconciliation paragraph: *"Before the runner writes its final
+  checkpoint it executes a `stub_reconcile` step (**also part of `fleet resume`'s reconciliation,
+  §11.5**)"*.
+
+**And the one site that does not: §11.5's numbered list.** Its closing paragraph runs
+*"… (7) regenerate `migration_state.json` from SQLite; (8) continue. Steps 1–7 make no network
+call and invoke no model …"*, with no stub step anywhere in the enumeration. **That asymmetry is
+the whole entry.** Read against §11.5's list, step 8 is the only thing missing. Read against §10's
+row, `stub_reconcile` is missing too, and no numbered step names it.
+
+### The absence, measured
+
+Instrument: `ast` over **every** `.py` blob under `src/` — **115** of them at both refs — resolving
+`ast.Call` by `Name.id` or `Attribute.attr`, so a wrapped or multi-line call counts identically to
+a one-liner, and walking `ast.Import` / `ast.ImportFrom` for any module or imported name containing
+`stubs`.
+
+| quantity | `9bf15bb` | `f36c9ad` |
+|---|---|---|
+| `.py` blobs under `src/` | 115 | 115 |
+| calls named `reconcile` or `stub_reconcile` | **0** | **0** |
+| imports of any module whose name contains `stubs` | **0** | **0** |
+
+**The implementation exists and nothing calls it.** `src/fleet/orchestrator/stubs.py` defines
+`reconcile` (alongside `supersede`, `plan_revalidation`, `settle_revalidation`,
+`abandon_by_operator`, `apply`). The module is imported **once in the whole tree**, by
+`tests/test_stubs.py`, which calls `reconcile` **9** times. So this is not a missing function; it
+is a missing **wiring** — the shape D79 records for D56 and D57, *"a dependency-injection
+parameter that exists, is documented, and is never supplied"*, which this register has adjudicated
+before and never by deletion.
+
+**The tree already says so, in a committed comment.** `cli._resume_impl` carries a comment block at
+the insertion point: *"`stub_reconcile` (§3.5.1, §13 row 45) **BELONGS HERE** — immediately
+below the re-poll and above the step-3 sweep — and nowhere earlier"*, ending *"**It does not exist
+on `main` yet**; when it lands, it goes on the next line, with that decision made explicitly rather
+than inherited from this ordering."* The comment also states the design question its author
+declined to settle: `stub_reconcile` judges PR state, and `--repoll-prs` is opt-in, so whoever
+lands it must decide what it does when `repoll != "polled"` — gate on it, or make `--repoll-prs`
+implied. **That question is part of this entry's cost and is not answered here.**
+
+### Would a test catch it? MEASURED — no, and the measurement is a two-armed one
+
+Predicate, over the **62** `.py` blobs under `tests/` at `9bf15bb`, applied to each `test_*`
+function's `ast.get_source_segment` (so a wrapped assertion is inside one segment and cannot be
+split by a line boundary — this is why it is not a `grep`):
+
+* **arm A**, "invokes the verb": the segment matches `"resume"` / `'resume'` / `cli.resume` /
+  `_resume_impl`;
+* **arm B**, "touches stub state": the segment matches `StubState` / `UnresolvedStub` /
+  `FROM stubs` / `INTO stubs` / `stub_reconcile`.
+
+| | count | files |
+|---|---|---|
+| arm A alone | **56** | 3 (`test_cli.py`, `test_resume_unblocking.py`, `test_state_models.py`) |
+| arm B alone | **26** | 7 (`test_blocked_by_writer_statements.py`, `test_cli.py`, `test_migrations.py`, `test_projection.py`, `test_state_models.py`, `test_stubs.py`, `test_workers_build.py`) |
+| **A ∧ B** | **0** | — |
+
+**Both arms fire on their own and their intersection is empty**, which is what makes the zero a
+measurement rather than a blind instrument: the predicate demonstrably *can* see stub state (26
+hits) and *can* see the verb (56 hits), and no test in the suite does both. A looser predicate —
+the bare word `stub`, case-insensitively, beside `resume` — returns **8** functions; every one was
+read, and all eight are word overlaps. **2** of the 8 invoke the verb and use "stub" only as prose
+(*"the §3.5.1 T1 stub trigger"*; *"edit a file, a flag or a stub before retrying"*); the other
+**6** never invoke it — one uses `stub_log: Any = _StubLog()` as the name of a test double, and
+five are `test_stubs.py` / `test_state_models.py` / `test_repository.py` tests in which "resume"
+is an ordinary English word. **Nothing binds `stub_reconcile` to `fleet resume`, so deleting the §10 row's
+clause and deleting a hypothetical implementation are indistinguishable to this suite.**
+
+**The detector after a fix may be static here, unlike D79's.** The intended remedy inserts a call
+at the marked point in `cli._resume_impl`, so the `0 → 1` call-count above is a real signal. The
+*sufficient* detector is still behavioural: seed a run with an open `stubs` row, run
+`fleet resume`, and assert the row moved to `ABANDONED` with an `UnresolvedStub` finding and that
+`migration_state.json#unresolved_stubs` names it — that is the §13 row 35 contract, and it is also
+the check that would notice a call placed above the re-poll.
+
+### Why this matters beyond bookkeeping, and what it does **not** do to ADR-0079
+
+ADR-0079's title and §6 rule that the un-refusal of `--from-phase` / `--repo` ships with subtask 10
+*because* step 8 is the only thing left for a scoping flag to scope. **That statement is scoped, in
+this round's same commit, to §11.5's numbered list, and §10's row is disclosed as this ninth
+absence. The RULING is unaffected and holds *a fortiori*:** §6 turns on there being nothing to
+scope, and two absences are strictly less to scope than one. ADR-0079 §6's own premise paragraph
+already argues the two-absence case explicitly, for `f4eade0`. **This entry is not grounds to
+reopen the un-refusal question**, and it must not be read as one.
+
+What it *does* change is the argument available to subtask 10. `docs/DECISIONS.md` ADR-0076's
+standing bullet says `ResumeIncompleteError` must be **deleted, not repurposed**, once the verb can
+do what it owes, and W7's 2026-08-21 amendment conditions that on *"steps 6 and 8 both"* existing.
+Step 6 exists. If §10's row is authoritative for what the verb owes, then after step 8 lands the
+verb still will not do everything §10 names, and ADR-0076's bullet would be discharged by a
+**second message rewrite** rather than by a deletion.
+
+### What this entry deliberately does NOT decide
+
+* **Which source is authoritative for "what `fleet resume` owes" — §11.5's numbered list, or §10's
+  row.** R4 states the two branches and this entry repeats them without choosing: **(a)** §11.5's
+  list governs and §10's row is prose, in which case an ADR must say so, because three sources
+  currently read the other way and none says this; or **(b)** `stub_reconcile` is a real ninth
+  obligation, in which case `ResumeIncompleteError` survives subtask 10 with its message rewritten
+  to name `stub_reconcile` instead of step 8. **The branches produce different subtask-10 file sets
+  and different tests**, which is why this is recorded as open rather than resolved by a worker.
+* **The `repoll != "polled"` gating question** the `_resume_impl` comment states.
+* **Ownership.** **Nothing owns this.** Measured at `9bf15bb` from the `git show HEAD:` blob:
+  `stub_reconcile` occurs **9** times in `docs/superpowers/plans/design-resume-step5.md`, and
+  **none of them makes landing it a deliverable of any row**. Exactly **one** of the ten task rows
+  names it — row 7, and only to require the opposite: *"the RS1 `stub_reconcile` marker comment is
+  left above, untouched"*. The other eight sit where nobody is being assigned anything: **2** in the
+  landed-branch provenance table at the head of the file, **1** under *"Order inside
+  `_resume_impl`"*, and **5** in the *"`--repoll-prs` → `stub_reconcile` ordering constraint"*
+  section (its heading and four body lines), which reasons about **where** the step would go and
+  never about **who writes it**. *(This bullet
+  originally asserted that no row named `stub_reconcile` at all; that was false and was caught by
+  re-running the sweep against this entry's own text before it was committed. Row 7's mention is a
+  non-ownership clause, which is the weaker and true claim.)* Design row 10 was **not** given it: row 10 is step 8
+  plus the two-flag un-refusal, and widening it to a step §11.5 never numbered would be exactly the
+  "assign by symmetry" move CLAUDE.md records as a dispatcher failure. **It needs an owner and a
+  ruling on (a)/(b) before it can be dispatched, in that order.**
+
+### What this entry does not establish
+
+* **No suite run** (round-E suite lock). Every figure is from standalone `.venv/bin/python` scripts
+  over `git show` blobs, plus one runtime import of `fleet.orchestrator.reentry` with
+  `fleet.__file__` asserted against this checkout's `src/`. The pytest command a later lane must
+  run, with no `-k` filter, is `.venv/bin/python -m pytest tests/test_stubs.py tests/test_cli.py
+  tests/test_projection.py`.
+* **The `src/` results are static sweeps.** A `stub_reconcile` reached through `importlib` or a
+  computed `getattr` would be invisible to them. The committed `_resume_impl` comment saying *"It
+  does not exist on `main` yet"* is the independent second source, and it is the implementer's own.
+* **The reading of §10 against §11.5 is R4's and W35's**, not a third party's. All four passages are
+  quoted above at length precisely so a reader can check the reading rather than inherit it.
+* **Two figures are R4's and were not re-measured here**: that `cli.resume`'s final statement is the
+  unconditional `raise ResumeIncompleteError`, and R4's 27-test blast-radius count for subtask 10.
+  Neither is load-bearing for this entry.
