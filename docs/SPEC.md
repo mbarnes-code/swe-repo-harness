@@ -3558,7 +3558,8 @@ class RepoState(FleetModel):
         "the only two): RepoStatus.REQUIRES_HUMAN_INTERVENTION (§3.5) and `fleet quarantine`, "
         "which writes SKIPPED (§10), are LIVE — measured at `34d6f82`, runner._contain and "
         "cli._quarantine_impl are the only non-delegating callers in `src/`. Non-delegating means "
-        "it calls `SqliteSchedulerStore.append_blocked_by`, or the "
+        "it calls the write sink `SqliteSchedulerStore.append_blocked_by`, or the removal "
+        "sink `SqliteStateRepository.clear_blocked_by`, or the "
         "`WaveScheduler.propagate_blocked` rule that fronts it, and is itself neither of those two "
         "nor a same-named wrapper forwarding to an inner store; under the bare reading 'callers of "
         "the append' the named pair is wrong in both directions, so "
@@ -3575,7 +3576,21 @@ class RepoState(FleetModel):
         "column `phases.blocked_by` on `contracts.status='FAILED'`; measured at `31484d5`, no code "
         "writes one (0 producers) and this `list[RepoId]` annotation would reject it, so the "
         "column and this field are not interchangeable and this is not a licence to widen either. "
-        "Reversible (§3.5, §12.14).",
+        "REMOVAL IS A SEPARATE CLASS FROM THE APPEND AND IS ENUMERATED SEPARATELY, because an "
+        "un-blocking is not the §3.5 propagation rule run backwards: the append marks the row "
+        "BLOCKED and the recompute only ever returns one to PENDING. The only non-delegating "
+        "remover in `src/` is cli._apply_unblocking, driving "
+        "`SqliteStateRepository.clear_blocked_by` for §11.5 step 6; what it may remove is decided "
+        "by orchestrator.reentry.plan_unblocking and nothing else, at the "
+        "retain-what-cannot-be-resolved polarity ADR-0090 §2.4 rules R2-CLOSED. Naming a remover "
+        "in the trigger enumeration above would be a category error and is refused by "
+        "`tests/test_blocked_by_writer_statements.py`. Three defects of that predicate are OPEN "
+        "at `f4eade0` and are recorded here rather than implied fixed: it is a deny-list, so a "
+        "blocker projected PENDING, RUNNING, BLOCKED or DEGRADED is removed although none of "
+        "those has landed; BlockerState carries one status for a quantity that is per (repo, "
+        "phase); and the reduction that projects the second onto the first is "
+        "`cli._blocker_states`, whose lowest-phase-that-has-not-landed rule retains a repo "
+        "quarantined between phases but is lossy by construction. Reversible (§3.5, §12.14).",
     )
     depends_on: list[RepoId] = Field(default_factory=list)
     depends_on_contracts: list[str] = Field(

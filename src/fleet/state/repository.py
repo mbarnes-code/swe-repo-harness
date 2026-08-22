@@ -61,10 +61,10 @@ fields are returned as stored (`str`).
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Final, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
 import aiosqlite
 
@@ -75,15 +75,39 @@ from fleet.models.enums import (
     RepoStatus,
     TaskKind,
     demote,
+    transition,
 )
 from fleet.obs.redact import redact_text
 from fleet.state import checkpoints
 from fleet.state.db import StateWriter
 from fleet.util.hashing import sha256_text
 
+if TYPE_CHECKING:  # `fleet.orchestrator` imports this module, so the arrow only points that way
+    from fleet.orchestrator.reentry import BlockerState, Unblocking
+
+
+type BlockerResolver = Callable[
+    [aiosqlite.Connection, frozenset[str]], Awaitable[Mapping[str, BlockerState]]
+]
+"""Look up what a resume knows about each named blocker, ON THE CONNECTION IT IS HANDED.
+
+Injected rather than implemented here for the reason `cli._demote_to_floors` supplies
+`evidence_holds`' probe: the lookup needs `findings` and `repos` facts that live in the CLI's
+read layer, and `fleet.state` may not reach up for them. What this module owns is *when* it
+runs — inside `BEGIN IMMEDIATE`, on the transaction's own connection, so the guard is a
+property of the write rather than of the caller.
+
+**A PEP 695 `type` alias, not a plain assignment, and that is load-bearing here.** Its value is
+evaluated lazily, so `BlockerState` — which lives in `fleet.orchestrator`, the layer that imports
+THIS module — stays a `TYPE_CHECKING`-only name while the alias itself is importable at runtime
+by `fleet.cli`. A plain assignment would need the real import and close the cycle
+`demote_to_floor`'s deferred import exists to break."""
+
 __all__ = [
     "READ_ARRAYSIZE",
     "AttemptRow",
+    "BlockedBySnapshotStaleError",
+    "BlockerResolver",
     "BudgetLedgerRow",
     "BudgetRefusedError",
     "ClaimedTask",
@@ -164,6 +188,22 @@ class ReservationRefusedError(BudgetRefusedError):
     A `BudgetRefusedError` but deliberately NOT a `RepoBudgetRefusedError`: no ceiling refused
     here, so `CostLedger.reserve`'s backpressure interpretation must not treat it as headroom
     that waiting could free.
+    """
+
+
+class BlockedBySnapshotStaleError(RepositoryError):
+    """`clear_blocked_by` re-ran §11.5 step 6's plan in-transaction and got a different answer.
+
+    `FloorSnapshotStaleError`'s sibling, one step later and for the identical reason: the plan is
+    computed through a `mode=ro` handle, `BEGIN IMMEDIATE` carries no snapshot across from it, and
+    `state/db.py`'s single-writer slot is process-wide module state so a second process is not
+    excluded at all. The reachable interleaving is ordinary rather than adversarial — `fleet retry`
+    re-opening a contained blocker, or a live worker completing one, between the resume's read and
+    its write.
+
+    Raised, never applied-anyway: the fresher answer may be the *wider* one, and removing a name
+    the operator's preview never showed is exactly what §12 item 46(ii) forbids. Nothing has been
+    written when this is raised; the check runs before the first `UPDATE` in the unit.
     """
 
 
@@ -475,6 +515,17 @@ class StateRepository(ReadOnlyRepository, Protocol):
         now: datetime,
         observed: Mapping[Phase, RepoStatus] | None = None,
     ) -> tuple[PhaseDemotion, ...]: ...
+
+    async def clear_blocked_by(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        observed: Unblocking,
+        floors: Mapping[str, Phase],
+        resolve: BlockerResolver,
+        now: datetime,
+    ) -> tuple[Phase, ...]: ...
 
     # -- primitive 4: the ledger CAS ---------------------------------------------------
     async def open_budget_ledger(self, run_id: str, *, max_usd: float, now: datetime) -> None: ...
@@ -1548,6 +1599,118 @@ class SqliteStateRepository:
                     ),
                 )
             return tuple(demotions)
+
+        return await self._writer.submit(unit)
+
+    async def clear_blocked_by(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        observed: Unblocking,
+        floors: Mapping[str, Phase],
+        resolve: BlockerResolver,
+        now: datetime,
+    ) -> tuple[Phase, ...]:
+        """§11.5 step 6's write for ONE repo: remove the planned names, in ONE transaction.
+
+        **The first code in `src/` that REMOVES a `blocked_by` entry.** ADR-0090 §2.3 measured that
+        class at zero members, which is why `docs/SPEC.md` §12 item 46(ii)'s
+        `blocked_by`-recomputation clause was unassertable rather than merely unasserted. It is
+        deliberately NOT `SqliteSchedulerStore.append_blocked_by`'s inverse-by-symmetry: the append
+        is §3.5's propagation rule and marks the row `BLOCKED`; this is §11.5 step 6's recompute and
+        only ever returns a row to `PENDING`.
+
+        **The plan is re-derived in-transaction by the SAME function, never a second rule.**
+        `observed` is what `orchestrator.reentry.plan_unblocking` returned to the caller from its
+        `mode=ro` read; this method calls that identical function again over the rows and blocker
+        states read inside `BEGIN IMMEDIATE`, and raises `BlockedBySnapshotStaleError` on any
+        difference rather than applying the fresher answer. That is `demote_to_floor`'s `observed`
+        precedent one step later, and it is why `--dry-run` and the write cannot state different
+        rules (defect D74's shape).
+
+        **No finding is minted, and that is `models.enums.demote`'s instruction, not a choice.**
+        `BLOCKED -> PENDING` is in `ALLOWED_TRANSITIONS` as "an unblocked dependency" and `demote()`
+        refuses it outright, because a `PhaseDemoted` there would claim landed green work was
+        discarded when none ran. ADR-0090 §4 rules that no new kind is minted for the un-blocking
+        either; `waves.synthetic = 1` on the appended wave is what the projection reads.
+
+        **A row is only touched if a planned name is actually on it.** A repo's blockers are
+        written into every non-`SUCCEEDED` phase, so the plan is per repo while the write is per
+        row; a row carrying none of `observed.removed` is left byte-for-byte alone.
+
+        Returns the phases it wrote, in row order — so the caller reports a write that happened
+        rather than one that was planned.
+        """
+        from fleet.orchestrator.reentry import plan_unblocking
+
+        stamp = _iso(now)
+
+        async def unit(conn: aiosqlite.Connection) -> tuple[Phase, ...]:
+            # Read *inside* the removal's own transaction: the plan came from a `mode=ro`
+            # handle, `BEGIN IMMEDIATE` carries no snapshot across from it, and `state/db.py`'s
+            # write slot is process-wide module state, so the rows the UPDATE will hit are these.
+            async with conn.execute(
+                "SELECT phase, status, blocked_by FROM phases WHERE run_id = ? AND repo_id = ?",
+                (run_id, repo_id),
+            ) as cursor:
+                rows = [
+                    (
+                        Phase(int(row[0])),
+                        RepoStatus(str(row[1])),
+                        sorted(set(json.loads(str(row[2]) or "[]"))),
+                    )
+                    for row in await cursor.fetchall()
+                ]
+            live = [(repo_id, names) for _phase, _status, names in rows if names]
+            named = frozenset(name for _repo, names in live for name in names)
+            fresh = plan_unblocking(
+                blocked_by_rows=live,
+                blocker_statuses=await resolve(conn, named),
+                floors=floors,
+            )
+            if fresh != (observed,):
+                raise BlockedBySnapshotStaleError(
+                    f"run {run_id} repo {repo_id}: the `phases` rows and blocker statuses this "
+                    f"un-blocking was planned from moved before this write — the plan removed "
+                    f"{list(observed.removed)} leaving {list(observed.remaining)}, and the same "
+                    f"rule re-run inside this transaction says "
+                    f"{[(u.removed, u.remaining) for u in fresh]}. Nothing was written for this "
+                    "repo, and the fresher answer was NOT applied: a preview that showed the "
+                    "operator one removal must not commit another. Re-run `fleet resume`: it is "
+                    "safe and idempotent (ADR-0076) and the next run plans from the rows as they "
+                    "now stand."
+                )
+            discard = set(observed.removed)
+            touched: list[Phase] = []
+            for phase, status, names in rows:
+                keep = [name for name in names if name not in discard]
+                if len(keep) == len(names):
+                    continue
+                written = (
+                    transition(status, RepoStatus.PENDING)
+                    if not keep and status is RepoStatus.BLOCKED
+                    else status
+                )
+                # **Spelled inline, not behind a module constant, and that is deliberate.**
+                # `tests/test_blocked_by_writer_statements.py` finds the `blocked_by` write sinks
+                # by scanning each function's own STRING LITERALS for `UPDATE phases SET
+                # blocked_by`; a name resolves to nothing there, so this write would be invisible
+                # to the module that binds the field's prose to its writers — measured on this
+                # method at `f4eade0`, which reported 2 entry points and 2 writers with the
+                # constant in place and 3 and 3 without it. `append_blocked_by` spells its own
+                # statement inline for the same reason. `status` is a bind parameter, not a
+                # literal: the row returns to `PENDING` only when the list EMPTIES, and a row
+                # still naming a blocker keeps the status it has. `attempts` is absent from the
+                # SET list for `_DEMOTE_PHASE_SQL`'s reason — `complete_phase` is its only writer
+                # in `src/`, and an un-blocking spends no rung of the ladder.
+                await conn.execute(
+                    "UPDATE phases SET blocked_by = ?, status = ?, updated_at = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    (json.dumps(keep), str(written), stamp, run_id, repo_id, int(phase)),
+                )
+                touched.append(phase)
+            return tuple(touched)
 
         return await self._writer.submit(unit)
 

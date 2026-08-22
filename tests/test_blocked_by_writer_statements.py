@@ -131,6 +131,14 @@ _MIRRORS: tuple[Path, ...] = (_STATE, _SPEC)
 #: starting at a missing terminator runs forward into the *next* model's and reports a block that
 #: straddles two listings.
 #:
+#: **Raised 3000 -> 4500 in round E, and the number is measured rather than padded.** The block was
+#: 3820 characters once §11.5 step 6's remover clause landed, so the old bound silently stopped
+#: matching and every check in this module failed at import with "no longer contains a `blocked_by`
+#: block" — a bound that rots into a total outage rather than a finding. The straddle protection is
+#: NOT this number: it is the `"\n\n" not in match` assert below, which fires on any match that
+#: crosses a blank line and therefore catches a run into the next listing at any bound. The bound
+#: is a backstop, so it is set with headroom over the measured size instead of at it.
+#:
 #: **Measured, both mirrors, `704099c`: 2398 characters** — so the bound leaves **602 characters
 #: (25% of the block)** of headroom, and the last two edits to this block spent +782 and +77. The
 #: figure this comment carried until W20 ("~1.5 KB") was the size of the block `50ad1e4`
@@ -139,7 +147,7 @@ _MIRRORS: tuple[Path, ...] = (_STATE, _SPEC)
 #: module built to stop unmeasured numbers (CR4's I1). Overrun is loud, not silent: the
 #: `match is not None` assert in `_prose` fires.
 _FIELD_BLOCK = re.compile(
-    r"^[ \t]*blocked_by:\s*list\[RepoId\]\s*=\s*Field\(\n[\s\S]{0,3000}?^[ \t]*\)$",
+    r"^[ \t]*blocked_by:\s*list\[RepoId\]\s*=\s*Field\(\n[\s\S]{0,4500}?^[ \t]*\)$",
     re.MULTILINE,
 )
 
@@ -498,6 +506,19 @@ _LIVE_MARKER = re.compile(r"\bLIVE\b")
 #: about closure ("the only ...") rather than a list of examples.
 _CALLER_MARKER = re.compile(r"non-delegating callers?", re.IGNORECASE)
 
+#: The clause that names the REMOVERS by symbol. A separate anchor from `_CALLER_MARKER`, and the
+#: separation is the adjudication rather than a convenience.
+#:
+#: `_SINK_SQL` finds every `UPDATE phases SET blocked_by`, which is a *column-write* detector; the
+#: prose it binds is about the §3.5 *append*. Those were the same set until §11.5 step 6 landed the
+#: first remover in `src/` (`SqliteStateRepository.clear_blocked_by`, round E). Folding the remover
+#: into the LIVE trigger enumeration would make the description claim an un-blocking is a trigger
+#: that blocks — the round-E orchestrator's ruling, and `test_the_remover_is_not_laundered_into_the
+#: _append_enumeration` is that ruling as a mechanism rather than a note. What is NOT split is
+#: `_append_machinery`: a removal sink is still an entry point of the column, so a caller of it is
+#: still a measured writer and still has to be named somewhere.
+_REMOVER_MARKER = re.compile(r"non-delegating removers?", re.IGNORECASE)
+
 #: The zero-producer clause, with its producer count parsed out rather than assumed to be zero.
 _ZERO_PRODUCER = re.compile(r"SPEC-mandated with (\d+) producers?", re.IGNORECASE)
 
@@ -623,6 +644,17 @@ def _prose_live_symbols(prose: _Prose) -> set[str]:
     return {f"{module}.{name}" for module, name in _SYMBOL.findall(sentence)}
 
 
+def _prose_removers(prose: _Prose) -> set[str]:
+    """The symbols the description names as REMOVERS of a `blocked_by` entry.
+
+    Parsed the same way as the appenders and from a different sentence, so that "who appends" and
+    "who removes" cannot be satisfied by one list. `_SYMBOL` is two-part, so a remover has to be
+    addressable as `module.function` exactly as an appender is.
+    """
+    sentence = _sentence_with(prose, _REMOVER_MARKER, "which removers are live, by symbol")
+    return {f"{module}.{name}" for module, name in _SYMBOL.findall(sentence)}
+
+
 def _enum_classes() -> dict[str, type[enum.Enum]]:
     """The enum classes `fleet.models.enums` *defines*, not the ones it imports.
 
@@ -734,16 +766,53 @@ def test_every_code_site_that_writes_blocked_by_is_named_by_the_prose(
     writer added to `src/` without a matching edit here makes the description false the moment it
     lands. Reported by the *code* site's `file:line`, because that is the thing to go and look at.
     """
-    named = _prose_live_symbols(prose)
+    named = _prose_live_symbols(prose) | _prose_removers(prose)
     unnamed = {
         symbol: site for symbol, site in code_writers.items() if _prose_symbol(symbol) not in named
     }
     assert not unnamed, (
-        f"{prose.site} claims to name every non-delegating caller of the §3.5 `blocked_by` append, "
-        f"but these write it and are not named: "
+        f"{prose.site} claims to name every non-delegating caller of a `blocked_by` write sink — "
+        f"appenders and removers, in their two separate clauses — but these write it and are "
+        f"named in neither: "
         f"{', '.join(f'{sym} at {site}' for sym, site in sorted(unnamed.items()))}. Either name "
-        f"them in BOTH mirrors, or the closure claim is false."
+        f"them in BOTH mirrors, in the clause of the right class, or the closure claim is false."
     )
+
+
+@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+def test_the_remover_is_not_laundered_into_the_append_enumeration(
+    prose: _Prose, code_writers: dict[str, str]
+) -> None:
+    """A remover must be named, and must NOT be named as an appender. Both halves, mechanised.
+
+    The cheap repair for the closure test above is to drop the remover's symbol into the sentence
+    that enumerates the §3.5 triggers. That buys green over a false sentence — an un-blocking is
+    not a reason a dependent is blocked — and it is CR4's C1 one class over: a claim satisfied by
+    putting a name in the wrong list is a claim nobody can read correctly afterwards. The
+    round-E orchestrator ruled the two classes distinct; this is that ruling as a mechanism.
+
+    Non-vacuous by construction: it asserts the removal clause names at least one symbol, so
+    deleting the clause fails here rather than passing on an empty set. What it cannot catch,
+    stated: whether the symbol in the removal clause really removes rather than appends — that is
+    the direction `_SINK_SQL` cannot see, because both statements are `UPDATE phases SET
+    blocked_by` and nothing in the AST says which way the list moved.
+    """
+    appenders = _prose_live_symbols(prose)
+    removers = _prose_removers(prose)
+    assert removers, (
+        f"{prose.site}: the removal clause names no symbol. `src/` holds a remover — measured "
+        f"writers: {sorted(code_writers)} — so an empty clause is a closure claim about nothing."
+    )
+    assert not (appenders & removers), (
+        f"{prose.site}: {sorted(appenders & removers)} is named as BOTH an appender of the §3.5 "
+        f"propagation rule and a remover. One of the two claims is false; naming a remover in the "
+        f"trigger enumeration is the cheap repair this test exists to refuse."
+    )
+    for symbol in sorted(removers):
+        assert symbol in {_prose_symbol(key) for key in code_writers}, (
+            f"{prose.site}: names `{symbol}` as a remover, but the AST finds no call to any "
+            f"`blocked_by` write sink in it. Writers measured: {sorted(code_writers.items())}"
+        )
 
 
 @pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
@@ -923,6 +992,15 @@ def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     but it is not the independent producer measurement the old wording promised, and Rule 12's
     redundancy question is what settled keeping it rather than deleting it.
 
+    **Removers are subtracted too, and that is a correction, not a widening.** `_code_writers`
+    counts every non-delegating caller of a `blocked_by` write sink, and since §11.5 step 6 landed
+    that includes `cli._apply_unblocking`, which REMOVES. A remover is not a producer of a
+    SPEC-mandated trigger, so leaving it in `beyond_live` made this test read 1 where the truth is
+    0 — measured on the round-E tree at `f4eade0`: 3 writers, 2 LIVE appenders, 1 remover. The
+    remover set is parsed from its own clause (`_prose_removers`), so subtracting it cannot be used
+    to hide an appender: an appender named in the removal clause fails
+    `test_the_remover_is_not_laundered_into_the_append_enumeration` instead.
+
     **The cost, disclosed.** On the day one of the three SPEC-mandated triggers gains a real
     producer, the *correct* prose edit is blocked by this test rather than validated by it: the
     closure test will require the new writer to be named in the "non-delegating callers" sentence,
@@ -933,11 +1011,13 @@ def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     """
     sentence = _sentence_with(prose, _ZERO_PRODUCER, "which writers have no producers")
     stated_producers = int(_ZERO_PRODUCER.search(sentence).group(1))  # type: ignore[union-attr]
-    beyond_live = len(code_writers) - len(_prose_live_symbols(prose))
+    accounted = _prose_live_symbols(prose) | _prose_removers(prose)
+    beyond_live = len(code_writers) - len(accounted)
     assert stated_producers == beyond_live, (
         f"{prose.site}: says the SPEC-mandated writers have {stated_producers} producer(s), but "
-        f"the AST finds {len(code_writers)} writer(s) in `src/` and the description marks "
-        f"{len(_prose_live_symbols(prose))} of them LIVE, leaving {beyond_live}."
+        f"the AST finds {len(code_writers)} writer(s) in `src/` and the description accounts for "
+        f"{len(accounted)} of them ({len(_prose_live_symbols(prose))} LIVE appender(s) + "
+        f"{len(_prose_removers(prose))} remover(s)), leaving {beyond_live}."
     )
 
 

@@ -145,10 +145,13 @@ from fleet.orchestrator.budgets import (
 )
 from fleet.orchestrator.context import RunContext, default_logger
 from fleet.orchestrator.reentry import (
+    BlockerState,
     EvidenceRow,
     RepoEvidence,
+    Unblocking,
     demotable_phases,
     evidence_holds,
+    plan_unblocking,
     resume_floor,
 )
 from fleet.orchestrator.registry import get_worker
@@ -205,6 +208,8 @@ from fleet.state.digest import run_digest
 from fleet.state.projection import DEFAULT_PROJECTION_PATH, build_state, project_once
 from fleet.state.repository import (
     AttemptRow,
+    BlockedBySnapshotStaleError,
+    BlockerResolver,
     EdgeRow,
     EventRow,
     FloorSnapshotStaleError,
@@ -7894,7 +7899,7 @@ async def _build_impl(
     all settled — so a SECOND `fleet build` over a partially complete run computed the root files
     over the unsettled waves alone and republished a `MODULE.bazel` missing whole ecosystems,
     exiting 0 both times. Since `fleet resume` reconciles the ledger and then refuses to continue
-    with exit 2 (`ResumeIncompleteError`; §11.5 steps 6 and 8 have no implementation),
+    with exit 2 (`ResumeIncompleteError`; §11.5 step 8 has no implementation),
     re-invoking `fleet build` is the only way to continue a partial run, so that was the normal
     operator path.
 
@@ -10094,15 +10099,17 @@ def resume(
     (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
     → `PENDING`, retaining `attempts`), 4 (ask Git whether each `RUNNING` task's commit landed
     and correct the row to match, charging no attempt either way), 5 (re-check each phase's
-    durable evidence and demote every repo to its re-entry floor) and 7 (regenerate
+    durable evidence and demote every repo to its re-entry floor), 6 (recompute `blocked_by`,
+    and move the repos that frees into an appended `waves.synthetic = 1` row) and 7 (regenerate
     `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and
-    `--raise-wave-budget`. Steps 6 and 8 do not
+    `--raise-wave-budget`. Step 8 does not
     exist, so the verb reconciles the ledger and then refuses to continue with **exit 2**
     (`ResumeIncompleteError`, ADR-0076 as amended by ADR-0089 — nothing failed, so it is
     deliberately not exit 1) naming what is absent. `--dry-run` is the free health check §11.5
     promises: it makes no network call, writes nothing, and previews the step-3 sweep, the
     step-4 arbitration, the step-5 demotion plan (both of them every git READ, no git or SQL
-    write) and the step-2 reap.
+    write), the step-6 un-blocking plan — the same `plan_unblocking` call the write path makes,
+    over the same inputs — and the step-2 reap.
 
     **One consequence of step 5 that this verb does not repair, stated because nothing else
     reports it (ADR-0089 §4).** A wave is `CLOSED` iff every one of its `wave_members` rows is
@@ -10159,19 +10166,20 @@ def resume(
             "is no such phase — RAN, and this run's report above carries its result (the "
             "`step 5:` lines, or `reentry_floors` under `--json`). Every repo now sits at the "
             "phase it should re-enter from. What the verb still cannot do is CONTINUE: nothing "
-            "here re-derives `blocked_by` from the rows step 5 just demoted, and nothing "
             "assembles the per-phase `PhaseRunner` that walks Phases 1–4 in order, which cli.py "
-            "today only hand-wires per verb. Steps 6 "
-            "(recompute `blocked_by`) and 8 (continue into the phase runners) are absent too. "
-            "Steps 2 and 4 are NOT: the orphan reap and the Git-as-arbiter task reconciliation "
-            "both ran, and this run's report above carries their results — the `step 2:` and "
-            "`step 4:` lines, or `reaped_worktrees`/`reaped_containers`/`git_arbitration` under "
+            "today only hand-wires per verb. Step 8 "
+            "(continue into the phase runners) is absent. "
+            "Steps 2, 4 and 6 are NOT: the orphan reap, the Git-as-arbiter task reconciliation "
+            "and the `blocked_by` recompute all ran, and this run's report above carries their "
+            "results — the `step 2:`, `step 4:` and `step 6:` lines, or `reaped_worktrees`/"
+            "`reaped_containers`/`git_arbitration`/`unblocked_dependents` under "
             "`--json`. The work reported above IS durable — the drift audit, any budget "
             "raise, the PR re-poll, the orphan reap, the stale-lease sweep, the task "
-            "reconciliation, the re-entry demotion and `migration_state.json` are all written "
+            "reconciliation, the re-entry demotion, the `blocked_by` recompute and "
+            "`migration_state.json` are all written "
             "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
             "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
-            "forge call per open PR for a refusal that cannot change until steps 6 and 8 are "
+            "forge call per open PR for a refusal that cannot change until step 8 is "
             "written (ADR-0076, and ADR-0089 on why the error outlives step 5)."
         )
 
@@ -10323,7 +10331,28 @@ async def _resume_impl(
     # the same inputs: counting `RUNNING` as settled moves the floor in 5,312, and a membership
     # rule admitting `RUNNING` moves the plan in 10,736. The ordering STAYS — the two reasons
     # above it are the load-bearing ones — but nothing about the floor may be re-derived from it.
-    floors = await _demote_to_floors(settings, path, run_id, dry_run=dry_run, now=now)
+    floors, computed_floors = await _demote_to_floors(
+        settings, path, run_id, dry_run=dry_run, now=now
+    )
+
+    # §11.5 step 6 — recompute `blocked_by` from `phases` + `edges` — sits HERE, between step 5
+    # and the projection, and the ordering is load-bearing in BOTH directions.
+    #
+    # BELOW step 5, because `plan_unblocking` takes step 5's floors as an input it never
+    # re-derives: `computed_floors` is the mapping the call above returned, and running step 6
+    # first would have nothing to pass it. It also reads the `phases` rows step 5 has just
+    # rewritten, so a repo demoted out of `SUCCEEDED` is judged on the status it now carries.
+    #
+    # ABOVE step 7, because the projection is regenerated FROM SQLite. Run after it, step 6's
+    # `blocked_by` edits, its `BLOCKED -> PENDING` writes and its appended `waves` row would all
+    # be invisible in the `migration_state.json` this same command publishes — the operator would
+    # read a fleet still blocked by a dependency the run had already cleared, which is precisely
+    # the drift class §11.5's preamble says a resume REMOVES. `tests/test_cli.py`'s
+    # `test_step_6_runs_between_step_5_and_the_projection_it_must_precede` asserts it against the
+    # published file rather than against this comment.
+    unblocked = await _unblock_dependents(
+        settings, path, run_id, floors=computed_floors, dry_run=dry_run, now=now
+    )
 
     projection: str | None = None
     if not dry_run:
@@ -10377,6 +10406,10 @@ async def _resume_impl(
         # confirmed, and `applied` is what separates the preview from the write (the defect
         # `raise_budget_applied` exists for, one key down).
         "reentry_floors": floors,
+        # §11.5 step 6, the whole report for step 5's reason: "2 repos un-blocked" cannot tell an
+        # operator whether an audited quarantine was re-admitted or a subtree is still held, and
+        # `applied` is what separates the preview from the write.
+        "unblocked_dependents": unblocked,
         # §11.5 step 2. `live_sandbox_names` is in the payload because it is the input an
         # operator has to see to trust the other two keys: "0 orphans reaped" and "every orphan
         # was spared as live" are the same output with opposite meanings.
@@ -10407,6 +10440,7 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
         )
     lines.extend(_arbitration_lines(result, dry=dry))
     lines.extend(_floor_lines(result, dry=dry))
+    lines.extend(_unblock_lines(result, dry=dry))
     lines.extend(_reap_lines(result, dry=dry))
     lines.extend(_budget_lines(result))
     lines.extend(_repoll_lines(result))
@@ -10618,10 +10652,13 @@ def _refuse_unbuilt_resume_flags(
 
     Every flag below scopes or re-drives the CONTINUATION this verb cannot perform — NOT
     §11.5 step 5, which is built and runs unconditionally on every `fleet resume` this function
-    does not refuse (`_resume_impl` calls `_demote_to_floors` with no flag guard). What is
-    absent is steps 6 and 8, which is the same absence `ResumeIncompleteError` names. **This
+    does not refuse (`_resume_impl` calls `_demote_to_floors` with no flag guard), and NOT
+    §11.5 step 6, which runs unconditionally beside it. What is
+    absent is step 8, which is the same absence `ResumeIncompleteError` names. **This
     docstring and the message below both said step 5 "is not built"; that was true when written
-    and was falsified at `2f0db34`, which wired step 5 into `_resume_impl`.** A
+    and was falsified at `2f0db34`, which wired step 5 into `_resume_impl`. They then said the
+    same of step 6, and that was falsified by the commit adding this sentence, which wired
+    `_unblock_dependents` in between step 5 and the projection.** A
     parser that accepted `--from-phase 2` and then resumed from wherever it liked is worse than
     one that refuses: the operator believes they scoped the resume, and nothing tells them
     otherwise. `--raise-budget`, `--raise-wave-budget`, `--accept-drift`, `--repoll-prs` and
@@ -10643,13 +10680,15 @@ def _refuse_unbuilt_resume_flags(
             "phase ABOVE the HIGHEST phase below the settled frontier whose evidence still "
             "holds or which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN "
             "if there is no such phase) "
-            "IS built and runs on every `fleet resume` this refusal does not stop. What has no "
-            "implementation is step 6 (recompute `blocked_by`) and step 8 (continue into the "
+            "IS built and runs on every `fleet resume` this refusal does not stop, and so is "
+            "step 6 (recompute `blocked_by`, and move the repos that frees into an appended "
+            "synthetic wave). What has no "
+            "implementation is step 8 (continue into the "
             "phase runners) — cli.py hand-wires a `PhaseRunner` per verb and no "
             "assembly walks Phases 1–4 in order, so there is no continuation for these flags to "
             "scope. Accepting the flag and ignoring it would let an "
             "operator believe they had scoped the resume. Re-run without it to get the "
-            "reconciliation that IS built (step 1's config digests, steps 2, 3, 4, 5 and 7, "
+            "reconciliation that IS built (step 1's config digests, steps 2, 3, 4, 5, 6 and 7, "
             "`--repoll-prs`, the budget raises)."
         )
 
@@ -11027,7 +11066,7 @@ async def _demote_to_floors(
     *,
     dry_run: bool,
     now: datetime,
-) -> dict[str, object]:
+) -> tuple[dict[str, object], dict[str, Phase]]:
     """§11.5 step 5: re-check each phase's durable evidence and demote each repo to its floor.
 
     **A driver over `orchestrator/reentry.py` and `demote_to_floor`, not new machinery.** The
@@ -11059,6 +11098,14 @@ async def _demote_to_floors(
     Git call that failed, or a `phases` row that moved under the floor computation. Collapsing
     any two of them is how an operator reads a fleet as reconciled when a quarter of it was
     skipped.
+
+    **The second return value is the floors themselves, and step 6 is why it exists.**
+    `reentry.plan_unblocking` takes `floors` as an input it never re-derives, and the report is
+    not that input: it carries the floor of every repo this step *demoted* and drops the floor of
+    every repo it left `unchanged` because nothing above the floor was `SUCCEEDED`. Feeding step 6
+    from the report would tell it `floor is None` for those repos — which `Unblocking`'s docstring
+    defines as "step 5 computed no floor", a different and false fact. So the mapping is returned
+    beside the report rather than parsed back out of it.
     """
     report: dict[str, object] = {
         "candidates": 0,
@@ -11083,8 +11130,9 @@ async def _demote_to_floors(
             post_commit_sha=None if post_commit_sha is None else str(post_commit_sha),
         )
     report["candidates"] = len(by_repo)
+    computed: dict[str, Phase] = {}
     if not by_repo:
-        return report
+        return report, computed
 
     # UNSUFFIXED, and that is the contract: `RepoEvidence.for_repo` appends
     # `reentry.MIRROR_CACHE_SUBDIR` itself so the one expression that knows git mirrors live a
@@ -11131,6 +11179,7 @@ async def _demote_to_floors(
             )
             cast(list[object], report["unchanged"]).append({"repo_id": repo_id, "reason": reason})
             continue
+        computed[repo_id] = floor
         plan = demotable_phases(statuses, floor)
         if not plan:
             cast(list[object], report["unchanged"]).append(
@@ -11151,9 +11200,9 @@ async def _demote_to_floors(
         )
 
     if dry_run or not plans:
-        return report
+        return report, computed
     await _apply_floor_demotions(path, run_id, plans, report, now=now)
-    return report
+    return report, computed
 
 
 def _floor_reason(floor: Phase, evidence: Mapping[Phase, bool]) -> str:
@@ -11223,6 +11272,394 @@ async def _apply_floor_demotions(
             await read_conn.close()
     report["demoted"] = kept
     report["applied"] = bool(kept)
+
+
+# --------------------------------------------------------------------------------------
+# §11.5 step 6 — recompute `blocked_by`, and move the repos it frees into an appended wave
+# --------------------------------------------------------------------------------------
+
+
+class UnblockLookupError(StateDbError):
+    """A `blocked_by` name the fleet knows as a repo produced no `BlockerState`. Rule 11.
+
+    `orchestrator.reentry.still_blocking` is fail-closed (ADR-0090 §2.4, R2-CLOSED): a name it
+    cannot resolve is RETAINED. That polarity is right, and it is also what makes a broken
+    lookup invisible — a resolver that silently returned nothing for every name would leave
+    every entry in place and report itself as "the recompute found nothing to remove", which is
+    indistinguishable from a healthy fleet. So the one case that is a *harness* fault rather
+    than an unresolvable name — the `repos` table knows this id and the status lookup did not
+    produce a state for it — is raised rather than folded into the retained set.
+    """
+
+
+def _blocker_states(
+    phase_rows: Sequence[tuple[str, int, str]], finding_kinds: Mapping[str, frozenset[str]]
+) -> dict[str, BlockerState]:
+    """Project each blocker's `phases` rows onto the ONE status `BlockerState` can carry today.
+
+    **The rule: the LOWEST phase whose status is not `SUCCEEDED`, and `SUCCEEDED` only when every
+    phase is.** A repo has landed exactly when all of its phases have; this surfaces the first one
+    that has not, so a blocker is never reported as landed on the strength of a later row.
+
+    **The obvious rule — "the highest phase reached wins", `state/projection._fold_repos`' fold —
+    was here until this commit and was FALSE for this question. Measured, not argued** (round E,
+    lane W21, against this function): a repo `fleet quarantine` abandoned *between phases* has
+    rows `{SCAN: SKIPPED, TRANSFORM: SUCCEEDED}` — `cli._quarantine_impl` moves only the
+    non-`TERMINAL_STATUSES` rows, so a later admission can complete a phase above a `SKIPPED` one.
+    Under the highest-phase fold that projects `SUCCEEDED`, `still_blocking` answers `False`, and
+    the dependents of an audited `OperatorQuarantine` are re-admitted on every `fleet resume` —
+    exactly the silent undo `docs/SPEC.md` §12 item 46(ii) was widened to forbid, and exactly the
+    quantity that criterion's original RHI clause leaves unchanged. `_fold_repos`' fold answers a
+    different question (which phase is this repo *at*, for the projection) and does not transfer.
+
+    **This projection is a STAND-IN and is lossy, stated rather than implied.** The quantity is
+    per `(repo, phase)`; `BlockerState.status` is one `RepoStatus`. Only the first non-`SUCCEEDED`
+    status survives, so a repo that is `SKIPPED` at one phase and `REQUIRES_HUMAN_INTERVENTION` at
+    another is reported by one of them. It is chosen so that the loss is always toward RETAINING
+    (the fail-closed direction of ADR-0090 §2.4), never toward removing.
+
+    **What this does NOT close, and must not be read as closing.** `still_blocking` is a
+    deny-list — `BLOCKING_STATUSES` at `f4eade0` is `{REQUIRES_HUMAN_INTERVENTION, SKIPPED}` — so a
+    blocker projected `PENDING`, `RUNNING`, `BLOCKED` or `DEGRADED` is still removed by it, and
+    none of those has landed. That is a defect of the predicate, owned by the predicate; this
+    function cannot fix it without re-deriving the verdict, which is defect D74's shape and the
+    one thing `plan_unblocking` exists to prevent. Recorded here as open at `f4eade0`.
+
+    `finding_kinds` defaults to the empty set for a repo with no `findings` row, and that is a
+    real answer rather than an omission: the caller reads the whole run's findings in one query,
+    so "absent from the mapping" means "this repo has no findings", not "the lookup failed". The
+    lookup that *can* fail is the status one, and `_refuse_unresolved_blockers` makes it loud.
+    """
+    worst: dict[str, tuple[int, RepoStatus]] = {}
+    for repo_id, phase, status in phase_rows:
+        current = RepoStatus(status)
+        seen = worst.get(repo_id)
+        if seen is None:
+            worst[repo_id] = (phase, current)
+            continue
+        seen_phase, seen_status = seen
+        if seen_status is RepoStatus.SUCCEEDED and current is not RepoStatus.SUCCEEDED:
+            worst[repo_id] = (phase, current)  # the first row that has not landed wins outright
+        elif current is not RepoStatus.SUCCEEDED and phase < seen_phase:
+            worst[repo_id] = (phase, current)  # ties broken low, so the rule is deterministic
+    return {
+        repo_id: BlockerState(status=status, finding_kinds=finding_kinds.get(repo_id, frozenset()))
+        for repo_id, (_phase, status) in worst.items()
+    }
+
+
+async def _read_blocker_states(
+    conn: aiosqlite.Connection, run_id: str, names: set[str]
+) -> dict[str, BlockerState]:
+    """`BlockerState` for every name that resolves to a repo carrying `phases` rows in this run.
+
+    Usable on the `mode=ro` handle AND on the writer's connection inside a unit, which is the
+    point: the guard the transaction re-evaluates is the guard the preview reported.
+    """
+    ordered = tuple(sorted(names))
+    if not ordered:
+        return {}
+    marks = ",".join("?" for _ in ordered)
+    phase_rows = [
+        (str(repo_id), int(phase), str(status))
+        for repo_id, phase, status in await _rows(
+            conn,
+            "SELECT repo_id, phase, status FROM phases "  # noqa: S608 - placeholders are '?' only
+            f" WHERE run_id = ? AND repo_id IN ({marks})",
+            (run_id, *ordered),
+        )
+    ]
+    kinds: dict[str, set[str]] = {}
+    for repo_id, kind in await _rows(
+        conn,
+        "SELECT DISTINCT repo_id, kind FROM findings "  # noqa: S608 - as above
+        f" WHERE run_id = ? AND repo_id IN ({marks})",
+        (run_id, *ordered),
+    ):
+        kinds.setdefault(str(repo_id), set()).add(str(kind))
+    return _blocker_states(phase_rows, {k: frozenset(v) for k, v in kinds.items()})
+
+
+async def _resolvable_repo_ids(conn: aiosqlite.Connection, names: set[str]) -> set[str]:
+    """Which of `names` the `repos` table knows. A `contract_id` is in `blocked_by` and not here."""
+    ordered = tuple(sorted(names))
+    if not ordered:
+        return set()
+    marks = ",".join("?" for _ in ordered)
+    return {
+        str(row[0])
+        for row in await _rows(
+            conn,
+            f"SELECT repo_id FROM repos WHERE repo_id IN ({marks})",  # noqa: S608 - as above
+            ordered,
+        )
+    }
+
+
+def _refuse_unresolved_blockers(
+    run_id: str, known: set[str], states: Mapping[str, BlockerState]
+) -> None:
+    """A name the fleet knows as a repo MUST have a `BlockerState`. See `UnblockLookupError`."""
+    missing = sorted(known - set(states))
+    if missing:
+        raise UnblockLookupError(
+            f"run {run_id}: {missing} appear in some repo's `blocked_by` and in `repos`, but the "
+            "status lookup produced no BlockerState for them. `still_blocking` is fail-closed, so "
+            "these entries would be RETAINED and step 6 would report itself as having found "
+            "nothing to remove — a broken lookup and a healthy fleet are the same output. "
+            "Nothing was written."
+        )
+
+
+def _unblocking_entry(plan: Unblocking) -> dict[str, object]:
+    """One repo's whole verdict — both halves of the split, never a count (D44).
+
+    `removed` and `remaining` are `plan_unblocking`'s own values, reported rather than
+    re-derived: `Unblocking` carries both precisely so no reader computes "did this list empty?"
+    from the other one.
+    """
+    return {
+        "repo_id": plan.repo_id,
+        "removed": list(plan.removed),
+        "remaining": list(plan.remaining),
+        "floor": None if plan.floor is None else plan.floor.name,
+    }
+
+
+def _blocker_resolver(run_id: str) -> BlockerResolver:
+    """The `BlockerState` lookup `SqliteStateRepository.clear_blocked_by` runs INSIDE its own
+    transaction, closed over the run.
+
+    Injected rather than implemented in `fleet.state` for `_demote_to_floors`' reason one step
+    over: the lookup needs the `findings` and `repos` facts the CLI's read layer owns, and
+    `fleet.state` may not reach up for them. What the repository owns is *when* it runs — on the
+    writer's connection, under `BEGIN IMMEDIATE`, so the guard is a property of the write and not
+    of this caller. The identical function is called by the `mode=ro` preview above, so the plan
+    the operator is shown and the plan the transaction re-derives cannot be two rules.
+
+    The loud check travels with it: a name the `repos` table knows that produced no `BlockerState`
+    raises `UnblockLookupError` in BOTH routes, because fail-closed retention makes a broken
+    lookup read exactly like a healthy fleet.
+    """
+
+    async def resolve(
+        conn: aiosqlite.Connection, names: frozenset[str]
+    ) -> Mapping[str, BlockerState]:
+        states = await _read_blocker_states(conn, run_id, set(names))
+        _refuse_unresolved_blockers(run_id, await _resolvable_repo_ids(conn, set(names)), states)
+        return states
+
+    return resolve
+
+
+async def _unblock_dependents(
+    settings: FleetSettings,
+    path: Path,
+    run_id: str,
+    *,
+    floors: Mapping[str, Phase],
+    dry_run: bool,
+    now: datetime,
+) -> dict[str, object]:
+    """§11.5 step 6: recompute `blocked_by`, and append the wave the freed repos move into.
+
+    **A driver over `orchestrator/reentry.plan_unblocking` and
+    `SchedulerStore.append_unblocked_wave`, not new machinery.** The removal rule lives in
+    `still_blocking`, the whole per-repo decision in `plan_unblocking`, and the wave allocation
+    in `append_unblocked_wave`. Nothing here restates any of them; this function supplies the
+    three things none of those can reach — the `phases` rows, the blockers' statuses, and step
+    5's floors.
+
+    **ONE route, not two — the same shape as step 5's.** `--dry-run` and the real run call the
+    *same* `plan_unblocking` with the *same* inputs; the branch is the terminal persist and
+    nothing above it. A preview derived by a second comprehension over "is this blocker still
+    RHI?" is defect D74 introduced on purpose, and it is the seam ADR-0090's design closes by
+    construction: `Unblocking` carries `removed` **and** `remaining` so that neither route
+    re-derives "did this list empty?".
+
+    **`floors` is passed in and never re-derived** — step 5 computed it (`_demote_to_floors` over
+    `phase_floor`). Step 6 REPORTS the floor and does not apply it: a status write that moved a
+    row down to the floor here would be a demotion outside step 5's audited `PhaseDemoted` path,
+    which `models.enums.demote` refuses by construction. The only status write here is the
+    `BLOCKED -> PENDING` the emptied list implies.
+
+    **Four buckets, none of them a bare count (D44).** `unblocked` is a repo whose list is now
+    empty — it re-enters the queue; `retained` is a repo still held, *by these names*, which is a
+    different fact from "no repo was freed"; `unresolved` is a repo step 6 refused to write
+    because its rows moved; and `wave_error` is the appended wave failing after the `blocked_by`
+    edits committed. Collapsing any two of them is how an operator reads a fleet as re-admitted
+    when a quarter of it is still blocked.
+    """
+    report: dict[str, object] = {
+        "candidates": 0,
+        "unblocked": [],
+        "retained": [],
+        "unresolved": [],
+        "wave_index": None,
+        "wave_error": None,
+        "applied": False,
+    }
+
+    conn = await connect_ro(path)
+    try:
+        blocked_by_rows = [
+            (str(repo_id), names)
+            for repo_id, blocked_by in await _rows(
+                conn,
+                # `phases.blocked_by` is `TEXT NOT NULL DEFAULT '[]'`, so the empty case is
+                # `'[]'` and not NULL; the filter is the walrus below, over the DECODED list, so
+                # a hand-written `'[ ]'` or a duplicated name cannot slip past a SQL predicate.
+                "SELECT repo_id, blocked_by FROM phases WHERE run_id = ?",
+                (run_id,),
+            )
+            if (names := sorted(set(json.loads(str(blocked_by) or "[]"))))
+        ]
+        named = {name for _repo_id, names in blocked_by_rows for name in names}
+        blocker_statuses = await _read_blocker_states(conn, run_id, named)
+        known = await _resolvable_repo_ids(conn, named)
+    finally:
+        await conn.close()
+    _refuse_unresolved_blockers(run_id, known, blocker_statuses)
+
+    plans = plan_unblocking(
+        blocked_by_rows=blocked_by_rows, blocker_statuses=blocker_statuses, floors=floors
+    )
+    report["candidates"] = len(plans)
+    refused: Mapping[str, str] = {}
+    if not dry_run and any(plan.removed for plan in plans):
+        refused = await _apply_unblocking(settings, path, run_id, plans, report, floors=floors,
+                                          now=now)
+    for plan in plans:
+        if plan.repo_id in refused:
+            _unresolved(report, {"repo_id": plan.repo_id}, refused[plan.repo_id])
+            continue
+        bucket = "retained" if plan.remaining else "unblocked"
+        cast(list[object], report[bucket]).append(_unblocking_entry(plan))
+    return report
+
+
+async def _apply_unblocking(
+    settings: FleetSettings,
+    path: Path,
+    run_id: str,
+    plans: Sequence[Unblocking],
+    report: dict[str, object],
+    *,
+    floors: Mapping[str, Phase],
+    now: datetime,
+) -> dict[str, str]:
+    """One `StateWriter`, one `BEGIN IMMEDIATE` per repo, then ONE `append_unblocked_wave`.
+
+    The writer is opened and closed HERE for `_apply_floor_demotions`' reason: `state/db.py`'s
+    write slot is process-wide module state and steps 3, 4 and 5 each open and close their own.
+
+    **TWO transactions, not one, and it is forced rather than chosen.**
+    `SchedulerStore.append_unblocked_wave` submits its own unit — that is where its
+    `MAX(wave_index) + 1` allocation lives, and allocating inside the write is the property
+    ADR-0090 ruling W bought. Reaching into it to share this function's transaction would mean
+    re-implementing its SQL here, which is the seam the ruling closes. So the order is
+    `blocked_by` first, wave second, and the residue is stated rather than hidden: a crash
+    between them leaves a freed repo `PENDING` in the wave it already sat in. That is the state
+    step 5's demotion leaves behind on every resume (ADR-0089 §4) — the repo's old wave answers
+    `OPEN`, so `open_wave` refuses every later wave until it re-settles. Visible, and one more
+    `fleet resume` does not repeat it, because the entry is already gone from `blocked_by` and
+    nothing re-appends the wave; an operator sees a repo at a floor in an early wave. The
+    opposite order is worse: it appends a fresh synthetic wave on *every* resume until the
+    `blocked_by` write lands.
+
+    Returns the repos whose write was refused, with the reason, so the caller can report them
+    rather than count them.
+    """
+    refused: dict[str, str] = {}
+    written: list[str] = []
+    freed: list[str] = []
+    resolve = _blocker_resolver(run_id)
+    async with StateWriter(path, owner="fleet-resume-step6") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            store = SqliteSchedulerStore(writer=writer, read_conn=read_conn)
+            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            for plan in plans:
+                if not plan.removed:
+                    continue  # nothing to write; `plan_unblocking` emits every repo, freed or not
+                try:
+                    await repository.clear_blocked_by(
+                        run_id,
+                        plan.repo_id,
+                        observed=plan,
+                        floors=floors,
+                        resolve=resolve,
+                        now=now,
+                    )
+                except BlockedBySnapshotStaleError as exc:
+                    refused[plan.repo_id] = str(exc)
+                    continue
+                written.append(plan.repo_id)
+                if not plan.remaining:
+                    freed.append(plan.repo_id)
+            report["applied"] = bool(written)
+            if freed:
+                try:
+                    report["wave_index"] = await store.append_unblocked_wave(
+                        run_id,
+                        freed,
+                        now=now,
+                        max_usd_per_repo=settings.config.budgets.wave_max_cost_usd_per_repo,
+                    )
+                except WaveNotReadyError as exc:
+                    # Rule 11: carried out in the payload, never swallowed. The `blocked_by`
+                    # edits above are already committed and stay committed — a repo that is no
+                    # longer blocked but has not moved wave is recoverable; re-blocking it to
+                    # tidy the report would discard a correct write.
+                    report["wave_error"] = str(exc)
+        finally:
+            await read_conn.close()
+    return refused
+
+
+def _unblock_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
+    """§11.5 step 6, reported per repo, for `_floor_lines`' reason one step over.
+
+    "2 repos un-blocked" cannot tell an operator whether a quarantined dependency was re-admitted
+    or a subtree is still held, and those are opposite facts about the same run. `applied` rather
+    than `dry` decides the verb, because a real run whose every entry is retained writes nothing.
+    """
+    report = result["unblocked_dependents"]
+    if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries it
+        return []
+    unblocked = cast(Sequence[Mapping[str, object]], report["unblocked"])
+    retained = cast(Sequence[Mapping[str, object]], report["retained"])
+    unresolved = cast(Sequence[Mapping[str, object]], report["unresolved"])
+    verb = "would clear" if dry else "cleared"
+    out: list[str] = []
+    if not int(cast(int, report["candidates"])):
+        return ["  step 6: no repo carries a `blocked_by` entry; nothing to recompute"]
+    for entry in unblocked:
+        removed = cast(Sequence[str], entry["removed"])
+        floor = entry["floor"]
+        out.append(
+            f"  step 6: {verb} {', '.join(removed)} from {entry['repo_id']} — its `blocked_by` "
+            f"is empty, so it returns to PENDING"
+            + (f" at floor {floor}" if isinstance(floor, str) else "")
+        )
+    for entry in retained:
+        removed = cast(Sequence[str], entry["removed"])
+        remaining = cast(Sequence[str], entry["remaining"])
+        out.append(
+            f"  step 6: {entry['repo_id']} still blocked by {', '.join(remaining)}"
+            + (f" ({verb} {', '.join(removed)})" if removed else "")
+        )
+    out.extend(
+        f"  step 6: UNRESOLVED for {entry['repo_id']} — {entry['reason']}"
+        for entry in unresolved
+    )
+    wave = report["wave_index"]
+    if isinstance(wave, int):
+        out.append(f"  step 6: freed repos moved into appended wave {wave} (synthetic)")
+    error = report["wave_error"]
+    if isinstance(error, str):
+        out.append(f"  step 6: the appended wave FAILED — {error}")
+    return out
 
 
 # --------------------------------------------------------------------------------------
