@@ -40,6 +40,19 @@ measurement is in `.superpowers/sdd/round-e/lanes/W28/report.md`.
   is a property of the harness, not something this file measures.
 * No length, count or size bound is used anywhere below, so there is no threshold that can rot
   into a silent pass as the statements grow.
+* **Three `write_target` boundaries review lane CR8 named, disposed here rather than left
+  undisclosed.** (i) A **schema-qualified** table resolves to its table half — `_resolve_table`
+  follows `schema.table` to `table`, so `INSERT INTO <attached>.waves …` resolves to the
+  whitelisted `('INSERT', 'waves')`. It needs an `ATTACH` first, which makes it adversarial-only:
+  disclosed, deliberately not patched, per CLAUDE.md's stop rule. (ii) A **multi-statement**
+  string whose leading verb is a read — `"SELECT 1; UPDATE waves SET max_usd = 1"` → `None`. This
+  one is **unreachable**, measured rather than argued: on CPython 3.12.3
+  `sqlite3.Connection.execute` raises `ProgrammingError: You can only execute one statement at a
+  time`, and `executescript` reaches the trace callback **already split** (`'SELECT 1;'` and
+  `' UPDATE t SET a=1;'` arrive as two separate callbacks). It is recorded as unreachable, and
+  with the reason, because an over-disclosed boundary misleads a reader the same way an
+  undisclosed one does. (iii) `ANALYZE` was classified as a non-write and writes `sqlite_stat1` —
+  that one is **fixed**, not disclosed; see `_NON_WRITE_VERBS`.
 """
 
 from __future__ import annotations
@@ -91,12 +104,21 @@ this instrument was validated against.
 _NON_WRITE_VERBS: Final[frozenset[str]] = frozenset(
     {
         "SELECT", "PRAGMA", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE",
-        "EXPLAIN", "ANALYZE", "ATTACH", "DETACH",
+        "EXPLAIN", "ATTACH", "DETACH",
     }
 )
 """Leading keywords that execute no row write. Anything outside this set and outside the
-resolvers below is reported as unresolved rather than assumed harmless — `VACUUM`, `REINDEX` and
-a CTE-prefixed `WITH … INSERT` all land there on purpose."""
+resolvers below is reported as unresolved rather than assumed harmless — `VACUUM`, `REINDEX`,
+`ANALYZE` and a CTE-prefixed `WITH … INSERT` all land there on purpose.
+
+`ANALYZE` was **in** this set until review lane CR8 measured that it is not a non-write: on
+CPython 3.12.3's SQLite it creates `sqlite_stat1` and writes a row into it (measured here:
+`sqlite_master` gains `sqlite_stat1`, which then holds `('t', 'i', '50 1')`). Nothing in step 6
+runs it and `sqlite_stat1` is outside `SNAPSHOT_TABLES`, so the misclassification costs no
+coverage today — it is corrected because this is a set asserted by **equality**, and the one
+place a misclassification widens the permitted surface silently instead of narrowing it is the
+non-write half. Removing it does not add a pair to the observed set: `ANALYZE` now falls to
+`write_target`'s final `else` and would be reported as `("ANALYZE", "?")`, loud."""
 
 _UNRESOLVED: Final = "?"
 _DDL_NOISE: Final[frozenset[str]] = frozenset(
@@ -157,10 +179,20 @@ def write_target(sql: str) -> tuple[str, str] | None:
     assertion naming the statement. Failing on an unresolvable form is the honest behaviour for a
     whitelist: the alternative is a recognition step that drops what it cannot parse, which is
     how a detector goes silent on exactly the site it exists to catch.
+
+    A statement that tokenises to **nothing while its text is non-empty** is that same recognition
+    failure and is reported as `("?", "?")` rather than as a read. It is not hypothetical: SQLite's
+    trace callback renders an internally generated nested statement as a `--`-prefixed single line,
+    `_TOKEN` matches that whole line as a comment, and every token is then dropped. Measured on
+    CPython 3.12.3: `PRAGMA optimize` traces as `PRAGMA optimize`, then `-- ANALYZE "main"."t"`,
+    then a `--`-prefixed `SELECT` — so the one statement of the three that writes `sqlite_stat1`
+    was, before this branch, the one classified as harmless. Measured cost of the branch on the
+    real capture: step 6 executes **37 statements / 25 distinct forms** inside the window and
+    **0** of them are comment-only, so this adds no pair to the observed set.
     """
     tokens = _tokens(sql)
     if not tokens:
-        return None
+        return None if not sql.strip() else (_UNRESOLVED, _UNRESOLVED)
     verb = tokens[0].upper()
     rest = tokens[1:]
     if verb in _NON_WRITE_VERBS:

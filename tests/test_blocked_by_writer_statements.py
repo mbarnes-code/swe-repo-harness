@@ -97,16 +97,28 @@ so keys are matched through `_prose_symbol` and two writers reducing to the same
 are **refused** rather than resolved — loud, but a repair this module will demand and cannot yet
 accept: `_SYMBOL` and the description have to be extended together. (f) `_sql_text` follows a SQL
 constant named in the same module; a constant **imported from another module**, and any statement
-assembled at run time, are still invisible to the sink detector. That direction is silent, and it
-is the one to watch: the measured cost of the narrower version of this same hole was 3 entry points
-and 3 writers collapsing to 1 and 1. (g) A markdown mirror is read from its fenced blocks, and a
-fence that does not parse as Python is skipped. The skip is counted and printed in the not-found
-failure, so recognition and resolution can be told apart — but a mirror inside a fence that stops
-parsing still presents as "the field is missing" first and as the real cause only to a reader of
-the message. What is NO LONGER a residual, because these fixes closed it: the `{0,N}` length bound
-on the field block, whose breach took the whole module off the air rather than producing a finding
-(measured: 2398 characters at `704099c`, 3814 at `1d0c8f6`), and the sink detector's blindness to
-SQL spelled anywhere but inline. None of the seven is closed. This module binds six claims; it does
+assembled at run time, are still invisible to the sink detector. The direction that is silent — and
+it is the one to watch — is a **new** sink whose statement is an imported constant: measured at
+`e93cbe3`, adding one leaves the derived sets at 3 entry points / 3 writers and the module at 20
+pass / 0 FAIL, while the *same* new sink with its SQL spelled inline is caught (4 entry points, 2
+FAIL). That inline control is what makes the green run evidence of a hole rather than of an absent
+defect. The other direction is **loud** and must not be offered as proof of this one: moving an
+**existing** sink's statement behind an imported constant collapses the derived sets (3/3 → 2/2 when
+one of the two sinks moves) and fails 6 checks by name. (g) A markdown mirror is read from its
+fenced blocks, and a fence that does not parse as Python is skipped. The skipped fences are counted
+**and named by their opening line** in the not-found failure, so recognition and resolution can be
+told apart and the broken fence can be found — but a mirror inside a fence that stops parsing still
+presents as "the field is missing" first and as the real cause only to a reader of the message. What
+it no longer presents as is an **outage**: while the mirrors were resolved inside the `parametrize`
+decorator this trigger was a collection error and took all twenty checks down (measured at
+`e93cbe3`: 20 pass → 0 executed), and the `prose` fixture now confines it to the ten cases for the
+mirror that failed (10 pass / 10 errors, module imported). What is NO LONGER a residual, because
+these fixes closed it: the `{0,N}` length bound on the field block, whose breach took the whole
+module off the air rather than producing a finding (measured: 2398 characters at `704099c`, 3814 at
+`1d0c8f6`) — deleting the number closed that trigger, while the module-wide *presentation* it shared
+with residual (g) was closed separately, by moving mirror resolution out of the `parametrize`
+decorator into the `prose` fixture; and the sink detector's blindness to SQL spelled anywhere but
+inline in the **same** module. None of the seven is closed. This module binds six claims; it does
 not certify the sentence.
 """
 
@@ -170,28 +182,34 @@ class _Prose:
         return self.path.relative_to(_ROOT).as_posix()
 
 
-def _python_regions(path: Path) -> tuple[list[tuple[str, int]], int]:
+def _python_regions(path: Path) -> tuple[list[tuple[str, int]], list[int]]:
     """`(regions, unparseable)` — every Python source region in `path`, with its 1-based start line.
 
     A `.py` file is one region starting at line 1; a markdown mirror is its fenced blocks, each
-    *tried* as Python and kept if it parses. The count of fences that did not parse is returned so
-    a "field not found" failure can say whether recognition or resolution is at fault: a detector's
+    *tried* as Python and kept if it parses. The fences that did not parse are returned so a "field
+    not found" failure can say whether recognition or resolution is at fault: a detector's
     recognition step is a separate attack surface from its resolver, and a pre-filter that drops a
     site in silence is a failure mode this project has already paid for.
+
+    They are returned as their **1-based opening lines, not as a count**. A count tells a reader
+    that recognition is where the failure lives and then leaves them to find the broken fence by
+    hand — and `bac5069`'s commit message claimed the fences were "named in the failure" when they
+    were only counted. Naming them is the cheaper of the two ways to make that true.
     """
     text = path.read_text(encoding="utf-8")
     if path.suffix == ".py":
-        return [(text, 1)], 0
+        return [(text, 1)], []
     regions: list[tuple[str, int]] = []
-    unparseable = 0
+    unparseable: list[int] = []
     for match in _FENCE.finditer(text):
         body = match.group(1)
+        line = text.count("\n", 0, match.start(1)) + 1
         try:
             ast.parse(body)
         except SyntaxError:
-            unparseable += 1
+            unparseable.append(line)
             continue
-        regions.append((body, text.count("\n", 0, match.start(1)) + 1))
+        regions.append((body, line))
     return regions, unparseable
 
 
@@ -215,10 +233,21 @@ def _prose(path: Path) -> _Prose:
     time this project has hit it. Raising the number to 4500 restarted the module and left the
     class intact.
 
-    So the number is gone rather than larger. An `ast` node cannot straddle two class bodies, so
-    the hazard the bound existed for is closed **by construction** rather than by a length that has
-    to stay ahead of the prose; and the field's own growth can no longer take the module off the
-    air. Every remaining failure here names the file and says which of the two steps failed.
+    So the number is gone rather than larger, and that closed the **trigger**: an `ast` node cannot
+    straddle two class bodies, so the hazard the bound existed for is closed by construction rather
+    than by a length that has to stay ahead of the prose, and the field's own growth can no longer
+    take the module off the air (measured at `e93cbe3`: +823 characters of description in both
+    mirrors, 20 pass / 0 FAIL).
+
+    It did **not** close the *presentation*, and the paragraph that replaced the bound said it had.
+    Any other location failure — a mirror renamed, a fence that stops parsing, a second declaration
+    — still raised from `_mirrors()` **inside the `parametrize` decorator**, i.e. at import, so it
+    still took all twenty checks down: measured at `e93cbe3`, one non-Python line in the
+    `docs/SPEC.md` fence gave `Interrupted: 1 error during collection`, 0 of 20 checks run. The
+    mirrors are now resolved in the `prose` fixture instead, where the same mutation costs the ten
+    cases for that mirror and no others; see that fixture's docstring for the measurement and for
+    what it does not buy. Every remaining failure here names the file, says which of the two steps
+    failed, and names the fences that did not parse.
     """
     regions, unparseable = _python_regions(path)
     found: list[tuple[ast.AnnAssign, int]] = []
@@ -236,11 +265,12 @@ def _prose(path: Path) -> _Prose:
     assert len(found) == 1, (
         f"{path.relative_to(_ROOT).as_posix()}: found {len(found)} `{_MODEL}.{_FIELD}` field "
         f"declarations, expected exactly 1, across {len(regions)} parseable Python region(s) "
-        f"({unparseable} fenced block(s) in this file did not parse and were skipped). If the "
-        f"field or the model was renamed, update _MODEL/_FIELD and the description in the same "
-        f"change; if a mirror was deleted deliberately, say so here rather than deleting this "
-        f"assertion; if the count is 0 and `unparseable` is not, the mirror is present and the "
-        f"recognition step is what broke."
+        f"({len(unparseable)} fenced block(s) in this file did not parse and were skipped; their "
+        f"opening lines are {unparseable or 'none'}). If the field or the model was renamed, "
+        f"update _MODEL/_FIELD and the description in the same change; if a mirror was deleted "
+        f"deliberately, say so here rather than deleting this assertion; if the count is 0 and "
+        f"`unparseable` is not, the mirror is present and the recognition step is what broke — "
+        f"start at the fences named above."
     )
     node, offset = found[0]
     assert isinstance(node.value, ast.Call), (
@@ -257,8 +287,14 @@ def _prose(path: Path) -> _Prose:
     )
 
 
-def _mirrors() -> list[_Prose]:
-    return [_prose(path) for path in _MIRRORS]
+def _mirror_id(path: Path) -> str:
+    """The parametrised case id for one mirror — its repo-relative path.
+
+    Byte-identical to what `_Prose.__repr__` produced while the mirrors were resolved inside the
+    `parametrize` decorator, so moving that resolution into the `prose` fixture left every node id
+    unchanged.
+    """
+    return path.relative_to(_ROOT).as_posix()
 
 
 # ---------------------------------------------------------------------------------------------
@@ -815,7 +851,31 @@ def code_writers() -> dict[str, str]:
     return _code_writers()
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.fixture
+def prose(request: pytest.FixtureRequest) -> _Prose:
+    """One mirror's description, resolved at **setup** time and deliberately not at import time.
+
+    Until this fixture existed the ten checks below were parametrised over a `_mirrors()` call
+    written **inside the `parametrize` decorator** (`bac5069`), which runs at module import. A
+    location failure in *either* mirror was therefore a collection error and **every** check in the
+    file stopped running — the same outage shape the `{0,N}` bound was deleted for. Measured at
+    `e93cbe3`, one non-Python line inserted into the `docs/SPEC.md` fence: **20 pass -> 0 executed,
+    `Interrupted: 1 error during collection`**. So deleting the bound closed the *trigger* it had
+    and left the *presentation* intact, and `_prose`'s "closed by construction" over-disposed it.
+
+    Resolving here instead makes a location failure a per-case setup error that names the mirror,
+    while the other mirror's ten checks still run and still report: the same mutation now measures
+    **10 pass / 10 errors, module imported**. Loud, not fatal (Rule 11).
+
+    What this does **not** do, stated rather than implied: it does not turn the failure into a
+    `FAIL`. pytest classifies an exception raised in fixture setup as an *error*, which is the
+    accurate label for "this case could not be set up" — the property bought here is that the
+    failure is per case and the module stays on the air, not that it is spelled `FAIL`.
+    """
+    return _prose(request.param)
+
+
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_prose_the_two_mirrors_carry_is_the_value_the_model_exposes(prose: _Prose) -> None:
     """Both mirrors state one claim, and the state.py copy is the description Pydantic serves.
 
@@ -835,7 +895,7 @@ def test_the_prose_the_two_mirrors_carry_is_the_value_the_model_exposes(prose: _
     )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_every_live_writer_the_prose_names_resolves_and_actually_writes_blocked_by(
     prose: _Prose, code_writers: dict[str, str]
 ) -> None:
@@ -872,7 +932,7 @@ def test_every_live_writer_the_prose_names_resolves_and_actually_writes_blocked_
         )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_every_code_site_that_writes_blocked_by_is_named_by_the_prose(
     prose: _Prose, code_writers: dict[str, str]
 ) -> None:
@@ -895,7 +955,7 @@ def test_every_code_site_that_writes_blocked_by_is_named_by_the_prose(
     )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_remover_is_not_laundered_into_the_append_enumeration(
     prose: _Prose, code_writers: dict[str, str]
 ) -> None:
@@ -931,7 +991,7 @@ def test_the_remover_is_not_laundered_into_the_append_enumeration(
         )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_enumeration_carries_the_count_and_any_stated_cardinal_agrees_with_it(
     prose: _Prose,
 ) -> None:
@@ -974,7 +1034,7 @@ def test_the_enumeration_carries_the_count_and_any_stated_cardinal_agrees_with_i
         )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_definition_the_prose_gives_is_the_one_derived_from_the_code(prose: _Prose) -> None:
     """CR2's I1: the description's key term must be self-defining, and defined the way the code is.
 
@@ -1034,7 +1094,7 @@ def test_the_definition_the_prose_gives_is_the_one_derived_from_the_code(prose: 
     )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_contract_trigger_spec_3_5_mandates_is_in_the_enumeration(prose: _Prose) -> None:
     """CR2's M3: §3.5 routes failed contracts through the same rule, so they are in the enumeration.
 
@@ -1084,7 +1144,7 @@ def test_the_contract_trigger_spec_3_5_mandates_is_in_the_enumeration(prose: _Pr
     )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     prose: _Prose, code_writers: dict[str, str]
 ) -> None:
@@ -1147,7 +1207,7 @@ def test_the_spec_mandated_writers_have_the_producer_count_the_prose_states(
     )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_every_enum_existence_claim_matches_models_enums(prose: _Prose) -> None:
     """The check that fires on `9b34497`'s "there is no StubState.ABANDONED".
 
@@ -1181,7 +1241,7 @@ def test_every_enum_existence_claim_matches_models_enums(prose: _Prose) -> None:
         )
 
 
-@pytest.mark.parametrize("prose", _mirrors(), ids=lambda p: repr(p))
+@pytest.mark.parametrize("prose", _MIRRORS, ids=_mirror_id, indirect=True)
 def test_the_annotation_and_the_setting_the_prose_cites_are_the_ones_the_code_carries(
     prose: _Prose,
 ) -> None:
