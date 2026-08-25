@@ -784,3 +784,96 @@ def test_the_effort_column_carries_its_adr_0075_annotation_in_both_copies() -> N
         "the two copies of the ADR-0075 `effort` annotation have drifted apart — this is the "
         "comment-only state c7f72c6 existed to end"
     )
+
+
+def _spec_section(text: str, heading: str, next_heading: str) -> str:
+    """One `###` section of `docs/SPEC.md`, by its heading — so a match cannot be picked up from
+    a neighbouring section that happens to restate the key.
+
+    Located inside the test body, never at import or in a decorator: a heading that moves must
+    fail this one test, not turn the whole module into a collection error (CLAUDE.md Rule 11).
+    """
+    start = text.find(heading)
+    assert start != -1, f"docs/SPEC.md has no heading {heading!r}"
+    end = text.find(next_heading, start)
+    assert end != -1, f"docs/SPEC.md has no heading {next_heading!r} after {heading!r}"
+    return text[start:end]
+
+
+def _spec_11_6_key_components() -> list[str]:
+    """The `cache_key` composition PARSED OUT of §11.6's own prose, in order.
+
+    The prose drives the assertion; this returns what §11.6 *says*, never what the code does.
+    Whitespace and the wrapping backticks are normalised away, so a re-wrap of the sentence is
+    not a failure — only a change of which components it names, or of their order.
+    """
+    spec = SPEC_PATH.read_text(encoding="utf-8")
+    section = _spec_section(spec, "### 11.6 Determinism and LLM drift", "### 11.7 ")
+    m = re.search(r"cache_key = sha256\((?P<body>[^)]*)\)", section, re.DOTALL)
+    assert m is not None, "§11.6 no longer states a `cache_key = sha256(...)` composition"
+    return [" ".join(part.split()).strip("`") for part in m.group("body").split("|")]
+
+
+def _compute_key_components() -> list[str]:
+    """The composition DERIVED FROM THE BODY of `CacheKeyParts.compute`: the `self.<field>` names
+    it joins, in argument order.
+
+    Derived from the body, never from a second copy of the sentence (Guardrail 6). A field read
+    twice inside one argument (`"" if self.effort is None else self.effort`) counts once, at the
+    position of its first read, and a field wrapped in `str(...)` or `",".join(sorted(...))` is
+    the same component as a bare one — those are encodings of a component, not components.
+    """
+    import ast
+    import inspect
+    import textwrap
+
+    tree = ast.parse(textwrap.dedent(inspect.getsource(CacheKeyParts.compute)))
+    calls = [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+    joins = [
+        n
+        for n in calls
+        if isinstance(n.func, ast.Name) and n.func.id == "_join_and_hash"
+    ]
+    assert len(joins) == 1, f"expected one `_join_and_hash` call in compute(), found {len(joins)}"
+    components: list[str] = []
+    for arg in joins[0].args:
+        names = [
+            node.attr
+            for node in ast.walk(arg)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+        ]
+        assert names, f"argument {ast.dump(arg)} reads no `self.<field>`"
+        components.append(names[0])
+    return components
+
+
+def test_spec_11_6s_stated_cache_key_is_the_one_compute_actually_joins() -> None:
+    """§11.6's prose, parsed, against `compute()`'s body — not against a second copy of the prose.
+
+    §11.6 stated a key carrying `harness_version` and omitting `prompt_template_version` while
+    `compute()` did the opposite, deliberately (D79 / the C6 row of
+    `docs/superpowers/plans/llm-cache-inert-research.md` §7). Three copies of the composition —
+    `compute()`, `llm_cache.cache_key`'s column comment and `LlmCallRecord.cache_key`'s
+    `description` — agreed with each other throughout, so no text-to-text comparison of them
+    could see it: §11.6 was the copy nobody compared. That is the escape this closes, and it is
+    accidentally reachable rather than adversarial — the drift arrived by `prompt_template_version`
+    being added to the code and the SPEC sentence not being swept.
+
+    The direction matters. §11.6 is a *specification*, so a reconciler who trusts it re-adds
+    `harness_version` to `compute()` and re-keys the whole corpus on the next patch release. The
+    binding therefore fires in BOTH directions: editing the prose alone fails, and editing
+    `compute()` alone fails.
+
+    What it still cannot catch, stated rather than implied: a consistent edit of §11.6 *and*
+    `compute()` together, and any drift in the other two statements of the key —
+    `schema.sql`'s `llm_cache.cache_key` column comment and `LlmCallRecord.cache_key`'s
+    `description` — which nothing binds to `compute()` either. Both agreed with `compute()` when
+    this was written; the assertion message routes a future failure to sweep them.
+    """
+    assert _spec_11_6_key_components() == _compute_key_components(), (
+        "§11.6's stated `cache_key` composition and the one `CacheKeyParts.compute` joins have "
+        "drifted apart — fix whichever is wrong, and sweep the other statements of the key "
+        "(schema.sql's column comment, LlmCallRecord.cache_key's description) in the same change"
+    )

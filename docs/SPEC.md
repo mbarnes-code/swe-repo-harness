@@ -1479,9 +1479,16 @@ PR state ingestion** — never assumed, and never waited on past `pr.merge_wait_
    commit landed or it did not. Draining is itself bounded: after `budgets.wave_drain_timeout_s`
    (default 900) the remaining tasks are killed, their containers and worktrees reaped, and they
    are reconciled as `FailureClass.TRANSIENT_INFRA`, which by ADR-0014 **consumes no attempt** —
-   the fleet's own clock may not spend a repo's three chances. `fleet resume` re-opens the same
-   `PARTIAL` wave and re-admits its `PENDING` members in descending blast-radius order, exactly as
-   a first admission would.
+   the fleet's own clock may not spend a repo's three chances. A resume re-opens that same
+   `PARTIAL` wave rather than starting a new one — `waves.wave_started_at` is stamped once and
+   inherited, so the wall clock above continues where it stopped rather than restarting. **Re-entry
+   is therefore not re-admission**: while the wave's cumulative elapsed time is still at or over
+   `budgets.wave_max_wallclock_s`, the wave admits nothing and every `PENDING` member is withheld
+   again, no attempt consumed. Raising that ceiling is what clears an exit 4, and it is an audited
+   config change, not a flag: the edit drifts exactly the `budgets` section, which
+   `fleet resume --accept-drift budgets` accepts and records as a `ConfigDrift` finding. Once the
+   ceiling is above the elapsed time, the `PhaseRunner` driving that wave admits its `PENDING`
+   members in descending blast-radius order.
 
    The Bazel invocation always carries `--keep_going` (one broken target must not hide the other
    nineteen), `--build_event_json_file` (machine-readable failures, so `FailureClass` comes from
@@ -7120,10 +7127,18 @@ Determinism therefore comes from **caching, not sampling**:
 
 - `llm/cache.py` keys every call by
   `cache_key = sha256(role | tier | backend | model_id | effort | context_policy |
-  rejected_approach_digest | prompt_sha256 | response_schema_sha256 | harness_version |
-  adapter_versions)`. The prompt hash
+  rejected_approach_digest | prompt_sha256 | prompt_template_version |
+  response_schema_sha256 | adapter_versions)`. The prompt hash
   covers the fully-rendered prompt including file content, so any input change is a new key — a
-  stale cache cannot silently apply yesterday's answer to today's file.
+  stale cache cannot silently apply yesterday's answer to today's file. **`harness_version` is
+  deliberately not a key component, and must not be re-added to make code match a longer list**: it
+  changes on every patch release, so keying on it re-pays for every cached call across a 250-repo
+  fleet after a bug-fix release that changed nothing a model can see. What actually invalidates a
+  cached answer is the prompt template or the response schema, and both are named above —
+  `prompt_template_version` is the invalidation knob, bumped deliberately when a role's template
+  changes meaning. `harness_version` is still carried on `CacheKeyParts`, and asserted not to move
+  the key, so the exclusion is a visible decision with a test on it rather than a missing line in
+  `compute()` that a later edit re-adds unnoticed.
 - **`backend` and the resolved `model_id` are load-bearing key components** (ADR-0023), for
   precisely the reason `context_policy` is (ADR-0021, below): they change the *identity* of the
   call, not its decoration. The cache is deliberately not scoped to `run_id`, so without them an
@@ -7153,7 +7168,11 @@ Determinism therefore comes from **caching, not sampling**:
 - `approach_signature` is computed from the *response*, never from the prompt, so it never enters
   the cache key. A cache hit therefore replays the same proposal, which re-fingerprints to the same
   signature — so anchoring detection is itself deterministic under `--llm-cache read-only`.
-- Cache mode is a CLI flag, `--llm-cache {read-write,read-only,off}` (default `read-write`).
+- Cache mode is a CLI flag, `--llm-cache {read-write,read-only,off}`. **The flag itself has no
+  default**: untyped it is `None`, and the resolved mode is `fleet.yaml`'s `llm.cache_mode`, which
+  is `read-write` unless the operator set it. The flag must not be given a non-optional default to
+  make code match this line — one that defaults to `read-write` substitutes that value over an
+  operator's configured `off` on every run where the flag is not typed.
   `read-only` is the **replay mode**: a miss is a hard error, which is what makes "this re-run
   used no new model output" a provable claim rather than an assertion. `off` is for deliberately
   re-rolling a decision.
@@ -7171,7 +7190,7 @@ every `Fleet-Patch-Id` trailer read off `migrate/<repo>` in commit order, per re
 contain (ADR-0024) — and every non-empty
 `(task_id, attempt, tier, context_policy, approach_signature)` from `attempts` sorted by
 `(task_id, attempt, approach_signature)` — so a ladder that anchors differently between two runs
-is a digest difference, not an invisible one. Two runs are equivalent iff their digests match. §12.20 asserts that a full fixture run,
+is a digest difference, not an invisible one. Two runs are equivalent iff their digests match. §12.21 asserts that a full fixture run,
 re-run with `--llm-cache read-only`, produces a byte-identical `run_digest` — and that mutating
 one fixture file changes it. A digest mismatch between two supposedly identical runs is a
 **defect report**, and the differing component is named by comparing the digest's constituent
