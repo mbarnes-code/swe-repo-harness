@@ -14,8 +14,13 @@ Four rules, and the scheduler is exactly their implementation:
 4. **The per-wave wall clock is CUMULATIVE across resumes.** It is measured from the persisted
    `waves.wave_started_at`, never from process start, or a crash-loop buys unbounded time
    (§3.4). On breach the wave stops admitting and is left `PARTIAL`: members never admitted
-   stay `PENDING` with no attempt consumed and no `blocked_by`, and `fleet resume` re-admits
-   them in the same descending blast-radius order a first admission would.
+   stay `PENDING` with no attempt consumed and no `blocked_by`. **Nothing re-admits them
+   today** — this rule used to claim `fleet resume` does. `fleet resume`'s step 8 has no
+   implementation, and `wave_started_at` is stamped once by `begin_wave`'s `COALESCE` and
+   never cleared, so a later scheduler over the same wave reads the same breach — including
+   a scheduler for a DIFFERENT phase, because `waves` has no phase column while this class is
+   one instance per (run, phase). `docs/SPEC.md` §3.4 states re-admission as intent; the
+   contradiction is recorded as D82 in `docs/INTEGRATION_HONESTY.md` and is not resolved here.
 
 `blocked_by` propagation (§3.5) lives here too, stated once and implemented once: the
 descendants over the **ordering subgraph only** are appended by set union, never replacement,

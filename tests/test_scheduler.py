@@ -303,7 +303,14 @@ async def test_a_wall_clock_breach_withholds_members_as_pending_and_leaves_the_w
 ) -> None:
     """Exit 4 is ordinary operations on a 250-repo run, so its semantics are normative: members
     never admitted stay `PENDING` with **no attempt consumed and no `blocked_by`**, and the wave
-    is `PARTIAL` so `fleet resume` re-admits exactly them in the same order."""
+    is left `PARTIAL`.
+
+    What this test does NOT assert, because the code does not do it: that anything re-admits
+    them. This docstring used to say `fleet resume` re-admits exactly them in the same order.
+    It does not — step 8 is unimplemented, and `wave_started_at` is stamped once and never
+    cleared, so the breach recurs on every later read of that wave (D82 in
+    `docs/INTEGRATION_HONESTY.md`). The property pinned here is the WITHHOLDING, not a
+    recovery."""
     repo, store, _ = wired
     clock = SteppableClock()
     scheduler = _scheduler(repo, store, clock, wave_max_wallclock_s=60)

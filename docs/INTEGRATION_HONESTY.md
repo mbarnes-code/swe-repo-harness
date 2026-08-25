@@ -3847,6 +3847,17 @@ round saw both.
 > govern the heading. Nothing in the vocabulary block permits a `FIXED, LANDED` heading to be
 > reopened for a consequence the entry itself scopes as second-order.
 
+*(2026-08-25, round F lane W11 — **annotation only. Heading, body and the marker above are all left
+exactly as their authors wrote them; nothing here is retracted.** The layer **under** this entry
+closed at `cac537d`. `CachingModelClient` — the component whose read/write key disagreement this
+entry records and whose four copied comments it fixed — was constructed by **no shipped run** for
+the whole life of that fix: D79 measured it and is now `FIXED, LANDED (cac537d)`. So D61's fix was
+correct at its own commit and was, until `cac537d`, correct about a code path production never
+reached. Re-derived at `b5f7760`: `RunContext.__post_init__` now wraps unconditionally
+(`src/fleet/orchestrator/context.py:228-241`), so this entry's invariant is load-bearing on a
+shipped run for the first time. **No claim in this entry changes** — the cache-key mechanism, the
+`9555346` correction above and the heading ruling are all untouched and all still hold.)*
+
 ---
 
 **D62 — OPEN. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
@@ -3881,6 +3892,33 @@ arriving through the writer rather than the pricing. The suite is green on `main
 as its concern 2 and declined: attribution is impossible from a wave-shared client without changing
 `WorkerError` (which carries no tier) or `TierUnavailable`'s raise sites — the same cross-lane change
 deferred for `tier=`. Writing the other four is smaller and unowned.
+
+*(2026-08-25, round F lane W11 — **annotation only; this entry stays `OPEN` and not one word of it
+is rewritten. A stated REASON is retired while the SYMPTOM is live for a NEW cause.** The retired
+reason is not stated here but in **D79**, which added that `llm_cache_hit` *"would read 0 even once
+written, because there is no cache to hit"*. That is **obsolete at `cac537d`**: `RunContext.__post_init__`
+now derives a `SqliteLlmCacheStore` and wraps the ladder client unconditionally
+(`src/fleet/orchestrator/context.py:228-241` at `b5f7760`), so a hit is reachable on a shipped run.
+
+**The symptom is unchanged: `attempts.llm_cache_hit` still reads `0` on a hit.** The cause is now
+**two** independent gaps where the body above named one:
+
+* **(a) this entry's own defect, untouched.** `record_attempt`'s `INSERT INTO attempts` still omits
+  the column. `cac537d` touched `cli.py`, `orchestrator/context.py` and four test files; it did not
+  touch `state/repository.py`.
+* **(b) a NEW cause, introduced by the wiring and disclosed by the wiring commit itself.**
+  `CachingModelClient.__init__` takes an `on_hit: Callable[[LlmCallRecord], None] | None = None`
+  (`src/fleet/llm/cache.py:412`), stores it (`:425`) and calls it on a hit (`:560-561`).
+  `__post_init__` passes **no** `on_hit`, so nothing reports a hit to the writer even if the
+  `INSERT` named the column. `cac537d`'s message states this: *"C1 does not pass on_hit, so
+  attempts.llm_cache_hit still reads 0 on a hit."*
+
+Both halves must land before the column is truthful; neither is done, and (b) is unowned. The other
+four columns this entry names — `llm_failovers`, `llm_backend`, `input_tokens`, `output_tokens` —
+are entirely unaffected by `cac537d`. `SPEC §12.24`'s fixture assertion is affected in one direction
+only, and not in this entry's favour: its `llm_cache_hit = 0` half used to pass because nothing
+wrote the column *and* nothing could hit the cache, and it now passes because nothing writes the
+column alone.)*
 
 ---
 
@@ -5115,7 +5153,7 @@ claim), D60 (why `failover_triggers_recorded` can never read `"complete"`), D62
 
 ---
 
-## D79 — OPEN, recorded only. SPEC §11.6's LLM response cache is entirely inert: no `LlmCacheStore` implementation is constructed anywhere in `src/`, so every production call is billed and no `llm_cache` row is ever written
+## D79 — FIXED, LANDED (`cac537d`). SPEC §11.6's LLM response cache is entirely inert: no `LlmCacheStore` implementation is constructed anywhere in `src/`, so every production call is billed and no `llm_cache` row is ever written
 
 **Measured by lane W30 (round E) at `1698de3`; found by lane R3, whose every figure repeated below
 was re-measured here before being repeated, and whose figures that were *not* re-measured are
@@ -5268,6 +5306,65 @@ the `effort: low` failure CLAUDE.md records.
 * **The billing and row-count figures are R3's**, cited above as R3's and not re-measured by W30.
 * **§11.6's reading is R3's and W30's**, not a third party's; §11.6 and §12 items 21/36/44 are
   quoted at length in the promoted brief precisely so a reader can check the reading.
+
+*(2026-08-25, round F lane W11 — **status field updated; the body above is untouched.** The defect
+this entry records is fixed on `main` at `cac537d`, whose own subject line names it: *"llm cache:
+wire SPEC §11.6's response cache, which shipped entirely inert (D79 C1-C4)"*. It lands C1–C4 of the
+promoted brief. `RunContext.__post_init__` now derives a `SqliteLlmCacheStore` and wraps the ladder
+client **unconditionally** — `src/fleet/orchestrator/context.py`, the `store = SqliteLlmCacheStore(…)
+if self.llm_cache is None else self.llm_cache` / `client = CachingModelClient(…)` pair at `:228-241`
+at `b5f7760` — and `llm_cache_mode` became `CacheMode | None`, so an unset field means *"not given"*
+rather than an override of an operator's `cache_mode: off`. That is the `effort: low` trap this entry
+predicted, avoided. **No `RunContext(` call site changed.**
+
+**The detector is behavioural, and it is NOT a `grep` — re-measured at `b5f7760`.** The class result
+this entry rests on is unchanged by the fix and that is the point: an AST sweep resolving
+`RunContext(` by dotted name finds **5 call sites in `src/` and 5 in `tests/`, and `llm_cache=` and
+`llm_cache_mode=` are passed at 0 of the 10**, before the fix and after it. A caller-side probe of
+any shape is blind here by construction, which is the D58 shape this entry named.
+
+**One raw total in the body above does not reproduce, and it is the grep figure.** The body predicts
+*"After a fix, `git grep "llm_cache=" -- src/` still returns zero"*. Measured at four anchors —
+`1698de3` (this entry's own), `cac537d^`, `cac537d` and `b5f7760` — that command returns **1 line in
+1 file at every one of them**: `src/fleet/cli.py`'s `GlobalOptions(… llm_cache=llm_cache …)`, the
+`--llm-cache` flag being carried into the options object, which is not a `RunContext(` kwarg and was
+never the subject. So the figure was false when written and is still false; the **class** claim it
+was standing in for — no `RunContext(` site passes the field — reproduces exactly. Guardrail 6's
+"prefer a class result to a raw total", demonstrated on this entry's own text. *The body is left as
+written: it records what its author measured at its own commit.*
+
+**Instrument validated against the known-bad state.** `tests/test_run_context_llm_cache.py` reads a
+call log off a scripted offline backend and a row count out of a real temp database — never a type
+or a field comparison alone. Run by this lane in a per-lane detached worktree at `b5f7760` with
+`cwd` inside it (pytest's `pythonpath = ["src"]` plus `tests/conftest.py`'s `sys.path.insert` make
+that tree the imported one), **no `-k` filter, file-scoped, not a whole-tree run**: **4 passed, 0
+failed**. The shipped-kwarg arm bills `['only']` — one backend call for two identical `complete()`
+calls — and leaves **1** `llm_cache` row. Restoring `src/fleet/orchestrator/context.py` from
+`cac537d^` in the same worktree, zero-change gate `git diff --numstat --no-index BACKUP MUTATED` =
+`12 31` read **before** the result, takes it to **3 failed, 1 passed**, with the shipped arm billing
+`['only', 'only']`. Reported per case rather than as a count, because that is what discrimination
+means: the revert reddens `test_two_identical_calls_bill_the_backend_once_and_write_one_row`,
+`test_cache_mode_read_only_in_fleet_yaml_makes_a_miss_fatal` and
+`test_an_explicit_llm_cache_mode_still_overrides_the_config`, and does **not** redden
+`test_cache_mode_off_in_fleet_yaml_bills_every_call_and_writes_nothing` — which is blind to it by
+construction, since `off` and "no cache at all" are indistinguishable at the backend. The `0`-row
+figure for the pre-fix shipped arm remains **R3's**, labelled as such in the body: the known-bad run
+aborts at the call-log assertion before reaching the row count, so this lane did not re-derive it.
+
+**Not closed by `cac537d`, and both were disclosed by the fix commit itself.** (i) C1 does not pass
+`on_hit` into the caching client — `CachingModelClient.__init__`'s `on_hit` parameter
+(`src/fleet/llm/cache.py:412`, stored at `:425`, invoked at `:560-561`) receives nothing from
+`__post_init__` — so `attempts.llm_cache_hit` still reads `0` on a hit. See the marker on **D62**,
+which stays `OPEN`. (ii) C5–C7 are not in this commit: §11.6's cache-key sentence still carries
+`harness_version` and omits `prompt_template_version` against three agreeing code statements, and its
+"§12.20" cross-reference is still off by one. The disclosure block above is unacted and still stands.
+
+**A separate D-number was allocated for this fix and is deliberately NOT used.** Round F's dispatch
+allocated **D81** for "SPEC §11.6's LLM cache shipped entirely inert — FIXED, LANDED (`cac537d`)".
+That is this entry's defect and not a second one; `cac537d` names D79 itself. By the "Status
+vocabulary, used strictly" block above and by the ruling recorded at `39862ec`, this file records a
+fix by setting the heading's status **field**, not by opening a duplicate entry — so the heading
+moved and **D81 remains free**.)*
 
 ## D80 — OPEN, recorded only, and **UNOWNED**. `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
 
@@ -5423,3 +5520,233 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
 * **Two figures are R4's and were not re-measured here**: that `cli.resume`'s final statement is the
   unconditional `raise ResumeIncompleteError`, and R4's 27-test blast-radius count for subtask 10.
   Neither is load-bearing for this entry.
+
+## D82 — OPEN, recorded only. `WaveScheduler` is documented "one instance per (run, phase)" but its wall clock is per-`(run, wave)` with no phase, so one exit-4 breach in TRANSFORM leaves BUILD and VERIFY of that wave permanently un-admittable
+
+**Found and exercised by lane R2 (round F) against a real temp database; recorded by lane W11, which
+re-derived every source fact below at `b5f7760` and labels the runtime figures it did not
+re-execute.** No `pytest` session was run by this lane in the primary checkout; the source facts are
+`ast`- and normalised-text reads of the working tree at `b5f7760`.
+
+### The mechanism, re-derived at `b5f7760`
+
+* **The scheduler is phase-scoped; its store is not.** `WaveScheduler`'s own class docstring
+  (`src/fleet/orchestrator/scheduler.py`) reads *"Decides what may run next, and what a failure
+  costs. **One instance per (run, phase)**"*, and it carries a `phase` field that `status_of` uses on
+  every read (`db.get_phase(self.run_id, repo_id, self.phase)`). Class result, this lane's own
+  predicate: of the **8** methods on the `SchedulerStore` protocol (`record_plan`, `wave_indices`,
+  `wave_members`, `wave_started_at`, `begin_wave`, `blast_radii`, `append_blocked_by`,
+  `append_unblocked_wave`), **0 take a phase argument**. The phase reaches `phases`, never `waves`.
+* **`waves` has no phase column.** `CREATE TABLE IF NOT EXISTS waves` (`src/fleet/state/schema.sql:218`)
+  declares `run_id`, `wave_index`, `computed_at`, `wave_started_at`, `synthetic`, `max_usd`, and
+  `PRIMARY KEY (run_id, wave_index)`. One row per `(run, wave)`, shared by all four phases.
+* **The clock is measured from that shared persisted stamp.** `WaveScheduler.elapsed_s`
+  (`scheduler.py:415-420`) is `max(0.0, clock() - stored)`; `WaveScheduler.breached`
+  (`scheduler.py:422-429`) is `False` iff the stamp is `NULL`, else
+  `elapsed_s >= budgets.wave_max_wallclock_s`.
+* **The stamp is written once and never cleared.** `begin_wave` issues
+  `UPDATE waves SET wave_started_at = COALESCE(wave_started_at, ?)` (`scheduler.py:234-235`), and its
+  docstring gives the reason: racing resumes "must not each decide the wave started now". Class
+  result at `b5f7760`: `grep -rn wave_started_at src/` → **20 hits**, of which exactly **1** is an
+  assignment — that `COALESCE` — and **0** assign `NULL` or a fresh value.
+* **Exit 4 is not `breached` alone.** `WaveReport.exit_code` (`src/fleet/orchestrator/runner.py:293-302`)
+  returns 4 iff `withheld` **and** `state is WaveState.PARTIAL`; a breached wave whose members have
+  all settled is `CLOSED` and returns `None` (`WaveScheduler.wave_state`, `scheduler.py:406-413`).
+* **Four schedulers, one clock.** AST sweep resolving `WaveScheduler(` by name: **4** construction
+  sites in `src/`, all in `cli.py` — `phase=Phase.SCAN` (`:1916`), `Phase.TRANSFORM` (`:4222`),
+  `Phase.BUILD` (`:7688`), `Phase.VERIFY` (`:7758`). All four read the same `waves` row for a given
+  wave index.
+
+### What it does — **R2's exercised figures, not re-executed by this lane**
+
+R2 drove a real `SqliteSchedulerStore` on a temp database with a 60 s ceiling: TRANSFORM opens wave 0
+and burns its clock, then a **brand-new scheduler for a phase that has never run** reads the same row.
+
+```
+TRANSFORM breached(0)=True  elapsed=61.0   wave_started_at(0)=2026-08-09 12:00:00+00:00
+BUILD     breached(0)=True  admitted=() withheld=('acme-auth','acme-commons') state=PARTIAL exit=4
+VERIFY    breached(0)=True  admitted=() withheld=('acme-auth','acme-commons') state=PARTIAL exit=4
+BUILD.open_wave(0) returned 2026-08-09T12:00:00+00:00  (COALESCE kept the TRANSFORM stamp)
+```
+
+R2 further measured a fresh process ten days later on the same database still reading `breached=True`
+(`elapsed=864000.0`), and members left `PENDING` with `attempts=0` — no attempt consumed, exactly as
+admission promises. **The consequence: one exit-4 halt makes every later phase on that wave
+un-admittable, in that run and in every later one**, because nothing in `src/` ever clears the stamp.
+The one live escape R2 found is §11.5 step 6's **synthetic** appended wave, whose `wave_started_at` is
+`NULL` and therefore un-breached — but that reaches only repos whose `blocked_by` cleared, not a repo
+that merely sat in a breached wave.
+
+### The open question — recorded, and this entry does NOT decide it
+
+**Nothing in the tree states whether cross-phase sharing of `wave_started_at` is intended.** R2
+looked and found no ADR or SPEC sentence addressing it either way; this lane re-checked at `b5f7760`
+with a whole-file normalised sweep — `wave_started_at` appears **20 times in `src/`, 11 in `tests/`
+across 5 files, and 8 in `docs/*.md`** — and every `docs/` hit is about **resumes and resequences**,
+never about phases: §3.4's budget-table row (`docs/SPEC.md:1473`), the `MigrationWave` model listing,
+the DDL listing, the migration `ALTER TABLE`, and §6's table-lifecycle row (*"a rewrite PRESERVES
+`wave_started_at`, or a resequence would restart a wave's wall clock"*). So the behaviour is
+**emergent from a schema choice**, and the question — should the clock be per-`(run, wave, phase)`,
+should a phase transition re-stamp, or is one wall clock for a wave's whole four-phase life the
+intent? — has no answer anywhere in the tree. **This entry states the behaviour and its consequence
+and rules on none of them.** An owner must decide before anything changes; choosing by symmetry with
+the per-phase `phases` table, or with the budget ledger, would be exactly the "assign by symmetry"
+move CLAUDE.md records as a dispatcher failure.
+
+### A second contradiction in the same §3.4 passage — recorded here, NOT fixed
+
+`docs/SPEC.md:1482-1484` — the prose nine lines below §3.4's budget-table row — says *"`fleet resume`
+re-opens the same `PARTIAL` wave and re-admits its `PENDING` members in descending blast-radius
+order, exactly as a first admission would."* Measured at `b5f7760`, that cannot hold on either count:
+`fleet resume`'s step 8 does not exist, so the verb reconciles and then refuses with **exit 2**
+(`ResumeIncompleteError`; the verb's own docstring says so at `cli.py:10099-10101`); and even once it
+does, the `COALESCE` above means the same breach recurs on every resume unless
+`budgets.wave_max_wallclock_s` is raised and the drift accepted. The **table row** at
+`docs/SPEC.md:1473` is the honest half — "exits with code 4", and "cumulative across resumes — a
+resume continues the wave's clock, it never restarts it". **The two halves of one §3.4 passage
+disagree with each other.** That is why the three `src/`- and `tests/`-side copies of the re-admit
+claim (corrected in the same change as this entry — see the class sweep under D84) were rewritten to
+describe **what the code does** and to point at this contradiction, rather than being "reconciled
+against the SPEC" as if the SPEC were settled. **Which half of §3.4 moves is a SPEC decision this
+entry does not take and this lane did not make: `docs/SPEC.md` is untouched, and this needs an
+owner.**
+
+### Would a test catch it? MEASURED — no, and it is not expressible
+
+AST sweep for `WaveScheduler(` in `tests/`: **5** construction sites across **4** files
+(`test_scheduler.py:142` and `:240`, `test_runner.py:416`, `test_cli.py:4839`,
+`test_step6_wave_write.py:356`). Every site in a given file uses a **single** phase —
+`PHASE = Phase.TRANSFORM` at `test_scheduler.py:47` and at `test_runner.py:96`, literal
+`Phase.BUILD` and `Phase.TRANSFORM` in the other two. **No test file constructs two schedulers for
+different phases over the same wave**, so no fixture in the suite can express this defect at all;
+R2's probe is the only artefact that has. That is a statement about expressibility, not about case
+count: adding cases to any of those files cannot reach it.
+
+---
+
+## D83 — OPEN. A wall-clock breach exits 4 carrying the literal message `None`, through all four phase verbs
+
+**Found by lane R2 (round F); the site located and the value re-exercised in the running interpreter
+by lane W11 at `b5f7760`.**
+
+`WaveReport.halt` is populated **only** from a `RunHalted` escaping the wave's `TaskGroup` —
+`except* RunHalted as raised: halt = _flatten(raised)` (`src/fleet/orchestrator/runner.py:379-380`),
+the sole assignment to it in the module. A wall-clock breach raises nothing: `admit` returns
+`admitted=()` and the runner's `may_admit` poll withholds the rest, so `halt` stays `None` while
+`WaveReport.exit_code` returns `WAVE_WALLCLOCK_EXIT_CODE = 4` from the *other* branch
+(`runner.py:293-302`; the constant at `runner.py:109`).
+
+Each phase impl then folds the reports into a payload with
+`"halt": next((str(r.halt) for r in reports if r.halt is not None), None)` — `None` for a breach —
+and the CLI maps a non-zero code with `raise FleetCliError(str(result["halt"]), exit_code=code)`.
+`str(None)` is `'None'`.
+
+**Class result, not a single site.** That exact `raise` line occurs **3 times** in
+`src/fleet/cli.py` — in `scan` (`:1047`), in `transform` (`:3208`), and in `_raise_for_phase`
+(`:8587`), which `build` calls at `:2509` and `verify` at `:2550`. **All four phase verbs reach it.**
+The payload half has the same shape at four sites: `:1864` (`scan`'s
+`None if report.halt is None else str(...)`) and the three `next((str(r.halt) …), None)` folds at
+`:4505`, `:8316` and `:8502`.
+
+**Exercised, not read.** Driver in this lane's own scratch subdirectory, run as
+`env -i PATH=/usr/bin:/bin HOME=… PYTHONPATH=<worktree>/src .venv/bin/python <driver>`, printing
+`sys.executable` and `fleet.__file__` and **asserting** the latter resolves inside the worktree
+before any result:
+
+```
+fleet.__file__ = <worktree>/src/fleet/__init__.py      PIN OK
+cli._raise_for_phase({"exit_code": 4, "halt": None, "failed": 0, "attention": []})
+  MESSAGE  = 'None'
+  EXITCODE = 4
+```
+
+An operator whose wave breaches its four-hour ceiling is told `None` on stderr, with exit 4. The exit
+code is correct; the message carries no information at all — not the wave index, not the ceiling, not
+the elapsed seconds, none of which is unavailable at the fold site. Rule 11 ("fail loud") is met by
+the code and defeated by the text.
+
+**Would a test catch it? MEASURED — no.** The two places in `tests/` that name this exit assert the
+**code**: `tests/test_runner.py:1801` (`assert report.exit_code == 4`) and `tests/test_cli.py:3844`
+(`ExitCode.WAVE_WALL_CLOCK_EXHAUSTED == runner.WAVE_WALLCLOCK_EXIT_CODE == 4`). A text sweep of
+`tests/` finds **no** assertion on the message of an exit-4 `FleetCliError`. The fix is a message
+construction at the fold sites, not a control-flow change.
+
+---
+
+## D84 — OPEN. `_prepare_repo` mutates every member's git state BEFORE admission discovers it can admit none
+
+**Found by lane R2 (round F) from source order; re-derived and widened to a second phase by lane W11
+at `b5f7760`. Source order, `ast`- and text-derived — NOT exercised end to end by either lane, and
+this entry says so rather than implying a run.**
+
+In `_transform_impl`'s wave loop (`src/fleet/cli.py`), for each wave index the order is:
+
+1. `upsert_phase` for **every** member (`cli.py:4419-4426`);
+2. `_prepare_repo` for **every** member not already planned (`cli.py:4427-4443`);
+3. `_run_transform_wave` (`cli.py:4445`) — **which is the first place `WaveScheduler.admit` is
+   reached at all**.
+
+`_prepare_repo` (`cli.py:3858`) is not a read. Its own docstring enumerates what it does before the
+first mutation, and two of its four steps are writes: step 2 **discards a crashed predecessor's
+dirty worktree** ("§3.2 step 6.4's 'No' branch"), and step 4 creates the phase anchor
+`refs/fleet/<run>/<repo>/phase-2/base` as a **real ref**, mirrored into `phases.base_ref` /
+`pre_commit_sha`. It also checks out `migrate/<repo>`.
+
+So on a wave whose clock is already spent (D82), the delegate discards worktrees and creates anchor
+refs for **every member of the wave**, and only then learns from `admit` that it may admit **none** —
+`admitted=()`, `withheld=` every member, exit 4. The git writes are not rolled back. This is not data
+loss on its own terms (step 2 can only discard an uncommitted worktree, and the anchor is reused
+verbatim on re-entry), but it is work done and state changed on behalf of an admission that was
+already impossible before the loop began.
+
+**Class result — the same ordering exists in VERIFY, which R2 marked `[UNVERIFIED]`.** `_verify_impl`
+calls `_prepare_verify` for every member (`cli.py:8430-8449`) before `_run_verify_wave`
+(`cli.py:8451`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
+mutex it takes a fresh snapshot ref, then per member runs `worktree remove --force`, a `shutil.rmtree`
+fallback, `worktree prune`, and `worktree add --detach --force`. So **2 of the 3 wave-driving phase
+impls** put per-member git mutation ahead of admission. `_build_impl` is **not** in this class as
+measured: its pre-admission work at `cli.py:8235-8251` is re-planning plus `_check_root_file_domain`,
+and this lane did not trace whether either writes git — **`[UNVERIFIED]` for BUILD**, stated rather
+than assumed in either direction.
+
+**The cheap fix, and why this entry does not prescribe it.** Polling `scheduler.breached(index)`
+before the preparation loop would skip the mutation on a breached wave — but a breach is not the only
+way admission ends up empty, and the preparation loop is also what produces the `plans` a later
+resume reuses. Whether preparation belongs per-admitted-repo rather than per-member touches the same
+`admit` contract D82 records as undecided, and should be ruled on **with** D82, not before it.
+
+**Would a test catch it? MEASURED — no.** No test in the suite asserts on work performed before an
+empty admission; the transform and verify e2e suites drive waves that admit.
+
+### The comment class this change also corrected
+
+The same change as these three entries corrected **3 `src/`- and `tests/`-side statements** of one
+false claim — *"a wall-clock-breached `PARTIAL` wave is re-admitted by `fleet resume`"* — which is
+false at `b5f7760` on the two counts D82 records. R2 reported **two** sites
+(`src/fleet/orchestrator/runner.py:107-108` and a line-16 citation in `tests/test_scheduler.py`); a
+whitespace-normalised whole-file sweep with offsets mapped back to line numbers, over `src/`,
+`tests/` and `docs/` (predicate: a `re-?admit` match within 220 normalised characters of both a
+`resume` token and one of `wall.?clock|breach|PARTIAL|wave`), returned **6 matches in 6 files**, of
+which **4 are in the class**: the two R2 named, plus
+**`src/fleet/orchestrator/scheduler.py:17`** — the module docstring, which no line-oriented grep for
+R2's phrasing reaches — plus `docs/SPEC.md:1482-1484`. The other 2 matches are about operator
+quarantine and about a `PENDING` row, and are out of class. R2's second citation had also **rotted**:
+the claim is at `tests/test_scheduler.py:306`, inside
+`test_a_wall_clock_breach_withholds_members_as_pending_and_leaves_the_wave_partial`'s docstring, not
+at `:15-16` — the module docstring's line-15 bullet says the *opposite* (that restarting the clock on
+resume would be the defect) and is **true**; editing it because it matched a grep would have been the
+mirror-image error. **The class of ASSERTING sites went 4 → 1**: the three code and test
+statements now describe what the code does; the survivor is `docs/SPEC.md`, a SPEC decision this lane
+did not take and left untouched, recorded under D82.
+
+**The raw total moved the other way, and that is the honest number.** Re-running the identical sweep
+after the corrections returns **10 matches in 7 files**, up from 6 in 6 — because a correction of
+this shape is a **retraction that quotes its own quarry** so a reader can see what was withdrawn
+("this rule used to claim `fleet resume` does"), and a match-counting detector cannot tell a
+retraction from the claim it retires. That is CLAUDE.md's recorded trap, reproduced here on this
+lane's own edit. Subtracting quotations-inside-retractions **by rule** and reading the residue: 1
+asserting site (`docs/SPEC.md:1483`), 4 matches over the 3 corrected sites now stating the negation
+(`runner.py:109`, `scheduler.py:17`, `tests/test_scheduler.py:308` and `:309`), 3 matches inside
+these ledger entries describing the class, and the same 2 out-of-class matches as before (a
+quarantine-dependents passage in a promoted plan, and `cli.py:3978`'s `PENDING`-row comment). **Do
+not sweep this class by count.**

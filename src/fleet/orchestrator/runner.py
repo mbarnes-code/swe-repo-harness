@@ -104,8 +104,15 @@ __all__ = [
     "WaveReport",
 ]
 
-#: §3.4: a per-wave wall-clock breach is the same fail-closed path as a budget breach, and it is
-#: a RESUMABLE state — the breached wave is left `PARTIAL` and re-admitted by `fleet resume`.
+#: §3.4: a per-wave wall-clock breach is the same fail-closed path as a budget breach. The
+#: breached wave is left `PARTIAL`, its withheld members `PENDING` with no attempt consumed —
+#: but NOTHING RE-ADMITS THEM TODAY. This comment used to say `fleet resume` does; it does not.
+#: `fleet resume`'s step 8 has no implementation (the verb refuses with exit 2,
+#: `ResumeIncompleteError`), and `waves.wave_started_at` is stamped once by `begin_wave`'s
+#: `COALESCE` and never cleared, so any later scheduler over that wave — in this phase or any
+#: other, in this run or a later one — re-reads the same breach. `docs/SPEC.md` §3.4 states
+#: re-admission as INTENT and contradicts its own budget-table row; which half moves is
+#: undecided. Recorded as D82/D83 in `docs/INTEGRATION_HONESTY.md`.
 WAVE_WALLCLOCK_EXIT_CODE: Final = 4
 #: §11.3 / §11.8. Named here for the same reason the ledger names its two: `fleet.cli.ExitCode`
 #: stops at 7 today, and inventing members into another module's enum from here is worse.
