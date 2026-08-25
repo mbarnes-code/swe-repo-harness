@@ -31,6 +31,7 @@ import aiosqlite
 import pytest
 from pydantic import BaseModel
 
+from fleet.llm.cache import CachingModelClient
 from fleet.llm.client import (
     BackendFailover,
     BackendReply,
@@ -449,14 +450,23 @@ async def test_run_context_supplies_both_callbacks_to_the_client(tmp_path: Path)
 
     Asserted against the client's own attributes rather than through behaviour so the failure
     message points at the wiring rather than at whichever finding happened to go missing.
+
+    The unwrapping step is not incidental. Since §11.6's cache was actually installed
+    (2026-08-25), `RunContext.model_client` is the `CachingModelClient` DECORATOR on every run,
+    and the two callbacks live on the ladder client it wraps. Both `isinstance` checks are kept
+    deliberately rather than relaxed to one: a decorator that stopped delegating to a
+    `LadderModelClient` at all would satisfy a looser assertion vacuously, and this test's whole
+    reason for existing is that these callbacks are OPTIONAL, so losing them is silent.
     """
     backend = ScriptedBackend(HONEST_CAPS)
     async for h in _build(tmp_path, backend, make_router()):
         client = h.ctx.model_client
-        assert isinstance(client, LadderModelClient)
+        assert isinstance(client, CachingModelClient)
+        inner = client._inner
+        assert isinstance(inner, LadderModelClient)
         sink = h.ctx.llm_findings
-        assert client._on_drift == sink.on_drift
-        assert client._on_failover == sink.on_failover
+        assert inner._on_drift == sink.on_drift
+        assert inner._on_failover == sink.on_failover
 
 
 # ======================================================================================

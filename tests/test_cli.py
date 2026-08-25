@@ -32,12 +32,13 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import uuid
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, cast
 
 import pytest
 from typer.testing import CliRunner
@@ -63,6 +64,7 @@ from fleet.models.enums import Ecosystem, Phase
 from fleet.models.state import SCHEMA_VERSION
 from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import WorktreeManager
+from fleet.state import db as dbmod
 from fleet.state.db import SCHEMA_PATH, StateWriter
 from fleet.util.proc import ProcResult
 from fleet.util.proc import run as proc_run
@@ -1166,37 +1168,114 @@ def test_profile_flag_selects_the_profile_every_role_resolves_through(tmp_path: 
     }
 
 
-def test_llm_cache_flag_reaches_the_caching_client(workspace: Path) -> None:
-    """`--llm-cache off` reaches `CachingModelClient.mode`, not just the parser (§11.6).
+def test_llm_cache_flag_reaches_the_run_it_is_a_flag_on(workspace: Path) -> None:
+    """`--llm-cache` selects the mode a `RunContext`-assembled client will actually use (§11.6).
 
-    Why: this is the other half of the named defect. A `--llm-cache off` that is accepted and
-    dropped means an operator trying to reproduce a result gets last week's cached answers
-    replayed — and, because a hit is indistinguishable from a fresh call at that boundary except
-    for cost, nothing in the output says so.
+    Why: this replaces `test_llm_cache_flag_reaches_the_caching_client`, which was true of a
+    helper and false of a run. That test asserted that `cli.caching_client` — a function with
+    **zero callers in `src/`** — mapped the flag onto a constructor argument, and that
+    `fleet models list --json` *reported* the flag back. Deleting §11.6's only production
+    consumption point, `RunContext.__post_init__`'s cache branch, left it green: the property in
+    its name ("reaches the caching client") was false for the whole life of the harness while it
+    passed, because nothing on any shipped path built a caching client at all.
+
+    Every assertion below is on a **resolved value in a live interpreter** — the settings object
+    the CLI actually loads and the client an actual `RunContext` actually assembles — never on a
+    declaration and never on the flag echoed back to stdout. The declaration is what carried the
+    other half of this defect: `--llm-cache` was declared `= LlmCacheMode.READ_WRITE`, a
+    non-optional default that an unconditional override would have substituted over an
+    operator's `cache_mode: off`.
     """
-    from fleet.cli import GlobalOptions, LlmCacheMode, caching_client
-    from fleet.llm.cache import MemoryLlmCacheStore
-    from fleet.settings import FleetSettings
+    from fleet.cli import GlobalOptions, LlmCacheMode, _load_settings
 
-    surfaced = runner.invoke(
-        app, [*base_args(workspace), "--llm-cache", "off", "--json", "models", "list"]
+    # Quoted: bare `off` is a YAML 1.1 boolean, and `llm.cache_mode` is a `Literal` of strings,
+    # so an unquoted one is an exit-2 config error rather than the mode this test is about.
+    write_config(workspace, fleet=FLEET_YAML + 'llm:\n  cache_mode: "off"\n')
+    config_path = workspace / "config" / "fleet.yaml"
+
+    # 1. No flag: `fleet.yaml` wins. This is the case the non-optional default would break.
+    unflagged = _load_settings(GlobalOptions(config_path=config_path))
+    assert unflagged.config.llm.cache_mode == "off", (
+        "with no --llm-cache typed, the operator's fleet.yaml value must survive; a flag default "
+        "reaching the override channel silently re-rolls a run the operator asked to replay"
     )
+    assert _client_mode(workspace, unflagged) == "off"
+
+    # 2. The flag overrides it, in both directions away from the config value.
+    for flag, expected in (
+        (LlmCacheMode.READ_ONLY, "read-only"),
+        (LlmCacheMode.READ_WRITE, "read-write"),
+        (LlmCacheMode.OFF, "off"),
+    ):
+        settings = _load_settings(GlobalOptions(config_path=config_path, llm_cache=flag))
+        assert settings.config.llm.cache_mode == expected
+        assert _client_mode(workspace, settings) == expected, (
+            f"--llm-cache {flag.value} must reach the client a run assembles, not just settings"
+        )
+
+    # 3. The pre-flight reports the RESOLVED mode, which with no flag is the config's.
+    surfaced = runner.invoke(app, [*base_args(workspace), "--json", "models", "list"])
     assert surfaced.exit_code == ExitCode.SUCCESS, surfaced.output
     assert json.loads(surfaced.stdout)["llm_cache"] == "off"
 
-    settings = FleetSettings.load(workspace / "config")
-    for flag, expected in (
-        (LlmCacheMode.OFF, "off"),
-        (LlmCacheMode.READ_ONLY, "read-only"),
-        (LlmCacheMode.READ_WRITE, "read-write"),
-    ):
-        client = caching_client(
-            object(),  # type: ignore[arg-type]  - the decorator never calls it here
-            settings,
-            MemoryLlmCacheStore(),
-            GlobalOptions(llm_cache=flag),
-        )
-        assert client._mode == expected
+
+def _client_mode(workspace: Path, settings: Any) -> str:
+    """The `mode` of the client a real `RunContext` assembles from `settings` — read off the
+    object, in the running interpreter, exactly as a phase run would get it.
+
+    Not `opts.cache_mode` and not `settings.config.llm.cache_mode`: those are the input. What
+    this test exists to prove is that the value arrives at the one client every worker calls.
+    """
+    from fleet.llm.roles import LlmRouter
+    from fleet.orchestrator.budgets import Ceilings, CostLedger, Limits
+    from fleet.orchestrator.context import RunContext, default_logger
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    async def _build() -> str:
+        path = workspace / "state" / "cache-mode.db"
+        await initialize_database(path)
+        async with StateWriter(path, owner="test-cache-mode") as writer:
+            read_conn = await connect_ro(path)
+            try:
+                repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                ledger = CostLedger(
+                    repo,
+                    run_id=RUN_ID,
+                    ceilings=Ceilings.from_settings(
+                        settings.config.budgets, settings.config.stubs
+                    ),
+                )
+                ctx = RunContext(
+                    run_id=uuid.UUID(RUN_ID),
+                    config=settings.config,
+                    writer=writer,
+                    repository=repo,
+                    read_conn=read_conn,
+                    ledger=ledger,
+                    limits=Limits(
+                        git_net=asyncio.Semaphore(1),
+                        subprocess=asyncio.Semaphore(1),
+                        docker=asyncio.Semaphore(1),
+                        llm={},
+                        cpu_pool=cast(Any, None),
+                        ledger=ledger,
+                    ),
+                    llm=LlmRouter.from_models_config(
+                        settings.models, profile=settings.profile
+                    ),
+                    log=default_logger("test.cache-mode"),
+                    work_dir=workspace / "work",
+                    harness_version="0.1.0",
+                )
+                return str(ctx.model_client._mode)  # type: ignore[union-attr]
+            finally:
+                await read_conn.close()
+
+    try:
+        return asyncio.run(_build())
+    finally:
+        dbmod._release_write_slot()
 
 
 def test_gc_refuses_to_evict_under_live_work(workspace: Path) -> None:

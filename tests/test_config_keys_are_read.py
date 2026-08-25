@@ -179,8 +179,12 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:build.openapi_generator",              # settings.py:580
         "fleet.yaml:scan.unknown_ecosystem_dest",          # settings.py:364
         "fleet.yaml:pr.reviewers_from",                    # settings.py:692
-        "fleet.yaml:llm.cache_path",                       # settings.py:679 — `llm/cache.py`
-        #                                                    takes its path from the caller
+        # `LlmSection.cache_path`. STILL INERT after the 2026-08-25 cache wiring, and separately
+        # judged from `cache_mode` rather than swept along with it: `RunContext.__post_init__`
+        # builds `SqliteLlmCacheStore(writer=..., read_conn=...)`, so the store rides the §11.5
+        # single writer and the §6 database — it takes no path at all, from this key or anywhere.
+        # `cache_path` occurs nowhere in `src/fleet/` outside `settings.py`.
+        "fleet.yaml:llm.cache_path",                       # `LlmSection.cache_path`
         #
         # --- revealed by comment/docstring stripping (was passing on prose alone) --------
         # `orchestrator/budgets.py:975`'s docstring names it; `Limits.create`'s `llm_overrides=`
@@ -234,12 +238,28 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # refusal block `cli.py:3156-3158`/`4772-4774` even says so: "--stub-blocked is not
         # implemented". Qualified `transform.stub_blocked` occurs nowhere for real.
         "fleet.yaml:transform.stub_blocked",                # settings.py:453
-        # `cli.py:413`'s `Options.cache_mode` property is derived entirely from `self.llm_cache`
-        # (`--llm-cache`, `cli.py:742-743`), never from `config.llm.cache_mode`; every call site
-        # of `opts.cache_mode` (`cli.py:558,10529,10532`) reads that property, not settings.
-        # `orchestrator/context.py:139`'s `llm_cache_mode` field is likewise never constructed
-        # from config. Qualified `llm.cache_mode` occurs nowhere for real.
-        "fleet.yaml:llm.cache_mode",                        # settings.py:678
+        # (`llm.cache_mode` used to sit here, and the mechanism was: `GlobalOptions.cache_mode`
+        # was derived entirely from `--llm-cache` and never from `config.llm.cache_mode`, so
+        # every reader of the bare name read that property rather than settings, and
+        # `RunContext.llm_cache_mode` was never constructed from config either. It left on
+        # 2026-08-25, when `cli._load_settings` began routing `--llm-cache` through
+        # `overrides["llm.cache_mode"]` and `RunContext.__post_init__` began resolving the mode
+        # from `self.config.llm.cache_mode`. It keeps its `QUALIFIED_MATCH_KEYS` membership: the
+        # bare name still collides with `cli.GlobalOptions.cache_mode`, which still exists and
+        # is still the flag-only view, so the plain scan remains useless for this key and
+        # dropping the membership is what would hide a revert of the wiring. Same shape and same
+        # remedy as the `llm.max_schema_repairs` note above.
+        #
+        # What this ratchet does NOT catch, measured rather than assumed: reverting the
+        # CONSUMPTION point alone — `RunContext.__post_init__` back to not installing a cache,
+        # with `cli._load_settings`'s `overrides["llm.cache_mode"]` left in place — leaves this
+        # whole file GREEN, because that dotted key is a plain string literal and `_sources()`
+        # blanks comments and docstrings but not string literals generally, so the ROUTING half
+        # satisfies the qualified scan by itself. Reverting BOTH halves does fail here, in two
+        # tests. The ratchet against the consumption point is therefore not a text scan at all:
+        # it is `tests/test_run_context_llm_cache.py`, which asserts a backend call log and an
+        # `llm_cache` row count. Recorded here so the next reader does not mistake this line's
+        # absence from KNOWN_INERT for a guarantee it cannot give.)
     }
 )
 

@@ -70,11 +70,10 @@ from fleet.graph.infer import InferenceInput, OwnerIndex, infer_edges
 from fleet.graph.infer import ManifestDependency as InferredDependency
 from fleet.graph.query import blast_radii as graph_blast_radii
 from fleet.graph.sequence import WavePlan, assign_waves
-from fleet.llm.cache import CacheMode, CachingModelClient, LlmCacheStore
+from fleet.llm.cache import CacheMode
 from fleet.llm.client import (
     CallBudget,
     LlmError,
-    ModelClient,
     TierUnavailable,
     UnknownRole,
     discover,
@@ -458,7 +457,7 @@ class GlobalOptions:
     run: str | None = None
     log_level: str = "INFO"
     json_output: bool = False
-    llm_cache: LlmCacheMode = LlmCacheMode.READ_WRITE
+    llm_cache: LlmCacheMode | None = None
     profile: str | None = None
     max_cost_usd: float | None = None
     max_rss_mb: int | None = None
@@ -468,15 +467,25 @@ class GlobalOptions:
         return self.config_path.parent
 
     @property
-    def cache_mode(self) -> CacheMode:
-        """`--llm-cache` as the `Literal` §11.6's `CachingModelClient` actually takes."""
+    def cache_mode(self) -> CacheMode | None:
+        """`--llm-cache` as the `Literal` §11.6's `CachingModelClient` takes — or `None`.
+
+        `None` is "the flag was not typed", and it is NOT a synonym for `read-write`: the
+        resolved mode then comes from `fleet.yaml`'s `llm.cache_mode`, which an operator may
+        have set to `off`. Collapsing the two here is how a flag default silently overwrites a
+        config value the operator did write; `_load_settings` therefore overrides on `is not
+        None`, never unconditionally. The RESOLVED mode is `settings.config.llm.cache_mode`,
+        and that is what a command must report or act on.
+        """
         match self.llm_cache:
             case LlmCacheMode.READ_ONLY:
                 return "read-only"
             case LlmCacheMode.OFF:
                 return "off"
-            case _:
+            case LlmCacheMode.READ_WRITE:
                 return "read-write"
+            case _:
+                return None
 
 
 def _options(ctx: typer.Context) -> GlobalOptions:
@@ -589,6 +598,12 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
         overrides["llm.profile"] = opts.profile
     if opts.max_rss_mb is not None:
         overrides["budgets.max_rss_mb"] = opts.max_rss_mb
+    # §11.6's `--llm-cache` reaches the run as `llm.cache_mode` and nowhere else, so
+    # `RunContext.__post_init__` reads ONE resolved value and the CLI carries no second notion
+    # of "the active cache mode" — the same rule `--profile` is held to two lines up.
+    # `is not None` is load-bearing: the flag's absence must leave `fleet.yaml` alone.
+    if (cache_mode := opts.cache_mode) is not None:
+        overrides["llm.cache_mode"] = cache_mode
 
     backends = tuple(discover())
     settings = FleetSettings.load(
@@ -613,28 +628,6 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
 def llm_router(settings: FleetSettings) -> LlmRouter:
     """The ADR-0023 router for the ACTIVE profile — the one `--profile` selected."""
     return LlmRouter.from_models_config(settings.models, profile=settings.profile)
-
-
-def caching_client(
-    inner: ModelClient,
-    settings: FleetSettings,
-    store: LlmCacheStore,
-    opts: GlobalOptions,
-) -> CachingModelClient:
-    """Wrap a backend client in §11.6's cache with `--llm-cache` and `--profile` honoured.
-
-    This is the fix for the two flags being parsed and then dropped: `mode` is `--llm-cache`, and
-    the router is built from the `--profile`-resolved settings, so `backend`/`model_id` — both
-    `llm_cache` key components — change with the profile and a profile swap is a genuine miss
-    rather than a replay of the other profile's answers (§10, §11.6).
-    """
-    return CachingModelClient(
-        inner,
-        llm_router(settings),
-        store,
-        mode=opts.cache_mode,
-        harness_version=HARNESS_VERSION,
-    )
 
 
 def _require_db(opts: GlobalOptions) -> Path:
@@ -817,8 +810,9 @@ def main_callback(
         bool, typer.Option("--json", help="Machine-readable stdout.")
     ] = False,
     llm_cache: Annotated[
-        LlmCacheMode, typer.Option("--llm-cache", help="§11.6 cache mode.")
-    ] = LlmCacheMode.READ_WRITE,
+        LlmCacheMode | None,
+        typer.Option("--llm-cache", help="§11.6 cache mode. Default: fleet.yaml llm.cache_mode."),
+    ] = None,
     profile: Annotated[
         str | None, typer.Option("--profile", help="config/models.yaml profile (ADR-0023).")
     ] = None,
@@ -12633,12 +12627,19 @@ def models_list(
             ]
         if output_format is OutputFormat.JSON or opts.json_output:
             # `llm_cache` is reported here because it is a property of the call this pre-flight
-            # is predicting: `off` means every route below is a fresh, billed call.
+            # is predicting: `off` means every route below is a fresh, billed call. It is read
+            # off `settings`, not off `opts`, because `_load_settings` has already folded
+            # `--llm-cache` in — so this echoes the mode the run will RESOLVE, including the
+            # `fleet.yaml` value when the flag was not typed.
             _echo_json(
-                {"profile": settings.profile, "llm_cache": opts.cache_mode, "routes": rows}
+                {
+                    "profile": settings.profile,
+                    "llm_cache": settings.config.llm.cache_mode,
+                    "routes": rows,
+                }
             )
             return
-        _echo(f"profile {settings.profile}  (llm-cache {opts.cache_mode})")
+        _echo(f"profile {settings.profile}  (llm-cache {settings.config.llm.cache_mode})")
         for row in rows:
             _echo(
                 f"  {row['role']:<20} {row['tier']:<10} {row['backend']:<20} "

@@ -40,7 +40,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
-from fleet.llm.cache import CachingModelClient
+from fleet.llm.cache import CachingModelClient, SqliteLlmCacheStore
 from fleet.llm.client import CallPolicy, LadderModelClient
 from fleet.models.base import utcnow
 from fleet.models.enums import Phase, TransformTier
@@ -167,9 +167,22 @@ class RunContext:
     `@register_backend` registry, which is the harness's own plugin table and not a vendor
     singleton — a test hands in `{"fake": FakeBackend()}` and reaches no network."""
     llm_cache: LlmCacheStore | None = None
-    """§11.6's store. Present ⇒ the client is wrapped in `CachingModelClient`; absent ⇒ it is not,
-    which is the whole of `--llm-cache off`."""
-    llm_cache_mode: CacheMode = "read-write"
+    """An EXPLICIT override of §11.6's store. `None` — which is what every `RunContext(` site in
+    `cli.py` passes, by passing nothing — means *build the shipped one*
+    (`SqliteLlmCacheStore` over this context's own `writer`/`read_conn`), NOT "run without a
+    cache". The distinction is this field's whole history: absent used to mean *unwrapped*, so
+    the cache §11.6 calls the harness's only determinism mechanism was never once installed on a
+    shipped run — every call billed, no `llm_cache` row ever written. Turning the cache OFF is
+    `cache_mode`'s `"off"` branch inside `CachingModelClient`, which is the ONE place that
+    decision is encoded; this field must never become a second encoding of it again."""
+    llm_cache_mode: CacheMode | None = None
+    """An EXPLICIT override of §11.6's mode. `None` means *derive it from
+    `config.llm.cache_mode`*, which is what `--llm-cache` writes through `cli._load_settings`.
+
+    Optional rather than `= "read-write"` deliberately: a non-optional default here cannot be
+    told apart from an operator's choice, so deriving "only when not given" would silently
+    substitute `read-write` over a `cache_mode: off` in `fleet.yaml` — the `effort: low` failure
+    this project records, one field over."""
     llm_policy: CallPolicy | None = None
     """An EXPLICIT override of the §9 `llm:` knobs the client reads. `None` — which is what
     every `RunContext(` site in `cli.py` passes, by passing nothing — means *derive them
@@ -212,14 +225,20 @@ class RunContext:
             on_drift=sink.on_drift,
             on_failover=sink.on_failover,
         )
-        if self.llm_cache is not None:
-            client = CachingModelClient(
-                client,
-                self.llm,
-                self.llm_cache,
-                mode=self.llm_cache_mode,
-                harness_version=self.harness_version,
-            )
+        store = (
+            SqliteLlmCacheStore(writer=self.writer, read_conn=self.read_conn)
+            if self.llm_cache is None
+            else self.llm_cache
+        )
+        client = CachingModelClient(
+            client,
+            self.llm,
+            store,
+            mode=(
+                self.config.llm.cache_mode if self.llm_cache_mode is None else self.llm_cache_mode
+            ),
+            harness_version=self.harness_version,
+        )
         object.__setattr__(self, "model_client", client)
 
     # ---------------------------------------------------------------- derived ceilings
