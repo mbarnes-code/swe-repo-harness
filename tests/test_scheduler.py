@@ -307,8 +307,10 @@ async def test_a_wall_clock_breach_withholds_members_as_pending_and_leaves_the_w
 
     What this test does NOT assert, because the code does not do it: that anything re-admits
     them. This docstring used to say `fleet resume` re-admits exactly them in the same order.
-    It does not — step 8 is unimplemented, and `wave_started_at` is stamped once and never
-    cleared, so the breach recurs on every later read of that wave (D82 in
+    It does not — and the reason is no longer that step 8 is unimplemented: `f6a2e4e`
+    (ADR-0080) wired it, so `fleet resume` continues and still re-admits nothing here.
+    `wave_started_at` is stamped once and never cleared, so the breach recurs on every later
+    read of that wave (D82 in
     `docs/INTEGRATION_HONESTY.md`). The property pinned here is the WITHHOLDING, not a
     recovery."""
     repo, store, _ = wired

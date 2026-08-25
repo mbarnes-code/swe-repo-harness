@@ -15,11 +15,13 @@ Four rules, and the scheduler is exactly their implementation:
    `waves.wave_started_at`, never from process start, or a crash-loop buys unbounded time
    (§3.4). On breach the wave stops admitting and is left `PARTIAL`: members never admitted
    stay `PENDING` with no attempt consumed and no `blocked_by`. **Nothing re-admits them
-   today** — this rule used to claim `fleet resume` does. `fleet resume`'s step 8 has no
-   implementation, and `wave_started_at` is stamped once by `begin_wave`'s `COALESCE` and
-   never cleared, so a later scheduler over the same wave reads the same breach — including
-   a scheduler for a DIFFERENT phase, because `waves` has no phase column while this class is
-   one instance per (run, phase). `docs/SPEC.md` §3.4 USED TO state re-admission as intent
+   today** — this rule used to claim `fleet resume` does. It used to give the reason as "step 8
+   has no implementation"; `f6a2e4e` (ADR-0080) wired step 8, so `fleet resume` continues now
+   and STILL does not re-admit this wave. The surviving reason stands alone: `wave_started_at`
+   is stamped once by `begin_wave`'s `COALESCE` and never cleared, so a later scheduler over
+   the same wave reads the same breach — including one a step-8 continuation composes, and
+   including a scheduler for a DIFFERENT phase, because `waves` has no phase column while this
+   class is one instance per (run, phase). `docs/SPEC.md` §3.4 USED TO state re-admission as intent
    against its own budget-table row; `f54dac8` moved the prose half, so the SPEC now agrees with
    this rule and that question is decided. What D82 still records as OPEN is a different
    question — whether sharing one wall clock across a wave's four phases is intended at all —

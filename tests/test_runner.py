@@ -1855,8 +1855,11 @@ async def test_a_wall_clock_breach_says_what_happened_rather_than_the_string_non
     )
     elapsed = re.search(r"after ([\d.]+)s", message)
     assert elapsed is not None
-    assert float(elapsed.group(1)) == pytest.approx(report.admission.elapsed_s, abs=0.05), (
-        "the elapsed must be the number the breach was decided on"
+    assert float(elapsed.group(1)) == pytest.approx(await scheduler.elapsed_s(0), abs=0.05), (
+        "the elapsed must be the wave's elapsed at the moment it stopped admitting"
+    )
+    assert float(elapsed.group(1)) >= 60, (
+        "a message that says a 60s ceiling was SPENT after less than 60s contradicts itself"
     )
     wave = re.search(r"wave (\d+)", message)
     assert wave is not None and int(wave.group(1)) == report.wave_index
@@ -1866,3 +1869,96 @@ async def test_a_wall_clock_breach_says_what_happened_rather_than_the_string_non
         assert repo_id in message, (
             "the operator cannot get the withheld members from anywhere else on this path"
         )
+
+
+class BreachesOnceTheWaveHasStarted(WaveScheduler):
+    """The production scheduler with exactly ONE seam: the wave's clock jumps past the ceiling
+    right after the runner's FIRST successful `may_admit` poll.
+
+    That seam, and not a trip-point count on clock reads, because a count is a magic number
+    that silently stops selecting the mid-wave path the moment anything reads the clock one
+    more or one fewer time (CLAUDE.md Rule 11). Overriding `may_admit` names the event
+    directly. `elapsed_s`, `breached`, `admit` and the withholding are all untouched
+    production code, which is what makes the elapsed the message prints a real measurement.
+    """
+
+    async def may_admit(self, wave_index: int) -> bool:
+        allowed = await super().may_admit(wave_index)
+        if allowed and not MID_WAVE_TRIPS:
+            MID_WAVE_TRIPS.append(wave_index)
+            cast(SteppableClock, self.clock).advance(61)
+        return allowed
+
+
+#: One entry per trip, so the test can assert the seam fired at all rather than passing
+#: vacuously on a scheduler that never breached.
+MID_WAVE_TRIPS: list[int] = []
+
+
+async def test_a_mid_wave_wall_clock_breach_names_the_elapsed_the_withholding_saw(
+    harness: Harness,
+) -> None:
+    """D83, the half its own fix could not see. `run_wave`'s docstring says `may_admit` is
+    re-polled between admissions "so a wall-clock breach stops admitting *inside* the wave" —
+    and on that path `admit` did NOT breach, so `admission.elapsed_s`, which `admit` snapshots
+    before the wave runs, is BY CONSTRUCTION below the ceiling. Building the message from it
+    printed "spent its 60s wall-clock ceiling after 0.0s".
+
+    Why the pre-existing D83 test cannot fail under that defect, stated so it is not re-added:
+    it drives `open_wave(0)` then `clock.advance(61)`, so `admit` itself breaches
+    (`admission.breached is True`, nothing dispatched) and `admission.elapsed_s` is already 61;
+    and its elapsed assertion compared the parsed number against **that same snapshot**, i.e.
+    against the value the message was built from. It asserted internal consistency, never
+    correspondence, so no change to the SOURCE of the elapsed could redden it.
+
+    `assert report.admission.breached is False` below is the proof this is the mid-wave path
+    and not the pre-wave one, and it is what makes the elapsed assertion discriminating: the
+    two quantities are EQUAL on the pre-wave path and differ by the whole ceiling here. That is
+    the two-anchor rule from CLAUDE.md Rule 12 — a fixture whose two anchors coincide cannot
+    express the defect at all, and the pre-existing test is exactly that fixture.
+    """
+    MID_WAVE_TRIPS.clear()
+    await _seed(harness, *SIX)
+    await harness.plan(SIX)
+    for repo_id in SIX:
+        BEHAVIOURS[repo_id] = [ok()]
+    scheduler = BreachesOnceTheWaveHasStarted(
+        run_id=RUN,
+        phase=PHASE,
+        store=harness.store,
+        db=harness.repo,
+        budgets=BudgetsSection(wave_max_wallclock_s=60),
+        clock=harness.clock,
+    )
+    await scheduler.open_wave(0)
+
+    report = await harness.runner(scheduler=scheduler).run_wave(0)
+
+    assert MID_WAVE_TRIPS == [0], "the seam must have fired, or this fixture proves nothing"
+    assert report.admission.breached is False, (
+        "if `admit` itself breached this is the PRE-wave path and the defect is not expressible"
+    )
+    assert len(CALLS) == 1 and CALLS[0][0] == "repo-a", (
+        "exactly the member admitted before the trip runs; the rest are discovered mid-wave"
+    )
+    assert sorted(report.withheld) == sorted(SIX[1:])
+    assert report.state is WaveState.PARTIAL
+    assert report.exit_code == 4
+    assert report.halt is not None
+    assert report.halt.reason is HaltReason.WAVE_WALLCLOCK
+
+    message = str(report.halt)
+    elapsed = re.search(r"after ([\d.]+)s", message)
+    assert elapsed is not None
+    assert float(elapsed.group(1)) == pytest.approx(await scheduler.elapsed_s(0), abs=0.05), (
+        "the elapsed must be the wave's elapsed at the moment it stopped admitting, not the "
+        "snapshot `admit` took before the wave started"
+    )
+    assert float(elapsed.group(1)) >= 60, (
+        "a message that says a 60s ceiling was SPENT after less than 60s contradicts itself, "
+        "and reads as a broken harness rather than as a ceiling to raise"
+    )
+    assert float(elapsed.group(1)) > report.admission.elapsed_s, (
+        "THE discriminator: on the mid-wave path the pre-wave snapshot is strictly smaller, "
+        "and it is the number the defect printed"
+    )

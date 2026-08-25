@@ -11228,3 +11228,35 @@ this repository has no CI configuration. `extend-exclude` in `[tool.ruff]` — i
 > measures how many files `.gitignore` actually keeps out and emits a `UserWarning` naming the
 > environment and the measured zero, so a lane meets the disclosure at the place the green is
 > produced rather than inferring it from this entry.
+
+> **ANNOTATION (2026-08-25, round G lane W9, measured at `3dc3a98`, `352c514` and `f5a188a`) —
+> the annotation above dates the 181→182 step one commit too late, and consequence (iii)'s
+> **6,970** is not a property of the tree at all. Nothing above is rewritten.**
+>
+> **(a) 182 holds at `352c514` itself, not first at `f6a2e4e`.** Predicate
+> `ruff 0.16.2 check . -q --show-files | wc -l`, run in a throwaway detached worktree per ref:
+> **181** at `3dc3a98` (= `352c514^`) and **182** at `352c514`. The added file is
+> `tests/test_lint_gate.py`, which `352c514` adds itself (`git show --stat 352c514`: 3 files,
+> `docs/DECISIONS.md`, `pyproject.toml`, `tests/test_lint_gate.py`) — so the delta is derived two
+> ways, by the count and by the commit's own file list. Both of (iii)'s totals therefore describe
+> **the parent tree, not the tree the gate guards**: CLAUDE.md Guardrail 6's "re-run the check
+> against the artefact the fix produced, not against the finding". (iii) is a record and is left
+> as written; this is its correction. Found by lane CR2 at `352c514`; the anchor is this lane's.
+>
+> **(b) `6,970` is a snapshot of one checkout's UNTRACKED content and cannot re-measure.** The
+> same predicate with `--no-respect-gitignore` reads **182** in a worktree at `352c514` (a fresh
+> worktree carries none of the ignored trees, exactly as the annotation above records) and
+> **6,975** in the primary checkout at `f5a188a`, of which **5,302** are outside `references/` —
+> i.e. `.venv` and the runtime write paths, whose contents move with every install and every lane.
+> So the figure is neither 6,970 nor 6,971 nor stable: it counts files that are not in the
+> repository. **The class result is what (iii) actually needs and it holds unchanged**: without
+> `respect-gitignore` the gate resolves READ-ONLY `references/` and would demand lint fixes in
+> files this project may not modify, which is what the scope check exists to prevent.
+>
+> **(c) `1,673` reproduces EXACTLY, and the `1660` in `tests/test_lint_gate.py:60` and `:211` is a
+> DIFFERENT, also-correct quantity — do not unify them.** In the primary at `f5a188a`,
+> `--no-respect-gitignore --show-files | grep -c /references/` → **1,673**, breaking down as
+> **1,651 `.py` + 21 `.toml` + 1 `.ipynb`**; `find references -name '*.py' | wc -l` → **1,660**.
+> Ruff applies its own default excludes to the `.py` side (1,660 − 1,651 = 9) and resolves
+> `.toml`/`.ipynb` that `find -name '*.py'` cannot see. Both numbers are right for what each says.
+> This note exists so a later sweep does not "correct" one into the other.

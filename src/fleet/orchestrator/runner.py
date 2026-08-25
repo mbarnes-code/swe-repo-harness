@@ -107,10 +107,14 @@ __all__ = [
 #: §3.4: a per-wave wall-clock breach is the same fail-closed path as a budget breach. The
 #: breached wave is left `PARTIAL`, its withheld members `PENDING` with no attempt consumed —
 #: but NOTHING RE-ADMITS THEM TODAY. This comment used to say `fleet resume` does; it does not.
-#: `fleet resume`'s step 8 has no implementation (the verb refuses with exit 2,
-#: `ResumeIncompleteError`), and `waves.wave_started_at` is stamped once by `begin_wave`'s
-#: `COALESCE` and never cleared, so any later scheduler over that wave — in this phase or any
-#: other, in this run or a later one — re-reads the same breach. `docs/SPEC.md` §3.4 USED TO
+#: It used to give the reason as "step 8 has no implementation"; `f6a2e4e` (ADR-0080) wired step
+#: 8 and deleted `ResumeIncompleteError`, so `fleet resume` DOES continue now — and it still does
+#: not re-admit this wave. The surviving reason is the second one, unchanged and sufficient on
+#: its own: `waves.wave_started_at` is stamped once by `begin_wave`'s `COALESCE` and never
+#: cleared, so any later scheduler over that wave — in this phase or any other, in this run or a
+#: later one, including one a step-8 continuation composes — re-reads the same breach.
+#: ADR-0080 records that step 8 does not touch `WaveScheduler` at all.
+#: `docs/SPEC.md` §3.4 USED TO
 #: state re-admission as INTENT against its own budget-table row; `f54dac8` moved the prose half,
 #: so the SPEC now agrees with the paragraph above and that question is decided. D82's OTHER half
 #: is still open and is a DIFFERENT question: `waves` carries no phase column, so one phase's
@@ -413,15 +417,25 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             # hands the operator the literal string `'None'` (D83). The exit code was always
             # right; the text carried nothing. Everything named here is a fact the operator
             # cannot otherwise get: which wave, which phase, the ceiling that was spent, the
-            # elapsed the breach was decided on, and how many members are still owed. No
-            # remedy is named on purpose: §3.4 calls the state resumable, but nothing re-admits
-            # a breached wave today (D82, and `scheduler.py`'s module docstring).
+            # elapsed at the moment the wave stopped admitting, and how many members are still
+            # owed. No remedy is named on purpose: §3.4 calls the state resumable, but nothing
+            # re-admits a breached wave today (D82, and `scheduler.py`'s module docstring).
+            #
+            # The elapsed is RE-READ here rather than taken from `admission.elapsed_s`, which
+            # `admit` snapshots BEFORE the wave runs. On the mid-wave path — the one this
+            # method's own docstring describes, where `may_admit` discovers the breach between
+            # admissions — that snapshot is by construction BELOW the ceiling, because `admit`
+            # itself did not breach; the message then read "spent its 60s ceiling after 0.0s",
+            # which is self-contradictory and reads as a broken harness rather than as a
+            # ceiling to raise. `elapsed_s` is the same quantity `breached` compares against,
+            # so the number printed is the number the withholding was decided on.
             ceiling = self.scheduler.budgets.wave_max_wallclock_s
+            elapsed_s = await self.scheduler.elapsed_s(wave_index)
             withheld_names = ", ".join(sorted(withheld))
             halt = RunHalted(
                 HaltReason.WAVE_WALLCLOCK,
                 f"wave {wave_index} of phase {int(self.phase)} ({self.phase.name}) spent its "
-                f"{ceiling}s wall-clock ceiling after {admission.elapsed_s:.1f}s; "
+                f"{ceiling}s wall-clock ceiling after {elapsed_s:.1f}s; "
                 f"{len(withheld)} member(s) withheld, still PENDING with no attempt consumed "
                 f"[{withheld_names}]",
             )
