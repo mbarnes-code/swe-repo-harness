@@ -127,6 +127,13 @@ class HaltReason(StrEnum):
 
     RUN_BUDGET = "RUN_BUDGET"
     WAVE_BUDGET = "WAVE_BUDGET"
+    WAVE_WALLCLOCK = "WAVE_WALLCLOCK"
+    """§3.4's per-wave wall clock. The ONE member no repo task ever raises: it is a property of
+    the wave, discovered by `admit`/`may_admit` rather than by a worker, so `run_wave`
+    CONSTRUCTS its `RunHalted` instead of catching one. It is on this list because §3.4 calls a
+    breach "the same fail-closed path as a budget breach" and because the alternative — leaving
+    `WaveReport.halt` `None` under a non-zero exit — is what shipped the operator the literal
+    string `'None'` (D83)."""
     HOST_MEMORY = "HOST_MEMORY"
     DISK = "DISK"
     TIER_UNAVAILABLE = "TIER_UNAVAILABLE"
@@ -135,6 +142,7 @@ class HaltReason(StrEnum):
 _EXIT_CODES: Final[Mapping[HaltReason, int]] = {
     HaltReason.RUN_BUDGET: RUN_BUDGET_EXIT_CODE,
     HaltReason.WAVE_BUDGET: 10,
+    HaltReason.WAVE_WALLCLOCK: WAVE_WALLCLOCK_EXIT_CODE,
     HaltReason.HOST_MEMORY: HOST_MEMORY_EXIT_CODE,
     HaltReason.DISK: DISK_EXIT_CODE,
     HaltReason.TIER_UNAVAILABLE: TIER_UNAVAILABLE_EXIT_CODE,
@@ -395,6 +403,25 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
 
         self.ctx.project()
         state = await self.scheduler.wave_state(wave_index)
+        if halt is None and withheld and state is WaveState.PARTIAL:
+            # A wall-clock breach raises nothing — `admit` simply returns `admitted=()` and
+            # `may_admit` withholds the rest — so without this the report carries exit 4 with
+            # `halt = None`, and every caller that folds `str(report.halt)` into its payload
+            # hands the operator the literal string `'None'` (D83). The exit code was always
+            # right; the text carried nothing. Everything named here is a fact the operator
+            # cannot otherwise get: which wave, which phase, the ceiling that was spent, the
+            # elapsed the breach was decided on, and how many members are still owed. No
+            # remedy is named on purpose: §3.4 calls the state resumable, but nothing re-admits
+            # a breached wave today (D82, and `scheduler.py`'s module docstring).
+            ceiling = self.scheduler.budgets.wave_max_wallclock_s
+            withheld_names = ", ".join(sorted(withheld))
+            halt = RunHalted(
+                HaltReason.WAVE_WALLCLOCK,
+                f"wave {wave_index} of phase {int(self.phase)} ({self.phase.name}) spent its "
+                f"{ceiling}s wall-clock ceiling after {admission.elapsed_s:.1f}s; "
+                f"{len(withheld)} member(s) withheld, still PENDING with no attempt consumed "
+                f"[{withheld_names}]",
+            )
         return WaveReport(
             wave_index=wave_index,
             phase=self.phase,

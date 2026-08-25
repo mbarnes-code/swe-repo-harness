@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -1806,3 +1807,62 @@ async def test_a_wall_clock_breach_mid_wave_withholds_the_rest_as_pending(
     assert report.exit_code == 4
     for repo_id in SIX:
         assert (await harness.phase_row(repo_id))[:2] == ("PENDING", 0)
+
+
+async def test_a_wall_clock_breach_says_what_happened_rather_than_the_string_none(
+    harness: Harness,
+) -> None:
+    """D83: exit 4 was always right and the operator-facing message was the literal `'None'`.
+
+    `WaveReport.halt` is populated only from a `RunHalted` escaping the wave's `TaskGroup`, and
+    a wall-clock breach raises nothing — `admit` returns `admitted=()` and `may_admit` withholds
+    the rest — so `halt` stayed `None` under a non-zero exit and every caller that folds
+    `str(report.halt)` into its payload handed the operator `'None'`.
+
+    The assertions PARSE the ceiling, the elapsed, the wave index and the withheld count back
+    OUT of the message and check each against the value the code actually used — the
+    scheduler's own `budgets.wave_max_wallclock_s`, the admission's own `elapsed_s`, the
+    report's own `wave_index` and `withheld`. Rewording the message therefore does not weaken
+    what is asserted, while hard-coding any of those four into the text fails: the fixture's
+    ceiling is 60, not the 14 400 default, and the elapsed and the member list are the
+    fixture's.
+    """
+    await _seed(harness, *SIX)
+    await harness.plan(SIX)
+    for repo_id in SIX:
+        BEHAVIOURS[repo_id] = [ok()]
+    scheduler = harness.scheduler(wave_max_wallclock_s=60)
+    await scheduler.open_wave(0)
+    harness.clock.advance(61)
+
+    report = await harness.runner(scheduler=scheduler).run_wave(0)
+
+    assert report.exit_code == 4, "the exit code was never the defect and must not move"
+    assert report.halt is not None, (
+        "a non-zero exit with no halt is exactly what makes `str(report.halt)` read `'None'`"
+    )
+    assert report.halt.reason is HaltReason.WAVE_WALLCLOCK
+    assert report.halt.exit_code == 4, (
+        "the two branches of `WaveReport.exit_code` must not disagree about a breach"
+    )
+
+    message = str(report.halt)
+    assert message != "None" and "None" not in message
+
+    ceiling = re.search(r"(\d+)s wall-clock ceiling", message)
+    assert ceiling is not None and int(ceiling.group(1)) == 60, (
+        "the message must name the ceiling the run was actually given, not the default"
+    )
+    elapsed = re.search(r"after ([\d.]+)s", message)
+    assert elapsed is not None
+    assert float(elapsed.group(1)) == pytest.approx(report.admission.elapsed_s, abs=0.05), (
+        "the elapsed must be the number the breach was decided on"
+    )
+    wave = re.search(r"wave (\d+)", message)
+    assert wave is not None and int(wave.group(1)) == report.wave_index
+    count = re.search(r"(\d+) member\(s\) withheld", message)
+    assert count is not None and int(count.group(1)) == len(report.withheld) == len(SIX)
+    for repo_id in report.withheld:
+        assert repo_id in message, (
+            "the operator cannot get the withheld members from anywhere else on this path"
+        )
