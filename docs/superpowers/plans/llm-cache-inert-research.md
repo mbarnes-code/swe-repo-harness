@@ -323,6 +323,31 @@ read.**
 > report, byte-identical apart from the provenance banner (`f36c9ad`); the miscount predates
 > promotion.
 
+> **Editorial correction (2026-08-25), lane W14 — the C4 row's `old-passes/new-fails` criterion
+> above is false as written, measured at `ee1ddc8`.** The row asks that the scan be re-run
+> against pre-C1 `context.py` and that `llm.cache_mode` "come back unexplained". It does not.
+> Three arms, `tests/test_config_keys_are_read.py` with **no `-k` filter**, in a detached
+> worktree at `ee1ddc8`, each revert taken from `12ac784` (= `cac537d^`, byte-identical to
+> `251cd30` in `context.py`, `cli.py` and this test file) and each gated on a non-zero
+> `git diff --numstat --no-index BACKUP MUTATED` read before the result:
+>
+> | arm | gate | result |
+> |---|---|---|
+> | C1 + C2 both landed (`ee1ddc8`) | — | **51 passed** |
+> | `context.py` reverted, `cli.py` left at C2 — *the criterion's arm* | `+12 / −31` | **51 passed — GREEN** |
+> | **both** halves reverted | `+33 / −213` | **2 failed** (`test_every_config_key_is_read`, `test_qualified_match_keys_resolve_to_a_verdict`), 49 passed |
+>
+> The mechanism: `_sources()` blanks comments and docstrings but **not string literals**, so C2's
+> own `overrides["llm.cache_mode"]` in `cli.py` satisfies the qualified scan by itself — the scan
+> is a ratchet against **C2**, not against C1. Reproduces W4's implementing measurement and CR3's
+> independent re-run number-for-number. What C4 wanted — a ratchet against C1's consumption point
+> — is carried instead by `tests/test_run_context_llm_cache.py`, whose assertions are a backend
+> call log and an `llm_cache` row count; CR3 measured that both the branch-deleted and the
+> restored-guard mutations redden that file. The row is a record of what was believed when it was
+> written and is left standing; only this correction is new. W4 disclosed the same result at the
+> retired `KNOWN_INERT` line in `tests/test_config_keys_are_read.py`, which a reader of this plan
+> does not encounter — that is the gap this block closes.
+
 **Ordering.** C1 → C2 → C3/C4 (C4 will fail the suite until C1 lands, so they must be one commit or
 strictly sequenced) → C5. C6 and C7 are independent of all of the above and of each other.
 

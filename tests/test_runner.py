@@ -339,8 +339,9 @@ class ScriptedBackend:
     """One transport, offline. Answers every role with the same JSON and counts its turns.
 
     A real `ModelBackend` rather than a stubbed `ModelClient` on purpose: the thing under test is
-    the wiring `RunContext` assembles — router → `LadderModelClient` → backend — and a fake client
-    would replace exactly the part that was broken.
+    the wiring `RunContext` assembles — router → `CachingModelClient` → `LadderModelClient` →
+    backend — and a fake client would replace exactly the part that was broken. Three hops since
+    `cac537d` wired §11.6's cache; it was two while the cache was never installed.
     """
 
     name: ClassVar[str] = "fake"
@@ -619,7 +620,11 @@ async def test_run_context_hands_workers_a_client_they_can_actually_call(
     "is this actually a client?" probe) rather than fail. Asserting through a hand-built context
     would re-introduce exactly the gap: the context a test writes by hand is the one place the
     real assembly is not exercised. So this goes through `RunContext.worker_context()`, whose
-    client `RunContext` built from the router, the backends and (absent here) the cache.
+    client `RunContext` built from the router, the backends and — since `cac537d` wired §11.6 —
+    the cache, at every `RunContext` including this harness's, which passes neither `llm_cache`
+    nor `llm_cache_mode` and so gets the shipped store at `config.llm.cache_mode`. The single
+    backend call asserted below is therefore a cache MISS paid for once;
+    `tests/test_run_context_llm_cache.py` is where a HIT is the property under test.
     """
     ctx = harness.ctx.worker_context(
         repo_id="repo-a",

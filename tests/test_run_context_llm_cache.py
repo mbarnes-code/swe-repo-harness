@@ -42,9 +42,9 @@ import pytest
 from pydantic import BaseModel
 
 from fleet.llm.cache import CacheMiss, CachingModelClient
-from fleet.llm.client import BackendReply, Message, StructuredOutputMode
+from fleet.llm.client import BackendReply, CallBudget, Message, StructuredOutputMode
 from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter
-from fleet.models.enums import ModelTier
+from fleet.models.enums import ModelTier, Phase
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
 from fleet.orchestrator.budgets import Ceilings, CostLedger, Limits
 from fleet.orchestrator.context import RunContext, default_logger
@@ -72,8 +72,10 @@ class Verdict(BaseModel):
 class LoggingBackend:
     """One offline transport that answers schema-valid. Every `invoke` is recorded, and the
     record is what every test here asserts on: a cache hit is invisible at the `ModelClient`
-    boundary by design (§11.6 — "a hit is indistinguishable from a fresh call except for cost"),
-    so the only honest instrument is the question the backend was or was not asked."""
+    boundary by design — that is `CachingModelClient`'s own stated contract (its class docstring
+    in `src/fleet/llm/cache.py`), and the one difference §11.6 intends is cost (`cost_usd = 0`),
+    not content. So the only honest instrument is the question the backend was or was not
+    asked."""
 
     name: ClassVar[str] = "fake"
     version: ClassVar[int] = 1
@@ -181,9 +183,18 @@ async def _context(
 
 
 async def _ask(ctx: RunContext) -> None:
-    """The worker's only call surface. `worker_context(...).llm` is asserted identical to
-    `model_client` by `tests/test_runner.py`; going through `model_client` here keeps this file
-    from depending on a worker fixture."""
+    """The call surface every case here drives. `ctx.model_client` is the object
+    `RunContext.worker_context()` hands down as `WorkerContext.llm` — but that is an
+    implementation fact (`orchestrator/context.py`, the `llm=` argument of the `WorkerContext`
+    it builds). An earlier version of this docstring said `tests/test_runner.py` asserted that
+    identity; it does not, and never did — that file drives `ctx.llm` behaviourally and names
+    `model_client` nowhere.
+
+    So driving `model_client` rather than a worker fixture keeps this file free of the worker
+    machinery, and `test_the_client_handed_to_a_worker_is_the_one_this_file_drives` below is
+    what makes that substitution legitimate instead of assumed. Without it, re-routing the
+    hand-down to an unwrapped client would leave every case here green while no worker on any
+    shipped run consulted the cache."""
     await ctx.model_client.complete(ROLE, [Message(role="user", content="go")], Verdict)
 
 
@@ -208,8 +219,10 @@ def _release_slot() -> AsyncIterator[None]:
 async def test_two_identical_calls_bill_the_backend_once_and_write_one_row(
     tmp_path: Path,
 ) -> None:
-    """§11.6: "determinism comes from caching, not sampling". The second identical call must be
-    served from `llm_cache`.
+    """§11.6 makes the cache — not a sampling control the harness does not pin — the thing that
+    lets a run be re-run and reviewed; `fleet.llm.cache`'s module docstring states the same rule
+    beside the code that implements it. The second identical call must be served from
+    `llm_cache`.
 
     DISCRIMINATES against the unassigned state directly, and it is the assertion the old
     `tests/test_cli.py::test_llm_cache_flag_reaches_the_caching_client` could not make: delete
@@ -242,7 +255,7 @@ async def test_two_identical_calls_bill_the_backend_once_and_write_one_row(
 async def test_cache_mode_off_in_fleet_yaml_bills_every_call_and_writes_nothing(
     tmp_path: Path,
 ) -> None:
-    """§11.6: "`off` is for deliberately re-rolling a decision".
+    """§11.6's `off` exists so an operator can deliberately re-roll a decision.
 
     DISCRIMINATES against the mode never being derived from config — against
     `llm_cache_mode` keeping a non-optional `= "read-write"` default, which is the `effort: low`
@@ -264,8 +277,9 @@ async def test_cache_mode_off_in_fleet_yaml_bills_every_call_and_writes_nothing(
 
 
 async def test_cache_mode_read_only_in_fleet_yaml_makes_a_miss_fatal(tmp_path: Path) -> None:
-    """§11.6: `read-only` is "the replay mode: a miss is a hard error, which is what makes 'this
-    re-run used no new model output' a provable claim rather than an assertion" (§12 item 21).
+    """§11.6's `read-only` mode raises on a miss instead of falling through to a backend — the
+    property that lets a re-run's "no new model output" be checked rather than asserted
+    (§12 item 21).
 
     DISCRIMINATES uniquely: this is the only case where the *absence* of a fresh backend call is
     the property. Under any mutation that leaves the mode at `read-write` — the config not read,
@@ -290,13 +304,17 @@ async def test_cache_mode_read_only_in_fleet_yaml_makes_a_miss_fatal(tmp_path: P
 
 
 async def test_an_explicit_llm_cache_mode_still_overrides_the_config(tmp_path: Path) -> None:
-    """Does NOT discriminate against the unassigned state — it is the arm that would have worked
-    had anyone ever used it.
+    """The UNIQUE discriminator against resolving the mode from `config.llm` unconditionally and
+    dropping the explicit field: the two values are deliberately opposed (config says `off`, the
+    injection says `read-write`), so the assertion cannot be satisfied by either one alone.
 
-    It discriminates against the opposite mutation: resolving the mode from `config.llm`
-    unconditionally and dropping the explicit field. The two values are deliberately opposed
-    (config says `off`, the injection says `read-write`) so the assertion cannot be satisfied by
-    either one alone.
+    It also reddens under the pre-fix guard being restored, and under the unconditional wrap
+    being deleted. An earlier version of
+    this docstring said the case "does NOT discriminate against the unassigned state"; that is
+    false, because the fixture passes `llm_cache_mode` but deliberately **not** `llm_cache`, so
+    the pre-fix `if self.llm_cache is not None:` never wrapped and the mode never arrived. The
+    claim is corrected here rather than left standing, since a later lane pruning
+    "non-discriminating" cases would have deleted a case that discriminates three ways.
     """
     backend = LoggingBackend()
     async with _context(
@@ -312,3 +330,53 @@ async def test_an_explicit_llm_cache_mode_still_overrides_the_config(tmp_path: P
         f"an explicit llm_cache_mode must win over config.llm.cache_mode; called {backend.calls}"
     )
     assert written == 1
+
+
+# ======================================================================================
+# The hand-down: the object a worker calls is the object this file drives
+# ======================================================================================
+
+
+async def test_the_client_handed_to_a_worker_is_the_one_this_file_drives(
+    tmp_path: Path,
+) -> None:
+    """`WorkerContext.llm` must BE `RunContext.model_client`, not a second client.
+
+    Why it matters, and why it is here rather than in `tests/test_runner.py`: every other case
+    in this file drives `ctx.model_client` (see `_ask`), while a real worker only ever touches
+    `WorkerContext.llm`. Nothing in the tree asserted those were the same object — the token
+    `model_client` does not occur in `tests/test_runner.py` at all — so the substitution the
+    whole file rests on was an unchecked implementation fact.
+
+    UNIQUELY DISCRIMINATES against re-routing the hand-down: keep `__post_init__`'s wrap but
+    hand a worker the pre-cache ladder client (`llm=self.model_client._inner`). Measured: every
+    other case in this file still passes under it — they call `model_client` directly — and all
+    of `tests/test_runner.py` still passes, because the ladder client completes perfectly well.
+    Only this assertion moves, and what it catches is D79 returning through the one door this
+    file does not otherwise use: no worker on a shipped run consulting the cache.
+
+    It also reddens under the pre-fix guard being restored and under the wrap being deleted (via
+    the `isinstance` half). It stays GREEN under the mode-derivation mutations — measured
+    against the non-optional `llm_cache_mode` default — which leave the identity intact.
+    """
+    async with _context(tmp_path, config=_config(), backend=LoggingBackend()) as ctx:
+        worker = ctx.worker_context(
+            repo_id="repo-a",
+            phase=Phase.TRANSFORM,
+            attempt=1,
+            lease_fence=1,
+            cancel=asyncio.Event(),
+            budget=CallBudget(
+                remaining_tokens=100_000,
+                remaining_usd=5.0,
+                deadline=asyncio.get_running_loop().time() + 60,
+            ),
+        )
+
+        assert worker.llm is ctx.model_client, (
+            "a worker must be handed the SAME assembled client this file drives; a second or "
+            "unwrapped client here means the cache is installed on a surface no worker uses"
+        )
+        assert isinstance(worker.llm, CachingModelClient), (
+            "stated separately from the identity above so a failure says which half broke"
+        )
