@@ -5694,7 +5694,7 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
 
 ---
 
-## D81 — PARTLY ADDRESSED (SPEC half corrected by the commit carrying the 2026-08-25 marker at the end of this entry, which also names the leg still open). `docs/SPEC.md` §5's retention paragraph assigns `PRAGMA wal_checkpoint(TRUNCATE)` to "the single projector task", and no code under `src/` issues it — a named duty with no implementation, which the C7 projector wiring does **not** create
+## D81 — PARTLY ADDRESSED (SPEC half corrected by `4398358`, whose 2026-08-25 marker at the end of this entry, which also names the leg still open). `docs/SPEC.md` §5's retention paragraph assigns `PRAGMA wal_checkpoint(TRUNCATE)` to "the single projector task", and no code under `src/` issues it — a named duty with no implementation, which the C7 projector wiring does **not** create
 
 **Found and measured by lane W13 (round F) while ruling on D79's task C7 (`RunContext.projector`),
 at `01ac4ca` and re-derived unchanged at `ee1ddc8`. Static sweeps plus one runtime read of the
