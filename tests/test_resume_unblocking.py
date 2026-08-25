@@ -305,7 +305,11 @@ def _membership(db: Path) -> dict[str, int]:
 
 
 def _resume(fleet: Path, *extra: str) -> tuple[int, Mapping[str, object]]:
-    result = runner.invoke(app, [*base_args(fleet), "--json", "resume", *extra])
+    # `--no-continue` on EVERY call, including the `--dry-run` ones where it is redundant: this
+    # module's subject is §11.5 step 6, and none of its fixtures was written to survive step 8
+    # driving four phase composition roots over them (ADR-0080). A case that wants the
+    # continuation asks for it by not using this helper.
+    result = runner.invoke(app, [*base_args(fleet), "--json", "resume", "--no-continue", *extra])
     if not result.stdout.strip():  # pragma: no cover - only on an unexpected early exit
         raise AssertionError(f"resume produced no JSON (exit {result.exit_code}): {result.output}")
     return result.exit_code, json.loads(result.stdout)
@@ -345,7 +349,7 @@ def test_the_blocked_by_recompute_clears_only_what_it_can_show_is_no_longer_bloc
     db = fleet / "state" / "fleet.db"
     before = _rows(db)
     code, payload = _resume(fleet)
-    assert code == ExitCode.USAGE, payload  # step 8 is still absent; steps 1-7 committed
+    assert code == ExitCode.SUCCESS, payload  # steps 1-7 committed; step 8 withheld
 
     assert _blocked_by(db, FREED) == [], "the reversal did not happen: nothing was removed"
     assert _statuses(db, FREED) == {"PENDING"}, (
@@ -469,7 +473,7 @@ def test_step_6_runs_between_step_5_and_the_projection_it_must_precede(fleet: Pa
     names the symbols, and it is deliberately NOT the primary assertion.
     """
     code, _payload = _resume(fleet)
-    assert code == ExitCode.USAGE
+    assert code == ExitCode.SUCCESS
     state = json.loads((fleet / "migration_state.json").read_text(encoding="utf-8"))
     freed = state["repos"][FREED]
     assert freed["blocked_by"] == [], (
@@ -565,7 +569,7 @@ def test_the_freed_repo_moves_upward_only_and_no_existing_wave_row_is_touched(
     db = fleet / "state" / "fleet.db"
     before_waves, before_members = _waves(db), _membership(db)
     code, payload = _resume(fleet)
-    assert code == ExitCode.USAGE
+    assert code == ExitCode.SUCCESS
     after_waves, after_members = _waves(db), _membership(db)
 
     assert after_waves[: len(before_waves)] == before_waves, (
@@ -603,7 +607,7 @@ def test_a_freed_repo_the_sequencer_never_planned_is_reported_not_admitted(fleet
         conn.close()
     before = len(_waves(db))
     code, payload = _resume(fleet)
-    assert code == ExitCode.USAGE
+    assert code == ExitCode.SUCCESS
     error = payload["unblocked_dependents"]["wave_error"]
     assert isinstance(error, str) and FREED in error, "the wave failure was swallowed"
     assert len(_waves(db)) == before, "a wave row was written by a call that raised"
@@ -654,7 +658,7 @@ def test_step_6_refuses_a_repo_whose_blocker_moved_under_the_plan(
 
     monkeypatch.setattr("fleet.cli.plan_unblocking", racing)
     code, payload = _resume(fleet)
-    assert code == ExitCode.USAGE
+    assert code == ExitCode.SUCCESS
     report = payload["unblocked_dependents"]
     unresolved = {str(entry["repo_id"]) for entry in report["unresolved"]}
     assert unresolved == {FREED, MIXED}, f"the race was applied silently: {report}"

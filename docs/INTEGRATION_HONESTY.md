@@ -2986,6 +2986,15 @@ materially different from the operator's tuned value; `graph.max_edges` bites on
 large enough that a cap would matter; `reaper_interval_s` / `projection_hz` are cadence knobs
 whose absence is likely cosmetic but was not traced to a concrete alternate constant.
 
+> **PARTLY DISCHARGED 2026-08-25 (round G, lane W1, ADR-0080) — `budgets.build_timeout_s` is no
+> longer inert, and the paragraph above is left standing as the record of what was true at its own
+> commit.** §11.5 step 8 (`cli.resume`'s continuation) resolves `_build_impl`'s `timeout_s` from
+> that key rather than from `fleet build --timeout`'s Typer literal, so the key has a reader in
+> `src/` and its `KNOWN_INERT` line was deleted in the same change — `test_known_inert_keys_are_
+> still_inert` fails while an entry there has become live, which is how this was found rather than
+> reasoned about. **Group 4 is now 4 keys, not 5**, and the other four are untouched: nothing here
+> gives `clone_timeout_s`, `graph.max_edges`, `reaper_interval_s` or `projection_hz` a reader.
+
 **Group 5 — single-value policy keys nothing branches on (6 keys): latent, bite only off-default.**
 `stubs.on_budget_exhausted` (`:604`), `build.fail_on_missing_adapter` (`:579`),
 `build.openapi_generator` (`:580`), `scan.unknown_ecosystem_dest` (`:364`), `pr.reviewers_from`

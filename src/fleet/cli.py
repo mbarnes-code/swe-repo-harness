@@ -382,35 +382,16 @@ class CommandUnavailableError(FleetCliError):
     for a verb that IS implemented but stops part-way, would falsify the first sentence; that
     case is carried by separate classes rather than by a second raise here, and by more than one
     of them — `ScanStepUnavailableError`, `TransformStepUnavailableError` and
-    `BuildStepUnavailableError` for a step of a verb that ran, and `ResumeIncompleteError` for
-    `fleet resume` stopping on a step of its own. This sentence used to name only the last as
-    "that case"; a definite article over four is false, and it pointed at the one member whose
-    exit code differs from this class's (2, because that stop is a refusal, not a fault).
+    `BuildStepUnavailableError`, each for a step of a verb that ran.
+
+    **The enumeration above named a fourth, `ResumeIncompleteError`, until ADR-0080 (round G).**
+    That class existed because `fleet resume` stopped on a step of its own; §11.5 step 8 is
+    wired now, so the class was deleted rather than repurposed — ADR-0076's own closing bullet
+    required exactly that. The sentence about "a definite article over four" went with it: there
+    are three, and the exit-code caveat it carried was about the deleted member.
     """
 
     exit_code = ExitCode.UNEXPECTED_ERROR
-
-
-class ResumeIncompleteError(FleetCliError):
-    """§10 exit 2: `fleet resume` reconciled everything it can and will not continue.
-
-    **Deliberately NOT exit 1, and the distinction is the whole point of the class.** Exit 1 is
-    "an unexpected error" — the harness fell over and the ledger may be anywhere. This is the
-    opposite: every step of §11.5 that exists ran to completion and committed, and the verb is
-    stopping because a documented step of its own has no implementation. Sharing a code with a
-    crash makes a CI wrapper retry, and a retry of `--repoll-prs` costs one forge call per open
-    PR — 250 on a full fleet — which trips a secondary rate limit and converts a clean
-    reconciliation into a failed one.
-
-    Exit 2 rather than a twelfth code because §10's exit-2 contract is already "the operator must
-    edit a file, a flag or a stub before retrying", and it already covers refusals that are not
-    mistyped commands (`fleet pr --ready` against an unresolved stub, the mirror mutex). Retrying
-    this unchanged produces the identical refusal, which is exactly what exit 2 tells CI. See
-    ADR-0076 in docs/DECISIONS.md; `_refuse_unbuilt_resume_flags` refuses the same missing step
-    with the same code.
-    """
-
-    exit_code = ExitCode.USAGE
 
 
 # --------------------------------------------------------------------------------------
@@ -7950,10 +7931,16 @@ async def _build_impl(
     never rehydrated from SQLite, while `_open_phase_waves` drops every wave whose members are
     all settled — so a SECOND `fleet build` over a partially complete run computed the root files
     over the unsettled waves alone and republished a `MODULE.bazel` missing whole ecosystems,
-    exiting 0 both times. Since `fleet resume` reconciles the ledger and then refuses to continue
-    with exit 2 (`ResumeIncompleteError`; §11.5 step 8 has no implementation),
-    re-invoking `fleet build` is the only way to continue a partial run, so that was the normal
-    operator path.
+    exiting 0 both times. Re-invoking `fleet build` was the only way to continue a partial run
+    when this was written, so that was the normal operator path.
+
+    **CORRECTED 2026-08-25 (round G, ADR-0080).** The premise this paragraph gave for that —
+    *"`fleet resume` reconciles the ledger and then refuses to continue with exit 2 (§11.5 step 8
+    has no implementation)"* — is false now: step 8 is wired, `fleet resume` continues, and it
+    delegates to `_build_impl` rather than to this command. **The defect above is unaffected and
+    the fix below still holds**; a resume-driven continuation enters `_build_impl` on a partial
+    run exactly as a second `fleet build` did, so the DB-derived domain is what makes the root
+    files right either way. Only the sentence naming why an operator ended up here changed.
 
     Hoisting the ingest is what makes the domain expressible: the units the root files must cover
     are exactly the eligible fleet, that set is known from SQLite before anything builds, and it
@@ -10316,6 +10303,13 @@ def resume(
         int | None, typer.Option("--raise-revalidation-rounds")
     ] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    no_continue: Annotated[
+        bool,
+        typer.Option(
+            "--no-continue",
+            help="Reconcile and stop at exit 0; do not run §11.5 step 8 (ADR-0080).",
+        ),
+    ] = False,
 ) -> None:
     """Reconcile after a crash and continue from each repo's re-entry floor (§11.5 step 5),
     never the earliest incomplete phase.
@@ -10327,22 +10321,36 @@ def resume(
     again forever without `--raise-wave-budget`; and the **schema version**, which a resume reads
     and never upgrades. Reads nothing from `migration_state.json` (§11.5).
 
-    **What is built today**, and it is not the whole verb. §11.5 steps 1 (its config-digest
-    half only — nothing here reads `runs.harness_version`, the other half step 1 names), 2
-    (reap the orphan containers and worktrees no live `phases` row claims), 3 (stale `RUNNING`
-    → `PENDING`, retaining `attempts`), 4 (ask Git whether each `RUNNING` task's commit landed
-    and correct the row to match, charging no attempt either way), 5 (re-check each phase's
-    durable evidence and demote every repo to its re-entry floor), 6 (recompute `blocked_by`,
-    and move the repos that frees into an appended `waves.synthetic = 1` row) and 7 (regenerate
-    `migration_state.json`) run, plus `--repoll-prs`, `--raise-budget` and
-    `--raise-wave-budget`. Step 8 does not
-    exist, so the verb reconciles the ledger and then refuses to continue with **exit 2**
-    (`ResumeIncompleteError`, ADR-0076 as amended by ADR-0089 — nothing failed, so it is
-    deliberately not exit 1) naming what is absent. `--dry-run` is the free health check §11.5
-    promises: it makes no network call, writes nothing, and previews the step-3 sweep, the
-    step-4 arbitration, the step-5 demotion plan (both of them every git READ, no git or SQL
-    write), the step-6 un-blocking plan — the same `plan_unblocking` call the write path makes,
-    over the same inputs — and the step-2 reap.
+    **What is built today.** §11.5 steps 1 (its config-digest half only — nothing here reads
+    `runs.harness_version`, the other half step 1 names), 2 (reap the orphan containers and
+    worktrees no live `phases` row claims), 3 (stale `RUNNING` → `PENDING`, retaining
+    `attempts`), 4 (ask Git whether each `RUNNING` task's commit landed and correct the row to
+    match, charging no attempt either way), 5 (re-check each phase's durable evidence and demote
+    every repo to its re-entry floor), 6 (recompute `blocked_by`, and move the repos that frees
+    into an appended `waves.synthetic = 1` row), 7 (regenerate `migration_state.json`) and **8
+    (continue)** run, plus `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. §11.5's
+    `stub_reconcile` step is still absent, and D80 in `docs/INTEGRATION_HONESTY.md` is its
+    record: this verb continues, and it does not reconcile stubs.
+
+    **Step 8, and what it will and will not serve (ADR-0080).** The continuation re-enters
+    `fleet transform`/`build`/`verify`'s own composition roots, one group per floor in ascending
+    phase order, and it hands the FIRST halting delegate's exit code back unchanged (§10). A repo
+    whose floor is `Phase.SCAN` is **reported and skipped, never served** — `fleet scan` takes
+    five flags no resume carries and no `wave` at all, so serving that floor means step 8 choosing
+    five values the operator never wrote — and the skipped repos are named under
+    `scan_floor_not_continued`. Every per-phase knob the delegates need is resolved from the
+    DECLARED config (`transform.max_attempts`, `budgets.build_timeout_s`, `verify.rdeps_limit`,
+    `verify.rdeps_sample_n`, `verify.affected_only`), never from a literal chosen here.
+
+    `--dry-run` is the free health check §11.5 promises: it makes no network call, writes
+    nothing, previews the step-3 sweep, the step-4 arbitration, the step-5 demotion plan (both of
+    them every git READ, no git or SQL write), the step-6 un-blocking plan — the same
+    `plan_unblocking` call the write path makes, over the same inputs — and the step-2 reap, and
+    it never continues. `--no-continue` is the other half of that pair and is not a preview: the
+    reconciliation is WRITTEN, and only step 8 is withheld, at exit 0. It is what an operator
+    wants after a crash — "reconcile my run, do not spend money yet" — and it is what the
+    §11.5-step tests in `tests/test_cli.py` pass so that asserting on a reconciliation does not
+    also drive four phases.
 
     **One consequence of step 5 that this verb does not repair, stated because nothing else
     reports it (ADR-0089 §4).** A wave is `CLOSED` iff every one of its `wave_members` rows is
@@ -10376,45 +10384,107 @@ def resume(
                 dry_run=dry_run,
             )
         )
-        _emit(opts, result, _resume_lines(result))
-        if dry_run:
-            return
-        # Ordering: a forge failure is a REAL failure (exit 1) and outranks the step-5 refusal
-        # (exit 2), which reports a reconciliation that succeeded. Both are raised only after the
-        # sweep, the projection and `_emit` — see `_resume_impl`.
+        # A forge failure is a REAL failure (exit 1) and outranks the continuation: it means the
+        # PR re-poll the operator asked for did not happen, and step 8 must not spend money on a
+        # fleet whose merge state the harness could not read.
         failure = result["pr_sync_error"]
+        withheld = dry_run or no_continue or isinstance(failure, str)
+
+        # ONE payload and ONE `_emit`, in a `finally`, and both halves of that are load-bearing.
+        # One payload, because `fleet resume --json` is parsed with a single `json.loads` and a
+        # second document on the same stdout is not JSON. In a `finally`, because the durability
+        # promise §11.5 rests on is that the reconciliation is REPORTED even when what comes
+        # after it does not survive: `_continue_impl` raises nothing of its own, but the phase
+        # impls it delegates to raise plenty, and an operator who loses the step-4 arbitration
+        # because a Phase-3 build threw has lost the only record of it.
+        continuation: dict[str, object] | None = None
+        try:
+            if not withheld:
+                continuation = _run(
+                    _continue_impl(
+                        opts,
+                        settings,
+                        path,
+                        run_id=str(result["run_id"]),
+                        floors=_floors_from(result),
+                        only=None,
+                        # Every knob is the operator's DECLARED value, never a literal chosen
+                        # here: a default invented at this call site is the recorded `effort:
+                        # low` defect (`src/fleet/models/tasks.py`), where deleting a value from
+                        # config substituted one the operator never wrote. `dry_run=False` is not
+                        # such a choice — `--dry-run` returns above without continuing at all.
+                        ladder=settings.config.transform.max_attempts,
+                        dry_run=False,
+                        timeout_s=settings.config.budgets.build_timeout_s,
+                        # `sandboxed` has no config form. This is not a chosen value but the
+                        # ABSENCE of `fleet build --no-sandbox`, whose own help says "CI only";
+                        # a continuation that dropped the sandbox silently would be strictly more
+                        # dangerous than the command it re-enters.
+                        sandboxed=True,
+                        rdeps_limit=settings.config.verify.rdeps_limit,
+                        rdeps_sample_n=settings.config.verify.rdeps_sample_n,
+                        affected_only=settings.config.verify.affected_only,
+                    )
+                )
+        finally:
+            _emit(
+                opts,
+                {**result, "continuation": continuation},
+                [*_resume_lines(result), *_continue_lines(continuation, withheld=withheld)],
+            )
+
         if isinstance(failure, str):
             raise PrEmissionError(
                 f"{failure}\n"
                 "§11.5 steps 3 and 7 ran anyway and are committed: the stale-lease sweep and "
                 "`migration_state.json` are purely local, and a flag added to do MORE must never "
                 "subtract the steps a plain `fleet resume` would have done. Fix the forge access "
-                "and re-run; the re-poll is the only part that did not happen."
+                "and re-run; the re-poll is the only part that did not happen. Step 8 did NOT "
+                "run: continuing over a fleet whose merge state the harness could not read is "
+                "how a dependent is transformed against a provider that merged an hour ago."
             )
-        raise ResumeIncompleteError(
-            "`fleet resume` reconciled the ledger and stopped: §11.5 step 5 — re-check each "
-            "phase's durable evidence and demote each repo to its re-entry floor, the phase "
-            "ABOVE the HIGHEST phase below the settled frontier whose evidence still holds or "
-            "which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN if there "
-            "is no such phase — RAN, and this run's report above carries its result (the "
-            "`step 5:` lines, or `reentry_floors` under `--json`). Every repo now sits at the "
-            "phase it should re-enter from. What the verb still cannot do is CONTINUE: nothing "
-            "assembles the per-phase `PhaseRunner` that walks Phases 1–4 in order, which cli.py "
-            "today only hand-wires per verb. Step 8 "
-            "(continue into the phase runners) is absent. "
-            "Steps 2, 4 and 6 are NOT: the orphan reap, the Git-as-arbiter task reconciliation "
-            "and the `blocked_by` recompute all ran, and this run's report above carries their "
-            "results — the `step 2:`, `step 4:` and `step 6:` lines, or `reaped_worktrees`/"
-            "`reaped_containers`/`git_arbitration`/`unblocked_dependents` under "
-            "`--json`. The work reported above IS durable — the drift audit, any budget "
-            "raise, the PR re-poll, the orphan reap, the stale-lease sweep, the task "
-            "reconciliation, the re-entry demotion, the `blocked_by` recompute and "
-            "`migration_state.json` are all written "
-            "before this refusal, so re-running the verb is safe and idempotent. This is exit 2, "
-            "NOT exit 1: nothing failed, and a CI wrapper must not retry — a retry re-polls one "
-            "forge call per open PR for a refusal that cannot change until step 8 is "
-            "written (ADR-0076, and ADR-0089 on why the error outlives step 5)."
+        if continuation is not None:
+            _raise_for_continuation(continuation)
+
+
+def _floors_from(result: Mapping[str, object]) -> dict[str, Phase]:
+    """Step 5's computed floors, re-typed off the payload step 8 is handed.
+
+    Read from `computed_floors` rather than from `reentry_floors`: the report's `unchanged` rows
+    carry a *reason* and no floor, so a repo step 5 confirmed in place would silently drop out of
+    the continuation plan — the fleet would resume minus every repo that needed no demotion,
+    which is most of it. `_demote_to_floors` returns the mapping separately for exactly this
+    reason and `_resume_impl` carries it through by phase NAME, so the payload stays JSON.
+    """
+    raw = cast("Mapping[str, str]", result["computed_floors"])
+    return {repo_id: Phase[name] for repo_id, name in raw.items()}
+
+
+def _continue_lines(
+    continuation: Mapping[str, object] | None, *, withheld: bool
+) -> list[str]:
+    """§11.5 step 8's human rendering, including the case where it did not run.
+
+    A silent absence is the failure mode this exists to prevent: "no continuation happened" and
+    "the continuation drove nothing" are the same empty output and opposite facts, and the
+    `scan_floor_not_continued` key is only load-bearing if an operator reading the table sees it.
+    """
+    if continuation is None:
+        return ["step 8: withheld" if withheld else "step 8: did not complete"]
+    driven = cast("list[str]", continuation["driven"])
+    skipped = cast("list[str]", continuation[_SCAN_SKIPPED_KEY])
+    halted = continuation["halted_phase"]
+    lines = [
+        f"step 8: continued {len(driven)} phase(s)"
+        + (f" ({', '.join(driven)})" if driven else "")
+        + (f", halted in {halted}" if halted is not None else "")
+    ]
+    if skipped:
+        lines.append(
+            f"step 8: {len(skipped)} repo(s) NOT continued — their re-entry floor is SCAN and "
+            f"`fleet scan` takes flags no resume carries: {', '.join(sorted(skipped))}"
         )
+    return lines
 
 
 async def _resume_impl(
@@ -10640,6 +10710,10 @@ async def _resume_impl(
         # confirmed, and `applied` is what separates the preview from the write (the defect
         # `raise_budget_applied` exists for, one key down).
         "reentry_floors": floors,
+        # §11.5 step 5's floors as a MAPPING, which the report above is not: `unchanged` rows
+        # carry a reason and no floor, so step 8 fed from the report would silently drop every
+        # repo that needed no demotion. By phase NAME so the payload survives `--json`.
+        "computed_floors": {repo_id: floor.name for repo_id, floor in computed_floors.items()},
         # §11.5 step 6, the whole report for step 5's reason: "2 repos un-blocked" cannot tell an
         # operator whether an audited quarantine was re-admitted or a subtree is still held, and
         # `applied` is what separates the preview from the write.
@@ -10884,19 +10958,21 @@ def _refuse_unbuilt_resume_flags(
 ) -> None:
     """Exit 2 rather than accept a flag whose behaviour does not exist (Rule 11, "fail loud").
 
-    Every flag below scopes or re-drives the CONTINUATION this verb cannot perform — NOT
-    §11.5 step 5, which is built and runs unconditionally on every `fleet resume` this function
-    does not refuse (`_resume_impl` calls `_demote_to_floors` with no flag guard), and NOT
-    §11.5 step 6, which runs unconditionally beside it. What is
-    absent is step 8, which is the same absence `ResumeIncompleteError` names. **This
-    docstring and the message below both said step 5 "is not built"; that was true when written
-    and was falsified at `2f0db34`, which wired step 5 into `_resume_impl`. They then said the
-    same of step 6, and that was falsified by the commit adding this sentence, which wired
-    `_unblock_dependents` in between step 5 and the projection.** A
-    parser that accepted `--from-phase 2` and then resumed from wherever it liked is worse than
+    Every flag below scopes or re-drives the continuation in a way §11.5 step 8 does not
+    implement. **The clause that stood here until ADR-0080 said "the CONTINUATION this verb
+    cannot perform", and step 8 falsified it**: the verb continues now. What each of these flags
+    still names is absent for its own reason, and none of them is step 8's absence:
+    `--from-phase` names a per-repo start OTHER than the re-entry floor, which is the one thing
+    §11.5 step 5 exists to compute; `--repo` names a scope `_continue_impl` takes as `only` but
+    that `_resume_impl` does not thread — reconciling the whole ledger and continuing a fifth of
+    it is a resume whose two halves disagree about what run they are on; and `--reset-attempts`,
+    `--revalidation` and `--raise-revalidation-rounds` name machinery (`attempts` rewriting, the
+    §3.5.1 revalidation rounds) that has no implementation anywhere in `src/`.
+
+    A parser that accepted `--from-phase 2` and then resumed from wherever it liked is worse than
     one that refuses: the operator believes they scoped the resume, and nothing tells them
-    otherwise. `--raise-budget`, `--raise-wave-budget`, `--accept-drift`, `--repoll-prs` and
-    `--dry-run` are NOT here — those are implemented and do what they say.
+    otherwise. `--raise-budget`, `--raise-wave-budget`, `--accept-drift`, `--repoll-prs`,
+    `--no-continue` and `--dry-run` are NOT here — those are implemented and do what they say.
     """
     unbuilt = {
         "--from-phase": from_phase is not None,
@@ -10909,21 +10985,21 @@ def _refuse_unbuilt_resume_flags(
     if named:
         raise UsageError(
             f"{', '.join(named)} cannot be honoured: each one scopes or re-drives the "
-            "CONTINUATION this verb cannot perform. §11.5 step 5 itself "
-            "(re-check each phase's durable evidence and demote to the re-entry floor — the "
-            "phase ABOVE the HIGHEST phase below the settled frontier whose evidence still "
-            "holds or which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN "
-            "if there is no such phase) "
-            "IS built and runs on every `fleet resume` this refusal does not stop, and so is "
-            "step 6 (recompute `blocked_by`, and move the repos that frees into an appended "
-            "synthetic wave). What has no "
-            "implementation is step 8 (continue into the "
-            "phase runners) — cli.py hand-wires a `PhaseRunner` per verb and no "
-            "assembly walks Phases 1–4 in order, so there is no continuation for these flags to "
-            "scope. Accepting the flag and ignoring it would let an "
-            "operator believe they had scoped the resume. Re-run without it to get the "
-            "reconciliation that IS built (step 1's config digests, steps 2, 3, 4, 5, 6 and 7, "
-            "`--repoll-prs`, the budget raises)."
+            "continuation in a way §11.5 step 8 does not implement. Step 8 itself IS built and "
+            "runs on every `fleet resume` this refusal does not stop (pass `--no-continue` to "
+            "withhold it, or `--dry-run` to preview the reconciliation and write nothing). "
+            "`--from-phase` names a per-repo start OTHER than the re-entry floor — the phase "
+            "ABOVE the HIGHEST phase below the settled frontier whose evidence still holds or "
+            "which is a DEGRADED/SKIPPED hard stop, never that phase itself, and SCAN if there "
+            "is no such phase — which is the one thing §11.5 step 5 exists to compute; "
+            "`--repo` names a scope the reconciliation does not carry, and a resume "
+            "that reconciles the whole ledger and continues a fifth of it is a resume whose two "
+            "halves disagree; `--reset-attempts`, `--revalidation` and "
+            "`--raise-revalidation-rounds` name machinery with no implementation in `src/`. "
+            "Accepting the flag and ignoring it would let an operator believe they had scoped "
+            "the resume. Re-run without it to get the "
+            "reconciliation that IS built (step 1's config digests, "
+            "steps 2, 3, 4, 5, 6, 7 and 8, `--repoll-prs`, the budget raises)."
         )
 
 

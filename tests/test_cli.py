@@ -421,8 +421,11 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
     # BEFORE it stops on the unbuilt §11.5 step 8 (exit 2, ADR-0076 — a reconciliation
     # that succeeded, not a crash) — the ordering that matters, since a raise recorded only on
     # success is a raise lost to the next crash.
-    real = runner.invoke(app, [*base_args(workspace), "resume", "--raise-wave-budget", "50"])
-    assert real.exit_code == ExitCode.USAGE, real.output
+    real = runner.invoke(
+        app,
+        [*base_args(workspace), "resume", "--no-continue", "--raise-wave-budget", "50"],
+    )
+    assert real.exit_code == ExitCode.SUCCESS, real.output
 
     conn = sqlite3.connect(db)
     try:
@@ -768,7 +771,10 @@ def test_accepted_drift_writes_one_config_drift_finding_per_section(workspace: P
     )
     result = runner.invoke(
         app,
-        [*base_args(workspace), "resume", "--accept-drift", "budgets", "--accept-drift", "gc"],
+        [
+            *base_args(workspace), "resume", "--no-continue",
+            "--accept-drift", "budgets", "--accept-drift", "gc",
+        ],
     )
     # The resume itself cannot complete (§11.5 step 8 is unbuilt) but the audit is
     # written before it stops, which is the ordering that matters: an accepted drift that is
@@ -1320,6 +1326,18 @@ def test_abort_checkpoints_and_regenerates_the_projection(workspace: Path) -> No
 # §11.5 — what `fleet resume` reconciles today (steps 1, 3, 7, --repoll-prs, --raise-budget)
 # --------------------------------------------------------------------------------------
 
+CONTINUE_KNOBS_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n"
+    "preflight:\n  min_free_bytes: 1048576\n"
+    "budgets:\n  build_timeout_s: 999\n"
+)
+"""`FLEET_YAML` with `budgets.build_timeout_s` set to a value NO Typer default shares.
+
+`fleet build --timeout` defaults to 1800 and `budgets.build_timeout_s` defaults to 1800 too, so a
+call site that hardcoded the Typer literal is indistinguishable from one that reads config under
+the default fixture. 999 is what makes that mutation expressible."""
+
+
 IMPATIENT_STALE_YAML = (
     "run:\n  monorepo_path: ../acme-monorepo\n  stale_after_s: 30\n"
     "preflight:\n  min_free_bytes: 1048576\n"
@@ -1418,11 +1436,11 @@ def test_resume_reclaims_a_stale_lease_without_charging_an_attempt(workspace: Pa
     db = workspace / "state" / "fleet.db"
     _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    # Step 8 is not built, so the verb still refuses — but AFTER the reconciliation is
-    # durable,
-    # and with exit 2, which is "retrying unchanged is futile", not "the harness crashed".
-    assert result.exit_code == ExitCode.USAGE, result.output
+    # `--no-continue` because this test's subject is step 3, and its fixture was not written to
+    # survive step 8 driving the phase composition roots over it (ADR-0080). Exit 0 is the whole
+    # of the claim: the reconciliation below is durable and nothing refused it.
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     status, attempts, fence, owner, heartbeat = _phase_row(db, "acme-commons")
     assert status == "PENDING"
@@ -1445,8 +1463,8 @@ def test_resume_leaves_a_lease_that_is_still_heart_beating_alone(workspace: Path
     fresh = datetime.now(UTC).isoformat(timespec="microseconds")
     _put_leased(db, "acme-commons", heartbeat_at=fresh, attempts=1, fence=7)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     status, attempts, fence, owner, _heartbeat = _phase_row(db, "acme-commons")
     assert (status, attempts, fence, owner) == ("RUNNING", 1, 7, "host:cid:1:boot")
@@ -1475,9 +1493,12 @@ def test_resume_dry_run_previews_the_sweep_and_writes_nothing(workspace: Path) -
 def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path) -> None:
     """`--from-phase` is exit 2, not a silently discarded argument.
 
-    Why: every flag refused here scopes or re-drives a CONTINUATION that has no implementation.
-    It is NOT §11.5 step 5, nor step 6 — both are built and run on every `fleet resume` this
-    refusal does not stop; step 8 is the absent one. A parser that accepted `--from-phase 2` and
+    Why: every flag refused here scopes or re-drives the continuation in a way §11.5 step 8 does
+    not implement. **Until ADR-0080 the reason was that the continuation itself did not exist**;
+    step 8 is wired now and this test's subject survived the change, because what each flag names
+    is absent for its OWN reason — a start other than the computed floor, a scope the
+    reconciliation does not carry, `attempts` rewriting and revalidation rounds with no
+    implementation in `src/`. A parser that accepted `--from-phase 2` and
     then resumed from wherever it liked leaves the
     operator believing they scoped the resume — and nothing anywhere tells them otherwise.
 
@@ -1500,6 +1521,9 @@ def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path
     as a whole rather than a fixed substring, so a successor that builds step 6 and forgets to add
     it trips too.
     """
+    # NO `--no-continue`, deliberately: `_refuse_unbuilt_resume_flags` runs before
+    # `_resume_impl`, so the continuation is unreachable from this path and adding the flag would
+    # hide that ordering. It is the one bare `resume` invocation 10e left bare.
     result = runner.invoke(app, [*base_args(workspace), "resume", "--from-phase", "2"])
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "--from-phase" in result.output
@@ -1507,10 +1531,11 @@ def test_resume_refuses_the_flags_whose_behaviour_does_not_exist(workspace: Path
     built = " ".join(result.output.split())
     built = built[built.index("reconciliation that IS built (") :]
     built = built[: built.index(")")]
-    assert "steps 2, 3, 4, 5, 6 and 7" in built, (
+    assert "steps 2, 3, 4, 5, 6, 7 and 8" in built, (
         f"the refusal's built-steps list is stale: {built!r} — step 4 (Git-as-arbiter task "
-        "reconciliation), step 5 (the re-entry demotion, wired in at `2f0db34`) and step 6 (the "
-        "`blocked_by` recompute and its appended wave) all run on every plain `fleet resume`"
+        "reconciliation), step 5 (the re-entry demotion, wired in at `2f0db34`), step 6 (the "
+        "`blocked_by` recompute and its appended wave) and step 8 (the continuation, wired in "
+        "by ADR-0080) all run on every plain `fleet resume`"
     )
     assert "precondition" not in result.output, (
         "the refusal names a predicate step 5 does not use, and cannot use"
@@ -1615,8 +1640,8 @@ def test_resume_repoll_prs_ingests_the_merge_the_harness_never_saw(
     forge = _MergedForge()
     monkeypatch.setattr(cli, "GH_RUNNER", forge)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume", "--repoll-prs"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue", "--repoll-prs"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     conn = sqlite3.connect(db)
     try:
@@ -1699,8 +1724,10 @@ def test_raise_budget_clears_the_sticky_halt_and_is_audited(workspace: Path) -> 
     db = workspace / "state" / "fleet.db"
     _halt_ledger(db, spent=10.0, max_usd=10.0)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume", "--raise-budget", "50"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(
+        app, [*base_args(workspace), "resume", "--no-continue", "--raise-budget", "50"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     assert _ledger(db) == (50.0, 0)
     conn = sqlite3.connect(db)
@@ -1730,7 +1757,9 @@ def test_raise_budget_below_committed_spend_is_refused_with_the_real_numbers(
     db = workspace / "state" / "fleet.db"
     _halt_ledger(db, spent=10.0, max_usd=10.0)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume", "--raise-budget", "1"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "resume", "--no-continue", "--raise-budget", "1"]
+    )
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "10.00" in result.output
     assert _ledger(db) == (10.0, 1), "a refused raise still moved the ledger"
@@ -1766,8 +1795,8 @@ def test_resume_will_not_reclaim_a_row_the_per_phase_ttl_still_calls_alive(
     sixty_s_ago = (datetime.now(UTC) - timedelta(seconds=60)).isoformat(timespec="microseconds")
     _put_leased(db, "acme-commons", heartbeat_at=sixty_s_ago, attempts=3, fence=9, ttl_s=300)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
     assert (status, attempts, fence, owner) == ("RUNNING", 3, 9, "host:cid:1:boot"), (
@@ -1786,8 +1815,8 @@ def test_resume_reclaims_once_both_horizons_are_breached(workspace: Path) -> Non
     long_gone = (datetime.now(UTC) - timedelta(seconds=3600)).isoformat(timespec="microseconds")
     _put_leased(db, "acme-commons", heartbeat_at=long_gone, attempts=3, fence=9, ttl_s=300)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     status, attempts, fence, owner, _hb = _phase_row(db, "acme-commons")
     assert (status, attempts, fence, owner) == ("PENDING", 3, 10, None)
@@ -1959,8 +1988,8 @@ def test_resume_reap_spares_the_rung_the_live_row_is_actually_on(workspace: Path
     teardown_rung = _cut(repo, workspace, _sandbox("acme-commons", 2))
     orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     payload = json.loads(result.stdout)
 
     assert _sandbox("acme-commons", 3) in payload["live_sandbox_names"], (
@@ -1985,14 +2014,14 @@ def test_resume_reap_is_silent_on_a_clean_tree_and_fires_on_one_injected_into_it
     """
     repo = _reap_workspace(workspace)
 
-    clean = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert clean.exit_code == ExitCode.USAGE, clean.output
+    clean = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert clean.exit_code == ExitCode.SUCCESS, clean.output
     assert json.loads(clean.stdout)["reaped_worktrees"]["reaped"] == []
 
     injected = _cut(repo, workspace, _sandbox("acme-commons", 4))
 
-    after = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert after.exit_code == ExitCode.USAGE, after.output
+    after = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert after.exit_code == ExitCode.SUCCESS, after.output
     assert json.loads(after.stdout)["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 4)]
     assert not injected.exists(), "the detector was inert on a worktree created after setup"
 
@@ -2011,8 +2040,8 @@ def test_resume_reap_cannot_reach_a_worktree_outside_the_run_namespace(workspace
     unrelated = _cut(repo, workspace, "wt-WT1-example")
     orphan = _cut(repo, workspace, _sandbox("acme-commons", 1))
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     assert json.loads(result.stdout)["reaped_worktrees"]["reaped"] == [_sandbox("acme-commons", 1)]
     assert other_run.exists(), "the sweep crossed into another run's namespace"
@@ -2153,9 +2182,9 @@ def test_resume_reports_every_worktree_the_sweep_could_not_remove(workspace: Pat
                 repo_dir=repo, work_dir=workspace / "work", run_id=run_id, runner=monkey
             ),
         )
-        result = runner.invoke(app, [*base_args(workspace), "resume"])
+        result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
 
-    assert result.exit_code == ExitCode.USAGE, result.output
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     for path in stuck:
         assert f"FAILED to reap worktree {path.name}" in result.output
         assert path.exists(), "an unsettled `worktree remove` was treated as licence to delete"
@@ -2192,9 +2221,9 @@ def test_resume_reap_hands_the_container_sweep_sandbox_names_not_expanded_ones(
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
-        result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+        result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
 
-    assert result.exit_code == ExitCode.USAGE, result.output
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     assert json.loads(result.stdout)["reaped_containers"]["reaped"] == [orphan_container]
     assert docker.removed == [orphan_container], (
         "the sweep force-removed a container a live row claims"
@@ -2232,9 +2261,9 @@ def test_resume_container_sweep_lists_once_so_a_build_starting_mid_sweep_survive
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
-        result = runner.invoke(app, [*base_args(workspace), "resume"])
+        result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
 
-    assert result.exit_code == ExitCode.USAGE, result.output
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     assert docker.listings == 1, (
         "the sweep asked docker twice; the gap between the two answers is a window in which a "
         "container a live row claims is absent from the spared set"
@@ -2261,9 +2290,9 @@ def test_resume_reports_every_container_docker_would_not_confirm_removed(
 
     with pytest.MonkeyPatch.context() as mp:
         mp.setattr("fleet.cli._reap_container_sandbox", lambda: ContainerSandbox(runner=docker))
-        result = runner.invoke(app, [*base_args(workspace), "resume"])
+        result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
 
-    assert result.exit_code == ExitCode.USAGE, result.output
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     assert f"FAILED to reap container {stuck}" in result.output
     assert "is in use" in result.output, "docker's own reason was discarded"
     assert "no orphan containers" not in result.output
@@ -2370,124 +2399,20 @@ def test_resume_dry_run_reports_a_docker_ps_it_could_not_run_instead_of_no_orpha
     )
 
 
-def test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash(
-    workspace: Path,
-) -> None:
-    """A reconciliation that fully succeeded exits 2, never 1 (ADR-0076).
-
-    Why CI cares, concretely: exit 1 is "unexpected error", and the reflex wrapper retries it.
-    Retrying `fleet resume --repoll-prs` costs one `gh pr view` per open PR per iteration, so a
-    250-PR fleet burns 250 forge calls per retry and trips GitHub's secondary rate limit — at
-    which point the re-poll starts failing and the operator is debugging a rate limit instead of
-    reading which §11.5 steps are absent. Exit 2 is §10's "the operator must edit a file, a flag
-    or a stub before retrying", which is exactly true here and is the signal not to loop.
-
-    The last two assertions pin what the refusal SAYS step 5 is, for the reason given at
-    `test_resume_refuses_the_flags_whose_behaviour_does_not_exist`: this message and that one were
-    the last two places still describing the re-entry floor as "the earliest phase whose
-    precondition holds", a predicate step 5 does not use and a quantifier that names a rung
-    `reentry.phase_floor` never returns.
-    """
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code != ExitCode.UNEXPECTED_ERROR, result.output
-    assert result.exit_code == ExitCode.USAGE
-    assert "step 5" in result.output
-    assert "precondition" not in result.output, (
-        "the refusal names a predicate step 5 does not use, and cannot use"
-    )
-    assert "HIGHEST phase below the settled frontier" in result.output, (
-        "the refusal states the floor without its quantifier, which is the half two earlier "
-        "fixes in this class left behind"
-    )
-    assert "DEGRADED/SKIPPED hard stop" in result.output, (
-        "the refusal drops `_HARD_STOPS`, which is the OTHER half a fix in this class already "
-        "omitted once: a floor stated without it reads as evidence-only and re-runs excluded work"
-    )
-
-
-def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines(
-    workspace: Path,
-) -> None:
-    """The refusal may only name the §11.5 steps that are genuinely unbuilt: step 8 alone.
-
-    Why this is a defect and not a wording quibble: the same stdout that carried the claim
-    "Steps 2 (orphan reap) … are absent too" also carries the `step 2:` lines `_reap_lines`
-    emits for the reap that just ran. An operator reading a self-contradicting report has to
-    decide which half to believe, and the half that says "absent" is the one that sends them to
-    `docker ps`/`git worktree list` to do by hand the sweep the verb already did.
-
-    The clause was **true when `c45db53` wrote it** and went stale when the reap landed
-    (`e915b93`); `da70221` then rewrote the *adjacent* clause of the same sentence — the
-    retracted floor predicate — and left this one standing. A fix that repairs one clause of a
-    sentence and leaves the next false is the failure mode this whole class keeps reproducing,
-    which is why the assertion below reads the absent-step *list* rather than a fixed substring:
-    a successor that fixes step 2 and forgets step 8 trips it too.
-
-    **Step 4 is the second instance of exactly that class, and it is why this test grew a third
-    assertion.** The Git-as-arbiter reconciliation landed with ADR-0087, and the refusal listing
-    it as absent went stale the same way step 2's clause did. Its own `step 4:` lines are
-    conditional — they print only when the run holds a `RUNNING` task — so the contradiction is
-    quieter than step 2's and the stale clause survives longer; the payload key `git_arbitration`
-    is unconditional and is what an operator reading `--json` sees beside the claim. The
-    landed/discarded/unresolved behaviour itself is pinned by the `test_resume_step4_*` cases.
-
-    **Step 6 is the third instance, and it is the one that broke this test's own locator.** When
-    the `blocked_by` recompute landed (`1d0c8f6`) the enumeration went from plural to singular —
-    *"Steps 6 (…) and 8 (…) **are absent too**"* became *"Step 8 (…) **is absent.**"* — and the
-    fixed phrase this test used to `partition` on (`" are absent too"`) ceased to exist, so the
-    shape guard fired and this file was RED on `main` from `1d0c8f6` until this commit. The guard
-    was right to fire and the message was right to change: only step 8 is unbuilt now. What was
-    wrong was the *locator*, which was itself the fixed substring the paragraph above objects to.
-    It now matches any `Step(s) <n> (<gloss>)[, …] is/are absent` claim and reads the step
-    NUMBERS out of it, so the singular and the plural shape are both covered, a reworded gloss
-    does not disarm it, and a successor that re-adds 2, 4 or 6 to the enumeration still trips the
-    discriminating assertions. The shape guard is preserved rather than relaxed: an enumeration
-    that stops matching the *rule* — not merely one phrase of it — still fails, loudly, before
-    any discriminating assertion runs.
-    """
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
-    output = " ".join(result.output.split())
-
-    # The CONTROL. True before the fix as well — which is precisely what made the claim
-    # self-contradicting rather than merely out of date.
-    assert "step 2:" in output, (
-        "the reap did not report at all, so this test is not exercising the contradiction"
-    )
-
-    # The SHAPE GUARD, by rule rather than by a fixed phrase: one `Step(s) <n> (<gloss>)[, …]
-    # is/are absent` claim, whose items are step numbers each carrying a parenthesised gloss.
-    # Singular and plural both match, so the enumeration may shrink to one step (as `1d0c8f6`
-    # made it) or grow back without this locator needing an edit.
-    enumeration = re.compile(r"Steps? ((?:\d+ \([^()]*\)(?:, | and )?)+) (?:is|are) absent")
-    claims = enumeration.findall(output)
-    assert len(claims) == 1, (
-        "the refusal no longer enumerates the absent steps in a shape this test can read — "
-        f"expected exactly one `Step(s) N (gloss) … is/are absent` claim, found {claims!r}"
-    )
-    absent = claims[0]
-    absent_steps = {int(number) for number in re.findall(r"(\d+) \(", absent)}
-
-    # The DISCRIMINATING assertions. Each names a step `_resume_impl` RUNS, so listing it as
-    # absent contradicts this same stdout.
-    assert 2 not in absent_steps, (
-        f"the refusal lists step 2 among the absent steps: {absent!r} — `_resume_impl` runs the "
-        "reap and this very output reports it"
-    )
-    assert 4 not in absent_steps, (
-        f"the refusal lists step 4 among the absent steps: {absent!r} — `_resume_impl` runs the "
-        "Git-as-arbiter reconciliation and reports it under `git_arbitration`"
-    )
-    assert 6 not in absent_steps, (
-        f"the refusal lists step 6 among the absent steps: {absent!r} — `_resume_impl` runs the "
-        "`blocked_by` recompute and reports it under `unblocked_dependents`"
-    )
-    assert 8 in absent_steps, (
-        f"step 8 (continue) is unbuilt and unnamed: {absent!r} — the refusal enumerates what is "
-        "missing, and an enumeration that stops short is how the next reader concludes the verb "
-        "is closer to done than it is"
-    )
-
+# `test_resume_step_5_refusal_does_not_share_an_exit_code_with_a_crash` and
+# `test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_lines` used to live
+# here. **ADR-0080 deleted them with their subject.** Both were tests OF `ResumeIncompleteError`:
+# the first asserted its exit code was 2 and not 1, the second parsed the `Step(s) N (gloss)
+# is/are absent` enumeration out of its message and asserted which numbers appeared. There is no
+# such message and no such class, so neither could be rewritten into anything that discriminates
+# — a kept shell asserting "exit 0, and the output does not enumerate absent steps" passes under
+# every mutation of the code it used to guard, which is a deleted test wearing a passing costume.
+#
+# What was worth keeping was re-homed rather than dropped. The floor-rule restatement the first
+# one pinned in rendered output survives in `_refuse_unbuilt_resume_flags`'s message and is
+# asserted by `test_resume_refuses_the_flags_whose_behaviour_does_not_exist` above. The second
+# one's rule — *the verb must not call a step absent in the same stdout that reports it running*
+# — is now carried by `test_a_no_continue_resume_says_step_8_was_withheld_rather_than_absent`.
 
 # `test_the_three_resume_re_entry_summaries_state_one_rule_and_it_is_not_the_earliest` used to
 # live here. It moved to `tests/test_floor_rule_statements.py` (Layer E) with this change: the
@@ -2499,33 +2424,256 @@ def test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_li
 # says, not what the floor rule is.
 
 
-def test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal(
+def test_the_reconciliation_payload_is_emitted_even_when_the_continuation_throws(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--json resume` prints ONE full report on stdout even if step 8 dies mid-delegate.
+
+    Why the ordering is the assertion and not the exit code: a `fleet resume` writes the
+    stale-lease sweep, the step-4 arbitration and `migration_state.json` BEFORE step 8 runs, so
+    the only path on which an operator's tooling learns what was reconciled is the one where the
+    thing after it failed. If `_emit` ran after the continuation rather than in a `finally`,
+    stdout would be empty exactly when the verb has most to say.
+
+    **Re-homed from `test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal`,
+    whose subject ADR-0080 deleted.** That test rode the exit-2 refusal, which was the normal
+    outcome of a real resume; the normal outcome now is a continuation, so the guarantee moved to
+    the failure mode that replaced it. It is strictly stronger: a `raise` after `_emit` was
+    satisfied by any statement order at all, and this one is not satisfied by putting `_emit`
+    after the continuation.
+
+    Unique discriminator of: moving the `_emit` call out of the `finally` (stdout empty, the
+    `json.loads` below raises), and of emitting the continuation as a SECOND document (the
+    `json.loads` below raises on trailing data).
+    """
+    _step5_landed_fleet(workspace)
+
+    async def explode(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("the delegate fell over")
+
+    from fleet import cli
+
+    monkeypatch.setattr(cli, "_refuse_concurrent_mirror_run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_build_impl", explode)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
+
+    payload = json.loads(result.stdout)  # empty stdout => the raise beat the emit
+    assert payload["dry_run"] is False
+    assert payload["reentry_floors"]["applied"] is True, (
+        "step 5's write is the thing this payload exists to report, and it did not happen"
+    )
+    assert payload["projection"], "the payload does not name the projection step 7 wrote"
+    assert payload["continuation"] is None, (
+        "a continuation that threw is reported as having produced a result"
+    )
+    assert payload["git_arbitration"] is not None
+    assert (workspace / "migration_state.json").exists()
+
+
+def test_a_no_continue_resume_writes_the_reconciliation_and_withholds_only_step_8(
     workspace: Path,
 ) -> None:
-    """`--json resume` (no `--dry-run`) prints the full report on stdout, THEN exits 2.
+    """`--no-continue` is not a preview: everything §11.5 writes is written, at exit 0.
 
-    Why the ordering is the assertion and not the exit code: the exit-2 path is the normal
-    outcome of a real resume today, so it is the path on which an operator's tooling has to learn
-    what was reconciled. If `_emit` ran after the refusal instead of before it, stdout would be
-    empty and the only trace of a committed stale-lease sweep and a rewritten
-    `migration_state.json` would be an error line on stderr — a machine-readable verb that emits
-    nothing machine-readable exactly when it has something to say.
+    This is the flag the §11.5-step tests in this file pass, so it earns a case of its own
+    rather than being trusted because thirty other tests use it. The pair with `--dry-run` is the
+    point: `--dry-run` withholds the WRITES and step 8; `--no-continue` withholds step 8 alone.
 
-    ADR-0076 states this ordering as a property; this is the test it cites. Every other `--json`
-    resume test passes `--dry-run` and therefore exercises the exit-0 path, which would keep
-    passing if the ordering were reversed.
+    Unique discriminator of: `no_continue` not reaching `withheld` (the continuation runs and
+    `payload["continuation"]` is a dict), and of `--no-continue` short-circuiting before
+    `_resume_impl` (the stale lease is not reclaimed and no projection is written).
     """
     db = workspace / "state" / "fleet.db"
     _put_leased(db, "acme-commons", heartbeat_at=STALE_HEARTBEAT, attempts=2, fence=4)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
-    payload = json.loads(result.stdout)  # empty stdout => the raise beat the emit
-    assert payload["dry_run"] is False
-    assert payload["stale_running_reset"] == 1
-    assert payload["projection"], "the payload does not name the projection step 7 wrote"
-    assert (workspace / "migration_state.json").exists()
+    payload = json.loads(result.stdout)
+    assert payload["continuation"] is None, "`--no-continue` ran step 8 anyway"
+    assert payload["stale_running_reset"] == 1, "`--no-continue` also withheld step 3's write"
+    assert payload["projection"], "`--no-continue` also withheld step 7"
+    status, attempts, fence, _owner, _hb = _phase_row(db, "acme-commons")
+    assert (status, attempts, fence) == ("PENDING", 2, 5), (
+        "`--no-continue` behaved as a preview; it withholds step 8 and nothing else"
+    )
+
+
+def test_a_no_continue_resume_says_step_8_was_withheld_rather_than_absent(
+    workspace: Path,
+) -> None:
+    """The verb never calls a step absent in the same stdout that reports it running.
+
+    Re-homed from `test_the_step_5_refusal_does_not_call_step_2_absent_beside_its_own_step_2_
+    lines`, which parsed the deleted refusal's absent-step enumeration. The defect class is the
+    same one and it outlived its instance: an operator reading "step N is absent" beside that
+    step's own output has to decide which half to believe, and the half that says "absent" sends
+    them to do by hand what the verb already did.
+
+    Unique discriminator of: rendering the withheld continuation as `"step 8: absent"` or
+    omitting `_continue_lines` from the human path entirely (the first assertion), and of
+    `_continue_lines` reporting a withheld step 8 as a completed one (the second).
+    """
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    output = " ".join(result.output.split())
+
+    assert "step 8: withheld" in output, (
+        f"a withheld step 8 is not reported as withheld: {output!r}"
+    )
+    assert "absent" not in output, (
+        f"the report calls a §11.5 step absent beside the output of the steps that ran: {output!r}"
+    )
+    assert "continued" not in output, (
+        "a withheld continuation is reported as one that ran"
+    )
+
+
+def test_a_scan_floor_is_named_in_the_payload_and_never_served(workspace: Path) -> None:
+    """ADR-0080 ruling B: a `SCAN` floor is reported and skipped, never served.
+
+    `fleet scan` takes five flags no resume carries and no `wave` at all, so serving a `SCAN`
+    floor means step 8 choosing five values the operator never wrote. The skip is only safe
+    because it is LOUD: on a fleet of un-started repos `computed_floors` is `SCAN`-heavy, and a
+    silent skip is a `fleet resume` that exits 0 having migrated nothing.
+
+    Unique discriminator of: `result[_SCAN_SKIPPED_KEY] = list(skipped)` -> `= []` in
+    `_continue_impl` (the payload assertion), and of dropping `_continue_lines`' skip branch (the
+    stdout assertion). Both are invisible to every other case in this file, which asserts on the
+    reconciliation and not on step 8's report.
+
+    The lease seeding is not decoration: `computed_floors` has one entry per repo with `phases`
+    rows, so a fixture with no rows at all yields an EMPTY plan and would pass the "nothing was
+    served" half while asserting nothing about the skip.
+    """
+    _put_leased(
+        workspace / "state" / "fleet.db",
+        "acme-commons",
+        heartbeat_at=STALE_HEARTBEAT,
+        attempts=2,
+        fence=4,
+    )
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    continuation = json.loads(result.stdout)["continuation"]
+    assert continuation is not None, "step 8 did not run on a plain `fleet resume`"
+    assert continuation["scan_floor_not_continued"] == ["acme-commons"], (
+        "the repo whose floor is SCAN was dropped from the report instead of named in it"
+    )
+    assert continuation["driven"] == [], "a SCAN floor was served"
+
+    human = runner.invoke(app, [*base_args(workspace), "resume"])
+    assert human.exit_code == ExitCode.SUCCESS, human.output
+    assert "NOT continued" in " ".join(human.output.split()), (
+        "the skip is invisible to an operator not reading `--json`"
+    )
+
+
+def test_the_continuation_is_driven_from_step_5s_floors_and_the_declared_config(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Step 8 is reached with step 5's OWN floors and with config-declared knobs.
+
+    Two claims, both of which a green suite would otherwise be blind to. **The floors** come from
+    `computed_floors`, not from the `reentry_floors` report: the report's `unchanged` rows carry a
+    reason and no floor, so a step 8 fed from the report continues every repo that needed a
+    demotion and silently drops every repo that did not — which on a healthy fleet is most of it.
+    **The knobs** are the operator's declared config, never a literal at the call site; a literal
+    here is character-for-character the recorded `effort: low` defect.
+
+    Unique discriminator of: passing `reentry_floors` instead of `computed_floors` to
+    `_continue_from_floors` (the floors assertion), and of replacing `budgets.build_timeout_s` at
+    the call site with `fleet build --timeout`'s Typer literal (the `timeout_s` assertion).
+
+    **The fixture is chosen so the first of those is EXPRESSIBLE, and the obvious one is not.**
+    Measured: with `_step5_landed_fleet`'s repo — Phase 3 `SUCCEEDED`, evidence gone, so step 5
+    DEMOTES it — the report-derived mapping and `computed_floors` agree, the mutation is a
+    semantic no-op and this case passes under the exact defect it exists to catch. The two
+    anchors have to differ: here Phase 3 is `PENDING`, so the floor is still `BUILD` and step 5
+    writes nothing, the repo lands in `unchanged` with no `floor` key, and a step 8 fed from the
+    report plans nothing at all. That is the healthy-fleet case, which is most of a fleet.
+    """
+    write_config(
+        workspace,
+        fleet=CONTINUE_KNOBS_YAML,
+    )
+    _reseal_config_digests(workspace)
+    _step5_mirror(workspace)
+    _worktree, anchor = _arbitration_worktree(workspace)
+    _step5_seed(
+        workspace / "state" / "fleet.db",
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "PENDING", 4: "PENDING"},
+        post_commit_sha={2: anchor},
+    )
+
+    seen: dict[str, object] = {}
+
+    async def recorder(*_args: object, **kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {"exit_code": int(ExitCode.SUCCESS), "run_id": RUN_ID}
+
+    from fleet import cli
+
+    monkeypatch.setattr(cli, "_refuse_concurrent_mirror_run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_build_impl", recorder)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    payload = json.loads(result.stdout)
+    assert payload["reentry_floors"]["demoted"] == [], (
+        "the fixture demoted something, so the report and `computed_floors` agree and the "
+        "floors-source mutation is a no-op here"
+    )
+    continuation = payload["continuation"]
+    assert [entry["phase"] for entry in continuation["plan"]] == ["BUILD"], (
+        "step 5's computed floor did not reach step 8's plan"
+    )
+    assert continuation["driven"] == ["BUILD"]
+    assert seen["timeout_s"] == 999, "`budgets.build_timeout_s` did not reach `_build_impl`"
+    assert seen["sandboxed"] is True
+    assert seen["wave"] is None, "step 8 invented a wave the operator never named"
+
+
+def test_a_halting_delegate_hands_its_own_exit_code_back_through_resume(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§10's exit code is the halting delegate's, read off ITS payload — not re-derived here.
+
+    `_raise_for_continuation` delegates to `_raise_for_phase` precisely so §10's table is not
+    copied a fourth time. This is the case that proves the wire reaches `fleet resume`: without
+    it, `_raise_for_continuation` could be a no-op on this path and every other case in this file
+    would still be green, because they all reach a `SCAN`-only plan that never halts.
+
+    Unique discriminator of: dropping the `_raise_for_continuation(continuation)` call at the end
+    of `resume` (exit 0 instead of 10), and of raising on `halted is None` (the `--no-continue`
+    and SCAN-only cases above go red instead).
+    """
+    _step5_landed_fleet(workspace)
+
+    async def halting(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "exit_code": int(ExitCode.WAVE_COST_EXHAUSTED),
+            "run_id": RUN_ID,
+            "halt": "the wave ceiling is spent",
+        }
+
+    from fleet import cli
+
+    monkeypatch.setattr(cli, "_refuse_concurrent_mirror_run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_build_impl", halting)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.WAVE_COST_EXHAUSTED, result.output
+
+    payload = json.loads(result.stdout)
+    assert payload["continuation"]["halted_phase"] == "BUILD"
+    assert payload["projection"], (
+        "the reconciliation was not reported before the halting exit code ended the process"
+    )
 
 
 def test_a_forge_failure_under_repoll_prs_still_reconciles_and_then_reports(
@@ -2561,7 +2709,7 @@ def test_a_forge_failure_under_repoll_prs_still_reconciles_and_then_reports(
         )
 
     monkeypatch.setattr(cli, "GH_RUNNER", unauthenticated)
-    result = runner.invoke(app, [*base_args(workspace), "resume", "--repoll-prs"])
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue", "--repoll-prs"])
 
     # The forge failure is a real failure and keeps exit 1 — it is NOT the step-5 refusal.
     assert result.exit_code == ExitCode.UNEXPECTED_ERROR, result.output
@@ -2624,7 +2772,9 @@ def test_raise_budget_refuses_to_lower_a_ceiling(workspace: Path) -> None:
     db = workspace / "state" / "fleet.db"
     _halt_ledger(db, spent=1.0, max_usd=100.0)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume", "--raise-budget", "5"])
+    result = runner.invoke(
+        app, [*base_args(workspace), "resume", "--no-continue", "--raise-budget", "5"]
+    )
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "LOWER" in result.output
     assert _ledger(db) == (100.0, 1), "a refused raise still moved the ledger"
@@ -2854,8 +3004,8 @@ def test_resume_step4_adopts_the_commit_git_says_landed_without_charging_an_atte
     sha = _land_task_commit(worktree)
     _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     report = json.loads(result.stdout)["git_arbitration"]
     assert report["candidates"] == 1
@@ -2905,8 +3055,8 @@ def test_resume_step4_discards_the_worktree_of_a_task_whose_commit_never_landed(
     debris.write_text("class Broken {\n", encoding="utf-8")
     _seed_running_task(db, task_anchor=task_anchor, phase_anchor=phase_anchor)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     report = json.loads(result.stdout)["git_arbitration"]
     assert [entry["task_id"] for entry in report["discarded"]] == [ARB_TASK]
@@ -2949,8 +3099,8 @@ def test_resume_step4_recreates_the_missing_anchor_at_the_sha_it_named_not_at_th
     assert _git_out(worktree, "for-each-ref", "--format=%(refname)", ARB_ANCHOR_REF) == ""
     _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     report = json.loads(result.stdout)["git_arbitration"]
     assert [entry["ref"] for entry in report["anchors_recreated"]] == [ARB_ANCHOR_REF]
@@ -3052,10 +3202,10 @@ def test_resume_step4_spares_the_task_whose_phase_lease_is_still_live(workspace:
 
     # Rendered output first, then the payload. Sparing writes nothing, so the second invocation
     # sees the identical state and the two readings are of one run's worth of behaviour.
-    rendered = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert rendered.exit_code == ExitCode.USAGE, rendered.output
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    rendered = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert rendered.exit_code == ExitCode.SUCCESS, rendered.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     payload = json.loads(result.stdout)
 
     # The CONTROL.
@@ -3102,8 +3252,8 @@ def test_resume_step4_reports_a_landed_commit_no_attempts_row_could_record(
 
     # Rendered output, not `--json`: the divergence has to reach the human who is reading the
     # reconciliation report, and the line is derivable only from `provenance_missing`.
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     output = " ".join(result.output.split())
 
     # The CONTROL: the landed verdict itself is unaffected, so a failure below is about the
@@ -3134,8 +3284,8 @@ def test_resume_step4_reports_a_candidate_it_could_not_ask_git_about_instead_of_
     db = workspace / "state" / "fleet.db"
     _seed_running_task(db, task_anchor="a" * 40, phase_anchor="b" * 40)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     assert f"step 4: UNRESOLVED acme-commons phase 2 task {ARB_TASK}" in result.output
     assert "no worktree at" in result.output, "the reason was reduced to a bare name"
@@ -4416,8 +4566,8 @@ def test_resume_step_5_demotes_the_span_above_the_floor_and_reports_what_it_disc
     db = workspace / "state" / "fleet.db"
     _step5_landed_fleet(workspace)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
 
     report = json.loads(result.stdout)["reentry_floors"]
     assert report["applied"] is True
@@ -4488,8 +4638,8 @@ def test_resume_step_5_dry_run_previews_the_same_plan_and_leaves_the_database_by
     assert _db_dump(db) == before, "--dry-run wrote to the database"
     assert not (workspace / "migration_state.json").exists()
 
-    applied = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert applied.exit_code == ExitCode.USAGE, applied.output
+    applied = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert applied.exit_code == ExitCode.SUCCESS, applied.output
     written = json.loads(applied.stdout)["reentry_floors"]
     assert written["applied"] is True
     assert [
@@ -4513,8 +4663,8 @@ def test_resume_step_5_dry_run_says_it_would_demote_and_the_real_run_says_it_did
     assert "step 5: would demote acme-commons to floor BUILD" in preview.output
     assert "step 5: demoted" not in preview.output
 
-    applied = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert applied.exit_code == ExitCode.USAGE, applied.output
+    applied = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert applied.exit_code == ExitCode.SUCCESS, applied.output
     assert "step 5: demoted acme-commons to floor BUILD" in applied.output
     assert "would demote" not in applied.output
 
@@ -4646,8 +4796,8 @@ def test_resume_step_5_demotes_a_repo_whose_worktree_the_reaper_removed_all_the_
     )
     shutil.rmtree(worktree)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     report = json.loads(result.stdout)["reentry_floors"]
 
     assert report["unresolved"] == [], (
@@ -4708,8 +4858,8 @@ def test_resume_step_5_contains_a_git_failure_to_the_one_repo_it_happened_to(
 
     monkeypatch.setattr("fleet.cli.evidence_holds", exploding)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     report = json.loads(result.stdout)["reentry_floors"]
 
     assert [entry["repo_id"] for entry in report["demoted"]] == [STEP5_REPO], (
@@ -4768,8 +4918,8 @@ def test_resume_step_5_refuses_a_floor_whose_phase_rows_moved_under_it(
 
     monkeypatch.setattr("fleet.cli.evidence_holds", racing)
 
-    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     report = json.loads(result.stdout)["reentry_floors"]
 
     assert report["demoted"] == [] and report["applied"] is False
@@ -4852,8 +5002,8 @@ def test_resume_step_5_re_opens_the_closed_wave_it_demotes_a_member_out_of(
     assert wave_state() is WaveState.CLOSED, (
         "the fixture's wave is not closed to begin with, so this test cannot see the re-opening"
     )
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     assert _step5_rows(db)[3][0] == "PENDING"
     assert wave_state() is WaveState.OPEN, (
         "the measured consequence this test exists to pin has changed; ADR-0089 §4 records it "
@@ -4881,8 +5031,8 @@ def test_resume_step_5_leaves_a_repo_at_its_floor_alone_and_says_which(
     )
     before = _db_dump(db)
 
-    result = runner.invoke(app, [*base_args(workspace), "resume"])
-    assert result.exit_code == ExitCode.USAGE, result.output
+    result = runner.invoke(app, [*base_args(workspace), "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
     assert "step 5: acme-commons unchanged — every phase has already settled" in result.output
     assert (
         "step 5: acme-billing unchanged — a phase requires human intervention" in result.output

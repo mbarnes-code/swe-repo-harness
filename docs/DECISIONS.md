@@ -6821,6 +6821,23 @@ Rejected alternatives, each for a specific reason:
   > **The obligation survives.** Design `docs/superpowers/plans/design-resume-step5.md` §5 row 10
   > carries the deletion. If `ResumeIncompleteError` is still raised once steps 6 and 8 both exist,
   > the bullet above applies unamended and that IS the defect it names.
+
+  > **DISCHARGED 2026-08-25 (round G, lane W1) — `ResumeIncompleteError` is deleted, and the
+  > bullet above is left standing rather than rewritten, as is the 2026-08-21 amendment.** §11.5
+  > step 6 landed at `1d0c8f6` and step 8 landed with **ADR-0080**, so the condition the amendment
+  > names — "once steps 6 and 8 both exist" — is met and the class went with it. The deletion is
+  > the one the bullet asks for and not the "repurposed" it forbids: no successor class carries
+  > the exit code, and `fleet resume` no longer refuses. **ADR-0089 §5's "rewritten, not deleted"
+  > and §6's "it does not delete `ResumeIncompleteError` — that is subtask 10's" are both correct
+  > records of their own commits and are not edited either; subtask 10 is what this discharge is.**
+  >
+  > **One citation in this ADR has rotted and is corrected here rather than in place.** The bullet
+  > four above cites `test_the_reconciliation_payload_is_emitted_before_the_step_5_refusal` as the
+  > mutation-checked binding for the emit-before-raise ordering. That test's subject was the
+  > refusal, so ADR-0080 re-homed it to
+  > `test_the_reconciliation_payload_is_emitted_even_when_the_continuation_throws` — a strictly
+  > stronger case, because a `raise` after `_emit` was satisfied by any statement order at all and
+  > this one is not satisfied by emitting after the continuation.
 ---
 
 ## ADR-0077 — `SUCCEEDED` stays terminal for every automatic path and becomes demotable for exactly one: `RESUME_DEMOTE` gated on a keyword-only `resume=True`, mirroring `OPERATOR_REOPEN`, with a `PhaseDemoted` finding the caller cannot decline to take
@@ -7806,38 +7823,191 @@ true only before this entry, which itself raises the total to 5.
 
 ---
 
-## ADR-0080 — RESERVED, not yet written
+## ADR-0080 — §11.5 step 8: `fleet resume` continues from each repo's re-entry floor, skips a `SCAN` floor loudly rather than serving it, and `--no-continue` is how an operator (and a test) asks for the reconciliation without the spend
 
-Allocated to §11.5 step-5 subtask 10, "Step 8 — 'continue': delegate to the three composition roots
-in phase order" (`docs/superpowers/plans/design-resume-step5.md` row 10): `fleet resume` without
-`--dry-run` running `_transform_impl` → `_build_impl` → `_verify_impl` for the phases the floors
-demand. Subtask 10 has not started — it depends on subtask 9, not landed. This number is reserved
-and not available for reuse; its absence from this file is not a deletion.
+> **WRITTEN 2026-08-25 (round G, lane W1), replacing the RESERVED placeholder in place.** The
+> paragraph and the round-F annotation below are kept verbatim as the record of what the
+> reservation said at its own commit (CLAUDE.md Guardrail 7); the ADR proper follows them and
+> carries the current semantics. Where the two disagree, the ADR proper is the decision.
 
-> **ANNOTATION (2026-08-25, round F lane W7, measured at `12ac784`) — the reservation stands; two
-> clauses of the paragraph above have been falsified since it was written, and nothing above is
-> edited.** This is a record of what was true at its own commit (CLAUDE.md Guardrail 7), so the
-> falsifying commits are named here rather than the sentences rewritten.
+**The reservation, as it stood:**
+
+> Allocated to §11.5 step-5 subtask 10, "Step 8 — 'continue': delegate to the three composition
+> roots in phase order" (`docs/superpowers/plans/design-resume-step5.md` row 10): `fleet resume`
+> without `--dry-run` running `_transform_impl` → `_build_impl` → `_verify_impl` for the phases the
+> floors demand. Subtask 10 has not started — it depends on subtask 9, not landed. This number is
+> reserved and not available for reuse; its absence from this file is not a deletion.
 >
-> **1. *"it depends on subtask 9, not landed"* — subtask 9 landed.** It was settled by
-> **ADR-0079** at **`bd35a54`** ("docs/ADR-0079 + design row 9: write the reserved ADR, and correct
-> the row its sequencing ruling falsifies"), whose own title records that "subtask 9 settles and
-> records the semantics rather than removing anything from the refusal set". So subtask 10's stated
-> blocker is discharged. **What is unchanged is that subtask 10 has not landed**: `_resume_impl`
-> still raises `ResumeIncompleteError` naming step 8 absent, and a costed decomposition for it was
-> promoted into the tracked tree at **`251cd30`** — research, not an implementation.
->
-> **2. *"delegate to the three composition roots in phase order"* — that is a verbatim copy of
-> `docs/superpowers/plans/design-resume-step5.md` row 10's title, and the row stopped saying it at
-> `f127680`.** The title now reads *"delegate to the **phase** composition roots in phase order, and
-> un-refuse the two flags ADR-0079 ruled"*. The count was removed rather than corrected because the
-> question is **open, not settled**: lane W35's `(ii)` annotation on that same row records that
-> `orchestrator.reentry.phase_floor` can return `Phase.SCAN`, which none of the three roots can
-> serve, and names three unruled options (D-1 a fourth root, D-2 skip-and-report, D-3 refuse) rather
-> than inventing a semantics. The phrase *"the three composition roots"* still occurs **once** in
-> that row — inside W35's annotation, which quotes the retired wording on purpose so a count-based
-> sweep finds the retraction rather than a survival. Whoever eventually writes this ADR must not
-> read the sentence above as pre-deciding the count.
+> > **ANNOTATION (2026-08-25, round F lane W7, measured at `12ac784`) — the reservation stands; two
+> > clauses of the paragraph above have been falsified since it was written, and nothing above is
+> > edited.** This is a record of what was true at its own commit (CLAUDE.md Guardrail 7), so the
+> > falsifying commits are named here rather than the sentences rewritten.
+> >
+> > **1. *"it depends on subtask 9, not landed"* — subtask 9 landed.** It was settled by
+> > **ADR-0079** at **`bd35a54`** ("docs/ADR-0079 + design row 9: write the reserved ADR, and correct
+> > the row its sequencing ruling falsifies"), whose own title records that "subtask 9 settles and
+> > records the semantics rather than removing anything from the refusal set". So subtask 10's stated
+> > blocker is discharged. **What is unchanged is that subtask 10 has not landed**: `_resume_impl`
+> > still raises `ResumeIncompleteError` naming step 8 absent, and a costed decomposition for it was
+> > promoted into the tracked tree at **`251cd30`** — research, not an implementation.
+> >
+> > **2. *"delegate to the three composition roots in phase order"* — that is a verbatim copy of
+> > `docs/superpowers/plans/design-resume-step5.md` row 10's title, and the row stopped saying it at
+> > `f127680`.** The title now reads *"delegate to the **phase** composition roots in phase order, and
+> > un-refuse the two flags ADR-0079 ruled"*. The count was removed rather than corrected because the
+> > question is **open, not settled**: lane W35's `(ii)` annotation on that same row records that
+> > `orchestrator.reentry.phase_floor` can return `Phase.SCAN`, which none of the three roots can
+> > serve, and names three unruled options (D-1 a fourth root, D-2 skip-and-report, D-3 refuse) rather
+> > than inventing a semantics. The phrase *"the three composition roots"* still occurs **once** in
+> > that row — inside W35's annotation, which quotes the retired wording on purpose so a count-based
+> > sweep finds the retraction rather than a survival. Whoever eventually writes this ADR must not
+> > read the sentence above as pre-deciding the count.
+
+**Status:** accepted, describing behaviour landed on `main` in this commit (`src/fleet/cli.py`,
+`tests/test_cli.py`, `tests/test_resume_unblocking.py`, `docs/SPEC.md`). **Discharges ADR-0076's
+closing bullet** ("when §11.5 step 5 lands, `ResumeIncompleteError` should be deleted, not
+repurposed"), which ADR-0089 §5 deferred to this subtask. Builds on `6a8fafd`, which landed
+`_continue_from_floors` and `_continue_impl` **dormant** — this ADR is what reaches them.
+
+## 1. The decision
+
+`fleet resume`, without `--dry-run` and without `--no-continue`, **continues**. After the seven
+reconciliation steps commit, it calls `_continue_impl` with step 5's own computed floors, and the
+first delegate to halt hands its §10 exit code back through `_raise_for_continuation`.
+
+`ResumeIncompleteError` is **deleted**, not rewritten. It was a class whose entire content was
+"a documented step of this verb has no implementation"; the step has one now.
+
+## 2. `--no-continue`, and why a new flag rather than a fixture seam
+
+`--dry-run` already withholds the continuation, but it also withholds every write, and the thing
+an operator wants after a crash — *"reconcile my run, do not spend money yet"* — needs the writes.
+`--no-continue` is that: the reconciliation is committed, step 8 alone is withheld, exit 0.
+
+It is also what makes 10e affordable. **Measured at `635a83c`, two genuinely different ways** (a
+source-segment predicate over `tests/test_cli.py`, and a structural per-`invoke`-argv AST walk):
+**36** tests issue at least one bare `resume`, over **38** call sites, and **34** of those tests
+structurally assert `exit_code == 2`. Exactly four are *about* the refusal; the other thirty are
+about steps 2/3/4/5, budgets, config drift or the PR re-poll, and none of their fixtures was
+written to survive four phase composition roots running over it. The alternative — thirty-odd
+fixture seams — buys nothing an operator can use.
+
+**The flag is not a rename of the refusal.** The refusal was exit 2 and unconditional; this is
+exit 0 and opt-in. A CI wrapper that retried the old exit 2 got the identical refusal forever;
+there is nothing here to retry.
+
+## 3. A `SCAN` floor is reported and skipped, never served
+
+`phase_floor` really can return `Phase.SCAN` — `phase_floor({}, {})` does — and `computed_floors`
+is written before `demotable_phases` runs, so it retains every repo step 5 did **not** demote. On
+a fleet with un-started repos, step 8's input is `SCAN`-heavy.
+
+Step 8 does not serve it. `_scan_impl` takes five resume-less flags and no `wave`, so serving a
+`SCAN` floor means step 8 choosing five values the operator never wrote — character for character
+the recorded `effort: low` defect (`src/fleet/models/tasks.py`), where deleting a value from YAML
+substituted a non-optional default instead of removing the parameter. The alternative of halting
+the whole verb because one repo never scanned punishes every other repo in the fleet.
+
+The skip is therefore **loud**: the plan stays total, the driver owns the skip, and the skipped
+repos are named under `scan_floor_not_continued` in the payload and in a stdout line. A silent
+skip is a `fleet resume` that exits 0 having migrated nothing.
+
+**Deliberately not distinguished in v1:** the two routes into a `SCAN` floor mean different things
+— a frontier `SCAN` is *"never started"*, a walk that fell through is *"the durable evidence is
+gone"*. Distinguishing them requires changing `phase_floor`'s return or re-deriving frontier state
+at the call site, and no consumer needing the distinction has been identified. Open, recorded, not
+built (Rule 2). The key is named for what is true of both routes, which is why it is not
+`never_scanned`.
+
+## 4. The continuation takes §10's refusal, once, before the first delegate
+
+`_transform_impl` / `_build_impl` / `_verify_impl` do **not** take §10's "a second run started
+against a mirror another live run already owns" check — the `transform`/`build`/`verify`
+**commands** do, through `_phase_preflight`. Delegating straight to the impls bypasses it, and a
+continuation runs the same work on the same mirrors as the commands that take it.
+
+**It is a check, not an acquisition, and this ADR says so on purpose.**
+`_refuse_concurrent_mirror_run` takes `flock(LOCK_EX|LOCK_NB)` and then `LOCK_UN` + `close()`
+inside the same call: a non-blocking probe. The round-F ruling this implements gave "per-delegate
+acquire/release opens a window" as its rationale; the lane that implemented it measured the source,
+found that rationale does not follow — this guard closes no window at any granularity, in
+`fleet build` either — and reported the correction. The conclusion is unaffected and rests on the
+bypass above. **The wording to use is "takes the same §10 refusal the phase commands take".**
+
+Taken only when something is servable, so an all-`SCAN` plan still reports its skip rather than
+refusing with the diagnosis withheld.
+
+## 5. Every per-phase knob resolves from declared config
+
+`_continue_impl` makes all seven per-phase knobs required keywords with no default, precisely so
+the caller cannot drift into inventing one. `resume` resolves them from the operator's **declared
+config**, never from a literal at the call site:
+
+| knob | source | phase command's own default |
+|---|---|---|
+| `ladder` | `transform.max_attempts` | `--max-attempts 3` |
+| `timeout_s` | `budgets.build_timeout_s` | `--timeout 1800` |
+| `rdeps_limit` | `verify.rdeps_limit` | `--rdeps-limit 2000` |
+| `rdeps_sample_n` | `verify.rdeps_sample_n` | `--rdeps-sample-n 500` |
+| `affected_only` | `verify.affected_only` | `--affected-only` |
+
+**Measured, not assumed:** all five config defaults in `src/fleet/settings.py` equal the Typer
+default of the corresponding phase flag, so under default config a continuation runs the identical
+knobs a bare `fleet transform`/`build`/`verify` would, and it tracks the config when an operator
+changes one. That equality is what makes the config read the *conservative* choice rather than a
+behaviour change smuggled in beside a wiring commit.
+
+Two knobs are not config reads and both are stated rather than hidden. `dry_run=False` is not a
+choice: `--dry-run` returns before the continuation. `sandboxed=True` has no config form — it is
+the **absence** of `fleet build --no-sandbox`, whose own help reads "CI only"; a continuation that
+dropped the sandbox silently would be strictly more dangerous than the command it re-enters.
+
+## 6. One payload, one `_emit`, in a `finally`
+
+`fleet resume --json` is parsed with a single `json.loads`, so the continuation is carried **inside**
+the reconciliation payload under `continuation` rather than printed as a second document. The
+`_emit` sits in a `finally`, which is the stronger form of the guarantee ADR-0076 stated: the
+reconciliation is written before step 8 runs, so the operator must still receive it when what comes
+after does not survive. `_continue_impl` raises nothing of its own — the phase impls it delegates to
+raise plenty.
+
+`_resume_impl`'s payload gains `computed_floors` (repo id → phase **name**, so it stays JSON) because
+the `reentry_floors` report is not a usable input: its `unchanged` rows carry a reason and no floor,
+so a step 8 fed from the report would continue every repo that needed a demotion and silently drop
+every repo that did not — which on a healthy fleet is most of them.
+
+## 7. What this ADR does **not** do
+
+- **It does not implement `stub_reconcile`.** §10's `fleet resume` row, §13 row 35 and §3.5.1 all
+  mandate it and it has no wiring in `src/`; `D80` in `docs/INTEGRATION_HONESTY.md` is its record and
+  stays `OPEN`. The verb continues now and it does not reconcile stubs.
+- **It does not un-refuse `--from-phase`, `--repo`, `--reset-attempts`, `--revalidation` or
+  `--raise-revalidation-rounds`.** `_refuse_unbuilt_resume_flags` keeps refusing all five, and only
+  its *reason* changed: the clause "the CONTINUATION this verb cannot perform" was falsified by this
+  commit and is replaced by a per-flag reason. `--repo` is the closest call — `_continue_impl` takes
+  an `only` — but `_resume_impl` does not carry a repo scope, and a resume that reconciles the whole
+  ledger while continuing a fifth of it is a verb whose two halves disagree about what run they are
+  on.
+- **It does not take `_require_disk_headroom`.** `fleet build` and `fleet verify` call it (§11.3,
+  exit 9) and the continuation does not, so a `fleet resume` can now start phase work without the
+  headroom preflight those commands take. That is subtask 10c, ruled and unlanded; it is **newly
+  reachable** because of this commit and is recorded here rather than fixed in it.
+- **It does not touch `WaveScheduler`.** Two recorded defects become reachable from `fleet resume`
+  for the first time. **D83** — an exit-4 wall-clock halt carrying the literal message `'None'` —
+  was fixed at **`8b40498`** by a sibling lane while this work was in flight, so what this commit
+  newly exposes is the *fixed* behaviour; the exposure is recorded because the reachability, not the
+  defect, is what changed here. **D82** — the wave clock is per-`(run, wave)` and not per-phase, so
+  one exit-4 halt makes every later phase on that wave un-admittable — is **`OPEN` and unowned**, and
+  is now reachable from a verb an operator runs after every crash. It is neither fixed nor worked
+  around here: a step-8 workaround for D82 would be growing a requirement that never existed.
+
+## 8. Cost if wrong
+
+If the `SCAN` skip is the wrong call, an operator resuming a fleet of un-started repos gets exit 0
+and no migration — a five-second diagnosis, because the skipped repos are named in the payload and
+in stdout. If `--no-continue` is the wrong shape, it is one flag with no state and nothing depends
+on it but tests. The irreversible half is the deletion of `ResumeIncompleteError`, and that was
+ADR-0076's own stated obligation rather than this ADR's choice.
 
 ---
 

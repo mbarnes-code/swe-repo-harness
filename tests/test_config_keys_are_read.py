@@ -167,7 +167,10 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:preflight.baseline_build.timeout_s",   # settings.py:275
         #
         # --- timeouts and ceilings with no consumer ---------------------------------------
-        "fleet.yaml:budgets.build_timeout_s",              # settings.py:267
+        # `budgets.build_timeout_s` left this list at ADR-0080 (§11.5 step 8): `cli.resume`
+        # resolves the continuation's `_build_impl` timeout from it rather than from a literal,
+        # so it has a real reader and `test_known_inert_keys_are_still_inert` fails while the
+        # line is here. D50's group-4 body carries the dated marker.
         "fleet.yaml:budgets.clone_timeout_s",              # settings.py:268
         "fleet.yaml:graph.max_edges",                      # settings.py:411
         "fleet.yaml:run.reaper_interval_s",                # settings.py:215

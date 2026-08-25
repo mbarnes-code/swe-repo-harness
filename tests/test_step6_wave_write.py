@@ -386,7 +386,7 @@ def test_step_6_executes_only_the_whitelisted_verb_table_pairs(
     known-bad state where the freed repo's membership is never moved.
     """
     code, payload = _resume(fleet)
-    assert code == cli.ExitCode.USAGE, "the fixture's resume did not reach step 6"
+    assert code == cli.ExitCode.SUCCESS, "the fixture's resume did not reach step 6"
     assert payload["unblocked_dependents"]["applied"] is True, "step 6 wrote nothing to observe"
 
     observed = step6_sql.writes()
@@ -429,7 +429,7 @@ def test_step_6_moves_exactly_one_member_and_leaves_every_existing_wave_row_alon
     before = {table: _dump(db, table) for table in SNAPSHOT_TABLES}
     before_waves, before_members = before["waves"], _membership(db)
     code, _payload = _resume(fleet)
-    assert code == cli.ExitCode.USAGE
+    assert code == cli.ExitCode.SUCCESS
     after = {table: _dump(db, table) for table in SNAPSHOT_TABLES}
     after_waves, after_members = after["waves"], _membership(db)
 
@@ -483,7 +483,7 @@ def test_the_appended_wave_computes_open_and_the_wave_it_emptied_stays_closed(
         "earlier wave, `OPEN` on the appended wave would say nothing about step 6"
     )
     code, _payload = _resume(fleet)
-    assert code == cli.ExitCode.USAGE
+    assert code == cli.ExitCode.SUCCESS
     after = _wave_states(db)
     assert after == {
         0: WaveState.CLOSED, 1: WaveState.CLOSED, 2: WaveState.CLOSED, 3: WaveState.OPEN
