@@ -52,7 +52,8 @@ measurement is in `.superpowers/sdd/round-e/lanes/W28/report.md`.
   `' UPDATE t SET a=1;'` arrive as two separate callbacks). It is recorded as unreachable, and
   with the reason, because an over-disclosed boundary misleads a reader the same way an
   undisclosed one does. (iii) `ANALYZE` was classified as a non-write and writes `sqlite_stat1` —
-  that one is **fixed**, not disclosed; see `_NON_WRITE_VERBS`.
+  that one is **fixed**, not disclosed; see `_NON_WRITE_VERBS`. The same shape one keyword over,
+  `PRAGMA`, is fixed too: see `_NON_WRITE_PRAGMAS`.
 """
 
 from __future__ import annotations
@@ -72,7 +73,7 @@ from fleet import cli
 from fleet.models.enums import Phase
 from fleet.orchestrator.scheduler import SqliteSchedulerStore, WaveScheduler, WaveState
 from fleet.settings import BudgetsSection
-from fleet.state.db import StateWriter, connect_ro
+from fleet.state.db import PER_CONNECTION_PRAGMAS, StateWriter, connect_ro
 from fleet.state.repository import SqliteStateRepository
 from tests.test_cli import RUN_ID
 from tests.test_resume_unblocking import (
@@ -103,13 +104,17 @@ this instrument was validated against.
 
 _NON_WRITE_VERBS: Final[frozenset[str]] = frozenset(
     {
-        "SELECT", "PRAGMA", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE",
+        "SELECT", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT", "RELEASE",
         "EXPLAIN", "ATTACH", "DETACH",
     }
 )
 """Leading keywords that execute no row write. Anything outside this set and outside the
 resolvers below is reported as unresolved rather than assumed harmless — `VACUUM`, `REINDEX`,
 `ANALYZE` and a CTE-prefixed `WITH … INSERT` all land there on purpose.
+
+`PRAGMA` was **in** this set until this lane measured that a leading `PRAGMA` decides nothing on
+its own — `PRAGMA foreign_keys = ON` writes nothing and `PRAGMA user_version = 9` writes the
+database header. It is resolved by argument now; see `_NON_WRITE_PRAGMAS`.
 
 `ANALYZE` was **in** this set until review lane CR8 measured that it is not a non-write: on
 CPython 3.12.3's SQLite it creates `sqlite_stat1` and writes a row into it (measured here:
@@ -164,12 +169,46 @@ def _bare(token: str) -> str | None:
 
 
 def _resolve_table(rest: Sequence[str]) -> str | None:
-    """The table a write names, following a `schema.table` qualifier to the table half."""
+    """The table a write names, following a `schema.table` qualifier to the table half.
+
+    A `PRAGMA`'s name has the same `[schema.]name` grammar (`PRAGMA main.user_version = 9`), so
+    `write_target`'s `PRAGMA` branch resolves through here too.
+    """
     if not rest:
         return None
     if len(rest) >= 3 and rest[1] == ".":
         return _bare(rest[2])
     return _bare(rest[0])
+
+
+_NON_WRITE_PRAGMAS: Final[frozenset[str]] = frozenset(
+    {"foreign_keys", "busy_timeout", "synchronous", "wal_autocheckpoint"}
+)
+"""PRAGMA names that write nothing. A `PRAGMA` outside this set is `("PRAGMA", "?")` — loud.
+
+**Why the verb alone cannot decide.** `PRAGMA` was in `_NON_WRITE_VERBS`, which exempted every
+form of it. Measured on this tree's interpreter (CPython 3.12.3 / SQLite 3.45.1) by hashing the
+database file and re-reading `sqlite_master` around each statement on a fresh 50-row database:
+`PRAGMA journal_mode = WAL`, `PRAGMA user_version = 99` and `PRAGMA application_id = 7` all
+change the file; the four names above, and the read forms `PRAGMA user_version`,
+`PRAGMA foreign_key_check`, `PRAGMA table_info("t")`, do not. So the leading keyword carries no
+information about whether a row or a header was written and the argument has to be read.
+
+**Why the set is these four names and not a shape rule.** "A `PRAGMA` with no `=` is a query, and
+a query is a read" is false, measured: `PRAGMA optimize` — no `=`, no argument — creates
+`sqlite_stat1` and writes `('t', 'i', '50 1')` into it, once any query against an indexed column
+has run on the same connection (with no such query first it writes nothing; both arms measured).
+These four are the names `PER_CONNECTION_PRAGMAS` issues on every handle the run opens, and they
+are here as a **literal** rather than derived from that tuple on purpose: deriving the exemption
+from the same declaration that produces the statements would make a wrong addition to the tuple
+exempt itself. `test_every_pragma_the_connection_factory_issues_is_classified` cross-checks the
+two, so production cannot grow a per-connection PRAGMA without this set being edited.
+
+**Disclosed cost.** Classification is by name, and `PRAGMA user_version` (a read, used by
+`fleet.state.db.read_user_version`) and `PRAGMA user_version = 9` (a header write) share one
+name. The writing form is what decides, so the read form is loud too if it ever enters the
+window. That is the whitelist's standard trade and it costs nothing today: step 6 executes 12
+PRAGMA statements and all 12 are of the four names above."""
 
 
 def write_target(sql: str) -> tuple[str, str] | None:
@@ -186,7 +225,9 @@ def write_target(sql: str) -> tuple[str, str] | None:
     `_TOKEN` matches that whole line as a comment, and every token is then dropped. Measured on
     CPython 3.12.3: `PRAGMA optimize` traces as `PRAGMA optimize`, then `-- ANALYZE "main"."t"`,
     then a `--`-prefixed `SELECT` — so the one statement of the three that writes `sqlite_stat1`
-    was, before this branch, the one classified as harmless. Measured cost of the branch on the
+    was, before this branch, the one classified as harmless. Both `--`-prefixed lines resolve to
+    `("?", "?")` and the leading `PRAGMA optimize` to `("PRAGMA", "?")` (`_NON_WRITE_PRAGMAS`), so
+    all three of them are loud now, by two independent branches. Measured cost of the branch on the
     real capture: step 6 executes **37 statements / 25 distinct forms** inside the window and
     **0** of them are comment-only, so this adds no pair to the observed set.
     """
@@ -197,6 +238,8 @@ def write_target(sql: str) -> tuple[str, str] | None:
     rest = tokens[1:]
     if verb in _NON_WRITE_VERBS:
         return None
+    if verb == "PRAGMA":
+        return None if _resolve_table(rest) in _NON_WRITE_PRAGMAS else (verb, _UNRESOLVED)
     if verb in {"INSERT", "REPLACE"}:
         if rest and rest[0].upper() == "OR":
             rest = rest[2:]
@@ -449,6 +492,14 @@ def test_the_appended_wave_computes_open_and_the_wave_it_emptied_stays_closed(
         ("SELECT 1", None),
         ("  begin immediate ", None),
         ("PRAGMA foreign_keys = ON", None),
+        ("pragma  main.busy_timeout = 30000", None),
+        # a PRAGMA is classified by its ARGUMENT: these three change the database file
+        ("PRAGMA user_version = 9", ("PRAGMA", _UNRESOLVED)),
+        ("PRAGMA journal_mode = WAL", ("PRAGMA", _UNRESOLVED)),
+        ("PRAGMA optimize", ("PRAGMA", _UNRESOLVED)),
+        ("PRAGMA", ("PRAGMA", _UNRESOLVED)),
+        # SQLite renders an internally generated nested statement as a `--` line
+        ('-- ANALYZE "main"."t"', (_UNRESOLVED, _UNRESOLVED)),
         # quoting, schema qualification and case are resolved, not dropped
         ('UPDATE  "waves"  SET max_usd = 1', ("UPDATE", "waves")),
         ("insert or replace into main.waves (run_id) values (?)", ("INSERT", "waves")),
@@ -475,3 +526,40 @@ def test_the_recognition_step_resolves_or_says_it_cannot(
     `test_step_6_executes_only_the_whitelisted_verb_table_pairs` fails on a `"?"`.
     """
     assert write_target(statement) == expected
+
+
+def test_every_pragma_the_connection_factory_issues_is_classified() -> None:
+    """`_NON_WRITE_PRAGMAS` is cross-checked against the declaration that produces the statements.
+
+    `_NON_WRITE_PRAGMAS` is a literal precisely so that it is not derived from
+    `PER_CONNECTION_PRAGMAS`: a set derived from the tuple would exempt whatever the tuple grew,
+    which is the one edit that can put a writing PRAGMA on every connection the run opens. Two
+    independently written sets, compared by equality, are loud in both directions instead — a
+    pragma added to the tuple is unclassified, a name left here that production stopped issuing is
+    stale.
+
+    **What this cannot do**, stated rather than implied: it forces a classification decision, it
+    does not check that the decision is right. An author who adds `PRAGMA user_version = 9` to the
+    tuple and then adds `user_version` here satisfies it. What catches *that* is
+    `test_step_6_executes_only_the_whitelisted_verb_table_pairs`, which sees the statement itself;
+    the two are complementary, not redundant — this one fires on a pragma added to a code path
+    step 6 never reaches, that one on a pragma issued anywhere inside the window whether or not it
+    came from this tuple.
+    """
+    issued: dict[str | None, str] = {}
+    for statement in PER_CONNECTION_PRAGMAS:
+        tokens = _tokens(statement)
+        assert tokens and tokens[0].upper() == "PRAGMA", (
+            f"`PER_CONNECTION_PRAGMAS` holds a statement this module cannot read as a PRAGMA: "
+            f"{statement!r}"
+        )
+        issued[_resolve_table(tokens[1:])] = statement
+    assert set(issued) == _NON_WRITE_PRAGMAS, (
+        "the PRAGMAs production issues on every connection and the PRAGMAs this module classifies "
+        "as non-writes have drifted apart. Unclassified (production issues it, this module would "
+        f"report it as `('PRAGMA', '?')`): "
+        f"{sorted(str(n) for n in set(issued) - _NON_WRITE_PRAGMAS)}. "
+        f"Stale (classified here, no longer issued): {sorted(_NON_WRITE_PRAGMAS - set(issued))}. "
+        "Decide whether the new one writes — measure it, do not assume the keyword — before "
+        "adding it here."
+    )

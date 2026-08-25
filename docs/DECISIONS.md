@@ -10681,3 +10681,91 @@ later reversed, the reversal is the §2 feature and this ADR is the record of wh
 - **The §1 pre-fix reproduction is W12's, cited not re-run.** Re-running it would require backing
   the validator out of the working tree, which this lane did not do; what was re-run here is the
   post-fix half, and it is reported as such.
+
+## ADR-0092 — `PRAGMA` is classified by **name**, not by shape and not by the tuple that emits it: the step-6 write window's exemption of the whole verb hid three writing pragmas this tree actually contains, while the one the residual named (`PRAGMA optimize`) appears nowhere in `src/`
+
+**Status:** ACCEPTED. Landed round F, lane W2.
+
+**Context.** `tests/test_step6_wave_write.py`'s write-window instrument classifies captured SQL
+statements by leading verb, exempting `_NON_WRITE_VERBS` from the "this statement writes" verdict.
+`PRAGMA` was in that set. The round-F handoff carried this as a disclosed residual: *"`PRAGMA` stays
+in `_NON_WRITE_VERBS` while `PRAGMA optimize` writes — its internal `ANALYZE` is now caught, but
+removing `PRAGMA` would redden `main` (12 of 37 captured statements)."*
+
+**What re-measurement found, at `251cd30`.** The arithmetic reproduces and the exemplar does not.
+The window captures **37 statements / 25 distinct forms**; the histogram is
+`PRAGMA 12 · SELECT 11 · UPDATE 7 · BEGIN 3 · COMMIT 3 · INSERT 1`, and a second, independent
+derivation — `PER_CONNECTION_PRAGMAS` (4 pragmas) × 3 connections — yields the same 12. All twelve
+are `foreign_keys` / `busy_timeout` / `synchronous` / `wal_autocheckpoint`. **`PRAGMA optimize`
+occurs nowhere in `src/`.** The residual named a form this tree never executes. The blocker clause
+("removing `PRAGMA` reddens `main`") is true — measured, 3 failed / 13 passed — but it is dissolved
+by classifying rather than removing.
+
+The forms that actually escape are **`journal_mode`, `user_version` and `application_id`**, all
+three of which exist in this tree (`src/fleet/state/schema.sql:37`, `:882`;
+`src/fleet/state/migrations/__init__.py:242`). Measured against fresh temp SQLite databases
+(CPython 3.12.3 / SQLite 3.45.1, verdict by file hash and `sqlite_master`, the instrument validated
+by all four Guardrail-6 checks): each changes the file and emits **exactly one** trace callback —
+its own text. **There is nothing downstream to catch them.** `PRAGMA optimize` writes only after a
+query on an indexed column has run on the same connection (both arms measured), and its write is
+caught by the comment-only branch — **not** by the tokenizer.
+
+**A second finding, unasked for and worth more than the first.** That comment-only branch had
+**zero test coverage** at `251cd30`: deleting it from a pristine copy leaves the file at 16 passed.
+The handoff's clause *"its internal `ANALYZE` is now caught"* was true of the code and **untested**.
+
+**Decision.** `PRAGMA` leaves `_NON_WRITE_VERBS`. A new `_NON_WRITE_PRAGMAS` literal
+(`foreign_keys`, `busy_timeout`, `synchronous`, `wal_autocheckpoint`) exempts by **name**;
+`write_target` gains one branch resolving `PRAGMA <name>` to `None` iff the name is in that set and
+to the loud `("PRAGMA", "?")` otherwise — the same form `VACUUM` already takes. The name resolves
+through the existing `_resolve_table`, so `PRAGMA main.busy_timeout = …` classifies correctly.
+
+**Why by name and not by shape.** Both shape rules are false, measured. *"A `PRAGMA` with no `=` is
+a query, and a query is a read"*: `PRAGMA optimize` has no `=` and writes `sqlite_stat1`;
+`PRAGMA wal_checkpoint` and `PRAGMA incremental_vacuum` are query-form and move file pages.
+*"A setter writes"*: seven of the measured setters change nothing. Neither half of the shape carries
+the information, so the name has to be read.
+
+**Why the exemption set is a literal and NOT derived from `PER_CONNECTION_PRAGMAS`.** Deriving it
+was the first design and it is wrong, for Guardrail 6's "two instruments sharing a blind spot"
+reason: that tuple is what *produces* the statements, so a set derived from it would exempt whatever
+the tuple grew — and adding a writing pragma to that tuple is precisely the accidentally-reachable
+edit (`src/fleet/state/db.py:92`'s own comment shows an author has already had to reason about
+`journal_mode`/`user_version` at that site). Two independently written sets compared by **equality**
+are loud in both directions instead. **The cross-check is disclosed as a tripwire, not a proof:** it
+forces a classification decision; it cannot tell a correct decision from a convenient one, and the
+docstring says so.
+
+**Stop rule (CLAUDE.md Rule 12) — accidentally reachable, so fixed rather than disclosed.** The
+escape needs no adversarial subclass and no `ATTACH`: adding one line to `PER_CONNECTION_PRAGMAS`,
+or one `conn.execute("PRAGMA …")` inside `append_unblocked_wave`, is an edit a normal author makes.
+Both are measured as passing the pre-fix instrument. This is the "fix it" side of the stop rule,
+unlike the schema-qualified-`ATTACH` boundary the module already discloses and deliberately leaves.
+
+**Disclosed cost, stated and not implied.** Classification is by name, and `PRAGMA user_version`
+(a read, `src/fleet/state/db.py:232`) shares its name with `PRAGMA user_version = 9` (a header
+write). The writing form decides, so a `PRAGMA user_version` **read** entering the window would be
+reported loud. That is a deliberate false-positive direction, measured as mutation M6, and it costs
+nothing today.
+
+**Evidence.** Discriminating mutation **M2** — `"PRAGMA journal_mode = WAL"` added to
+`PER_CONNECTION_PRAGMAS`, zero-change gate `1 0` read **before** the result: the **old** module
+passes everything and the **new** module fails 3, in one interpreter invocation. **M3** — a pragma
+injected into `append_unblocked_wave` — also discriminates and leaves the cross-check test green,
+proving the two instruments complementary rather than redundant. **M4**, the cosmetic-reflow control
+(gate `6 1`), stays green. Each of the six new parametrised cases is the unique discriminator of at
+least one classifier mutation; `pragma main.busy_timeout` and `-- ANALYZE "main"."t"` are the only
+statements in the file that move under C4 and C5 respectively.
+
+**Verification, file-scoped and disclosed as such.** `pytest tests/test_step6_wave_write.py`
+unfiltered: **23 passed** (was 16). `pytest tests/test_resume_unblocking.py` unfiltered: **14
+passed**. `ruff check` clean. `python -m mypy` with no path arguments: **115 files, no issues** —
+and `pyproject.toml` pairs `strict` with `packages = ["fleet"]`, so `tests/` is out of scope and
+that result says nothing about the changed file. The whole-tree suite was **not** run in the lane;
+the consumer sweep found one consumer module, and the orchestrator's own certification run covers
+the tree.
+
+**What this does not close.** The instrument still classifies by leading verb for every other verb,
+and the schema-qualified-`ATTACH` escape remains a stated boundary. Naming `PRAGMA` in the module
+docstring's boundary (iii) alongside `ANALYZE` is part of this change; it is a disclosure, not a
+mechanism.
