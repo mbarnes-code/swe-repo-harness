@@ -8588,6 +8588,185 @@ def _raise_for_phase(result: Mapping[str, object]) -> None:
 
 
 # --------------------------------------------------------------------------------------
+# §11.5 step 8 — continue from the re-entry floors
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _Continuation:
+    """One phase §11.5 step 8 must re-drive, and the repos whose floor put it there."""
+
+    phase: Phase
+    repos: tuple[str, ...]
+
+
+#: The phases step 8 can actually serve. `Phase.SCAN` is deliberately absent: `_scan_impl` takes
+#: five flags no resume carries and no `wave` at all, so serving a `SCAN` floor means step 8
+#: inventing five values the operator never wrote — character for character the recorded
+#: `effort: low` defect (`src/fleet/models/tasks.py`). ADR-0080 rules it reported and skipped.
+_SERVABLE_PHASES: Final = (Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY)
+
+#: The loud payload key ruling B makes load-bearing. Named for what is TRUE of both routes into
+#: a `SCAN` floor — a frontier `SCAN` ("never started") and a walk that fell through ("the
+#: durable evidence is gone") — because v1 does not distinguish them and a name like
+#: `never_scanned` would be false of the second.
+_SCAN_SKIPPED_KEY: Final = "scan_floor_not_continued"
+
+
+def _continue_from_floors(
+    floors: Mapping[str, Phase], only: str | None
+) -> tuple[_Continuation, ...]:
+    """§11.5 step 8's PLAN: one entry per `(Phase, repos)` group, ascending. **No I/O.**
+
+    `floors` is step 5's `computed_floors`, PASSED IN and never recomputed: the caller has
+    already paid for the walk, and a second derivation is free to disagree with the one the
+    demotion was written from — a plan that continues from a floor nothing was demoted to is a
+    plan for a fleet that does not exist.
+
+    `only` is applied with the same predicate the phase drivers use — `fnmatch` over the repo
+    id, as `_wave_repos` does — so a phase reaches the plan only if some repo the delegates
+    would admit is floored there. Wave membership is NOT consulted: it is a SQLite read, this
+    function performs none, and each delegate re-derives it from the `only` it is handed.
+
+    A `Phase.SCAN` group is returned like any other. `phase_floor` really can return
+    `Phase.SCAN` — `phase_floor({}, {})` does — and `computed_floors` is written before
+    `demotable_phases` runs, so it retains every repo step 5 did NOT demote, which on a fleet
+    with un-started repos is `SCAN`-heavy. The plan stays TOTAL and the driver owns the skip:
+    a repo dropped here would be a repo an operator cannot see, and `_SCAN_SKIPPED_KEY` is the
+    whole point of the ruling.
+    """
+    grouped: dict[Phase, list[str]] = {}
+    for repo_id, floor in floors.items():
+        if only is not None and not fnmatch(repo_id, only):
+            continue
+        grouped.setdefault(floor, []).append(repo_id)
+    return tuple(
+        _Continuation(phase=phase, repos=tuple(sorted(grouped[phase])))
+        for phase in sorted(grouped)
+    )
+
+
+async def _continue_impl(
+    opts: GlobalOptions,
+    settings: FleetSettings,
+    path: Path,
+    *,
+    run_id: str,
+    floors: Mapping[str, Phase],
+    only: str | None,
+    ladder: int,
+    dry_run: bool,
+    timeout_s: int,
+    sandboxed: bool,
+    rdeps_limit: int,
+    rdeps_sample_n: int,
+    affected_only: bool,
+) -> dict[str, object]:
+    """Drive `_continue_from_floors`'s plan through the three phase composition roots.
+
+    Every per-phase knob is a REQUIRED keyword with no default. The three roots do not share a
+    signature and this function does not invent one: `ladder`/`dry_run` are `_transform_impl`'s,
+    `timeout_s`/`sandboxed` are `_build_impl`'s, the three `rdeps*`/`affected_only` are
+    `_verify_impl`'s. Defaulting any of them here would be step 8 choosing a value the operator
+    never wrote, which is the same defect the `SCAN` skip exists to avoid; the caller that owns
+    the command line chooses them.
+
+    **No fifth `PhaseRunner`.** The four instantiations in this module are the phase impls' own;
+    step 8 re-enters them rather than composing a runner of its own, so a continuation and a
+    bare `fleet transform` run the identical composition.
+
+    **The mirror mutex, once, before the first delegate (ADR-0080 ruling C).** §10's "a second
+    run started against a mirror another live run already owns" is checked by
+    `_phase_preflight` — which the `transform`/`build`/`verify` COMMANDS call and the `_impl`s do
+    not — so delegating straight to the impls bypasses it. Taken once rather than per delegate:
+    a per-delegate check leaves a window between phases for exactly the racing run it excludes.
+    Taken only when something is servable, so a plan that is entirely `SCAN` still reports
+    `_SCAN_SKIPPED_KEY` instead of refusing with the diagnosis withheld.
+
+    Stops at the FIRST halt. The halting delegate's whole payload is returned under `"halted"`;
+    `_raise_for_continuation` reads §10's exit code off it. This function raises nothing of its
+    own, so the caller can emit the report before the exit code ends the process.
+    """
+    plan = _continue_from_floors(floors, only)
+    servable = tuple(entry for entry in plan if entry.phase in _SERVABLE_PHASES)
+    skipped = tuple(
+        repo for entry in plan if entry.phase is Phase.SCAN for repo in entry.repos
+    )
+    result: dict[str, object] = {
+        "run_id": run_id,
+        "plan": [{"phase": e.phase.name, "repos": list(e.repos)} for e in plan],
+        _SCAN_SKIPPED_KEY: list(skipped),
+        "driven": [],
+        "phase_results": {},
+        "halted": None,
+        "halted_phase": None,
+    }
+    if not servable:
+        return result
+    _refuse_concurrent_mirror_run(settings, run_id)
+    for entry in servable:
+        if entry.phase is Phase.TRANSFORM:
+            phase_result = await _transform_impl(
+                opts,
+                settings,
+                path,
+                run_id=run_id,
+                wave=None,
+                only=only,
+                ladder=ladder,
+                dry_run=dry_run,
+            )
+        elif entry.phase is Phase.BUILD:
+            phase_result = await _build_impl(
+                opts,
+                settings,
+                path,
+                run_id=run_id,
+                wave=None,
+                only=only,
+                timeout_s=timeout_s,
+                sandboxed=sandboxed,
+            )
+        elif entry.phase is Phase.VERIFY:
+            phase_result = await _verify_impl(
+                opts,
+                settings,
+                path,
+                run_id=run_id,
+                wave=None,
+                only=only,
+                rdeps_limit=rdeps_limit,
+                rdeps_sample_n=rdeps_sample_n,
+                affected_only=affected_only,
+            )
+        else:
+            raise FleetCliError(
+                f"§11.5 step 8 has no composition root for {entry.phase.name}; "
+                f"the servable phases are {[p.name for p in _SERVABLE_PHASES]}."
+            )
+        cast("list[str]", result["driven"]).append(entry.phase.name)
+        cast("dict[str, object]", result["phase_results"])[entry.phase.name] = phase_result
+        if int(str(phase_result["exit_code"])) != ExitCode.SUCCESS:
+            result["halted"] = phase_result
+            result["halted_phase"] = entry.phase.name
+            break
+    return result
+
+
+def _raise_for_continuation(result: Mapping[str, object]) -> None:
+    """§11.5 step 8's exit code — the halting delegate's, read off ITS payload.
+
+    Delegates to `_raise_for_phase` rather than re-deriving §10's table. Exactly three functions
+    in this module pair `HumanInterventionError` with `FleetCliError(exit_code=...)`; step 8 is
+    deliberately not a fourth, because a fourth copy is a fourth place §10's table can rot.
+    """
+    halted = result["halted"]
+    if halted is None:
+        return
+    _raise_for_phase(cast("Mapping[str, object]", halted))
+
+
+# --------------------------------------------------------------------------------------
 # the durable wave ledger (§11.2) — exit 10
 # --------------------------------------------------------------------------------------
 
