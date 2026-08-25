@@ -45,7 +45,8 @@ RUN_ID = UUID("00000000-0000-4000-8000-0000000000ff")
 BRANCH = "migrate/acme-billing"
 REPO_ID = "acme/billing"
 
-#: A mirror remote's origin URL in this environment embeds a plaintext PAT (CLAUDE.md, §11.4).
+#: A mirror remote's origin URL in this environment embeds a plaintext PAT (CLAUDE.md); the
+#: redaction contract that keeps it out of every egress is SPEC §11.4.
 FAKE_PAT = "github_pat_11ABCDEFG0aBcDeFgHiJkLmNoPqRsTuVwXyZ012345"
 PAT_URL = f"https://oauth2:{FAKE_PAT}@git.example.invalid/acme/billing.git"
 
