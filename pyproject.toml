@@ -46,7 +46,9 @@ dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
   "hypothesis>=6.115",
-  "ruff>=0.8",
+  # Exact pin, not a floor: `select` below lists family prefixes, so a future release adding
+  # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
+  "ruff==0.16.2",
   "mypy>=1.13",
 ]
 
@@ -59,7 +61,9 @@ dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
   "hypothesis>=6.115",
-  "ruff>=0.8",
+  # Exact pin, not a floor: `select` below lists family prefixes, so a future release adding
+  # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
+  "ruff==0.16.2",
   "mypy>=1.13",
 ]
 

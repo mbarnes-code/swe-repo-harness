@@ -10982,3 +10982,35 @@ mechanism.
 > item 5's `PRAGMA` clause was **already** annotated as HISTORICAL by lane W7 at `b5f7760`; it is not
 > re-fixed here. Two claims *inside* W7's annotation belong to item 1's class and to this lane's
 > `_NON_WRITE_PRAGMAS` docstring correction; they carry their own dated marker in that file.
+
+## ADR-0093 — `ruff` is pinned exactly and `ruff check` is gated, in ONE change: an ungated linter is a claim nobody checks, and a gated unpinned linter hands an upstream release the power to redden a tree nobody touched
+
+**Status:** ACCEPTED. Landed round G, lane W6.
+
+**Context.** `ruff check` was red on `main` — 8 errors in one test file, surviving two refs —
+while a report called it "clean" from a run scoped to a file, with the scoping undisclosed.
+Nothing in the suite ran `ruff`, so nothing could contradict the report. Separately,
+`pyproject.toml` declared `ruff>=0.8` in both dev tables while `[tool.ruff.lint].select` lists 14
+**family prefixes**. A family prefix selects rules that do not exist yet.
+
+**Decision.** Pin `ruff==0.16.2` in both dependency tables **and** add `tests/test_lint_gate.py` in
+the same change. Neither is safe alone: an ungated linter is a claim nobody checks, and a gated
+unpinned linter hands an upstream release the power to redden a tree nobody touched — turning a
+`ruff` release into a broken build for whichever lane next builds an environment.
+
+**Consequences.** (i) Upgrading `ruff` becomes a deliberate edit that re-runs the gate, which is
+the point. (ii) The suite gains ~0.15 s and a dependency on `ruff` being installed; absence
+**fails loudly** naming the PATH searched, never skips — following
+`tests/test_bazel.py::_fail_if_registry_unreachable`, which was rewritten from a skip after every
+one of its tests skipped on this host while looking green. A worktree lacking `.venv` will fail
+this gate, the same class as the existing missing-toolchain failures. (iii) The gate's file set
+comes from `respect-gitignore`: without it `ruff check .` resolves **6,970** files instead of
+**181**, including 1,673 under READ-ONLY `references/`. A scope check asserts the resolved set
+stays inside `src/`, `tests/` and the repository root, so that regression fails loudly instead of
+demanding lint fixes in files this project may not modify.
+
+**Rejected.** A `tools/bin/ruff` wrapper — `ruff` is a pyproject-declared dev dependency, not an
+external toolchain, and a wrapper would be a second source of truth for the version. A CI gate —
+this repository has no CI configuration. `extend-exclude` in `[tool.ruff]` — it would duplicate
+`.gitignore`. Gating `ruff format --check` — deferred by standing ruling; its class result is
+"fails" and pinning `ruff` does not by itself make it ratchetable.

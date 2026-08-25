@@ -1,0 +1,212 @@
+"""`ruff check` is a GATE, and the pin is what makes gating it safe.
+
+**Why this file exists.** `ruff check` was red on `main` — 8 errors in one test file, surviving
+across two refs — while a round-F report called it "clean". That report was true of the run it
+made and false of the repository: the run was scoped to a file and the scoping was not
+disclosed. Nothing in the suite would have caught it, because nothing ran `ruff` at all. So the
+first three checks here run `ruff` over the whole repository and put the resolved scope in the
+failure message, where a reader cannot mistake it for something wider.
+
+**Why the pin is part of the same change, and why a gate alone would be a defect.**
+`[tool.ruff.lint].select` lists *family prefixes* — `E`, `B`, `SIM`, `RUF`, `S`, `ANN`, `TRY`.
+A family prefix selects rules that do not exist yet: every ruff release that adds a rule to one
+of those families is enabled here the moment somebody installs it. Gating an unpinned linter
+therefore hands an upstream release the power to redden a tree nobody touched, and the failure
+arrives on whichever unlucky lane next builds an environment. `pyproject.toml` pins
+`ruff==0.16.2` in both dependency tables, and `test_the_ruff_that_will_run_is_the_ruff_that_is
+_pinned` checks the *resolved* binary rather than the declaration, because a declaration read
+is not a value exercised.
+
+**On absence.** `ruff` missing does not skip. `tests/conftest.py` prepends `.venv/bin` to PATH
+at import time and `ruff` is a declared `dev` dependency, so its absence is a broken
+environment, not weather — and a gate that no-ops when its tool is missing is a convention
+wearing a mechanism's clothes. `_ruff()` fails naming the PATH it searched. This follows
+`_fail_if_registry_unreachable` in `tests/test_bazel.py`, which was rewritten from a skip for
+exactly this reason.
+
+**What is deliberately NOT gated:** `ruff format --check`. Measured whole-repo at `12d3527`,
+117 of 142 files are dirty under it; gating it would redden `main` on the same commit that
+added the gate. It is deferred, not forgotten, and pinning `ruff` does not by itself make it
+ratchetable.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import tomllib
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PYPROJECT = REPO_ROOT / "pyproject.toml"
+
+# The trees this project owns. `references/` is READ-ONLY by directive (CLAUDE.md §5) and holds
+# 1660 `.py` files at `12d3527`; `work/`, `cache/`, `mirrors/` and `artifacts/` are runtime
+# write paths that fill with *other repositories'* source. Today ruff excludes all of them, but
+# it excludes them by honouring `.gitignore` — a default (`respect-gitignore`) and a file that
+# neither this gate nor `[tool.ruff]` controls. `test_ruff_resolves_only_this_projects_own_files`
+# turns that implicit exclusion into a loud one instead of duplicating `.gitignore` here, which
+# would be a second source of truth for the same list.
+_OWNED_TREES = ("src", "tests")
+
+_RUFF_REQUIREMENT = re.compile(r'^\s*"(ruff(?:\[[^\]]*\])?)([^"]*)"\s*,?\s*$', re.MULTILINE)
+
+
+def _ruff() -> str:
+    """The absolute path of the `ruff` that will run, or a failure that names where we looked."""
+    found = shutil.which("ruff")
+    if found is None:
+        pytest.fail(
+            "`ruff` is not on PATH, so the lint gate cannot run — and a lint gate that passes "
+            "when its linter is absent is worse than no gate. `ruff` is a declared `dev` "
+            "dependency in pyproject.toml and `tests/conftest.py` prepends "
+            f"{REPO_ROOT / '.venv' / 'bin'} to PATH at import time; install the dev group. "
+            f"PATH searched:\n  " + "\n  ".join(os.get_exec_path())
+        )
+    return found
+
+
+def _run_ruff(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(  # noqa: S603 - absolute path from shutil.which, fixed argv, no shell
+        [_ruff(), *args],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+
+def _declared_ruff_requirements() -> dict[str, str]:
+    """Every `ruff` requirement in pyproject, keyed by the table path that declares it.
+
+    Derived by walking the parsed TOML rather than by grepping two known line numbers, so a
+    third declaration added to a new table is covered the day it appears.
+    """
+    data = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    found: dict[str, str] = {}
+    tables: list[tuple[str, object]] = [
+        ("project.dependencies", data.get("project", {}).get("dependencies")),
+    ]
+    for key, table in (("dependency-groups", data.get("dependency-groups", {})),
+                       ("project.optional-dependencies",
+                        data.get("project", {}).get("optional-dependencies", {}))):
+        for group, requirements in table.items():
+            tables.append((f"{key}.{group}", requirements))
+    for where, requirements in tables:
+        for requirement in requirements or []:
+            if not isinstance(requirement, str):
+                continue
+            name = re.split(r"[<>=!~\[;\s]", requirement, maxsplit=1)[0]
+            if name.strip().lower().replace("_", "-") == "ruff":
+                found[where] = requirement
+    return found
+
+
+def test_every_declared_ruff_requirement_pins_one_exact_version():
+    """`ruff` is pinned with `==`, everywhere it is declared, to the same version.
+
+    Two genuinely different derivations, because one instrument cannot check itself: the TOML
+    walk in `_declared_ruff_requirements` resolves requirements semantically, and the regex
+    below counts them as raw text. If the walk silently stopped finding anything it would pass
+    vacuously — the equality against the text count is what makes that impossible.
+    """
+    declared = _declared_ruff_requirements()
+    textual = [m.group(0).strip() for m in
+               _RUFF_REQUIREMENT.finditer(PYPROJECT.read_text(encoding="utf-8"))]
+    assert len(declared) == len(textual), (
+        f"the two derivations disagree about how many `ruff` requirements pyproject.toml "
+        f"declares — TOML walk found {len(declared)} ({sorted(declared)}), raw text found "
+        f"{len(textual)} ({textual}). One of them is blind; fix it before trusting either."
+    )
+    assert declared, "pyproject.toml declares no `ruff` requirement at all"
+
+    unpinned = {where: req for where, req in declared.items()
+                if not re.fullmatch(r"ruff(\[[^\]]*\])?==[0-9][^,;]*", req)}
+    assert not unpinned, (
+        f"`ruff` must be pinned with `==`, not a floor: {unpinned}. `[tool.ruff.lint].select` "
+        f"lists family prefixes, so a release that adds a rule to any selected family reddens "
+        f"`ruff check` on a tree nobody touched — and `ruff check` is gated by this file."
+    )
+
+    versions = {req.split("==", 1)[1] for req in declared.values()}
+    assert len(versions) == 1, (
+        f"the `ruff` declarations pin different versions {sorted(versions)} across "
+        f"{sorted(declared)}; there is then no single answer to 'which ruff is this repo's'."
+    )
+
+
+def test_the_ruff_that_will_run_is_the_ruff_that_is_pinned():
+    """The RESOLVED binary matches the pin — a declaration read is not a value exercised.
+
+    Guardrail 6: reading `ruff==0.16.2` out of pyproject proves what was written, never what
+    the environment installed. This runs `ruff --version` in the interpreter's own PATH, which
+    is the one the gate below shells out to.
+    """
+    versions = {req.split("==", 1)[1].strip()
+                for req in _declared_ruff_requirements().values() if "==" in req}
+    assert len(versions) == 1, (
+        f"there is no single pinned ruff version to compare the installed one against "
+        f"(found {sorted(versions)}); "
+        f"`test_every_declared_ruff_requirement_pins_one_exact_version` says why."
+    )
+    pinned = versions.pop()
+    out = _run_ruff("--version")
+    assert out.returncode == 0, f"`ruff --version` exited {out.returncode}: {out.stderr!r}"
+    installed = out.stdout.strip().removeprefix("ruff").strip()
+    assert installed == pinned, (
+        f"pyproject.toml pins ruff=={pinned} but the `ruff` on PATH is {installed} "
+        f"({_ruff()}). The gate below would then be measuring a different linter from the one "
+        f"this repository declares; reinstall the dev group."
+    )
+
+
+def test_ruff_resolves_only_this_projects_own_files():
+    """The gate's scope is asserted, not assumed — and it is asserted before it is reported.
+
+    `ruff check .` builds its own file list, and part of how it builds it is by honouring
+    `.gitignore`. That is what keeps `references/` (1660 read-only `.py` files) and the runtime
+    write paths out of the gate. It is a default plus a file this gate does not own, so if it
+    ever stops holding, the next `ruff check .` lints a thousand files nobody may modify and
+    the gate becomes unfixable rather than merely red. Failing here instead says which paths
+    escaped.
+    """
+    out = _run_ruff("check", "--no-cache", "--show-files", ".")
+    assert out.returncode == 0, (
+        f"`ruff check --show-files .` exited {out.returncode} — ruff could not resolve its own "
+        f"file set, which is a configuration failure, not a lint finding:\n{out.stderr}"
+    )
+    resolved = [Path(line) for line in out.stdout.splitlines() if line.strip()]
+    assert resolved, "`ruff check --show-files .` resolved no files at all"
+
+    strays = []
+    for path in resolved:
+        relative = path.relative_to(REPO_ROOT) if path.is_absolute() else path
+        if relative.parts[0] not in _OWNED_TREES and len(relative.parts) > 1:
+            strays.append(str(relative))
+    assert not strays, (
+        f"`ruff check .` resolved {len(strays)} file(s) outside {_OWNED_TREES} and outside the "
+        f"repository root: {sorted(strays)[:20]}. Either a new source tree was added and this "
+        f"list needs it, or `.gitignore` stopped excluding read-only/runtime trees — in which "
+        f"case the gate is about to lint code this project is forbidden to change."
+    )
+
+
+def test_ruff_check_is_clean_across_the_whole_repository():
+    """`ruff check .` — WHOLE REPOSITORY, no path filter, no `--select` override, no cache.
+
+    The scope is stated in that sentence on purpose. The claim this replaces was "ruff check is
+    clean", made from a run scoped to one file and reported without the scope; it was true of
+    the run and false of the repository, and it stayed false across two refs. `--no-cache`
+    because a gate that can be satisfied by a stale cache entry is a detector that goes silently
+    blind on exactly the file somebody just changed.
+    """
+    out = _run_ruff("check", "--no-cache", "--output-format=concise", ".")
+    assert out.returncode == 0, (
+        f"`ruff check --no-cache --output-format=concise .` exited {out.returncode} "
+        f"(0=clean, 1=violations, 2=ruff itself failed), run from {REPO_ROOT}.\n"
+        f"--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
+    )
