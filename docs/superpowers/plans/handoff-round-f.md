@@ -145,8 +145,83 @@ D81** — and note **a `^### D<n>` probe returns D75 and is WRONG**: D76–D80 u
 5. **Two disclosed instrument residuals:** the prose-binding module's failure is an **ERROR, not a
    FAIL**; and **`PRAGMA` stays in `_NON_WRITE_VERBS` while `PRAGMA optimize` writes** — its internal
    `ANALYZE` is now caught, but removing `PRAGMA` would redden `main` (12 of 37 captured statements).
+
+   > **SPLIT AND CORRECTED 2026-08-25, round F lane W7. Item 5 above is left byte-identical as the
+   > record of what was routed; read (a)–(c) instead of it.** As written it packed **three** claims of
+   > different status into one sentence, and the conflation had a measured cost: the first clause reads
+   > as both *"a location failure takes the whole module down"* (closed) and *"a per-case failure is
+   > spelled ERROR"* (open, and a deliberate boundary), and the closed half was routed as open work
+   > three times. Round F's remaining work here is **(b) only, as a boundary to leave alone**.
+   >
+   > **(a) The module-wide OUTAGE in `tests/test_blocked_by_writer_statements.py` is CLOSED — not
+   > round-F work.** Closed at **`eeb0c6a`** ("a location failure is a per-case error, not a module
+   > outage") by moving mirror resolution out of the `parametrize` decorator into the `prose` fixture.
+   > The module's own measurement, at `e93cbe3`: one non-Python line in the `docs/SPEC.md` fence gave
+   > `Interrupted: 1 error during collection`, **20 pass → 0 executed**; the same mutation after the fix
+   > gives **10 pass / 10 errors, module imported**. Re-derived here as a **class**, not a site.
+   > Predicate: *a `pytest.mark.parametrize` whose argvalues expression calls a same-module helper
+   > that, through the transitive closure of same-module calls, resolves an external artefact (file
+   > read/parse) at import time* — so a location failure there is a collection error. Swept by `ast`
+   > over all **57** `tests/test_*.py` files. **`eeb0c6a^`: 10 decorators in 1 module. `eeb0c6a`,
+   > `251cd30`, `12ac784`: 0 in 0.** The instrument was validated four ways before its clean read was
+   > trusted — fires on the known-bad tree; silent on the swept tree; **fires on a synthetic fault
+   > injected into the clean tree** (a locator-backed `parametrize` appended to `test_ecosystems.py` →
+   > 1 member); and a **cosmetic reflow** of the ten real decorators stays **0**. Its first cut read 0
+   > on the known-bad tree — it checked only the directly-called helper, not transitively — and was
+   > fixed before use. **[probe @ 12ac784]**
+   >
+   > **(b) A per-case location failure is spelled `ERROR`, not `FAIL` — a STATED BOUNDARY, deliberately
+   > not patched.** The primary source settles this and says more than "open": the `prose` fixture's own
+   > docstring records that pytest classifies an exception raised in fixture setup as an *error*, which
+   > is *"the accurate label for 'this case could not be set up'"*, and that the property bought was
+   > *"that the failure is per case and the module stays on the air, not that it is spelled `FAIL`"*.
+   > Under Rule 12's stop rule this is a documented boundary, not an accidentally-reachable defect:
+   > patching the spelling would buy the appearance of closure over a label that is already correct.
+   > **Do not route it as work; route it as a boundary already disclosed at its own source.**
+   > **[decision]**
+   >
+   > **(c) The `PRAGMA` clause is HISTORICAL — it was true when written and both its assertions are now
+   > false.** Landed at **`12ac784`** / **ADR-0092** by lane W2. `PRAGMA` has **left** `_NON_WRITE_VERBS`;
+   > classification is now **by name** through `_NON_WRITE_PRAGMAS` (`foreign_keys`, `busy_timeout`,
+   > `synchronous`, `wal_autocheckpoint`), cross-checked against `PER_CONNECTION_PRAGMAS` by
+   > `test_every_pragma_the_connection_factory_issues_is_classified` so production cannot grow a
+   > per-connection pragma without the set being edited. *"Removing `PRAGMA` would redden `main`"* did
+   > not survive contact: it was removed and `main` is green — step 6 executes **12** PRAGMA statements
+   > inside its **37**-statement window and all 12 are of those four names. And the exemplar the residual
+   > named, **`PRAGMA optimize`, occurs nowhere in `src/`** (0 hits at `12ac784`); what the blanket
+   > exemption actually hid is **three writing pragmas this tree does contain** —
+   > `src/fleet/state/schema.sql:37` (`PRAGMA journal_mode = WAL`), `:882` (`PRAGMA user_version = 8`)
+   > and `src/fleet/migrations/__init__.py:242` (`PRAGMA user_version = {version}`). **W2's second
+   > finding, and the one worth carrying forward:** the comment-only recognition branch — the *only*
+   > mechanism catching `PRAGMA optimize`'s internally traced `-- ANALYZE "main"."t"` — had **zero
+   > coverage** at `251cd30`; mutation C5 (that branch replaced by `return None`, zero-change gate
+   > `1 1` read before the result) left the module **16 passed**. It is pinned now by the
+   > `-- ANALYZE "main"."t"` case added at `12ac784`, of which C5 is the unique discriminator.
+   > **[probe @ 12ac784]**
 6. **`ruff format --check` on `cli.py`** — deferred past subtask 10 by ruling; **66 hunks and growing**
    (58 → 60 → 66).
+
+   > **RESTATED AS A CLASS RESULT 2026-08-25, round F lane W7. Item 6 above is left byte-identical;
+   > read the sentence below instead of its integer. The deferral ruling is unaffected and stands.**
+   >
+   > **`ruff format --check src/fleet/cli.py` FAILS; the hunk count is formatter-version-dependent and
+   > is not a ratchetable quantity while `ruff` is unpinned.** Why the integer had to go rather than be
+   > corrected: **66 is wrong** — it is **68** at default `-U3`, agreed by three independent instruments
+   > (`ruff format --diff`, `git diff --no-index -U3` against a formatted copy, and
+   > `difflib.unified_diff(n=3)`), and **74** at `-U0`, so the number does not even survive a change of
+   > context width. **And it is not code growth:** `src/fleet/cli.py` is blob `e56a3714…` at `0b3fbae`,
+   > at `251cd30`, at `12ac784` and in the worktree — the file has not moved across the whole series.
+   > The root cause is that `pyproject.toml` declares **`ruff>=0.8`, unpinned** — twice, at `:49` under
+   > `[dependency-groups] dev` and `:62` under `[project.optional-dependencies] dev` — while the
+   > installed formatter is **0.16.2**; hunk decomposition is a function of formatter version, so no
+   > integer here is reproducible in another environment. Item 6's `66` carries **no measurement tag**
+   > (no §6 item does) and, re-measured while writing this, **no attribution either**: `66` occurs
+   > **nowhere else in the tree** — the only hit for `66 hunk` outside this correction is item 6's own
+   > line. What `docs/PROGRESS.md` records is `58` at `7a8bfbb` → **`60` on landed `main`** (`:5669`,
+   > `:5790`, `:5891`), plus D70's earlier `58 → 59 → 58` which that section already cites as proof the
+   > quantity moves under re-measurement. So the series as written is `58 → 60 → ?`, with the third
+   > term invented at this handoff. **Ratchet the pass/fail, or pin `ruff` first; do not ratchet the
+   > count.** **[probe @ 12ac784]**
 
 ---
 

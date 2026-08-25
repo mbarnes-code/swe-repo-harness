@@ -152,12 +152,12 @@ _RESIDUAL = """Not bound, stated rather than implied:
    "deleted", and it cannot tell "re-worded correctly" from "re-worded wrongly".
 
 6. Two further sites state the rule in full and are **not** in this census: the operator-facing
-   `ResumeIncompleteError` and `UsageError` messages in `src/fleet/cli.py` (`:10083`, `:10401`).
+   `ResumeIncompleteError` and `UsageError` messages in `src/fleet/cli.py` (`:10164`, `:10681`).
    They restate it in the uppercase, markdown-free register an error message needs (`ABOVE the
    HIGHEST phase below the settled frontier ...`), so `_CENSUS` -- deliberately case-sensitive and
    anchored on markdown emphasis -- cannot see them, and widening it to reach them would make it
    match the register-free prose of every future paraphrase. They are bound instead by
-   `tests/test_cli.py:1269` and `:2149`, which assert the phrase in the *rendered* output of the
+   `tests/test_cli.py:1439` and `:2319`, which assert the phrase in the *rendered* output of the
    two commands that emit it. That is a real binding in another file, not a gap; it is recorded
    here because a reader counting this module's census sites would otherwise conclude the rule is
    stated in five places when it is stated in eight. `cli.py` is in `_GOVERNED`, so Layer D
@@ -166,6 +166,9 @@ _RESIDUAL = """Not bound, stated rather than implied:
    enrolment buys the future case (a re-statement in the stop-condition shape would be
    considered); the earlier wording here said it "does now cover both", which claimed the future
    case as the present one.
+   All four `file:line` citations in this item are anchored at `12ac784`. Every one of them had
+   rotted by round F and was re-derived by grepping the phrase, which is how to re-derive them
+   again: both cited files move under this module, and a bare number carries no ref to check.
 
 7. Layer F binds `reentry.py`'s module docstring the way Layer C binds `enums.py`'s comment, and
    inherits Layer C's residual: a rewrite keeping the three required phrases while asserting

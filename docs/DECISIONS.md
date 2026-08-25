@@ -7814,6 +7814,31 @@ in phase order" (`docs/superpowers/plans/design-resume-step5.md` row 10): `fleet
 demand. Subtask 10 has not started — it depends on subtask 9, not landed. This number is reserved
 and not available for reuse; its absence from this file is not a deletion.
 
+> **ANNOTATION (2026-08-25, round F lane W7, measured at `12ac784`) — the reservation stands; two
+> clauses of the paragraph above have been falsified since it was written, and nothing above is
+> edited.** This is a record of what was true at its own commit (CLAUDE.md Guardrail 7), so the
+> falsifying commits are named here rather than the sentences rewritten.
+>
+> **1. *"it depends on subtask 9, not landed"* — subtask 9 landed.** It was settled by
+> **ADR-0079** at **`bd35a54`** ("docs/ADR-0079 + design row 9: write the reserved ADR, and correct
+> the row its sequencing ruling falsifies"), whose own title records that "subtask 9 settles and
+> records the semantics rather than removing anything from the refusal set". So subtask 10's stated
+> blocker is discharged. **What is unchanged is that subtask 10 has not landed**: `_resume_impl`
+> still raises `ResumeIncompleteError` naming step 8 absent, and a costed decomposition for it was
+> promoted into the tracked tree at **`251cd30`** — research, not an implementation.
+>
+> **2. *"delegate to the three composition roots in phase order"* — that is a verbatim copy of
+> `docs/superpowers/plans/design-resume-step5.md` row 10's title, and the row stopped saying it at
+> `f127680`.** The title now reads *"delegate to the **phase** composition roots in phase order, and
+> un-refuse the two flags ADR-0079 ruled"*. The count was removed rather than corrected because the
+> question is **open, not settled**: lane W35's `(ii)` annotation on that same row records that
+> `orchestrator.reentry.phase_floor` can return `Phase.SCAN`, which none of the three roots can
+> serve, and names three unruled options (D-1 a fourth root, D-2 skip-and-report, D-3 refuse) rather
+> than inventing a semantics. The phrase *"the three composition roots"* still occurs **once** in
+> that row — inside W35's annotation, which quotes the retired wording on purpose so a count-based
+> sweep finds the retraction rather than a survival. Whoever eventually writes this ADR must not
+> read the sentence above as pre-deciding the count.
+
 ---
 
 ## ADR-0081 — §11.5 step 2 runs **after** the step-3 stale sweep, and the ordering alone is **not** the fix: `--dry-run` never runs that sweep, so liveness is derived from step 3's own staleness predicate negated, at both rungs `attempts` and `attempts + 1` — and the worktree half of the sweep, correct as written, **reaps nothing in a real run today** because production cuts its checkouts outside the namespace `WorktreeManager.reap` sweeps
@@ -8707,6 +8732,35 @@ re-introducing an attempt suffix into `checkout_name`, and dropping `reap()`'s p
   layout change causes for mid-flight runs (design task 6).
 * Whether the non-injectivity in §3 is worth closing, and at what cost to the container names that
   share the scheme.
+
+---
+
+## ADR-0086 — RESERVED, not yet written
+
+Allocated at dispatch to the worktree-namespace design's **task 6**, *"Disposition of worktrees
+already on disk — adopt, or leak-and-report"* (`docs/superpowers/plans/design-worktree-namespace.md`
+row 6, at `c6bdd26`): what `fleet resume` does with old-form `work/<repo_id>` directories left by a
+run predating ADR-0085's two name forms — reported by name in a distinct key, neither silently
+reaped nor invisible — and the mid-flight checkpoint invalidation a layout change causes. That
+design's *"ADR needed"* paragraph reserves a number for task 6 and expressly does **not** assign it
+("**Do not assign numbers**"); the orchestrator's ledger at
+`docs/superpowers/plans/design-resume-step5-orchestrator-ledger.md:1042` records **ADR-0085 and
+ADR-0086 ALLOCATED for round D** for tasks 1 and 6 respectively. Task 1 landed as **ADR-0085**
+(`eaa112f`). **Task 6 never ran**, and ADR-0085 §6 lists its question among what that ADR does not
+decide. `docs/superpowers/plans/handoff-round-e.md:159` and `handoff-round-f.md:132` record the
+number as a **permanent reserved gap**. This number is reserved and not available for reuse; its
+absence from this file is not a deletion.
+
+> **WHY THIS PLACEHOLDER WAS WRITTEN LATE (2026-08-25, round F lane W7, measured at `12ac784`).**
+> Until this entry, `ADR-0086` had **zero occurrences in this file and never had one** —
+> `git log -S"ADR-0086" -- docs/DECISIONS.md` returns no commit. It was reserved in
+> `docs/PROGRESS.md`, `docs/superpowers/plans/handoff-round-e.md`,
+> `docs/superpowers/plans/handoff-round-f.md` and the step-5 orchestrator ledger: everywhere except
+> the file that allocates numbers, which is the one file a future author reads before taking "the
+> next number". It was the **only** reserved number in that state — measured two ways at `12ac784`:
+> `86` is the sole gap in the `^## ADR-\d{4}` heading sequence (91 headings, 1–92, no duplicates),
+> and `ADR-0080` is the only remaining `RESERVED, not yet written` heading in the file. Writing it
+> down is the whole of what this entry does; it decides nothing and supersedes nothing.
 
 ---
 
