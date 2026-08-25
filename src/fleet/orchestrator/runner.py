@@ -110,9 +110,12 @@ __all__ = [
 #: `fleet resume`'s step 8 has no implementation (the verb refuses with exit 2,
 #: `ResumeIncompleteError`), and `waves.wave_started_at` is stamped once by `begin_wave`'s
 #: `COALESCE` and never cleared, so any later scheduler over that wave — in this phase or any
-#: other, in this run or a later one — re-reads the same breach. `docs/SPEC.md` §3.4 states
-#: re-admission as INTENT and contradicts its own budget-table row; which half moves is
-#: undecided. Recorded as D82/D83 in `docs/INTEGRATION_HONESTY.md`.
+#: other, in this run or a later one — re-reads the same breach. `docs/SPEC.md` §3.4 USED TO
+#: state re-admission as INTENT against its own budget-table row; `f54dac8` moved the prose half,
+#: so the SPEC now agrees with the paragraph above and that question is decided. D82's OTHER half
+#: is still open and is a DIFFERENT question: `waves` carries no phase column, so one phase's
+#: breach withholds every later phase of that wave too, and nothing in the tree says whether that
+#: sharing is intended. Recorded as D82/D83 in `docs/INTEGRATION_HONESTY.md`.
 WAVE_WALLCLOCK_EXIT_CODE: Final = 4
 #: §11.3 / §11.8. Named here for the same reason the ledger names its two: `fleet.cli.ExitCode`
 #: stops at 7 today, and inventing members into another module's enum from here is worse.

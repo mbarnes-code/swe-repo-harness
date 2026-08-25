@@ -471,7 +471,8 @@ def test_every_sentence_stating_the_walks_stop_condition_names_the_hard_stop() -
     silent = [(site, text) for site, text in sentences if not _HARD_STOP_NAMED.search(text)]
     assert not silent, (
         "these sentences say where the backward walk stops without naming the `_HARD_STOPS` break "
-        "that `reentry.phase_floor` tests BEFORE evidence -- a reconciler following them rebuilds the "
+        "that `reentry.phase_floor` tests BEFORE evidence -- a reconciler following them "
+        "rebuilds the "
         "walk that demotes every repo with an excluded middle phase to `SCAN` on every resume:\n"
         + "\n".join(f"  {site}: {text}" for site, text in silent)
     )
@@ -943,8 +944,8 @@ def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks
 
     Three claims, none of them written twice. **The direction** is read out of the docstring's own
     words and compared to `_observed_walk_direction()`, so flipping "walks backward from there" to
-    "forward" makes the file disagree with the function it describes. **The predicate it swears off**
-    is read out of "never consults `X`" and checked against every name `reentry.py` actually
+    "forward" makes the file disagree with the function it describes. **The predicate it swears
+    off** is read out of "never consults `X`" and checked against every name `reentry.py` actually
     references, resolved through the AST rather than by substring -- so the sentence stops being
     true the moment someone wires that predicate in, and re-wording it to name a different symbol
     changes what is checked. **The disaster it names** -- promoting a never-cloned repo "straight to
@@ -968,10 +969,14 @@ def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks
         + "; ".join(f"{d} (expected {p!r})" for d, p in sorted(missing.items()))
     )
 
-    stated = {m.group(1).lower() for m in re.finditer(r"(?:search runs|walks)\s+\**(backward|forward)", span)}
+    stated = {
+        m.group(1).lower()
+        for m in re.finditer(r"(?:search runs|walks)\s+\**(backward|forward)", span)
+    }
     observed = _observed_walk_direction()
     assert stated == {observed}, (
-        f"`reentry.py`'s module docstring says the search {sorted(stated) or ['<nothing>']} off the "
+        f"`reentry.py`'s module docstring says the search "
+        f"{sorted(stated) or ['<nothing>']} off the "
         f"frontier; `phase_floor` measurably walks {observed}. A reconciler implementing the "
         f"docstring builds the ascending scan item 1 exists to forbid, which promotes a "
         f"never-cloned repo past every phase it has not run."
@@ -1003,7 +1008,8 @@ def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks
     floor = phase_floor({}, {})
     assert floor is not forbidden, (
         f"the module docstring says a forward scan would promote a never-cloned repo straight to "
-        f"the {reach.group(1)} phase (`{forbidden.name}`), and that `phase_floor` does not; with no "
+        f"the {reach.group(1)} phase (`{forbidden.name}`), and that `phase_floor` does not; "
+        f"with no "
         f"rows and no evidence it returned {floor!r}"
     )
 
@@ -1032,14 +1038,17 @@ def test_the_reentry_module_docstring_states_the_search_direction_the_code_walks
 #: the phrase only as history** -- review reports, ledger entries, `PROGRESS.md` checkpoints and
 #: decision records that quote it *because* it was retracted -- and exactly **1** is a live design
 #: authority a task brief routes implementers at. A directory-wide rule would therefore flag correct
-#: prose in 7 of 8 files and need a hand-maintained exemption list, which is the instrument CLAUDE.md
-#: guardrail 6 says rots. So the scope is one file, chosen by a stated reason rather than by
-#: convenience, and the rest is disclosed in `_RESIDUAL` item 9 instead of being silently exempted.
+#: prose in 7 of 8 files and need a hand-maintained exemption list, which is the instrument
+#: CLAUDE.md guardrail 6 says rots. So the scope is one file, chosen by a stated reason rather than
+#: by convenience, and the rest is disclosed in `_RESIDUAL` item 9 instead of being silently
+#: exempted.
 _STEP5_PLAN = _ROOT / "docs" / "superpowers" / "plans" / "design-resume-step5.md"
 
 #: The retracted quantifier itself -- text far older than the markers this layer requires, so a
 #: reverted marker reads as a failure rather than as a deletion.
-_RETRACTED_QUANTIFIER = re.compile(r"earliest\s+phase\s+whose\s+precondition\s+holds", re.IGNORECASE)
+_RETRACTED_QUANTIFIER = re.compile(
+    r"earliest\s+phase\s+whose\s+precondition\s+holds", re.IGNORECASE
+)
 
 #: A supersession marker. **`SUPERSEDED` only, deliberately.** The same file also carries
 #: `**SETTLED` markers, but those retire *open questions* (§3's ambiguity list), not retracted
@@ -1080,7 +1089,9 @@ def _plan_lines() -> list[tuple[int, str, bool]]:
             i = j
         else:
             i += 1
-    return [(n + 1, text, flag) for n, (text, flag) in enumerate(zip(lines, inside))]
+    return [
+        (n + 1, text, flag) for n, (text, flag) in enumerate(zip(lines, inside, strict=True))
+    ]
 
 
 def _step5_plan_sections() -> list[tuple[int, list[tuple[int, str, bool]]]]:

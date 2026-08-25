@@ -181,8 +181,10 @@ class RunContext:
 
     Optional rather than `= "read-write"` deliberately: a non-optional default here cannot be
     told apart from an operator's choice, so deriving "only when not given" would silently
-    substitute `read-write` over a `cache_mode: off` in `fleet.yaml` — the `effort: low` failure
-    this project records, one field over."""
+    substitute `read-write` over a `cache_mode: "off"` in `fleet.yaml` — the `effort: low`
+    failure this project records, one field over. **The quotes are load-bearing**: YAML 1.1
+    reads a bare `off` as the boolean `False`, and `LlmSection.cache_mode`'s `Literal` then
+    rejects it, so the operator this field exists to protect has to write it quoted."""
     llm_policy: CallPolicy | None = None
     """An EXPLICIT override of the §9 `llm:` knobs the client reads. `None` — which is what
     every `RunContext(` site in `cli.py` passes, by passing nothing — means *derive them
