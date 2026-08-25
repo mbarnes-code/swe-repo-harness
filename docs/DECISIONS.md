@@ -11184,3 +11184,47 @@ external toolchain, and a wrapper would be a second source of truth for the vers
 this repository has no CI configuration. `extend-exclude` in `[tool.ruff]` — it would duplicate
 `.gitignore`. Gating `ruff format --check` — deferred by standing ruling; its class result is
 "fails" and pinning `ruff` does not by itself make it ratchetable.
+
+> **ANNOTATION (2026-08-25, round G lane W7, measured at `f6a2e4e`) — consequence (ii)'s worktree
+> sentence names the wrong class, and that sentence is why the gate was unusable for every lane.**
+> `ruff` is not absent in a detached worktree; it is present, pinned and runnable. What is absent
+> is `REPO_ROOT/.venv/bin`, and `_ruff()` searched only PATH, which `tests/conftest.py` seeds from
+> `REPO_ROOT`. The predicate therefore asked *where would this checkout's virtualenv be* and
+> reported the answer as *the linter is not installed*. Measured in a clean detached worktree at
+> `f6a2e4e` with nothing applied: **3 of 4 checks fail** —
+> `test_the_ruff_that_will_run_is_the_ruff_that_is_pinned`,
+> `test_ruff_resolves_only_this_projects_own_files` and
+> `test_ruff_check_is_clean_across_the_whole_repository`, all three from the single `pytest.fail`
+> in `_ruff()` — while in that same worktree the `ruff` beside the running interpreter reports
+> `ruff 0.16.2` and `ruff check --no-cache .` exits 0. That is **not** the class of the 24
+> missing-`tools/` failures: those toolchains are gitignored binaries that genuinely do not exist
+> in a worktree, whereas here the tool exists in the environment that is running the suite. Since
+> every lane works in a detached worktree (`BAZEL_ROOT` is keyed on `sha256(REPO_ROOT)`, so
+> concurrent pytest sessions in one checkout reap each other's output base), the lint gate became
+> the one part of the tree no worker could self-certify. Reported by lane W1, reproduced here with
+> no patch applied.
+>
+> `_ruff()` now searches PATH first and, only when that finds nothing, the directory this
+> environment installs console scripts into — `sysconfig.get_path("scripts")`, cross-checked
+> against the **unresolved** parent of `sys.executable`. Do not `.resolve()` it: `.venv/bin/python`
+> is a symlink to the system interpreter, so the resolved parent is `/usr/bin`, and the first draft
+> of this fix did exactly that and reproduced the identical 3-of-4 failure. The fallback is
+> additive — in a checkout where `.venv` is present, unpatched and patched both read **4 passed** —
+> and absence still fails loudly, now naming PATH *and* the interpreter directories.
+>
+> **Consequence (iii)'s numbers reconcile exactly; the check they justify has no power in a
+> worktree.** (iii)'s **181** is 180 tracked `.py` at `12d3527` plus `pyproject.toml`; the same
+> predicate (`ruff check --no-cache --show-files . | wc -l`) reads **182** at `f6a2e4e`, because
+> `tests/test_lint_gate.py` is itself the 181st `.py`. In a fresh worktree at `f6a2e4e`
+> `--no-respect-gitignore` also reads **182** — `.gitignore` keeps **zero** files out, because a
+> fresh worktree contains none of the ignored trees (`references/*/` are separate git repositories
+> that exist only in a populated checkout; `work/`, `cache/`, `mirrors/` and `artifacts/` are
+> runtime write paths). Re-derived in a control worktree populated with the primary's
+> `references/`: `--no-respect-gitignore` resolves **1,855**, of which **1,673** are under
+> `references/` — (iii)'s figure to the file. The mutation `352c514` reported as INEXPRESSIBLE
+> (un-ignoring `references/*/`) is expressible in that populated control, taking the gate to
+> **2 failed / 2 passed**; in a worktree the same mutation reads **4 passed**. That blindness is a
+> genuine environmental boundary, not a defect, and it is **not** patched — the scope check now
+> measures how many files `.gitignore` actually keeps out and emits a `UserWarning` naming the
+> environment and the measured zero, so a lane meets the disclosure at the place the green is
+> produced rather than inferring it from this entry.

@@ -17,12 +17,21 @@ arrives on whichever unlucky lane next builds an environment. `pyproject.toml` p
 _pinned` checks the *resolved* binary rather than the declaration, because a declaration read
 is not a value exercised.
 
-**On absence.** `ruff` missing does not skip. `tests/conftest.py` prepends `.venv/bin` to PATH
-at import time and `ruff` is a declared `dev` dependency, so its absence is a broken
-environment, not weather — and a gate that no-ops when its tool is missing is a convention
-wearing a mechanism's clothes. `_ruff()` fails naming the PATH it searched. This follows
-`_fail_if_registry_unreachable` in `tests/test_bazel.py`, which was rewritten from a skip for
-exactly this reason.
+**On absence.** `ruff` missing does not skip. It is a declared `dev` dependency, so a `ruff`
+that is genuinely absent is a broken environment, not weather — and a gate that no-ops when
+its tool is missing is a convention wearing a mechanism's clothes. `_ruff()` fails naming
+every directory it searched. This follows `_fail_if_registry_unreachable` in
+`tests/test_bazel.py`, which was rewritten from a skip for exactly this reason.
+
+**And "absent" is not the same question as "absent from `REPO_ROOT/.venv/bin`".**
+`tests/conftest.py` prepends that directory to PATH at import time, which answers *where would
+this checkout's virtualenv be*, never *which environment is running*. The two are one directory
+in the primary checkout and two in a detached worktree, which has no `.venv` of its own — and
+every lane in this project works in a detached worktree, because `BAZEL_ROOT` is keyed on
+`sha256(REPO_ROOT)` and concurrent pytest sessions in one checkout reap each other's Bazel
+output base. At `f6a2e4e` that made three of these four checks fail in a clean worktree with
+`ruff` installed and runnable, reported by lane W1 and reproduced with no patch applied; see
+`_ruff()` for what searching the running interpreter's own `bin/` does and does not change.
 
 **What is deliberately NOT gated:** `ruff format --check`. Measured whole-repo at `12d3527`,
 117 of 142 files are dirty under it; gating it would redden `main` on the same commit that
@@ -36,7 +45,10 @@ import os
 import re
 import shutil
 import subprocess
+import sys
+import sysconfig
 import tomllib
+import warnings
 from pathlib import Path
 
 import pytest
@@ -57,15 +69,43 @@ _RUFF_REQUIREMENT = re.compile(r'^\s*"(ruff(?:\[[^\]]*\])?)([^"]*)"\s*,?\s*$', r
 
 
 def _ruff() -> str:
-    """The absolute path of the `ruff` that will run, or a failure that names where we looked."""
+    """The absolute path of the `ruff` that will run, or a failure that names where we looked.
+
+    Two places, in this order: PATH exactly as `tests/conftest.py` left it, then the `bin/` of
+    the interpreter actually running this suite. The second is searched only after the first
+    finds nothing, so wherever the PATH-only predicate resolved a binary this one resolves the
+    same file — the fallback is additive, and cannot change which `ruff` an environment that
+    already has one runs. What it does change is the detached-worktree case, where PATH carries
+    a `REPO_ROOT/.venv/bin` that does not exist while `ruff` sits beside `sys.executable`.
+
+    Absence still fails: if nowhere has it, this fails naming everywhere it looked.
+    `sys.executable` is the environment that will run the code (Guardrail 6), which is why it
+    is the right second question to ask — a checkout-relative path is a declaration, not a
+    resolved value.
+
+    Do NOT `.resolve()` that path. `.venv/bin/python` is a symlink to the system interpreter,
+    so `Path(sys.executable).resolve().parent` is `/usr/bin` and the fallback silently looks in
+    the wrong directory — measured, in the first draft of this fix, which reproduced the exact
+    3-of-4 failure it was written to remove. `sysconfig.get_path("scripts")` is asked first
+    because it answers the question directly ("where does THIS environment install console
+    scripts", and `ruff` is one); the unresolved parent of `sys.executable` is a second,
+    independent derivation of the same directory.
+    """
+    candidates = [sysconfig.get_path("scripts"), str(Path(sys.executable).parent)]
     found = shutil.which("ruff")
+    for candidate in candidates:
+        if found is None:
+            found = shutil.which("ruff", path=candidate)
     if found is None:
+        interpreter_dirs = "\n  ".join(candidates)
+        path_dirs = "\n  ".join(os.get_exec_path())
         pytest.fail(
-            "`ruff` is not on PATH, so the lint gate cannot run — and a lint gate that passes "
-            "when its linter is absent is worse than no gate. `ruff` is a declared `dev` "
-            "dependency in pyproject.toml and `tests/conftest.py` prepends "
-            f"{REPO_ROOT / '.venv' / 'bin'} to PATH at import time; install the dev group. "
-            f"PATH searched:\n  " + "\n  ".join(os.get_exec_path())
+            "`ruff` is nowhere this gate can find it, so the lint gate cannot run — and a lint "
+            "gate that passes when its linter is absent is worse than no gate. `ruff` is a "
+            "declared `dev` dependency in pyproject.toml; install the dev group into the "
+            f"environment running this suite ({sys.executable}).\n"
+            f"interpreter directories searched:\n  {interpreter_dirs}\n"
+            f"PATH searched:\n  {path_dirs}"
         )
     return found
 
@@ -181,6 +221,27 @@ def test_ruff_resolves_only_this_projects_own_files():
     )
     resolved = [Path(line) for line in out.stdout.splitlines() if line.strip()]
     assert resolved, "`ruff check --show-files .` resolved no files at all"
+
+    # How much work `.gitignore` is actually doing here — measured, not assumed, because it is
+    # also this check's discriminating power. Disclosed rather than asserted: a worktree in
+    # which the answer is 0 is a real environment a lane will be standing in, not a defect.
+    unignored = _run_ruff("check", "--no-cache", "--no-respect-gitignore", "--show-files", ".")
+    kept_out = (
+        len([line for line in unignored.stdout.splitlines() if line.strip()]) - len(resolved)
+        if unignored.returncode == 0
+        else None
+    )
+    if kept_out == 0:
+        warnings.warn(
+            f"the scope check ran and cannot discriminate in this environment ({REPO_ROOT}): "
+            f"`.gitignore` keeps 0 files out of `ruff check .` here, so a `.gitignore` "
+            f"regression is undetectable by this check as run. A fresh detached worktree holds "
+            f"none of the ignored trees — `references/*/` are separate git repositories that "
+            f"exist only in a populated checkout, and `work/`, `cache/`, `mirrors/` and "
+            f"`artifacts/` are runtime write paths — so green here is not evidence "
+            f"that the gate is silent on a leak. Certify this check in a populated checkout.",
+            stacklevel=2,
+        )
 
     strays = []
     for path in resolved:
