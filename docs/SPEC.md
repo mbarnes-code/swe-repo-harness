@@ -5031,9 +5031,16 @@ the boundary as attributed, reapable holds rather than being freed or stranded.
 **Retention and on-disk ceiling.** `events`, `attempts`, and `llm_cache` are the only unbounded
 tables. `fleet gc --cache-max-age 30d --events-keep-runs 5` deletes `llm_cache` rows whose
 `last_hit_at` is older than the age and every `events` row outside the newest N runs, then
-`VACUUM`s. The single projector task (below) issues `PRAGMA wal_checkpoint(TRUNCATE)` after each
-debounce window, which is what stops a long-lived reader from pinning the WAL until the disk fills
-mid-run. Expected steady-state ceiling for a 250-repo run: **< 2 GB** — ~4 000 `phases`/`tasks`
+`VACUUM`s. The WAL's only bound is `PRAGMA wal_autocheckpoint = 1000` (`state/db.py`'s
+`PER_CONNECTION_PRAGMAS`) — nothing under `src/` issues `PRAGMA wal_checkpoint`, and **no code path
+may hold a read transaction open across a wave**, because a held read transaction defeats that
+autocheckpoint entirely: with one open, `-wal` grows by ~4 MB per 1 000 write transactions instead
+of sitting on a flat ~4 MB plateau. The tree's only read transaction is `build_state`'s
+`BEGIN DEFERRED` (`state/projection.py`), on a handle `project_once` opens and closes around one
+snapshot and that the ≤ 1 Hz `MIN_PROJECTION_INTERVAL_S` debounce re-opens at most once a second —
+so nothing holds one for longer than a rebuild, and even the pathological case is bounded by the
+run's transition count rather than by the disk: tens of megabytes at the ~4 000 transitions below.
+Expected steady-state ceiling for a 250-repo run: **< 2 GB** — ~4 000 `phases`/`tasks`
 rows, ~10⁵ `events`, ~10⁴ `attempts` with tails capped by `TruncatedStr`, and an `llm_cache` bounded
 by the 30-day LRU rather than by run count.
 

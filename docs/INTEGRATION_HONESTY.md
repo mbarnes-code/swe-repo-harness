@@ -5694,7 +5694,7 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
 
 ---
 
-## D81 — OPEN. `docs/SPEC.md` §5's retention paragraph assigns `PRAGMA wal_checkpoint(TRUNCATE)` to "the single projector task", and no code under `src/` issues it — a named duty with no implementation, which the C7 projector wiring does **not** create
+## D81 — PARTLY ADDRESSED (SPEC half corrected by the commit carrying the 2026-08-25 marker at the end of this entry, which also names the leg still open). `docs/SPEC.md` §5's retention paragraph assigns `PRAGMA wal_checkpoint(TRUNCATE)` to "the single projector task", and no code under `src/` issues it — a named duty with no implementation, which the C7 projector wiring does **not** create
 
 **Found and measured by lane W13 (round F) while ruling on D79's task C7 (`RunContext.projector`),
 at `01ac4ca` and re-derived unchanged at `ee1ddc8`. Static sweeps plus one runtime read of the
@@ -5756,6 +5756,82 @@ Every figure above is a static sweep or a source read of the working tree at `ee
 of a file this lane did not read would be invisible to both sweeps — though `wal_autocheckpoint`
 being the *only* WAL-adjacent pragma found by a case-insensitive `PRAGMA[^"']*wal` sweep over `src/`
 is the independent second source that makes that unlikely.
+
+---
+
+**2026-08-25 — status marker, lane W8 (round G), at `f6a2e4e`. Nothing above is rewritten.** Every
+measurement W13 recorded was true at `ee1ddc8` and re-derives unchanged at `f6a2e4e`; the paragraph
+above that says the deciding measurement "was not taken" is a correct record of what was true when
+it was written. It has since been taken — by lane R3 (round G) and independently again here — and
+this marker records the outcome, the fix, and the leg the fix does **not** close.
+
+**The SPEC sentence is corrected, not deleted, in the same commit as this marker.** R3 measured that
+its *causal* half is TRUE: a held read transaction defeats `wal_autocheckpoint` completely. Only the
+*attribution* was false, and the severity with it. Deleting the sentence would have removed the
+tree's only written statement of a real hazard, which this project treats as worse than an honest
+disclosure. The replacement names `PRAGMA wal_autocheckpoint = 1000` as the actual bound, states
+that a held read transaction defeats it, records that `build_state`'s `BEGIN DEFERRED` is the tree's
+only read transaction and is debounce-bounded, and drops *"until the disk fills mid-run"*.
+
+**Re-measured here at `f6a2e4e`, not inherited from R3.**
+
+* `wal_checkpoint` under `src/` → **0**, two genuinely different instruments: a whitespace-normalised
+  whole-file sweep over all 115 `*.py`, and an `ast` walk over 10 557 string literals whose positive
+  control finds the one `wal_autocheckpoint` literal (`state/db.py:98`). `tests/` → **0**. All of
+  W13's static figures reproduce.
+* Exactly **three** executed `BEGIN` sites under `src/`: `migrations/__init__.py:228` EXCLUSIVE,
+  `state/db.py:459` IMMEDIATE, `state/projection.py:194` `BEGIN DEFERRED` — the only reader.
+  `project_once` (`state/projection.py:341-353`) opens and closes that handle around one snapshot.
+* **Runtime, own fixture** (SQLite 3.45.1, ext4, 1 000-row `phases` table, 8 000 write transactions
+  per arm, a **unique** 400-byte payload per transaction): shipped pragmas with no reader plateau at
+  **4 120 032 B**, flat from txn 1 000; `wal_autocheckpoint = 0` grows linearly to **33 437 952 B**
+  (**8.12×**); **shipped plus one held `BEGIN DEFERRED` is byte-identical to the disabled arm at all
+  eight samples**, with `wal_checkpoint(TRUNCATE)` returning `(1, 8116, 116)` and reclaiming nothing
+  while the reader is open, then `(0, 0, 0)` once it closes. Four validation checks were read before
+  any verdict: fires on known-bad; silent on a clean arm; fires on a synthetic held-read-transaction
+  fault injected into a verified-clean fresh instance `(0,0,0)` → `(1, 300, 0)`; and the **cosmetic
+  control** — a `mode=ro` handle open but **idle**, no `BEGIN` — stays **GREEN** at 4 120 032 B and
+  `(0,0,0)`, which is what proves the instrument reads *"a read transaction is held"* and not
+  *"a connection exists"*.
+* **An instrument defect found and disclosed:** the first version of that probe rewrote each row
+  with an **identical** payload. SQLite then dirties no page, so every arm read flat, the
+  autocheckpoint-disabled arm did not grow, and all four validation checks passed **vacuously**. The
+  WAL header's checkpoint-sequence field (`ckpt_seq`, non-perturbing, unlike `PRAGMA wal_checkpoint`)
+  is what exposed it: 0 throughout, i.e. no checkpoint had occurred and the WAL simply was not
+  growing. Only the unique-payload workload discriminates.
+* **Severity.** The pathological arm grows **4 179 744 B per 1 000 write transactions**, so at the
+  ~4 000 transitions `docs/SPEC.md` and `state/projection.py:11` both size a 250-repo run at, the
+  worst case is on the order of **16 MB**, and reaching the SPEC's own **< 2 GB** ceiling would take
+  ~**478 000** transactions. *"Until the disk fills mid-run"* was overstated as well as misattributed.
+  This extrapolates one fixture's per-transaction page cost; treat 16 MB as an order of magnitude,
+  not a measurement. R3, on a different fixture and a different driver, derived ~16.5 MB and
+  ~485 000 — a class agreement, not a shared instrument.
+
+**The open leg — why this is `PARTLY ADDRESSED` and not `FIXED, LANDED`.** The corrected sentence's
+load-bearing structural claim is *"the tree's only read transaction is `build_state`'s"*, and
+**nothing binds it**. The pragma half *is* bound — `tests/test_db.py:147` asserts
+`wal_autocheckpoint == 1000` on the read handle and `:160-166` on the write handle — but no test
+asserts how many read transactions exist, and `grep -rniE 'wal_checkpoint' tests/` still returns
+**0** at `f6a2e4e`, so W13's *"Would a test catch it? MEASURED — no"* remains true for that clause.
+A second `BEGIN DEFERRED` added anywhere under `src/` would falsify the SPEC silently and re-open
+the hazard R3 measured. The replacement sentence's *"no code path may hold a read transaction open
+across a wave"* is a **stated rule, not a mechanism**, and is recorded as one here rather than
+closed with a convention wearing a mechanism's clothes. Closing this leg means an instrument that
+derives the `BEGIN` set from the source and fails by `file:line` — out of W8's file scope this
+round, and not written.
+
+**Also still unmeasured, and inherited as unmeasured:** whether a process *outside* the harness — an
+operator's `sqlite3` shell, or a command overlapping a wave — can hold a read transaction across it.
+R3 tagged that `[UNVERIFIED]`; W8 did not measure it either.
+
+**One number in the routing corrected.** The brief and R3 both state the SPEC class sweep as
+*"46 hits, 2 belonging to the claim"*. Under R3's own predicate that reproduces exactly at
+`f6a2e4e` (46, of which 2 are the claim); under a predicate that also names the severity clause
+(`disk fills`) the claim has **3** members. Both readings resolve to the **same single sentence** —
+a predicate-dependent raw total over an identical class result, exactly as Guardrail 6 predicts.
+After the fix that class is **0 affirming sites**; one `wal_checkpoint` occurrence survives in
+`docs/SPEC.md` and it is the correction's own **denial** (*"nothing under `src/` issues …"*), which
+a count-based detector cannot distinguish from the claim it retired — subtract it by rule.
 
 
 ## D82 — OPEN, recorded only. `WaveScheduler` is documented "one instance per (run, phase)" but its wall clock is per-`(run, wave)` with no phase, so one exit-4 breach in TRANSFORM leaves BUILD and VERIFY of that wave permanently un-admittable
@@ -6194,3 +6270,95 @@ citation repair to D82). Re-derived at `8b40498`, content unchanged at every one
 `:8430-8449`→`:8490-8498` (its def is at `:7499`); `_run_verify_wave` `:8451`→`:8510`;
 `_build_impl`'s pre-admission block `:8235-8251`→`:8240-8252`, with `_check_root_file_domain` now
 defined at `:7140`.)*
+
+
+---
+
+## D85 — OPEN (the fix is in flight, not landed: lane W7's round-G patch to `tests/test_lint_gate.py` was uncommitted when this entry was written; `main` was `f6a2e4e` and the newest commit touching that file was still `352c514`). The lint gate fails 3 of 4 checks in every detached worktree and passes in the primary, because `_ruff()` asks where this checkout's virtualenv *would be* instead of whether `ruff` runs — the certification environment and the working environment diverge, and the instrument reports the divergence as the defect
+
+**Found, fixed and measured by lane W7 (round G) at `f6a2e4e`; recorded here by lane W8, which
+re-derived every figure it uses in its own separate detached worktree at `f6a2e4e` — a second
+environment, not W7's. Figures W8 did not re-derive are labelled inline as W7's.** The number was
+allocated centrally by the orchestrator and verified free by a form-agnostic `\bD85\b` sweep over
+this whole file (0 occurrences) before writing, because this document heads entries three ways and
+`D12`/`D18`/`D19`/`D75` each carry two forms.
+
+### The instance, reproduced independently
+
+`pytest tests/test_lint_gate.py` in a clean detached worktree at `f6a2e4e`, **no `-k`, no node IDs,
+nothing applied** → **3 failed, 1 passed in 0.12s**. W7's "3 of 4" reproduces exactly, and so does
+its sharper claim: **all three fail at one site**, the single `pytest.fail` in `_ruff()`
+(`tests/test_lint_gate.py:63`). The survivor,
+`test_every_declared_ruff_requirement_pins_one_exact_version`, is the **only** check that never
+shells out to `ruff` — it reads `pyproject.toml`. One defect with three faces, not three failures.
+
+The mechanism: `_ruff()` is `shutil.which("ruff")` and nothing else. `tests/conftest.py` prepends
+`REPO_ROOT/.venv/bin` to PATH at import time, `REPO_ROOT` is derived from `conftest.__file__`, and
+`_prepend_path` inserts an entry only `if entry.is_dir()` — so in a worktree that entry is
+`<WT>/.venv/bin`, which **does not exist**, is silently skipped, and `ruff` is never found. The
+emitted failure names that path verbatim.
+
+### Why this is not the missing-toolchain class, which is the finding
+
+ADR-0093's consequence (ii) reads, at `f6a2e4e` (anchor on the sentence, not the line): *"A worktree
+lacking `.venv` will fail this gate, the same class as the existing missing-toolchain failures."*
+**That classification is wrong**, and W8 measured why in its own worktree:
+
+| | the 24 missing-`tools/` failures | this gate in a worktree |
+| --- | --- | --- |
+| Is the tool present in the running environment? | **No** — gitignored binaries, genuinely absent | **Yes** — `ruff 0.16.2`, and `ruff check --no-cache --output-format=concise .` from the worktree root exits **0** |
+| What the predicate asks | "is the toolchain here?" | "would this checkout's virtualenv be here?" |
+| Verdict | a genuine environmental **boundary** | a **predicate defect** |
+
+The linter is installed, pinned (`ruff==0.16.2` in both dependency tables of `pyproject.toml`),
+runnable and clean; the gate looked in a checkout-relative place instead of asking the environment.
+That is Guardrail 6's *"a declaration read is not a value exercised"* — committed inside a gate
+written to enforce exactly that discipline. **Every lane in this project works in a detached
+worktree**, so the gate could not be self-certified by the workers it exists to protect.
+
+The ADR sentence is **true of `352c514`'s certification environment** and is a correct record of it;
+W7 annotated ADR-0093 in `docs/DECISIONS.md` rather than rewriting it, and this entry does the same.
+
+### The class — why this earns a number rather than a comment
+
+1. **An instrument's verdict can depend on which checkout it runs in even when the thing it measures
+   is identical in both.** `ruff` is the same binary, at the same version, resolving the same 182
+   files, in both environments; only the verdict differs.
+2. **"INEXPRESSIBLE" is a property of the environment, not of the mutation.** `352c514` reported the
+   un-ignoring of `references/*/` as an inexpressible mutation and correctly refused to count its
+   green. In W7's populated control the same mutation is expressible and fires — **2 failed / 2
+   passed** *(W7's figure; W8 built no populated control and did not re-derive it)*. A lane that
+   writes off a mutation as inexpressible has measured its checkout, not its instrument.
+
+### A separate finding, disclosed as a boundary and deliberately NOT patched
+
+The gate's scope check has **zero discriminating power in a worktree**. Re-derived by W8 in its own
+worktree at `f6a2e4e`: `ruff check --no-cache --show-files .` resolves **182** files and
+`--no-respect-gitignore` resolves the **same 182**, of which **0** are under `references/`, so
+`.gitignore` keeps **0** files out. Cross-derived a second way: `git ls-tree -r --name-only f6a2e4e
+| grep -c '\.py$'` = **181** tracked `.py`, plus `pyproject.toml` = 182; and `find references -name
+'*.py'` in a worktree returns **0**, because `references/` holds only tracked `.md` files there —
+the sibling git repositories that make it large are untracked and absent from any worktree.
+
+So that check **cannot fail in a worktree for the reason it exists**. W7 did not patch it: patching
+it would be a convention wearing a mechanism's clothes. It is **disclosed where a lane meets it** —
+the check emits a `UserWarning` naming the environment and the measured zero whenever `.gitignore`
+keeps nothing out, silent where the check does discriminate. This entry states that plainly rather
+than implying the instrument is equally trustworthy in both environments: **after the fix in flight
+lands, checks 1, 2 and 4 are self-certifiable in a worktree and check 3 is green by construction
+there.** A disclosure is not a mechanism, and this leg stays open by design.
+
+### What this entry does not establish
+
+* **No populated-checkout control was built by W8.** W7's `CTL` figures — 1,673 `references/` files,
+  the 6,970 bounded-above cross-derivation, and the (f) mutation's 2 failed / 2 passed — are W7's
+  and are **not** re-derived here.
+* **The primary checkout was not touched** by W8: no edit, no `pytest`, no `ruff`. A whole-tree
+  suite was running there. Only read-only `git` was run against it.
+* **A second instance of the same class is inherited unswept**: W7 reports that
+  `.claude/settings.json` allowlists the file-scoped `ruff check src/ tests/`, narrower than
+  `ruff check .` by exactly `pyproject.toml`, so a lane reaching for the allowlisted form gets a run
+  that cannot see a `pyproject.toml` finding. Neither W7 nor W8 swept that independently.
+* **Status.** `OPEN`, not `FIXED, LANDED`, because the fix was uncommitted when this was written —
+  checked against `git log`, not assumed. When it lands, the status field takes the landed SHA and
+  the scope-check boundary above stays open as a stated boundary.
