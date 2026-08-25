@@ -10823,3 +10823,162 @@ the tree.
 and the schema-qualified-`ATTACH` escape remains a stated boundary. Naming `PRAGMA` in the module
 docstring's boundary (iii) alongside `ANALYZE` is part of this change; it is a disclosure, not a
 mechanism.
+
+> **MEASURED CORRECTION (2026-08-25, round F lane W9, measured at `b5f7760`) — six defects in the
+> evidence above: statements that are false, predicate-dependent with the predicate unstated, or not
+> established by the evidence they cite. The first is a fresh false claim of the exact kind this ADR
+> was written to document. The DECISION, the
+> `_NON_WRITE_PRAGMAS` membership, the `write_target` branch and the Rule-12 conclusion are
+> unaffected; every defect is in the evidence half.** The findings are review lane CR2's, filed
+> against `12ac784`. **Every number below was re-derived at `b5f7760` by this lane's own drivers
+> before being written**, and where CR2's figure did not reproduce it is said so. The paragraphs
+> above are left **byte-identical** as the record of what was published; read 1–6 instead of them.
+>
+> **1. `application_id` is not in this tree. The set is TWO names at THREE sites, not three names.**
+> *"The forms that actually escape are `journal_mode`, `user_version` and `application_id`, all three
+> of which exist in this tree"* is false in its third name, and the title's *"three writing pragmas
+> this tree actually contains"* is a count of **sites**, not of names — which is what the three
+> `file:line` refs beside the sentence actually enumerate. Predicate: an executed (non-comment,
+> non-docstring) writing `PRAGMA` statement under `src/`. Derived two ways — a statement-by-statement
+> read of `git grep -inE 'pragma[ \t]+[a-z_]' -- src/`, and a per-name `git grep -in <name> -- src/`:
+>
+> * `journal_mode` — **1 site**, `src/fleet/state/schema.sql:37`;
+> * `user_version`, writing form — **2 sites**, `src/fleet/state/schema.sql:882` and
+>   `src/fleet/migrations/__init__.py:242`;
+> * `application_id` — **0 sites in `src/`**. Before this correction it had **2** occurrences
+>   tree-wide: the sentence above, and `tests/test_step6_wave_write.py`'s `_NON_WRITE_PRAGMAS`
+>   docstring, which names it as a statement W2 **probed** — that is correct and is not a claim
+>   about the tree, and it is left alone.
+>
+> `application_id` does write (measured, both by W2 and again here). It is simply a form this tree
+> never executes — which is precisely what this ADR's own headline says about `PRAGMA optimize`. A
+> raw count of `application_id` occurrences is now skewed by this correction quoting it, so the
+> class result is stated instead: **the true membership of "a writing PRAGMA name that exists in
+> `src/`" is 2, not the 3 the sentence above asserts.** That sentence is **left in place and
+> annotated**, per this file's convention, so a count-based sweep still finds it — the residue after
+> subtracting quotations-inside-corrections **by rule** is the annotated original, not zero.
+>
+> **2. The citation `src/fleet/state/migrations/__init__.py:242` does not resolve; the path is
+> `src/fleet/migrations/__init__.py:242`, with no `state/`.** `git show
+> b5f7760:src/fleet/state/migrations/__init__.py` → *fatal: path … does not exist*, and
+> `git ls-tree --name-only b5f7760 src/fleet/state/` lists seven blobs — `__init__.py checkpoints.py
+> db.py digest.py projection.py repository.py schema.sql` — and **no `migrations/` tree**. The **line number and the line content are right**: `src/fleet/migrations/__init__.py:242`
+> is `conn.execute(f"PRAGMA user_version = {int(step.version)}")`. **The rot happened in promotion,
+> not in the measurement** — W2's lane report writes `migrations/__init__.py:242` without `state/`;
+> the ADR and the commit message both inserted it, by analogy with the two `schema.sql` refs beside
+> it. **`12ac784`'s commit message carries the same wrong path. A commit message is landed history:
+> it is annotated here, not rewritten.** Class result, predicate `state/migrations`, normaliser =
+> strip markdown blockquote and list markers **then** collapse whitespace whole-file with an
+> offset-to-line map. **At `b5f7760` the tracked tree held exactly 1 occurrence, the citation above,
+> and it is the only one.** It is **left in place and annotated**, not deleted — so the honest class
+> result is *"0 unannotated pointers to a non-existent path"*, not *"0 occurrences"*. After this
+> correction the tracked tree holds **5**: the annotated original, three quotations in this
+> paragraph, and one in `docs/superpowers/plans/handoff-round-f.md`'s W9 annotation. A sweep asking
+> *"is the wrong path gone?"* reads 5 and must subtract quotations-inside-corrections **by rule**,
+> because a correction that quotes what it retires leaves the retired string a member of its own
+> class. **The first draft of this paragraph said "1 before, 0 after" — a fresh false claim inside
+> the correction, produced by counting the finding rather than the artefact, and caught by re-running
+> this sweep against the edited tree.**
+>
+> **3. *"`PRAGMA wal_checkpoint` and `PRAGMA incremental_vacuum` are query-form and move file pages"*
+> is true about SQLite and FALSE as a report of the evidence beside it — and the probe this lane
+> filed cannot express the write.** W2's §3 results table and its driver `pragma_probe.py` put
+> **both statements in the `no-write` column**, because that driver's fixture (a rollback-journal
+> database, 50 rows, no WAL content, no `auto_vacuum`) is one in which neither statement *can* move
+> a page. The lane found and disclosed exactly this precondition problem for `PRAGMA optimize` —
+> `optprobe.py` exists for it — and did not carry the reasoning to these two. The sentence is
+> therefore presented under a *measured* label while its cited source says the opposite. **The write
+> needs a precondition; it is named here so the next author does not have to rediscover it.**
+> Re-measured at `b5f7760` (`env -i PATH=/usr/bin:/bin HOME=… .venv/bin/python`, CPython 3.12.3 /
+> SQLite 3.45.1; verdict = per-file `(size, sha256)` over the main database and `-wal`, **excluding
+> `-shm`, which changes on any connection to a WAL database — the `SELECT count(*)` control shows
+> it**):
+>
+> | statement | W2's fixture shape | live uncheckpointed WAL | `auto_vacuum = INCREMENTAL`, freed pages |
+> |---|---|---|---|
+> | `PRAGMA wal_checkpoint(TRUNCATE)` | no-write | **WROTE** — main `2293760 → 4575232`, `-wal` `2315472 → 0` | no-write |
+> | `PRAGMA wal_checkpoint` (PASSIVE) | no-write | **WROTE** — main `2293760 → 4575232` | no-write |
+> | `PRAGMA incremental_vacuum` | no-write | no-write | **WROTE** — main `2297856 → 61440` |
+>
+> Instrument validated four ways, every arm read before the verdicts: (a) fires on known-bad — a
+> committed `INSERT` reads WROTE in **all three** fixtures; (b) silent where nothing wrote —
+> `SELECT count(*)` reads no-write in all three; (c) fires on a synthetic fault injected into a clean
+> instance — the same statement that reads no-write on W2's fixture reads WROTE once its precondition
+> is injected, which is what the two right-hand columns are; (d) cosmetic control —
+> `pragma   wal_checkpoint( TRUNCATE )` and a newline-broken `pragma\n  incremental_vacuum` return
+> the **same verdict in every fixture**, so the instrument is not keying on layout. Two facts neither
+> the sentence above nor CR2 states: the **PASSIVE** form (no argument) writes too, not only
+> `TRUNCATE`; and `incremental_vacuum` is **no-write on a live-WAL database that lacks
+> `auto_vacuum`**, so "a real database" is not the precondition — `auto_vacuum = INCREMENTAL` with
+> freed pages is. **CR2's raw byte figures do not reproduce, and were not expected to**: it reports
+> main `4096 → 16384` and `1036288 → 12288`, which are its fixture's sizes rather than a property of
+> the statements. The **class result reproduces exactly** — both statements are no-write on W2's
+> fixture shape and write once their precondition exists.
+>
+> Why this is worse than a wording slip: `test_every_pragma_the_connection_factory_issues_is_classified`'s
+> assertion message tells the next author *"Decide whether the new one writes — measure it, do not
+> assume the keyword,"* and `pragma_probe.py` is the only probe this lane filed. An author who obeys
+> the instruction with that probe reads `no-write` for both names and adds them to
+> `_NON_WRITE_PRAGMAS`, silently exempting two forms that do change the database file — restoring,
+> for two names, the defect this ADR closes. That is CLAUDE.md's *"a validated instrument can still be
+> blind to the defect you are hunting"*: `pragma_probe.py` passes all four of its own validation
+> checks and is still blind here, because the quantity it watches cannot move in a fixture with no WAL
+> content and no `auto_vacuum`.
+>
+> **4. *"Each of the six new parametrised cases is the unique discriminator of at least one classifier
+> mutation"* is TRUE, but the mutations cited cannot establish it and the scoping is undisclosed. Read
+> it as: unique among the parametrised recognition cases, NOT file-wide.** Re-run at `b5f7760` in this
+> lane's own detached worktree, `cwd` inside it, one pytest session, `tests/test_step6_wave_write.py`
+> unfiltered (no `-k`, no node IDs), baseline **23 passed**; every gate
+> `git diff --numstat --no-index BACKUP MUTATED` printed and read **before** the result; **every**
+> failing node ID recorded, not only the parametrised ones:
+>
+> | mutation | gate | tests that redden |
+> |---|---|---|
+> | C1 `"user_version"` added to `_NON_WRITE_PRAGMAS` | `1 1` | case `PRAGMA user_version = 9` **and** `test_every_pragma_the_connection_factory_issues_is_classified` |
+> | C7 `"journal_mode"` added | `1 1` | case `PRAGMA journal_mode = WAL` **and** the cross-check |
+> | C8 `"optimize"` added | `1 1` | case `PRAGMA optimize` **and** the cross-check |
+> | C2 `"foreign_keys"` dropped | `1 1` | case `PRAGMA foreign_keys = ON` **and** three others |
+> | C10 `write_target`'s branch exempts `user_version`, set untouched | `2 1` | **only** case `PRAGMA user_version = 9` |
+> | C11 same, `journal_mode` | `2 1` | **only** case `PRAGMA journal_mode = WAL` |
+> | C12 same, `optimize` | `2 1` | **only** case `PRAGMA optimize` |
+> | cosmetic reflow of that branch (control) | `5 1` | none — 23 passed |
+>
+> The reason is **structural, not an accident of these mutation texts**: every mutation that *edits*
+> `_NON_WRITE_PRAGMAS` trips the cross-check's equality assertion by construction, so that whole
+> family can never leave one of these cases alone in the red. C1/C7/C8 were the only mutations cited
+> for those three cases, so the cited evidence could not have established the claim for them. What
+> does establish it is C10/C11/C12 — misclassify exactly one name *inside* the branch, leaving the
+> set alone — which are **CR2's contribution**, re-derived here rather than taken on trust. The
+> companion claim that `pragma main.busy_timeout` and `-- ANALYZE "main"."t"` *"are the only
+> statements in the file that move under C4 and C5"* is untouched by this correction.
+>
+> Failure scenario this closes: a later lane applying CLAUDE.md's *"keep only cases that are the
+> unique discriminator of at least one"* re-runs the filed battery, sees C1/C7/C8 each caught twice,
+> and deletes the three cases as redundant with the cross-check. C10/C11/C12 then all go **green**.
+>
+> **5. *"seven of the measured setters change nothing"* reproduces only under a distinct-*names*
+> predicate.** Re-run of `pragma_probe.py` unmodified at `b5f7760`: the probe set holds **8 setter
+> statements** measured no-write — `foreign_keys = ON`, `foreign_keys = OFF`, `busy_timeout = 30000`,
+> `synchronous = NORMAL`, `wal_autocheckpoint = 1000`, `auto_vacuum = FULL`, `page_size = 8192`,
+> `secure_delete = ON` — over **7 distinct names**. The class result, which is what the argument
+> needs and what survives a change of predicate: **every setter in that probe set changed nothing
+> except `journal_mode`, `user_version` and `application_id`.**
+>
+> **6. *"the instrument validated by all four Guardrail-6 checks"* overstates what was run: two of the
+> four are analogues.** W2's four are (a) fires on known-bad — `INSERT INTO t VALUES (999)` → WRITE;
+> (b) **silent on a read** — `SELECT count(*)` → no-write; (c) fires on a synthetic fault in a clean
+> instance — `ANALYZE` on a never-analysed database → WRITE, `sqlite_master` gains `sqlite_stat1`;
+> (d) **`PRAGMA foreign_keys = ON` vs `= OFF` both no-write**. CLAUDE.md's (b) is *"silent on an
+> already-swept file"* and its (d) is *"a cosmetic reflow or reindent of the same region stays
+> green"*. W2's substitutes are sensible for a runtime SQLite probe — such a probe has no
+> "already-swept file" — but they are **analogues**, and the sentence asserts literal compliance.
+> Item 3's table runs the literal (d) and it holds.
+>
+> **What is not corrected, and why.** The 37/25/12 arithmetic, the `PER_CONNECTION_PRAGMAS` × 3
+> cross-derivation, the M2 / M3 / M4 evidence, the zero-coverage finding about the comment-only
+> branch, and the disclosed false-positive cost all reproduced under CR2's independent
+> re-measurement at `12ac784` and are untouched. `docs/superpowers/plans/handoff-round-f.md` §6
+> item 5's `PRAGMA` clause was **already** annotated as HISTORICAL by lane W7 at `b5f7760`; it is not
+> re-fixed here. Two claims *inside* W7's annotation belong to item 1's class and to this lane's
+> `_NON_WRITE_PRAGMAS` docstring correction; they carry their own dated marker in that file.

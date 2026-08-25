@@ -202,7 +202,16 @@ These four are the names `PER_CONNECTION_PRAGMAS` issues on every handle the run
 are here as a **literal** rather than derived from that tuple on purpose: deriving the exemption
 from the same declaration that produces the statements would make a wrong addition to the tuple
 exempt itself. `test_every_pragma_the_connection_factory_issues_is_classified` cross-checks the
-two, so production cannot grow a per-connection PRAGMA without this set being edited.
+two, so production cannot grow **`PER_CONNECTION_PRAGMAS`** without this set being edited. It does
+*not* reach a per-connection PRAGMA added outside that tuple, and the earlier wording here
+("cannot grow a per-connection PRAGMA") claimed that it did. Measured (round F, lane W9,
+zero-change gate `1 0` read before the result): `await conn.execute("PRAGMA journal_mode = WAL")`
+appended to `_apply_per_connection_pragmas` leaves that cross-check **green**, and
+`test_step_6_executes_only_the_whitelisted_verb_table_pairs` and
+`test_step_6_moves_exactly_one_member_and_leaves_every_existing_wave_row_alone` are what fail
+(2 failed, 21 passed). The two instruments are complementary in both directions: that one fires on
+a pragma added to a code path step 6 never reaches, these two on a pragma issued anywhere inside
+the window.
 
 **Disclosed cost.** Classification is by name, and `PRAGMA user_version` (a read, used by
 `fleet.state.db.read_user_version`) and `PRAGMA user_version = 9` (a header write) share one

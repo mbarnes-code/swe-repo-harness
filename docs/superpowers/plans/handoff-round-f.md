@@ -198,6 +198,35 @@ D81** — and note **a `^### D<n>` probe returns D75 and is WRONG**: D76–D80 u
    > `1 1` read before the result) left the module **16 passed**. It is pinned now by the
    > `-- ANALYZE "main"."t"` case added at `12ac784`, of which C5 is the unique discriminator.
    > **[probe @ 12ac784]**
+
+   > **ANNOTATION (2026-08-25, round F lane W9, measured at `b5f7760`) — two claims inside (c) above
+   > are members of classes corrected elsewhere in this commit. (c) is left byte-identical and its
+   > conclusion — the `PRAGMA` clause is HISTORICAL — is unaffected.**
+   >
+   > **(i)** *"so production cannot grow a per-connection pragma without the set being edited"* is
+   > false as literally written. Measured, zero-change gate `1 0` read before the result: appending
+   > `await conn.execute("PRAGMA journal_mode = WAL")` to `_apply_per_connection_pragmas` — a
+   > per-connection PRAGMA that does not go through `PER_CONNECTION_PRAGMAS` — leaves
+   > `test_every_pragma_the_connection_factory_issues_is_classified` **green**;
+   > `test_step_6_executes_only_the_whitelisted_verb_table_pairs` and
+   > `test_step_6_moves_exactly_one_member_and_leaves_every_existing_wave_row_alone` are what catch
+   > it (2 failed, 21 passed). The cross-check binds `_NON_WRITE_PRAGMAS` to
+   > **`PER_CONNECTION_PRAGMAS`**, not to "a per-connection pragma". The same sentence in
+   > `tests/test_step6_wave_write.py`'s `_NON_WRITE_PRAGMAS` docstring is corrected in place by this
+   > commit — that one is code, so it is fixed rather than annotated.
+   >
+   > **(ii)** *"three writing pragmas this tree does contain"* is a count of **sites**, not of names:
+   > `journal_mode` at 1 site and the writing form of `user_version` at 2 — **2 distinct names / 3
+   > sites**, which is exactly what the three `file:line` refs beside it enumerate. (c) is right
+   > about the sites and right about the paths; `docs/DECISIONS.md`'s ADR-0092 states the same count
+   > as three *names*, adds `application_id` — which appears in no `src/` file — and cites
+   > `src/fleet/state/migrations/__init__.py:242`, a path that does not exist. Both are corrected
+   > there by this commit.
+   >
+   > **This annotation's own sweep found (i) only after the normaliser was changed to strip markdown
+   > blockquote markers before collapsing whitespace.** A line-oriented grep and a naive whole-file
+   > whitespace collapse both missed it, because the sentence wraps across two `> `-prefixed lines
+   > and `> ` is not whitespace. **[probe @ b5f7760]**
 6. **`ruff format --check` on `cli.py`** — deferred past subtask 10 by ruling; **66 hunks and growing**
    (58 → 60 → 66).
 
