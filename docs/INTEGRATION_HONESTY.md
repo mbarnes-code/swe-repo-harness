@@ -3920,6 +3920,75 @@ only, and not in this entry's favour: its `llm_cache_hit = 0` half used to pass 
 wrote the column *and* nothing could hit the cache, and it now passes because nothing writes the
 column alone.)*
 
+*(2026-08-25, round F lane W13 — **annotation only; status stays `OPEN` and nothing above is
+rewritten, W11's marker included.** Recording what lane **W15** measured when it was dispatched to
+close leg (b) by passing `on_hit`, and returned **BLOCKED**. Every figure below re-derived by W13 at
+`53e5d8d` before being written; W15's own report and a runnable repro are at
+`.superpowers/sdd/handoff-round-f/lanes/W15/`.*
+
+* ***Leg (a) is real, and this entry's class is larger than the heading says — its five are all
+  correct, and there are two more.*** Parsing `SqliteStateRepository.record_attempt`'s
+  `INSERT INTO attempts` column list out of the source and differencing it against
+  `PRAGMA table_info(attempts)` over `state/schema.sql` gives **31 declared / 24 named → 7
+  unwritable**: this entry's five plus **`integration_ref`** and **`container_id`**. Derived a
+  second, genuinely different way — `AttemptRow`'s own annotated field set (24) differenced against
+  the same 31 — the seven are **identical**. `integration_ref` is not in the same position as the
+  other six: it is written afterwards by `cli._AttemptWriter._stamp_ref`'s separate
+  `UPDATE attempts SET integration_ref = ?`, so it is reachable; `container_id` is not.
+  Consequence for whoever fixes this: adding `llm_cache_hit` to the `INSERT` **without a producer**
+  would create one more declared-and-never-assigned field — the D79 shape, not a fix.*
+
+* ***Leg (b) is not merely unowned; `on_hit` alone cannot close it, because the attribution does not
+  exist to be passed.*** `LlmCallRecord` (`src/fleet/models/tasks.py`) has **16** fields and **none**
+  of `run_id` / `repo_id` / `phase` / `attempt`, and one `CachingModelClient` serves a whole wave —
+  so an `on_hit` callback is handed a record that cannot name the attempt whose row it would set.
+  That is this entry's own wave-shared-client argument, which it already accepts for
+  `llm_failovers`, now confirmed for this column too. **A buffer-then-`UPDATE` fails for an
+  independent second reason**: inside `PhaseRunner._drive`, `_drain_llm_findings` is called at
+  `runner.py:489` and the `attempts` row is written by `self._sink(...)` at `:520`, so any flush
+  keyed to the drain precedes the row it would update.*
+
+* ***The one seam that could have supplied the identity was closed this round, deliberately and
+  correctly, by us.*** `RunContext.worker_context()` handing a worker a per-attempt `scoped()` view
+  of the client was the natural attribution route. `53e5d8d` landed
+  `tests/test_run_context_llm_cache.py::test_the_client_handed_to_a_worker_is_the_one_this_file_drives`,
+  asserting `worker.llm is ctx.model_client` (`:376`). **That test was the right fix for a real
+  review finding** — the file's justification for driving `model_client` instead of the worker
+  surface cited an assertion that did not exist anywhere in the tree — **and it is simultaneously a
+  constraint on this entry's repair.** Both facts are recorded here so that whoever takes the
+  eventual route relaxes that assertion as a decision rather than discovering it as a surprise.*
+
+* ***The route W15 recommends instead, recorded as an Agent Recommendation and NOT as a
+  requirement*** (CLAUDE.md Guardrail 1): carry the hit flag on `TokenUsage`, set it in
+  `llm/cache.py`'s `_replay`, so the attribution travels **by data flow** rather than by ambient
+  context. Two things that route must not miss: it has to be **`OR`-ed** in `workers/base.py`'s
+  `accumulate()` (`:228`) or a multi-call attempt silently drops the flag; and it needs
+  `state/repository.py` and `cli.py` changed **in one commit by one author**, since a multi-site
+  correction split across authors ships partial wording. **Deferred to round G by ruling**, not by
+  oversight: what a hit flag should mean for an attempt that made several calls, some hits and some
+  misses, is unsettled in SPEC §11.6 and needs a ruling of its own before any column can be truthful.*
+
+* ***`docs/SPEC.md` §11.6's cache-hit bullet — *"Cache hits set `attempts.llm_cache_hit = 1` and
+  `cost_usd = 0`, so cost accounting stays honest"* (`:7181` at `53e5d8d`) is deliberately NOT
+  being edited, by ruling, and this entry is where that is recorded.*** It is a **conjunction whose two halves have different truth values**: `cost_usd =
+  0` is true and exercised (`_replay` returns the usage with `cost_usd` zeroed), while
+  `attempts.llm_cache_hit = 1` is false on every path and under no condition — so there is no
+  conditional wording that would make the sentence describe the code. Softening it to match code the
+  project intends to fix is how the `supports_effort` class of defect is manufactured. **The sentence
+  therefore stands as a true REQUIREMENT and a false DESCRIPTION, and that split is a property of
+  this entry, not of the SPEC.** Two neighbours a later lane must keep consistent if it disagrees:
+  §11.2 (`:6785`) lists `llm_cache_hit` among six columns written in **one** transaction, which
+  `record_attempt` plus `_stamp_ref`'s separate `UPDATE` already does not satisfy; and §12.24
+  (`:7351`) / §12.44 (`:7371`) still pass for the wrong reason, exactly as this entry's body says.*
+
+*W11's citations above re-derive **unchanged** at `53e5d8d` — `src/fleet/orchestrator/context.py`
+has **zero** commits between `b5f7760` and `53e5d8d`, which is why. **What this annotation does not
+establish:** W13 changed no code for it and ran no suite for it; every figure is an `ast` or
+normalised-text read of the working tree at `53e5d8d`, plus one `sqlite3` `PRAGMA table_info` over
+`state/schema.sql`. The behavioural half — that a shipped `RunContext` leaves the column at `0` on a
+real hit — is **W15's** measurement, reproducible from its repro script, and is cited here rather
+than re-executed.)*
+
 ---
 
 **D63 — FIXED, LANDED (`698f750`). `_unavailable`'s message text is false for every module it names: it tells the operator
@@ -5520,6 +5589,72 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
 * **Two figures are R4's and were not re-measured here**: that `cli.resume`'s final statement is the
   unconditional `raise ResumeIncompleteError`, and R4's 27-test blast-radius count for subtask 10.
   Neither is load-bearing for this entry.
+
+---
+
+## D81 — OPEN. `docs/SPEC.md` §5's retention paragraph assigns `PRAGMA wal_checkpoint(TRUNCATE)` to "the single projector task", and no code under `src/` issues it — a named duty with no implementation, which the C7 projector wiring does **not** create
+
+**Found and measured by lane W13 (round F) while ruling on D79's task C7 (`RunContext.projector`),
+at `01ac4ca` and re-derived unchanged at `ee1ddc8`. Static sweeps plus one runtime read of the
+shipped pragma list — NOT an exercised WAL-growth reproduction, and this entry says so rather than
+implying one.**
+
+`docs/SPEC.md`'s retention-and-on-disk-ceiling paragraph (§5, at `docs/SPEC.md:5027` at `ee1ddc8`;
+anchor on the sentence, not the line — it names `fleet gc` and the **< 2 GB** steady-state ceiling
+in the same block) reads:
+
+> The single projector task (below) issues `PRAGMA wal_checkpoint(TRUNCATE)` after each debounce
+> window, which is what stops a long-lived reader from pinning the WAL until the disk fills mid-run.
+
+**Measured two genuinely different ways at `ee1ddc8`, both returning zero:**
+
+1. `grep -rniE 'wal_checkpoint' src/` → **0 matches.**
+2. A whitespace-normalised whole-file sweep for `wal[ _]*checkpoint` (case-insensitive) over every
+   `*.py` under `src/`, offsets mapped back to line numbers — the predicate that catches a
+   line-wrapped or oddly-spaced occurrence a line-oriented `grep` would miss → **0 matches.**
+
+`Projector._loop` (`src/fleet/state/projection.py`) issues no PRAGMA of any kind: its debounce body
+is `project_once` plus a `writes` increment. The **only** WAL bound anywhere in the tree is
+`PRAGMA wal_autocheckpoint = 1000` in `src/fleet/state/db.py`'s per-connection pragma list (also
+recorded, commented out, in `src/fleet/state/schema.sql`'s header). The same normalised sweep over
+`docs/SPEC.md` returns **1** occurrence — the sentence quoted above — so the SPEC states the duty
+exactly once and nothing implements it.
+
+**Why this is recorded now, and why it is NOT closed by the C7 landing.** C7 asked whether §6's
+≤ 1 Hz debounced projection is wanted, and W13 ruled Arm A (wire it): before the fix, a wave's
+transitions refreshed `migration_state.json` **zero** times, measured by driving `cli`'s own
+composition root and watching the file. That fix constructs and starts a real `Projector` in each of
+the four wave functions — so after it lands, "the single projector task" finally exists on a shipped
+run. **It still issues no `wal_checkpoint`.** Recorded as its own number rather than as an
+annotation on the C7 commit precisely because an annotation on a commit that does not fix it is how
+a reader comes to believe it was fixed: with the projector now live, the SPEC sentence acquires a
+subject it never had, and its verb is still unimplemented.
+
+**Deliberately not decided here — the entry records the gap, not its remedy.** Two readings are
+open and this lane took neither: (a) the SPEC sentence is the design and the projector should issue
+the checkpoint, in which case `Projector._loop` gains it and this becomes a code fix; or (b)
+`wal_autocheckpoint = 1000` is the harness's actual and sufficient WAL bound and the SPEC sentence
+should be corrected to say so, in which case it is a SPEC fix. **The measurement that would decide
+between them was not taken**: whether a long-lived reader in this harness can in fact pin the WAL
+past the autocheckpoint threshold. `state/db.py` opens a `mode=ro` `read_conn` that lives for a
+whole command, and SQLite's passive autocheckpoint is the one a reader can block — but passive
+checkpointing is blocked by an open **read transaction**, not by an idle connection, and nobody has
+measured which of those the shipped `read_conn` presents during a long wave. Whoever takes this must
+measure that first; both remedies are wrong if the premise is.
+
+**Would a test catch it? MEASURED — no.** `grep -rniE 'wal_checkpoint' tests/` returns **0**. No
+test in the suite asserts on WAL size, on checkpoint behaviour, or on the projector issuing any
+PRAGMA. `tests/test_projection.py` (10 checks at `53e5d8d`) drives the debounce, the coalescing, the
+atomic write, the failure re-raise and the non-blocking of the single writer — and none of them can
+observe a PRAGMA the loop does not issue.
+
+**What this entry does not establish.** No `pytest` session measured it and no WAL file was grown.
+Every figure above is a static sweep or a source read of the working tree at `ee1ddc8`, plus the
+`db.py` pragma list read as text. A checkpoint reached through a computed string or an `executescript`
+of a file this lane did not read would be invisible to both sweeps — though `wal_autocheckpoint`
+being the *only* WAL-adjacent pragma found by a case-insensitive `PRAGMA[^"']*wal` sweep over `src/`
+is the independent second source that makes that unlikely.
+
 
 ## D82 — OPEN, recorded only. `WaveScheduler` is documented "one instance per (run, phase)" but its wall clock is per-`(run, wave)` with no phase, so one exit-4 breach in TRANSFORM leaves BUILD and VERIFY of that wave permanently un-admittable
 

@@ -204,7 +204,12 @@ from fleet.state.db import (
     initialize_database,
 )
 from fleet.state.digest import run_digest
-from fleet.state.projection import DEFAULT_PROJECTION_PATH, build_state, project_once
+from fleet.state.projection import (
+    DEFAULT_PROJECTION_PATH,
+    Projector,
+    build_state,
+    project_once,
+)
 from fleet.state.repository import (
     AttemptRow,
     BlockedBySnapshotStaleError,
@@ -600,7 +605,7 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
         overrides["budgets.max_rss_mb"] = opts.max_rss_mb
     # §11.6's `--llm-cache` reaches the run as `llm.cache_mode` and nowhere else, so
     # `RunContext.__post_init__` reads ONE resolved value and the CLI carries no second notion
-    # of "the active cache mode" — the same rule `--profile` is held to two lines up.
+    # of "the active cache mode" — the same rule `overrides["llm.profile"]` above is held to.
     # `is not None` is load-bearing: the flag's absence must leave `fleet.yaml` alone.
     if (cache_mode := opts.cache_mode) is not None:
         overrides["llm.cache_mode"] = cache_mode
@@ -1799,6 +1804,7 @@ async def _scan_impl(
                 evidence = _ScanEvidence()
                 report, run_ctx = await _run_scan_wave(
                     settings,
+                    db_path=path,
                     repository=repository,
                     writer=writer,
                     read_conn=read_conn,
@@ -1866,12 +1872,36 @@ async def _scan_impl(
     }
 
 
+async def _close_wave_projector(projector: Projector, ctx: RunContext) -> None:
+    """Stop a wave's live projector without letting a failed rebuild fail the wave.
+
+    `Projector.aclose()` re-raises whatever the last rebuild raised, deliberately, so that a
+    projection which stopped updating is not silent (Rule 11). But the projection is an OUTPUT
+    (§11.5) and `RunContext.project()` is documented as never raising, so that same exception
+    must not stall the wave that feeds it. Logged rather than suppressed — `suppress(Exception)`
+    would satisfy §11.5 by hiding an error, and a bare `async with Projector(...)` would satisfy
+    Rule 11 by failing the command; this is the shape `_drain_llm_findings` already uses for a
+    diagnostics write that must not rewrite a run's outcome. The command's own trailing
+    `project_once` still writes the durable file, so nothing an operator reads is lost.
+    """
+    try:
+        await projector.aclose()
+    except Exception as exc:
+        ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback in a durable record
+            "wave_projection_failed",
+            run_id=str(ctx.run_id),
+            exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+            error=str(exc),
+        )
+
+
 async def _run_scan_wave(
     settings: FleetSettings,
     *,
     repository: SqliteStateRepository,
     writer: StateWriter,
     read_conn: aiosqlite.Connection,
+    db_path: Path,
     run_id: str,
     fleet: Sequence[RepoEntry],
     members: Sequence[str],
@@ -1899,6 +1929,7 @@ async def _run_scan_wave(
             "subprocess": min(settings.config.concurrency.subprocess, lanes),
         }
     )
+    projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
         run_id=UUID(run_id),
         config=settings.config,
@@ -1910,6 +1941,7 @@ async def _run_scan_wave(
         llm=llm_router(settings),
         log=default_logger("fleet.scan"),
         work_dir=(settings.root / settings.config.run.work_dir).resolve(),
+        projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
     )
@@ -1932,7 +1964,11 @@ async def _run_scan_wave(
             writer=writer, repository=repository, run_id=run_id, evidence=evidence
         ),
     )
-    return await runner.run_wave(SCAN_WAVE_INDEX), ctx
+    try:
+        await projector.start()
+        return await runner.run_wave(SCAN_WAVE_INDEX), ctx
+    finally:
+        await _close_wave_projector(projector, ctx)
 
 
 def _scan_payloads(
@@ -4190,6 +4226,7 @@ async def _run_transform_wave(
     repository: SqliteStateRepository,
     writer: StateWriter,
     read_conn: aiosqlite.Connection,
+    db_path: Path,
     run_id: str,
     wave_index: int,
     plans: Mapping[str, _TransformPlan],
@@ -4205,6 +4242,7 @@ async def _run_transform_wave(
         ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
         clock=_now,
     )
+    projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
         run_id=UUID(run_id),
         config=settings.config,
@@ -4216,6 +4254,7 @@ async def _run_transform_wave(
         llm=llm_router(settings),
         log=default_logger("fleet.transform"),
         work_dir=(settings.root / settings.config.run.work_dir).resolve(),
+        projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
     )
@@ -4245,7 +4284,11 @@ async def _run_transform_wave(
             evidence=evidence,
         ),
     )
-    return await runner.run_wave(wave_index)
+    try:
+        await projector.start()
+        return await runner.run_wave(wave_index)
+    finally:
+        await _close_wave_projector(projector, ctx)
 
 
 async def _transform_criterion(
@@ -4445,6 +4488,7 @@ async def _transform_impl(
                     try:
                         report = await _run_transform_wave(
                             settings,
+                            db_path=path,
                             repository=repository,
                             writer=writer,
                             read_conn=read_conn,
@@ -7651,6 +7695,7 @@ async def _run_build_wave(
     repository: SqliteStateRepository,
     writer: StateWriter,
     read_conn: aiosqlite.Connection,
+    db_path: Path,
     run_id: str,
     wave_index: int,
     plans: Mapping[str, _BuildPlan],
@@ -7669,6 +7714,7 @@ async def _run_build_wave(
         ceilings=Ceilings.from_settings(config.budgets, config.stubs),
         clock=_now,
     )
+    projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
         run_id=UUID(run_id),
         config=config,
@@ -7682,6 +7728,7 @@ async def _run_build_wave(
         # `ctx.workdir` is `work_dir / repo_id`, and for Phase 3 that must be the worktree cut
         # from this repo's snapshot ref — not the Phase 1/2 checkout of the source repo.
         work_dir=build_root,
+        projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
     )
@@ -7712,7 +7759,11 @@ async def _run_build_wave(
             evidence=evidence,
         ),
     )
-    return await runner.run_wave(wave_index)
+    try:
+        await projector.start()
+        return await runner.run_wave(wave_index)
+    finally:
+        await _close_wave_projector(projector, ctx)
 
 
 async def _run_verify_wave(
@@ -7722,6 +7773,7 @@ async def _run_verify_wave(
     repository: SqliteStateRepository,
     writer: StateWriter,
     read_conn: aiosqlite.Connection,
+    db_path: Path,
     run_id: str,
     wave_index: int,
     plans: Mapping[str, _VerifyPlan],
@@ -7741,6 +7793,7 @@ async def _run_verify_wave(
         ceilings=Ceilings.from_settings(config.budgets, config.stubs),
         clock=_now,
     )
+    projector = Projector(db_path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
     ctx = RunContext(
         run_id=UUID(run_id),
         config=config,
@@ -7752,6 +7805,7 @@ async def _run_verify_wave(
         llm=llm_router(settings),
         log=default_logger("fleet.verify"),
         work_dir=verify_root,
+        projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
     )
@@ -7787,7 +7841,11 @@ async def _run_verify_wave(
             run_id=run_id,
         ),
     )
-    return await runner.run_wave(wave_index)
+    try:
+        await projector.start()
+        return await runner.run_wave(wave_index)
+    finally:
+        await _close_wave_projector(projector, ctx)
 
 
 async def _gated_members(
@@ -8253,6 +8311,7 @@ async def _build_impl(
                         report = await _run_build_wave(
                             settings,
                             config=config,
+                            db_path=path,
                             repository=repository,
                             writer=writer,
                             read_conn=read_conn,
@@ -8451,6 +8510,7 @@ async def _verify_impl(
                         report = await _run_verify_wave(
                             settings,
                             config=config,
+                            db_path=path,
                             repository=repository,
                             writer=writer,
                             read_conn=read_conn,
