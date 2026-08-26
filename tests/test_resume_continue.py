@@ -18,7 +18,7 @@ import fcntl
 import os
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -57,6 +57,16 @@ async def _drive(
 
     Every per-phase knob is supplied explicitly here for the same reason `_continue_impl` makes
     them required: a default chosen in a test is a default that can leak into the caller.
+
+    **`_require_disk_headroom` is stubbed, and that is a repair, not a convenience.** `94a2653`
+    added the §12.22 gate to `_continue_impl`; this fixture's settings stand-in is a
+    `SimpleNamespace` with no `config.run.cache_dir`, so from that commit every driver case here
+    died in `_gc_disk` with `AttributeError` — five of them, red on `main`, for a reason that has
+    nothing to do with what they assert. It is stubbed to a plain no-op rather than to a
+    `calls` recorder so the ordering assertions on `calls[0]` keep meaning what they say; the
+    gate's own behaviour is covered end to end by
+    `test_the_continuation_takes_the_disk_headroom_gate_before_its_first_delegate`
+    (`tests/test_cli.py`), which drives the real settings object.
     """
     calls = trace if trace is not None else []
     results = results or {}
@@ -71,6 +81,7 @@ async def _drive(
     monkeypatch.setattr(cli, "_transform_impl", recorder(Phase.TRANSFORM))
     monkeypatch.setattr(cli, "_build_impl", recorder(Phase.BUILD))
     monkeypatch.setattr(cli, "_verify_impl", recorder(Phase.VERIFY))
+    monkeypatch.setattr(cli, "_require_disk_headroom", lambda *a, **k: {})
     if patch_mutex:
         monkeypatch.setattr(
             cli, "_refuse_concurrent_mirror_run", lambda *a, **k: calls.append("MUTEX")
@@ -120,28 +131,35 @@ def test_the_repos_in_a_group_are_sorted_and_the_entry_is_frozen() -> None:
     """Repo order inside a group is the repo id's, not the mapping's.
 
     Unique discriminator of: `tuple(sorted(grouped[phase]))` -> `tuple(grouped[phase])`. One
-    phase only, so the ascending-phase mutation is a no-op here and cannot claim this case.
+    floored phase only, so the ascending-phase mutation is a no-op here and cannot claim this
+    case. It deliberately asserts the FLOORED entry alone and not the span above it — the span
+    cases below own that, and pinning it here as well would leave them discriminating nothing.
     """
     plan = cli._continue_from_floors({"z": Phase.BUILD, "a": Phase.BUILD, "m": Phase.BUILD}, None)
-    assert plan == (_Continuation(phase=Phase.BUILD, repos=("a", "m", "z")),)
+    assert plan[0] == _Continuation(phase=Phase.BUILD, repos=("a", "m", "z"))
     with pytest.raises((AttributeError, TypeError)):
         plan[0].repos = ()  # type: ignore[misc]
 
 
-def test_only_filters_with_fnmatch_and_drops_a_phase_left_with_no_repo() -> None:
+def test_only_filters_with_fnmatch_and_the_excluded_repo_is_in_no_group() -> None:
     """`only` is the delegates' predicate (`fnmatch`, as `cli._wave_repos` uses), applied here.
 
+    What `only` takes from `other` is MEMBERSHIP, not the phase: `acme-web` is floored at
+    `TRANSFORM`, so VERIFY is in the span and is driven either way. An excluded repo can neither
+    pull the span down nor keep its own phase out of it.
+
     Unique discriminator of two mutations: dropping the `only` guard altogether (then `other`
-    survives and VERIFY is still planned), and `fnmatch(repo_id, only)` -> `repo_id == only`
-    (then nothing matches the glob and the plan is empty). It is the only case that passes
-    `only`, so no other case can express either.
+    survives into the VERIFY group), and `fnmatch(repo_id, only)` -> `repo_id == only` (then
+    nothing matches the glob, there is no servable floor to span from, and the plan is empty).
+    It is the only case that passes `only`, so no other case can express either. It asserts
+    membership and an exclusion rather than the whole tuple, so that the span cases below keep
+    their own discrimination.
     """
     floors = {"acme-web": Phase.TRANSFORM, "acme-api": Phase.BUILD, "other": Phase.VERIFY}
     plan = cli._continue_from_floors(floors, "acme-*")
-    assert plan == (
-        _Continuation(phase=Phase.TRANSFORM, repos=("acme-web",)),
-        _Continuation(phase=Phase.BUILD, repos=("acme-api",)),
-    )
+    assert _Continuation(phase=Phase.TRANSFORM, repos=("acme-web",)) in plan
+    assert _Continuation(phase=Phase.BUILD, repos=("acme-api",)) in plan
+    assert all("other" not in entry.repos for entry in plan)
 
 
 def test_a_scan_floor_is_a_group_in_the_plan_like_any_other() -> None:
@@ -154,12 +172,75 @@ def test_a_scan_floor_is_a_group_in_the_plan_like_any_other() -> None:
     Phase.SCAN: continue`) while keeping the driver's payload key correct by deriving `skipped`
     from `floors` directly. Under that refactor every driver case below stays green and only
     this one reddens — which is exactly why it is worth a case.
+
+    It asserts MEMBERSHIP rather than the whole tuple, and that is deliberate: the span cases
+    below own the shape of the plan, and pinning it here as well would leave them discriminating
+    nothing of their own.
     """
     plan = cli._continue_from_floors({"unstarted": Phase.SCAN, "w": Phase.BUILD}, None)
-    assert plan == (
-        _Continuation(phase=Phase.SCAN, repos=("unstarted",)),
-        _Continuation(phase=Phase.BUILD, repos=("w",)),
-    )
+    assert _Continuation(phase=Phase.SCAN, repos=("unstarted",)) in plan
+    assert _Continuation(phase=Phase.BUILD, repos=("w",)) in plan
+
+
+# --------------------------------------------------------------------------------------
+# 10a — the SPAN: the plan is the phases from the lowest floor UPWARD, not the floors present
+# --------------------------------------------------------------------------------------
+
+
+def test_the_plan_spans_a_phase_no_repo_is_floored_at_between_two_that_are() -> None:
+    """The defect C1 records: the plan was the SET of floors, so a gap between two floors was
+    never driven, and `fleet resume` transformed a repo it never built — at exit 0.
+
+    Each delegate drives exactly ONE phase and nothing walks the ladder, so a phase the plan
+    omits is not run for anybody. With `{A: TRANSFORM, B: VERIFY}` the pre-fix plan was
+    `[TRANSFORM, VERIFY]`: `A` ends `TRANSFORM = SUCCEEDED`, `BUILD = PENDING`, `_verify_impl`
+    cannot admit it, nothing halts, `halted_phase` is `None` and the verb reports success.
+
+    **The floors are deliberately NON-CONTIGUOUS and deliberately unequal.** Every fixture in
+    this file before this one was contiguous upward from its own minimum, which is why the whole
+    file was GREEN under the defect: a contiguous fixture is blind to it by construction, and a
+    fixture whose repos share one floor is blind for the same reason.
+
+    Unique discriminator of: filling only ABOVE the highest floor rather than across the span
+    (`if phase >= lowest` -> `if phase > max(servable_floors)`). Every sibling keeps passing
+    under that mutation — `{A: TRANSFORM}` still fills BUILD and VERIFY above its own maximum,
+    and the `only` case above still fills VERIFY above `BUILD` — because this is the only case
+    whose missing phase sits BETWEEN two present floors rather than above them all.
+
+    It compares a `{phase: repos}` MAPPING rather than the ordered tuple, for the reason the
+    ascending-order case above gives: the order is that case's to pin, and pinning it twice
+    would leave it discriminating nothing of its own.
+    """
+    plan = cli._continue_from_floors({"A": Phase.TRANSFORM, "B": Phase.VERIFY}, None)
+    assert {entry.phase: entry.repos for entry in plan} == {
+        Phase.TRANSFORM: ("A",),
+        Phase.BUILD: (),
+        Phase.VERIFY: ("B",),
+    }
+
+
+def test_a_scan_floor_does_not_pull_the_span_down_to_phases_it_was_skipped_for() -> None:
+    """The span is measured over the SERVABLE floors. A `SCAN` floor is reported and skipped
+    (ADR-0080 §3), so it is not a repo the span exists to carry.
+
+    Spanning up from `SCAN` here would plan `TRANSFORM` and `BUILD` on a fleet whose only
+    sub-`VERIFY` repo was never scanned — spend for a beneficiary that was skipped, and an
+    invitation to transform un-scanned work.
+
+    Unique discriminator of: taking the span's lower end from every floor rather than from the
+    servable ones (`lowest = min(servable_floors)` -> `lowest = min(grouped)`), which yields
+    `[SCAN, TRANSFORM, BUILD, VERIFY]` here. It is the only case with a `SCAN` floor BELOW a
+    servable one: the all-`SCAN` case has no servable floor at all so the fill never runs, and
+    the `{SCAN, BUILD}` case above asserts membership, which extra groups cannot break.
+
+    It asserts the two ABSENCES and the VERIFY group, and deliberately not the `SCAN` group —
+    the case above owns that, and asserting it here too would take its discrimination away.
+    """
+    plan = cli._continue_from_floors({"unstarted": Phase.SCAN, "B": Phase.VERIFY}, None)
+    planned = {entry.phase for entry in plan}
+    assert Phase.TRANSFORM not in planned, "the SCAN floor pulled the span down to TRANSFORM"
+    assert Phase.BUILD not in planned, "the SCAN floor pulled the span down to BUILD"
+    assert _Continuation(phase=Phase.VERIFY, repos=("B",)) in plan
 
 
 # --------------------------------------------------------------------------------------
@@ -199,6 +280,39 @@ async def test_the_driver_hands_every_delegate_the_glob_and_the_whole_run(
         assert kwargs["run_id"] == "run-1"
 
 
+async def test_the_driver_really_drives_the_phases_above_the_only_floor_there_is(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The WORK, not the exit code. C1's signature is exit 0 with a phase skipped, so a case
+    asserting a non-zero exit code can pass for the wrong reason; this asserts the delegates
+    above the floor were actually ENTERED, and that the continuation still ends clean.
+
+    The fixture is C1's degenerate shape, and it is not adversarial at all: a fleet whose every
+    floor is `TRANSFORM` — the ordinary state after a crash during transform. Pre-fix this drove
+    `TRANSFORM` alone, so the fleet was transformed, never built, never verified, and `fleet
+    resume` exited 0. Both phases above the floor have EMPTY groups here, which is what carries
+    them.
+
+    Unique discriminator of two mutations: bounding the span at the highest floor rather than at
+    `_SERVABLE_PHASES`'s last entry (nothing above `TRANSFORM` is planned), and dropping the
+    span's empty groups back out at the DRIVER (`if entry.phase in _SERVABLE_PHASES` ->
+    `if entry.phase in _SERVABLE_PHASES and entry.repos`) — the plausible "why drive a phase
+    with no repos" optimisation, which re-opens C1 in full while every plan case above stays
+    green, because the plan they inspect is correct. No other driver case has an empty group for
+    either to reach. It asserts the SET of delegated phases, not their order: the order is the
+    plan's.
+    """
+    calls: list[Any] = []
+    result = await _drive(monkeypatch, {"A": Phase.TRANSFORM}, trace=calls)
+    assert sorted(entry[0] for entry in calls if entry != "MUTEX") == [
+        Phase.TRANSFORM,
+        Phase.BUILD,
+        Phase.VERIFY,
+    ], "a repo floored at TRANSFORM was transformed and never built or verified"
+    assert set(result["driven"]) == {"TRANSFORM", "BUILD", "VERIFY"}  # type: ignore[arg-type]
+    assert result["halted"] is None
+
+
 async def test_the_driver_stops_at_the_first_halt(monkeypatch: pytest.MonkeyPatch) -> None:
     """A halted phase ends the continuation; the phases above it are never driven.
 
@@ -230,12 +344,17 @@ async def test_a_scan_floor_is_named_in_the_payload_and_never_served(
     deliberate — its sibling below owns the "nothing servable" shape and asserting the key there
     too would leave this case, the ruling's success criterion, discriminating nothing alone. The
     floors are seeded in sorted order so the repo-ordering mutation cannot claim it either.
+
+    The `driven` assertion is deliberately the WEAK form — "`SCAN` is not among the phases
+    driven" rather than an exact list. The exact list moves with the span above this floor,
+    which the span cases own; asserting it here would make this case redden under every span
+    mutation and leave those cases discriminating nothing of their own.
     """
     result = await _drive(
         monkeypatch, {"unstarted-a": Phase.SCAN, "w": Phase.BUILD, "unstarted-b": Phase.SCAN}
     )
     assert result["scan_floor_not_continued"] == ["unstarted-a", "unstarted-b"]
-    assert result["driven"] == ["BUILD"]
+    assert "SCAN" not in cast("list[str]", result["driven"]), "a SCAN floor was served"
     assert result["halted"] is None
 
 

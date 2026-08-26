@@ -8641,7 +8641,14 @@ def _raise_for_phase(result: Mapping[str, object]) -> None:
 
 @dataclass(frozen=True, slots=True)
 class _Continuation:
-    """One phase §11.5 step 8 must re-drive, and the repos whose floor put it there."""
+    """One phase §11.5 step 8 must re-drive, and the repos whose floor put it there.
+
+    `repos` is **empty** for a phase the plan carries because it lies inside the span rather than
+    because a repo is floored at it. That is the honest reading of the field's own definition —
+    "the repos whose floor put it there" — and an empty tuple is not "nothing to do": the repos
+    floored BELOW that phase pass through it, and the delegate re-derives its own admissions from
+    `only`, never from this tuple.
+    """
 
     phase: Phase
     repos: tuple[str, ...]
@@ -8663,7 +8670,29 @@ _SCAN_SKIPPED_KEY: Final = "scan_floor_not_continued"
 def _continue_from_floors(
     floors: Mapping[str, Phase], only: str | None
 ) -> tuple[_Continuation, ...]:
-    """§11.5 step 8's PLAN: one entry per `(Phase, repos)` group, ascending. **No I/O.**
+    """§11.5 step 8's PLAN: the servable SPAN from the lowest floor upward, ascending. **No I/O.**
+
+    **The span, not the set of floors present.** Each delegate drives exactly ONE phase and
+    nothing walks the ladder, so a phase the plan omits is not run for anybody. Planning the
+    distinct floors instead of the span from the lowest of them is how `{A: TRANSFORM,
+    B: VERIFY}` plans `TRANSFORM, VERIFY` with **BUILD absent**: `A` is transformed, never built,
+    `_verify_impl` cannot admit it, nothing halts, and the verb exits 0 having stranded it
+    mid-ladder — "a success it has not earned", which is what ADR-0076's closing bullet forbade.
+    So every phase of `_SERVABLE_PHASES` at or above the lowest **servable** floor is planned,
+    carrying its own floored repos or none (see `_Continuation`). The upper end is
+    `_SERVABLE_PHASES`'s own last entry rather than a literal, and the lower end is a floor that
+    was actually observed — neither is a hard-coded list.
+
+    **The span is fleet-wide; ADMISSION stays per repo,** so a repo floored above a spanned phase
+    is not re-run at it: `orchestrator.runner.PhaseRunner` admits on a `PENDING` CAS and answers
+    an already-terminal phase with `_already_complete`, which is why §10's *"continue from each
+    repo's re-entry floor"* still holds of every repo while the phases driven are the union.
+
+    **Lowest SERVABLE floor, not lowest floor.** A `SCAN`-floored repo is skipped, not served
+    (below), so it is not a repo the span exists to carry. Spanning up from `SCAN` would plan
+    `TRANSFORM` for a fleet whose only sub-`VERIFY` repo was never scanned — spend for a
+    beneficiary that was skipped, and an invitation to transform un-scanned work. The skip stays
+    the driver's, and its input is unchanged.
 
     `floors` is step 5's `computed_floors`, PASSED IN and never recomputed: the caller has
     already paid for the walk, and a second derivation is free to disagree with the one the
@@ -8671,8 +8700,9 @@ def _continue_from_floors(
     plan for a fleet that does not exist.
 
     `only` is applied with the same predicate the phase drivers use — `fnmatch` over the repo
-    id, as `_wave_repos` does — so a phase reaches the plan only if some repo the delegates
-    would admit is floored there. Wave membership is NOT consulted: it is a SQLite read, this
+    id, as `_wave_repos` does — so the span is measured over the floors of the repos the
+    delegates would admit, and a repo the glob excludes cannot pull the span down. Wave
+    membership is NOT consulted: it is a SQLite read, this
     function performs none, and each delegate re-derives it from the `only` it is handed.
 
     A `Phase.SCAN` group is returned like any other. `phase_floor` really can return
@@ -8687,6 +8717,12 @@ def _continue_from_floors(
         if only is not None and not fnmatch(repo_id, only):
             continue
         grouped.setdefault(floor, []).append(repo_id)
+    servable_floors = [floor for floor in grouped if floor in _SERVABLE_PHASES]
+    if servable_floors:
+        lowest = min(servable_floors)
+        for phase in _SERVABLE_PHASES:
+            if phase >= lowest:
+                grouped.setdefault(phase, [])
     return tuple(
         _Continuation(phase=phase, repos=tuple(sorted(grouped[phase])))
         for phase in sorted(grouped)
@@ -10335,13 +10371,16 @@ def resume(
     match, charging no attempt either way), 5 (re-check each phase's durable evidence and demote
     every repo to its re-entry floor), 6 (recompute `blocked_by`, and move the repos that frees
     into an appended `waves.synthetic = 1` row), 7 (regenerate `migration_state.json`) and **8
-    (continue)** run, plus `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. §11.5's
+    (continue)** run, plus `--repoll-prs`, `--raise-budget` and `--raise-wave-budget`. §10's
     `stub_reconcile` step is still absent, and D80 in `docs/INTEGRATION_HONESTY.md` is its
-    record: this verb continues, and it does not reconcile stubs.
+    record: this verb continues, and it does not reconcile stubs. (§10's, not §11.5's: D80's
+    heading rules the attribution, and §11.5 contains the string zero times.)
 
     **Step 8, and what it will and will not serve (ADR-0080).** The continuation re-enters
-    `fleet transform`/`build`/`verify`'s own composition roots, one group per floor in ascending
-    phase order, and it hands the FIRST halting delegate's exit code back unchanged (§10). A repo
+    `fleet transform`/`build`/`verify`'s own composition roots, every servable phase from the
+    lowest servable floor UPWARD in ascending phase order — not the distinct floors present,
+    which would leave a repo transformed and never built at exit 0 — and it hands the FIRST
+    halting delegate's exit code back unchanged (§10). A repo
     whose floor is `Phase.SCAN` is **reported and skipped, never served** — `fleet scan` takes
     five flags no resume carries and no `wave` at all, so serving that floor means step 8 choosing
     five values the operator never wrote — and the skipped repos are named under

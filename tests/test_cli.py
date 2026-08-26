@@ -2615,10 +2615,18 @@ def test_the_continuation_is_driven_from_step_5s_floors_and_the_declared_config(
         seen.update(kwargs)
         return {"exit_code": int(ExitCode.SUCCESS), "run_id": RUN_ID}
 
+    async def quiet(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"exit_code": int(ExitCode.SUCCESS), "run_id": RUN_ID}
+
     from fleet import cli
 
     monkeypatch.setattr(cli, "_refuse_concurrent_mirror_run", lambda *a, **k: None)
     monkeypatch.setattr(cli, "_build_impl", recorder)
+    # The floor is `BUILD`, so the plan SPANS up to `VERIFY` and the driver really enters
+    # `_verify_impl` — a repo built and not verified is the half of C1 above the floor. It is
+    # stubbed separately rather than with `recorder` so `seen` stays `_build_impl`'s kwargs
+    # alone, which is what the two knob assertions below read.
+    monkeypatch.setattr(cli, "_verify_impl", quiet)
 
     result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
     assert result.exit_code == ExitCode.SUCCESS, result.output
@@ -2629,10 +2637,10 @@ def test_the_continuation_is_driven_from_step_5s_floors_and_the_declared_config(
         "floors-source mutation is a no-op here"
     )
     continuation = payload["continuation"]
-    assert [entry["phase"] for entry in continuation["plan"]] == ["BUILD"], (
+    assert [entry["phase"] for entry in continuation["plan"]] == ["BUILD", "VERIFY"], (
         "step 5's computed floor did not reach step 8's plan"
     )
-    assert continuation["driven"] == ["BUILD"]
+    assert continuation["driven"] == ["BUILD", "VERIFY"]
     assert seen["timeout_s"] == 999, "`budgets.build_timeout_s` did not reach `_build_impl`"
     assert seen["sandboxed"] is True
     assert seen["wave"] is None, "step 8 invented a wave the operator never named"
