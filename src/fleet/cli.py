@@ -8750,6 +8750,13 @@ async def _continue_impl(
     }
     if not servable:
         return result
+    # §11.3/§12.22, once and before the first delegate — the same shape as the mirror mutex
+    # immediately below and for the same reason: `fleet build`/`fleet verify` take this gate at
+    # the top of their own command bodies (cli.py's `_require_disk_headroom(settings)` calls),
+    # `_continue_impl` re-enters `_build_impl`/`_verify_impl` directly and bypasses it, and a
+    # continuation is not exempt from starting real phase work on a volume already under
+    # `preflight.min_free_bytes` (subtask 10c, ADR-0080 §7).
+    _require_disk_headroom(settings)
     _refuse_concurrent_mirror_run(settings, run_id)
     for entry in servable:
         if entry.phase is Phase.TRANSFORM:

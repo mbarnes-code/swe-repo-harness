@@ -2638,6 +2638,54 @@ def test_the_continuation_is_driven_from_step_5s_floors_and_the_declared_config(
     assert seen["wave"] is None, "step 8 invented a wave the operator never named"
 
 
+def test_the_continuation_takes_the_disk_headroom_gate_before_its_first_delegate(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.22's disk-headroom refusal, on the `fleet resume` continuation (subtask 10c).
+
+    `fleet build` and `fleet verify` call `_require_disk_headroom` at the top of their own
+    command bodies (cli.py's two `_require_disk_headroom(settings)` calls) and exit 9 before any
+    phase work starts. ADR-0080 §7 records that `_continue_impl` re-enters `_build_impl`/
+    `_verify_impl` directly and does NOT take it — "newly reachable" once step 8 stopped being a
+    refusal. `_continue_impl` already takes one gate exactly this way, once and "before the first
+    delegate" (its own docstring, ADR-0080 ruling C, for the mirror mutex); this is the same
+    shape for the same reason: a precondition of doing phase work at all, not a property of
+    which phase runs first.
+
+    Unique discriminator of: a missing, or per-delegate-only, `_require_disk_headroom` call on
+    this path. Pre-fix, nothing blocks the plan and the monkeypatched `_build_impl` below runs
+    (`seen` is populated); post-fix, `DiskExhaustedError` (§10 exit 9) is raised before it and
+    `seen` stays empty.
+    """
+    write_config(workspace, fleet=DISK_FLOOR_YAML)
+    _reseal_config_digests(workspace)
+    _step5_mirror(workspace)
+    _worktree, anchor = _arbitration_worktree(workspace)
+    _step5_seed(
+        workspace / "state" / "fleet.db",
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "PENDING", 4: "PENDING"},
+        post_commit_sha={2: anchor},
+    )
+
+    seen: dict[str, object] = {}
+
+    async def recorder(*_args: object, **kwargs: object) -> dict[str, object]:
+        seen.update(kwargs)
+        return {"exit_code": int(ExitCode.SUCCESS), "run_id": RUN_ID}
+
+    from fleet import cli
+
+    monkeypatch.setattr(cli, "_refuse_concurrent_mirror_run", lambda *a, **k: None)
+    monkeypatch.setattr(cli, "_build_impl", recorder)
+
+    result = runner.invoke(app, [*base_args(workspace), "resume"])
+
+    assert result.exit_code == ExitCode.DISK_EXHAUSTED == 9, result.output
+    assert str(IMPOSSIBLE_FLOOR) in result.output, result.output
+    assert "min_free_bytes" in result.output, result.output
+    assert seen == {}, "the BUILD delegate ran before the disk floor was checked"
+
+
 def test_a_halting_delegate_hands_its_own_exit_code_back_through_resume(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
