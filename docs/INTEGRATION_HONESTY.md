@@ -4062,7 +4062,7 @@ re-verified at `8b40498`). This marker settles only what the flag must MEAN when
 *(2026-08-26, round H lane W2 — **the status FIELD moves `OPEN` -> `PARTLY ADDRESSED`; not one
 word above is rewritten, W11's, W13's, W15's and W4's markers included.** One of this entry's five
 columns is now written; four are not, which is exactly what this file's own vocabulary block calls
-`PARTLY ADDRESSED`. Landed in `<W2-COMMIT-SHA>`.*
+`PARTLY ADDRESSED`. Landed in `f9ff651`.*
 
 ***Which leg landed, as a class result rather than a raw total.*** Re-deriving W15's §2
 measurement against the patch, two genuinely different ways — `ast.literal_eval` of
