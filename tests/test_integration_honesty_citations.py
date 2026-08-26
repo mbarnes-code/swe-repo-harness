@@ -50,9 +50,14 @@ is the honest statement of this instrument's blind spot: a citation into the int
 definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
-"the file still has that many lines" are both **invariant under drift** (all 409 resolvable
-citations are in range at ``3dd500d``, and 38 of them are nonetheless unresolved), and a
-whole-file digest would move under any edit at all.
+"the file still has that many lines" are both **invariant under drift** -- every resolvable
+citation is in range and 46 anchored citations are nonetheless unresolved -- and a whole-file
+digest would move under any edit at all. That count is **not** hand-maintained: every census
+number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
+prose and checked against the live survey by
+``test_every_census_number_this_module_states_is_the_number_it_derives``. It exists because this
+sentence and the census comment below once stated two different counts for the same class, and
+the suite could not see it -- nothing read this module's own prose.
 
 Scope, stated so it is not mistaken for more
 --------------------------------------------
@@ -104,6 +109,12 @@ _LEDGER_REL = "docs/INTEGRATION_HONESTY.md"
 # the primary, which does not yet hold it -- the whole difference is this file. The verdict --
 # 414 citations / 409 uniquely resolved / 5 ambiguous / 2 commit-bound / 60 anchored /
 # 46 unresolved / 0 unpinned failures / 0 stale pins -- is identical in both.
+# `Measured at <sha>:` is what marks that paragraph a RECORD of a past tree rather than a live
+# claim, and it is what exempts its numbers -- by that rule, never by a hand-maintained list of
+# sites, which is the part that rots -- from
+# `test_every_census_number_this_module_states_is_the_number_it_derives`. Annotate it if it
+# decays; do not rewrite it. Every census number stated OUTSIDE such a paragraph is a live claim
+# and is checked against the survey.
 # A citation naming a repo-root file now fails loudly in
 # `test_every_pathed_citation_names_a_file_that_exists`, naming the directories searched.
 _SEARCH_DIRS = ("src", "tests", "docs")
@@ -123,6 +134,17 @@ _ANCHORED = re.compile(
     r"`(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + _EXT_ALT + r"))(?P<lines>(?::\d+(?:-\d+)?)+)`"
 )
 _IDENT_PATH = re.compile(r"^\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
+
+# A census claim this module makes about itself, in its own prose: a number, at most six
+# lowercase words, then one of the three phrasings this class is written in. Deliberately
+# vocabulary-bound, and that vocabulary is this check's stated blind spot -- a claim worded
+# some other way escapes it.
+_CENSUS_CLAIM = re.compile(
+    r"\b(?P<n>\d+)\s+(?:[a-z]+\s+){0,6}(?:unresolved|do not resolve|fail to resolve)\b"
+)
+# The by-rule exemption: `Measured at <sha>:` opens a paragraph recording a PAST tree, whose
+# numbers legitimately diverge from today's and must be annotated rather than rewritten.
+_RECORD_MARKER = re.compile(r"Measured at [0-9a-f]{7,40}:")
 
 
 # Every anchored citation that did not resolve at 3dd500d, as (anchor, citation).
@@ -585,3 +607,76 @@ def test_a_commit_bound_citation_is_never_offered_for_resolution(ledger_survey: 
         assert not _CITATION.search(m.group(0)), (
             f"a commit-bound citation {m.group(0)!r} was matched as a live citation"
         )
+
+
+def _record_exempt_lines(source_lines: list[str]) -> set[int]:
+    """1-based line numbers inside a ``Measured at <sha>:`` record paragraph.
+
+    The paragraph runs from the marker line to the end of its contiguous block -- the first
+    following line that is blank, or that is not a ``#`` comment when the marker sits in one.
+    Derived from the text, not from a list of sites: a new record paragraph is exempt the
+    moment it is written, and moving one does not need this function edited.
+    """
+    exempt: set[int] = set()
+    for i, line in enumerate(source_lines):
+        if not _RECORD_MARKER.search(line):
+            continue
+        in_comment = line.lstrip().startswith("#")
+        j = i
+        while j < len(source_lines):
+            nxt = source_lines[j].strip()
+            if j > i and (not nxt or (in_comment and not nxt.startswith("#"))):
+                break
+            exempt.add(j + 1)
+            j += 1
+    return exempt
+
+
+def test_every_census_number_this_module_states_is_the_number_it_derives(
+    ledger_survey: Survey,
+) -> None:
+    """This module's prose is an input to the next author, so it is checked like code.
+
+    The defect this exists to stop is measured, not hypothetical: the docstring above said the
+    census was one number while the comment on ``_SEARCH_DIRS`` said another, both landed in the
+    same commit, and **every check in this file passed the whole time** -- because the quantity
+    nothing watched was *agreement between what this module says about its census and what it
+    derives*. A self-contradiction cannot leave that quantity unchanged: the two statements are
+    the same class, so one of them must differ from the derivation.
+
+    The claim is parsed **out of** the prose and checked against the survey, so editing the
+    sentence changes what is asserted; a text-to-text comparison would only prove the copies
+    agree, and copies agree on a false sentence just as readily. Matched over the
+    whitespace-normalised source with offsets mapped back to line numbers -- both census
+    sentences in this file are line-wrapped, and a line-oriented sweep sees neither.
+
+    Stated blind spots: a census claim worded outside ``_CENSUS_CLAIM``'s vocabulary is invisible
+    here, and a claim inside a ``Measured at <sha>:`` record is exempt by rule and unchecked.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    norm, omap = _normalised(source)
+    exempt = _record_exempt_lines(source.split("\n"))
+    derived = sum(1 for a in ledger_survey.anchored if not a.resolves)
+
+    checked: list[int] = []
+    wrong: list[str] = []
+    for m in _CENSUS_CLAIM.finditer(norm):
+        line = source.count("\n", 0, omap[m.start()]) + 1
+        if line in exempt:
+            continue
+        checked.append(line)
+        if int(m.group("n")) != derived:
+            wrong.append(
+                f"{Path(__file__).name}:{line}: this module states {m.group('n')} for the "
+                f"anchored-unresolved census; the survey derives {derived} "
+                f"({m.group(0).strip()!r})"
+            )
+    assert not wrong, (
+        "this module contradicts its own measurement -- correct the prose, or annotate it as a "
+        "`Measured at <sha>:` record if it is a claim about a past tree:\n" + "\n".join(wrong)
+    )
+    assert checked, (
+        "no live census claim was found in this module's prose, so this check is asserting "
+        "nothing. Either the census sentence was deleted, or it was reworded out of "
+        f"_CENSUS_CLAIM's vocabulary ({_CENSUS_CLAIM.pattern!r})."
+    )
