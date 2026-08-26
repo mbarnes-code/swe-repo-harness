@@ -142,6 +142,23 @@ twice, independently, in lanes auditing their own work:**
   every arm came out flat, and **all four checks passed vacuously**. Caught by reading the WAL header's
   `ckpt_seq` (0 throughout).
 
+> **[Editorial correction — 2026-08-26, round-H lane W3. Every word above is left exactly as its
+> author wrote it; this marker records what falsified one of its claims and where that claim came
+> from.]** The framing *"Round G measured this twice, independently"* does not hold for the **first**
+> bullet. That `sha256(whole file)` incident is **round F's**, lane **W13**: round F's `progress.md`
+> records it as *"W13's first instrument was wrong and its own control caught it"*, and **both** round
+> G's and round H's `LANE-PROTOCOL.md` carry it under the heading **"Round F's measured results"**,
+> item 1. Round G's W3 never ran that instrument — its report calls the digest *"round F's result
+> 1, re-derived here as a landed check"* and deliberately chose a different quantity, which is the
+> fifth check **working**, not a second failure. Only the **second** bullet (the WAL probe, `ckpt_seq`
+> 0 throughout) is a round-G finding, lane **W8**.
+>
+> **The class is unaffected and the amendment rests on it unchanged**: the four-check battery passed
+> unanimously over nothing **once in round F and once in round G** — one instance per round, in
+> consecutive rounds, each found by the lane auditing its **own** instrument. What does not survive is
+> the raw total, *"twice, independently"*, attributed to a single round. The `CLAUDE.md` amendment this
+> section proposes carries the per-round attribution instead.
+
 **The fifth check the rules do not yet require: name the quantity the instrument watches, and say why
 the defect could not leave it unchanged.** A third lane then applied it unprompted and rejected three
 candidate quantities by measurement — *file exists* and *line in range* are **invariant under drift**
