@@ -38,6 +38,7 @@ from uuid import UUID
 
 import aiosqlite
 import pytest
+import structlog
 from pydantic import BaseModel, Field
 
 from fleet.graph.sequence import WavePlan
@@ -59,6 +60,7 @@ from fleet.models.enums import (
     TransformTier,
 )
 from fleet.models.graph import MigrationWave
+from fleet.models.state import SCHEMA_VERSION
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
 from fleet.orchestrator.budgets import (
     Ceilings,
@@ -1149,6 +1151,122 @@ async def test_a_refused_precondition_re_runs_the_phase_whole_and_never_skips_it
     assert report.outcomes["repo-a"].checkpoint_rejected is True
     assert report.outcomes["repo-a"].skipped_complete is False
     assert (await harness.phase_row("repo-a"))[0] == "SUCCEEDED"
+
+
+class _NotAPhaseCheckpoint(BaseModel):
+    """A checkpoint written by some other class, so `load` refuses it on the model name alone.
+
+    Deliberately field-compatible with `PhaseCheckpoint`: if the rejection were keyed on the
+    DATA rather than on the recorded class, this payload would validate and the test would be
+    measuring nothing.
+    """
+
+    completed_units: list[str] = []
+    remaining_units: list[str] = []
+    attempt: int = 1
+
+
+def _unreadable_events(logs: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [entry for entry in logs if entry.get("event") == "checkpoint_unreadable"]
+
+
+async def test_a_checkpoint_at_another_schema_version_is_reported_with_BOTH_versions(
+    harness: Harness,
+) -> None:
+    """A stored checkpoint the loader refuses must NAME what it refused and why (Rule 11).
+
+    The quantity watched is the `checkpoint_unreadable` emit and its `rejection`/`detail` pair,
+    not "some log line appeared": the runner already emits a `checkpoint_rejected` for the
+    worker's verdict on a checkpoint that loaded fine, so an instrument that counted emits, or
+    matched on the substring "checkpoint", would read that unrelated event as this one. The
+    defect cannot leave this quantity unchanged, because the pre-fix loader returned
+    `loaded.payload` and dropped `rejection` and `detail` on the floor with nothing emitted at
+    all — and `detail` is asserted against the two version NUMBERS resolved here rather than
+    against `checkpoints.py`'s message text, which nothing would keep in step with a copy.
+
+    This is the path a `SCHEMA_VERSION` bump takes for every repo holding a checkpoint, which is
+    what makes the silence expensive: the whole fleet re-runs completed units and says nothing.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    await checkpoints.save(
+        harness.writer,
+        run_id=RUN_ID,
+        repo_id="repo-a",
+        phase=PHASE,
+        payload=PhaseCheckpoint(completed_units=["u1", "u2"], remaining_units=["u3"], attempt=1),
+        schema_version=SCHEMA_VERSION - 1,
+    )
+    BEHAVIOURS["repo-a"] = [ok()]
+
+    with structlog.testing.capture_logs() as logs:
+        report = await harness.runner().run_wave(0)
+
+    events = _unreadable_events(logs)
+    assert len(events) == 1, "the discarded checkpoint was never reported"
+    assert events[0]["rejection"] == "SCHEMA_VERSION_MISMATCH"
+    assert events[0]["repo_id"] == "repo-a"
+    assert str(SCHEMA_VERSION - 1) in events[0]["detail"], "the stored version is not named"
+    assert str(SCHEMA_VERSION) in events[0]["detail"], "the loader version is not named"
+    assert report.outcomes["repo-a"].checkpoint_unreadable is True
+    assert [call[3] for call in CALLS] == [UNITS], (
+        "an unreadable checkpoint must re-run the phase whole from its anchor"
+    )
+
+
+async def test_a_checkpoint_from_another_model_reports_THAT_rejection_not_the_schema_one(
+    harness: Harness,
+) -> None:
+    """The report must identify WHICH refusal happened, not merely that one did.
+
+    `checkpoints.load` has four ways to refuse stored bytes and the schema bump is only one of
+    them; a report that names a constant tells an operator to go looking at the schema version
+    when the actual cause was a renamed class, a truncated envelope, or data the model refused.
+    So this case fixes the rejection kind while holding everything else — the emit, the outcome
+    flag, the whole-phase re-run — identical to the case above.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    await checkpoints.save(
+        harness.writer,
+        run_id=RUN_ID,
+        repo_id="repo-a",
+        phase=PHASE,
+        payload=_NotAPhaseCheckpoint(completed_units=["u1"], remaining_units=["u2", "u3"]),
+    )
+    BEHAVIOURS["repo-a"] = [ok()]
+
+    with structlog.testing.capture_logs() as logs:
+        report = await harness.runner().run_wave(0)
+
+    events = _unreadable_events(logs)
+    assert len(events) == 1, "the discarded checkpoint was never reported"
+    assert events[0]["rejection"] == "MODEL_MISMATCH", (
+        "the report names a rejection other than the one that happened"
+    )
+    assert report.outcomes["repo-a"].checkpoint_unreadable is True
+
+
+async def test_a_key_with_no_checkpoint_at_all_is_not_reported_as_a_discard(
+    harness: Harness,
+) -> None:
+    """The control, and the half a "did anything get emitted?" assertion cannot express.
+
+    `ABSENT` is the ordinary fresh dispatch: nothing was stored, so nothing was thrown away.
+    Reporting it would fire once per repo on the first wave of every run and bury the four
+    refusals that DO mean landed work is gone — the loudness would be spent on the one case that
+    carries no information. A fix that simply reported every `rejection` is silent under both
+    cases above and fails only here.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [ok()]
+
+    with structlog.testing.capture_logs() as logs:
+        report = await harness.runner().run_wave(0)
+
+    assert _unreadable_events(logs) == [], "a fresh key was reported as a discarded checkpoint"
+    assert report.outcomes["repo-a"].checkpoint_unreadable is False
 
 
 async def test_a_refused_checkpoint_is_not_resurrected_by_the_next_partial(

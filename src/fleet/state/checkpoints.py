@@ -71,6 +71,13 @@ class LoadedCheckpoint[M: BaseModel]:
     def usable(self) -> bool:
         return self.payload is not None
 
+    @property
+    def discarded_stored_work(self) -> bool:
+        """Bytes WERE stored under this key and were refused: the phase re-runs work it had
+        already landed. `ABSENT` is deliberately not this — nothing was there to discard, and a
+        key with no checkpoint is the ordinary fresh dispatch rather than something to report."""
+        return self.rejection is not None and self.rejection is not CheckpointRejection.ABSENT
+
 
 _ENVELOPE_KEYS: Final = ("schema_version", "model", "data")
 

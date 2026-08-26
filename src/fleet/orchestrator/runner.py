@@ -281,6 +281,13 @@ class RepoOutcome:
     """`preconditions_hold` refused the checkpoint: it was discarded and the phase re-ran whole.
     Surfaced on the outcome rather than only in a log, because a rejection means landed work was
     thrown away and that must be visible to whoever reads the wave."""
+    checkpoint_unreadable: bool = False
+    """`checkpoints.load` refused the STORED checkpoint before the worker ever saw it — a stale
+    `schema_version`, a different model class, a truncated envelope, or a payload the model would
+    not validate. Distinct from `checkpoint_rejected`, which is the worker's verdict on a
+    checkpoint that loaded fine; these two answer different questions and a reader that cannot
+    tell them apart cannot tell a schema bump from a moved tree. Surfaced here for the same
+    reason as its sibling: landed work was thrown away."""
     skipped_complete: bool = False
     """The checkpoint owed nothing and its preconditions held, so no rung was dispatched."""
 
@@ -513,7 +520,10 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                     # Either way this task has no claim and must not touch the worktree.
                     return replace(outcome, status=await self._status(repo_id), admitted=False)
 
-            checkpoint = await self._load_checkpoint(repo_id)
+            loaded = await self._load_checkpoint(repo_id)
+            if loaded.discarded_stored_work:
+                outcome = replace(outcome, checkpoint_unreadable=True)
+            checkpoint = loaded.payload
             cancel = asyncio.Event()
             dispatched = await self._dispatch(
                 repo_id,
@@ -1127,7 +1137,25 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
 
     # ------------------------------------------------------------------ checkpoints
 
-    async def _load_checkpoint(self, repo_id: str) -> PhaseCheckpoint | None:
+    async def _load_checkpoint(
+        self, repo_id: str
+    ) -> checkpoints.LoadedCheckpoint[PhaseCheckpoint]:
+        """Load this phase's checkpoint, and REPORT a refusal instead of dropping it (Rule 11).
+
+        `checkpoints.load` never raises on a bad checkpoint: a stale `schema_version`, a
+        different model class, a truncated envelope and a payload the model rejects all come back
+        as `payload=None` with a named `rejection` and a `detail`, and that module's own contract
+        for this caller is to log both and proceed. Returning `loaded.payload` alone dropped
+        both, so the phase re-ran units it had already completed with nothing emitted anywhere —
+        the only symptom was repeated work, noticed by whoever happened to be watching.
+
+        The whole `LoadedCheckpoint` is returned rather than the payload because the caller owes
+        the wave a `RepoOutcome.checkpoint_unreadable`; a log line alone is the standard this
+        codebase already declined for `checkpoint_rejected`, for the same reason.
+
+        This changes what is REPORTED and nothing about what is accepted: which checkpoints
+        `load` refuses is its decision and is untouched here.
+        """
         loaded = await checkpoints.load(
             self.ctx.read_conn,
             run_id=self.ctx.run_id,
@@ -1135,7 +1163,15 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
             phase=self.phase,
             model=PhaseCheckpoint,
         )
-        return loaded.payload
+        if loaded.discarded_stored_work:
+            self.ctx.log.warning(
+                "checkpoint_unreadable",
+                repo_id=repo_id,
+                phase=int(self.phase),
+                rejection=str(loaded.rejection),
+                detail=loaded.detail,
+            )
+        return loaded
 
     async def _save_checkpoint(
         self,
