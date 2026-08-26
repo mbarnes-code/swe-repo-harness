@@ -5883,6 +5883,58 @@ After the fix that class is **0 affirming sites**; one `wal_checkpoint` occurren
 `docs/SPEC.md` and it is the correction's own **denial** (*"nothing under `src/` issues …"*), which
 a count-based detector cannot distinguish from the claim it retired — subtract it by rule.
 
+---
+
+**2026-08-26 — annotation, lane W9 (round H), at `<W9-COMMIT-SHA>`. Nothing above is rewritten: no
+figure, sentence or verdict of W13's or W8's is altered, and nothing here is retracted.** W8's
+marker above records the leg that kept this entry open — the corrected §5 sentence's structural
+claim *"the tree's only read transaction is `build_state`'s"* was a **stated rule, not a
+mechanism** — and names what would close it: an instrument deriving the `BEGIN` set from the
+source and failing by `file:line`. **That instrument now exists**, written by a sibling lane in
+its own commit this round: `tests/test_read_transaction_statements.py`. It parses the claims out
+of §5's paragraph rather than comparing copies of it (so editing the prose changes what is
+asserted), derives the executed transaction set from `src/` with `ast`, and fails by `file:line`
+when a second read transaction exists; it binds the paragraph's other parsed claims in the same
+way — the `wal_autocheckpoint` value and the module constant said to carry it, the denial that
+anything under `src/` issues `PRAGMA wal_checkpoint`, and the debounce rate — and it separately
+asserts that the `BEGIN` is terminated inside the function that opens it, so no caller can hold
+the snapshot past that function's return. A second `BEGIN DEFERRED` added anywhere under `src/`
+therefore no longer falsifies `docs/SPEC.md` with the suite green, which is exactly the silent
+falsification W8 recorded as unguarded.
+
+**What that instrument cannot catch, from the residual it records about itself — stated here so
+no reader takes "bound" for "closed".** Two of its recorded limits bear directly on this entry:
+
+* **Everything it asserts is static.** No WAL file is grown and no transaction is executed by it.
+  It binds the *structural* claim about how many read transactions the source contains; the
+  physics — the 8 000-write-transaction fixture, the held reader byte-identical to the
+  autocheckpoint-disabled arm, the 8.12× figure — remain W8's runtime measurements recorded above
+  and are **not** reproduced by any test. **This file must not be cited as reproducing D81's
+  fixture.**
+* **A quoted `;` inside a SQL script literal buys a bounded silence in the instrument's
+  recognition-gap arm.** Because that arm's gate splits on `;` without parsing string quoting, a
+  literal carrying a quoted semicolon is rejected whole and the arm never looks at a `BEGIN`
+  inside it. Its lane measured the bound rather than asserting it: the **same** literal handed to
+  an execute call is still caught by the primary census arm, which does not consult that gate, so
+  what escapes is a transaction statement that both sits in such a literal **and** is executed
+  through no call the file can resolve. What is lost is the net under the net, not the census.
+
+The instrument's residual is longer than these two and is recorded in the file itself rather than
+summarised here; it is explicit that it is a floor and not a ceiling.
+
+**Why the heading still reads `PARTLY ADDRESSED`, and why that is a ruling rather than an
+oversight.** By the "Status vocabulary, used strictly" block above, `PARTLY ADDRESSED` means some
+legs landed and others are still open, with the entry saying which — and by the ruling recorded at
+`39862ec`, the heading is a status **field** governed by that vocabulary. The read-transaction leg
+is now bound and is no longer the reason. **The second unclosed item is**: whether a process
+*outside* the harness — an operator's `sqlite3` shell, or a command overlapping a wave — can hold
+a read transaction across it. R3 tagged that `[UNVERIFIED]`; W8 recorded that it did not measure
+it either; and the new instrument does not reach it, its own residual stating that its scope is
+`src/` and that a read transaction opened by a test, a script or an operator's shell is outside
+every assertion it makes. So the item is now carried unmeasured by a third lane, and the entry
+stays `PARTLY ADDRESSED` for that item alone rather than for the one this annotation closes.
+Nothing here promotes the entry, and nothing here weakens W8's `[UNVERIFIED]` tag.
+
 
 ## D82 — OPEN, recorded only. `WaveScheduler` is documented "one instance per (run, phase)" but its wall clock is per-`(run, wave)` with no phase, so one exit-4 breach in TRANSFORM leaves BUILD and VERIFY of that wave permanently un-admittable
 
