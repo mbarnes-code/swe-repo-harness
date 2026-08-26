@@ -2957,6 +2957,32 @@ class TokenUsage(FleetModel):
     # A locally-served model has no price. `cost_usd = 0.0` with a non-empty `backend` is a
     # legitimate free call, NOT a cache hit; `attempts.llm_cache_hit` is the only cache signal
     # (§11.2, §11.6), so a local profile does not silently look like a fully-cached run.
+    llm_cache_lookups: int = Field(default=0, ge=0)
+    llm_cache_hits: int = Field(default=0, ge=0)
+    # ADR-0094, §11.6. The `llm_cache` signal, carried on the data that already flows from the
+    # call to the `attempts` row that bills it. COUNTERS and not a `bool`: `accumulate` is used as
+    # a running fold seeded with a zero `TokenUsage()`, so a boolean AND over that seed answers
+    # `False` for every attempt those sites produce, and a boolean OR is any-hit — which
+    # `state/schema.sql`'s `llm_cache_hit = 1 => cost_usd = 0` forbids the moment one call in a
+    # multi-call attempt misses and the summed `cost_usd` is non-zero.
+    # NOT `cache_read_tokens`' neighbourhood: that field is the PROVIDER's prompt cache. These two
+    # count lookups against `llm_cache`, the harness's own store.
+    # These two fields and the property below are NORMATIVE and this listing must not shrink to
+    # match a shorter reading of §11.6 — a reconciler who deletes them so this listing matches an
+    # older copy of `models/tasks.py` restores D62 leg (b), leaving the column silently at 0.
+
+    @property
+    def all_served_from_llm_cache(self) -> bool:
+        """The value `attempts.llm_cache_hit` takes for this (possibly accumulated) usage.
+
+        ALL-hit, and derived rather than chosen: `state/schema.sql` states `1 => cost_usd = 0` and
+        `accumulate` SUMS `cost_usd`, so an any-hit flag on a one-miss attempt publishes a row the
+        schema forbids. `llm_cache_lookups > 0` is normative and not defensive: `all()` over
+        nothing is `True`, so without it a DETERMINISTIC rung, an `--llm-cache off` run and a
+        default-constructed `TokenUsage` all report themselves fully cached. Do not simplify that
+        guard away to make the code match a shorter sentence.
+        """
+        return self.llm_cache_lookups > 0 and self.llm_cache_hits == self.llm_cache_lookups
 
 
 class ModelCapabilities(FleetModel):
@@ -7185,7 +7211,18 @@ Determinism therefore comes from **caching, not sampling**:
   re-rolling a decision.
 - The cache is **not** scoped to `run_id`. Cross-run reuse is the point: re-running the fleet
   after fixing one adapter re-pays only for the prompts that actually changed.
-- Cache hits set `attempts.llm_cache_hit = 1` and `cost_usd = 0`, so cost accounting stays honest.
+- An attempt **all** of whose LLM calls were replayed from `llm_cache` sets
+  `attempts.llm_cache_hit = 1`, and its `cost_usd` is then `0`, so cost accounting stays honest.
+  ALL-hit rather than any-hit is forced, not chosen: `state/schema.sql`'s own column comment is
+  `1 => cost_usd = 0`, and `workers/base.py::accumulate` **sums** `cost_usd`, so a multi-call
+  attempt with one miss has `cost_usd > 0` and an any-hit flag would publish a row contradicting
+  the schema. The flag is derived from `TokenUsage.llm_cache_lookups` / `llm_cache_hits` —
+  counters and **not** a boolean, because `accumulate` is used as a running fold seeded with a
+  zero `TokenUsage()` and a boolean AND over that seed is `False` for every attempt. An attempt
+  that consulted the cache zero times (a DETERMINISTIC rung, or `--llm-cache off`) is **not** a
+  hit; a reconciler must not simplify that guard away to make the code match a shorter sentence,
+  because `all()` over nothing is `True` and the result is the `cost_usd == 0` conflation §11.2
+  exists to forbid.
 
 **Proving two runs equivalent.** `fleet status --format json --digest` emits a `run_digest`:
 sha256 over the canonical JSON of the wave assignment (`wave_index, node_kind, node_id` sorted),

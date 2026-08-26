@@ -11260,3 +11260,121 @@ this repository has no CI configuration. `extend-exclude` in `[tool.ruff]` — i
 > Ruff applies its own default excludes to the `.py` side (1,660 − 1,651 = 9) and resolves
 > `.toml`/`.ipynb` that `find -name '*.py'` cannot see. Both numbers are right for what each says.
 > This note exists so a later sweep does not "correct" one into the other.
+
+---
+
+## ADR-0094 — `attempts.llm_cache_hit` is ALL-HIT, and it is carried by two summed counters on `TokenUsage` rather than by a boolean: `AND` is not merely undesirable in `accumulate`, it is **unimplementable**, because five of the seven `usage = TokenUsage()` seeds in `src/fleet/` are folded through it and a boolean `AND` over a seed that is a hit of nothing answers `False` for every attempt they produce
+
+**Status:** ACCEPTED. Landed round H, lane W2, alongside the code it decides.
+
+**Context.** `docs/SPEC.md` §11.6 says *"Cache hits set `attempts.llm_cache_hit = 1` and
+`cost_usd = 0`"* and does not say what the flag means for an attempt that made several model
+calls, some hits and some misses. Multi-call attempts are the normal case, not the exception.
+`docs/INTEGRATION_HONESTY.md` D62 records the history: lane W13 deferred the semantics question
+explicitly; round G lane W4 ruled **ALL-HIT** in that entry's body; round F lane W15 (promoted as
+`docs/superpowers/plans/llm-cache-hit-attribution-research.md`) established that no attribution
+route through `on_hit` can work, because one `CachingModelClient` serves a whole wave and
+`LlmCallRecord` carries no `run_id`/`repo_id`/`phase`/`attempt`. This ADR is written in the same
+commit as the code, so the doc cannot spend a round forbidding what the code does.
+
+**Decision, part 1 — the semantics. ALL-HIT, and it is derived, not preferred.**
+`attempts.llm_cache_hit` is `1` iff **every** model call the attempt made was replayed from
+`llm_cache`. `state/schema.sql`'s column comment is an implication rather than a label —
+`1 => served from llm_cache, cost_usd = 0` — and `workers/base.py::accumulate` **sums** `cost_usd`.
+So a multi-call attempt with one miss has `cost_usd > 0`, and an any-hit flag would publish a row
+contradicting the schema's own comment. This restates round G lane W4's ruling; it is not a new
+verdict, and it is recorded here because a ruling that lives only in a ledger entry's body is not
+where the next implementer looks.
+
+**Decision, part 2 — the mechanism, and this part CORRECTS one word of that ruling.** W4 inverted
+lane W13's recommended `OR` in `accumulate` to **`AND`**. `OR` is indeed any-hit and is correctly
+refused. But `AND` cannot be written, and the reason is structural rather than stylistic:
+`accumulate` is used as a **running fold seeded with a zero `TokenUsage()`**. Measured with `ast`,
+per enclosing function rather than by line proximity: **7** functions in `src/fleet/` seed
+`usage = TokenUsage()`, and **5** of those fold that seed with `accumulate(usage, ...)` —
+`workers/base.py::execute`, `workers/buildgen.py::run`, `workers/buildgen.py::_module_bazel`,
+`workers/prwriter.py::_compose`, `workers/rewrite.py::run`. (`workers/buildverify.py::run` and
+`workers/prwriter.py::run` seed without folding. The 7 and the 5 are different quantities and must
+not be collapsed into one; D62's body carries a third, the count of `accumulate(` **call sites**.)
+The seed is a hit of nothing, so a boolean `AND` over the fold answers `False` for **every**
+attempt those five functions produce — the flag would never leave `0`, which is D62's original
+symptom arriving through the fix.
+
+So the flag is carried as two counters on `TokenUsage`, `llm_cache_lookups` and `llm_cache_hits`,
+both **summed** by `accumulate` exactly as its docstring already promises ("Sum the countable
+fields"). Summing has no identity element to poison. The ALL-hit rule is derived in exactly one
+place, `TokenUsage.all_served_from_llm_cache` = `llm_cache_lookups > 0 and llm_cache_hits ==
+llm_cache_lookups`, and both producers read it rather than restating it.
+
+**The `llm_cache_lookups > 0` half is normative, not defensive.** `all()` over nothing is `True`.
+Without that guard a DETERMINISTIC rung, an `--llm-cache off` run and a default-constructed
+`TokenUsage` all report themselves fully cached — the `cost_usd == 0`-means-cached conflation that
+`models/tasks.py`'s `cost_usd` comment and SPEC §11.2 exist to forbid, arriving through the
+property instead of through the ledger. A later author must not simplify it away to make the code
+match a shorter sentence.
+
+**Counting both sides of the lookup is also normative.** `CachingModelClient` stamps
+`llm_cache_lookups`/`llm_cache_hits` on the hit path (`_replay`) **and** on the miss path
+(after `_store_response`, so the persisted `LlmCallRecord.usage` is a record of the call and not
+of this lookup). A usage that only ever recorded hits cannot distinguish "one call, cached" from
+"one hit and one miss": `accumulate` folds those two identically, and the ALL-hit rule then reads
+a paid attempt as free. The `mode == "off"` early return stamps nothing, which is correct — it
+consulted no cache, so it reports no lookup.
+
+**Consequences.** (i) `TokenUsage` gains two fields and one plain `@property` — plain, not
+`@computed_field`, so SPEC §12.46(i)'s round-trip criterion is untouched. (ii) The flag is
+attributed by data flow, so **no per-attempt or per-worker model client is created**;
+`tests/test_run_context_llm_cache.py::test_the_client_handed_to_a_worker_is_the_one_this_file_drives`
+is untouched and `worker.llm is ctx.model_client` still holds. (iii) `on_hit` is **retained**,
+unchanged, as the out-of-band observer hook `scoped()` propagates; `llm/cache.py`'s class
+docstring, which described it as this column's route, is corrected in the same change. (iv) Round
+G lane W4's recorded *cost* of ALL-HIT stands and is now shipped: partial hits are the normal case
+and the column will read `0` most of the time. Nothing here softens that. **The column still has
+no consumer, and this states that precisely rather than repeating W4's wording**: W4 measured
+*"no `SELECT`, no projection, no branch anywhere in `src/`"* — this change adds a `SELECT` and a
+projection (`iter_attempts` names the column and `AttemptRow` carries it), so that sentence is now
+two-thirds false and one-third true. The part that matters is the part still true: **nothing in
+`src/` branches on the value, and `iter_attempts` itself has zero callers in `src/`** (grep at the
+patch). The column is written truthfully and read by nobody, which is the honest state to record. (v) D62 moves `OPEN` -> `PARTLY ADDRESSED`: of its five
+columns `llm_cache_hit` is closed and `llm_failovers`, `llm_backend`, `input_tokens`,
+`output_tokens` are not. The class *"declared in `state/schema.sql` and never nameable by
+`record_attempt`"* goes **7 -> 6**.
+
+**Rejected.** (a) A boolean `TokenUsage.cache_hit` OR-ed in `accumulate` (lane W13's
+recommendation) — that is any-hit, and it breaks `schema.sql`'s stated invariant the moment one
+call in an attempt misses. (b) The same boolean AND-ed (round G lane W4's inversion) — measured
+unimplementable above; **do not re-propose it.** (c) A `ContextVar` carrying the current attempt —
+a module global with extra steps, against Guardrail 3. (d) A per-attempt `scoped()` client whose
+`on_hit` closes over `(repo_id, phase, attempt)` — it reddens the identity assertion at `53e5d8d`
+by construction, and that assertion is a deliberate regression guard. (e) Buffering hits and
+`UPDATE`-ing them in at flush — `PhaseRunner._drive` drains before the `attempts` row exists, so
+the `UPDATE` matches zero rows. (f) Softening SPEC §11.6's sentence to match code — the
+`supports_effort` failure mode. §11.6 is instead made **exact** about ALL-hit and about the
+zero-lookup guard, with an anchor forbidding a reconciler from growing the code to match a shorter
+reading of it. **`docs/SPEC.md` carries TWO sites for this decision and both move in this commit,
+because one alone regenerates the defect:** the §11.6 prose above, and the `class
+TokenUsage(FleetModel)` **code listing**, which ended at `cost_usd` — exactly where the two
+counters and the property are inserted. Left unedited, `docs/SPEC.md` would contradict itself at
+one commit, naming the counters normatively in §11.6 while listing a model without them, and a
+reconciler resolves that by deleting the counters — restoring D62 leg (b). The listing therefore
+carries the sentence forbidding its own shrinkage inside the listing itself, as a Python comment
+rather than as prose, because `tests/test_blocked_by_writer_statements.py::_FENCE` tries **every**
+fenced block in `docs/SPEC.md` as Python — the info string is deliberately not trusted — so this
+listing is read as code whether or not any check currently compares it to one.
+
+**What that does not mean, measured rather than assumed.** An earlier draft of this clause said a
+non-Python line in that fence *"is a module-wide failure"*. That is **false**, and false in the
+one way `CLAUDE.md` Rule 11 already records as corrected: the module-wide collection error was the
+**pre-`e93cbe3`** behaviour, and `e93cbe3` moved the resolution into a fixture precisely so a
+location failure became a per-case error with the module still imported. Re-measured here by
+injecting one prose line into this fence — gate `1 0`, and the fence census moves 19 -> 20
+non-Python, so the fault genuinely landed — `tests/test_blocked_by_writer_statements.py` reports
+**20 passed**, identical to its baseline, and all ten `docs/SPEC.md`-reading test files report
+**399 passed**. **Nothing reddens at all**, because that module's `_MIRRORS` compares the
+`RepoState.blocked_by` block, which is a **different** fence (`class RepoState`, §5.5), while this
+listing is §5.4. So the comment form is a property of how the document is read, not a gate this
+listing is behind. It is chosen so the listing stays machine-parseable for the next check that
+wants it — the re-review of this very commit compared listing to code by `ast`-parsing both — and
+this paragraph exists so no later author cites a gate that is not there. Round F lane W15 recommended not editing that sentence at all, on the ground that
+the code did not meet it; the code now does, so that ground is spent — but the recommendation was
+recorded, and this is its answer rather than an oversight of it.

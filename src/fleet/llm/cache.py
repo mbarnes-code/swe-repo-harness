@@ -392,9 +392,16 @@ class CachingModelClient:
     deleting one construction. **A hit is indistinguishable from a fresh call at this boundary
     except for cost**: the same validated object, the same `mode`, a `ModelResponse` of the same
     shape. Cost is the one intended difference (`cost_usd = 0.0`, §11.6), and because a local
-    profile legitimately answers at `0.0` too, the cache *signal* is reported out-of-band through
-    `on_hit` — which is exactly why §6 has an `attempts.llm_cache_hit` column and not a
+    profile legitimately answers at `0.0` too, the cache *signal* is reported separately from
+    cost — which is exactly why §6 has an `attempts.llm_cache_hit` column and not a
     `cost_usd == 0` convention.
+
+    That signal travels on `TokenUsage.llm_cache_lookups` / `llm_cache_hits`, set on BOTH sides
+    of the lookup below, because it has to reach a row this class cannot see: one client serves a
+    whole wave, `LlmCallRecord` carries no `run_id`/`repo_id`/`phase`/`attempt`, and the usage is
+    the only thing that already flows from the call to the attempt that made it. `on_hit` is
+    retained and unchanged — it is an out-of-band observer hook (`scoped()` propagates it), not
+    the column's route.
     """
 
     def __init__(
@@ -499,7 +506,20 @@ class CachingModelClient:
             budget=budget,
         )
         await self._store_response(role, route, parts, response, schema_sha)
-        return response
+        # The MISS half of the §11.6 signal, and the reason the flag can be ALL-hit at all: a usage
+        # that only ever recorded hits cannot distinguish "one call, cached" from "one hit and one
+        # miss", and `accumulate` would fold the two identically. Stamped AFTER `_store_response`
+        # on purpose — a row persisted with `llm_cache_lookups = 1` would replay a phantom second
+        # lookup on every future hit. `mode == "off"` returns far above and stamps nothing: it
+        # consulted no cache, so it reports no lookup and `all_served_from_llm_cache` is `False`
+        # rather than vacuously true.
+        return response.model_copy(
+            update={
+                "usage": response.usage.model_copy(
+                    update={"llm_cache_lookups": response.usage.llm_cache_lookups + 1},
+                ),
+            },
+        )
 
     def stream[T: BaseModel](
         self,
@@ -561,7 +581,9 @@ class CachingModelClient:
             self._on_hit(record)
         return ModelResponse(
             value=response_model.model_validate_json(record.response_json),
-            usage=record.usage.model_copy(update={"cost_usd": 0.0}),
+            usage=record.usage.model_copy(
+                update={"cost_usd": 0.0, "llm_cache_lookups": 1, "llm_cache_hits": 1},
+            ),
             mode=record.structured_output_mode,
             finish_reason="stop",
             repairs=0,

@@ -3869,7 +3869,7 @@ shipped run for the first time. **No claim in this entry changes** — the cache
 
 ---
 
-**D62 — OPEN. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
+**D62 — PARTLY ADDRESSED. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
 `llm_backend`, `input_tokens`, `output_tokens` and `llm_cache_hit` are dead in shipped code.**
 Verified against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**.
 
@@ -4058,6 +4058,56 @@ nothing. Both legs this entry's markers name are still open — leg (a), `record
 `RunContext.__post_init__` still does not pass (`orchestrator/context.py:233-241` constructs
 `CachingModelClient` with three positional and two keyword arguments, none of them `on_hit`;
 re-verified at `8b40498`). This marker settles only what the flag must MEAN when someone writes it.)*
+
+*(2026-08-26, round H lane W2 — **the status FIELD moves `OPEN` -> `PARTLY ADDRESSED`; not one
+word above is rewritten, W11's, W13's, W15's and W4's markers included.** One of this entry's five
+columns is now written; four are not, which is exactly what this file's own vocabulary block calls
+`PARTLY ADDRESSED`. Landed in `<W2-COMMIT-SHA>`.*
+
+***Which leg landed, as a class result rather than a raw total.*** Re-deriving W15's §2
+measurement against the patch, two genuinely different ways — `ast.literal_eval` of
+`record_attempt`'s `sql` assignment for the `INSERT` column list, and `PRAGMA table_info(attempts)`
+on a database built from the real `state/schema.sql` — gives **31 declared, 25 named**. The class
+*"declared in the schema and never nameable by `record_attempt`"* goes **7 -> 6**:
+`integration_ref, container_id, input_tokens, output_tokens, llm_backend, llm_failovers`. Of this
+entry's five, **`llm_cache_hit` is closed and `llm_failovers`, `llm_backend`, `input_tokens`,
+`output_tokens` remain open.** `AttemptRow` gained the field, `record_attempt`'s `INSERT` names the
+column, and `iter_attempts` reads it back.
+
+***Leg (b) is closed by a different door than the one this entry describes, and `on_hit` is
+untouched.*** The flag is not attributed by `on_hit` at all: `TokenUsage` gained two counters
+(`llm_cache_lookups`, `llm_cache_hits`) which `CachingModelClient` stamps on **both** sides of the
+lookup, and they ride the usage that already flows from the call to the attempt that billed it.
+`on_hit` is retained, unchanged, as the out-of-band observer hook `scoped()` propagates; only
+`cache.py`'s class docstring, which described it as the column's route, is corrected. W15's §4
+"door 2" is NOT used, so `53e5d8d`'s `worker.llm is ctx.model_client` was not relaxed and did not
+need to be.
+
+***CORRECTION to one word of round G lane W4's ruling above — the ALL-HIT verdict stands, its
+combinator does not.*** W4 inverted W13's recommended `OR` to **`AND`** in `accumulate`. Measured
+at the patch with `ast`, per enclosing function rather than by line proximity: **7** functions in
+`src/fleet/` seed `usage = TokenUsage()` and **5** of those fold that seed with
+`accumulate(usage, ...)` — `base.py::execute`, `buildgen.py::run`, `buildgen.py::_module_bazel`,
+`prwriter.py::_compose`, `rewrite.py::run`. (`buildverify.py::run` and `prwriter.py::run` seed
+without folding; the 7 and the 5 are different quantities and are not one number. Note also that
+W4's own **7** above counts `accumulate(` CALL SITES, a third quantity again.) A boolean `AND`
+over a fold whose seed is a hit of nothing answers `False` for **every** attempt those five
+produce — so `AND` is not merely undesirable, it is unimplementable as a boolean, and `OR` is
+any-hit, which W4 correctly refused. The fix keeps W4's semantics exactly and drops the boolean:
+two summed counters have no identity element to poison, and the ALL-hit rule is derived once, in
+`TokenUsage.all_served_from_llm_cache` = `lookups > 0 and hits == lookups`. The `lookups > 0`
+half is load-bearing: `all()` over nothing is `True`, so without it every DETERMINISTIC rung and
+every `--llm-cache off` run would self-report as fully cached. Recorded as ADR-0094.
+
+***W4's "the cost of the ruling" paragraph stands unaltered and is now shipped.*** Partial hits
+are still the normal case and the column will still read `0` most of the time; nothing here
+softens that, and no consumer was added.
+
+***What this annotation does not establish.*** The four remaining columns are untouched; no
+suite-wide certification is claimed here (a sibling held the primary checkout's pytest session
+while this was written); and `docs/SPEC.md` §11.2's "written in **one** transaction" claim about
+six columns is still inaccurate for `integration_ref`, which W15 recorded and this change neither
+worsens nor repairs.)*
 
 ---
 

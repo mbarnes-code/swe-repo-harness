@@ -61,6 +61,34 @@ class TokenUsage(FleetModel):
     # A locally-served model has no price. `cost_usd = 0.0` with a non-empty `backend` is a
     # legitimate free call, NOT a cache hit; `attempts.llm_cache_hit` is the only cache signal
     # (§11.2, §11.6), so a local profile does not silently look like a fully-cached run.
+    llm_cache_lookups: int = Field(default=0, ge=0)
+    llm_cache_hits: int = Field(default=0, ge=0)
+    # The `llm_cache` (§11.6) signal, carried on the data that already flows from the call to the
+    # `attempts` row. COUNTERS and not a `bool`, for a measured reason: `workers/base.py`'s
+    # `accumulate` is used as a running fold seeded with a zero `TokenUsage()`
+    # (`base.py`, `buildgen.py`, `prwriter.py`, `rewrite.py` all open with `usage = TokenUsage()`),
+    # so a boolean AND over that fold is `False` for every attempt that ever existed and a
+    # boolean OR is any-hit. Two summed counters have no identity element to poison, and they
+    # keep `accumulate` doing exactly what its own docstring says it does: summing.
+    # NOT `cache_read_tokens`' neighbourhood: that field is the PROVIDER's prompt cache. These
+    # two count lookups against `llm_cache`, the harness's own store.
+
+    @property
+    def all_served_from_llm_cache(self) -> bool:
+        """The value `attempts.llm_cache_hit` takes for this (possibly accumulated) usage.
+
+        ALL-hit, not any-hit, and that is forced rather than chosen: `state/schema.sql`'s column
+        comment states `1 => cost_usd = 0`, and `accumulate` SUMS `cost_usd`. One miss in a
+        multi-call attempt therefore leaves `cost_usd > 0`, so an any-hit flag would publish a
+        row that contradicts the schema's own invariant.
+
+        `llm_cache_lookups > 0` is the other half and is not a formality: a DETERMINISTIC rung, a
+        `--llm-cache off` run and a default-constructed `TokenUsage` all reach here with zero
+        lookups, and `all()` over nothing is `True`. Without this guard every attempt that never
+        consulted the cache would report itself fully cached — the `cost_usd == 0` conflation the
+        comment above exists to forbid, arriving through a different door.
+        """
+        return self.llm_cache_lookups > 0 and self.llm_cache_hits == self.llm_cache_lookups
 
 
 class ModelCapabilities(FleetModel):

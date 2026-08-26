@@ -3741,6 +3741,11 @@ class _TransformSink:
                 duration_ms=result.duration_ms,
                 stderr_tail="" if error is None else error.stderr_tail,
                 cost_usd=result.usage.cost_usd,
+                # §11.6, ALL-hit. Derived from the SAME accumulated `TokenUsage` the line above
+                # bills from, which is the whole point of carrying the signal on the usage: the
+                # flag and the cost it constrains (`schema.sql`: `1 => cost_usd = 0`) cannot drift
+                # apart, because neither is read from anywhere the other is not.
+                llm_cache_hit=result.usage.all_served_from_llm_cache,
                 commit_sha=commit,
                 # §3.2 step 6.1's `already_applied` event: at least one unit of this dispatch was
                 # skipped because the guard found its effect already in the tree. It is what makes
@@ -6043,6 +6048,7 @@ class _AttemptWriter:
         steps: Sequence[StepRecord],
         error: WorkerError | None,
         cost_usd: float = 0.0,
+        llm_cache_hit: bool = False,
     ) -> list[str]:
         stamp = _iso(self._clock())
         written: list[str] = []
@@ -6070,6 +6076,12 @@ class _AttemptWriter:
                     duration_ms=step.duration_ms,
                     stderr_tail="" if step.ok or error is None else error.stderr_tail,
                     cost_usd=cost_usd if not written else 0.0,
+                    # Attributed exactly as `cost_usd` on the line above is: to the FIRST step row
+                    # of the rung. The two must ride the same row or the pair contradicts
+                    # `schema.sql`'s `llm_cache_hit = 1 => cost_usd = 0` — a later step row would
+                    # carry the flag beside a `cost_usd` that is 0 only because the first row took
+                    # it, which reads as a cache hit on a step that made no LLM call.
+                    llm_cache_hit=llm_cache_hit if not written else False,
                 )
             )
             written.append(attempt_id)
@@ -6141,6 +6153,7 @@ class _BuildSink:
             steps=output.steps,
             error=result.error,
             cost_usd=result.usage.cost_usd,
+            llm_cache_hit=result.usage.all_served_from_llm_cache,
         )
         if output.module_lock_foreign_registry:
             # The durable half of `_publish_module_lock`'s decision. The publish already happened
@@ -6225,6 +6238,7 @@ class _VerifySink:
             steps=output.steps,
             error=result.error,
             cost_usd=result.usage.cost_usd,
+            llm_cache_hit=result.usage.all_served_from_llm_cache,
         )
         if output.report is not None:
             await _record_verification(

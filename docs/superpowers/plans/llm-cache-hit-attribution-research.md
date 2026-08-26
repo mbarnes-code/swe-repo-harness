@@ -92,8 +92,21 @@ wave-shared client").
 
 **Door 1 — `record_attempt` writes the column from an `AttemptRow` field.** Needs
 `repository.py` (unowned, available to me) **and a producer**. AST over `src/`: `AttemptRow(` is
-constructed at exactly **`cli.py:3698`** (`_TransformSink.__call__`) and **`cli.py:6028`**
-(`_BuildAttemptSink.record`) — `repository.py:1097` is the `iter_attempts` *read*. `cli.py` is
+constructed at exactly **`cli.py:3715`** (`_TransformSink.__call__`) and **`cli.py:6053`**
+(`_AttemptWriter.record`) — `repository.py:1097` is the `iter_attempts` *read*. `cli.py` is
+*[EDITORIAL, 2026-08-26, round H lane W2. **Two of the three citations in the sentence above were
+repointed; the third was correct and is untouched.** All numbers below re-measured at `5f14ca0`,
+the ref this lane's change is authored against. As written at `53e5d8d` the sentence read
+`cli.py:3698`, `cli.py:6028` (`_BuildAttemptSink.record`) and `repository.py:1097`. (i) `3698` had
+rotted to **3715** and still resolved to the right symbol. (ii) `6028` had rotted to **6053**, and
+more seriously **the name `_BuildAttemptSink` does not resolve at all** — no such symbol exists in
+the tree; the class is `_AttemptWriter` (`cli.py:6008` at `5f14ca0`). This lane found it only
+because a test import of the old name raised, which is the shape of rot a reader cannot catch by
+eye. (iii) `repository.py:1097` **re-measures correct at `5f14ca0` and was NOT edited** — it is
+recorded here so a later sweep does not "fix" a right number. Forward notice, because the commit
+carrying this marker moves two of them itself: after it lands, the `cli.py` construction sits at
+**6059** and the `repository.py` read at **1101**, both shifted by lines this same commit inserts
+above them. Nothing else in this document is edited.]*
 W13's this round. Landing the field and the column without a producer would create a **fifth**
 declared-and-never-assigned field beside `llm_cache`, `llm_cache_mode`, `llm_policy` and the two
 `LlmFindingSink` callbacks — the exact anti-pattern D79 and this entry exist to record. I did not

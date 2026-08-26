@@ -239,6 +239,13 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
         output_tokens=sum(u.output_tokens for u in usages),
         cache_read_tokens=sum(u.cache_read_tokens for u in usages),
         cost_usd=sum(u.cost_usd for u in usages),
+        # Summed, not AND-ed. Every caller uses this as a running fold seeded with a zero
+        # `TokenUsage()`, and a boolean AND over that seed is `False` for every attempt; a
+        # boolean OR is any-hit, which `schema.sql`'s `llm_cache_hit = 1 => cost_usd = 0` forbids
+        # the moment one call in the attempt missed and this `sum` of `cost_usd` is non-zero.
+        # `TokenUsage.all_served_from_llm_cache` derives the flag from the pair.
+        llm_cache_lookups=sum(u.llm_cache_lookups for u in usages),
+        llm_cache_hits=sum(u.llm_cache_hits for u in usages),
     )
 
 
