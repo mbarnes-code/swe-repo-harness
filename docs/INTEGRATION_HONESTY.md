@@ -5885,7 +5885,7 @@ a count-based detector cannot distinguish from the claim it retired — subtract
 
 ---
 
-**2026-08-26 — annotation, lane W9 (round H), at `<W9-COMMIT-SHA>`. Nothing above is rewritten: no
+**2026-08-26 — annotation, lane W9 (round H), at `f087876`. Nothing above is rewritten: no
 figure, sentence or verdict of W13's or W8's is altered, and nothing here is retracted.** W8's
 marker above records the leg that kept this entry open — the corrected §5 sentence's structural
 claim *"the tree's only read transaction is `build_state`'s"* was a **stated rule, not a
