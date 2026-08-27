@@ -224,6 +224,73 @@ _RESIDUAL = """Not bound, stated rather than implied:
    file can resolve -- both conditions at once. Arm 2 is the recognition-gap net, so what is lost
    is the net under the net, not the primary census.
 
+14. **Comment stripping is NOT quote-aware, and that buys a bounded SILENCE -- the bad direction.**
+   `_strip_sql_comments` closed a live escape that was pre-existing at `924b159`: a second executed
+   reader whose `BEGIN` followed a leading `--` comment left this file **10 passed**, and so did
+   `/* */` inline, `/* */` spanning lines, and the `--`-then-`executescript`-script form. All three
+   recognition arms shared one assumption -- *a statement's text opens with its own first keyword*
+   -- and it is removed once, in `_statements`, rather than patched in the arm that was exercised.
+
+   What it costs: a `--` inside a **quoted** SQL string blanks the rest of that line, so a real
+   `BEGIN` after it on that line is hidden. Unlike item 12's `;`, whose mis-split fires **loudly**,
+   this one is **silent**, and silence is the direction this file has twice refused to trade
+   toward.
+
+   **Measured as a flip, not described.** This was disclosed in words for a round before anyone
+   ran it, which is the sibling of the failure item 12 names: a disclosure the reader *can* see but
+   that was never measured. The input is live SQL (verified against sqlite 3.45.1, `executescript`
+   accepts it)::
+
+       "SELECT tag FROM runs WHERE tag = '--'; BEGIN DEFERRED; SELECT 1 FROM runs; COMMIT;"
+
+   Executed under `src/` it is **RED pre-fix** (uniqueness case) and **GREEN post-fix**, gate
+   +5/-0. That is old-fails / new-passes on one input -- this project's discriminating shape
+   pointed the wrong way -- and it is the honest cost of this item, stated as a number rather than
+   as a caveat.
+
+   It is admitted for one reason, and it is a reachability bound rather than a construction
+   one: of the **87** strings reaching an execute-family call under `src/` at `924b159`, **zero
+   contain `--`, zero contain `/*` and zero contain `;`** -- the same class result item 12 rests
+   on, re-derived here by an independent AST walk. The raw total is predicate-dependent (a reviewer
+   counted 75 for item 12's version of it); the class result is the part that carries the claim.
+
+   The alternative was rejected on measurement, not taste: a quote-aware strip would let an
+   **unbalanced** quote swallow the rest of a script silently, converting a shipped loud verdict
+   into a miss -- item 12's refusal arriving by a different token. The block form is already biased
+   loud: `/\\*[\\s\\S]*?\\*/` requires its terminator, so an unterminated `/*` strips nothing.
+
+   **The comment class is closed rather than merely reduced, and that is checkable.** SQLite has
+   exactly two comment forms, and both are handled in every position: leading, trailing, and
+   *interior* -- `BEGIN /* mode */ DEFERRED` is real SQLite that opens a read transaction, and it
+   is why comments are blanked to a **space** rather than to nothing. Two shapes that look like
+   members and are not: `#` is not a SQLite comment (`unrecognized token: "#"`) and block comments
+   do not nest (`/* a /* b */ */` is a syntax error). All five verified against sqlite 3.45.1.
+
+   **What this item does NOT claim is that the widening is free in the other direction.** Stripping
+   comments lets `_sql_script_literals` see a literal's real first keyword, and widening that gate
+   is what produced this file's one historical loud-wrong failure (item 11). Measured at `924b159`
+   by loading the pre-fix and post-fix modules side by side against the same tree: the gate's
+   admitted set is **identical, 315 literals before and 315 after, with 0 admitted only after**,
+   and arm 2's `BEGIN` sites are the same three.
+
+   **The cost this widening can carry is NOT "a literal is newly admitted" -- it is a RED ON
+   DOCUMENTATION, and that wording matters because it names the failure this file has already
+   committed once.** A review supplied the case, and it is a flip, gate +3/-0::
+
+       _CR2_USAGE = "-- fleet resume --\nBEGIN by choosing a wave"
+
+   Pure prose, not a docstring, nothing to do with SQL. **GREEN pre-fix, RED post-fix** -- and it
+   fails at the mode-vocabulary control claiming *"a transaction mode has dropped out of the
+   recognition vocabulary"*, which is a false verdict about the instrument on a literal that is not
+   a statement at all. That is item 11's route, re-opened by one token.
+
+   It is acceptable **only because the class is empty and stays checked**: of the **8781**
+   non-docstring string literals under `src/` at `924b159`, **295 open with `--` or `/*` and 0 are
+   newly admitted, 0 newly RED** (independent AST walk; a reviewer counting only `--` reports 357
+   carrying it against this walk's 388 for either token -- predicate-dependent raw totals, one
+   class result). Emptiness of a class today is not a property, which is why **M16 stays a
+   permanent control** rather than being retired as settled.
+
 """
 
 
@@ -300,8 +367,50 @@ _BEGIN = re.compile(r"^BEGIN(?:\s+(?P<mode>DEFERRED|IMMEDIATE|EXCLUSIVE|TRANSACT
 _READ_MODES = frozenset({"", "DEFERRED", "TRANSACTION"})
 
 
+#: SQLite has exactly two comment forms: `--` to end of line, and `/* ... */`, which may span
+#: lines. Both are matched here; the block form is non-greedy and **requires its terminator**, so
+#: an unterminated `/*` strips nothing rather than swallowing the rest of the script -- the loud
+#: direction, chosen for the reason `_RESIDUAL` item 12 gives.
+_SQL_COMMENT = re.compile(r"--[^\n]*|/\*[\s\S]*?\*/")
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """`sql` with its SQL comments replaced by a space.
+
+    **This is the root of an escape a review measured, and it is removed once here rather than
+    patched in the three arms that suffered it.** Every recognition step in this file decides what
+    a statement is by reading its *first characters* -- `_BEGIN` anchors `^BEGIN`,
+    `_sql_script_literals` takes `statement.split(None, 1)[0]`, and `_statements_opening_with_begin`
+    anchors `^BEGIN\\b`. All three therefore shared one assumption: **a statement's text opens with
+    its own first keyword.** A SQL comment falsifies that, and SQLite does not care --
+    `conn.execute("-- refresh the snapshot\\nBEGIN DEFERRED")` opens a read transaction (measured on
+    sqlite 3.45.1: `in_transaction` True through both `execute` and `executescript`, for `--`,
+    for `/* */` inline, and for `/* */` spanning lines).
+
+    Measured at `924b159` before this existed: a second live reader whose `BEGIN` follows a leading
+    `--` comment left the file **10 passed**, and so did all three of the other comment shapes. The
+    one shape that was *not* silent was a **trailing** comment, and it was worse than silent in a
+    different way -- it reddened the mode-vocabulary control with the message "a transaction mode
+    has dropped out of the recognition vocabulary", which is a misdiagnosis of a live second
+    reader. Stripping first makes that site fail as what it is.
+
+    Blanked to a space, not to nothing, so that `BEGIN/*x*/DEFERRED` reads `BEGIN DEFERRED` and not
+    `BEGINDEFERRED`.
+
+    The cost, disclosed here and in `_RESIDUAL` item 14: this is not quote-aware, for the same
+    reason the `;` split below is not (item 12 -- a quote-aware scanner trades a loud wrong verdict
+    for a silent miss on an unbalanced quote). So a `--` inside a quoted SQL string blanks the rest
+    of its line. That direction is **silent**, which is the bad one; it is bounded by reachability
+    rather than by construction, and the bound is measured, not assumed: of the **87** strings that
+    reach an execute-family call under `src/` at `924b159`, **zero contain `--`, zero contain `/*`
+    and zero contain `;`** -- the same class result item 12 rests on, re-derived here.
+    """
+    return _SQL_COMMENT.sub(" ", sql)
+
+
 def _statements(sql: str) -> list[str]:
-    """`sql` split into its `;`-separated statements, stripped, empties dropped.
+    """`sql` with its comments stripped, split into its `;`-separated statements, stripped,
+    empties dropped.
 
     **Every recognition step in this file goes through here, and the first version did not have
     it.** `_BEGIN` anchors `^...$`, so it reads a whole literal as one statement -- and a review
@@ -323,8 +432,13 @@ def _statements(sql: str) -> list[str]:
     direction that matters that is harmless -- a mis-split fragment simply fails `_BEGIN` -- but a
     fragment reading exactly `BEGIN DEFERRED` inside a quoted string would be a false positive.
     This file would rather fire loudly than miss another escape.
+
+    **A third recognition step ran through here and was still escaped**, by the same shape one
+    level down: comments. `_strip_sql_comments` above is that fix, and it is applied before the
+    split so that every arm inherits it -- the split itself must see a `;` that a `--` comment
+    would otherwise have hidden behind it.
     """
-    return [part.strip() for part in sql.split(";") if part.strip()]
+    return [part.strip() for part in _strip_sql_comments(sql).split(";") if part.strip()]
 
 
 
@@ -972,13 +1086,13 @@ def test_the_retired_arm_two_name_stays_retired() -> None:
 
 def test_the_residual_is_recorded_rather_than_implied_closed() -> None:
     """CLAUDE.md's stop rule: an honest disclosure beats a mechanism that looks enforced. The
-    thirteen things this file cannot catch -- and, since a review found that direction
+    fourteen things this file cannot catch -- and, since a review found that direction
     missing entirely,
     the two it wrongly *can* catch -- are enumerated in `_RESIDUAL`, and this asserts they stay
     enumerated — a residual quietly deleted is how a partial binding starts reading as closure."""
     items = re.findall(r"^\d+\. ", _RESIDUAL, flags=re.MULTILINE)
-    assert len(items) == 13, (
-        f"_RESIDUAL enumerates {len(items)} gaps, expected 13. If a gap was genuinely closed, say "
+    assert len(items) == 14, (
+        f"_RESIDUAL enumerates {len(items)} gaps, expected 14. If a gap was genuinely closed, say "
         f"which test closed it in the same change; if one was added, update this count."
     )
     # Normalised, because a line-oriented substring check certifies a class as fixed when it is
