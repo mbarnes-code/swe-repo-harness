@@ -8294,7 +8294,65 @@ async def _build_impl(
                     if not members:
                         continue
                     driven.append(index)
-                    if published and snapshot is not None:
+                    # D84: the re-cut below is one `_wave_snapshot` plus one `_plan_build` per
+                    # member, and `_plan_build` runs `worktree remove --force`, a `shutil.rmtree`
+                    # fallback, `worktree prune` and `worktree add --detach --force`. On a wave
+                    # whose wall clock is already spent, all of that is git mutation for members
+                    # `_run_build_wave`'s `admit` will not admit: it returns `admitted=()`, the
+                    # members stay PENDING at 0 attempts and the verb exits 4. Skipping it moves
+                    # none of that. Control falls through to `_check_root_file_domain`, whose
+                    # coverage half reads the KEYS of `plans` — which a re-cut never changes, it
+                    # only replaces a value — and whose containment half reads the PASS-2
+                    # worktree, cut from a snapshot taken after the run's last ingest and so
+                    # already holding every `dest` in the domain.
+                    #
+                    # `published` is deliberately NOT cleared when the re-cut is skipped: the
+                    # re-cut is still owed. It is in fact never read again, because a breached
+                    # wave's report carries an exit code and the loop `break`s on it below.
+                    #
+                    # PASS 2 above is the other pre-admission git mutation in this function. It
+                    # is NOT guarded here, and that is a DEFERRED DEFECT — not a stated boundary.
+                    # The stop rule's "documented boundary" means adversarial-only, and this is
+                    # reachable on an ordinary path (below), so it stays an open defect that this
+                    # change did not fix. Two measured reasons not to have patched it HERE:
+                    #
+                    #   1. It is not in this guard's class. PASS 2 is the ONLY populator of
+                    #      `plans`, and PASS 3, PASS 4 and `_check_root_file_domain` all read
+                    #      `plans` and the worktrees it cuts, regardless of what `admit` does. So
+                    #      it is not "git mutation solely for work that cannot run" — though its
+                    #      consumers do sit on the same doomed path.
+                    #   2. The ONE candidate fix that was tried — "every wave is breached", the
+                    #      only predicate that fits a site with no wave index — empties `plans`,
+                    #      and `_check_root_file_domain`'s coverage half then raises
+                    #      `RootFileDomainDriftError` naming every repo, so the run exits 1 where
+                    #      the breached-wave contract fixes it at 4. That is a result about ONE
+                    #      candidate, NOT about the class of fixes: whether any fix exists was
+                    #      never measured, and nothing here should be read as saying it does not.
+                    #
+                    # The residue is reachable, not adversarial: `waves` has no phase column, so
+                    # TRANSFORM stamps `wave_started_at` for every wave — measured non-NULL after
+                    # `fleet transform`, NULL only before any phase has run — and the clock is
+                    # cumulative across phases. A `fleet build` started more than
+                    # `budgets.wave_max_wallclock_s` (default 14 400 s) after its transform
+                    # reaches PASS 2 with every wave ALREADY breached, on a fresh run with no
+                    # resume: transform before lunch, build after. Filed OPEN; D84 is PARTLY
+                    # ADDRESSED, not fixed.
+                    if (
+                        published
+                        and snapshot is not None
+                        and not await _wave_is_breached(
+                            settings,
+                            writer=writer,
+                            read_conn=read_conn,
+                            repository=repository,
+                            run_id=run_id,
+                            wave_index=index,
+                            phase=Phase.BUILD,
+                            # The same narrowing `_run_build_wave` gives the scheduler it builds
+                            # for this wave, so the predicate is read off the same store.
+                            only=members,
+                        )
+                    ):
                         # A previous wave published, so this wave's members are re-cut from a
                         # fresh snapshot: their internal dependencies' generated `BUILD.bazel`
                         # files are on the branch now and their worktrees must contain them.
