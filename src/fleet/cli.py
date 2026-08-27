@@ -3670,6 +3670,43 @@ class _ScopedWaveStore:
         )
 
 
+async def _wave_is_breached(
+    settings: FleetSettings,
+    *,
+    writer: StateWriter,
+    read_conn: aiosqlite.Connection,
+    repository: SqliteStateRepository,
+    run_id: str,
+    wave_index: int,
+    phase: Phase,
+    only: Sequence[str] | None,
+) -> bool:
+    """Has this wave already spent `budgets.wave_max_wallclock_s`? (D84)
+
+    The `_impl` drivers prepare every member's git BEFORE `_run_*_wave` composes the scheduler
+    that decides whether anything can be admitted at all, so on a breached wave they cut branches,
+    anchors and worktrees for work that will never run. The predicate they need is
+    `WaveScheduler.breached`, but the scheduler is constructed inside `_run_*_wave` — after the
+    loops that would have to consult it. So it is constructed here instead, from the same inputs,
+    and the formula is not copied: `breached` is the one definition of it.
+
+    `descendants` is deliberately NOT supplied. It is admission's ordering input and `breached`
+    reads only `store.wave_started_at`, `clock` and `budgets`; supplying it would run
+    `_ordering_pairs` and build a graph once per wave for a predicate that cannot consult it.
+    This helper is therefore the `_run_*_wave` scheduler MINUS that one field, which is a
+    disclosure rather than a claim that the two objects are identical.
+    """
+    scheduler = WaveScheduler(
+        run_id=run_id,
+        phase=phase,
+        store=_ScopedWaveStore(SqliteSchedulerStore(writer=writer, read_conn=read_conn), only),
+        db=repository,
+        budgets=settings.config.budgets,
+        clock=_now,
+    )
+    return await scheduler.breached(wave_index)
+
+
 class _TransformSink:
     """Persists one dispatch's ADR-0024 pointers under the fence that produced it (§11.5).
 
@@ -4453,24 +4490,39 @@ async def _transform_impl(
                             now=_now(),
                             max_attempts=ladder,
                         )
-                    for repo_id in members:
-                        if repo_id in plans:
-                            continue
-                        try:
-                            plans[repo_id] = await _prepare_repo(
-                                settings,
-                                writer=writer,
-                                run_id=run_id,
-                                repo_id=repo_id,
-                                dest_path=dest_paths.get(repo_id),
-                                import_specifier=specifiers.get(repo_id, repo_id),
-                                rules=rules,
-                                now=_now(),
-                            )
-                        except (TransformStepUnavailableError, GitError, OSError) as exc:
-                            await _abandon_repo(
-                                writer, run_id, repo_id, detail=str(exc), now=_now()
-                            )
+                    # D84: a wave whose wall clock is already spent admits nothing, so every
+                    # branch, anchor and worktree `_prepare_repo` cuts below is git mutation for
+                    # work that cannot run. Skipping it changes no verdict: control falls through
+                    # to `_run_transform_wave`, which produces the same exit-4 report — `admit`
+                    # returns `admitted=()`, the members stay PENDING and consume no attempt.
+                    if not await _wave_is_breached(
+                        settings,
+                        writer=writer,
+                        read_conn=read_conn,
+                        repository=repository,
+                        run_id=run_id,
+                        wave_index=index,
+                        phase=Phase.TRANSFORM,
+                        only=members if only is not None else None,
+                    ):
+                        for repo_id in members:
+                            if repo_id in plans:
+                                continue
+                            try:
+                                plans[repo_id] = await _prepare_repo(
+                                    settings,
+                                    writer=writer,
+                                    run_id=run_id,
+                                    repo_id=repo_id,
+                                    dest_path=dest_paths.get(repo_id),
+                                    import_specifier=specifiers.get(repo_id, repo_id),
+                                    rules=rules,
+                                    now=_now(),
+                                )
+                            except (TransformStepUnavailableError, GitError, OSError) as exc:
+                                await _abandon_repo(
+                                    writer, run_id, repo_id, detail=str(exc), now=_now()
+                                )
                     try:
                         report = await _run_transform_wave(
                             settings,
@@ -8463,6 +8515,25 @@ async def _verify_impl(
                             now=_now(),
                             max_attempts=MAX_ATTEMPTS,
                         )
+                    # D84: same class, same remedy as `_transform_impl`'s prepare loop, but the
+                    # guard is read once per wave and consulted below rather than wrapping the
+                    # loop — and that is REQUIRED, not a preference. A breached wave's observable
+                    # behaviour must not move, and a member's STATUS is part of what must not
+                    # move. `_dest_for`'s §3.4 refusal calls `_abandon_repo`, which writes
+                    # REQUIRES_HUMAN_INTERVENTION; wrapping the loop would leave that member
+                    # PENDING instead, changing the very thing the guard must preserve. So the
+                    # refusal keeps running: `_dest_for` is pure, and the guard sits after it and
+                    # before `_prepare_verify`, which is the only git mutation here.
+                    breached = await _wave_is_breached(
+                        settings,
+                        writer=writer,
+                        read_conn=read_conn,
+                        repository=repository,
+                        run_id=run_id,
+                        wave_index=index,
+                        phase=Phase.VERIFY,
+                        only=members,
+                    )
                     for repo_id in members:
                         if repo_id in plans:
                             continue
@@ -8486,6 +8557,12 @@ async def _verify_impl(
                                 phase=Phase.VERIFY,
                                 kind="VerifyPreparationFailed",
                             )
+                            continue
+                        if breached:
+                            # D84: the snapshot ref, the `worktree remove --force`/`rmtree`, the
+                            # `worktree prune` and the `worktree add` below are all git mutation
+                            # for a member `admit` will not admit. Fall through to
+                            # `_run_verify_wave` and its unchanged exit-4 report.
                             continue
                         try:
                             plans[repo_id] = await _prepare_verify(
