@@ -168,6 +168,14 @@ brief, that is the orchestrator's call.
 Measured by pointing the same survey at each file; the module is already root- and file-parameterised,
 so the code change is one constant becoming a tuple. The cost is the pin and the immediate red:
 
+> **Partly superseded, 2026-08-27 — round I, lane W4, against `924b159`.** "one constant becoming a
+> tuple" no longer describes the change. `tests/test_integration_honesty_citations.py` now carries a
+> frozen `DocProfile`, and a second profile must additionally **declare a disposition** — `assert`, or
+> `not_applicable` with a reason — for each category `_CATEGORIES` names, because a document lacking a
+> category would otherwise turn every check over it into a vacuous green. Nothing in the table below is
+> retracted. Two of its figures were re-derived at `924b159` and are unchanged (`docs/DECISIONS.md`:
+> 346 citations, 66 anchored; `docs/SPEC.md`: 0); the remaining columns were not re-measured.
+
 | file | citations | unique | ambiguous | **path resolves to nothing** | anchored | would-be pins | green |
 |---|---|---|---|---|---|---|---|
 | `docs/DECISIONS.md` | 346 | 303 | 12 | **31** | 66 | 52 | 14 |
