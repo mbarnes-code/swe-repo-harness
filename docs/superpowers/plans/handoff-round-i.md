@@ -157,6 +157,35 @@ live, checked the `finally:` durability path. **It was rigorous over the wrong f
 `CLAUDE.md` already says *"key recognition on what the code DOES, not on where its text sits"* — about
 detectors. **It applies to choosing which tests to run**, and nobody had noticed.
 
+> **FALSIFIED IN PART (2026-08-27), lane W3 — the conclusion holds and the REASON does not.
+> `94a2653`'s five reds reproduce exactly; the clause *"which is what actually drives
+> `_continue_impl`"* does not. Nothing above is changed, per Guardrail 7 — this is the record of
+> what round H's close believed.**
+> Re-measured at `94a2653` in a detached worktree, whole files, **no `-k` and no node-ID
+> selection**: `tests/test_resume_continue.py` **5 failed / 8 passed**, `tests/test_cli.py`
+> **133 passed**. That is the conclusion this section draws, and it reproduces.
+>
+> * **Both files drive `_continue_impl`.** A pytest-plugin counter wrapping `cli._continue_impl`
+>   (`functools.wraps`; `fleet.__file__` pinned to the worktree and asserted before any test
+>   result) reads **6 executions in each file** at `94a2653`.
+> * **Both files execute the changed line.** `94a2653` adds a single
+>   `_require_disk_headroom(settings)` call inside `_continue_impl`. A caller-attributed probe
+>   wrapping `cli._require_disk_headroom` and keying each hit on `sys._getframe(1)` reads, at
+>   `94a2653`, `_continue_impl:8759` → **4 hits inside the GREEN `tests/test_cli.py` run** against
+>   **5** inside the red one. The same run separates those from `scan:991` and from two direct
+>   in-test calls, which is the probe's discrimination check.
+> * **So the rule as stated in this heading would not have prevented the incident it was written
+>   from.** "Run what executes the changed line" selects `tests/test_cli.py` too, and that file
+>   executed the changed line four times while passing 133 of 133. Executing the line is the
+>   **floor, not a sufficient condition**.
+> * **The corrected rule — take EVERY executor, not the nearest — is what landed in `CLAUDE.md`**,
+>   as an extension of §6's "State what you ran, including what you excluded" bullet rather than as
+>   a free-standing rule.
+>
+> **This section is itself an instance of §6.1 above.** The unmeasured sentence was the *reason*
+> offered for the amendment, attached to a conclusion that reproduces exactly — which is what §6.1
+> says happens. Kept on the record rather than tidied away.
+
 ### 6.3 Two smaller ones, both measured
 
 - **A green can mean "known cost", not "correct".** Round H shipped a mutation deliberately green **by
