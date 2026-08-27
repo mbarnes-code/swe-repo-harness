@@ -89,8 +89,13 @@ bazel-*-events.json
 tools/bazel-test-root/
 
 # ---- Third-party reference corpora (their own git repos) ----
-# Cited by path in docs/DECISIONS.md; re-fetch to fact-check those citations:
+# Cited by path in docs/DECISIONS.md; re-fetch to fact-check those citations. Each URL clones
+# into the like-named directory below, and the `@ <sha>` is the whole mechanism -- an unpinned
+# re-fetch of an actively-developed upstream does not reproduce the cited bytes. Nothing in CI
+# resolves a citation into these corpora: see docs/DECISIONS.md ADR-0095 for what that costs.
 #   https://github.com/All-The-Vibes/Agent-Harness.git              @ d1aab58
+#   https://github.com/langchain-ai/deepagents.git                  @ 1c6d358
+#   https://github.com/langchain-ai/open-swe.git                    @ e712a9e
 #   https://github.com/visa/visa-vulnerability-agentic-harness.git  @ 3d972f6
 references/*/
 

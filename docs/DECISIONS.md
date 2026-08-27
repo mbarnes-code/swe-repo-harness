@@ -11378,3 +11378,257 @@ wants it — the re-review of this very commit compared listing to code by `ast`
 this paragraph exists so no later author cites a gate that is not there. Round F lane W15 recommended not editing that sentence at all, on the ground that
 the code did not meet it; the code now does, so that ground is spent — but the recommendation was
 recorded, and this is its answer rather than an oversight of it.
+
+---
+
+## ADR-0095 — The `.gitignore` reference block is a **fact-check instruction whose `@ <sha>` pin is the entire mechanism**, and it named two of the four corpora it covers: **24 of the 29** out-of-tree citations in this file point into `deepagents` and `open-swe`, which the block did not list, while `Agent-Harness` — which it did list — **carries none**, measured, though it is citable and nothing prevents a future one
+
+**Status:** ACCEPTED. Round I, lane W5. Written against `05553e9`; **every number below is measured
+at that commit** and none is carried forward from a brief. `main` moved to `96ec623` while this was
+being written, touching only `src/fleet/cli.py` and `tests/test_prepare_before_admit.py`; both
+probes re-derive **every figure in §2 identically at `96ec623`** (only the tracked-file universe
+moves, 291 -> 292, which changes no citation's resolution). Lands in the same commit as the
+`.gitignore` change it decides — an ADR landing after its change leaves the tree unexplained, and
+one landing without its change is a decision about nothing.
+
+### 1. What the block is for, and why that is not self-evident
+
+`references/*/` is gitignored. The four third-party corpora under it are **clones of other
+people's repositories**, present on a developer's disk and absent from this repository's history —
+absent, in particular, from any detached worktree, which is why the landed citation instrument's
+`_SEARCH_DIRS` is `("src", "tests", "docs")` and deliberately does not reach them.
+
+That makes a citation such as `` `backends/sandbox.py:962-968` `` unresolvable **by design**, not
+by rot. It is a correct citation into material this repository chose not to vendor. The comment
+block above `references/*/` is the only thing in the tree that tells a reader how to check such a
+citation: clone this URL, check out this commit, open that file at that line. **The pin is what
+makes it work.** Without it the instruction says "fetch the current tip of an actively-developed
+monorepo", which does not reproduce the cited bytes and is therefore not a fact-check at all.
+
+ADR-0069 §1 and ADR-0071 §1 already say this in prose ("*the pin is what makes it checkable*").
+This ADR records it where it is enforceable — beside the ignore rule itself — and states the
+limit, which neither of those sections does.
+
+### 2. The defect, measured
+
+Before this change the block named **two** URLs: `All-The-Vibes/Agent-Harness` and
+`visa/visa-vulnerability-agentic-harness`. On disk at `05553e9`, `references/` holds **four**
+directories: `Agent-Harness`, `deepagents`, `open-swe`, `visa-vulnerability-agentic-harness`.
+
+**Predicate, stated so the count is reproducible.** A *pathed citation* is an inline-code token in
+`docs/DECISIONS.md` of the form `` `<path>.<ext>:N` `` or `` `<path>.<ext>:N-M` ``, counted after
+whitespace normalisation with offsets mapped back to line numbers, so a citation wrapped across a
+line break is one match and not zero. A citation is *out-of-tree* when its path matches no file in
+the repository. It is *attributed* to a reference corpus when its written path is a path suffix of
+exactly one file in exactly one clone's own `git ls-files`.
+
+| quantity at `05553e9` | value |
+|---|---|
+| pathed citations in `docs/DECISIONS.md` | **346** |
+| out of tree, universe `("src","tests","docs")` (the landed instrument's) | **31** |
+| out of tree, universe `git ls-tree -r HEAD` (the tracked-file universe, 291 files at `05553e9`) | **29** |
+| of those, attributed to a `references/` corpus | **24** |
+| → `deepagents` | **17** |
+| → `open-swe` | **7** |
+| → `visa-vulnerability-agentic-harness` | **0** |
+| → `Agent-Harness` | **0** |
+| remaining, on no disk here | **5** |
+
+The two universes differ by exactly the repo's own root `pyproject.toml`, cited at `:300` and
+`:5588` — a tracked file the landed instrument's index excludes on purpose. Quote **29** or **31**
+only with its universe attached; the class result — *the out-of-tree class is dominated by
+`references/`, 24 of 29* — is the one that reproduces under both.
+
+Of the 24, **22** are attributed by unique path suffix. The other two are suffix-ambiguous across
+two clones and are resolved by **section membership**, not by the index: `` `sandbox.py:974` ``
+(`:5227`) and `` `libs/code/.../hooks/runner.py:46-163` `` (`:5228`) both sit inside ADR-0069,
+whose §1 states that every `libs/...` citation below it is relative to the `deepagents` commit.
+
+The remaining 5 are a different class and are untouched here: three name Bazel `rules_js`
+internals that are on no disk in this environment, and two are the
+`src/fleet/state/migrations/__init__.py:242` pair — one wrong citation and one **quotation of it
+inside its own retraction**, which must not be repointed.
+
+**So the block was a mechanism that could not perform its stated function for 24 of the 24
+citations it exists to serve.** Not one of the two repos it named carried a `path:line` citation.
+`Agent-Harness` **carries none, at `05553e9`** — and that is a measurement, not an impossibility.
+An earlier draft of this ADR said it *cannot*, and that modal is **false**: `git ls-files` inside
+that clone returns **16** files, of which **6 `.md`, 3 `.html` and 2 `.js`** are as citable as any
+other text, so a `path:line` citation into it could be written tomorrow. What is true is narrower
+and is the only thing claimed here: none exists today. `visa-vulnerability-agentic-harness`
+carries three `references/`-prefixed path mentions in this file
+(`vvaharness/orchestrator/checkpoints.py`, `pyproject.toml`, `docs/models.md`), none of them
+carrying a line number, so the block's older sentence was true of it under the looser reading of
+"cited by path" and false of it under the one that needs a pin.
+
+### 3. Correction to a handed figure, recorded rather than dropped
+
+Round I's research lane reported the split as *"deepagents 12, open-swe 11, visa 3"*, explicitly
+**by basename**. Those figures sum to 26 against that lane's own class result of 24, because a bare
+basename (`sandbox.py`, `prepare_run.py`, `pyproject.toml`) matches in more than one clone. Under
+full path-suffix attribution the split is **17 / 7 / 0**, and the total returns to **24**,
+reproducing the class result exactly. The two derivations disagree about the split and agree about
+the class — which is why this file states the class.
+
+**Both numbers here were derived twice, and here is exactly what the two derivations share.** They
+share no module, no normaliser, no path universe and no corpus index. They were nonetheless found
+to share their **path character classes, verbatim, twice over** — first `[A-Za-z0-9_]` as a path's
+initial character, so a **dot-leading** path was invisible to *both*; and then, after that was
+fixed, `[A-Za-z0-9_./-]` as the path *body*, so a `$`-bearing path was invisible to both **inside
+the fix for the first**. `references/open-swe` has **seven** real tracked route files containing
+`$` (`ui/src/routes/agents/$threadId.tsx` among them). Both were latent — neither form is cited in
+this file today — and both are now admitted.
+
+**The list of what two instruments share is itself a claim, and stating it without measuring it is
+how the second instance survived the fix for the first.** So it is now derived rather than
+asserted: over the union of this repository's tracked paths and all four clones' tracked paths, the
+character set of every path is exactly `[-./_$0-9A-Za-z]`, and `$` is the **only** member outside
+the original class. The recognisers admit exactly that set. **That is complete for the class of
+characters appearing in paths that exist in these two universes — it is not completeness in any
+wider sense**, and a path form neither universe contains (a space, a bracket, a non-ASCII
+character) would defeat both again.
+
+**And a derivation closes the class it ranges over and nothing else** — which is the general lesson,
+and it was paid for here three times. The derivation above ranges over *characters*; the
+recognisers' **non**-character requirements were carried forward unmeasured behind it, and one of
+them is false in the same way. **Both recognisers require a dot-extension, so an extensionless path
+is invisible to both.** Such citations exist: at `05553e9`, sweeping backticked `:N` tokens whose
+final segment has no dot finds **eight**, of which **five are genuine path citations** —
+`` `.gitignore:87` `` twice, `` `LICENSE:1-3` `` (ADR-0071 §1) and `` `README:46` `` / `` `README:118` ``
+(ADR-0069 §10, into a fifth reference not on disk) — **including the ADR's own §6.8 subject.** The
+instrument cannot see the citation this document is about.
+
+**This one is named, not fixed, and the reason is measured rather than preferred.** The other three
+of those eight are not paths at all — a commit SHA (`` `a1178f7:568-630` ``) and a container image
+tag twice (`` `ghcr.io/acme/fleet-build:2026-08` ``) — so dropping the dot-extension requirement
+admits non-citations and **moves the published total**, which for a recogniser underwriting a landed
+number is worse than the gap it closes. Every figure in §2 is **unchanged** under both widenings
+that *were* made — 346 / 31 / 29 / 24 / 5, identical in both probes, measured before and after each
+edit with the zero-change gate read first — and the dot-extension requirement is therefore recorded
+as a **stated boundary of the predicate** in §2, which already publishes it as `<path>.<ext>`.
+Beyond the recogniser: one recognises citations
+with a single regex over a document-wide whitespace normalisation and indexes the corpora with an
+`os.walk`; the other splits blank-line-delimited blocks into a backtick **token stream** and
+indexes the corpora with each clone's own `git ls-files`. They return the same 346, the same 24,
+the same 17/7/0, and the same line numbers. The instrument was validated four ways before its clean
+half was believed: it fires on the known-bad state (24 citations into unnamed corpora); it is
+silent where it should be (`docs/INTEGRATION_HONESTY.md`, 414 pathed citations, **0** into
+`references/`; `docs/SPEC.md`, 0 of either); it fires on a **synthetic fault injected into a clean
+site** — one citation each into `Agent-Harness` and `visa`, previously zero, both detected, total
+346 → 348; and a **cosmetic reflow** of the ADR-0069 §1 paragraph leaves every number identical.
+The first attempt at the synthetic-fault check reported no change and was a **false clean**: the
+injected path began with a dot, which both recognisers excluded. That is what check (c) is for —
+and re-running it with a *different* path made it pass without fixing anything, which is why the
+recognisers were widened instead. Check (c) now passes on the **real** dot-leading file,
+`` `.github/prompts/build-harness.prompt.md:3` ``, plus a `.js` path: `Agent-Harness` moves 0 → 2
+and the total 346 → 348 in **both** probes. It passes the same way on the **real** `$`-bearing
+file, `ui/src/routes/agents/$threadId.tsx:42` plus a bare-basename route form: the pre-widening
+probes read **346** and `open-swe` **7** on that identical input — a false clean in *both* — and the
+widened probes read **348** and **9**. Old-passes / new-fires, on the artefact rather than on a
+path chosen to make the check succeed.
+
+**Probe A carries one further stated limit**, which is why probe B is the generic one: probe A
+matches an **extension whitelist**, and that whitelist did not admit `ts`/`tsx`/`js` — while ADR-0071
+§1 describes `open-swe` as *"398 Python files, 235 TS/TSX"*. Nothing published here depended on it
+(probe B accepts any extension and agrees at 346, and no TS/TSX citation exists in this file), but a
+future citation into a `.ts` file would have been invisible to probe A alone. The whitelist has been
+widened; the limit is recorded because a whitelist is the part that rots.
+
+**This ADR is a member of every class it counts, and here is the subtraction.** Every figure in §2
+is measured at `05553e9`, before this ADR existed. Its prose quotes **eight** pathed citations
+verbatim so a reader can see which sites are meant -- two of them, the dot-leading `.github/...`
+path and the `$`-bearing route file, being the very injections that exposed the shared character
+classes in §3 -- so re-running the same two probes over this file **with ADR-0095 in it** returns
+**354** pathed citations, **29** attributed to a `references/` corpus and **6** out of tree
+elsewhere. Subtract by rule -- a pathed token inside ADR-0095 is a *quotation of a citation*, not a
+citation this document makes -- and 354 returns to 346, 29 to 24, 6 to 5: of the eight quotations,
+five are references-attributed, one is unresolvable and two resolve in tree. Do not
+"correct" §2's table into the post-landing figures: a correction that quotes what it retires becomes
+a member of its own class, which is the failure this paragraph exists to pre-empt. Annotate the
+table if the tree moves under it; do not rewrite it.
+
+### 4. Decision
+
+Name all four corpora in the block, each with its upstream URL and the commit it is pinned at, and
+say in the block what the block does not do. The `references/*/` pattern line is unchanged
+byte-for-byte and still matches all four directories (`git check-ignore -v`, all four, before and
+after).
+
+### 5. The pins, each derived two genuinely different ways
+
+| directory | upstream | pin (block) | full SHA |
+|---|---|---|---|
+| `Agent-Harness` | `All-The-Vibes/Agent-Harness` | `d1aab58` | `d1aab58a6f72667778b5156d69e03a93da080a56` |
+| `deepagents` | `langchain-ai/deepagents` | `1c6d358` | `1c6d358c60306aad2af0067dcca76f85f4deeba1` |
+| `open-swe` | `langchain-ai/open-swe` | `e712a9e` | `e712a9ef950cda7200e7761400b169e09fb075be` |
+| `visa-vulnerability-agentic-harness` | `visa/visa-vulnerability-agentic-harness` | `3d972f6` | `3d972f679d8f5e3838b394edee0b5ea9c626b0fb` |
+
+Derivation A is the clone itself: `git -C references/<d> remote get-url origin` and `rev-parse
+HEAD`, with `git status --porcelain` empty in all four, so each working tree **is** the pinned
+commit and a re-fetch reproduces the bytes the citations were read from. Derivation B is this
+document: ADR-0069 §1 records `1c6d358c…` for `deepagents` and ADR-0071 §1 records `e712a9ef…` for
+`open-swe`, both written by the lanes that made the clones. **A and B agree on all 40 characters**,
+and A independently confirms the two pins the block already carried. **Nothing was fetched from
+the network for this ADR, and nothing under `references/` was modified.**
+
+### 6. What this does NOT achieve — read this before citing the block as coverage
+
+1. **The corpora are not vendored and this does not vendor them.** They remain gitignored. This
+   repository's history cannot reproduce them. A citation into `references/` is verifiable **only
+   by a human who re-fetches**, and by nobody else.
+2. **Nothing in CI checks these citations, and nothing here makes it.** The landed instrument
+   deliberately excludes `references/` because including it would give **different verdicts in two
+   trees** — the corpora are present in a primary checkout and absent from a detached worktree.
+   This block makes the 24 citations *checkable*; it does not make them *checked*. Do not cite it
+   as though it did.
+3. **The pin fixes a commit, not the upstream's continued existence.** If either repository is
+   deleted, made private, or force-pushed past the pinned object, the instruction fails and there
+   is no detector in this tree that would notice.
+4. **Two of the four clones on this machine are shallow (`grafted`)** — `Agent-Harness` and
+   `visa-vulnerability-agentic-harness`. A fresh full clone at the pinned SHA reproduces the cited
+   bytes; it does not reproduce the local clone.
+5. **The block's abbreviations are 7 characters**, matching the form already landed. Seven
+   characters are unambiguous in these repositories today and can stop being so as an upstream
+   grows; §5 above carries the full 40 for exactly that reason.
+6. **Nothing checks this block against the directories actually on disk — the very class of defect
+   it was written to repair.** The block went stale because a lane cloned a fifth corpus and no
+   mechanism noticed; that is exactly as true after this change as before it. Clone a sixth into
+   `references/` tomorrow, cite it, and the block will be incomplete again with nothing in the tree
+   saying so. **This ADR does not close that loop and does not claim to** — closing it means a check
+   comparing `ls -d references/*/` against the URLs listed here, and such a check is
+   environment-dependent for the reason given in item 2, so it is a genuinely open design question
+   rather than an oversight.
+7. **Not one citation was repaired, and none may be.** The 24 are *correct* citations into
+   out-of-tree material. The five remaining out-of-tree paths span at least two further causes and
+   are not separable from the 24 by any rule available today; a rule-based sweep over this file
+   would repoint records and destroy what they record.
+8. **This block is itself cited by line, and those citations are already wrong.** Four sites in the
+   tree cite `` `.gitignore:87` `` for `references/*/` — `docs/DECISIONS.md:5170` and `:5741`,
+   `docs/PROGRESS.md:4632` and `:4829` — while at `05553e9` git reports the pattern at
+   `.gitignore:95`, and this change moves it to `:100`. Those four are left as they stand: this ADR
+   fixes the block, never a citation, and repairing them belongs to whichever subtask takes the
+   citation classes as a whole. Recorded here so a later reader does not mistake the drift for
+   something this change introduced — it was **+8** before this change and is **+13** after.
+
+### 7. Alternatives rejected
+
+**Widen the citation instrument's `_SEARCH_DIRS` to include `references/`.** Rejected: it makes the
+suite's verdict depend on whether the developer happens to have four gitignored clones on disk, and
+it would redden a detached worktree, which has none of them. The current comment on `_SEARCH_DIRS`
+exists to prevent exactly that.
+
+**Vendor the corpora.** Rejected: `deepagents` alone is 1,529 tracked files and `open-swe` 788,
+against a repository of 291 tracked files at `05553e9`. Vendoring three orders of reference material to make 24 citations
+resolve inverts the cost, and the licence position differs per corpus (ADR-0071 §1 records
+`open-swe` as MIT with a travelling-notice condition and names a reference in ADR-0069 §10 that
+ships **no licence at all**).
+
+**Rewrite the 24 citations as `references/<dir>/<path>:N`.** Rejected on two grounds. It edits
+records — several of the 24 sit inside passages kept verbatim, and one nearby citation exists only
+as the quarry of its own retraction — and it would not help, because a prefixed path resolves no
+better than a bare one against a tree that does not contain the file. The pin, not the prefix, is
+what makes the citation checkable.
+
+**Say nothing and leave the block short.** Rejected under this project's own standard: a mechanism
+that looks enforced and covers none of what it is about is worse than an honest disclosure. That is
+the whole reason §6 is written as a list of what this does not buy.
