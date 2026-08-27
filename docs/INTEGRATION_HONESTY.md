@@ -6552,3 +6552,65 @@ there.** A disclosure is not a mechanism, and this leg stays open by design.
 * **Status.** `OPEN`, not `FIXED, LANDED`, because the fix was uncommitted when this was written —
   checked against `git log`, not assumed. When it lands, the status field takes the landed SHA and
   the scope-check boundary above stays open as a stated boundary.
+
+---
+
+## D86 — OPEN. §12.28 and §12.47 both require every `ProcessPoolExecutor` to be built with an initializer that calls each registry's `discover()`, "asserted by inspecting the initializer arguments". No such initializer exists, no test mentions one, and five other places in the tree assert that it does
+
+**Found by:** the 2026-08-27 audit of `docs/SPEC.md` §12 against the test suite, at base `076076d`
+(tree clean). Allocated centrally by the orchestrator after a form-agnostic sweep; see "Allocation"
+below.
+
+### The measurement
+
+`ProcessPoolExecutor(` has exactly **one** occurrence in `src/` and `tests/` combined —
+`src/fleet/orchestrator/budgets.py`, inside `new_cpu_pool` — and it passes `max_workers=` and
+`mp_context=` only. The token `initializer=` appears **nowhere** in `src/` or in `tests/`. So the
+clause is not weakly covered or covered at the wrong scale: the thing it asserts about does not
+exist, and the assertion it names ("inspecting the initializer arguments") could not be written
+today against anything.
+
+Re-derived three times before landing: two audit lanes reached it independently without shared
+context (one auditing §12.28, one auditing §12.47), and the orchestrator re-measured it by hand.
+
+### Why this is worse than an ordinary missing test
+
+Five places state the initializer as settled fact, so the tree reads as if the property holds:
+
+* `src/fleet/ecosystems/base.py` — three separate statements that `discover()` runs "in every
+  process, including each `cpu_pool` initializer". **One of the three is inside a raised error
+  message**, so the claim is printed to an operator at the moment the registry check fails.
+* `docs/SPEC.md` §5 and §9 carry the same claim in prose.
+
+This is the CLAUDE.md Guardrail 7 shape — "the SPEC says X but the code cannot do X" is **two
+edits, not one**. A reconciler who trusts the docstrings will make the *code* match a claim that
+nothing enforces, and will reasonably believe they are fixing a bug rather than implementing an
+unbuilt feature.
+
+### What this entry does NOT establish
+
+* **Not shown to cause a live defect.** `new_cpu_pool`'s children may already resolve their
+  registries by another route — import side effects at module load are the obvious candidate. This
+  entry records that the *asserted mechanism* is absent and that five sites claim otherwise; it does
+  **not** claim a pool child fails to resolve an adapter. Establishing that needs a run, not a grep,
+  and no such run was made.
+* **The blast radius was not measured.** Whether any pool child actually needs a registry it would
+  not otherwise have is unexamined.
+* **No fix is proposed here.** The audit that found this was scoped to measurement. Whether the
+  remedy is to add the initializer, or to retire the claim from all five sites, is undecided — and
+  the two answers have different costs.
+
+### Status
+
+`OPEN`. Nothing fixes it, checked against `git log` rather than assumed: `initializer=` has never
+appeared in this tree. The SPEC sentences in §12.28 and §12.47 were **left standing** by the audit
+that found this, deliberately — correcting them is the second half of the two-edit pair above and
+belongs with the adjudication, not with a measurement pass.
+
+### Allocation
+
+`D86` was verified free before writing, form-agnostically: `\bD86\b` over `docs/` returned **0**
+occurrences. Its only occurrence anywhere in the working tree was in a git-ignored round-G lane
+report reading "D86+ free" — a negative mention, not an allocation. That is the D71 trap named in
+`CLAUDE.md` §3, avoided by reading the body rather than trusting the match. `D85` was confirmed a
+real entry with a `## D85 — OPEN` heading. Per `CLAUDE.md` §3 no census total or range is quoted.
