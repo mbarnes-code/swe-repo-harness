@@ -70,6 +70,19 @@ Measured at 924b159: pointing this module's own survey at each candidate file gi
 ``docs/DECISIONS.md`` 346 pathed citations and **zero** commit-bound ones, and
 ``docs/SPEC.md`` zero of either. Reproduced by an independent normalised sweep sharing
 none of this module's index, offset-map or extension-whitelist code.
+Annotated 2026-08-27 at 9b61878, the commit that appended ADR-0095 to ``docs/DECISIONS.md``:
+the same survey now returns **352** for that file. All six added tokens sit *inside* ADR-0095,
+which quotes the citations it is about; subtract them by the rule that ADR states of itself in
+its §3 -- a pathed token inside ADR-0095 is a quotation of a citation, not a citation the
+document makes -- and the figure above stands unchanged at 346. The commit-bound and
+``docs/SPEC.md`` halves are untouched. The universe, stated because these figures come in pairs
+that differ by it: a *pathed citation* count is a property of the document's text alone, so it
+is the same under every universe; only **resolution** depends on one, and there the pair does
+differ -- out of tree, 31 under this module's ``_SEARCH_DIRS`` and 29 under
+``git ls-tree -r HEAD``, both after that same subtraction (35 and 33 before it). Every figure
+here was re-derived at 9b61878 by two probes sharing no normaliser, index or extension list,
+which agree on all of them, and each was validated against the prior tree (346 -> 352), an
+already-swept file (``docs/SPEC.md``, 0), a synthetic injection (+1) and a cosmetic reflow (0).
 
 So a second profile added naively either reds on day one for the new document, or is
 "fixed" by weakening an assertion -- at which point the check stops testing anything for
