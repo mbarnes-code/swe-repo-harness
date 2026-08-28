@@ -313,3 +313,167 @@ be deciding that question by side effect. Flagged here so the next author decide
 them. That is the second half of `D86`'s two-edit pair and belongs with its adjudication — retiring
 the claim and building the mechanism are different remedies, and this pass did not choose between
 them.
+
+---
+
+# 2026-08-28 — round-K repair of `12be741` (lane W4). Annotation only; nothing above is rewritten.
+
+An independent review found three Critical and five Important defects in `12be741`, the commit that
+promoted this report and filed `D86`. The controller re-verified every Critical and all reproduce.
+Each correction below was **re-measured in this lane's own worktree at `12be741`** before it was
+written; none is inherited. The retired wording is quoted inside each correction on purpose, so a
+count-based sweep for a withdrawn claim finds this section rather than a survival — which also means
+**no raw occurrence total quoted above or below is safe to re-derive from this file**, because this
+section is itself a member of every class it names.
+
+## The residue swept a string, not the class — §12.17 and §12.7
+
+"The five classes that explain most of the misses", class 1, names **six** unsatisfiable criteria:
+§12.40, §12.45, §12.16, §12.17, §12.7 and §12.32. `12be741` corrected three (§12.16, §12.40,
+§12.45), §12.32 was pre-adjudicated by ADR-0065 and self-declares in the SPEC — and **§12.17 and
+§12.7 got neither a correction nor a disclosure**, in either the SPEC or this report's residue
+section, whose stated boundary therefore did not account for every member of its own class. Both
+now carry in-place dated markers in `docs/SPEC.md`:
+
+* **§12.17** — "byte-identical" is false by construction, re-derived here rather than inherited:
+  `MigrationState.updated_at` is `Field(default_factory=utcnow)` (`src/fleet/models/state.py:236`)
+  and `state/projection.py::build_state` (`:213-238`) does not supply that key, so two projections
+  of an untouched database differ in it. The JSON-validity half is unaffected.
+* **§12.7** — the named location is false: `tests/fixtures/repos/` holds exactly one file,
+  `.gitkeep`, and a sweep of `src/` and `tests/` for that path returns **zero** references. The
+  fixtures are synthesized inline into `tmp_path` by `tests/test_manifests.py`'s `write()` helper
+  (`:47-50` — this report's row 7 cites `:44`, which is the `SRC` constant, not the helper). The
+  property the criterion asserts still holds; only its location claim does not.
+
+Both markers state that choosing the replacement wording is an **adjudication**, and neither makes
+it.
+
+## §12.40's exclusion was applied, and validated as a gate before it was called one
+
+`12be741`'s marker asserted that "both greps take the same `| grep -v '^src/fleet/llm/backends/'`
+exclusion". They did not — at `12be741` that exclusion appears on the §12.40 line only inside the
+SDK-import command and inside the sentence describing the edit, so the two greps it describes still
+returned **7** and **1** and the criterion remained unsatisfiable, while the same marker forbade the
+repairs a reader would otherwise reach for. This lane made the edit rather than restating the gap,
+because the alternative leaves a criterion asserting "returns nothing" of a command that returns
+seven, with no legal repair available.
+
+Validated three ways before being called a gate, all re-run in this lane's worktree:
+
+| state | model-id grep | `/v1` endpoint grep |
+| --- | --- | --- |
+| clean tree, exclusion applied | 0 | 0 |
+| clean tree, exclusion removed | 7 | 1 |
+| synthetic fault injected into `src/fleet/llm/client.py` (outside `backends/`), exclusion applied | 1 | 1 |
+
+The fault was reverted and `git status src/` is clean; no file under `src/` is modified by this
+repair. The quantity these greps watch is *a model id or endpoint literal appearing in Python
+outside `llm/backends/`*, and the disclosed blind spot is exact: a hard-coded model id **inside** a
+backend file is invisible to them. That is why the structural SDK-import form stays beside them, and
+it is stated in the marker rather than left to be discovered.
+
+`12be741`'s other §12.40 number was inverted: "The structural form … returns **0** unscoped". The
+SDK-import form **without** the exclusion returns **5** at `12be741` — `llm/backends/anthropic.py:24`,
+`bedrock.py:46`, `openai_compatible.py:44`, `vertex.py:58`, `:59` — and **0** only with it. The class
+result, which is what reproduces: *no vendor SDK is imported outside `src/fleet/llm/backends/`*, true
+at `12be741` and true now.
+
+## The §12.16 marker carried a fabricated verbatim quote
+
+It attributed *"must never raise and never half-populate a model"* to `state/checkpoints.py`'s
+docstring. **The phrase is not in that file.** A whitespace-normalised sweep of `src/` and `tests/`
+finds it exactly **once** — in the module docstring of `tests/test_checkpoints.py`, wrapped across
+`:4-5`, which is why a line-oriented `grep` reports zero and why the review that found this recorded
+zero occurrences. So the review's substance was right (the quote is misattributed and unenforced)
+and its measurement was not: one occurrence, in the test module rather than the module under test.
+The quote is replaced in `docs/SPEC.md` §12.16 by a citation to
+`src/fleet/state/checkpoints.py:8-15`, per CLAUDE.md §3's rule against quoting another module's
+comment verbatim.
+
+`docs/DECISIONS.md` ADR-0002 (`:49-51`) is the **origin** of the retired "must produce a
+`ValidationError`" sentence and was the last site still asserting it after §12.16 and §12.48 were
+corrected. It now carries a dated marker: annotation only, the decision it records is unchanged and
+still correct, and the reconciler is told the SPEC is the corrected side.
+
+## The `routing.py` sweep was incomplete within its own stated scope
+
+The sweep above declares its scope as "`docs/` and `src/`, excluding `references/`, `tools/` and
+the git-ignored `.superpowers/`". Re-run at `12be741` under that exact scope, whitespace-normalised
+over the whole file, it finds one file the list omits:
+
+* **`docs/superpowers/plans/ledger-sdd-backlog-b.md:47`** — "SPEC §8 names llm/routing.py,
+  negotiate.py, capabilities.py — none exists, none should be created." Correct as written and not
+  to be edited; missing from the residue list, which is the defect.
+
+Two further measurements the residue did not make:
+
+* **`docs/SPEC.md` §8's `llm/` listing names FOUR modules that do not exist**, not one:
+  `routing.py`, `negotiate.py`, `failover.py` and `capabilities.py` (`:6036-6042` at `12be741`).
+  Exactly **one** module that exists is missing from the listing: `roles.py`. `__init__.py` is
+  omitted throughout the listing by convention — `rewrite/` has one and it is not listed either —
+  so it is not counted as an omission. The listing now carries an in-place marker.
+* **`docs/PROGRESS.md` records the absence in THREE places, and two of them disagree.** `:5542`
+  ("none exists, none should be created") names routing/negotiate/capabilities; `:780` names
+  `failover.py`; `:777` resolves the SAME clause the OTHER way — "`llm/roles.py` holds the router
+  that §8 and §12.40's AST test expect at `llm/routing.py` — a rename plus import update".
+  `12be741` cited `:5542` and not `:777`, resolving a contradicting record silently, which
+  CLAUDE.md Rule 7 forbids. §12.40's marker now surfaces the conflict and says why `settings.py`
+  wins: the clause's predicate is *reads `config/models.yaml`*, and `settings.py` opens the file
+  (`:1138`, `:1149`) while `roles.py` wraps an already-parsed tree (`:112`, `:161`). Class result
+  re-derived here: of the modules under `src/fleet/` that name `models.yaml`, exactly **one** opens
+  it.
+* **This report's row 40 (`:134`) attributes `:5542`'s words to `:777`.** It reads, verbatim: *(the reader is
+  settings.py:1138; PROGRESS.md:777 records "none exists, none should be created")*. It does not — `:5542` does; `:777` says the
+  opposite. So the two contradicting records were **conflated**, not merely one overlooked, which is
+  how the conflict survived into `12be741`'s commit message. The row is left as its author wrote it;
+  this is the dated marker beside it.
+* **This report's own self-count was wrong at its own commit.** The bullet above reads "This report
+  ×2"; a whole-file normalised count of `routing.py` in this file at `12be741` is **7**. It is
+  replaced by a class statement rather than a corrected number, because a self-referential count in
+  a document that quotes what it retires cannot be kept true: **every mention of `routing.py` in
+  this file is either a finding about the SPEC or a quotation of one, and none is a claim that the
+  module exists.**
+
+## §12.28 was never the §12.47 claim — `D86` conflated two criteria
+
+`D86`'s heading said §12.28 and §12.47 **both** require the `discover()` initializer. §12.28
+requires only that pool children carry **no database handle**, "asserted by inspecting the
+initializer arguments" — the same evidence phrase, a weaker requirement, and one that is **true
+today**: `orchestrator/budgets.py:947-949` passes `max_workers=` and `mp_context=` only. Retiring
+both together would have discarded a true requirement. §12.47's sentence is retired; §12.28's is
+kept and marked. `D86`'s heading and status are corrected in `docs/INTEGRATION_HONESTY.md`, with
+the retired wording quoted there.
+
+## Two minors, recorded rather than fixed
+
+* **M1 — §12.40's AST clause is intent, not coverage.** It asserts "an AST test asserts that the
+  only module in `src/fleet/` reading `config/models.yaml` is `settings.py`". A whitespace-
+  normalised sweep of `tests/` for any such assertion returns **zero** at `12be741`; the two
+  §12.40-and-`models.yaml` hits in `tests/` (`test_llm_backend_vertex.py:755`,
+  `test_llm_backend_bedrock.py:783`) assert the model-id half. Recorded in §12.40's marker; writing
+  the test is out of this repair's scope.
+* **M2 — §12.45's "five" is predicate-dependent, and the landed marker already says so.** Measured
+  here two ways: under *column holding a single commit SHA* (the predicate §12.45's own
+  `git cat-file -e <sha>^{commit}` assertion fixes) the count is **5** — `repos.head_sha`,
+  `phases.pre_commit_sha`, `phases.post_commit_sha`, `tasks.pre_commit_sha`,
+  `attempts.commit_sha`. Under a *structural* predicate — a `length(...) = 40` CHECK in
+  `state/schema.sql` — it is **1**, `attempts.commit_sha` alone. The marker in `docs/SPEC.md`
+  already carries that distinction ("only `attempts.commit_sha` carries a `length(...) = 40`
+  CHECK; the other four are conventionally 40-hex but unconstrained"), so no SPEC edit was made.
+  `collisions.blob_shas` is excluded under both predicates: it holds a JSON list of blob SHAs, not
+  a commit.
+
+## What this repair deliberately did NOT do
+
+* It did not touch `src/`. The three `ecosystems/base.py` docstrings (`:109`, `:118` inside a
+  **raised** message, `:632`) still assert the initializer as settled fact. That is the reason
+  `D86` is `PARTLY ADDRESSED` and not fixed.
+* It did not adjudicate whether `routing.py`, `negotiate.py`, `failover.py` and `capabilities.py`
+  get built or the §8 listing gets retired, and it did not repoint the listing. It made the
+  disagreement between `docs/PROGRESS.md:777` and `:5542` visible at the sites a reconciler reads,
+  which is what `12be741` failed to do.
+* It did not choose replacement wording for §12.7 or §12.17.
+* It could not verify `docs/DECISIONS.md`'s reference-harness passage: the file it cites,
+  `references/visa-vulnerability-agentic-harness/vvaharness/orchestrator/checkpoints.py`, is not in
+  `references/` and appears nowhere in this repository's history. It is named as a deliberate
+  non-edit beside ADR-0002's marker so the next sweep does not "fix" it.

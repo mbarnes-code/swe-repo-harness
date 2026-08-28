@@ -6555,7 +6555,17 @@ there.** A disclosure is not a mechanism, and this leg stays open by design.
 
 ---
 
-## D86 — OPEN. §12.28 and §12.47 both require every `ProcessPoolExecutor` to be built with an initializer that calls each registry's `discover()`, "asserted by inspecting the initializer arguments". No such initializer exists, no test mentions one, and five other places in the tree assert that it does
+## D86 — PARTLY ADDRESSED. §12.47 required every `ProcessPoolExecutor` to be built with an initializer that calls each registry's `discover()`, "asserted by inspecting the initializer arguments". No such initializer exists, no test mentions one, and six other places in the tree assert that it does — three in `docs/SPEC.md` prose (§7.2, §7.5, §11.1) and three in `src/fleet/ecosystems/base.py`. §12.47's criterion sentence is RETIRED and all three SPEC prose sites carry `D86` markers (`__W4_SHA__`); the three `src/fleet/ecosystems/base.py` sites still assert it unqualified
+
+> **[2026-08-28, round-K lane W4 — this heading was rewritten because it was wrong twice, and the retired wording is quoted here so nothing is laundered. The BODY below is untouched; every correction to it is a dated marker beside the sentence it corrects, never an edit to it.]**
+>
+> The heading read: *"**D86 — OPEN.** §12.28 and §12.47 **both** require every `ProcessPoolExecutor` … and **five** other places in the tree assert that it does"*. Two errors and a status change:
+>
+> * **§12.28 does not carry this claim.** `docs/SPEC.md` §12.28 requires that pool children carry **no database handle**, "asserted by inspecting the initializer arguments" — the same *evidence* phrase, a different and weaker *requirement*, and one that is **true in the tree today**: the sole `ProcessPoolExecutor(` (`src/fleet/orchestrator/budgets.py:947-949`) passes `max_workers=` and `mp_context=` only, so no handle can cross. Retiring §12.28 alongside §12.47 would have discarded a true, cheap requirement. Only §12.47 carried the `discover()` claim; only §12.47's copy is retired. §12.28 now carries a marker saying so.
+> * **Six sites, not five, and the SPEC list named the wrong sections.** The body below says the SPEC prose sites are "§5 and §9". A fence-aware nearest-preceding-heading walk over `docs/SPEC.md` at `12be741` puts them at **§7.2** (`:5386-5387`), **§7.5** (`:5587-5588`) and **§11.1** (`:6796-6797`) — **three** SPEC prose sites, not two, so the total is **six**, not five. Class result, which is what reproduces: a normalised sweep of `src/` and `docs/SPEC.md` for the cpu-pool-initializer claim returns exactly two families — the three `src/fleet/ecosystems/base.py` docstrings (`:109`, `:118` **inside a raised message**, `:632`) and the three `docs/SPEC.md` prose paragraphs above — plus §12.47's criterion, which is the sentence being retired rather than a site asserting it.
+> * **Status is now `PARTLY ADDRESSED`**, per this file's "Status vocabulary, used strictly" block: *some legs landed, others still open; the entry says which, and which SHA carries the landed half.* **Landed (`__W4_SHA__`):** §12.47's sentence is retired in `docs/SPEC.md`; §12.28 is marked as not carrying the claim; the three SPEC prose sites carry `D86` markers; §13 row 36 is marked. **Still open:** `src/fleet/ecosystems/base.py:109`, `:118`, `:632` still assert the mechanism as settled fact — `src/` was outside this lane's ownership, and `:118` is printed to an operator at the moment the registry check fails, which is the sharpest of the three.
+>
+> **The remedy is adjudicated: RETIRE the claim, do not build the initializer.** `mp_context` is unconditionally `forkserver` (`budgets.py:948`), so a pool child genuinely does not inherit the parent's registries — the body's "import side effects at module load" hypothesis is therefore **refuted**, not merely unverified. But the property is unreached rather than violated: exactly one callable is ever submitted to that pool — `scan_file`, through the tree's only `run_in_executor` (`src/fleet/workers/symbolindex.py:266-268`) — and an `ast` walk of `scan_file`'s body names no `discover()`, no registry and no adapter. Adding the initializer would import `anthropic`, `boto3`, `openai` and `google.auth` in every pool child and convert a startup `RuntimeError` naming the missing adapter into a `BrokenProcessPool`, **inverting** CLAUDE.md Rule 11 to buy a property nothing needs. This closes the body's third "What this entry does NOT establish" bullet ("No fix is proposed here") and answers its second ("the blast radius was not measured"): the blast radius is one callable, and it is registry-free.
 
 **Found by:** the 2026-08-27 audit of `docs/SPEC.md` §12 against the test suite, at base `076076d`
 (tree clean). Allocated centrally by the orchestrator after a form-agnostic sweep; see "Allocation"
@@ -6581,6 +6591,7 @@ Five places state the initializer as settled fact, so the tree reads as if the p
   process, including each `cpu_pool` initializer". **One of the three is inside a raised error
   message**, so the claim is printed to an operator at the moment the registry check fails.
 * `docs/SPEC.md` §5 and §9 carry the same claim in prose.
+  *(Corrected 2026-08-28, round-K lane W4 — measured at `12be741`: the sites are **§7.2** `:5386-5387`, **§7.5** `:5587-5588` and **§11.1** `:6796-6797`. Three, not two, and neither is in §5 or §9. The retired "§5 and §9" is quoted above on purpose so a sweep for it finds this correction and not a survival. All three now carry `D86` markers in `docs/SPEC.md`.)*
 
 This is the CLAUDE.md Guardrail 7 shape — "the SPEC says X but the code cannot do X" is **two
 edits, not one**. A reconciler who trusts the docstrings will make the *code* match a claim that
@@ -6606,6 +6617,15 @@ unbuilt feature.
 appeared in this tree. The SPEC sentences in §12.28 and §12.47 were **left standing** by the audit
 that found this, deliberately — correcting them is the second half of the two-edit pair above and
 belongs with the adjudication, not with a measurement pass.
+
+> **[2026-08-28, round-K lane W4 — SUPERSEDED AS A STATUS FIELD; kept as a record. The heading is this
+> entry's only status field and now reads `PARTLY ADDRESSED`; read it, not this block.]** The paragraph
+> above was accurate at `12be741` and is left exactly as its author wrote it. Two things in it have since
+> changed: §12.47's sentence is no longer standing (retired at `__W4_SHA__`), and §12.28 was never the
+> same sentence — see the heading's marker. `initializer=` still occurs **zero** times in `src/` and
+> `tests/`, so the mechanism half is unchanged. Stating `OPEN` in both a heading and a body block is the
+> divergence D63 had to be repaired for; this annotation collapses the authority to the heading without
+> rewriting the record.
 
 ### Allocation
 
