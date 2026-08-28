@@ -65,6 +65,7 @@ from fleet.bazel.lockfile import MODULE_LOCK_PATH, check_lock_registry
 from fleet.bazel.query import DEFAULT_RDEPS_LIMIT, DEFAULT_SAMPLE_N
 from fleet.ecosystems.base import EcosystemAdapter, path_segment
 from fleet.graph.build import GraphError, build_graph
+from fleet.graph.collisions import CollisionInput, CoordinateClaim, audit_collisions
 from fleet.graph.cycles import break_cycles
 from fleet.graph.infer import InferenceInput, OwnerIndex, infer_edges
 from fleet.graph.infer import ManifestDependency as InferredDependency
@@ -121,6 +122,7 @@ from fleet.models.enums import (
     transition,
 )
 from fleet.models.graph import (
+    CollisionFinding,
     ContractNode,
     CycleFinding,
     DependencyEdge,
@@ -2376,28 +2378,144 @@ def _contract_rows(
             )
         if output.collisions:
             await conn.executemany(
-                "INSERT INTO collisions (run_id, kind, key, repo_ids, blob_shas, severity, "
-                "    resolution, detected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
-                # §11.7: a re-scan re-detects the same contest and must not duplicate its row.
-                "ON CONFLICT (run_id, kind, key) DO UPDATE SET repo_ids = excluded.repo_ids, "
-                "    blob_shas = excluded.blob_shas, severity = excluded.severity, "
-                "    resolution = excluded.resolution, detected_at = excluded.detected_at",
-                [
-                    (
-                        run_id,
-                        collision.kind,
-                        collision.key,
-                        json.dumps(collision.repo_ids),
-                        json.dumps(collision.blob_shas),
-                        collision.severity,
-                        collision.resolution,
-                        stamp,
-                    )
-                    for collision in output.collisions
-                ],
+                COLLISION_UPSERT,
+                [_collision_params(run_id, c, stamp) for c in output.collisions],
             )
 
     return unit
+
+
+COLLISION_UPSERT: Final = (
+    "INSERT INTO collisions (run_id, kind, key, repo_ids, blob_shas, severity, "
+    "    resolution, detected_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+    # §11.7: a re-detection of the same contest must not duplicate its row.
+    "ON CONFLICT (run_id, kind, key) DO UPDATE SET repo_ids = excluded.repo_ids, "
+    "    blob_shas = excluded.blob_shas, severity = excluded.severity, "
+    "    resolution = excluded.resolution, detected_at = excluded.detected_at"
+)
+"""The ONE statement that writes a `collisions` row.
+
+Step 5b (`CONTRACT`, at scan) and step 8 (`COORDINATE`, at sequence) are different steps in
+different commands writing the same table, and a second spelling of this upsert is how the two
+would drift into disagreeing about the §11.7 idempotency key.
+"""
+
+
+def _collision_params(
+    run_id: str, collision: CollisionFinding, stamp: str
+) -> tuple[object, ...]:
+    return (
+        run_id,
+        collision.kind,
+        collision.key,
+        json.dumps(collision.repo_ids),
+        json.dumps(collision.blob_shas),
+        collision.severity,
+        collision.resolution,
+        stamp,
+    )
+
+
+def _collision_rows(
+    run_id: str, collisions: Sequence[CollisionFinding], stamp: str
+) -> Callable[[aiosqlite.Connection], Coroutine[Any, Any, None]]:
+    """One transaction for a step-8 audit's rows.
+
+    Insert-or-update, never DELETE-then-insert: this run audits only the kinds it has evidence
+    for, and wiping the table would silently retract step 5b's `CONTRACT` rows — which are
+    written by a different command (`fleet scan`) and which no part of `fleet sequence` re-derives.
+    """
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        if collisions:
+            await conn.executemany(
+                COLLISION_UPSERT, [_collision_params(run_id, c, stamp) for c in collisions]
+            )
+
+    return unit
+
+
+async def _coordinate_claims(conn: aiosqlite.Connection) -> tuple[CoordinateClaim, ...]:
+    """§3.1 step 8's `COORDINATE` input: who publishes what, one row per (repo, manifest).
+
+    Read from `manifests` and NOT from `coordinates`, which cannot express the contest at all:
+    `coordinates.coord_key` is a PRIMARY KEY (`state/schema.sql`) holding ONE `owner_repo_id`, so
+    by the time two repos publishing one key reach that table the second insert has already been
+    dropped by its `ON CONFLICT` and the collision is unobservable. `manifests` is keyed
+    `(repo_id, path)` and keeps every claim, which is why the detector can see two.
+
+    `ecosystem` is the manifest's own column rather than the ecosystem token inside `publishes_key`.
+    That is the whole point: `Coordinate.key` is `"{ecosystem}:{group}:{name}"`, so reading the
+    ecosystem back out of the key would make the detector's divergence test compare a value with
+    itself and it could never fire. Taken from the column, it compares what the adapter SAID this
+    manifest was against what the key it produced CLAIMS — and a disagreement there is the
+    normalization bug §3.1 step 8 marks `error`.
+
+    `depth` and `commit_count` are the ownership ladder's rungs (ii) and (iii); the join is a
+    LEFT JOIN so a manifest whose repo row is missing still contributes its claim at
+    `commit_count = 0` rather than vanishing from a contest it is party to.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT m.repo_id, m.publishes_key, m.ecosystem, m.path, "
+        "       COALESCE(r.commit_count, 0) "
+        "  FROM manifests AS m LEFT JOIN repos AS r ON r.repo_id = m.repo_id "
+        " WHERE m.publishes_key IS NOT NULL AND m.publishes_key <> '' "
+        " ORDER BY m.publishes_key, m.repo_id, m.path",
+    )
+    claims: list[CoordinateClaim] = []
+    for row in rows:
+        try:
+            ecosystem = Ecosystem(str(row[2]))
+        except ValueError:
+            # An ecosystem this build does not know is not evidence of a collision. Skipping the
+            # claim loses one participant; inventing UNKNOWN for it would manufacture a
+            # divergence against every well-formed claim on the same key and block the run.
+            continue
+        path = str(row[3])
+        claims.append(
+            CoordinateClaim(
+                coord_key=str(row[1]),
+                repo_id=str(row[0]),
+                ecosystem=ecosystem,
+                depth=path.count("/"),
+                commit_count=int(row[4] or 0),
+            )
+        )
+    return tuple(claims)
+
+
+def _owns_hints(
+    settings: FleetSettings, claims: Sequence[CoordinateClaim]
+) -> dict[str, str]:
+    """`config/repos.yaml`'s `owns:` as the ladder's rung (i), keyed by the thing owned.
+
+    `workers/contracts.py::_owner` resolves the same rung as
+    `sorted({c.repo_id for c in sources if contract_id in ...owns})[0]` — it intersects the
+    hinting repos with the repos that actually CARRY the thing, and only then takes the lowest
+    `repo_id`. This does the same for coordinates, and the intersection is the load-bearing half:
+    `owns_hints` maps a key to ONE repo, so without it a repo that hints a coordinate it does not
+    publish would shadow a real publisher's hint simply by sorting earlier, and the operator's
+    actual instruction would be lost before the detector ever saw it.
+
+    A hint that survives to here naming NO publisher is still passed on rather than dropped. The
+    detector refuses it and falls through to the ladder, which keeps that judgement in one place;
+    dropping it here would make the two indistinguishable from "no hint was written at all".
+    """
+    publishers: dict[str, set[str]] = {}
+    for claim in claims:
+        publishers.setdefault(claim.coord_key, set()).add(claim.repo_id)
+
+    hinting: dict[str, list[str]] = {}
+    for entry in sorted(settings.repos.repos, key=lambda e: e.name):
+        for owned in entry.owns:
+            hinting.setdefault(owned, []).append(entry.name)
+
+    hints: dict[str, str] = {}
+    for owned, names in sorted(hinting.items()):
+        publishing = [n for n in names if n in publishers.get(owned, set())]
+        hints[owned] = (publishing or names)[0]
+    return hints
 
 
 async def _owner_index(conn: aiosqlite.Connection) -> OwnerIndex:
@@ -2793,6 +2911,9 @@ async def _sequence_impl(
         # assigned a wave". An empty repo SKIPPED by step 1's gate is out of the fleet on the
         # same principle — giving it a wave index would make it a member the wave waits on.
         wave_plan = assign_waves(report, gated_repo_ids=await _gated_repos(conn, run_id))
+        # §3.1 step 8 runs AFTER waves are assigned and before any transformation, so the claims
+        # are read here, on the last use of the read connection.
+        coordinate_claims = await _coordinate_claims(conn)
     finally:
         await conn.close()
 
@@ -2823,8 +2944,34 @@ async def _sequence_impl(
                 max_usd_per_repo=settings.config.budgets.wave_max_cost_usd_per_repo,
             )
             await _persist_cycle_findings(writer, run_id, wave_plan.cycle_findings, now=_now())
+            collisions = audit_collisions(
+                CollisionInput(
+                    coordinates=coordinate_claims,
+                    owns_hints=_owns_hints(settings, coordinate_claims),
+                )
+            )
+            await writer.submit(_collision_rows(run_id, collisions.collisions, _iso(_now())))
         finally:
             await conn_ro.close()
+
+    # §10 exit 6, for the rows THIS run just detected. The gate at the top of this function reads
+    # the table as it stood on entry, which cannot include an audit that had not run yet; without
+    # this second refusal a fleet whose coordinates collide would sequence cleanly and only fail
+    # on the NEXT invocation.
+    #
+    # Raised AFTER the writer has committed, never instead of committing. `StateWriter.submit`
+    # awaits its unit's transaction, so by here the rows are durable — and an operator who is
+    # told to go and resolve a collision must be able to find it in the database. The same
+    # ordering is why `orchestrator/findings.py::record_backend_unavailable` is documented
+    # "Written BEFORE the exit-8 halt".
+    if collisions.blocking:
+        listed = ", ".join(f"{c.kind}:{c.key}" for c in collisions.blocking[:5])
+        raise UnresolvedFindingsError(
+            f"{len(collisions.blocking)} unresolved severity='error' collision(s) detected by "
+            f"this run's §3.1 step 8 audit ({listed}"
+            f"{'…' if len(collisions.blocking) > 5 else ''}); the rows are persisted — resolve "
+            "them in config, not in a half-migrated monorepo."
+        )
 
     payload: dict[str, object] = {
         "run_id": run_id,
