@@ -55,12 +55,25 @@ __all__ = [
     "EmitResult",
     "EventEmitter",
     "EventSink",
+    "events_jsonl_path",
 ]
 
 #: Failures are diagnostics, not state: keep the recent tail, never an unbounded list.
 MAX_RETAINED_FAILURES: Final = 64
 
 _LEVELS: Final[frozenset[str]] = frozenset({"debug", "info", "warning", "error", "critical"})
+
+
+def events_jsonl_path(root: Path, run_id: str) -> Path:
+    """`<root>/logs/events-<run_id>.jsonl` — the one path §8's directory listing names.
+
+    Here rather than at the call sites because there are two callers per run and they must
+    agree: `configure(json_path=…)` opens the structlog half of ADR-0012's "one event pipeline,
+    two renderers", and `EventEmitter(jsonl_path=…)` writes the typed half. Two call sites
+    spelling the same literal is how the two renderers end up in different files, and then §10's
+    `jq` recipe reads one of them and reports half a run.
+    """
+    return (root / "logs" / f"events-{run_id}.jsonl").resolve()
 
 
 @runtime_checkable
