@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 46 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 45 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -116,7 +116,16 @@ directions, by ``file:line``. A new unresolved citation fails
 ``test_no_unpinned_anchored_citation_fails_to_resolve``; a pinned one that starts resolving
 (or whose text changes at all) fails its own
 ``test_each_pinned_citation_is_still_unresolved`` case. It therefore cannot rot silently,
-which a hand-maintained exemption list can. Its members have **three different causes**
+which a hand-maintained exemption list can. **One direction of it can nonetheless go green
+without anything being repaired, and that has now happened once** (round K,
+``_run_transform_wave`` / ``cli.py:4445``, retired from the tuple below with its measurement):
+a pin whose citation points into the *interior* of a definition starts resolving as soon as
+unrelated drift in the cited file slides that definition over the cited line -- the citation
+text never changed and nothing was fixed. That is not a new blind spot; it is the one the
+Sensitivity paragraph above already names, observed. The quantity this ratchet watches is
+*containment in the anchor's AST span*, and pure drift in the cited file can move it, so a
+pin flipping to green is a prompt to measure, never by itself evidence of a repair.
+Its members have **three different causes**
 and this module does not claim to separate them -- the ledger marks records in prose, not
 in syntax, so no rule here can:
   * genuine drift -- verified independently against history for the ``settings.py``
@@ -281,7 +290,14 @@ def _check_population(profile: DocProfile, key: str, size: int) -> None:
 
 # Every anchored citation that did not resolve at 3dd500d, as (anchor, citation).
 # Both-directions ratchet -- see the module docstring. Do not add to this without a
-# measurement; do not delete from it without repointing the citation.
+# measurement; do not delete from it without repointing the citation -- with ONE stated
+# exception, measured rather than assumed: a pin may be retired WITHOUT repointing when the
+# citation sits inside a passage the ledger rules must not be repointed AND it began
+# resolving through drift in the cited file rather than through any edit to the citation.
+# Retiring one that way costs real coverage -- that citation is thereafter invisible to both
+# directions of this ratchet -- so it is recorded at the retirement site and in the ledger
+# entry, never done silently. See the round-K retirement noted where `_prepare_repo` /
+# `cli.py:3858` still sits, below.
 _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     (
         "test_every_file_the_generated_files_name_exists_after_the_phase_that_writes_them",
@@ -404,10 +420,17 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "WaveReport.exit_code",
         "src/fleet/orchestrator/runner.py:311-320",
     ),  # L5865 defined at [(314, 324)], cited 311-320
-    (
-        "_run_transform_wave",
-        "cli.py:4445",
-    ),  # L6239 defined at [(4202, 4272), (4202, 4272)], cited 4445-4445
+    # RETIRED in round K under the stated exception above, not repointed. Measured at
+    # 506cadb: `_run_transform_wave` (`cli.py:4445`), cited in `D84` step 3 of
+    # `docs/INTEGRATION_HONESTY.md`, began RESOLVING -- its definition moved to
+    # cli.py:4393-4461, so the cited 4445 now falls in its interior (cli.py:4445 is `ctx,`,
+    # an argument inside that function's own body). The flip is datable to this round's last
+    # merge, which took cli.py from 13266 to 13413 lines (+147) and the definition from
+    # 4246-4314 to 4393-4461; at 12be741 the cited 4445 was still outside it. The
+    # citation names a USAGE site -- the call in `_transform_impl`, now at cli.py:4674, which
+    # is 229 lines from the cited line -- and it sits in a passage `D84` rules is reported,
+    # not repointed. So it is neither repaired nor repointable, and the ratchet can no longer
+    # see it in either direction. The record is the dated marker beside `D84` step 3.
     (
         "_prepare_repo",
         "cli.py:3858",

@@ -61,10 +61,7 @@ def _random_dag(draw: st.DrawFn) -> tuple[list[str], list[tuple[str, str]]]:
     candidates = [
         (src, dst) for src in repo_ids for dst in repo_ids if rank[dst] < rank[src]
     ]
-    if candidates:
-        edges = draw(st.lists(st.sampled_from(candidates), unique=True))
-    else:
-        edges = []
+    edges = draw(st.lists(st.sampled_from(candidates), unique=True)) if candidates else []
     return repo_ids, edges
 
 

@@ -131,7 +131,7 @@ enumerated exemptions — one of the five cannot be planted by the pipeline.
 | 37 | stub lifecycle, only way out of DEGRADED | PARTIAL (16 sub-clauses: 4 yes, 4 partial, 8 no) | **The fixture premise is CONTRADICTED: `--stub-blocked` is unimplemented and refused exit 2 (cli.py:5001), and that refusal is itself a passing test.** `orchestrator/stubs.py` has NO importer in src/ — the whole §3.5.1 state machine is unwired; tests/test_stubs.py is a pure-function suite writing no row, enqueuing no task, emitting no finding. Already recorded as a D69 amendment. |
 | 38 | no ready-for-review while a stub is unresolved | PARTIAL (20 sub-clauses: 5 yes, 4 partial, 11 no) | The headline refusal IS well covered — exit 2 + PrState unchanged + a recording forge asserting `gh pr ready` never ran, two independent tests. Everything downstream (resolution, sweep, exit 7) unasserted. `stub_reconcile` has no implementation (cli.py:10771 is a comment) = KNOWN D80, which already names §12.38's missing behavioural check nearly verbatim. Sharpest: the `--ready` guard's SUPERSEDED arm is unexercised — **deleting `'SUPERSEDED'` from cli.py:9902 passes the whole suite**; and the gate's POSITIVE half is asserted nowhere, so an unconditionally-refusing guard would also pass. |
 | 39 | bounded, priced rework; stub rot reaches a human | PARTIAL (18 sub-clauses: 4 yes, 6 partial, 8 no) | Case (iii) (batched=1 / eager=3, key hashes all three providers) is the batch's strongest assertion. Cases (i)/(ii) only test what is handed in as a parameter. |
-| 40 | no model string outside config | PARTIAL (1 of 5) | **CONTROLLER-VERIFIED: the criterion's own greps do NOT return nothing at 076076d.** `src/fleet/llm/backends/openai_compatible.py` carries llama.cpp prose (non-zero under any variant of the pattern; A07 counted 7 under its predicate, I counted 10 lines under mine — the CLASS result is what holds: non-empty), and `llm/backends/vertex.py:262` is a hardcoded `f"https://{host}/v1/projects/{project}/locations/{region}"`. The AST clause names `src/fleet/llm/routing.py`, which **does not exist** (the reader is settings.py:1138; PROGRESS.md:777 records "none exists, none should be created"). Implementing §12.40 verbatim would RED the suite — a SPEC-text edit is owed alongside any coverage work. |
+| 40 | no model string outside config | PARTIAL (1 of 5) | **CONTROLLER-VERIFIED: the criterion's own greps do NOT return nothing at 076076d.** `src/fleet/llm/backends/openai_compatible.py` carries llama.cpp prose (non-zero under any variant of the pattern; A07 counted 7 under its predicate, I counted 10 lines under mine — the CLASS result is what holds: non-empty), and `llm/backends/vertex.py:262` is a hardcoded `f"https://{host}/v1/projects/{project}/locations/{region}"`. The AST clause names `src/fleet/llm/routing.py`, which **does not exist** (the reader is settings.py:1138; PROGRESS.md:777 records "none exists, none should be created"). Implementing §12.40 verbatim would RED the suite — a SPEC-text edit is owed alongside any coverage work. **[Marker 2026-08-28, round-K lane W5 — beside the claim, because the correction at `:453` is ~319 lines below this row and a reader of this row never reaches it. This row's original wording is left untouched.]** The attribution *"PROGRESS.md:777 records 'none exists, none should be created'"* is **wrong, and inverted**: `docs/PROGRESS.md:5542` carries those words; `docs/PROGRESS.md:777` resolves the same clause the **other** way — *"`llm/roles.py` holds the router that §8 and §12.40's AST test expect at `llm/routing.py` — a rename plus import update"*. Re-measured at `506cadb`. So the two contradicting records were **conflated**, not merely one overlooked. The rest of the row stands; see the fuller correction at `:453`. |
 
 ## Criteria 45-46 (lane A09)
 | # | paraphrase | verdict | evidence |
@@ -262,6 +262,34 @@ criteria plus three code docstrings plus two SPEC sites):
 > `:632`), as do `SPEC.md:5386` and `:6796`. Neither ledger mentions it.
 Guardrail 7 shape: fixing this is two edits (code + the SPEC/docstring sentences), and a
 reconciler who trusts the docstrings would "fix" the code to match a claim nothing enforces.
+
+> **[Marker 2026-08-28, round-K lane W5 — read this before the paragraph below it. That paragraph
+> is left exactly as its author wrote it at `12be741`; this is the annotation, not a rewrite.]**
+>
+> **The numbers in the next paragraph are PROPOSALS. The ledger has issued none of them.** Of the
+> numbers this section names, only `D86` — recommended above — was ever allocated, and it is a real
+> entry in `docs/INTEGRATION_HONESTY.md`. Class result, measured at `506cadb`: for **every** number
+> proposed in the paragraph below, a form-agnostic word-boundary sweep over `docs/` returns
+> **exactly one hit, and that hit is the paragraph below itself**; a `git grep` of the same pattern
+> over every tracked file in the worktree returns that one file and nothing else. So an allocator
+> who sweeps and stops at the match reads every one of them as taken, and taken for these subjects.
+> **This marker deliberately does not repeat those numbers**, so that the sweep it describes still
+> lands on that paragraph and on nothing else — quoting them here would make this marker a member
+> of the class it measures and falsify its own count.
+>
+> This is exactly the trap `CLAUDE.md` §3 records: **a match is not an allocation — read the body.**
+> The body is this marker, and it says these numbers are free. Do not treat the paragraph below as
+> an allocation, and do **not** renumber it. **Re-derive the next free number from
+> `docs/INTEGRATION_HONESTY.md` at the moment you allocate**, form-agnostically, as one past the
+> *measured* maximum — the highest number carrying an entry there at `506cadb` is `D86`. Anything
+> actually allocated off this list is recorded in the ledger; this file never records an allocation.
+>
+> **One candidate below is also stale.** The last one — *"no `hypothesis` test exists despite
+> ADR-0013 deciding on it"* — was true at `12be741` and is **false at `506cadb`**:
+> `tests/test_graph_properties.py` landed at `83e1493` (2026-08-28) as a `hypothesis` property test
+> for ADR-0013's wave-ordering claim, and it is the only file under `tests/` or `src/` importing
+> `hypothesis`. Its words stand below as the record of what was proposed; they are no longer a live
+> finding.
 
 Further candidates, if more numbers are allocated, in my order of value:
 D87 §12.27 detectors unreachable from any CLI path · D88 §12.16 SPEC-vs-code "raises"
@@ -477,3 +505,27 @@ the retired wording quoted there.
   `references/visa-vulnerability-agentic-harness/vvaharness/orchestrator/checkpoints.py`, is not in
   `references/` and appears nowhere in this repository's history. It is named as a deliberate
   non-edit beside ADR-0002's marker so the next sweep does not "fix" it.
+
+---
+# 2026-08-28 — round-K final-review repairs (lane W5). Annotation only; nothing above is rewritten.
+
+Three documentary corrections landed in this pass — the `D86` "Landed" clause in
+`docs/INTEGRATION_HONESTY.md`, the pre-allocation marker above the candidate list, and the marker
+beside row 40. Each is a dated marker beside the claim it corrects; no earlier author's wording was
+edited. One further item is **recorded here rather than fixed**, because `src/` is outside this
+lane's ownership.
+
+## Residue — recorded, not fixed
+
+* **`_owns_hints` is now defined twice, with different signatures.** Measured at `506cadb` with an
+  `ast` walk of each file, not by grep:
+  * `src/fleet/cli.py:2488-2518` — `_owns_hints(settings: FleetSettings, claims: Sequence[CoordinateClaim]) -> dict[str, str]`
+  * `src/fleet/workers/contracts.py:889-896` — `_owns_hints(payload: ContractsInput, known: set[str]) -> Mapping[str, str]`
+
+  Harmless at runtime: they are module-private, neither imports the other, and nothing resolves the
+  name across module boundaries. It is recorded because of what `CLAUDE.md` Guardrail 6 measured
+  about detectors that key on **name plus file membership** rather than on what a function's body
+  does: a sibling-exclusion filter written as *"ignore any function of this name"* now silently
+  excludes **two** functions, and a detector deriving a set by name would fold two unrelated
+  functions into one. No detector in `tests/` is known to be fooled by this today — that was not
+  swept, and this note claims only the duplication, not a live defect. Neither function was touched.
