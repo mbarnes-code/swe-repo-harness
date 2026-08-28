@@ -115,10 +115,19 @@ commit this module landed at. It is a ratchet, not a whitelist: it fails in **bo
 directions, by ``file:line``. A new unresolved citation fails
 ``test_no_unpinned_anchored_citation_fails_to_resolve``; a pinned one that starts resolving
 (or whose text changes at all) fails its own
-``test_each_pinned_citation_is_still_unresolved`` case. It therefore cannot rot silently,
-which a hand-maintained exemption list can. **One direction of it can nonetheless go green
-without anything being repaired, and that has now happened once** (round K,
-``_run_transform_wave`` / ``cli.py:4445``, retired from the tuple below with its measurement):
+``test_each_pinned_citation_is_still_unresolved`` case. **While a citation is pinned** it
+therefore cannot rot silently, which a hand-maintained exemption list can. **That claim now
+stops at the retirement exception below, and the exception IS hand-maintained**: a retired
+citation leaves the pinned set on an author's judgement rather than by any rule, and is
+thereafter covered in one direction only -- it stays in the anchored survey, so it still
+fails ``test_no_unpinned_anchored_citation_fails_to_resolve`` if it goes unresolved again,
+but a silent repoint of it is caught by nothing here. Stated plainly so the next author is
+not misled by the sentence above it: this module is a mechanism up to the pin boundary and a
+convention across it.
+
+**One direction of it can nonetheless go green without anything being repaired, and that has
+now happened once** (round K, ``_run_transform_wave`` / ``cli.py:4445``, retired from the
+tuple below with its measurement):
 a pin whose citation points into the *interior* of a definition starts resolving as soon as
 unrelated drift in the cited file slides that definition over the cited line -- the citation
 text never changed and nothing was fixed. That is not a new blind spot; it is the one the
@@ -294,10 +303,14 @@ def _check_population(profile: DocProfile, key: str, size: int) -> None:
 # exception, measured rather than assumed: a pin may be retired WITHOUT repointing when the
 # citation sits inside a passage the ledger rules must not be repointed AND it began
 # resolving through drift in the cited file rather than through any edit to the citation.
-# Retiring one that way costs real coverage -- that citation is thereafter invisible to both
-# directions of this ratchet -- so it is recorded at the retirement site and in the ledger
-# entry, never done silently. See the round-K retirement noted where `_prepare_repo` /
-# `cli.py:3858` still sits, below.
+# Retiring one that way costs real coverage, and WHICH coverage is measured rather than
+# guessed: the citation stays in the anchored survey and simply becomes unpinned, so
+# `test_no_unpinned_anchored_citation_fails_to_resolve` still fires on it by `file:line` if
+# drift ever makes it unresolved again. Exactly one direction is lost, not both -- while
+# pinned, `test_each_pinned_citation_is_still_unresolved` ALSO failed if the citation's text
+# changed at all, so a silent repoint of a known-wrong citation is what stops being caught.
+# So it is recorded at the retirement site and in the ledger entry, never done silently.
+# See the round-K retirement noted where `_prepare_repo` / `cli.py:3858` still sits, below.
 _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     (
         "test_every_file_the_generated_files_name_exists_after_the_phase_that_writes_them",
@@ -429,8 +442,12 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     # 4246-4314 to 4393-4461; at 12be741 the cited 4445 was still outside it. The
     # citation names a USAGE site -- the call in `_transform_impl`, now at cli.py:4674, which
     # is 229 lines from the cited line -- and it sits in a passage `D84` rules is reported,
-    # not repointed. So it is neither repaired nor repointable, and the ratchet can no longer
-    # see it in either direction. The record is the dated marker beside `D84` step 3.
+    # not repointed. So it is neither repaired nor repointable. It stays an anchored citation
+    # of this survey, now resolving and unpinned: still covered by
+    # `test_no_unpinned_anchored_citation_fails_to_resolve` if it goes unresolved again, no
+    # longer covered against a silent repoint. One direction, not both. (`4393-4461` is the
+    # `def` span; `_logical_span` widens it to `4391-4461` over the blank lines above the
+    # `def`, and 4445 is interior to both.) The record is the dated marker beside `D84` step 3.
     (
         "_prepare_repo",
         "cli.py:3858",
