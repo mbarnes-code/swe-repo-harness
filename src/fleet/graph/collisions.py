@@ -174,9 +174,8 @@ def ownership_rank(
     It is a function rather than a comment because `COORDINATE` and `CONTRACT` ownership are the
     same question asked about two key spaces, and two ladders that drift apart are two different
     answers to "who owns this" — a disagreement that would surface only as a mis-migrated repo.
-    `workers/contracts.py::_owner` ranks `CONTRACT` carriers on these same four rungs and still
-    spells them inline; repointing it at this function is a one-line change the lane that added
-    this did not own that file to make, and is reported rather than done.
+    `workers/contracts.py::_owner` ranks `CONTRACT` carriers through this same function, so the
+    `CONTRACT` and `COORDINATE` ladders cannot drift apart by an edit to one of them.
     """
     return (not publishes_coordinate, depth, -commit_count, repo_id)
 
