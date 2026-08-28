@@ -18,6 +18,15 @@ What each test is for:
   One package carried by three repos is ONE node with one owner; the vendored copy does not vote
   for ownership (5b iv) and the generated copy is evidence of consumption, never of ownership
   (5b ii).
+* the four `_ladder_owner` tests — one per rung of §3.1 5b (iv)'s ownership ladder
+  (`graph/collisions.py::ownership_rank`), which nothing in this suite used to assert. They are
+  the reason `_payload` takes `commit_counts`/`publishes` and the reason `LADDER_FLEET` exists:
+  with `SHARED_FLEET` the ladder is not thinly covered, it is **unreachable** — one carrier is
+  vendored and one generated, so `_owner`'s `eligible` filter leaves a single candidate, and a
+  one-element sort returns that candidate whatever the sort key says. Every rung was constant or
+  unreached, and inverting the depth rung left this file entirely green. Each of the four is the
+  unique discriminator of at least one mutation of the rung it names; the matrix is in the round
+  report, and the fixture docstrings say which mutation each one answers.
 * `test_hoisting_the_discovered_contract_dissolves_the_two_repo_cycle` — **the payoff.** Discovery
   and cycle-breaking were each green in isolation and had never been run against each other:
   `infer_contract_edges` could always convert a `ContractNode`, and nothing produced one. This
@@ -87,6 +96,7 @@ from fleet.workers.contracts import (
     carry_over_committed,
     discover_contracts,
 )
+from fleet.workers.interrogate import is_ignored
 from fleet.workers.symbolindex import scan_file
 from tests.test_cli import MODELS_YAML
 from tests.test_scan_e2e import _fresh_db, _make_repo
@@ -188,7 +198,18 @@ def _payload(
     *,
     owns: Mapping[str, tuple[str, ...]] | None = None,
     committed: Sequence[ContractNode] = (),
+    commit_counts: Mapping[str, int] | None = None,
+    publishes: Mapping[str, bool] | None = None,
 ) -> ContractsInput:
+    """`commit_counts` and `publishes` override ladder rungs (i) and (iii) PER REPO.
+
+    They exist because without them the ownership ladder is not merely under-tested, it is
+    unreachable: every `RepoFacts` row this helper built carried `commit_count=1` and
+    `publishes_coordinate=True`, so two of `ownership_rank`'s four rungs were constant by
+    construction and no fixture in this file could express a defect in either. The defaults below
+    are the values that were hardcoded, so every fixture that does not ask for an override sees
+    exactly the payload it saw before.
+    """
     _write_fleet(root, repos)
     symbols: list[SymbolRef] = []
     for repo_id, files in sorted(repos.items()):
@@ -199,9 +220,9 @@ def _payload(
             RepoFacts(
                 repo_id=repo_id,
                 worktree_path=str(root / repo_id),
-                commit_count=1,
+                commit_count=(commit_counts or {}).get(repo_id, 1),
                 owns=(owns or {}).get(repo_id, ()),
-                publishes_coordinate=True,
+                publishes_coordinate=(publishes or {}).get(repo_id, True),
             )
             for repo_id in sorted(repos)
         ),
@@ -341,6 +362,40 @@ CYCLE_FLEET: Mapping[str, Mapping[str, str]] = {
     },
 }
 
+LADDER_DEEP = "proto/acme/identity/v1/identity.proto"
+"""`_Carrier.depth` is `path.count("/")` — 4 here."""
+LADDER_SHALLOW = "contracts/identity.proto"
+"""The same package, one directory down — depth 1, and matched by no vendor or generated glob."""
+
+LADDER_FLEET: Mapping[str, Mapping[str, str]] = {
+    # TWO carriers that are neither vendored nor generated, at DIFFERING depths. That is what
+    # `SHARED_FLEET` cannot supply: its second carrier sits under `third_party/`, so `_owner`'s
+    # `eligible` filter in `workers.contracts._owner` leaves one element and the sort decides
+    # nothing. Here `eligible` has two, the two disagree on depth, and `repo_id` — the LAST rung —
+    # would crown the other one, so each rung's own answer is visible in `owning_repo_id`.
+    "acme-identity": {
+        LADDER_DEEP: IDENTITY_PROTO,
+        "package.json": _pkg("@acme/identity"),
+    },
+    "acme-platform": {
+        LADDER_SHALLOW: IDENTITY_PROTO,
+        "package.json": _pkg("@acme/platform"),
+    },
+    # a consumer, so the node clears `min_consumers` and is a real EXTRACTABLE row
+    "acme-reporting": {
+        IDENTITY_BINDING: _binding("acme.identity.v1"),
+        "package.json": _pkg("@acme/reporting"),
+    },
+}
+
+TIED_DEPTH_FLEET: Mapping[str, Mapping[str, str]] = {
+    **LADDER_FLEET,
+    # the same contract at the same depth in both carriers, so rung (ii) cannot answer and the
+    # contest falls through to whichever lower rung the test varies.
+    "acme-platform": {LADDER_DEEP: IDENTITY_PROTO, "package.json": _pkg("@acme/platform")},
+}
+
+
 PROTO_ID = "proto:acme.identity.v1"
 
 
@@ -452,6 +507,102 @@ def test_an_owns_hint_beats_the_ladder_and_is_recorded_in_the_confidence(tmp_pat
     for value in node.confidence_factors.values():
         product *= value
     assert node.extraction_confidence == pytest.approx(product)
+
+
+def _ladder_owner(
+    tmp_path: Path, repos: Mapping[str, Mapping[str, str]], **facts: Any
+) -> ContractNode:
+    """Run 5b and return the one contract node — after proving the ladder had a real contest.
+
+    The candidate assertion is not decoration. The defect these tests exist to catch is a ladder
+    that never runs: with one eligible carrier `sorted()` returns it whatever the key says, and
+    every assertion on `owning_repo_id` below would hold under any mutation of any rung. So the
+    candidate set is checked before the winner is.
+
+    It is derived the way `_owner` derives `eligible` — `source_paths` minus the vendored copies —
+    and NOT as the bare set of `source_paths` repo ids, which was this guard's first form and was
+    blind by construction: `source_paths` carries every non-generated carrier INCLUDING vendored
+    ones, so it reads the same whether the rival carrier is eligible or not. Measured: with both
+    rivals moved under `third_party/`, the bare-repo-id form stayed green on the guard and let
+    `test_repo_id_settles_a_contest_the_other_rungs_all_tie` pass over a one-element sort — the
+    exact state this module is here to make impossible. This form fails all four.
+    """
+    node = _by_id(_run(_payload(tmp_path, repos, **facts)))[PROTO_ID]
+    vendor_globs = _scan_defaults()["vendor"]
+    eligible = {
+        entry["repo_id"]
+        for entry in node.source_paths
+        if not is_ignored(str(entry["path"]), vendor_globs)
+    }
+    assert eligible == {"acme-identity", "acme-platform"}, (
+        f"the ownership ladder must have two candidates to rank, got {sorted(eligible)}"
+    )
+    return node
+
+
+def test_the_busier_carrier_wins_the_commit_count_rung(tmp_path: Path) -> None:
+    """Rung (iii): equal depth, so the repo with MORE commits owns it.
+
+    `ownership_rank` negates `commit_count` because the ladder sorts ascending and this rung wants
+    the largest value first — a rung that is easy to write as an unnegated `commit_count` and then
+    silently mean its opposite. `acme-identity` keeps the default 1 and sorts first by `repo_id`,
+    so it wins under both a dropped rung and an unnegated one.
+
+    Quantity: `owning_repo_id`. The candidates tie on rungs (i), (ii) and differ only in
+    `commit_count`, so nothing but this rung can order them.
+    """
+    node = _ladder_owner(tmp_path, TIED_DEPTH_FLEET, commit_counts={"acme-platform": 9})
+    assert node.owning_repo_id == "acme-platform"
+
+
+def test_a_publishing_carrier_outranks_a_non_publishing_one(tmp_path: Path) -> None:
+    """Rung (i): the repo that publishes a coordinate for this package owns it.
+
+    `_payload` used to hardcode `publishes_coordinate=True` for every repo, which made this rung
+    constant and therefore unfalsifiable. Here `acme-identity` publishes nothing; it would still
+    win on `repo_id`, so the assertion holds only if rung (i) really ran and really preferred the
+    publisher. Note the rung is written `not publishes_coordinate` — dropping the `not` is the
+    natural typo and it inverts the whole rung.
+    """
+    node = _ladder_owner(tmp_path, TIED_DEPTH_FLEET, publishes={"acme-identity": False})
+    assert node.owning_repo_id == "acme-platform"
+
+
+def test_repo_id_settles_a_contest_the_other_rungs_all_tie(tmp_path: Path) -> None:
+    """Rung (iv): with every other rung tied, the lexicographically first `repo_id` owns it.
+
+    This is the rung that makes the ladder TOTAL, and a total order is the whole reason the
+    docstring on `ownership_rank` gives for the rung existing: without it the winner depends on
+    the order rows came out of the carrier index, and two runs over one fleet can disagree. So the
+    fixture ties rungs (i)-(iii) deliberately — this is the only test here whose answer changes
+    when `repo_id`'s direction changes, because it is the only one that reaches rung (iv).
+    """
+    assert _ladder_owner(tmp_path, TIED_DEPTH_FLEET).owning_repo_id == "acme-identity"
+
+
+def test_the_shallower_carrier_wins_even_against_a_busier_one(tmp_path: Path) -> None:
+    """Rung (ii), and rung (ii)'s POSITION — deliberately one test, not two.
+
+    `acme-platform`'s copy is 3 directories shallower; `acme-identity`'s is deeper and has 9
+    commits against 1. The ladder is `(publishes, depth, -commits, repo_id)`, so depth answers
+    first and the shallow carrier wins anyway. Rungs (i) and (iv) are tied and unreached — and
+    `repo_id`, if it were reached, would crown the other repo.
+
+    Why the two properties share one test: the depth rung's direction and its position are not
+    independently discriminable. A fixture that asserts only "shallowest wins" (depths differing,
+    commits tied) reddens under exactly the mutations that redden this one, MINUS the rung-order
+    swap — its mutation set is a strict subset of this one's, measured. Shipping both would add a
+    case that is the unique discriminator of nothing, which is the failure mode CLAUDE.md's
+    coverage-in-discrimination rule names. So the weaker fixture was deleted and this one keeps
+    its work.
+
+    Quantity watched: `owning_repo_id`, which IS `_owner`'s `ranked[0].repo_id` — the output of
+    the sort under test. Depth is the only rung that can decide this pair while the ladder is
+    intact, so no defect in it can leave that quantity unchanged; and because depth and
+    `commit_count` disagree here, a defect that merely reorders the two rungs cannot either.
+    """
+    node = _ladder_owner(tmp_path, LADDER_FLEET, commit_counts={"acme-identity": 9})
+    assert node.owning_repo_id == "acme-platform"
 
 
 def test_a_contract_no_repo_owns_is_not_invented_as_a_node(tmp_path: Path) -> None:
