@@ -132,6 +132,7 @@ from fleet.models.graph import (
 from fleet.models.repo import Coordinate, ManifestRef, RawDependency, RepoId
 from fleet.models.state import SCHEMA_VERSION
 from fleet.models.tasks import MAX_ATTEMPTS, PullRequestDraft, VerificationReport
+from fleet.obs.events import EventEmitter, events_jsonl_path
 from fleet.obs.log import configure as log_configure
 from fleet.obs.redact import redact_text
 from fleet.orchestrator.budgets import (
@@ -217,7 +218,6 @@ from fleet.state.repository import (
     BlockedBySnapshotStaleError,
     BlockerResolver,
     EdgeRow,
-    EventRow,
     FloorSnapshotStaleError,
     SqliteStateRepository,
     SymbolRow,
@@ -1759,7 +1759,12 @@ async def _scan_impl(
     # long-lived process is a handle that may since have been closed. A worker whose `log.info`
     # raises is a worker that FAILS: the first symptom of this was five healthy repos reaching
     # REQUIRES_HUMAN_INTERVENTION with `I/O operation on closed file`.
-    log_configure(level=opts.log_level)
+    #
+    # `json_path` is the other half, and until it was passed here `logs/events-<run_id>.jsonl`
+    # was produced by no code path at all: ADR-0012 decided "one event pipeline, two renderers",
+    # and only the console renderer was ever installed. Every phase verb opens the SAME path for
+    # the SAME `run_id`, which is what makes §10's `jq` recipe read one run rather than one verb.
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     fleet = _fleet_entries(settings, only)
     steps = tuple(
         unit
@@ -4590,7 +4595,7 @@ async def _transform_impl(
     refuses to open wave N+1 while wave N is not `CLOSED`, which is the whole ordering guarantee
     the topological sequencer bought (§3.1 step 7).
     """
-    log_configure(level=opts.log_level)
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     rules = _transform_rules(settings)
     evidence = _TransformEvidence()
     plans: dict[str, _TransformPlan] = {}
@@ -8176,7 +8181,7 @@ async def _build_impl(
     fails, so what widened is *when* the merge happens, not *whether* an unbuilt repo can be on
     the branch.
     """
-    log_configure(level=opts.log_level)
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     config = _phase_config(settings, Phase.BUILD, timeout_s)
     evidence = _BuildEvidence()
     plans: dict[str, _BuildPlan] = {}
@@ -8681,7 +8686,7 @@ async def _verify_impl(
     affected_only: bool,
 ) -> dict[str, object]:
     """Phase 4 steps 1–3 over one fleet, wave by wave, through the real composition."""
-    log_configure(level=opts.log_level)
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     config = settings.config
     evidence = _VerifyEvidence()
     plans: dict[str, _VerifyPlan] = {}
@@ -9523,7 +9528,7 @@ async def _pr_sync_impl(
     slot on an answer that cannot change is what makes a 250-PR fleet cost one call per PR per
     `pr.poll_interval_s`.
     """
-    log_configure(level=opts.log_level)
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     conn = await connect_ro(path)
     try:
         records = await _pr_records(conn, run_id)
@@ -9555,6 +9560,17 @@ async def _pr_sync_impl(
         read_conn = await connect_ro(path)
         try:
             repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            # ADR-0012's stream, constructed where the run has both halves: the `run_id` that
+            # partitions `seq`, and the repository that satisfies `EventSink`. Going through the
+            # emitter rather than calling `append_event` directly is what puts `pr_merged` on
+            # `logs/events-<run_id>.jsonl` as well as in `events` — and it is also what redacts
+            # the payload, because `append_event` takes `row.payload` as a finished string and
+            # `obs/events.py` is the boundary where §11.4's redaction actually happens.
+            emitter = EventEmitter(
+                run_id=run_id,
+                sink=repository,
+                jsonl_path=events_jsonl_path(settings.root, run_id),
+            )
             for repo_id, draft in sorted(pollable.items()):
                 status = observed.get(draft.url or "")
                 if status is None or status.state is draft.state:
@@ -9568,30 +9584,38 @@ async def _pr_sync_impl(
                 await _write_pr_record(writer, run_id, updated, now=stamp)
                 if status.state is PrState.MERGED:
                     merged.append(repo_id)
-                    await repository.append_event(
-                        EventRow(
-                            run_id=run_id,
-                            seq=0,  # allocated IN-STATEMENT by append_event (§6)
-                            ts=_iso(stamp),
-                            level="info",
-                            event="pr_merged",
-                            event_uid=str(uuid4()),
-                            repo_id=repo_id,
-                            phase=Phase.VERIFY,
-                            payload=json.dumps(
-                                {
-                                    "url": status.url,
-                                    "merge_commit_sha": status.merge_commit_sha,
-                                    "merged_at": (
-                                        None
-                                        if status.merged_at is None
-                                        else _iso(status.merged_at)
-                                    ),
-                                },
-                                sort_keys=True,
+                    outcome = await emitter.emit(
+                        "pr_merged",
+                        level="info",
+                        repo_id=repo_id,
+                        phase=Phase.VERIFY,
+                        payload={
+                            "url": status.url,
+                            "merge_commit_sha": status.merge_commit_sha,
+                            "merged_at": (
+                                None if status.merged_at is None else _iso(status.merged_at)
                             ),
-                        )
+                        },
+                        now=stamp,
                     )
+                    # `emit()` never raises, and here that carve-out does NOT apply: it is
+                    # written for "the caller is a worker mid-transform and the failing
+                    # operation is telemetry", and `pr_merged` is not telemetry. It is the fact
+                    # three gates read (§3.4's stacking precondition, §3.5's `blocked_by`
+                    # release, §3.5.1's T1 trigger), and a `pr_merged` that is silently dropped
+                    # leaves every dependent blocked forever — the 242-of-250 stall this whole
+                    # function exists to fix, arriving back through the telemetry door. So the
+                    # SQL leg is checked and Rule 11 applies. The JSONL leg deliberately is not:
+                    # a full disk under `logs/` must not un-merge a PR that really did merge,
+                    # and `EventEmitter` has already counted and logged that failure.
+                    if not outcome.stored:
+                        why = "; ".join(f.error for f in outcome.failures) or "no sink configured"
+                        raise StateDbError(
+                            f"{repo_id}: the forge says MERGED but the `pr_merged` event was not "
+                            f"recorded ({why}). Nothing downstream can observe the merge, so this "
+                            "run fails rather than leaving the dependent wave blocked with no "
+                            "error (§3.4 step 5, CLAUDE.md Rule 11)."
+                        )
                 elif status.state is PrState.CLOSED:
                     closed.append(repo_id)
         finally:
@@ -9771,7 +9795,7 @@ async def _pr_impl(
     against what the forge says right now, which is the difference between "observed" and
     "assumed" that §3.4 step 5 is written to enforce.
     """
-    log_configure(level=opts.log_level)
+    log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     conn = await connect_ro(path)
     try:
         candidates, unverified = await _pr_candidates(conn, settings, run_id, wave, only)
