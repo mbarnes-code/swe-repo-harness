@@ -50,6 +50,33 @@ ships an even more conservative `pydantic>=2.13.4`, and we adopt its validate-on
 verbatim because a tampered or truncated checkpoint must produce a `ValidationError` that
 re-runs the step, never a smuggled value.
 
+> **[Marker 2026-08-28, round-K lane W4 — the sentence above is the ORIGIN of a claim the code has
+> never satisfied, and it is now the last site still asserting it. Annotation only: nothing in
+> ADR-0002 is rewritten, and the record of what this ADR decided stands.]**
+> `docs/SPEC.md` §12.16 said the same thing (*"raises `ValidationError` on load"*) until `12be741`
+> retired it, and §12.48's cross-reference was corrected with it. `src/fleet/state/checkpoints.py`
+> has never raised: its module docstring (`:8-15`) states that `load()` returns
+> `LoadedCheckpoint(payload=None, rejection=...)` for every failure, and
+> `tests/test_checkpoints.py::test_a_truncated_blob_invalidates_instead_of_raising` asserts the
+> opposite of the retired sentence **in its own name**. So this ADR now contradicts both the SPEC
+> and the module. **The decision it records is unchanged and still correct** — validate on load, no
+> pickle, never a smuggled value; only the *mechanism* named for the failure is wrong, because
+> `ValidationError` is caught and converted to a named `CheckpointRejection` rather than
+> propagated. A reconciler must **not** make `load()` raise to reconcile the SPEC with this ADR;
+> the SPEC is the corrected side. Whether ADR-0002's wording is superseded by a new ADR is an
+> adjudication this marker does not make.
+>
+> **Deliberate non-edit, named so the next sweep does not "fix" it:** the same wording appears
+> again in this file at `:4939-4946` (numbered after this marker's own insertion; the passage opens
+> *"Checkpoints are JSON validated on load — never pickle"*, which is the anchor to search on if the
+> lines move again) (*"so a tampered checkpoint produces a `ValidationError` and
+> the step is re-run"*). That passage describes a **third-party reference harness**, cited to
+> `references/visa-vulnerability-agentic-harness/vvaharness/orchestrator/checkpoints.py` — a path
+> that is **not present in `references/` and appears nowhere in this repository's history**
+> (`git log --all -- 'references/visa*'` is empty at `12be741`), so this lane could not and did not
+> verify what that module does. It is a description of somebody else's code, not a normative claim
+> about `fleet`, and it is correctly left exactly as written.
+
 **Alternatives rejected.** `dataclasses` + manual validation (no JSON Schema generation for
 LLM structured output, no coercion); `attrs` (same gap); Pydantic v1 (dead-end API, ~20×
 slower validation); raw `dict` state (the failure mode we are explicitly engineering against).
