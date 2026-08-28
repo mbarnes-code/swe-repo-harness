@@ -49,7 +49,12 @@ from typing import ClassVar, Final
 from pydantic import Field
 
 from fleet.bazel.layout import is_reserved_dest, normalize_dest
-from fleet.graph.collisions import CollisionInput, ContractClaim, audit_collisions
+from fleet.graph.collisions import (
+    CollisionInput,
+    ContractClaim,
+    audit_collisions,
+    ownership_rank,
+)
 from fleet.models.base import FleetModel
 from fleet.models.enums import ContractKind, ContractStatus, Phase, SymbolKind
 from fleet.models.graph import CollisionFinding, ContractId, ContractNode, SymbolRef
@@ -663,13 +668,17 @@ def _owner(
     # (ii) prefer a carrier whose copy is neither vendored nor generated; only if EVERY copy is
     # one of those does the ladder fall back to the whole carrier set — an owner must exist.
     eligible = [c for c in sources if not c.vendored and not c.generated] or list(sources)
+    # Rungs (ii)-(iv) come from `graph.collisions.ownership_rank`, which is the SAME ladder the
+    # `COORDINATE` detector applies. It is shared rather than spelled twice because the two are
+    # one question asked about two key spaces, and a second copy is how the next edit to one of
+    # them silently makes contract ownership and coordinate ownership disagree.
     ranked = sorted(
         eligible,
-        key=lambda c: (
-            not facts.get(c.repo_id, _NO_FACTS).publishes_coordinate,
-            c.depth,
-            -facts.get(c.repo_id, _NO_FACTS).commit_count,
-            c.repo_id,
+        key=lambda c: ownership_rank(
+            publishes_coordinate=facts.get(c.repo_id, _NO_FACTS).publishes_coordinate,
+            depth=c.depth,
+            commit_count=facts.get(c.repo_id, _NO_FACTS).commit_count,
+            repo_id=c.repo_id,
         ),
     )
     return ranked[0].repo_id, False

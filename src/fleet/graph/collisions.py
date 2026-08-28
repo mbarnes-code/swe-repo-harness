@@ -34,6 +34,7 @@ __all__ = [
     "FileClaim",
     "VersionRequirement",
     "audit_collisions",
+    "ownership_rank",
 ]
 
 WARN_DIVERGENT_BASENAMES: Final[tuple[str, ...]] = (
@@ -57,11 +58,21 @@ _VERSION_ATOM = re.compile(r"^(==|>=|<=|=|>|<|\^|~>|~)?\s*v?(\d+(?:\.\d+)*)")
 
 @dataclass(frozen=True, slots=True)
 class CoordinateClaim:
-    """One repo publishing one `Coordinate.key` (§3.1 step 3)."""
+    """One repo publishing one `Coordinate.key` (§3.1 step 3).
+
+    `depth` and `commit_count` are the ownership ladder's rungs (ii) and (iii), carried on the
+    claim because the detector is a pure function and cannot go and look them up. Both default
+    to the value that makes the rung inert, so a caller that has neither still gets rung (iv)'s
+    total order on `repo_id` rather than an exception.
+    """
 
     coord_key: str
     repo_id: str
     ecosystem: Ecosystem
+    depth: int = 0
+    """Path depth of the manifest declaring the publish (`path.count("/")`); SHALLOWEST wins."""
+    commit_count: int = 0
+    """`repos.commit_count`; HIGHEST wins."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +162,24 @@ class CollisionReport:
         return not self.blocking
 
 
+def ownership_rank(
+    *, publishes_coordinate: bool, depth: int, commit_count: int, repo_id: str
+) -> tuple[bool, int, int, str]:
+    """The §3.1 (iv) / §13 row 6 ownership ladder as a sort key, where **lowest wins**.
+
+    Four rungs, in order: a repo that publishes a coordinate outranks one that does not; then the
+    SHALLOWEST declaring path; then the HIGHEST `commit_count`; then `repo_id` — total, so the
+    winner is reproducible rather than dependent on row order.
+
+    It is a function rather than a comment because `COORDINATE` and `CONTRACT` ownership are the
+    same question asked about two key spaces, and two ladders that drift apart are two different
+    answers to "who owns this" — a disagreement that would surface only as a mis-migrated repo.
+    `workers/contracts.py::_owner` ranks `CONTRACT` carriers through this same function, so the
+    `CONTRACT` and `COORDINATE` ladders cannot drift apart by an edit to one of them.
+    """
+    return (not publishes_coordinate, depth, -commit_count, repo_id)
+
+
 def audit_collisions(data: CollisionInput) -> CollisionReport:
     """One pass, five detectors, in the order §3.1 step 8 tabulates them."""
     collisions: list[CollisionFinding] = []
@@ -189,8 +218,26 @@ def _coordinate_collisions(data: CollisionInput) -> list[CollisionFinding]:
         # `error` when the carriers disagree about the ecosystem: `Coordinate.key` embeds the
         # ecosystem (ADR-0017), so this is a normalization bug rather than a fleet fact.
         divergent = len({c.ecosystem for c in claims}) > 1
-        winner = data.owns_hints.get(coord_key) or repo_ids[0]
-        rule = "owns-hint" if coord_key in data.owns_hints else "ladder:lexicographic-repo-id"
+        # Rung (i) is the operator's `owns:` hint — but only when it names a repo that actually
+        # publishes this coordinate. A hint pointing anywhere else does not resolve THIS contest,
+        # and crowning a non-claimant would record an owner no manifest backs.
+        hinted = data.owns_hints.get(coord_key)
+        if hinted is not None and hinted in set(repo_ids):
+            winner, rule = hinted, "owns-hint"
+        else:
+            best = min(
+                claims,
+                key=lambda c: ownership_rank(
+                    # Every claimant in this group publishes the coordinate by construction, so
+                    # rung (i)'s publishes-vs-not is constant here and cannot discriminate; it is
+                    # passed explicitly rather than dropped so the ladder keeps ONE definition.
+                    publishes_coordinate=True,
+                    depth=c.depth,
+                    commit_count=c.commit_count,
+                    repo_id=c.repo_id,
+                ),
+            )
+            winner, rule = best.repo_id, "ladder:depth,commit-count,repo-id"
         out.append(
             CollisionFinding(
                 kind="COORDINATE",
