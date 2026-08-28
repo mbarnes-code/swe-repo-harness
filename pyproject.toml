@@ -45,6 +45,7 @@ fleet = "fleet.cli:app"
 dev = [
   "pytest>=8.3",
   "pytest-asyncio>=0.24",
+  "pytest-cov>=6.0",
   "hypothesis>=6.115",
   # Exact pin, not a floor: `select` below lists family prefixes, so a future release adding
   # a rule reddens an untouched tree. `tests/test_lint_gate.py` gates and explains it.
@@ -93,6 +94,24 @@ asyncio_default_fixture_loop_scope = "function"
 markers = [
   "integration: touches real SQLite / git fixtures (still offline)",
   "contract: model round-trip and golden-schema checks",
+]
+
+# --------------------------------------------------------------------------------------
+# coverage.py (SPEC.md §12.3: >=85% line coverage on src/fleet/). Configured, not armed:
+# no `fail_under` here, and `--cov` is deliberately NOT added to the pytest addopts above —
+# that would collect coverage on every targeted pytest invocation in this repo and interacts
+# with the suite's multiprocessing/forkserver use. Run explicitly with
+# `.venv/bin/python -m pytest --cov=fleet --cov-report=term-missing`.
+# --------------------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["src/fleet"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+  "pragma: no cover",
+  "if TYPE_CHECKING:",
+  "raise NotImplementedError",
 ]
 
 # --------------------------------------------------------------------------------------
