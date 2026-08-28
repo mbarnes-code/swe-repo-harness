@@ -229,7 +229,7 @@ def test_a_credential_in_a_pr_url_survives_into_neither_sink(
     assert "github.invalid/acme/monorepo/pull/1" in stored_url, "the PR link did not survive"
 
 
-def test_a_dropped_pr_merged_event_fails_the_run_instead_of_stalling_the_wave(
+def test_a_dropped_pr_merged_event_fails_the_run_loudly_and_names_what_was_lost(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When the `events` sink refuses the event, `pr --sync` exits 1 with a message, not a stall.
@@ -237,12 +237,17 @@ def test_a_dropped_pr_merged_event_fails_the_run_instead_of_stalling_the_wave(
     This is the one test here that is not about the pre-wiring tree; it is about the regression
     routing through the emitter would otherwise ship. `EventEmitter.emit` **never raises** — that
     carve-out is written, at length, for "the caller is a worker mid-transform and the failing
-    operation is telemetry". `pr_merged` is not telemetry. It is the fact §3.4's stacking
-    precondition, §3.5's `blocked_by` release and §3.5.1's T1 trigger all read, and the direct
-    `repository.append_event` call this replaced propagated its failure. Swallow it and the
-    forge's MERGED is written to `findings` while nothing downstream can see it: every dependent
-    wave blocks forever and the operator is told the sync succeeded. That is the 242-of-250 stall
-    `_pr_sync_impl` exists to fix, re-entering through the telemetry door.
+    operation is telemetry". `pr_merged` is not telemetry: `docs/SPEC.md:1529` designates it the
+    signal that "unblocks the dependent's Phase 4 precondition and fires T1", and the direct
+    `repository.append_event` call this replaced propagated its failure.
+
+    What the guard does NOT do, written down because this docstring claimed otherwise until
+    round L measured it: **nothing reads the `events` table for `pr_merged`.** The only
+    `FROM events` sites in `src/` are `state/repository.py`'s per-run iterator, `fleet doctor`'s
+    count summary and the GC. §3.4 step 5's stacking gate reads the `findings` row of kind
+    `PullRequest` that `_write_pr_record` writes *before* the emit (`cli._pr_records`), so a
+    swallowed event blocks no dependent today. What it loses is the record SPEC designates as
+    the signal, while the operator is told the sync succeeded — which is why the run fails loud.
 
     Discriminating mutation, measured rather than argued: deleting the `if not outcome.stored:`
     guard from `_pr_sync_impl` leaves the other four tests in this file GREEN and reddens only

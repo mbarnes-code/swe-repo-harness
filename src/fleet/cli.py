@@ -9600,21 +9600,31 @@ async def _pr_sync_impl(
                     )
                     # `emit()` never raises, and here that carve-out does NOT apply: it is
                     # written for "the caller is a worker mid-transform and the failing
-                    # operation is telemetry", and `pr_merged` is not telemetry. It is the fact
-                    # three gates read (§3.4's stacking precondition, §3.5's `blocked_by`
-                    # release, §3.5.1's T1 trigger), and a `pr_merged` that is silently dropped
-                    # leaves every dependent blocked forever — the 242-of-250 stall this whole
-                    # function exists to fix, arriving back through the telemetry door. So the
-                    # SQL leg is checked and Rule 11 applies. The JSONL leg deliberately is not:
+                    # operation is telemetry", and `pr_merged` is not telemetry: SPEC §3.4
+                    # designates it the merge signal — "that event — not a worker's guess — is
+                    # what unblocks the dependent's Phase 4 precondition and fires T1"
+                    # (`docs/SPEC.md:1529`).
+                    # What it is NOT is a signal anything reads. Measured at `a8f52c9`: the only
+                    # `FROM events` sites in `src/` are `state/repository.py`'s per-run iterator,
+                    # this file's `fleet doctor` count summary and its GC, none of them keyed on
+                    # `pr_merged`. §3.4 step 5's gate reads the `findings` row of kind
+                    # `PullRequest` that `_write_pr_record` commits on the line above, BEFORE this
+                    # emit (`_pr_records`), so a dropped event strands no dependent today. The
+                    # guard is still right and Rule 11 still applies — a durable record the SPEC
+                    # designates as the signal was asked for and not written, and the first
+                    # consumer built on that designation would read a merge with no event. Do NOT
+                    # restate this as "every dependent blocks forever": that was this comment's
+                    # own claim until round L measured the reader set and found it empty.
+                    # So the SQL leg is checked. The JSONL leg deliberately is not:
                     # a full disk under `logs/` must not un-merge a PR that really did merge,
                     # and `EventEmitter` has already counted and logged that failure.
                     if not outcome.stored:
                         why = "; ".join(f.error for f in outcome.failures) or "no sink configured"
                         raise StateDbError(
                             f"{repo_id}: the forge says MERGED but the `pr_merged` event was not "
-                            f"recorded ({why}). Nothing downstream can observe the merge, so this "
-                            "run fails rather than leaving the dependent wave blocked with no "
-                            "error (§3.4 step 5, CLAUDE.md Rule 11)."
+                            f"recorded ({why}). SPEC §3.4 designates that event as the merge "
+                            "signal, so this run fails rather than reporting a merge whose "
+                            "durable record it failed to write (§3.4 step 5, CLAUDE.md Rule 11)."
                         )
                 elif status.state is PrState.CLOSED:
                     closed.append(repo_id)
