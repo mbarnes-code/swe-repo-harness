@@ -6355,9 +6355,15 @@ In `_transform_impl`'s wave loop (`src/fleet/cli.py`), for each wave index the o
 > wrong as it was; only the arithmetic of containment changed. Recorded because it had a
 > mechanical consequence: `tests/test_integration_honesty_citations.py` pinned this citation as
 > *unresolved*, the drift flipped it to *resolving*, and that pin is retired in this same commit
-> under the one stated exception now written at the pin site — so this citation is no longer
-> watched by that instrument in either direction, and this marker is the only thing left recording
-> that it is wrong.
+> under the one stated exception now written at the pin site. **Exactly one direction of cover is
+> lost, not both**, re-measured at `12f2cf3` rather than inferred: the citation is still an anchored
+> citation of that module's survey (60 anchored, 45 unresolved, 45 pins), still sited at this entry's
+> step 3, now *resolving* and *unpinned*. Because it is unpinned it is still covered by
+> `test_no_unpinned_anchored_citation_fails_to_resolve`, which fails by `file:line` if drift ever
+> moves the definition back off `:4445`. What is no longer covered is the other direction: while it
+> was pinned, `test_each_pinned_citation_is_still_unresolved` also failed if the citation's text
+> changed at all, so a silent **repoint** of this known-wrong citation would now go undetected. This
+> marker is what records that it is wrong.
 
 `_prepare_repo` (`cli.py:3858`) is not a read. Its own docstring enumerates what it does before the
 first mutation, and two of its four steps are writes: step 2 **discards a crashed predecessor's
