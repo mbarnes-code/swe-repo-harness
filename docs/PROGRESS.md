@@ -6616,3 +6616,6 @@ Post-round-O full-suite run dispatched in the background; result to follow. Work
 **Round P not yet opened as of this checkpoint** — pending the full-suite confirmation, per the
 same discipline round N/O's own regressions taught: verify combined integration before adding
 more surface area.
+
+**Post-round-O full suite: 1976 passed, 0 failed, 0 errors, clean `bazel disk` line.** Confirms
+rounds M/N/O's nine merged branches (three regression fixes included) all integrate cleanly.
