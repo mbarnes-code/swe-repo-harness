@@ -75,6 +75,37 @@ Never hide errors. If a build or AST transformation fails after 3 subagent retri
 - **Invert an enumeration of escapes into a whitelist.** Once a third escape defeats a blacklist of forbidden sinks, assert what the code *may* name at all (`TRANSITION_GLOBALS`) — a side effect must then name something to reach it, so unpredicted forms trip it too.
 - **An instrument is subject to the discipline it enforces.** Settle a redundancy question with mutations **before** deleting either instrument: when one looked redundant beside a newer one, four mutations proved them complementary (`f1e9686`) — the runtime probe is blind to a source restructure that preserves behaviour, the AST check is blind to an evidence lookup added elsewhere, and only both together catch all four. Disclose an instrument's cost rather than hiding it: that AST check fires on correct code via its unresolvable-structure branch and **says so**, which makes it an honest tripwire on the loop's shape rather than a false ordering verdict. And check the checker — `tests/test_instruments_are_armed.py` was failing on `main` in exactly the way it exists to detect in others: an unresolvable base made the file fail **and** the class it guards go unchecked (unresolved bases 1 → 0, methods examined 34 → 35 at `f1e9686`). When two careful lanes disagree about whether an instrument is red at `HEAD`, settle it by running it at a clean tree, not by preferring a source.
 - **Stop rule — adversarial-only is a boundary, accidentally-reachable is a defect.** Ask whether a normal author would trip the escape a reviewer demonstrated. Escapes requiring a deliberately side-effecting subclass get **documented as a stated boundary and not patched**; patching them buys the appearance of closure while the escapes bypass the mechanism the patch would harden. Fix the accidentally reachable one. Never close a documentary gap with a convention wearing a mechanism's clothes — a fake mechanism is worse than an honest disclosure because it *looks* enforced.
+
+### Rule 13 — Every Round Ties to the Acceptance Bar, Or Names Its Debt
+`docs/SPEC.md` §12 defines 48 acceptance criteria. For 19 days / 355 commits, `docs/PROGRESS.md`
+checkpoints tracked test pass-count and line coverage every round but never §12 itself — coverage
+reached 93% while `12be741` (2026-08-27) found only 1 of 48 criteria actually met, the first time
+anyone had measured §12 directly. Coverage proves a line executed under a test; it does not prove
+the SPEC's acceptance bar is met, and the two diverged silently because only one was tracked.
+**Before dispatching a round, name which §12 criterion number(s) it is expected to move from unmet
+to met.** A round with none — pure verification/process-hardening — is allowed, but must say so
+explicitly, and may not be followed by a second such round without an intervening
+criteria-closing round: process integrity that never cashes out in criteria movement is the
+failure this rule exists to stop. Every `docs/PROGRESS.md` checkpoint (Rule 10) reports the
+current count as `<n> of 48`, re-measured against §12 directly — never carried forward from the
+last audit. Pick targets from `docs/CRITERIA_PLAN.md`, the per-criterion closure backlog this
+rule requires be kept current; each criterion there carries a bounded "done bar" so a round knows
+when to stop, not just where to start.
+
+### Rule 14 — §12 Criterion Text Changes Only By Disclosed Adjudication
+A `docs/SPEC.md` §12 criterion's wording is the acceptance bar Rule 13 measures against —
+changing it changes what "done" means, and is a decision, not a bugfix. §12 grew from 39 criteria
+(`docs/PROGRESS.md:33`, measured 2026-08-09) to 48 (measured 2026-08-27) with no single decision
+record disclosing the growth as one deliberate act; legitimate scope additions and undisclosed
+relaxation are indistinguishable in this tree today. Any edit to a §12 criterion's substance
+(wording, count, or scope — not a citation or typo fix) requires, in the same commit: a dated
+in-place marker at the criterion naming what changed and why (the convention already used for
+§12.16/§12.40/§12.45/§12.48 at `12be741`/`827fc6e`), and either an ADR recording the decision or an
+explicit "adjudication pending" flag if replacement wording isn't chosen yet (§12.7 and §12.17
+carry that flag as of `827fc6e` — see `docs/CRITERIA_PLAN.md`, which must be updated in the same
+commit as any §12 edit). Never let a criterion's wording drift to match what was already built —
+the reverse direction, building to match the criterion, is the only one this project treats as a
+legitimate closure.
 ---
 
 ## 5. Workspace Directory Layout

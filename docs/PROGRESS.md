@@ -6422,3 +6422,70 @@ Tests NOT run — suite lock (COMMON.md rule 1). A later lane should run, no `-k
 `.venv/bin/python -m pytest tests/test_run_context_llm_policy.py tests/test_config_keys_are_read.py
 tests/test_llm_findings.py tests/test_llm_client.py tests/test_settings.py` (W22's own list, not
 re-run by this lane).
+
+### Checkpoint — 2026-08-30 (round M controller, retroactively logging round L, then opening round M)
+
+**§12 criteria met: 2 of 48** (§12.12, §12.16 — both fully pass their own literal text). This is
+the first checkpoint carrying that figure per `CLAUDE.md` Rule 13, added this session after the
+human partner identified that no round before `12be741` (2026-08-27) had ever tracked it, and that
+tracking it without a bounded per-criterion "done bar" still let the acceptance bar itself drift
+(§12 measured 39 criteria on 2026-08-09, `:33` above, vs. 48 now — see `docs/CRITERIA_PLAN.md`'s
+ground rules and `CLAUDE.md` Rules 13-14 / ADR-0096 / ADR-0097 for the full mechanism this
+responds to).
+
+**Round L, retroactively logged — this entry is the only `docs/PROGRESS.md` record of it; it was
+never checkpointed at the time, a Rule 10 gap.** Found via `git log 12be741..HEAD` while
+re-grounding before dispatching round M. Commits `bcd08eb` through `fa95469` (21 commits,
+`12be741..fa95469`):
+- `bcd08eb` — `uv.lock` created for the first time (83 packages), `pytest-cov` +
+  `[tool.coverage]` declared but deliberately unarmed (no `fail_under`, `--cov` not in `addopts`,
+  disclosed reason: interaction risk with the suite's multiprocessing/forkserver use). Moves
+  §12.1/§12.3 partway.
+- `83e1493` — the `hypothesis` property test ADR-0013 declared and nothing had ever written
+  (`tests/test_graph_properties.py`, wave-ordering claim). Closes that leg of §12.8.
+- `3da6e79` — wired the COORDINATE collision detector into real `fleet sequence`
+  (`cli.py:2952`), the first of `graph/collisions.py`'s three previously-unreachable detectors to
+  get a real caller; 6 discriminating tests + 7 validated mutations
+  (`tests/test_collisions_wiring.py`). DEST_PATH/FILE_PATH left unwired **by disclosed decision**
+  — see that commit's body for why each is blocked on a missing upstream mechanism, not oversight.
+  Closes §12.27's COORDINATE leg; DEST_PATH/FILE_PATH legs reclassified NEW-MECHANISM.
+- `f3fb567`, `73a3f8f` — routed the CONTRACT owner ladder through the shared `ownership_rank` and
+  proved rungs (ii)-(v) discriminable. Substantially closes that leg of §12.29.
+- `01b64d3` — wired `EventEmitter`/`events_jsonl_path` end-to-end (all six CLI entry points now
+  pass `json_path=`); also fixed a live §12.20 leak (a PAT reaching `events.payload` in clear via
+  a bare `json.dumps` call that bypassed redaction). Deliberately deferred the `llm_call` event
+  and the `errors-<run_id>.jsonl` split as separate tasks — reclassifies the remainder of §12.18
+  from NEW-MECHANISM to WIRING.
+- round-K/round-L merge commits (`239e329` through `fa95469`) — citation and disclosure repairs
+  in the same self-correcting pattern documented above for round K; `97adc77`/`fa95469` fixed
+  citations that round L's own `+5`-line edits had already made stale, and corrected a guard
+  justification naming a reader that doesn't exist. Not independently re-verified by this
+  checkpoint; flagged for a future lane if load-bearing.
+
+Net effect on `docs/CRITERIA_PLAN.md`: 5 entries were stale (§12.1, §12.3, §12.18, §12.27, §12.29)
+and were corrected in place via a dated addendum (not rewritten) before round M's tasks were
+selected, per the file's own ground rules.
+
+**Round M, opened this checkpoint.** Dispatched per the human partner's explicit instruction to
+run 5 concurrent subagents (3 workers / 1 research / 1 review) and not wait for further direction.
+Plan: `docs/superpowers/plans/round-M-criteria-closure.md`. Ledger:
+`.superpowers/sdd/round-M-criteria-closure/progress.md` (git-ignored workspace, per the
+subagent-driven-development skill). Targets, all freshly re-verified as still-open pure-WIRING
+tasks immediately before dispatch (no new design logic, only caller integration):
+- Task 1 — §12.9, wire `check_criteria()` (currently zero callers outside a unit test) into the
+  real Phase-1-exit path.
+- Task 2 — §12.37 / D69, wire `orchestrator/stubs.py`'s state machine (currently zero importers
+  in `src/`) into the real `--stub-blocked` build/resume path.
+- Task 3 — §12.18 remainder, emit the `llm_call`/`latency_ms` event and split
+  `logs/errors-<run_id>.jsonl`, using `01b64d3`'s now-existing infrastructure.
+
+**Ruling recorded in the round's ledger, not repeated in full here:** running 3 implementers in
+parallel contradicts the subagent-driven-development skill's default single-implementer-at-a-time
+rule (git race risk). Resolved via one isolated worktree per worker plus sequential
+controller-only merge-back, matching `CLAUDE.md`'s own prescribed pattern for concurrent lanes.
+Cost if wrong: a merge conflict between two workers' branches, caught and resolved by the
+controller before landing — reversible.
+
+Next: process round M's five reports as they return (workers, research, preflight review), run
+per-task reviews, integrate sequentially, log completion, then select round M+1's targets from
+`docs/CRITERIA_PLAN.md`'s dispatch-order list without waiting for further direction.

@@ -11659,3 +11659,73 @@ what makes the citation checkable.
 **Say nothing and leave the block short.** Rejected under this project's own standard: a mechanism
 that looks enforced and covers none of what it is about is worse than an honest disclosure. That is
 the whole reason §6 is written as a list of what this does not buy.
+
+---
+
+## ADR-0096 — Every dispatch round names the §12 criterion it targets
+
+**Decision.** `CLAUDE.md` Rule 13: before dispatching a round of subagent work, the orchestrator
+names which `docs/SPEC.md` §12 acceptance-criterion number(s) the round is expected to move from
+unmet to met. A round with none — pure verification/process-hardening — is permitted but must say
+so explicitly, and cannot be followed by a second such round without an intervening
+criteria-closing round. Every `docs/PROGRESS.md` checkpoint reports the current count as `<n> of
+48`, re-measured against §12 directly.
+
+**Rationale.** `12be741` (2026-08-27) was the first commit in the project's history — 19 days,
+355 commits — to measure `docs/SPEC.md` §12 directly. Every checkpoint before it tracked test
+pass-count and line coverage instead, which climbed to 1958/1958 and 93% while §12 sat at 1 of 48
+criteria met. Coverage and pass-count are proxies for "the code runs under its own tests"; they
+are not the SPEC's definition of done, and nothing tracked the second quantity, so the two
+diverged for the whole project lifetime without anyone noticing. The guardrails accumulated over
+those 19 days (mutation-testing rigor, citation-drift detection, concurrent-git safety) are real
+fixes to real process-integrity failures, but none of them has a stopping condition tied to the
+acceptance bar — a review always finds another integrity gap to close, so without an explicit tie
+back to §12, dispatch has an infinite supply of defensible-looking work that never closes the
+actual criteria.
+
+**Alternatives rejected.** *Trust `docs/PROGRESS.md`'s narrative framing as a proxy for §12
+progress* — rejected because that is exactly the mechanism that produced the 19-day gap; a
+narrative checkpoint can assert progress without any criterion having moved. *A hard numeric cap
+on consecutive process-hardening rounds* — rejected in favor of the softer "must say so
+explicitly and alternate with a criteria-closing round" rule; a fixed cap invites gaming (padding
+a criteria-closing round with unrelated hardening work to reset a counter) where a named-criterion
+requirement does not.
+
+---
+
+## ADR-0097 — §12 criterion text is append-only except by disclosed adjudication, and gets a per-criterion closure backlog
+
+**Decision.** `CLAUDE.md` Rule 14: any edit to a `docs/SPEC.md` §12 criterion's substance requires,
+in the same commit, a dated in-place marker naming what changed and why, plus either an ADR or an
+explicit "adjudication pending" flag. `docs/CRITERIA_PLAN.md` is created as the per-criterion
+closure backlog Rule 13 dispatches from — each of the 48 criteria gets a status, a class (why it's
+unmet), a bounded "done bar" (an Agent Recommendation, not a new hard requirement — CLAUDE.md item
+1), and an explicit out-of-scope note where gold-plating is a real risk.
+
+**Rationale.** `docs/PROGRESS.md:33` measured §12 at 39 criteria on 2026-08-09; the audit at
+`12be741` measured 48 on 2026-08-27. No single decision record discloses that growth, so nothing
+in the tree today distinguishes legitimate scope expansion from undisclosed relaxation of the
+acceptance bar. Separately, the audit that first measured §12 directly needed its own repair one
+day later (`827fc6e`, round-K): an independent review found 3 Critical and 5 Important defects in
+`12be741` — a misattributed quote, an inverted number, two criteria (§12.7, §12.17) that were
+supposed to get corrected wording but didn't, and a defect number (`D86`) that conflated two
+different requirements. The instrument measuring "how many criteria are met" was itself wrong on
+first landing. Rule 13 alone (tie dispatch to a criterion number) doesn't prevent either failure
+mode: a round can still legitimately move a criterion by quietly loosening what it requires, and
+nothing forced per-criterion bounds to exist before work started. `docs/CRITERIA_PLAN.md` supplies
+the missing bound — a stopping point per criterion, derived from the existing audit
+(`docs/superpowers/plans/spec12-success-criteria-audit.md`) rather than invented fresh — and Rule
+14 supplies the missing guard on the acceptance bar's own text.
+
+**Alternatives rejected.** *Freeze §12's text entirely, no edits ever* — rejected: three of the
+criteria are genuinely unsatisfiable as written (§12.16, §12.40, §12.45 pre-correction) and a
+frozen SPEC would make those permanently unclosable rather than fixing the actual defect, which is
+silence around changes, not the changes themselves. *Renumber criteria with stable UUIDs instead
+of positional integers* — rejected as disproportionate: the dated-marker convention already in use
+(§12.16/§12.40/§12.45/§12.48) works and costs nothing to keep using; a new ID scheme would touch
+every cross-reference in `docs/SPEC.md` §13 and the test suite for a problem the marker convention
+already solves. *Let `docs/CRITERIA_PLAN.md`'s done-bars be binding requirements rather than
+recommendations* — rejected per the existing Directive Authority & Lineage guardrail: a bound this
+document proposes is the orchestrator's own judgment call, not something cited from `docs/SPEC.md`
+or an ADR, and must be labeled accordingly so a future reader doesn't mistake an Agent
+Recommendation for a spec requirement.
