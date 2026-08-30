@@ -1106,6 +1106,24 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
     classification advisory metadata nothing in `waves`/`edges`/`cycles`/`contracts`/
     `collisions`/`attempts` may branch on, so the two fake backends below are free to answer
     identically and the equality below is about the DETERMINISTIC sections, not about the model.
+
+    **What is and is not exercised.** `run_digest` has 7 sections (`DIGEST_SECTIONS`,
+    `state/digest.py`). Only TWO — `waves` and `edges` — hold non-trivial content in this
+    fixture (a two-repo, acyclic, no-contract, no-collision, no-repair fleet; verified by
+    querying the DB after a run). The other FIVE are empty-but-equal here, each for a distinct
+    structural reason rather than by coincidence: `cycles`/`contracts`/`collisions` are empty
+    because this fixture has no SCC, no shared IDL and no naming clash to produce one;
+    `attempts` is empty because its digest query filters on `approach_signature <> ''`
+    (`state/digest.py`), which only a repair-ladder rewrite ever sets, and nothing here fails a
+    deterministic step badly enough to trigger repair; `patch_trailers` is empty because the CLI
+    calls `run_digest(conn, UUID(run_id))` with no `patch_trailers` argument at
+    `cli.py:_status_once`, so it is unconditionally `{}` unless a caller supplies one, and no
+    `fleet pr` ever runs in this test. An empty-vs-empty comparison is a real, deterministic
+    equality — SQLite returned the identical empty list both times — but it is not evidence
+    about determinism of THOSE sections' content, only that they stayed structurally empty on
+    both runs. Exercising the other five for real (a cyclic/contract fixture, a forced repair,
+    a `fleet pr` pass) is out of this task's scope (round-O task-2 brief: no new harness
+    plumbing) and is left to whichever future test builds that fixture.
     """
     from fleet.llm import client as client_module
     from fleet.llm.client import BackendReply, StructuredOutputMode
