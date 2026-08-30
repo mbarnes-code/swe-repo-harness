@@ -69,6 +69,15 @@ discovers nothing — which is the case worth having in the end-to-end file: a f
 contract must produce zero `contracts` rows *and still exit 0*, rather than the refusal this
 config previously had to answer with `hoist_contracts: false`."""
 
+LFS_FLEET_YAML = FLEET_YAML + "  require_lfs_binary: false\n"
+"""`FLEET_YAML` plus `preflight.require_lfs_binary: false`, used only by `lfs_fleet` below.
+
+Whether `git-lfs` happens to be on the PATH of the machine running this suite is not this
+fixture's business — what it exists to prove is that `has_lfs` is measured and persisted for a
+repo that declares `filter=lfs`, not that the `require_lfs_binary` gate (`clone.py`'s
+`shutil.which("git-lfs")` check) fires. Disabling it keeps the assertion true regardless of the
+host's toolchain."""
+
 #: Repo name → (relative path, contents). Real manifests: the npm and python adapters parse
 #: these files for real, and the edges under test come out of what they declare.
 FIXTURE_REPOS: dict[str, dict[str, str]] = {
@@ -185,10 +194,30 @@ def _make_repo(root: Path, name: str, files: dict[str, str]) -> Path:
     return path
 
 
-def _write_config(root: Path, sources: dict[str, Path], *, names: Sequence[str]) -> None:
+def _make_repo_with_submodule(root: Path, name: str, target: Path, submodule_path: str) -> Path:
+    """One real git repository whose HEAD tree carries a genuine submodule reference: a real
+    `.gitmodules` and a `160000` gitlink entry, produced by an actual `git submodule add` against
+    `target` — not a hand-written `.gitmodules` with no gitlink behind it.
+
+    `target` never has to be fetched again after this returns: §3.1 step 1's probe
+    (`CloneWorker._submodule_count`) only reads `.gitmodules`' text at `head_sha` via `git show`,
+    so the submodule's own history being unreachable later is exactly the case this fixture is
+    for. `protocol.file.allow=always` is required — modern git refuses a local-path submodule
+    fetch by default (CVE-2022-39253), and `target` is deliberately local so this fixture never
+    touches the network.
+    """
+    path = _make_repo(root, name, {"app.py": "print('hi')\n"})
+    _git(path, "-c", "protocol.file.allow=always", "submodule", "add", str(target), submodule_path)
+    _git(path, "commit", "-m", "add submodule")
+    return path
+
+
+def _write_config(
+    root: Path, sources: dict[str, Path], *, names: Sequence[str], fleet_yaml: str = FLEET_YAML
+) -> None:
     config = root / "config"
     config.mkdir(parents=True, exist_ok=True)
-    (config / "fleet.yaml").write_text(FLEET_YAML, encoding="utf-8")
+    (config / "fleet.yaml").write_text(fleet_yaml, encoding="utf-8")
     (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
     entries = "".join(
         f"  - name: {name}\n    url: {sources[name]}\n" for name in names
@@ -586,3 +615,109 @@ def test_sequence_refuses_the_cycle_flags_it_cannot_thread(fleet: Path) -> None:
 
     honoured = sequence(fleet, "--max-hoists-per-scc", "1", "--scc-atomic-threshold", "3")
     assert honoured.exit_code == ExitCode.SUCCESS, honoured.output
+
+
+# ---------------------------------------------------------------------------------------
+# git-scale hazards: submodules and LFS are recorded, never a crash (§12 item 26)
+# ---------------------------------------------------------------------------------------
+#
+# Each fixture below is its own one-repo fleet rather than an addition to `FIXTURE_REPOS`:
+# folding a sixth repo into the five-repo fleet above would perturb the wave-ordering and
+# table-count assertions every other test in this file makes. Kept separate, the two tests here
+# read exactly like `test_an_empty_repo_is_skipped_with_a_finding_and_the_fleet_continues` above
+# — a real git repo, driven through real `fleet scan`, asserted against the tables `clone.py`
+# actually writes — for the two remaining §3.1 step 1 hazards that file's fixture never plants.
+
+
+_LFS_POINTER = (
+    "version https://git-lfs.github.com/spec/v1\n"
+    "oid sha256:" + "0" * 64 + "\n"
+    "size 123\n"
+)
+"""A real Git LFS pointer file's content — the small, fixed text format LFS substitutes for the
+tracked blob in the repository proper. `CloneWorker._has_lfs` reads `.gitattributes`, never the
+blob a pointer resolves to, so this is a complete fixture without the megabyte the pointer names."""
+
+
+@pytest.fixture
+def submodule_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A workspace holding one real repo with a genuine submodule reference, and a fresh db."""
+    target = _make_repo(tmp_path / "sources", "acme-submodule-target", {"README.md": "hi\n"})
+    source = _make_repo_with_submodule(
+        tmp_path / "sources", "acme-with-submodule", target, "vendor/sub"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, {"acme-with-submodule": source}, names=["acme-with-submodule"])
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    yield workspace
+
+
+def test_a_submodule_reference_is_recorded_and_the_repo_still_scans(
+    submodule_fleet: Path,
+) -> None:
+    """A repo declaring a real submodule is not a crash, and it is not gated at all.
+
+    `clone.py` never sets `_Preflight.gate` for a submodule — `SubmodulePresent` is a FINDING,
+    published alongside `repos.submodule_count`, and the phase completes `SUCCEEDED`. Nothing
+    here needs the submodule's own history to be reachable: `_materialize_worktree`'s
+    `git worktree add` never initializes a gitlink on its own (that needs an explicit
+    `git submodule update --init`, which this harness never runs), and `_submodule_count` only
+    reads `.gitmodules`' text at `head_sha`.
+    """
+    result = scan(submodule_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    statuses = dict(query(submodule_fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
+    assert statuses["acme-with-submodule"] == "SUCCEEDED"
+
+    repos = dict(query(submodule_fleet, "SELECT repo_id, submodule_count FROM repos"))
+    assert repos["acme-with-submodule"] == 1
+
+    findings = query(
+        submodule_fleet,
+        "SELECT kind FROM findings WHERE repo_id = 'acme-with-submodule' ORDER BY kind",
+    )
+    assert ("SubmodulePresent",) in findings
+
+
+@pytest.fixture
+def lfs_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A workspace holding one real repo declaring `filter=lfs` with a real pointer file."""
+    source = _make_repo(
+        tmp_path / "sources",
+        "acme-with-lfs",
+        {
+            ".gitattributes": "*.bin filter=lfs diff=lfs merge=lfs -text\n",
+            "model.bin": _LFS_POINTER,
+        },
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(
+        workspace, {"acme-with-lfs": source}, names=["acme-with-lfs"], fleet_yaml=LFS_FLEET_YAML
+    )
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    yield workspace
+
+
+def test_an_lfs_pointer_file_is_recorded_and_the_repo_still_scans(lfs_fleet: Path) -> None:
+    """A repo declaring `filter=lfs` with a real pointer file is not a crash.
+
+    `clone.py`'s `_has_lfs` reads only `.gitattributes`' text at `head_sha` — the pointer's own
+    content is irrelevant to the probe, which is why a pointer file with no real object behind it
+    is a complete fixture. With `require_lfs_binary: false` (`lfs_fleet`'s config) the presence
+    check cannot become a gate, so this asserts what the probe measures and persists
+    (`repos.has_lfs`), not the separate `require_lfs_binary` gate (`clone.py`'s
+    `shutil.which("git-lfs")` check), which this fixture does not exercise.
+    """
+    result = scan(lfs_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    statuses = dict(query(lfs_fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
+    assert statuses["acme-with-lfs"] == "SUCCEEDED"
+
+    repos = dict(query(lfs_fleet, "SELECT repo_id, has_lfs FROM repos"))
+    assert repos["acme-with-lfs"] == 1
