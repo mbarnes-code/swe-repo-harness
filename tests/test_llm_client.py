@@ -434,6 +434,72 @@ def test_an_unpriced_target_is_a_config_error_not_a_free_call() -> None:
     assert estimate_cost_usd(free_target("m1"), 1_000_000, 1_000_000) == 0.0
 
 
+def test_register_backend_refuses_a_duplicate_name() -> None:
+    """WHY (§7.7 / §12.42): "a new backend costs one file + one registry line" only holds if a
+    SECOND file claiming an already-taken line fails LOUD at import time — otherwise whichever
+    backend happens to import last silently wins the name and the other's `BackendTarget.backend`
+    references dispatch to the wrong transport with no error anywhere.
+
+    Two freshly-defined decoy classes sharing one synthetic name that is not a shipped backend's,
+    never a real name collision, so this cannot perturb `discover()`'s live registry state for any
+    other test in the session — and the entry is removed again in `finally` regardless of outcome,
+    same reasoning as the worktree-registry isolation CLAUDE.md requires of concurrent lanes."""
+    decoy_name = "duplicate_decoy_for_register_backend_test"
+    assert decoy_name not in client_module.registry()  # never a shipped backend's name
+
+    class FirstDecoy:
+        name: ClassVar[str] = decoy_name
+        version: ClassVar[int] = 1
+
+        def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+            raise NotImplementedError
+
+        async def invoke(
+            self,
+            target: BackendTarget,
+            messages: Sequence[Message],
+            schema: dict[str, object] | None,
+            mode: StructuredOutputMode,
+            *,
+            max_output_tokens: int,
+            timeout_s: float,
+        ) -> BackendReply:
+            raise NotImplementedError
+
+    class SecondDecoy:
+        name: ClassVar[str] = decoy_name
+        version: ClassVar[int] = 1
+
+        def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+            raise NotImplementedError
+
+        async def invoke(
+            self,
+            target: BackendTarget,
+            messages: Sequence[Message],
+            schema: dict[str, object] | None,
+            mode: StructuredOutputMode,
+            *,
+            max_output_tokens: int,
+            timeout_s: float,
+        ) -> BackendReply:
+            raise NotImplementedError
+
+    try:
+        client_module.register_backend(FirstDecoy)
+        assert decoy_name in client_module.registry()
+
+        with pytest.raises(RuntimeError) as excinfo:
+            client_module.register_backend(SecondDecoy)
+        assert decoy_name in str(excinfo.value)
+
+        # the refused registration must not have replaced or removed the first entry
+        assert isinstance(client_module.registry()[decoy_name], FirstDecoy)
+    finally:
+        client_module._BACKENDS.pop(decoy_name, None)
+    assert decoy_name not in client_module.registry()  # teardown actually held
+
+
 def test_no_vendor_sdk_crosses_the_boundary() -> None:
     """WHY (CLAUDE.md guardrail 3): this module is the reason the harness is model-agnostic. Two
     honest checks: (1) an AST scan of the module's own source for a literal vendor import at ANY
