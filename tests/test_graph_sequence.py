@@ -520,6 +520,100 @@ def test_check_criteria_reports_all_four_in_spec_order() -> None:
     assert outcome.ok, [f.detail for f in outcome.failures]
 
 
+def test_check_criteria_holds_with_every_c_exemption_shape_planted_at_once() -> None:
+    """§12.9's done bar, at the `check_criteria()` level rather than `check_criterion_c` alone:
+    every case `EXEMPTION_CASES` above proves in isolation, on its own single-exemption
+    `WavePlan`, planted in ONE fleet and checked through the actual composed Phase 1 exit
+    condition — not just (c), all four criteria in the order `fleet sequence` now enforces them.
+
+    Six shapes, not five: SPEC names five exemption *categories*, but (c)'s "preflight-gated"
+    category has two distinct evidentiary forms — `PreflightFailed`/`REQUIRES_HUMAN_INTERVENTION`
+    and `EmptyRepo`/`SKIPPED` — and `EXEMPTION_CASES` above tests both separately rather than
+    picking one. This fixture plants both, matching the fixture file's own six-case breakdown.
+    """
+    normal = ["acme-a", "acme-b"]
+    isolated_exempt = [
+        "acme-config-skip",
+        "acme-baseline-red",
+        "acme-quarantined",
+        "acme-preflight-failed",
+        "acme-empty",
+    ]
+    manual_scc = ["acme-cyc-x", "acme-cyc-y", "acme-cyc-z"]
+
+    graph = build_graph(
+        nodes(*normal, *isolated_exempt, *manual_scc),
+        [
+            edge("acme-a", "acme-b"),
+            edge("acme-cyc-x", "acme-cyc-y"),
+            edge("acme-cyc-y", "acme-cyc-z"),
+            edge("acme-cyc-z", "acme-cyc-x"),
+        ],
+    )
+    report = break_cycles(graph, config=GraphSection(scc_hard_max=2))
+    manual_members = {
+        member
+        for res in report.resolutions
+        if res.break_strategy is BreakStrategy.MANUAL
+        for member in res.members
+    }
+    assert manual_members == set(manual_scc), "the fixture must actually produce a MANUAL SCC"
+
+    # `assign_waves` drops MANUAL members on its own (§3.1 (b)); only the five isolated
+    # exemptions need to be named as gated here.
+    plan = assign_waves(report, gated_repo_ids=isolated_exempt)
+    assert set(plan.repo_members) == set(normal), "only the two ungated repos reach a wave"
+
+    statuses: dict[str, RepoStatus] = {
+        "acme-a": RepoStatus.PENDING,
+        "acme-b": RepoStatus.PENDING,
+        "acme-config-skip": RepoStatus.SKIPPED,
+        "acme-baseline-red": RepoStatus.SKIPPED,
+        "acme-quarantined": RepoStatus.SKIPPED,
+        "acme-preflight-failed": RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+        "acme-empty": RepoStatus.SKIPPED,
+        **dict.fromkeys(manual_scc, RepoStatus.REQUIRES_HUMAN_INTERVENTION),
+    }
+    finding_kinds: dict[str, list[str]] = {
+        "acme-baseline-red": ["BaselineRed"],
+        "acme-quarantined": ["OperatorQuarantine"],
+        "acme-preflight-failed": ["PreflightFailed"],
+        "acme-empty": ["EmptyRepo"],
+    }
+    config_skipped = ["acme-config-skip"]
+    baseline_ok = {"acme-baseline-red": 0}
+    failure_classes = dict.fromkeys(manual_scc, FailureClass.CYCLE)
+
+    outcome = check_criteria(
+        report,
+        plan,
+        statuses=statuses,
+        repos_with_manifests=list(statuses),
+        finding_kinds=finding_kinds,
+        config_skipped_repo_ids=config_skipped,
+        baseline_ok=baseline_ok,
+        failure_classes=failure_classes,
+    )
+    assert outcome.ok, [f.detail for f in outcome.failures]
+
+    # Teeth: this is a real, closed exemption set and not a fixture that passes regardless of
+    # what is supplied — dropping ONE justification (here, the config-skip repo's own config
+    # fact) must fail criterion (c) again, exactly as `test_criterion_c_rejects_every_exemption
+    # _stripped_of_its_justification` proves for each case alone.
+    stripped = check_criteria(
+        report,
+        plan,
+        statuses=statuses,
+        repos_with_manifests=list(statuses),
+        finding_kinds=finding_kinds,
+        config_skipped_repo_ids=(),
+        baseline_ok=baseline_ok,
+        failure_classes=failure_classes,
+    )
+    assert not stripped.ok
+    assert "acme-config-skip" in stripped.result("c").detail
+
+
 # =======================================================================================
 # (4) synthetic waves
 # =======================================================================================

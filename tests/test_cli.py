@@ -482,7 +482,30 @@ def test_force_resequence_overrides_the_refusal(workspace: Path) -> None:
     Why: a refusal with no escape hatch is a run an operator cannot recover; §3.1 names the flag,
     so it must reach the plan writer rather than merely being accepted by the parser.
     """
-    _put_in_flight(workspace / "state" / "fleet.db")
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db)
+    # §3.1's Phase 1 exit condition (SPEC §12 criterion 9) runs for real at the end of `fleet
+    # sequence` now, so this fixture's fleet has to satisfy it: `_put_in_flight` seeds a phase-1
+    # row only for `acme-commons` (criterion (c) reads `acme-billing`'s absence from `phases` as
+    # an unexplained drop from the wave count), and neither repo has a `manifests` row or a
+    # `no-manifest` finding (criterion (a)).
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-billing', 1, 'PENDING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+        conn.executemany(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, 'no-manifest', 'warn', ?, '{}', ?)",
+            [
+                (RUN_ID, repo, f"no-manifest:{repo}", "2026-08-08T12:00:00+00:00")
+                for repo in ("acme-commons", "acme-billing")
+            ],
+        )
+    finally:
+        conn.close()
     result = runner.invoke(
         app, [*base_args(workspace), "--json", "sequence", "--force-resequence"]
     )

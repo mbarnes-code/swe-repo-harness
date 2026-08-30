@@ -66,11 +66,17 @@ from fleet.bazel.query import DEFAULT_RDEPS_LIMIT, DEFAULT_SAMPLE_N
 from fleet.ecosystems.base import EcosystemAdapter, path_segment
 from fleet.graph.build import GraphError, build_graph
 from fleet.graph.collisions import CollisionInput, CoordinateClaim, audit_collisions
-from fleet.graph.cycles import break_cycles
+from fleet.graph.cycles import CycleReport, break_cycles
 from fleet.graph.infer import InferenceInput, OwnerIndex, infer_edges
 from fleet.graph.infer import ManifestDependency as InferredDependency
 from fleet.graph.query import blast_radii as graph_blast_radii
-from fleet.graph.sequence import WavePlan, assign_waves
+from fleet.graph.sequence import (
+    CriteriaReport,
+    WavePlan,
+    assign_waves,
+    check_criteria,
+    check_criterion_a,
+)
 from fleet.llm.cache import CacheMode
 from fleet.llm.client import (
     CallBudget,
@@ -367,6 +373,18 @@ class SequenceRefusedError(FleetCliError):
     spent, and no `halted = 1` ledger is waiting for `--raise-budget`."""
 
     exit_code = ExitCode.SEQUENCE_REFUSED
+
+
+class SequenceCriterionError(FleetCliError):
+    """§3.1's Phase 1 exit condition — `check_criteria()`'s composed (a)-(d) — does not hold.
+
+    Exit 6, the same reason `TransformCriterionError`/`BuildCriterionError` are: the plan is
+    computed and persisted (an operator debugging this must find the waves it produced), but a
+    claim it makes about the fleet is false, and shipping that to Phase 2 would transform repos
+    whose ordering, manifest coverage, or evidence the harness cannot actually stand behind.
+    """
+
+    exit_code = ExitCode.UNRESOLVED_FINDINGS
 
 
 class CommandUnavailableError(FleetCliError):
@@ -2861,6 +2879,124 @@ def _sequence_graph_config(
         raise UsageError(f"invalid --break-cycles override: {exc}") from exc
 
 
+async def _phase1_exit_report(
+    conn: aiosqlite.Connection,
+    run_id: str,
+    settings: FleetSettings,
+    *,
+    report: CycleReport,
+    wave_plan: WavePlan,
+) -> CriteriaReport:
+    """§3.1's Phase 1 exit condition — `check_criteria()`'s composed (a)-(d) — against the plan
+    this run just persisted.
+
+    Every fact `check_criteria()` cannot itself read is gathered here and injected, exactly as
+    `graph/sequence.py`'s own docstrings require: `statuses` and `finding_kinds` from `phases`/
+    `findings` (this run only), `repos_with_manifests`/`baseline_ok` from `manifests`/`repos`
+    (not run-scoped — a manifest or a baseline measurement is a fact about the repo, not the run),
+    `contract_statuses` from `contracts` (this run — includes the hoists this run just
+    committed), and `config_skipped_repo_ids` from `config/repos.yaml` directly (§3.1 (c)'s
+    config-`skip` exemption is a manifest fact, not a `findings` row).
+
+    `evidence_exists` is deliberately left at its default (always-True): (d)'s own docstring says
+    the real check is a join against "the `ls-tree` path/blob-SHA listing captured at preflight
+    ... rather than stat()ing 250 checkouts a second time", and nothing in `src/` persists that
+    listing yet — `graph/collisions.py`'s `FILE_PATH`/`DEST_PATH` detectors document the identical
+    gap (§12.27) and are unwired for exactly this reason. Building a stat()-based substitute here
+    would both contradict that documented design and duplicate a capture mechanism §12.27 already
+    scoped as its own future task. Disclosed, not hidden: (d) does not fail a real run today.
+    """
+    statuses = await _scan_statuses(conn, run_id)
+    repos_with_manifests = {
+        str(row[0])
+        for row in await _rows(
+            conn,
+            "SELECT DISTINCT m.repo_id FROM manifests AS m "
+            "JOIN phases AS p ON p.repo_id = m.repo_id "
+            "WHERE p.run_id = ? AND p.phase = ?",
+            (run_id, int(Phase.SCAN)),
+        )
+    }
+    no_manifest_repo_ids = {
+        str(row[0])
+        for row in await _rows(
+            conn,
+            "SELECT DISTINCT repo_id FROM findings WHERE run_id = ? AND kind = 'no-manifest'",
+            (run_id,),
+        )
+    }
+    finding_kinds: dict[str, set[str]] = {}
+    for repo_id, kind in await _rows(
+        conn,
+        "SELECT repo_id, kind FROM findings WHERE run_id = ? AND repo_id IS NOT NULL",
+        (run_id,),
+    ):
+        finding_kinds.setdefault(str(repo_id), set()).add(str(kind))
+    contract_statuses = {
+        str(row[0]): ContractStatus(str(row[1]))
+        for row in await _rows(
+            conn, "SELECT contract_id, status FROM contracts WHERE run_id = ?", (run_id,)
+        )
+    }
+    config_skipped_repo_ids = tuple(
+        entry.name for entry in settings.repos.repos if entry.skip
+    )
+    baseline_ok = {
+        str(row[0]): (None if row[1] is None else int(row[1]))
+        for row in await _rows(
+            conn,
+            "SELECT repo_id, baseline_ok FROM repos WHERE repo_id IN "
+            "(SELECT repo_id FROM phases WHERE run_id = ? AND phase = ?)",
+            (run_id, int(Phase.SCAN)),
+        )
+    }
+    failure_classes = {
+        str(row[0]): FailureClass(str(row[1]))
+        for row in await _rows(
+            conn,
+            "SELECT repo_id, failure_class FROM phases "
+            "WHERE run_id = ? AND phase = ? AND failure_class IS NOT NULL",
+            (run_id, int(Phase.SCAN)),
+        )
+    }
+    base = check_criteria(
+        report,
+        wave_plan,
+        statuses=statuses,
+        repos_with_manifests=repos_with_manifests,
+        no_manifest_repo_ids=no_manifest_repo_ids,
+        finding_kinds=finding_kinds,
+        contract_statuses=contract_statuses,
+        config_skipped_repo_ids=config_skipped_repo_ids,
+        baseline_ok=baseline_ok,
+        failure_classes=failure_classes,
+    )
+    # check_criteria() composes (a) over EVERY repo in `statuses` unconditionally. That is
+    # unsatisfiable for a real fleet: a repo gated by `EmptyRepo`/`PreflightFailed`, or by
+    # config `skip: true`, is excluded from the fleet BEFORE step 2 (manifest discovery) ever
+    # runs on it — `workers/clone.py` documents "no worktree is cut" for `EmptyRepo`, config
+    # skip transitions to SKIPPED in `_seed_fleet` before any clone at all, and
+    # `tests/test_scan_e2e.py::test_an_empty_repo_is_skipped_with_a_finding_and_the_fleet_continues`
+    # asserts a real `EmptyRepo` repo has ZERO `manifests` rows. None of the three can ever carry
+    # a `manifests` row or a `no-manifest` finding, so composing (a) over the unfiltered set
+    # fails on every real fleet containing one — measured directly against
+    # `tests/test_scan_e2e.py` and `tests/test_transform_e2e.py`'s real-repo fixtures before this
+    # exclusion existed. Re-scoped here rather than inside `check_criterion_a` (unmodified);
+    # every OTHER repo — including `BaselineRed`/`OperatorQuarantine`, both gated only after a
+    # clone that already ran step 2 — stays in scope.
+    never_manifest_discovered = set(config_skipped_repo_ids) | {
+        repo_id
+        for repo_id, kinds in finding_kinds.items()
+        if "EmptyRepo" in kinds or "PreflightFailed" in kinds
+    }
+    criterion_a = check_criterion_a(
+        sorted(set(statuses) - never_manifest_discovered),
+        repos_with_manifests=repos_with_manifests,
+        no_manifest_repo_ids=no_manifest_repo_ids,
+    )
+    return CriteriaReport(results=(criterion_a, *base.results[1:]))
+
+
 async def _sequence_impl(
     opts: GlobalOptions,
     settings: FleetSettings,
@@ -2976,6 +3112,25 @@ async def _sequence_impl(
             f"this run's §3.1 step 8 audit ({listed}"
             f"{'…' if len(collisions.blocking) > 5 else ''}); the rows are persisted — resolve "
             "them in config, not in a half-migrated monorepo."
+        )
+
+    # §3.1's Phase 1 exit condition — SPEC §12 success criterion 9 — checked against what this
+    # run just persisted, not against the finding that motivated wiring it in (CLAUDE.md
+    # "measurement, stand-in & audit discipline": the artefact the fix produced needs its own
+    # measurement). A fresh read connection: the one this function opened is already closed, and
+    # `contract_statuses` must see the hoists the writer block above just committed.
+    criteria_conn = await connect_ro(path)
+    try:
+        criteria = await _phase1_exit_report(
+            criteria_conn, run_id, settings, report=report, wave_plan=wave_plan
+        )
+    finally:
+        await criteria_conn.close()
+    if not criteria.ok:
+        failed = "; ".join(f"({r.name}) {r.detail}" for r in criteria.failures)
+        raise SequenceCriterionError(
+            f"§3.1's Phase 1 exit condition does not hold for run {run_id}: "
+            f"{len(criteria.failures)} of 4 criteria failed — {failed}"
         )
 
     payload: dict[str, object] = {
