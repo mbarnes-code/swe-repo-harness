@@ -11785,3 +11785,31 @@ decide (a)/(b) itself* — rejected: D80 explicitly frames these as needing an o
 dispatch, and the implementer correctly stopped and escalated rather than guess; deciding here
 is what "in that order" in D80's entry calls for. *Renumber §11.5's list to give `stub_reconcile`
 a real step number* — rejected per the citation-stability rationale above.
+
+---
+
+## ADR-0099 — §12.7's fixture-location sentence is reworded to name the real mechanism, not built to match
+
+**Decision.** `docs/SPEC.md` §12 item 7 named `tests/fixtures/repos/` as the location of the six
+`ManifestAdapter` fixtures. That directory holds only `.gitkeep`; the real fixtures are
+synthesized inline via `tests/test_manifests.py`'s `write(tmp_path, name, body)` helper. The
+criterion is reworded to name that mechanism directly, rather than standing up committed fixture
+repos at the named path to satisfy the old sentence.
+
+**Rationale.** Round-K's `12be741` repair (`docs/SPEC.md:7422` prior to this change) disclosed
+the mismatch and explicitly declined to resolve it, framing the choice as a real adjudication:
+"Whether committed fixture repos are wanted at that path is an adjudication, not a correction; do
+not create them merely to make this sentence true." The underlying property this criterion checks
+— all six adapters parse and produce a correct `Coordinate.key` — already holds and is already
+tested; inline `tmp_path` synthesis is a well-established, self-contained pattern this test suite
+already uses successfully across many other fixtures, and it avoids the maintenance burden of a
+second, committed-repo fixture mechanism duplicating what synthesis already does (`CLAUDE.md`
+Rule 2, Simplicity First). This is the cheapest possible closure of a §12 criterion in this round:
+no code or test change, only the SPEC sentence needed to describe reality.
+
+**Alternatives rejected.** *Build committed fixture repos under `tests/fixtures/repos/`* —
+rejected: pure churn, the property this criterion checks doesn't need a second fixture mechanism
+to hold, and round-K's own marker already warned against doing this "merely to make this sentence
+true." *Leave the adjudication open for a future round* — rejected: the decision has no real
+ambiguity once stated plainly (inline synthesis already works and is idiomatic here), and leaving
+it open costs a criterion's closure for no benefit.

@@ -114,13 +114,10 @@ gaps today, but a regression of either shape would pass every test.
 **Out of scope:** none.
 
 ## 7. Six `ManifestAdapter`s parse fixtures at `tests/fixtures/repos/`
-**OPEN — SPEC location claim is false — SPEC-ADJUDICATION (trivial).** The property holds — all
-six adapters parse and assert an exact `.key` — but `tests/fixtures/repos/` is empty
-(`.gitkeep` only); real fixtures are synthesized inline via `test_manifests.py`'s `write()` helper
-(audit row 7; round-K flagged this needs a marker but did not choose replacement wording).
-**Done bar:** per Rule 14, add the dated marker + repoint the SPEC sentence at the actual
-mechanism (`tests/test_manifests.py`'s inline `write(tmp_path, ...)` helper). This is the cheapest
-possible closure in this file — no code or test changes needed, the substance already passes.
+**DONE (ADR-0099, 2026-08-30).** SPEC.md item 7 reworded to name the actual mechanism
+(`tests/test_manifests.py`'s inline `write(tmp_path, ...)` helper) rather than a location that was
+never populated. The property already held and needed no code/test change — this closure was the
+SPEC sentence alone.
 
 ## 8. Graph correctness incl. `hypothesis` property tests
 **OPEN — mixed — TEST-ONLY, mostly landed.** Confidence reconstruction is exact and covered.
