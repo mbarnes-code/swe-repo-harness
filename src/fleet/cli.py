@@ -131,7 +131,7 @@ from fleet.models.graph import (
 )
 from fleet.models.repo import Coordinate, ManifestRef, RawDependency, RepoId
 from fleet.models.state import SCHEMA_VERSION
-from fleet.models.tasks import MAX_ATTEMPTS, PullRequestDraft, VerificationReport
+from fleet.models.tasks import MAX_ATTEMPTS, PullRequestDraft, StubRecord, VerificationReport
 from fleet.obs.events import EventEmitter, events_jsonl_path
 from fleet.obs.log import configure as log_configure
 from fleet.obs.redact import redact_text
@@ -173,6 +173,9 @@ from fleet.orchestrator.scheduler import (
     WaveScheduler,
     ordering_descendants,
 )
+from fleet.orchestrator.stubs import ProviderFacts, StubDecision
+from fleet.orchestrator.stubs import apply as apply_stub_decision
+from fleet.orchestrator.stubs import reconcile as stub_reconcile
 from fleet.rewrite.rules import (
     EngineRegistry,
     EngineUnavailableError,
@@ -10949,26 +10952,36 @@ async def _resume_impl(
             repoll = "failed"
 
     # ---------------------------------------------------------------------------------
-    # `stub_reconcile` (§3.5.1, §13 row 45) BELONGS HERE — immediately below the re-poll and
-    # above the step-3 sweep — and nowhere earlier. It walks `ix_stubs_open` and writes one
-    # `UnresolvedStub` finding per open row, which is what makes the run exit 7. Run before the
-    # re-poll, it would report as "a human is needed" every stub whose resolving PR a human had
-    # ALREADY merged and the harness simply had not observed yet, and exit 7 would come to mean
-    # "the fleet gave up waiting" instead of "a human is needed".
+    # `stub_reconcile` (§3.5.1, §13 row 45, §10's `fleet resume` row): landed HERE, immediately
+    # below the re-poll and above the step-3 sweep — and nowhere earlier. It walks `ix_stubs_open`
+    # and writes one `UnresolvedStub` finding per open row via `orchestrator.stubs.reconcile()`,
+    # which is what makes the run exit 7. Run before the re-poll, it would report as "a human is
+    # needed" every stub whose resolving PR a human had ALREADY merged and the harness simply had
+    # not observed yet, and exit 7 would come to mean "the fleet gave up waiting" instead of "a
+    # human is needed".
     #
-    # RELATIVE ORDER IS NOT ENOUGH, because the line above is CONDITIONAL. `repoll` is
+    # This step existed as a marked TODO (D80 in `docs/INTEGRATION_HONESTY.md`) that deliberately
+    # left two questions open rather than guess: whether `stub_reconcile` is a real ninth
+    # obligation of `fleet resume` given §11.5's own numbered list omits it, and whether the call
+    # below should gate on `repoll == "polled"` or make `--repoll-prs` implied. Both are now
+    # settled by controller ruling (ADR-0098, assigned centrally per this repo's SDD protocol; the
+    # ADR text and D80's own dated marker land separately from this commit): §11.5's list is the
+    # stale source — §10's row, §13 row 35 and §3.5.1 all require this step, so it is a real
+    # obligation — and the call below is UNCONDITIONAL, not gated on `repoll`. `repoll` is
     # `"not-requested"` on a plain `fleet resume` (the flag is opt-in), `"skipped-dry-run"` under
-    # `--dry-run`, and `"failed"` when the forge refused — in all three the PR state
-    # `stub_reconcile` would judge is whatever was last observed, possibly hours stale, and row 45
-    # fires exactly as if the re-poll had been ordered after it. So whoever lands it must ALSO
-    # decide what it does when `repoll != "polled"`: either gate it on that, or make
-    # `--repoll-prs` implied by it. It does not exist on `main` yet; when it lands, it goes on the
-    # next line, with that decision made explicitly rather than inherited from this ordering.
+    # `--dry-run`, and `"failed"` when the forge refused — in all three the PR state this step
+    # judges is whatever was last observed, possibly hours stale, and it fires exactly as if the
+    # re-poll had been ordered after it. The accepted tradeoff is an occasional false exit-7
+    # (recoverable: re-run with `--repoll-prs`), which is safer than the alternative this step
+    # exists to prevent — a stub shipping unresolved with nothing noticing on a plain, unflagged
+    # `fleet resume`, the common case.
     # ---------------------------------------------------------------------------------
 
     # §11.5 step 3. `cutoff` is the config horizon `run.stale_after_s` names; `now` drives the
-    # per-row `heartbeat_ttl_seconds` half. Both are required — see `_STALE_HEARTBEAT_PREDICATE`.
+    # per-row `heartbeat_ttl_seconds` half. Both are required — see `_STALE_HEARTBEAT_PREDICATE`,
+    # and `stub_reconcile` above shares it for the same reason `_now()` is called once per resume.
     now = _now()
+    stub_reconciled = await _stub_reconcile_impl(path, settings, run_id, now=now, dry_run=dry_run)
     horizons = (_iso(now - timedelta(seconds=settings.config.run.stale_after_s)), _iso(now))
 
     if dry_run:
@@ -11076,6 +11089,11 @@ async def _resume_impl(
         "budget_ledger_before": None if ledger is None else ledger.payload(),
         "raise_wave_budget": raise_wave_budget,
         "raise_wave_budget_applied": raise_wave_budget is not None and not dry_run,
+        # `stub_reconcile` (§3.5.1, §13 row 45, §10) — the whole report, for the same reason step
+        # 4's and step 5's are below: "N stubs abandoned" cannot tell an operator whether a stub's
+        # provider still has a legitimate open PR (`held_for_merge`) or genuinely ran out the
+        # clock, and those are opposite facts about the same run.
+        "stub_reconcile": stub_reconciled,
         "stale_running_reset": stale,
         # §11.5 step 4. The whole report, not a count: "2 tasks reconciled" cannot tell an
         # operator whether landed work was adopted or a worktree was discarded, and those are
@@ -11122,6 +11140,7 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
         lines.append(
             f"  step 3: {stale} stale RUNNING row(s) would reset to PENDING (attempts retained)"
         )
+    lines.extend(_stub_reconcile_lines(result, dry=dry))
     lines.extend(_arbitration_lines(result, dry=dry))
     lines.extend(_floor_lines(result, dry=dry))
     lines.extend(_unblock_lines(result, dry=dry))
@@ -11131,6 +11150,28 @@ def _resume_lines(result: Mapping[str, object]) -> list[str]:
     if not dry:
         lines.append(f"  projection at {result['projection']}")
     return lines
+
+
+def _stub_reconcile_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
+    """`stub_reconcile` (§3.5.1, §13 row 45), reported so a held row and an abandoned one can
+    never read as each other — the same reason `_arbitration_lines` prints every `unresolved`
+    entry rather than a bare count (D44)."""
+    report = result["stub_reconcile"]
+    if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries it
+        return []
+    abandoned = cast(Sequence[str], report["abandoned"])
+    held = cast(Sequence[str], report["held_for_merge"])
+    if not abandoned and not held:
+        return []
+    verb = "would abandon" if dry else "abandoned"
+    out = [f"  stub_reconcile: {verb} {len(abandoned)} open stub(s) (UnresolvedStub, exit 7)"]
+    out.extend(f"  stub_reconcile: abandoned {entry}" for entry in abandoned)
+    out.extend(
+        f"  stub_reconcile: {entry} held — provider's PR is still open within "
+        "pr.merge_wait_timeout_s"
+        for entry in held
+    )
+    return out
 
 
 def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
@@ -11377,6 +11418,188 @@ def _refuse_unbuilt_resume_flags(
             "reconciliation that IS built (step 1's config digests, "
             "steps 2, 3, 4, 5, 6, 7 and 8, `--repoll-prs`, the budget raises)."
         )
+
+
+# --------------------------------------------------------------------------------------
+# `stub_reconcile` (§3.5.1, §13 row 45, §10) — see the call site in `_resume_impl` for why it
+# runs unconditionally, immediately below the re-poll. `orchestrator/stubs.py` owns every
+# decision (D69, D80); the three functions below only read the rows it needs and persist exactly
+# what it decided — never a rule re-derived here.
+# --------------------------------------------------------------------------------------
+
+
+async def _stub_reconcile_inputs(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[dict[tuple[str, str], StubRecord], dict[str, ProviderFacts]]:
+    """Every open (`ACTIVE`/`SUPERSEDED`) `stubs` row, as one `StubRecord` per (consumer,
+    coord_key) pair, plus the `ProviderFacts` `reconcile()` needs for each row's provider.
+
+    One `StubRecord` per DB row rather than one aggregate per `stub_id`: `schema.sql`'s PRIMARY
+    KEY is `(run_id, repo_id, stub_coord_key, revalidation_round)`, so two consumers of the same
+    provider can independently reach different states once `settle_revalidation` has run for one
+    and not the other — collapsing them into one aggregate `consumer_repo_ids` list would either
+    invent a shared state that does not hold or silently drop the divergence. At most one OPEN row
+    can exist per (consumer, coord_key) at a time (`next_round_record`: a new round opens only
+    once the previous one is terminal), so the dict key does not collide.
+    """
+    stub_rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, provider_repo_id, stub_id, stub_coord_key, state, "
+        "       stub_fidelity, pinned_version, revalidation_round, max_revalidation_rounds, "
+        "       created_at, state_changed_at "
+        "  FROM stubs WHERE run_id = ? AND state IN ('ACTIVE','SUPERSEDED')",
+        (run_id,),
+    )
+    records = {
+        (str(row[0]), str(row[3])): StubRecord(
+            stub_id=UUID(str(row[2])),
+            run_id=UUID(run_id),
+            coord_key=str(row[3]),
+            provider_repo_id=str(row[1]),
+            consumer_repo_ids=[str(row[0])],
+            fidelity=StubFidelity(str(row[5])),
+            pinned_version=None if row[6] is None else str(row[6]),
+            state=StubState(str(row[4])),
+            max_revalidation_rounds=int(row[8]),
+            rounds_spent=int(row[7]),
+            created_at=datetime.fromisoformat(str(row[9])),
+            state_changed_at=datetime.fromisoformat(str(row[10])),
+        )
+        for row in stub_rows
+    }
+    provider_ids = sorted({record.provider_repo_id for record in records.values()})
+    pr_records = await _pr_records(conn, run_id) if provider_ids else {}
+    phase_status: dict[str, RepoStatus] = {}
+    if provider_ids:
+        placeholders = ", ".join("?" * len(provider_ids))
+        for row in await _rows(
+            conn,
+            "SELECT repo_id, status FROM phases WHERE run_id = ? AND repo_id IN "  # noqa: S608
+            f"({placeholders}) ORDER BY repo_id, phase DESC",
+            (run_id, *provider_ids),
+        ):
+            phase_status.setdefault(str(row[0]), RepoStatus(str(row[1])))
+    providers = {
+        provider_id: ProviderFacts(
+            repo_id=provider_id,
+            # `.status` is not consulted by `reconcile()` — only `.pr_open`/`.pr_created_at` are,
+            # via `_awaiting_merge` — so PENDING here is the honest "no phases row observed"
+            # value, not a value chosen to steer the §13 row 45 carve-out.
+            status=phase_status.get(provider_id, RepoStatus.PENDING),
+            pr_state=pr_records[provider_id].state if provider_id in pr_records else None,
+            pr_created_at=(
+                pr_records[provider_id].created_at if provider_id in pr_records else None
+            ),
+        )
+        for provider_id in provider_ids
+    }
+    return records, providers
+
+
+async def _apply_stub_reconcile(
+    path: Path,
+    run_id: str,
+    records: Mapping[tuple[str, str], StubRecord],
+    decisions: Sequence[StubDecision],
+    *,
+    now: datetime,
+) -> None:
+    """Persist `reconcile()`'s decisions in one transaction: `apply()` computes each row's new
+    state — never re-derived here, per the module's own "the single writer persists" contract —
+    and one `UnresolvedStub` finding is upserted per decision, keyed so a replayed sweep (a second
+    `fleet resume` before the operator acts) cannot double-write it (§11.7's idempotency key,
+    `ux_findings_ident`)."""
+    stamp = _iso(now)
+    async with StateWriter(path, owner="fleet-resume") as writer:
+
+        async def unit(db: aiosqlite.Connection) -> None:
+            for decision in decisions:
+                original = records[(decision.consumer_repo_id, decision.coord_key)]
+                updated = apply_stub_decision(original, decision, now=now)
+                await db.execute(
+                    "UPDATE stubs SET state = ?, revalidation_round = ?, state_changed_at = ?, "
+                    "       abandon_reason = ?, resolved_at = COALESCE(resolved_at, ?) "
+                    " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ? "
+                    "   AND revalidation_round = ? AND state = ?",
+                    (
+                        updated.state.value,
+                        updated.rounds_spent,
+                        stamp,
+                        decision.abandon_reason.value if decision.abandon_reason else None,
+                        stamp,
+                        run_id,
+                        decision.consumer_repo_id,
+                        decision.coord_key,
+                        original.rounds_spent,
+                        decision.from_state.value,
+                    ),
+                )
+                if decision.finding is not None:
+                    await db.execute(
+                        "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
+                        "                      payload, created_at) "
+                        "VALUES (?, ?, ?, 'warn', ?, ?, ?) "
+                        "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+                        "DO UPDATE SET payload = excluded.payload, "
+                        "              created_at = excluded.created_at",
+                        (
+                            run_id,
+                            decision.consumer_repo_id,
+                            decision.finding.value,
+                            _fingerprint(run_id, decision.consumer_repo_id, decision.coord_key),
+                            redact_text(
+                                json.dumps(
+                                    {
+                                        "consumer": decision.consumer_repo_id,
+                                        "coord_key": decision.coord_key,
+                                        "provider": decision.provider_repo_id,
+                                        "transition": decision.transition.value,
+                                        "abandon_reason": (
+                                            decision.abandon_reason.value
+                                            if decision.abandon_reason
+                                            else None
+                                        ),
+                                        "detail": decision.detail,
+                                    },
+                                    sort_keys=True,
+                                )
+                            ),
+                            stamp,
+                        ),
+                    )
+
+        await writer.submit(unit)
+
+
+async def _stub_reconcile_impl(
+    path: Path, settings: FleetSettings, run_id: str, *, now: datetime, dry_run: bool
+) -> dict[str, object]:
+    """`stub_reconcile`: the sweep §13 row 35 requires before the final checkpoint and again in
+    `fleet resume` (§10, §3.5.1). Every `stubs` row still `ACTIVE`/`SUPERSEDED` goes `ABANDONED`
+    with an `UnresolvedStub` finding, UNLESS its provider's PR is still open within
+    `pr.merge_wait_timeout_s` (§13 row 45's carve-out), in which case it is left open and reported
+    under `held_for_merge` — see `orchestrator.stubs.reconcile()`, not re-implemented here.
+
+    `--dry-run` computes and returns the identical outcome without writing: `reconcile()` is a
+    pure function over rows already read, so the preview and the real run share one read path and
+    diverge only in whether `_apply_stub_reconcile` runs (§11.5's dry-run promise: no SQL write).
+    """
+    records, providers = await _with_ro(path, lambda conn: _stub_reconcile_inputs(conn, run_id))
+    outcome = stub_reconcile(
+        records.values(),
+        providers,
+        now=now,
+        open_pr_max_age_s=float(settings.config.pr.merge_wait_timeout_s),
+    )
+    if not dry_run and outcome.decisions:
+        await _apply_stub_reconcile(path, run_id, records, outcome.decisions, now=now)
+    return {
+        "abandoned": sorted(f"{d.consumer_repo_id}→{d.coord_key}" for d in outcome.decisions),
+        "held_for_merge": sorted(
+            f"{h.consumer_repo_id}→{h.coord_key}" for h in outcome.held_for_merge
+        ),
+        "degraded_consumers": sorted(outcome.degraded_consumers),
+    }
 
 
 async def _count_stale_running(

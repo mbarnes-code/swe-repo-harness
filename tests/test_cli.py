@@ -1685,6 +1685,191 @@ def test_resume_dry_run_never_reaches_the_forge_even_with_repoll_prs(
     assert result.exit_code == ExitCode.SUCCESS, result.output
 
 
+# ---- stub_reconcile (§3.5.1, §13 row 45, §10; D80 / ADR-0098) -----------------------
+
+
+def _put_consumer_at_verify_degraded(db: Path, repo: str = "acme-commons") -> None:
+    """Phases 1-3 `SUCCEEDED`, phase 4 `DEGRADED`: `reentry.phase_floor` finds every phase
+    already settled (`DEGRADED` is one of `_SETTLED_FOR_DEMOTION`'s two hard stops, and the walk
+    never moves the floor onto it) and returns `None`, so §11.5 step 5 demotes nothing here. The
+    fixture models a repo that finished migrating against a stub, not one interrupted mid-phase —
+    which is what `stub_reconcile` actually reconciles, and keeps step 5 from being a confound on
+    the assertions below.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase, status in (
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"), (4, "DEGRADED"),
+        ):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (RUN_ID, repo, phase, status, "2026-08-08T12:00:00.000000+00:00"),
+            )
+    finally:
+        conn.close()
+
+
+def _put_stub(
+    db: Path,
+    *,
+    consumer: str = "acme-commons",
+    provider: str = "acme-billing",
+    coord_key: str = "acme-billing@1.0.0",
+    state: str = "ACTIVE",
+) -> None:
+    """One open `stubs` row exactly as `--stub-blocked` would have written it (§3.5.1): the
+    consumer is `DEGRADED` against a provider that never opened a PR, so `stub_reconcile`'s only
+    legal decision is T4 -> `ABANDONED` with `abandon_reason='END_OF_RUN'` — §13 row 45's
+    carve-out needs an open PR, and this fixture seeds none.
+    """
+    stamp = "2026-08-08T12:00:00.000000+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, revalidation_round, max_revalidation_rounds, "
+            "                   state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
+            (
+                "22222222-2222-4222-8222-222222222222",
+                RUN_ID, consumer, coord_key, consumer, provider, "1.0.0",
+                f"//third_party/stubs/{provider}", state, stamp, stamp,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
+    workspace: Path,
+) -> None:
+    """D80 / ADR-0098: `stub_reconcile` runs inside `fleet resume` UNCONDITIONALLY — not gated on
+    `--repoll-prs` — because §10's `fleet resume` row, §13 row 35 and §3.5.1 all require it and
+    only §11.5's own numbered list omitted it. A plain, unflagged `fleet resume` is the case that
+    matters: `repoll_prs` stays `"not-requested"` there, and gating this step on
+    `repoll == "polled"` would silently never reconcile a stub on that path — the exact failure
+    §13 row 35 exists to prevent. Proving that requires NOT passing `--repoll-prs` here.
+
+    The provider ("acme-billing") never opened a PR, so §13 row 45's carve-out does not apply and
+    `orchestrator.stubs.reconcile()`'s only legal decision is T4: `ACTIVE` -> `ABANDONED`,
+    `abandon_reason='END_OF_RUN'`, an `UnresolvedStub` finding. Asserted at three independent
+    layers so a partial wire-up (writes the row but not the finding, or vice versa, or writes
+    both but the projection still drops it) cannot pass: the `stubs` row itself, the `findings`
+    row, and `migration_state.json#unresolved_stubs` — the §13 row 35 contract an operator
+    actually reads to know the run needs a human.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db)
+    _put_stub(db)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["repoll_prs"] == "not-requested", "the fixture must not imply --repoll-prs"
+    assert payload["stub_reconcile"]["abandoned"] == ["acme-commons→acme-billing@1.0.0"]
+    assert payload["stub_reconcile"]["held_for_merge"] == []
+
+    conn = sqlite3.connect(db)
+    try:
+        state, abandon_reason, resolved_at = conn.execute(
+            "SELECT state, abandon_reason, resolved_at FROM stubs "
+            " WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "   AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+        finding = conn.execute(
+            "SELECT kind, severity FROM findings "
+            " WHERE run_id = ? AND repo_id = 'acme-commons' AND kind = 'UnresolvedStub'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert (state, abandon_reason) == ("ABANDONED", "END_OF_RUN")
+    assert resolved_at is not None, "schema.sql CHECKs a non-ACTIVE row carries one"
+    assert finding == ("UnresolvedStub", "warn")
+
+    published = json.loads((workspace / "migration_state.json").read_text())
+    assert published["unresolved_stubs"] == {"acme-commons": ["acme-billing@1.0.0"]}
+    assert published["repos"]["acme-commons"]["stub_states"] == {
+        "acme-billing@1.0.0": "ABANDONED"
+    }
+
+
+def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
+    """Like `_seed_pr_record`, but `created_at` is real "now" rather than that helper's fixed
+    2026-08-08 stamp. `_awaiting_merge` bounds the §13 row 45 carve-out by
+    `pr.merge_wait_timeout_s` (default 2 days) measured against wall-clock `_now()`, so a fixed
+    past `created_at` would silently age out of the carve-out as real time moves past it — this
+    test is about whether the row is held AT ALL, not about the age bound, so the PR must be
+    fresh at whatever moment the suite actually runs.
+    """
+    from fleet.cli import PR_RECORD_KIND, _fingerprint
+
+    now = datetime.now(UTC).isoformat(timespec="microseconds")
+    payload = json.dumps(
+        {
+            "run_id": RUN_ID, "repo_id": repo, "wave_index": 0,
+            "branch": f"migrate/{repo}", "base": "integration",
+            "title": f"migrate {repo}", "body": "body",
+            "source_url": f"https://example.invalid/{repo}", "source_sha": "a" * 40,
+            "state": state, "url": url, "created_at": now,
+        }
+    )
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
+            (
+                RUN_ID, repo, PR_RECORD_KIND,
+                _fingerprint(RUN_ID, repo, PR_RECORD_KIND), payload, now,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
+    workspace: Path,
+) -> None:
+    """§13 row 45's carve-out, exercised through the wired CLI path rather than
+    `orchestrator.stubs.reconcile()` called directly: a provider with a `DRAFTED` PR is a human
+    mid-review, not a giveup, so the row is left open and reported under `held_for_merge` instead
+    of abandoned — and no `UnresolvedStub` finding is written for it.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db)
+    _put_stub(db)
+    _seed_fresh_pr_record(
+        db, "acme-billing", state="DRAFTED",
+        url="https://github.invalid/acme/monorepo/pull/2",
+    )
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["stub_reconcile"]["abandoned"] == []
+    assert payload["stub_reconcile"]["held_for_merge"] == ["acme-commons→acme-billing@1.0.0"]
+
+    conn = sqlite3.connect(db)
+    try:
+        state = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "  AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+        finding = conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = 'UnresolvedStub'",
+            (RUN_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert state == "ACTIVE", "held, not abandoned — the provider's PR is still open"
+    assert finding == 0
+
+
 # ---- --raise-budget -----------------------------------------------------------------
 
 
