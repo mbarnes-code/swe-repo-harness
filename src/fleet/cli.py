@@ -1932,6 +1932,7 @@ async def _run_scan_wave(
         projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
+        root=settings.root,
     )
     scheduler = WaveScheduler(
         run_id=run_id,
@@ -4432,6 +4433,7 @@ async def _run_transform_wave(
         projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
+        root=settings.root,
     )
     scheduler = WaveScheduler(
         run_id=run_id,
@@ -7930,6 +7932,7 @@ async def _run_build_wave(
         projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
+        root=settings.root,
     )
     scheduler = WaveScheduler(
         run_id=run_id,
@@ -8007,6 +8010,7 @@ async def _run_verify_wave(
         projector=projector,
         clock=_now,
         harness_version=HARNESS_VERSION,
+        root=settings.root,
     )
     scheduler = WaveScheduler(
         run_id=run_id,
@@ -9931,6 +9935,7 @@ async def _emit_prs(
                     work_dir=pr_root,
                     clock=_now,
                     harness_version=HARNESS_VERSION,
+                    root=settings.root,
                 )
                 worker = PrwriterWorker(runner=GH_RUNNER)
                 try:

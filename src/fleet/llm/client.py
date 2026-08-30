@@ -238,6 +238,40 @@ class BackendFailover(BaseModel):
     trigger: FailoverTrigger
 
 
+class LlmCall(BaseModel):
+    """One `llm_call` event (§12.18): the fields SPEC §12.18 lists, verbatim — `role`, `tier`,
+    `backend`, the resolved `model_id`, `structured_output_mode`, token counts, `cost_usd`, and
+    `latency_ms`.
+
+    Emitted once per *actual provider call* — one `backend.invoke()` that RETURNS, whatever its
+    outcome — not once per `complete()` (which may walk several targets) and not once per
+    `_call_target()` (which may retry the SAME target for a truncation or a schema repair, each
+    retry its own billed call). ADR-0012 says "token usage, cost, and latency are logged as
+    `llm_call` events so per-repo spend is a `jq` away"; a repair re-ask spends real tokens on the
+    same target, so folding it into one event per `_call_target()` would undercount exactly the
+    spend an operator is `jq`-ing for.
+
+    A raised `TransportError` is NOT covered — there is no `BackendReply` to report `input_tokens`
+    /`output_tokens`/`cost_usd` from, and that failure is `_emit_failover`'s job, not this one's.
+
+    `level` is `"error"` for a reply the transport itself flags as unusable (`finish_reason` of
+    `refusal` or `filtered`, §12.18's neighbouring "recoverable error" sink) and `"info"`
+    otherwise — including a truncated reply, which is ordinary ladder behaviour handled by
+    `_raise_cap` on the SAME target, not an error.
+    """
+
+    role: str
+    tier: ModelTier
+    backend: str
+    model_id: str
+    structured_output_mode: StructuredOutputMode
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+    latency_ms: int
+    level: Literal["info", "error"]
+
+
 # ---------------------------------------------------------------------------------------------
 # Protocols
 # ---------------------------------------------------------------------------------------------
@@ -506,6 +540,7 @@ class LadderModelClient:
         policy: CallPolicy | None = None,
         on_drift: Callable[[CapabilityDrift], None] | None = None,
         on_failover: Callable[[BackendFailover], None] | None = None,
+        on_llm_call: Callable[[LlmCall], None] | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._router = router
@@ -513,6 +548,7 @@ class LadderModelClient:
         self._policy = policy or CallPolicy()
         self._on_drift = on_drift
         self._on_failover = on_failover
+        self._on_llm_call = on_llm_call
         self._clock = clock
 
     # -- public surface ------------------------------------------------------------------------
@@ -709,6 +745,38 @@ class LadderModelClient:
             ),
         )
 
+    def _emit_llm_call(
+        self,
+        role: str,
+        tier: ModelTier,
+        target: BackendTarget,
+        mode: StructuredOutputMode,
+        reply: BackendReply,
+        started: float,
+    ) -> None:
+        """One §12.18 `llm_call` event per completed `backend.invoke()`. See `LlmCall`'s
+        docstring for why this fires once per raw call rather than once per `_call_target()`."""
+        if self._on_llm_call is None:
+            return
+        self._on_llm_call(
+            LlmCall(
+                role=role,
+                tier=tier,
+                backend=target.backend,
+                # Same convention as `_stamp`: `usage.model_id` is the CONFIGURED id, never the
+                # transport's served/resolved name (client.py:896-909).
+                model_id=reply.usage.model_id or target.model_id,
+                structured_output_mode=mode,
+                input_tokens=reply.usage.input_tokens,
+                output_tokens=reply.usage.output_tokens,
+                cost_usd=estimate_cost_usd(
+                    target, reply.usage.input_tokens, reply.usage.output_tokens
+                ),
+                latency_ms=self._elapsed_ms(started),
+                level="error" if reply.finish_reason in ("refusal", "filtered") else "info",
+            ),
+        )
+
     async def _call_target[T: BaseModel](
         self,
         *,
@@ -736,6 +804,7 @@ class LadderModelClient:
         input_tokens = estimate_input_tokens(messages)
 
         while True:
+            call_started = self._clock()
             reply = await backend.invoke(
                 target,
                 conversation,
@@ -744,6 +813,10 @@ class LadderModelClient:
                 max_output_tokens=cap,
                 timeout_s=timeout_s,
             )
+            # "Measure around the actual provider call" (§12.18): THIS invocation, not the
+            # ladder walk `complete()` may still be doing and not the retry loop this method is
+            # in the middle of — each iteration here is its own billed request.
+            self._emit_llm_call(role, tier, target, mode, reply, call_started)
 
             if reply.finish_reason == "length":
                 truncations += 1

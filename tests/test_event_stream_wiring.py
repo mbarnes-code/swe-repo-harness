@@ -27,6 +27,7 @@ discriminator for:
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 import sqlite3
@@ -36,6 +37,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
+from fleet import cli as cli_module
 from fleet.cli import app
 from fleet.obs import log as logmod
 from tests.test_cli import (
@@ -280,3 +282,66 @@ def test_a_dropped_pr_merged_event_fails_the_run_loudly_and_names_what_was_lost(
     )
     assert "acme-commons" in result.output, "the failure does not name the repo"
     assert "pr_merged" in result.output, "the failure does not name what was lost"
+
+
+# ======================================================================================
+# §12.18 — every real `RunContext(` site must pass `root=`
+# ======================================================================================
+
+
+def _run_context_call_sites() -> list[ast.Call]:
+    """Every `RunContext(...)` call in `src/fleet/cli.py`, found by walking the real source —
+    not by grepping the five call sites this docstring already knows about, which is exactly the
+    kind of hand-maintained list Guardrail 6 warns rots ("derive from the body").
+    """
+    source = Path(cli_module.__file__).read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    return [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "RunContext"
+    ]
+
+
+def test_every_run_context_call_site_in_cli_passes_root(workspace: Path) -> None:
+    """§12.18's JSONL/errors-sink routing is dead on any `RunContext(` site missing `root=` —
+    `RunContext.__post_init__` builds the run's `EventEmitter` with `jsonl_path=None` and
+    `errors_jsonl_path=None` whenever `root is None` (see that field's own docstring), so a run
+    assembled at such a site would still write `llm_call` to the `events` table (`sink=
+    self.repository` is unconditional) but NEVER to `logs/events-<run_id>.jsonl` or
+    `logs/errors-<run_id>.jsonl` — silently, with no exception and no other test failure, because
+    `root` is `Path | None = None` by design (the same optional-collaborator shape as
+    `llm_cache`/`llm_policy`/`backends` on this dataclass).
+
+    Only ONE of `cli.py`'s five real sites (`_run_scan_wave`, `_run_transform_wave`,
+    `_run_build_wave`, `_run_verify_wave`, `_emit_prs`) is exercised end-to-end for this by
+    `test_fleet_pr_llm_calls_reach_the_event_stream_with_every_spec_1218_field` in
+    `tests/test_pr_e2e.py` (the `_emit_prs` one) — a full e2e per site would mean standing up a
+    real scan/transform/build wave four more times just to prove one keyword argument survived,
+    which is disproportionate to what it guards. This structural sweep is the cheap alternative:
+    it does not prove `root=settings.root` resolves to the right VALUE at any one site (the e2e
+    test above already proves that for the one it drives), but it does prove every site still
+    PASSES the keyword at all, which is exactly what a future edit dropping it from any of the
+    other four would silently break.
+
+    The count assertion is not decorative: a `RunContext(` site added in the future that this
+    sweep does not know about must fail LOUD (a 6th, unlisted site) rather than silently pass by
+    virtue of not being checked — the same reasoning `test_run_context_llm_policy.py`'s "five,
+    AST-counted" already documents in prose for `policy=None`, made executable here for `root=`.
+    """
+    sites = _run_context_call_sites()
+    assert len(sites) == 5, (
+        f"expected exactly 5 `RunContext(` call sites in cli.py, found {len(sites)} at lines "
+        f"{[node.lineno for node in sites]} — update this sweep's expectation deliberately if a "
+        "site was added or removed, don't just raise the number to make it pass"
+    )
+
+    missing = [node.lineno for node in sites if not any(kw.arg == "root" for kw in node.keywords)]
+    assert missing == [], (
+        f"RunContext( at cli.py:{missing} does not pass root=, so that run silently loses "
+        "§12.18's logs/events-<run_id>.jsonl and logs/errors-<run_id>.jsonl routing for "
+        "llm_call — with no exception and no other test catching it (RunContext.root's own "
+        "field docstring names this exact failure mode)"
+    )

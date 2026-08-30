@@ -1804,7 +1804,9 @@ async def test_a_failing_findings_sink_cannot_rewrite_a_successful_repos_verdict
         "the repo did its work; a diagnostics writer failing is not its failure"
     )
     assert failure_class is None
-    assert harness.ctx.llm_findings.pending == 1, (
+    # 1 drift + 1 `llm_call` (§12.18) — the one `backend.invoke()` this repo made returned, so it
+    # is buffered alongside the drift and both are still DEFERRED, not dropped, by the failure.
+    assert harness.ctx.llm_findings.pending == 2, (
         "isolated must mean DEFERRED, not dropped — the drift the client really computed is "
         "still held for the next drain. Swallowing the failure AND the record would trade one "
         "instance of this lane's bug class for another"

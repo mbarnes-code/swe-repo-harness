@@ -1,17 +1,19 @@
 """`LlmFindingSink` — the persistence half of the LLM layer's diagnostics (§7.7, §11.8, §13).
 
-`LadderModelClient` **computes** three things it deliberately cannot store: a `CapabilityDrift`
+`LadderModelClient` **computes** four things it deliberately cannot store: a `CapabilityDrift`
 (a reply produced at a lower structured-output rung than the profile promised, §13 row 37), a
-`BackendFailover` (§11.8's `backend_failover` event) and, when every target for a tier is spent,
-a `TierUnavailable` (§13 row 40). The client owns no database handle and must not acquire one —
-it is the module with no vendor import and no I/O beyond the backend call, and that is what makes
-it testable offline. So it accepts two sinks (`on_drift`, `on_failover`) and calls them.
+`BackendFailover` (§11.8's `backend_failover` event), an `LlmCall` (§12.18's `llm_call` event,
+one per actual provider call) and, when every target for a tier is spent, a `TierUnavailable`
+(§13 row 40). The client owns no database handle and must not acquire one — it is the module
+with no vendor import and no I/O beyond the backend call, and that is what makes it testable
+offline. So it accepts three sinks (`on_drift`, `on_failover`, `on_llm_call`) and calls them.
 
-**Until this module existed nobody supplied those sinks.** `orchestrator/context.py` built the
-client with neither, so `_emit_drift` and `_emit_failover` returned at their `is None` guards and
-every drift and every failover the fleet ever computed was discarded — a silent local server that
-dropped guided JSON showed up as nothing at all. This is the sink, wired once per run where the
-client is assembled, which is the only place that knows both the client and the writer.
+**Until this module existed nobody supplied `on_drift`/`on_failover`.** `orchestrator/context.py`
+built the client with neither, so `_emit_drift` and `_emit_failover` returned at their `is None`
+guards and every drift and every failover the fleet ever computed was discarded — a silent local
+server that dropped guided JSON showed up as nothing at all. This is the sink, wired once per run
+where the client is assembled, which is the only place that knows both the client and the writer.
+`on_llm_call` is the same shape, added later (§12.18) once the sink already existed.
 
 Three design points, each of which is load-bearing rather than taste:
 
@@ -22,13 +24,14 @@ Three design points, each of which is load-bearing rather than taste:
   that something went wrong. So emission **buffers**, in memory, in O(1), and `flush()` drains
   the buffer through the run's one writer at a point the caller chooses. `PhaseRunner` flushes
   after every dispatch, so nothing sits in the buffer across a wave.
-* **Drift and failover carry no `repo_id`, and that is correct, not a shortcut.** One client
-  serves every repo in a wave concurrently, so the callback has no way to know which repo's task
-  it is running inside; attributing it to "the current repo" would be a guess that is wrong
-  whenever two repos are in flight. Both are properties of a *target* (backend + model_id), not
-  of a repository, and `CapabilityDrift` (client.py:215) has no repo field for the same reason.
-  They are therefore fleet-level findings — `repo_id IS NULL`, which `ux_findings_ident` already
-  supports via its `IFNULL(repo_id, '')` expression.
+* **Drift, failover and `llm_call` carry no `repo_id`, and that is correct, not a shortcut.** One
+  client serves every repo in a wave concurrently, so the callback has no way to know which repo's
+  task it is running inside; attributing it to "the current repo" would be a guess that is wrong
+  whenever two repos are in flight. All three are properties of a *target* (backend + model_id),
+  not of a repository, and `CapabilityDrift` (client.py:215) has no repo field for the same
+  reason. They are therefore fleet-level — `repo_id IS NULL`, which `ux_findings_ident` already
+  supports via its `IFNULL(repo_id, '')` expression for the two finding kinds, and which
+  `emit(repo_id=None)` supports directly for the `llm_call` event.
 * **`BackendUnavailable` is the one that DOES know its repo**, because it is written from
   `PhaseRunner` at the §11.8 halt, where the repo whose dispatch met the outage is in hand.
 
@@ -54,8 +57,9 @@ from fleet.util.hashing import sha256_text
 if TYPE_CHECKING:
     import aiosqlite
 
-    from fleet.llm.client import BackendFailover, CapabilityDrift
+    from fleet.llm.client import BackendFailover, CapabilityDrift, LlmCall
     from fleet.models.enums import ModelTier, Phase
+    from fleet.obs.events import EventEmitter
     from fleet.state.db import StateWriter
     from fleet.state.repository import StateRepository
 
@@ -63,6 +67,7 @@ __all__ = [
     "BACKEND_FAILOVER_EVENT",
     "BACKEND_UNAVAILABLE",
     "CAPABILITY_DRIFT",
+    "LLM_CALL_EVENT",
     "LlmFindingSink",
 ]
 
@@ -75,6 +80,10 @@ BACKEND_UNAVAILABLE: Final = "BackendUnavailable"
 #: `events.event` for §11.8. A failover is an EVENT, not a finding: it is a hop the fleet took
 #: and recovered from, and `BackendFailover`'s own docstring (client.py:228) names it as one.
 BACKEND_FAILOVER_EVENT: Final = "backend_failover"
+
+#: `events.event` for §12.18. One per completed `backend.invoke()` — see `LlmCall`'s docstring
+#: (client.py) for why it is not one per `complete()` or per `_call_target()`.
+LLM_CALL_EVENT: Final = "llm_call"
 
 #: Carried in every `BackendUnavailable` payload. Prose in a row is normally a smell; here it is
 #: the point — the row's own name overstates what the harness measured, and the operator reading
@@ -145,16 +154,29 @@ def _json(payload: dict[str, object]) -> str:
 class LlmFindingSink:
     """Buffers what the LLM client computes; `flush()` writes it through the run's one writer.
 
-    Constructed by `RunContext.__post_init__` and handed to `LadderModelClient` as `on_drift=`
-    and `on_failover=`. Nothing here reaches for a module global (CLAUDE.md Guardrail 3): the
-    writer, the repository and the clock all arrive by construction, which is what lets a test
-    drive it against a temp database with no network.
+    Constructed by `RunContext.__post_init__` and handed to `LadderModelClient` as `on_drift=`,
+    `on_failover=` and `on_llm_call=`. Nothing here reaches for a module global (CLAUDE.md
+    Guardrail 3): the writer, the repository, the emitter and the clock all arrive by
+    construction, which is what lets a test drive it against a temp database with no network.
     """
 
     run_id: str
     writer: StateWriter
     repository: StateRepository
     clock: Callable[[], datetime] = utcnow
+    emitter: EventEmitter | None = None
+    """§12.18's `llm_call` events go through THIS, not through `repository.append_event`
+    directly, the way `_write_failover` does — `llm_call` is what CLAUDE.md's redaction
+    discipline is about here (this sink's payloads are LLM-adjacent, and `obs/events.py` is the
+    one boundary that redacts before either sink), and going through `emit()` is also what puts
+    it on `logs/events-<run_id>.jsonl` and, for `level='error'`, on the §12.18 errors sink.
+
+    `None` is a valid no-op, the same shape as `RunContext.root` and as `EventEmitter`'s own
+    `sink`/`jsonl_path`: a caller that only cares about drift/failover (every existing test in
+    this file, before this field existed) does not have to construct one. `RunContext` always
+    builds a real one; `_write_llm_call` drops the record on the floor when this is `None`,
+    exactly as `EventEmitter.emit()` drops a line when `jsonl_path` is `None` — a caller's
+    deliberate scope, not a swallowed failure."""
     _drifts: list[CapabilityDrift] = field(default_factory=list, init=False, repr=False)
     _failovers: list[tuple[BackendFailover, str]] = field(
         default_factory=list, init=False, repr=False
@@ -165,6 +187,11 @@ class LlmFindingSink:
     re-buffered record re-written under a FRESH uid would slip past
     `ON CONFLICT (run_id, event_uid) DO NOTHING` and double-count. A stable uid makes the retry
     idempotent, which is the same property `_INSERT_FINDING`'s fingerprint gives the drift side."""
+
+    _llm_calls: list[tuple[LlmCall, str]] = field(default_factory=list, init=False, repr=False)
+    """`(event, event_uid)`, same idempotency reasoning as `_failovers` — `emitter.emit()` also
+    conflicts on `(run_id, event_uid)`, so a re-buffered record after a cancelled flush must reuse
+    its uid or double-count on retry."""
 
     _triggers: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
     """`{tier: {"<backend>:<model_id>": trigger}}`. **Keyed by TIER first, and that is the whole
@@ -200,10 +227,17 @@ class LlmFindingSink:
             f"{event.from_backend}:{event.from_model_id}"
         ] = event.trigger
 
+    def on_llm_call(self, call: LlmCall) -> None:
+        """`LadderModelClient(on_llm_call=...)`. Same synchronous-buffer contract as `on_drift`/
+        `on_failover` — this runs inside `_call_target`, once per actual provider call, on the
+        hot path, and the client itself owns no database handle to write through.
+        """
+        self._llm_calls.append((call, str(uuid.uuid4())))
+
     @property
     def pending(self) -> int:
         """How much is buffered. Diagnostics and tests; never a control-flow input."""
-        return len(self._drifts) + len(self._failovers)
+        return len(self._drifts) + len(self._failovers) + len(self._llm_calls)
 
     def observed_triggers(self, tier: ModelTier | None = None) -> dict[str, dict[str, str]]:
         """`{tier: {"<backend>:<model_id>": "<FailoverTrigger>"}}`, optionally narrowed to one tier.
@@ -245,20 +279,28 @@ class LlmFindingSink:
         """
         drifts, self._drifts = self._drifts, []
         failovers, self._failovers = self._failovers, []
+        llm_calls, self._llm_calls = self._llm_calls, []
         written = 0
-        unsent = 0
+        unsent_failovers = 0
+        unsent_calls = 0
         try:
             if drifts:
                 written += await self._write_drifts(drifts)
                 drifts = []
-            while unsent < len(failovers):
-                event, event_uid = failovers[unsent]
+            while unsent_failovers < len(failovers):
+                event, event_uid = failovers[unsent_failovers]
                 await self._write_failover(event, event_uid)
-                unsent += 1
+                unsent_failovers += 1
+                written += 1
+            while unsent_calls < len(llm_calls):
+                call, event_uid = llm_calls[unsent_calls]
+                await self._write_llm_call(call, event_uid)
+                unsent_calls += 1
                 written += 1
         except BaseException:
             self._drifts[:0] = drifts
-            self._failovers[:0] = failovers[unsent:]
+            self._failovers[:0] = failovers[unsent_failovers:]
+            self._llm_calls[:0] = llm_calls[unsent_calls:]
             raise
         return written
 
@@ -332,6 +374,48 @@ class LlmFindingSink:
                     }
                 ),
             )
+        )
+
+    async def _write_llm_call(self, call: LlmCall, event_uid: str) -> None:
+        """One §12.18 `llm_call` event, through `self.emitter` rather than
+        `repository.append_event` directly — unlike `_write_failover`, this is the ONE call site
+        in this module CLAUDE.md's redaction discipline actually requires it for: `obs/events.py`
+        is where §11.4's redaction happens (`_build_row` redacts, THEN serialises), and going
+        through `emit()` is what puts the event on `logs/events-<run_id>.jsonl` — and, for a
+        `level='error'` call, on the §12.18 errors sink — as well as in `events`.
+
+        `event_uid` is passed IN, same reasoning as `_write_failover`: a retry after a cancelled
+        flush must reuse the uid the record was buffered with, or `emit()`'s own `ON CONFLICT
+        (run_id, event_uid) DO NOTHING` cannot recognise a row that already landed.
+
+        `emit()` never raises (§11.4's carve-out: the caller is a worker mid-call and the failing
+        operation is telemetry), so this method cannot raise either — a dropped `llm_call` is
+        counted and retained by the emitter itself, exactly like a dropped `backend_failover` row
+        currently is not (that gap is pre-existing and out of this method's scope).
+
+        A `None` emitter (see the field docstring) is a no-op: the record is dropped without a
+        write, which is a caller's deliberate scope and not itself a failure to count.
+        """
+        if self.emitter is None:
+            return
+        await self.emitter.emit(
+            LLM_CALL_EVENT,
+            level=call.level,
+            repo_id=None,  # fleet-level: same reasoning as CapabilityDrift/BackendFailover
+            phase=None,
+            payload={
+                "role": call.role,
+                "tier": str(call.tier),
+                "backend": call.backend,
+                "model_id": call.model_id,
+                "structured_output_mode": str(call.structured_output_mode),
+                "input_tokens": call.input_tokens,
+                "output_tokens": call.output_tokens,
+                "cost_usd": call.cost_usd,
+                "latency_ms": call.latency_ms,
+            },
+            event_uid=event_uid,
+            now=self.clock(),
         )
 
     async def record_backend_unavailable(

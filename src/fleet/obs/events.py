@@ -2,7 +2,10 @@
 
 The event stream is append-only and is the third place a terminal state is recorded (ADR-0014),
 alongside the `phases` row and `migration_state.json`. Each event goes to two sinks: a line on
-`logs/events-<run_id>.jsonl` (what `jq` reads, §10) and a row in `events` (what SQL reads, §6).
+`logs/events-<run_id>.jsonl` (what `jq` reads, §10) and a row in `events` (what SQL reads, §6). An
+`error`/`critical`-level event additionally goes to a third, OPTIONAL sink —
+`logs/errors-<run_id>.jsonl` (§12.18) — a filtered copy of the same line, written lazily so the
+file's mere existence is the "a recoverable error occurred" signal ADR-0012 describes.
 
 **`seq`, not `ts`, is the ordering key (§6, §11.5).** This module never computes a sequence
 number. Allocation happens *inside* the insert —
@@ -55,8 +58,15 @@ __all__ = [
     "EmitResult",
     "EventEmitter",
     "EventSink",
+    "errors_jsonl_path",
     "events_jsonl_path",
 ]
+
+#: Levels routed to the §12.18 errors sink, on top of the main stream. `warning` is deliberately
+#: excluded: `backend_failover` events are `warn` (§11.8) and are not the "recoverable error"
+#: signal ADR-0012 describes — a failover is a hop the fleet took and recovered FROM, not the
+#: thing an operator greps `logs/errors-<run_id>.jsonl` for.
+_ERROR_LEVELS: Final[frozenset[str]] = frozenset({"error", "critical"})
 
 #: Failures are diagnostics, not state: keep the recent tail, never an unbounded list.
 MAX_RETAINED_FAILURES: Final = 64
@@ -74,6 +84,19 @@ def events_jsonl_path(root: Path, run_id: str) -> Path:
     `jq` recipe reads one of them and reports half a run.
     """
     return (root / "logs" / f"events-{run_id}.jsonl").resolve()
+
+
+def errors_jsonl_path(root: Path, run_id: str) -> Path:
+    """`<root>/logs/errors-<run_id>.jsonl` — §12.18's "recoverable errors only" sibling stream.
+
+    Same derivation shape as `events_jsonl_path` and for the same reason: `EventEmitter` is
+    constructed once per run and needs to hand this to `_write_jsonl` alongside the main path, so
+    the literal must not be spelled twice. Unlike `events_jsonl_path`, this file is written to
+    lazily and ONLY on an error-level event — ADR-0012 designates its mere existence as the
+    signal that the run was not clean, so nothing may pre-create it the way `obs/log.py`'s
+    `configure()` eagerly opens the main stream.
+    """
+    return (root / "logs" / f"errors-{run_id}.jsonl").resolve()
 
 
 @runtime_checkable
@@ -126,6 +149,13 @@ class EventEmitter:
     run_id: str
     sink: EventSink | None = None
     jsonl_path: Path | None = None
+    errors_jsonl_path: Path | None = None
+    """§12.18's second stream. `None` is a valid no-op, exactly like `jsonl_path` and `sink`: a
+    caller that has not derived one (or does not want the split) simply does not get it. Written
+    to ONLY when a redacted line's `level` is `error`/`critical` (§11.8's `_ERROR_LEVELS`), as a
+    FILTER over the main stream, not a route away from it — `events-<run_id>.jsonl` still carries
+    "every line" per ADR-0012's own description of that file, and the errors file is a curated
+    subset an operator can grep without the rest of a 250-repo run's noise."""
     failed_emits: int = 0
     failures: deque[EmitFailure] = field(
         default_factory=lambda: deque(maxlen=MAX_RETAINED_FAILURES)
@@ -201,8 +231,6 @@ class EventEmitter:
         )
 
     async def _write_jsonl(self, row: EventRow, failures: list[EmitFailure]) -> bool:
-        if self.jsonl_path is None:
-            return False
         line = json.dumps(
             {
                 "ts": row.ts,
@@ -216,14 +244,25 @@ class EventEmitter:
             },
             sort_keys=False,
         )
-        try:
-            # One append per line, serialised: two concurrent emitters must not interleave a line.
-            async with self._lock:
-                await asyncio.to_thread(_append_line, self.jsonl_path, line)
-        except Exception as exc:
-            self._record(failures, row.event, row.event_uid, "jsonl", exc)
-            return False
-        return True
+        streamed = False
+        if self.jsonl_path is not None:
+            try:
+                # One append per line, serialised: two concurrent emitters must not interleave.
+                async with self._lock:
+                    await asyncio.to_thread(_append_line, self.jsonl_path, line)
+                streamed = True
+            except Exception as exc:
+                self._record(failures, row.event, row.event_uid, "jsonl", exc)
+        # A FILTER over the main stream (see the field docstring), so it never gates `streamed`:
+        # a caller asking "did this reach the run's stream?" means the main one, and a failure
+        # here is its own diagnostic, retained exactly like the main sink's.
+        if self.errors_jsonl_path is not None and row.level in _ERROR_LEVELS:
+            try:
+                async with self._lock:
+                    await asyncio.to_thread(_append_line, self.errors_jsonl_path, line)
+            except Exception as exc:
+                self._record(failures, row.event, row.event_uid, "jsonl_errors", exc)
+        return streamed
 
     async def _write_sql(self, row: EventRow, failures: list[EmitFailure]) -> int | None:
         if self.sink is None:
