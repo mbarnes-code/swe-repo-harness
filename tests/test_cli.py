@@ -1081,6 +1081,248 @@ def test_status_digest_is_the_run_equivalence_proof(workspace: Path) -> None:
     assert len(payload["digest"]) == 64
 
 
+def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_llm_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.21's determinism claim, proved over a REAL run — the test above only pins the
+    digest's *shape*.
+
+    Two SEPARATE, from-scratch workspaces (their own `config/`, their own fresh `state/fleet.db`)
+    are pointed at the SAME real git repositories and both driven through `fleet scan` (classify
+    **not** skipped — the one model-bearing step in Phase 1, ADR-0008) and `fleet sequence`. The
+    second run's registered backend EXPLODES on any `invoke`, so it can only reach `SUCCESS`
+    under `--llm-cache read-only` if every `repo_classify` call was answered out of the §11.6
+    cache rather than a live model — the cache is seeded by copying `llm_cache`'s rows out of the
+    first (real, default read-write) run straight into the second workspace's freshly-created
+    database, which is the whole of what "warm cache" means here: `llm_cache.cache_key` is
+    explicitly run-UNSCOPED (`state/schema.sql`), so a row minted under one run_id is a
+    legitimate hit for another, and no new harness plumbing is needed to prime it.
+
+    `--llm-cache read-only` hard-failing on an actual cache MISS is proved elsewhere (see the
+    round-O task-2 brief) — that is deliberately not re-tested here. What this test adds is the
+    byte-identical claim itself, over a run that structurally required a working cache replay to
+    finish at all — not over two computations of the same static fixture DB, and not over a
+    classify answer the digest could be accidentally insensitive to: ADR-0008 makes
+    classification advisory metadata nothing in `waves`/`edges`/`cycles`/`contracts`/
+    `collisions`/`attempts` may branch on, so the two fake backends below are free to answer
+    identically and the equality below is about the DETERMINISTIC sections, not about the model.
+    """
+    from fleet.llm import client as client_module
+    from fleet.llm.client import BackendReply, StructuredOutputMode
+    from fleet.models.tasks import ModelCapabilities, TokenUsage
+
+    class _ScriptedClassify:
+        """A `repo_classify` answer that is fixed and schema-valid. What it says does not
+        matter — ADR-0008 — only that both runs get the SAME real model-bearing step answered
+        without a network, so the two runs are comparable at all."""
+
+        name = "anthropic"
+        version = 1
+
+        def declared_capabilities(self, target: Any) -> ModelCapabilities:
+            return ModelCapabilities(
+                supports_json_schema=True,
+                max_output_tokens=4096,
+                structured_output_modes=(StructuredOutputMode.JSON_SCHEMA,),
+            )
+
+        async def invoke(self, target: Any, *args: Any, **kwargs: Any) -> BackendReply:
+            return BackendReply(
+                text=json.dumps(
+                    {
+                        "ecosystem": "npm",
+                        "is_library": False,
+                        "confidence": 0.9,
+                        "rationale": "fixture backend for the §12.21 warm-cache determinism test",
+                    }
+                ),
+                usage=TokenUsage(input_tokens=10, output_tokens=5, model_id=target.model_id),
+                finish_reason="stop",
+            )
+
+    class _ExplodingClassify:
+        """Registered for the SECOND run only. Reaching `invoke` at all means `--llm-cache
+        read-only` fell through to a live call instead of the warm cache — the one way this
+        test's digest equality could be an accident rather than a real second execution."""
+
+        name = "anthropic"
+        version = 1
+
+        def declared_capabilities(self, target: Any) -> ModelCapabilities:
+            return _ScriptedClassify().declared_capabilities(target)
+
+        async def invoke(self, *args: Any, **kwargs: Any) -> BackendReply:
+            raise AssertionError(
+                "the second run must replay repo_classify from the warm §11.6 cache; reaching "
+                "the backend means --llm-cache read-only made a live call"
+            )
+
+    def make_repo(root: Path, name: str, files: dict[str, str]) -> Path:
+        """One real git repository — the same shape `tests/test_scan_e2e.py::_make_repo` builds,
+        kept local here rather than imported: that module imports `MODELS_YAML` FROM this one, so
+        the reverse import would be circular."""
+        path = root / name
+        path.mkdir(parents=True)
+        env = {
+            "GIT_AUTHOR_NAME": "Fleet Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fleet Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(path),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        }
+        subprocess.run(
+            ["git", "init", "--initial-branch=main"],  # noqa: S607
+            cwd=path, check=True, capture_output=True, env=env,
+        )
+        for rel, text in sorted(files.items()):
+            target = path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=path, check=True, capture_output=True, env=env  # noqa: S607
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],  # noqa: S607
+            cwd=path, check=True, capture_output=True, env=env,
+        )
+        return path
+
+    def llm_cache_snapshot(root: Path) -> tuple[tuple[str, ...], list[tuple[Any, ...]]]:
+        conn = sqlite3.connect(root / "state" / "fleet.db")
+        try:
+            cols = tuple(row[1] for row in conn.execute("PRAGMA table_info(llm_cache)"))
+            rows = [
+                tuple(row)
+                for row in conn.execute(
+                    f"SELECT {', '.join(cols)} FROM llm_cache"  # noqa: S608 — cols is PRAGMA
+                ).fetchall()
+            ]
+            return cols, rows
+        finally:
+            conn.close()
+
+    def seed_llm_cache(
+        root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]
+    ) -> None:
+        cols, rows = snapshot
+        conn = sqlite3.connect(root / "state" / "fleet.db")
+        try:
+            placeholders = ", ".join("?" for _ in cols)
+            conn.executemany(
+                f"INSERT INTO llm_cache ({', '.join(cols)}) VALUES ({placeholders})",  # noqa: S608
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    # A minimal, real dependency edge — one npm library, one npm app that imports it — mirroring
+    # `tests/test_scan_e2e.py`'s fixture shape closely enough that scan/sequence's real ecosystem
+    # adapters and edge inference run for real, over real manifests.
+    repo_files = {
+        "acme-lib": {
+            "package.json": json.dumps({"name": "@acme/lib", "version": "1.0.0"}, indent=2),
+            "src/index.ts": "export const value = 1;\n",
+        },
+        "acme-app": {
+            "package.json": json.dumps(
+                {
+                    "name": "@acme/app",
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/lib": "^1.0.0"},
+                },
+                indent=2,
+            ),
+            "src/main.ts": (
+                "import { value } from '@acme/lib';\nexport const doubled = value * 2;\n"
+            ),
+        },
+    }
+    sources = {
+        name: make_repo(tmp_path / "sources", name, files)
+        for name, files in repo_files.items()
+    }
+
+    fleet_yaml = (
+        "run:\n  monorepo_path: ../acme-monorepo\n  cache_dir: cache/\n  work_dir: work/\n"
+        "concurrency:\n  cpu_pool_workers: 1\n"
+        "preflight:\n  min_free_bytes: 1048576\n"
+    )
+    repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
+        f"  - name: {name}\n    url: {path}\n" for name, path in sources.items()
+    )
+
+    def build_workspace(label: str) -> Path:
+        ws = tmp_path / label
+        write_config(ws, fleet=fleet_yaml, repos=repos_yaml)
+        fresh_db(ws / "state" / "fleet.db")
+        return ws
+
+    ws1 = build_workspace("run1")
+    ws2 = build_workspace("run2")
+
+    # `--repos` (from `--config`'s directory) must match the CWD-relative path §9 hashes into
+    # `runs.config_digests` — see `tests/test_scan_e2e.py`'s `fleet` fixture for the same chdir.
+    monkeypatch.chdir(ws1)
+
+    # Run 1: clean DB, classify live, default cache mode (read-write) — warms the cache.
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ScriptedClassify()})
+    scan1 = runner.invoke(app, [*base_args(ws1), "scan"], catch_exceptions=False)
+    assert scan1.exit_code == ExitCode.SUCCESS, scan1.output
+    seq1 = runner.invoke(app, [*base_args(ws1), "sequence"], catch_exceptions=False)
+    assert seq1.exit_code == ExitCode.SUCCESS, seq1.output
+
+    digest1_result = runner.invoke(
+        app, [*base_args(ws1), "--json", "status", "--digest"], catch_exceptions=False
+    )
+    assert digest1_result.exit_code == ExitCode.SUCCESS, digest1_result.output
+    digest1 = json.loads(digest1_result.stdout)["digest"]
+
+    snapshot = llm_cache_snapshot(ws1)
+    assert snapshot[1], "run 1 made no repo_classify call — the fake backend was never reached"
+
+    # Seed run 2's fresh DB with the warm cache BEFORE scanning: `llm_cache` is run-unscoped by
+    # design, so copying its rows into a different run's database is a legitimate way to prime a
+    # replay, not a special case.
+    seed_llm_cache(ws2, snapshot)
+
+    # Run 2: a SEPARATE clean workspace and DB, classify live, forced read-only, and a backend
+    # that raises on any call — success is only possible via a cache hit.
+    monkeypatch.chdir(ws2)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ExplodingClassify()})
+    scan2 = runner.invoke(
+        app, [*base_args(ws2), "--llm-cache", "read-only", "scan"], catch_exceptions=False
+    )
+    assert scan2.exit_code == ExitCode.SUCCESS, scan2.output
+    seq2 = runner.invoke(app, [*base_args(ws2), "sequence"], catch_exceptions=False)
+    assert seq2.exit_code == ExitCode.SUCCESS, seq2.output
+
+    digest2_result = runner.invoke(
+        app, [*base_args(ws2), "--json", "status", "--digest"], catch_exceptions=False
+    )
+    assert digest2_result.exit_code == ExitCode.SUCCESS, digest2_result.output
+    digest2 = json.loads(digest2_result.stdout)["digest"]
+
+    assert digest2 == digest1, (
+        "two clean-DB runs of the same fleet produced different run_digests — §12.21's "
+        "run-equivalence proof does not hold"
+    )
+    # The equality is not vacuous: it is taken over sections that actually hold something.
+    conn = sqlite3.connect(ws1 / "state" / "fleet.db")
+    try:
+        (wave_count,) = conn.execute("SELECT COUNT(*) FROM wave_members").fetchone()
+        (edge_count,) = conn.execute("SELECT COUNT(*) FROM edges").fetchone()
+    finally:
+        conn.close()
+    assert wave_count > 0 and edge_count > 0, (
+        "the fixture produced no waves/edges — the digest equality above would be over empty "
+        "sections and would prove nothing"
+    )
+
+
 def test_models_list_renders_an_undeclared_effort_as_a_dash(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
