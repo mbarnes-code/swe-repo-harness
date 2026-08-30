@@ -227,17 +227,21 @@ modulo `updated_at`" and add a field-scoped equality test (SPEC edit only, no co
 the chosen invariant across two regenerations of an untouched database.
 
 ## 18. Observability — `llm_call` event, `latency_ms`, `logs/errors-<run_id>.jsonl`
-**OPEN — reclassified WIRING (2026-08-30, see file addendum).** `01b64d3` wired
-`EventEmitter`/`events_jsonl_path` end-to-end (all six CLI entry points pass `json_path=`),
-explicitly scoping out `llm_call`/`latency_ms` and the `errors-<run_id>.jsonl` split as later
-tasks. The emission infrastructure this criterion needs now exists — closing it is calling it,
-not building it. `backend_failover` events remain covered, unaffected.
-**Done bar:** emit an `llm_call` event carrying `latency_ms` from the real call site
-(`src/fleet/llm/client.py`'s `LadderModelClient.complete`/`invoke`, confirmed 2026-08-30 as the
-place every LLM call actually passes through) using the existing `EventEmitter`, and split or
-filter errors into `logs/errors-<run_id>.jsonl` using the same sink.
-**Out of scope:** does not require a new observability backend or touching `obs/events.py`'s core
-derivation — additive emission calls only.
+**DONE (landed round M task 3, `5f31fd3`/`agent/roundm-task3`, reviewed Approved, fix round 1
+addressed both findings).** Verified against SPEC.md item 18's exact text (all three clauses):
+(1) every `llm_call` event carries `role`, `tier`, `backend`, `model_id`, `structured_output_mode`,
+token counts, `cost_usd`, `latency_ms` — field set confirmed to match verbatim, emitted once per
+raw `backend.invoke()` call (`llm/client.py`'s `_call_target`, the corrected call site — the
+brief's original `.invoke`/`complete()` citation was wrong and was corrected mid-task). (2)
+`backend_failover` events name both targets and trigger — already covered pre-existing, unaffected
+by this task. (3) `logs/errors-<run_id>.jsonl` exists iff a recoverable error occurred — implemented
+as a filter (not route-away) so the main stream's "every line" property (`obs/events.py`'s own
+docstring) stays true, written lazily so the file's mere existence is the signal. Redaction
+verified: both sinks share the same already-redacted line, no second unredacted egress path. A
+regression-guard sweep test (AST-based, not a hand-maintained list) now asserts all 5 production
+`RunContext(` call sites in `cli.py` pass `root=`, closing the one gap the task review found.
+**This is the third criterion (after §12.12 and §12.16) to reach the file's genuinely strict DONE
+bar — full literal text, not a partial reading.**
 
 ## 19. Cycles broken at the stated scale
 **OPEN — SCALE-FIXTURE.** Existing tests use 2-3 node cycles; the criterion states 3/12/41-node
@@ -404,17 +408,24 @@ self-declares the gap in its own refusal message (audit row 36).
 **Done bar:** identical to D50's closure. Do not open a separate effort here.
 
 ## 37. Stub lifecycle — only way out of DEGRADED
-**OPEN — mechanism exists, nothing calls it — WIRING (second-highest-value item after §12.27).**
-`orchestrator/stubs.py`'s full state machine is correct and covered by a pure-function test suite,
-but has no importer anywhere in `src/`. `--stub-blocked` is unimplemented and refused with exit 2
-— and that refusal itself is what the current test suite treats as passing. Already recorded as a
-D69 amendment (audit row 37).
-**Done bar:** wire `orchestrator/stubs.py` into the real `fleet build`/`fleet resume` path so
-`--stub-blocked` actually reaches the state machine instead of being refused, then re-point the
-existing pure-function tests at the wired path via one e2e fixture that writes a real row/task/
-finding.
-**Out of scope:** the state machine's own logic does not need to change — this is D69's wiring gap,
-not a design gap.
+**OPEN — PARTLY ADDRESSED (2026-08-30). D80 landed (resume-time reconciliation), but the
+criterion's own literal text requires more than D80 covers.** SPEC.md item 37's full scenario
+starts with `--stub-blocked` actually creating a `stubs` row (`state='ACTIVE'`,
+`stub_fidelity='PUBLISHED_ARTIFACT'`, a `VerificationReport` with `equivalence='STUB_LIMITED'`) —
+that half still doesn't exist: `--stub-blocked` needs a stub-*creation* worker in
+`workers/buildgen.py` that was never built (confirmed 2026-08-30 by a research agent investigating
+round M task 2 — see `docs/INTEGRATION_HONESTY.md` D80's entry and ADR-0098). What round M's task
+2 landed is the *other* half the criterion also requires: once a stub row exists, re-running its
+blocker to `SUCCEEDED` now correctly reconciles it via `fleet resume` (`orchestrator/stubs.py`'s
+`reconcile()`, wired at last), moving `ACTIVE`→`SUPERSEDED`→`RESOLVED`, and the idempotency
+half (`revalidation_key`, no duplicate rows across repeat triggers) is real per D80's landed
+tests. This closes real ground but not the whole criterion — do not mark §12.37 DONE.
+**Done bar (remaining):** build the `--stub-blocked` stub-creation worker (NEW-MECHANISM, not
+wiring — this is genuinely new logic, not a caller-wiring task; do not attempt as a one-shot). Once
+it exists, wire it to actually create the row instead of refusing exit 2, then the full end-to-end
+scenario in SPEC.md item 37 becomes testable for the first time.
+**Out of scope for the remaining work:** D80's landed reconciliation logic does not need to
+change — it's correct and tested; the remaining gap is purely on the creation side.
 
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — mostly D80 + TEST-ONLY.** The headline refusal (exit 2 + PrState
