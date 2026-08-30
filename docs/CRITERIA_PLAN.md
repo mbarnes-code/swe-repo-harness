@@ -299,11 +299,24 @@ Python only) and assert it builds; fix or split the `kind` conflation into two s
 assertions.
 
 ## 26. Preflight gates rather than crashes
-**OPEN — SCALE-FIXTURE.** Empty-repo and shallow cases are covered (shallow at unit level only).
-Submodule-bearing and LFS-bearing repos have zero positive fixtures anywhere in `tests/` (audit
-row 26). D41 covers a different defect (never-ran vs. settled-negative), not this gap.
-**Done bar:** one fixture repo with a real submodule and one with real LFS pointers, each driven
-through preflight and asserted to gate rather than crash.
+**OPEN — submodule/LFS closed (round O, `1c8e0ef`), one sub-case this file's original done-bar
+missed remains.** SPEC.md item 26's full text (`:7441`) names **five** fixture categories: empty,
+shallow, submodule-bearing, LFS-bearing, and **default-branched to `trunk`**. This file's earlier
+done-bar named only submodule/LFS — an incomplete reading, caught only now. Empty-repo and shallow
+were already covered pre-round; submodule/LFS are now covered with real fixtures
+(`tests/test_scan_e2e.py`, reviewed Approved — genuine `git submodule add`, genuine LFS pointer
+format, driven through real preflight, `SUCCEEDED` + documented columns + `SubmodulePresent`
+finding, matching the criterion's own "either proceed or produce a `PreflightFailed` finding"
+wording verbatim). **`trunk`-default-branch has zero fixture coverage anywhere** — confirmed by
+grep, not yet attempted. D41 covers a different defect (never-ran vs. settled-negative), not this
+gap. Do not count §12.26 toward the `<n> of 48` tally until the fifth case lands.
+**Done bar (remaining):** one fixture repo whose default branch is named `trunk` (not `main`),
+driven through preflight, asserted to proceed or gate per the same criterion text — read
+`workers/clone.py`'s actual handling of a non-`main` default branch before writing the assertion,
+don't assume.
+**Also flagged, separate future item (not this criterion's scope):** `require_lfs_binary: true` +
+no `git-lfs` on `PATH` → `PREFLIGHT` failure has zero test coverage anywhere (found by round O
+task 3, correctly left out of scope).
 
 ## 27. Collisions caught before transformation
 **PARTIALLY CLOSED (2026-08-30, see file addendum) — COORDINATE done, DEST_PATH/FILE_PATH
