@@ -375,6 +375,48 @@ def test_no_shell_anywhere_in_the_subprocess_boundary() -> None:
         assert "subprocess.run" not in source, f"{path} uses blocking subprocess.run"
 
 
+def test_no_forbidden_construct_appears_anywhere_in_src_fleet() -> None:
+    """SPEC §12 item 5, reproduced directly: `grep -rn "import pickle\\|ThreadPoolExecutor\\|
+    subprocess.run" src/fleet/` must return nothing, over the WHOLE tree — not just the three
+    files `test_no_shell_anywhere_in_the_subprocess_boundary` above scopes to, and a different
+    property besides: that test is about `shell=True` reaching the subprocess boundary; this one
+    is about three constructs the criterion forbids outright, each for its own reason.
+
+    - `import pickle`: pickle's REDUCE/BUILD opcodes are an arbitrary-callable VM (CWE-502,
+      `docs/DECISIONS.md` reference #2) — the reference harness's checkpoint module carries an
+      explicit note that there is *deliberately* no `import pickle`, and this harness inherits
+      that: every checkpoint is re-hydrated through Pydantic `model_validate` instead.
+    - `ThreadPoolExecutor`: ADR-0003's offload boundary is `ProcessPoolExecutor` for CPU-bound
+      work and `asyncio.create_subprocess_exec` for everything that blocks on a socket or pipe
+      (`docs/SPEC.md` §7); a `ThreadPoolExecutor` is a third lane neither `limits.cpu_pool` nor
+      `limits.subprocess` accounts for.
+    - `subprocess.run`: it blocks the event loop — exactly the failure mode this module
+      (`util/proc.py`) and every `ModelBackend.invoke` exist to avoid by going through
+      `asyncio.create_subprocess_exec` or an async client instead.
+
+    Plain substring containment, not `grep`'s basic-regex alternation, so an unescaped `.` in
+    `subprocess.run` cannot pass on a look-alike character — stricter than the literal criterion
+    command in the one spot where that matters, identical everywhere else. And every file under
+    the tree, not only `*.py`: `grep -rn` has no extension filter either, and `src/fleet/` holds
+    one non-Python file (`state/schema.sql`) the criterion's own command would still scan.
+    `__pycache__/` is excluded — it is gitignored, a build artifact rather than source, and
+    scanning it as text raises `UnicodeDecodeError` on the compiled `.pyc` bytes; a real `grep`
+    on a fresh checkout would never encounter it at all, since it never lands in git.
+    """
+    forbidden = ("import pickle", "ThreadPoolExecutor", "subprocess.run")
+    src_fleet = Path(proc.__file__).parents[1]
+    repo_root = src_fleet.parents[1]
+    offenders = [
+        f"{path.relative_to(repo_root)}:{n}: {line.strip()}"
+        for path in sorted(
+            p for p in src_fleet.rglob("*") if p.is_file() and "__pycache__" not in p.parts
+        )
+        for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), start=1)
+        if any(needle in line for needle in forbidden)
+    ]
+    assert offenders == []
+
+
 async def test_result_is_labelled_not_a_tuple() -> None:
     """`attempts` rows are built from this: an unlabelled tuple is how stdout ends up in the
     `stderr_tail` column."""
