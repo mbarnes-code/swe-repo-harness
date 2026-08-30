@@ -68,6 +68,33 @@ def test_discover_is_a_total_bijection_over_ecosystem(
     assert registry[Ecosystem.MAVEN] is registry[Ecosystem.GRADLE]
 
 
+def test_discover_raises_naming_a_decoy_ecosystem_member_with_no_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """**Why:** the §7.5 bijection assertion (`base.py`'s `discover()`, the `missing` branch) is
+    what makes `for_ecosystem()` and `layout()` fallback-free — but no *shipped* `Ecosystem`
+    member is ever missing an adapter (the previous test covers that side), so the raise branch
+    itself has never fired under test. A decoy proves it: a fresh `StrEnum` carrying every real
+    member's name and value plus one extra reproduces the gap without hand-editing the real,
+    deliberately hand-maintained `Ecosystem` (§1) or touching the real registry, so the only way
+    `discover()` can fail here is the one member the real adapters never claimed."""
+    from enum import StrEnum
+
+    from fleet.ecosystems import base
+
+    decoy = StrEnum(
+        "Ecosystem",
+        [(member.name, member.value) for member in Ecosystem] + [("DECOY", "decoy")],
+    )
+    monkeypatch.setattr(base, "Ecosystem", decoy)
+    reset_adapters()
+    with pytest.raises(RuntimeError) as excinfo:
+        ecosystems.discover(force=True)
+    message = str(excinfo.value)
+    assert "no EcosystemAdapter is registered for ['decoy']" in message
+    assert "total bijection over Ecosystem" in message
+
+
 def test_duplicate_ecosystem_registration_raises_naming_both_claimants() -> None:
     """**Why:** a silent overwrite makes the surviving adapter a function of `pkgutil` import
     order, so the same fleet lands in one directory on one host and another elsewhere, with
