@@ -792,6 +792,18 @@ with `extractable = 1` has a non-null `hoist_target_path`, and every `HOISTED` r
 `severity='error'` has a non-null `resolution`; `(f)` every repo has a non-null
 `default_branch` and a preflight verdict recorded.
 
+> **Correction 2026-08-30 (round M controller, SPEC.md §12.9's wiring — see `docs/CRITERIA_PLAN.md`
+> §12.9): criterion `(a)` above is unsatisfiable as written for the same five exemption categories
+> `(c)` already names.** A `config`-skipped, baseline-red, operator-quarantined, or
+> `PreflightFailed`/`EmptyRepo` repo never reaches manifest discovery — `workers/clone.py` cuts no
+> worktree for `EmptyRepo`, and `_seed_fleet` excludes `skip: true` repos before any clone — so
+> such a repo can have neither a `manifests` row nor a `no-manifest` finding, structurally, not as
+> a bug. `(a)` is corrected to read: *every repo **not matching one of the five exemptions listed
+> under `(c)`** has ≥1 `manifests` row or a `no-manifest` row in `findings`.* The wired runtime
+> check (`src/fleet/cli.py`'s `_phase1_exit_report`) implements exactly this scoping. `MANUAL`-SCC
+> members are excluded from `(a)` for the same reason `(b)` already excludes them from the
+> ordering subgraph.
+
 ### 3.2 Phase 2 — Hybrid Transformation Engine
 
 **Purpose.** Rewrite one repo's tree so it is correct *at its monorepo path*, before any build

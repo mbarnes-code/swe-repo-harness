@@ -132,16 +132,29 @@ correction) and now covers ADR-0013's wave-ordering claim.
 fixture run, not only the hand-built `InferenceInput`.
 
 ## 9. Phase 1 exit condition is a runtime gate
-**OPEN — mechanism exists, nothing calls it — WIRING.** `check_criteria()` and its four
-sub-checks are correct and unit-tested but have exactly one call site in the whole tree, inside a
-test (audit row 9). It is a library property, not the runtime gate §3's phase-exit language
-describes. Also: each of the five exemption cases is proven with its own single-exemption
-`WavePlan`, never all five planted simultaneously.
-**Done bar:** call `check_criteria()` (or the sub-checks it composes) from the real Phase-1-exit
-code path in the CLI, and add one e2e fixture that plants all five exemption cases at once and
-asserts closure holds there.
-**Out of scope:** does not require rewriting `check_criteria()`'s internals — it is already
-correct; this is purely a wiring + one-fixture task.
+**PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
+`check_criteria()` is now wired into `_sequence_impl` (`fleet sequence`) via a new
+`_phase1_exit_report()` helper, refusing with `SequenceCriterionError` (exit 6, naming the failed
+sub-criterion) when the gate fails. One e2e fixture plants all six §3.1(c) exemption shapes
+simultaneously (five SPEC bullets, six test shapes — see the file addendum) and asserts closure.
+Criterion `(a)`'s scoping bug (unsatisfiable over an unscoped repo set for config-skipped/
+baseline-red/quarantined/preflight-failed/empty-repo categories) was found and fixed at the call
+site during this task — `docs/SPEC.md`'s criterion `(a)` text corrected in place (dated marker,
+2026-08-30) to match, rather than left silently inconsistent.
+**Still open — criterion `(d)`** ("no edge exists whose `evidence_path` does not resolve to a real
+file at `head_sha`") is a **disclosed no-op**: nothing in `src/` persists the `ls-tree` listing
+`evidence_path` resolution needs, so the sub-check defaults to vacuously `True`. This is the same
+underlying gap §12.27's FILE_PATH leg is blocked on (a missing path/blob-SHA capture mechanism) —
+do not build a second, divergent mechanism for this criterion; wire both from the same capture
+point once it exists.
+**Also open:** the `MANUAL`-SCC exemption shape is only exercised at the `check_criteria()` unit
+level — an earlier guard in `_sequence_impl` refuses `MANUAL` SCCs before the new gate runs, so
+live CLI traffic never reaches that one shape through the wired path (disclosed, not a regression).
+**Done bar (remaining):** wire criterion `(d)` once a real path/blob-SHA capture mechanism exists
+(shared with §12.27's FILE_PATH leg — track as one piece of work, not two). Until then this
+criterion stays PARTLY ADDRESSED, not DONE — do not round up the `<n> of 48` count for it.
+**Out of scope:** `check_criteria()`'s other sub-checks' internal logic was not and should not be
+touched further — already correct.
 
 ## 10. Phase 2 exit condition — `_transform_criterion`
 **OPEN — TEST-ONLY.** All three violation branches (probe-returns-False, empty-diff,

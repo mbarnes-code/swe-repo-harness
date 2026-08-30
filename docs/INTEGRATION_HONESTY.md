@@ -5587,7 +5587,7 @@ hit. See **D62**, which stays `OPEN` and now carries the semantics ruling that l
 every figure above re-derived by this lane at `8b40498` before being written. No code changed and no
 suite was run for this marker.)*
 
-## D80 — OPEN, ruled and owned 2026-08-30 (round M controller, ADR-0098; see the in-place marker below — record unedited above it). `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
+## D80 — FIXED, LANDED (`5377969`, merged `9c20eeb`). `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
 
 **Found by lane R4 (round E) while costing subtask 10; recorded by lane W35, which re-measured
 every figure below before repeating it and labels the two it did not.** Interpreter for every
@@ -5741,6 +5741,9 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
 > 6 and 8), so deletion may need to become a message rewrite instead. Left for whoever owns
 > subtask 10; round M's task 2 is scoped to the wiring only, not to ADR-0076's bullet.
 > **Owner, now:** round M task 2 (implementer agent `ada3bb9a965bcc4f5`).
+> **Landed `5377969`, merged `9c20eeb`, reviewed Approved (no Critical/Important findings; every
+> checkable claim independently reproduced, including the exact assertion-failure text under the
+> rejected-design mutation). Heading updated above.**
 
 ### What this entry does not establish
 
