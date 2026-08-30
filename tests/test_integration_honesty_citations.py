@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 45 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 46 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -448,6 +448,20 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     # longer covered against a silent repoint. One direction, not both. (`4393-4461` is the
     # `def` span; `_logical_span` widens it to `4391-4461` over the blank lines above the
     # `def`, and 4445 is interior to both.) The record is the dated marker beside `D84` step 3.
+    (
+        "_run_transform_wave",
+        "cli.py:4445",
+    ),  # RE-PINNED 2026-08-30 (round M/N controller). Measured fresh, not inherited: cli.py is
+    # now 13830 lines (three round-M merges added ~417 lines total); `_run_transform_wave`'s
+    # definition is now at cli.py:4555-4626 (survey span), so the cited `:4445` -- previously
+    # interior to the definition per the round-K retirement above -- now falls 110 lines BEFORE
+    # it starts, outside any span, and the citation is unresolved again exactly as the
+    # retirement comment predicted ("still covered ... if it goes unresolved again"). Per
+    # D84's own standing ruling, this citation names a USAGE site (the call inside
+    # `_transform_impl`, now at cli.py:4839, 394 lines from the cited line) and sits in a
+    # passage that ruling says is reported, not repointed -- so it is re-pinned here rather
+    # than repaired, continuing the same non-repointing this citation has had since round K.
+    # `docs/INTEGRATION_HONESTY.md`'s `D84` step 3 carries a matching dated marker.
     (
         "_prepare_repo",
         "cli.py:3858",

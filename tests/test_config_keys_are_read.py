@@ -198,9 +198,14 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # `validate_memory_budget` (settings.py:1272) is the only reader and is never called —
         # `memory_commitment_mb`'s own docstring says the caller "decides"; none does.
         "fleet.yaml:budgets.max_host_rss_mb",               # settings.py:265
-        # Only a comment (`workers/prwriter.py:274`) and a docstring (`cli.py:9027`) cite it as
-        # the rationale for HELD; no deadline is ever checked against it.
-        "fleet.yaml:pr.merge_wait_timeout_s",               # settings.py:694
+        # `fleet.yaml:pr.merge_wait_timeout_s` REMOVED 2026-08-30 (round M, D80 wiring,
+        # `9c20eeb`): `cli.py`'s `_resume_impl` now passes `open_pr_max_age_s=
+        # float(settings.config.pr.merge_wait_timeout_s)` into `orchestrator/stubs.py::reconcile`,
+        # a real deadline check against a real held-PR row — closing the exact deferred item
+        # `docs/PROGRESS.md:5751` named ("the wiring lane must delete the KNOWN_INERT line...
+        # when it first passes the real setting"). Per this file's own ratchet: a key leaving this
+        # list only ever means "now proven read", never "found unnecessary" — removal is a stricter
+        # claim than presence, so it stays deleted rather than commented out.
         # `obs/redact.py:72-73` hard-codes `ENTROPY_MIN_BITS = 4.0` / `ENTROPY_MIN_LEN = 20` —
         # the same defaults as the config, but as module constants, not reads. The `#:` comment
         # above them just cross-references the config keys it does not consult.

@@ -6384,6 +6384,19 @@ In `_transform_impl`'s wave loop (`src/fleet/cli.py`), for each wave index the o
 > changed at all, so a silent **repoint** of this known-wrong citation would now go undetected. This
 > marker is what records that it is wrong.
 
+> **[Marker 2026-08-30, round M/N controller — measured fresh, not inherited.]** The prediction in
+> the marker above held: `cli.py` grew a further ~417 lines across round M's three merges (now
+> 13830 lines), `_run_transform_wave`'s definition moved to `cli.py:4555-4626`, and the cited
+> `:4445` — previously interior to the definition — now falls 110 lines **before** it starts,
+> outside any span. The citation is unresolved again, exactly as the retirement comment said it
+> would be if drift moved the definition back off `:4445`. Per this entry's own standing ruling,
+> the citation names a USAGE site — the call inside `_transform_impl`, now at `cli.py:4839`, 394
+> lines from the cited line — and sits in a passage this entry rules is reported, not repointed.
+> **Nothing is repointed here either.** `tests/test_integration_honesty_citations.py`'s
+> `_PINNED_UNRESOLVED` re-pins it (it had been retired from that list at the prior marker) with a
+> matching dated comment, and that test module's own "anchored citations are nonetheless
+> unresolved" census sentence is corrected from 45 to 46 to reflect the flip back.
+
 `_prepare_repo` (`cli.py:3858`) is not a read. Its own docstring enumerates what it does before the
 first mutation, and two of its four steps are writes: step 2 **discards a crashed predecessor's
 dirty worktree** ("§3.2 step 6.4's 'No' branch"), and step 4 creates the phase anchor
