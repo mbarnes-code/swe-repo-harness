@@ -257,10 +257,21 @@ redaction test; the PR-body `«redacted:…»` placeholder is unverified (audit 
 columns plus the PR-body placeholder.
 
 ## 21. Determinism — clean re-run, byte-identical digest
-**OPEN — TEST-ONLY.** `--llm-cache read-only` hard-fail-on-miss is covered. No test does a clean-DB
-re-run under `--llm-cache read-only` and asserts a byte-identical `status` digest — the existing
-digest test only checks the shape (64 hex chars), not stability across runs (audit row 21).
-**Done bar:** one test: run twice from a clean DB with a warm cache, assert identical digest.
+**OPEN — 2 of 3 clauses closed (round O, `daf2a24`), one remains.** SPEC.md item 21 has three
+clauses: (1) clean re-run under `--llm-cache read-only` produces a byte-identical digest — **now
+covered** (`tests/test_cli.py`, reviewed Approved through one fix round; two real from-scratch
+runs, cache warmed then seeded cross-run per `schema.sql`'s own documented "NOT scoped to
+run_id" design, second run forced through an exploding backend so success requires a genuine
+cache hit; the digest's `waves`/`edges` sections are non-trivially exercised, the other 5 are
+honestly disclosed as structurally empty-but-equal in this fixture, not silently overclaimed).
+(2) `--llm-cache read-only` with a cleared cache fails loudly — **already covered pre-existing**
+(`test_llm_cache.py:454`, `test_run_context_llm_cache.py:279`). (3) **mutating one fixture source
+file changes the digest — still untested**, confirmed by grep, not attempted this round. Do not
+count §12.21 toward the `<n> of 48` tally until clause 3 lands.
+**Done bar (remaining):** one test that mutates a single fixture source file (any real content
+change) between two otherwise-identical runs and asserts the digest *differs* — the inverse of
+this round's test, proving the digest is actually sensitive to source content, not just stable
+when nothing changes.
 
 ## 22. Memory + disk ceilings
 **OPEN — mostly missing — NEW-MECHANISM.** `resource_guard` defaults to a no-op
