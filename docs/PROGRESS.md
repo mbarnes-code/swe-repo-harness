@@ -6489,3 +6489,85 @@ controller before landing — reversible.
 Next: process round M's five reports as they return (workers, research, preflight review), run
 per-task reviews, integrate sequentially, log completion, then select round M+1's targets from
 `docs/CRITERIA_PLAN.md`'s dispatch-order list without waiting for further direction.
+
+### Checkpoint — 2026-08-30 (round M controller, close-out)
+
+**§12 criteria met: 4 of 48** (§12.7, §12.12, §12.16, §12.18 — all four verified against their
+full literal SPEC text, not a partial reading). Up from 2 at round M's open, this checkpoint.
+
+Round M's three dispatched tasks all landed and were reviewed Approved (Task 3 needed one fix
+round for two Important findings — both independently re-verified fixed):
+- **§12.9** (`0d7f841`) — `check_criteria()` wired into `fleet sequence` as a real exit-6 gate.
+  A real bug found and fixed during wiring (criterion (a) was structurally unsatisfiable over an
+  unscoped repo set). **PARTLY ADDRESSED, not DONE** — criterion (d) is a disclosed no-op pending
+  a path/blob-SHA capture mechanism shared with §12.27's FILE_PATH leg.
+- **§12.37 / D80** (`9c20eeb`) — `orchestrator/stubs.py::reconcile()` wired into `fleet resume`,
+  unconditionally, per two SPEC-authority rulings this round made explicit (ADR-0098). A mutation
+  exercise caught a real bug (wrong DB column name) before landing. **PARTLY ADDRESSED, not
+  DONE** — the criterion's own scenario also requires `--stub-blocked` to create a stub row,
+  which needs a stub-creation worker that still doesn't exist (confirmed absent by this round's
+  research agent; that's new-mechanism-tier work, out of this round's scope).
+- **§12.18** (`7d866f0`) — `llm_call` event + `logs/errors-<run_id>.jsonl` split, on top of a
+  prior round's event-emission infrastructure. **DONE** — verified against all three of the
+  criterion's clauses.
+- **§12.7** (`edc343c`, ADR-0099) — closed directly by the controller (no subagent needed): a
+  round-K adjudication left open ("whether committed fixture repos are wanted... do not create
+  them merely to make this sentence true") was resolved by rewording the SPEC sentence to the
+  fixture mechanism that already works, rather than building a redundant one.
+
+**Round M's process, briefly:** dispatched 5 concurrent subagents (3 workers, isolated worktrees;
+1 research; 1 preflight review) per explicit human-partner direction, contradicting the SDD
+skill's default single-implementer rule — resolved via per-worker worktree isolation and
+controller-only sequential merges, ledgered as a ruling. The research and preflight-review agents
+caught real errors in the controller's own dispatch plan before any worker wasted effort on them:
+a dead-code integration-point guess (Task 1), a wrong premise requiring two new SPEC-authority
+rulings mid-round (Task 2/D80, ADR-0098), and a nonexistent method citation (Task 3). All three
+task reviews independently re-verified implementer claims against primary sources rather than
+trusting reports, and caught one false test-count number (a rotted measurement, not fabrication)
+in fix round 1. Ledger: `.superpowers/sdd/round-M-criteria-closure/progress.md`. Full post-merge
+suite run dispatched in the background to confirm all three merges integrate cleanly together
+(each was tested individually, not yet combined) — result to follow in a subsequent checkpoint if
+it surfaces anything; round N is not gated on waiting for it given the individual-task evidence.
+
+**Round N, opening next** (per the human partner's standing "do not wait for decisions, move to
+the next highest-impact criteria" instruction): targets selected from `docs/CRITERIA_PLAN.md`'s
+dispatch-order list, next tier after this round's WIRING items — TEST-ONLY criteria with no file
+overlap with each other or with round M's landed changes.
+
+### Checkpoint — 2026-08-30 (round N controller, close-out)
+
+**§12 criteria met: 6 of 48** (added this round: §12.5, §12.32 — both verified against full
+literal SPEC text). Up from 4 at round N's open.
+
+Round N: three TEST-ONLY tasks, all landed, reviewed Approved with zero findings across all
+three (the cleanest round yet — zero file overlap meant zero mid-round redirects needed, unlike
+round M). Reviewers gave real independent scrutiny rather than rubber-stamping: Task 2's reviewer
+verified the registry-cleanup `finally` block is leak-free by tracing the exact write order;
+Task 3's reviewer mechanistically verified pytest's fixture-teardown ordering prevents the
+monkeypatch from leaking, then empirically confirmed it by deliberately running the new test
+adjacent to a registry-sensitive sibling in both orders.
+
+**One controller error caught mid-round and corrected:** the round's plan stated "BASE for the
+round: edc343c" (current main tip at dispatch time), but all three workers' isolated worktrees
+had actually forked from the older `fa95469` (visible in the worktree-mirrored `.superpowers/`
+directory not existing yet, and confirmed by each worker's own reported commit range). Generating
+review packages with the stated-but-wrong BASE produced a misleading 241KB diff appearing to
+delete round M's entire body of work. Caught before any review was dispatched on the bad diff;
+verified via `git merge-base` (= `fa95469` for all three) and `git merge-tree` (zero conflicts,
+nothing lost) before regenerating correctly. Lesson for future rounds: verify a worktree's actual
+fork point before generating its review package rather than assuming it matches the plan's stated
+BASE.
+
+`docs/CRITERIA_PLAN.md` §12.32's closure surfaced a favorable reading worth naming: its SPEC text
+self-declares one of its four parts "UNSATISFIABLE AS WRITTEN and NOT a passing gate"
+(pre-adjudicated, ADR-0065) — so closing the one remaining real gap (the decoy-member test) closed
+the whole criterion, since the self-declared carve-out doesn't count against it. Worth checking
+other multi-clause criteria for the same pattern before assuming they need every sub-clause closed.
+
+Post-round-M full-suite run (all three round-M merges combined, not yet individually confirmed
+together) was dispatched in the background before round N started; still running as of this
+checkpoint — result to follow.
+
+**Round O, opening next.** Targets to be selected from `docs/CRITERIA_PLAN.md`'s remaining
+TEST-ONLY/SCALE-FIXTURE tier, re-verified fresh against current `HEAD` before dispatch, per this
+round's own lesson about not trusting a written done-bar without re-checking it.
