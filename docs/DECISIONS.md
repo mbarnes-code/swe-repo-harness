@@ -11729,3 +11729,59 @@ recommendations* — rejected per the existing Directive Authority & Lineage gua
 document proposes is the orchestrator's own judgment call, not something cited from `docs/SPEC.md`
 or an ADR, and must be labeled accordingly so a future reader doesn't mistake an Agent
 Recommendation for a spec requirement.
+
+---
+
+## ADR-0098 — D80 resolved: `stub_reconcile` is a real ninth obligation of `fleet resume`, and `reconcile()` runs unconditionally
+
+**Decision.** Two open questions in `docs/INTEGRATION_HONESTY.md` D80, both blocking round M task
+2 (wiring `orchestrator/stubs.py::reconcile()` into `_resume_impl`), are resolved:
+
+**(a)** `docs/SPEC.md` §11.5's numbered resume-steps list is incomplete, not authoritative over
+§10's `fleet resume` row, §13 row 35, and §3.5.1 — all three require `stub_reconcile` as part of
+`fleet resume`'s reconciliation; only §11.5's list omits it. `stub_reconcile` is a real ninth
+obligation. The list is corrected via an in-place dated marker immediately after it (not a
+renumbering — see rationale below).
+
+**(b)** `reconcile()` runs unconditionally at the marked `_resume_impl` insertion point,
+regardless of the local `repoll` variable's value (`"polled"` / `"not-requested"` /
+`"skipped-dry-run"` / `"failed"`). It is not gated on `repoll == "polled"`, and does not imply
+`--repoll-prs`.
+
+**Rationale.** For (a): three independent SPEC sections asserting the same obligation against one
+enumerated list's silent omission is far more consistent with "the list went stale when
+`stub_reconcile` was specified elsewhere and nobody updated every enumeration" than with "three
+sections all overstate the verb's contract and the list alone is correct" — the latter would
+require three independent errors converging on the same false claim, the former requires one
+missed sweep, which this project's own history (`CLAUDE.md` §7's "sweep for the class, not the
+reported site") shows is the far more common failure mode. Not renumbering: steps 5-8 are cited
+by number extensively elsewhere (code comments, `docs/PROGRESS.md`, `CLAUDE.md`'s own guardrail
+text quoting "§11.5 step 6"), and a renumbering risks exactly the citation-rot Guardrail 7 warns
+about, for a benefit (one step number) not worth that risk — an unlabeled prose insertion between
+step 6 and step 7 gets the same effect without touching a single existing citation.
+
+For (b): §10 and §3.5.1 describe `stub_reconcile` as an unconditional part of resume's
+reconciliation, with no gating language in either. Gating on `repoll == "polled"` would make it
+silently never run on a plain, unflagged `fleet resume` — the common case, since `--repoll-prs` is
+opt-in — which reintroduces the exact failure §13 row 35 exists to prevent: a stub ships unresolved
+and the fleet never notices. The alternative, implying `--repoll-prs`, would add an undisclosed
+network dependency to every resume invocation, contradicting the flag's own opt-in design and
+risking resume itself becoming unavailable offline. The accepted cost of running unconditionally
+is an occasional false exit-7 (a stub reported as needing a human when its PR already merged, just
+not yet re-polled) — recoverable by re-running with `--repoll-prs` or waiting for the next
+automatic poll, and safer than the silent-miss direction of gating.
+
+**Consequence flagged, not resolved by this ADR:** ruling (a) means `docs/DECISIONS.md`'s
+pre-existing ADR-0076 bullet ("`ResumeIncompleteError` deleted once steps 6 and 8 both exist")
+needs revisiting once round M's task 2 lands — if `stub_reconcile` is a real obligation, the verb
+doesn't do everything §10 names until it too is wired, so ADR-0076's deletion may need to become a
+message rewrite instead. This ADR does not decide that; it is left for whoever owns "subtask 10"
+per D80's own entry.
+
+**Alternatives rejected.** *Leave D80 open and skip the criterion this round* — rejected: the
+wiring itself is cheap and correct once the two questions are answered, and both had enough
+evidence in D80's own entry to decide now rather than defer again. *Have the round-M implementer
+decide (a)/(b) itself* — rejected: D80 explicitly frames these as needing an owner's ruling before
+dispatch, and the implementer correctly stopped and escalated rather than guess; deciding here
+is what "in that order" in D80's entry calls for. *Renumber §11.5's list to give `stub_reconcile`
+a real step number* — rejected per the citation-stability rationale above.

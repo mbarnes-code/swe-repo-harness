@@ -7154,6 +7154,21 @@ so a since-fixed dependency unblocks its subtree; (7) regenerate `migration_stat
 SQLite; (8) continue. Steps 1–7 make no network call and invoke no model, so a resume is free
 and can be run as a dry-run health check (`fleet resume --dry-run`).
 
+> **Ruling 2026-08-30 (round M controller, ADR-0098), resolving D80's open question (a):**
+> **this list is incomplete, not authoritative over §10 and §3.5.1 — `stub_reconcile` is a real
+> obligation of `fleet resume`, not prose.** Three sites (§10's `fleet resume` row, §13 row 35,
+> §3.5.1) require it; this numbered list is the only site that omits it, and the far more likely
+> explanation is that this list went stale when `stub_reconcile` was specified elsewhere, not that
+> those three sites all overstate the verb's contract. **Deliberately not renumbered as a step
+> 6.5/9** — steps 5-8 are cited by number extensively elsewhere in this codebase and its history
+> (code comments, `docs/PROGRESS.md`, `CLAUDE.md`'s own guardrails), and renumbering risks the
+> exact "sweep for the class, not the reported site" citation-rot hazard `CLAUDE.md` §7 warns
+> against, for a gain (one step number) not worth that risk. Read as: `stub_reconcile` runs after
+> step 6 and before step 7, unconditionally (ADR-0098 resolves D80's `repoll` gating question the
+> same way: it does not gate on `repoll == "polled"` and does not imply `--repoll-prs`), and it
+> too makes no network call, so the "Steps 1-7 make no network call" claim above is unaffected by
+> its insertion. `docs/INTEGRATION_HONESTY.md` D80 carries the same marker.
+
 ### 11.6 Determinism and LLM drift
 
 The same fleet, scanned twice, must produce the same waves; the same file, repaired twice, must

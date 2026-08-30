@@ -5587,7 +5587,7 @@ hit. See **D62**, which stays `OPEN` and now carries the semantics ruling that l
 every figure above re-derived by this lane at `8b40498` before being written. No code changed and no
 suite was run for this marker.)*
 
-## D80 — OPEN, recorded only, and **UNOWNED**. `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
+## D80 — OPEN, ruled and owned 2026-08-30 (round M controller, ADR-0098; see the in-place marker below — record unedited above it). `docs/SPEC.md` §10 orders a `stub_reconcile` step inside `fleet resume` that no code performs, so `fleet resume` has TWO absent steps and not one — "step 8 is the sole remaining absence" is true of §11.5's numbered list and false of §10's row
 
 **Found by lane R4 (round E) while costing subtask 10; recorded by lane W35, which re-measured
 every figure below before repeating it and labels the two it did not.** Interpreter for every
@@ -5725,6 +5725,22 @@ verb still will not do everything §10 names, and ADR-0076's bullet would be dis
   plus the two-flag un-refusal, and widening it to a step §11.5 never numbered would be exactly the
   "assign by symmetry" move CLAUDE.md records as a dispatcher failure. **It needs an owner and a
   ruling on (a)/(b) before it can be dispatched, in that order.**
+
+> **Ruling 2026-08-30 (round M controller, ADR-0098) — both (a) and (b) decided; this entry's
+> analysis stands unedited above.** **(a)** §11.5's numbered list is incomplete, not authoritative
+> over §10/§13 row 35/§3.5.1: `stub_reconcile` is a real ninth obligation of `fleet resume`, three
+> sites require it against one silent list omission. See `docs/SPEC.md` §11.5's own marker,
+> immediately after its numbered list, for the full reasoning — deliberately not renumbered as a
+> step, for the citation-stability reason given there. **(b)** `reconcile()` runs unconditionally
+> at the marked `_resume_impl` insertion point regardless of `repoll`'s value — not gated on
+> `repoll == "polled"`, and does not imply `--repoll-prs`. Rationale for both in ADR-0098.
+> **Consequence flagged, not resolved here:** since (a) makes `stub_reconcile` a real obligation,
+> `docs/DECISIONS.md` ADR-0076's "`ResumeIncompleteError` deleted once steps 6 and 8 both exist"
+> bullet needs revisiting once this round's wiring lands — per this entry's own analysis, the
+> verb still won't do everything §10 names until `stub_reconcile` is *also* wired (not merely steps
+> 6 and 8), so deletion may need to become a message rewrite instead. Left for whoever owns
+> subtask 10; round M's task 2 is scoped to the wiring only, not to ADR-0076's bullet.
+> **Owner, now:** round M task 2 (implementer agent `ada3bb9a965bcc4f5`).
 
 ### What this entry does not establish
 
