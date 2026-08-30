@@ -465,10 +465,12 @@ Then: run at least a Phase-1-through-Phase-3 slice of the fixture fleet under `-
 (or whatever the local-only profile is named) and assert every named sub-clause.
 
 ## 42. New backend costs one file + one registry line
-**OPEN — TEST-ONLY.** Four of nine startup refusals are covered. `register_backend`'s
-duplicate-name `RuntimeError` (`llm/client.py:379-380`) has zero assertions — every existing hit is
-a docstring mention or source-string parse, none actually constructs a duplicate (audit row 42).
-**Done bar:** one test registering a duplicate backend name and asserting the `RuntimeError`.
+**OPEN — this done bar's own scope closed (round N, `cc12a2a`), criterion overall still 5 of 9.**
+`register_backend`'s duplicate-name `RuntimeError` now has a real, reviewed-Approved test
+(`tests/test_llm_client.py::test_register_backend_refuses_a_duplicate_name`) — the specific gap
+this file's done bar named. Four of the other eight startup refusals were already covered before
+this round; four remain open (not this round's scope). Do not count §12.42 toward the `<n> of 48`
+tally — the criterion as a whole is still open.
 
 ## 43. Failover layered, bounded, fail-closed
 **OPEN — mixed, 8 of 16 sub-clauses — TEST-ONLY + known D55/D58/D62/D78.** Case (ii) is entirely
