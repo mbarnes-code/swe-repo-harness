@@ -53,6 +53,7 @@ from fleet.models.enums import ContextPolicy, ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, LlmCallRecord, Price, TokenUsage
 from fleet.state.db import StateWriter, connect_ro, initialize_database
 from fleet.state.db import _release_write_slot as release_write_slot
+from fleet.util.hashing import cache_key as raw_cache_key
 
 ROLE = str(Role.REPO_CLASSIFY)
 T0 = datetime(2026, 8, 9, 12, 0, 0, tzinfo=UTC)
@@ -638,6 +639,126 @@ def test_the_sqlite_store_round_trips_through_the_single_writer(tmp_path: Path) 
                 assert row.record.usage.input_tokens == 1_000
                 assert await store.evict_older_than(T0 + timedelta(days=1)) == 1
                 assert await store.get(_parts().compute()) is None
+            finally:
+                await read.close()
+
+    try:
+        asyncio.run(drive())
+    finally:
+        release_write_slot()
+
+
+@pytest.mark.integration
+def test_recomputing_the_key_from_the_rows_own_columns_detects_a_tampered_column(
+    tmp_path: Path,
+) -> None:
+    """§12.44's tamper-detection sub-clause. Every other test above compares two freshly
+    *computed* `CacheKeyParts` against each other; none of them ever reads a row back from the
+    table and checks it against itself. A `cache_key` that only ever agrees with the object that
+    produced it is not a check on the STORED row — a row corrupted in place (disk bitrot, a
+    hand-run `UPDATE`, a bad migration) would sail through untouched.
+
+    This recomputes the key using `hashing.cache_key()` directly — not `CacheKeyParts.compute()`
+    — because that is the primitive `llm_cache.cache_key`'s own column comment (`schema.sql:492`)
+    names, and because a value read back from a `SELECT` is raw TEXT/INTEGER, not the typed
+    `ModelTier`/`ContextPolicy` objects `CacheKeyParts` takes. `adapter_versions` is part of §6's
+    formula but is not a stored column at all (`schema.sql`'s `llm_cache` definition has none) —
+    it exists only transiently in `CacheKeyParts` at write time — so a row written with none (the
+    default `_parts()` used everywhere else in this file) recomputes correctly under the same
+    empty-tuple spelling `compute()` itself joins: `",".join(sorted(()))` == `""`.
+    """
+    columns = (
+        "cache_key, role, tier, backend, model_id, effort, context_policy, "
+        "rejected_approach_digest, prompt_sha256, prompt_template_version, "
+        "response_schema_sha256"
+    )
+    select_sql = f"SELECT {columns} FROM llm_cache WHERE cache_key = ?"  # noqa: S608
+
+    def recompute(row: Sequence[object]) -> str:
+        (
+            _cache_key,
+            role,
+            tier,
+            backend,
+            model_id,
+            effort,
+            context_policy,
+            rejected_approach_digest,
+            prompt_sha,
+            prompt_template_version,
+            response_schema,
+        ) = row
+        return raw_cache_key(
+            str(role),
+            str(tier),
+            str(backend),
+            str(model_id),
+            str(effort),
+            "" if context_policy is None else str(context_policy),
+            str(rejected_approach_digest),
+            str(prompt_sha),
+            str(prompt_template_version),
+            str(response_schema),
+            "",  # adapter_versions: not a stored column; §6 keys it "" when none were sent
+        )
+
+    async def drive() -> None:
+        db = tmp_path / "state" / "fleet.db"
+        await initialize_database(db)
+        async with StateWriter(db, owner="llm-cache-tamper-test") as writer:
+            read = await connect_ro(db)
+            try:
+                store = SqliteLlmCacheStore(writer=writer, read_conn=read)
+                key = _parts().compute()
+                await store.put(
+                    CacheRow(
+                        record=LlmCallRecord(
+                            cache_key=key,
+                            role=ROLE,
+                            tier=ModelTier.CHEAP,
+                            backend=PRIMARY.backend,
+                            model_id=PRIMARY.model_id,
+                            structured_output_mode=StructuredOutputMode.JSON_SCHEMA,
+                            effort="low",
+                            prompt_sha256=prompt_sha256(MESSAGES),
+                            response_schema_sha256=response_schema_sha256(RepoClassification),
+                            response_json=ANSWER.model_dump_json(),
+                            created_at=T0,
+                        ),
+                        last_hit_at=T0,
+                    )
+                )
+
+                async with read.execute(select_sql, (key,)) as cursor:
+                    genuine = await cursor.fetchone()
+                assert genuine is not None, "the row just written"
+                assert genuine[0] == key
+                assert recompute(genuine) == key, (
+                    "recomputing from the row's OWN stored columns must reproduce the cache_key "
+                    "still stored on that same row — this is the untampered baseline"
+                )
+
+                async def tamper(conn: aiosqlite.Connection) -> None:
+                    # `model_id` is a named cache-key component (ADR-0023, schema.sql:502-521):
+                    # a failover answer keyed under the wrong model would silently satisfy a call
+                    # routed elsewhere. Written directly, bypassing `store.put()`, exactly as a
+                    # disk-level corruption or a hand-run UPDATE would.
+                    await conn.execute(
+                        "UPDATE llm_cache SET model_id = ? WHERE cache_key = ?",
+                        ("tampered-model", key),
+                    )
+
+                await writer.submit(tamper)
+
+                async with read.execute(select_sql, (key,)) as cursor:
+                    tampered = await cursor.fetchone()
+                assert tampered is not None
+                assert tampered[0] == key, "the stored cache_key column is untouched by the tamper"
+                assert tampered[4] == "tampered-model"
+                assert recompute(tampered) != key, (
+                    "a tampered model_id must NOT recompute to the key still recorded on the row "
+                    "— that mismatch IS tamper detection"
+                )
             finally:
                 await read.close()
 
