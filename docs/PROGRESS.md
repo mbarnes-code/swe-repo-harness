@@ -6571,3 +6571,48 @@ checkpoint — result to follow.
 **Round O, opening next.** Targets to be selected from `docs/CRITERIA_PLAN.md`'s remaining
 TEST-ONLY/SCALE-FIXTURE tier, re-verified fresh against current `HEAD` before dispatch, per this
 round's own lesson about not trusting a written done-bar without re-checking it.
+
+### Checkpoint — 2026-08-30 (post-round-M/N full suite, confirmed green)
+
+**1972 passed, 0 failed, 0 errors, clean `bazel disk` line.** Confirms rounds M and N's six merged
+branches integrate cleanly together — the first full-suite run since `12be741`'s 1958/1958 (up
+138 tests: 3 new from round M's tasks' own suites plus fix rounds, 3 from round N, plus whatever
+round K/L added that was never checkpointed). Three real regressions found and fixed first (see
+prior checkpoint) — none would have been caught by any individual task's own scoped test run,
+only by running everything together. Confirms the value of this checkpoint step; keep it after
+every multi-task round, not only when something feels risky.
+
+§12 criteria met: still 6 of 48, unchanged by this checkpoint (no criteria closed or reopened by
+the regression fixes themselves).
+
+### Checkpoint — 2026-08-30 (round O controller, close-out)
+
+**§12 criteria met: 6 of 48, unchanged** — round O closed real ground but none of its three
+targets fully close their criterion (each closes one sub-clause of a multi-clause criterion,
+correctly not counted toward the tally):
+- **§12.44** (`70a4398`) — cache-key tamper detection now real (recompute from a persisted row's
+  own columns, non-tautological, reviewed Approved). Criterion has 5 more sub-clauses untouched.
+- **§12.26** (`1c8e0ef`) — submodule- and LFS-bearing repo fixtures now real (genuine `git
+  submodule add`, genuine LFS pointer format), reviewed Approved on the first pass. Correcting
+  this file's own prior incomplete done-bar: the criterion names a **fifth** fixture category
+  (`trunk`-default-branch) this round didn't attempt — found only while closing out, not before.
+- **§12.21** (`daf2a24`) — clean re-run byte-identical digest now proven over two real from-scratch
+  runs (cache warmed then seeded cross-run per `schema.sql`'s documented run-unscoped design,
+  second run forced through an exploding backend so success requires a genuine cache hit). One fix
+  round: the docstring undercounted which digest sections are structurally empty-but-equal in this
+  fixture (named 3, reviewer's trace found 4, implementer's own independent re-derivation — not
+  just accepting the reviewer's number — found the true count is 5, confirmed a third time by the
+  scoped re-review). Criterion's third clause (mutation-sensitivity) untouched.
+
+**Pattern worth naming:** three of round O's own findings (§12.21's digest-section count, §12.26's
+5th fixture category, and round N's already-noted base-mismatch) were each caught by continuing to
+check *after* a review said Approved — approval means the code is correct for what it claims, not
+that the claim itself was complete. Worth carrying into future rounds' close-out step as routine,
+not exceptional.
+
+Post-round-O full-suite run dispatched in the background; result to follow. Worktrees cleaned up
+(`git worktree remove` on all six merged round-M/N/O branches).
+
+**Round P not yet opened as of this checkpoint** — pending the full-suite confirmation, per the
+same discipline round N/O's own regressions taught: verify combined integration before adding
+more surface area.
