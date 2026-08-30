@@ -1012,6 +1012,198 @@ def test_fleet_pr_persists_the_llm_findings_its_own_run_computed(
     )
 
 
+class AnsweringBackend:
+    """A registered backend that actually ANSWERS, honestly, at the top rung.
+
+    `DriftingBackend` above cannot exercise §12.18's `llm_call` event: its `invoke` always raises
+    `TransportError`, so `LadderModelClient._call_target`'s `backend.invoke()` never RETURNS and
+    `_emit_llm_call` never fires — see `LlmCall`'s own docstring on why a raised `TransportError`
+    produces no event. This backend declares full JSON_SCHEMA support (so `invoke` receives the
+    real schema, unlike PROMPTED mode where it is folded into the prompt text) and answers every
+    required string field with a short valid value, which validates against whichever of
+    `PrTitle`/`PrBody` the schema names.
+    """
+
+    name = "anthropic"
+    version = 1
+
+    def declared_capabilities(self, target: Any) -> Any:
+        from fleet.models.tasks import ModelCapabilities
+
+        return ModelCapabilities(
+            supports_json_schema=True,
+            supports_tools=True,
+            supports_constrained_decoding=True,
+            max_output_tokens=4096,
+            structured_output_modes=(StructuredOutputMode.JSON_SCHEMA,),
+        )
+
+    async def invoke(
+        self, target: Any, messages: Any, schema: Any, mode: Any, **kwargs: Any
+    ) -> Any:
+        from fleet.llm.client import BackendReply
+        from fleet.models.tasks import TokenUsage
+
+        properties = dict((schema or {}).get("properties", {}))
+        answer = {name: "ok" for name, spec in properties.items() if spec.get("type") == "string"}
+        return BackendReply(
+            text=json.dumps(answer),
+            usage=TokenUsage(input_tokens=42, output_tokens=7, model_id=target.model_id),
+            finish_reason="stop",
+        )
+
+
+class RefusingBackend:
+    """A registered backend whose every reply carries `finish_reason='refusal'` — the §12.18
+    `llm_call` ERROR leg: the transport itself flags the reply as unusable. `ModelRefused`
+    propagates out of `complete()`, and `prwriter._compose`'s `except LlmError` catches it exactly
+    as it already catches `DriftingBackend`'s `TransportError`, so the PR still opens with a
+    degraded (prose-less) body rather than failing the run.
+    """
+
+    name = "anthropic"
+    version = 1
+
+    def declared_capabilities(self, target: Any) -> Any:
+        from fleet.models.tasks import ModelCapabilities
+
+        return ModelCapabilities(
+            supports_json_schema=True,
+            supports_tools=True,
+            supports_constrained_decoding=True,
+            max_output_tokens=4096,
+            structured_output_modes=(StructuredOutputMode.JSON_SCHEMA,),
+        )
+
+    async def invoke(
+        self, target: Any, messages: Any, schema: Any, mode: Any, **kwargs: Any
+    ) -> Any:
+        from fleet.llm.client import BackendReply
+        from fleet.models.tasks import TokenUsage
+
+        return BackendReply(
+            text=None,
+            usage=TokenUsage(input_tokens=5, output_tokens=0, model_id=target.model_id),
+            finish_reason="refusal",
+        )
+
+
+def _jsonl_lines(path: Path) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+
+
+def test_fleet_pr_llm_calls_reach_the_event_stream_with_every_spec_1218_field(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    forge: FakeForge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12.18: "every `llm_call` event carries `role`, `tier`, `backend`, the resolved `model_id`,
+    `structured_output_mode`, token counts, `cost_usd`, and `latency_ms`" — asserted against the
+    real `logs/events-<run_id>.jsonl` a real `fleet pr` run produces, not against a mock's call
+    log (Task 3's brief: "drive the real CLI, then inspect the filesystem").
+
+    Two libraries open in wave 0, each driving `write_pr_body` (WORKHORSE) then `write_pr_title`
+    (CHEAP) once, so a clean run with no retries makes exactly 4 raw `backend.invoke()` calls —
+    the count is itself the discriminator against an implementation that fires once per
+    `complete()` (which would read 2, one per repo's *first* successful role) or once per repo
+    (also 2) instead of once per actual provider call (`LlmCall`'s own docstring on why).
+
+    The same event must also reach `events` under the same `event_uid` (ADR-0012's "one event
+    pipeline"), exactly like `pr_merged`'s existing dual-sink test — and a clean run must leave
+    `logs/errors-<run_id>.jsonl` ABSENT, which is the "iff" half of §12.18's errors-sink clause.
+    """
+    verified(fleet)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": AnsweringBackend()})
+
+    result = run_pr(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert sorted(payload(result)["opened"]) == list(LIBRARIES)
+
+    run_id = run_id_of(fleet)
+    events_path = fleet / "logs" / f"events-{run_id}.jsonl"
+    errors_path = fleet / "logs" / f"errors-{run_id}.jsonl"
+
+    llm_calls = [line for line in _jsonl_lines(events_path) if line["event"] == "llm_call"]
+    assert len(llm_calls) == 4, (
+        f"expected one llm_call per actual provider call (2 repos x [title, body]): {llm_calls}"
+    )
+    for line in llm_calls:
+        fields = line["payload"]
+        assert fields["role"] in ("pr_title", "pr_body")
+        assert fields["tier"] in ("CHEAP", "WORKHORSE")
+        assert fields["backend"] == "anthropic"
+        assert fields["model_id"]
+        assert fields["structured_output_mode"] == "JSON_SCHEMA"
+        assert fields["input_tokens"] == 42
+        assert fields["output_tokens"] == 7
+        assert fields["cost_usd"] >= 0.0
+        assert isinstance(fields["latency_ms"], int) and fields["latency_ms"] >= 0
+        assert line["level"] == "info"
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db")
+    try:
+        sql_uids = {
+            row[0] for row in conn.execute("SELECT event_uid FROM events WHERE event = 'llm_call'")
+        }
+    finally:
+        conn.close()
+    assert sql_uids == {line["event_uid"] for line in llm_calls}, (
+        "the JSONL stream and the `events` table must agree on which llm_call events landed"
+    )
+
+    assert not errors_path.exists(), (
+        "no error-level event occurred this run — §12.18's errors sink must not exist"
+    )
+
+
+def test_fleet_pr_llm_refusal_reaches_the_errors_sink_without_failing_the_run(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    forge: FakeForge,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other half of §12.18's "iff": a run that really does meet a recoverable error produces
+    `logs/errors-<run_id>.jsonl`, and the line on it is the SAME redacted line as on the main
+    stream (a filtered copy, not a route-away — see `EventEmitter.errors_jsonl_path`'s docstring),
+    under the SAME `event_uid`.
+
+    `ModelRefused` is exactly the shape CLAUDE.md's Guardrail 6 calls "accidentally reachable, not
+    adversarial-only": a local server or a content filter answering with a refusal is ordinary
+    operation, not a test harness reaching for a private subclass — so this run must still SUCCEED
+    (`prwriter._compose` catches `LlmError` and falls back to a prose-less body), exactly like the
+    existing `DriftingBackend` scenario above.
+    """
+    verified(fleet)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": RefusingBackend()})
+
+    result = run_pr(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert sorted(payload(result)["opened"]) == list(LIBRARIES), (
+        "a refused model is a degraded body, not a failed run — same contract as TransportError"
+    )
+
+    run_id = run_id_of(fleet)
+    events_path = fleet / "logs" / f"events-{run_id}.jsonl"
+    errors_path = fleet / "logs" / f"errors-{run_id}.jsonl"
+
+    error_calls = [line for line in _jsonl_lines(errors_path) if line["event"] == "llm_call"]
+    assert error_calls, "every call was refused, so the errors sink must exist and hold them"
+    assert all(line["level"] == "error" for line in error_calls)
+
+    main_calls = {
+        line["event_uid"]: line for line in _jsonl_lines(events_path) if line["event"] == "llm_call"
+    }
+    for line in error_calls:
+        assert main_calls.get(line["event_uid"]) == line, (
+            "the errors sink must carry the SAME line as the main stream, not a divergent one"
+        )
+
+
 def test_fleet_pr_persists_its_llm_findings_even_when_the_command_fails_partway(
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811

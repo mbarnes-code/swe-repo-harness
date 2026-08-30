@@ -249,7 +249,9 @@ async def test_a_drift_computed_by_the_client_becomes_a_findings_row(tmp_path: P
             "nothing may be written from the synchronous callback: it runs on `complete()`'s hot "
             "path and a write there would be a fire-and-forget task racing the writer's close"
         )
-        assert await h.ctx.llm_findings.flush() == 1
+        # 1 drift finding + 1 `llm_call` event (§12.18): the one `backend.invoke()` this call made
+        # returned, so it is buffered and drained by this same `flush()` alongside the drift.
+        assert await h.ctx.llm_findings.flush() == 2
 
         rows = await h.findings(CAPABILITY_DRIFT)
         assert len(rows) == 1
@@ -285,7 +287,9 @@ async def test_an_honest_backend_writes_no_drift_finding(tmp_path: Path) -> None
     backend = ScriptedBackend(HONEST_CAPS)
     async for h in _build(tmp_path, backend, make_router()):
         await h.ctx.model_client.complete(ROLE, [Message(role="user", content="x")], Verdict)
-        assert await h.ctx.llm_findings.flush() == 0
+        # 0 drift findings, but the call itself is still 1 `llm_call` event (§12.18) — that event
+        # is unconditional on every completed provider call, drift or no drift.
+        assert await h.ctx.llm_findings.flush() == 1
         assert await h.findings(CAPABILITY_DRIFT) == []
 
 
@@ -319,7 +323,10 @@ async def test_a_failover_becomes_a_backend_failover_event_row(tmp_path: Path) -
         assert response.value.summary == "second target answered"
 
         assert await h.events(BACKEND_FAILOVER_EVENT) == [], "the callback must only buffer"
-        assert await h.ctx.llm_findings.flush() == 1
+        # 1 `backend_failover` + 1 `llm_call` (§12.18): `fake-1` raised `TransportError` before
+        # any `BackendReply` existed, so it produces no `llm_call` (see `LlmCall`'s docstring —
+        # there is nothing to report metrics from); `fake-2` answered, so it produces exactly one.
+        assert await h.ctx.llm_findings.flush() == 2
 
         events = await h.events(BACKEND_FAILOVER_EVENT)
         assert len(events) == 1

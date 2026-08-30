@@ -582,3 +582,107 @@ async def test_emit_stores_a_redacted_payload_in_the_events_table(
     assert LEAK_GREP.search(rows[0].payload) is None
     assert rows[0].level == "error"
     assert json.loads(rows[0].payload)["url"].startswith("https://«redacted")
+
+
+# ======================================================================================
+# §12.18 — the `logs/errors-<run_id>.jsonl` sink
+# ======================================================================================
+
+
+async def test_an_error_level_emit_reaches_both_jsonl_sinks_under_one_event_uid(
+    tmp_path: Path,
+) -> None:
+    """The errors sink is a FILTER, not a route-away: an `error`-level line lands on BOTH
+    `events-<run_id>.jsonl` and `errors-<run_id>.jsonl`, same `event_uid` — ADR-0012 still
+    describes the main stream as carrying "every line", so ONLY duplicating (never diverting)
+    keeps that description true once this sink exists.
+    """
+    emitter = EventEmitter(
+        run_id=RUN,
+        jsonl_path=tmp_path / "logs" / "events-x.jsonl",
+        errors_jsonl_path=tmp_path / "logs" / "errors-x.jsonl",
+    )
+    result = await emitter.emit("llm_call", level="error", payload={"latency_ms": 12})
+
+    main_line = json.loads((tmp_path / "logs" / "events-x.jsonl").read_text().strip())
+    errors_line = json.loads((tmp_path / "logs" / "errors-x.jsonl").read_text().strip())
+    assert main_line["event_uid"] == errors_line["event_uid"] == result.event_uid
+    assert main_line == errors_line, "the errors sink must carry the SAME redacted line"
+
+
+async def test_an_info_level_emit_never_creates_the_errors_sink_file(tmp_path: Path) -> None:
+    """§12.18's "if and only if": the file's mere EXISTENCE is the "something went wrong" signal
+    (ADR-0012), so a clean `info` line must leave it absent, not empty. Discriminates against an
+    implementation that pre-creates the file (mirroring `obs/log.py`'s eager `_Sink`, which
+    `tests/test_event_stream_wiring.py::test_the_log_pipeline_points_at_the_runs_stream_file`
+    explicitly documents as the wrong shape for THIS file) or writes a blank line to it.
+    """
+    errors_path = tmp_path / "logs" / "errors-x.jsonl"
+    emitter = EventEmitter(
+        run_id=RUN,
+        jsonl_path=tmp_path / "logs" / "events-x.jsonl",
+        errors_jsonl_path=errors_path,
+    )
+    await emitter.emit("llm_call", level="info", payload={"latency_ms": 12})
+
+    assert not errors_path.exists(), "an info-level event must not create the errors sink"
+
+
+async def test_a_warning_level_emit_also_never_reaches_the_errors_sink(tmp_path: Path) -> None:
+    """`backend_failover` events are `warn` (§11.8) and are a hop the fleet RECOVERED from, not
+    the "recoverable error" ADR-0012's errors sink exists to flag — see `_ERROR_LEVELS`'s own
+    docstring. Only `error`/`critical` qualify; this is the boundary one level below that.
+    """
+    errors_path = tmp_path / "logs" / "errors-x.jsonl"
+    emitter = EventEmitter(
+        run_id=RUN,
+        jsonl_path=tmp_path / "logs" / "events-x.jsonl",
+        errors_jsonl_path=errors_path,
+    )
+    await emitter.emit("backend_failover", level="warning", payload={})
+
+    assert not errors_path.exists()
+
+
+async def test_the_errors_sink_copy_is_redacted_exactly_like_the_main_stream(
+    tmp_path: Path,
+) -> None:
+    """The filtered copy must not become a second, unredacted egress path (CLAUDE.md's redaction
+    discipline, and `01b64d3`'s own commit message: this class of leak has happened once
+    already). Both files are built from the SAME already-redacted `line` string in `_write_jsonl`,
+    so this also catches an implementation that re-serialises the errors copy from `row` instead
+    of reusing it.
+    """
+    errors_path = tmp_path / "logs" / "errors-x.jsonl"
+    emitter = EventEmitter(
+        run_id=RUN,
+        jsonl_path=tmp_path / "logs" / "events-x.jsonl",
+        errors_jsonl_path=errors_path,
+    )
+    await emitter.emit("llm_call", level="error", payload={"url": REMOTE_URL})
+
+    written = errors_path.read_text(encoding="utf-8")
+    assert LEAK_GREP.search(written) is None
+    assert json.loads(written)["payload"]["url"].startswith("https://«redacted")
+
+
+async def test_a_failing_errors_sink_does_not_cost_the_main_stream_or_the_caller(
+    tmp_path: Path,
+) -> None:
+    """The errors sink is a FILTER over the main stream (see its field docstring): a caller asking
+    whether the event "reached the run's stream" means the main one, so a write failure on the
+    side channel must not flip `EmitResult.streamed` to `False` and must not raise. It is still
+    counted and retained, under its own sink name, exactly like every other emit failure.
+    """
+    events_path = tmp_path / "logs" / "events-x.jsonl"
+    # A directory where the errors sink expects a plain file: every `open("a")` against it raises.
+    bad_errors_path = tmp_path / "logs" / "errors-x.jsonl"
+    bad_errors_path.mkdir(parents=True)
+    emitter = EventEmitter(run_id=RUN, jsonl_path=events_path, errors_jsonl_path=bad_errors_path)
+
+    result = await emitter.emit("llm_call", level="error", payload={})
+
+    assert result.streamed, "the main sink took the line; the side channel's failure is separate"
+    assert events_path.read_text().strip(), "the main stream must not be starved by the side one"
+    assert emitter.failed_emits == 1
+    assert emitter.failures[-1].sink == "jsonl_errors"

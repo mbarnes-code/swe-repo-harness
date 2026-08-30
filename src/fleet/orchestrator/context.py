@@ -44,6 +44,7 @@ from fleet.llm.cache import CachingModelClient, SqliteLlmCacheStore
 from fleet.llm.client import CallPolicy, LadderModelClient
 from fleet.models.base import utcnow
 from fleet.models.enums import Phase, TransformTier
+from fleet.obs.events import EventEmitter, errors_jsonl_path, events_jsonl_path
 from fleet.obs.log import get_logger
 from fleet.orchestrator.findings import LlmFindingSink
 from fleet.settings import FleetConfig, LlmSection
@@ -193,6 +194,15 @@ class RunContext:
     never once assigned, so every `llm.failover.*` value an operator wrote was echoed back
     by `fleet config` and read by nothing."""
     harness_version: str = ""
+    root: Path | None = None
+    """The workspace root §8 puts `logs/` under — `settings.root` at every real `RunContext(`
+    site in `cli.py`, exactly what `events_jsonl_path`/`errors_jsonl_path` need and what
+    `FleetConfig` itself does not carry (`RunSection` has no `log_dir` either — see
+    `events_jsonl_path`'s own docstring). `None` — which is what a test `RunContext(` site that
+    does not care about §12.18's `llm_call` event passes, by passing nothing — means *the
+    `EventEmitter` this context builds gets no JSONL sink*: `llm_call` still reaches `events` via
+    `sink=self.repository`, just not `logs/events-<run_id>.jsonl`. A production run always sets
+    this, so a JSONL-less `llm_call` is a test fixture's deliberate scope, never a shipped gap."""
 
     model_client: ModelClient = field(init=False, repr=False, compare=False)
     """The ONE call surface every worker gets. Assembled in `__post_init__` from the three fields
@@ -200,22 +210,32 @@ class RunContext:
     quietly build a differently-configured client of its own."""
 
     llm_findings: LlmFindingSink = field(init=False, repr=False, compare=False)
-    """Where the client's `CapabilityDrift` and `BackendFailover` records are PERSISTED.
+    """Where the client's `CapabilityDrift`, `BackendFailover` and `LlmCall` records are
+    PERSISTED.
 
     Derived rather than injected because it is the client's other half: the client accepts
-    `on_drift`/`on_failover` precisely so that it does not have to hold a database handle, and
-    for the whole life of that design **nobody supplied either callback** — every drift and
-    every failover the fleet computed was discarded at the `is None` guards in `_emit_drift` and
-    `_emit_failover`. Building the sink here, beside the client it feeds, is what makes that
-    impossible to forget again. `PhaseRunner` drains it; see `orchestrator/findings.py`."""
+    `on_drift`/`on_failover`/`on_llm_call` precisely so that it does not have to hold a database
+    handle, and for the whole life of the first two design points **nobody supplied either
+    callback** — every drift and every failover the fleet computed was discarded at the `is
+    None` guards in `_emit_drift` and `_emit_failover`. Building the sink here, beside the client
+    it feeds, is what makes that impossible to forget again. `PhaseRunner` drains it; see
+    `orchestrator/findings.py`."""
 
     def __post_init__(self) -> None:
         """Assemble the client. `object.__setattr__` because the dataclass is frozen and this is
         a derived field, not a mutation of run identity."""
+        run_id = str(self.run_id)
+        emitter = EventEmitter(
+            run_id=run_id,
+            sink=self.repository,
+            jsonl_path=None if self.root is None else events_jsonl_path(self.root, run_id),
+            errors_jsonl_path=(None if self.root is None else errors_jsonl_path(self.root, run_id)),
+        )
         sink = LlmFindingSink(
-            run_id=str(self.run_id),
+            run_id=run_id,
             writer=self.writer,
             repository=self.repository,
+            emitter=emitter,
             clock=self.clock,
         )
         object.__setattr__(self, "llm_findings", sink)
@@ -226,6 +246,7 @@ class RunContext:
             policy=policy,
             on_drift=sink.on_drift,
             on_failover=sink.on_failover,
+            on_llm_call=sink.on_llm_call,
         )
         store = (
             SqliteLlmCacheStore(writer=self.writer, read_conn=self.read_conn)
