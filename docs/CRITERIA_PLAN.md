@@ -98,11 +98,12 @@ checked into a fixture and asserted by a real (non-network) test.
 satisfies the criterion as written.
 
 ## 5. No `pickle` / `ThreadPoolExecutor` / `subprocess.run` in `src/fleet/`
-**OPEN — TEST-ONLY.** No test for `pickle` or `ThreadPoolExecutor` at all (only used inside test
-code, which is fine); the `subprocess.run` test covers 3 files, not the `src/fleet/` tree the
-criterion names (audit row 5).
-**Done bar:** widen the existing `test_no_shell_anywhere_in_the_subprocess_boundary`-style grep to
-scope `src/fleet/` for all three forbidden constructs in one test.
+**DONE (landed round N task 1, `51f7e31`, reviewed Approved).**
+`test_no_forbidden_construct_appears_anywhere_in_src_fleet` (`tests/test_proc.py`) reproduces the
+criterion's exact grep semantics as a tree-wide walk over all of `src/fleet/`, with substring
+containment (stricter than the grep's BRE alternation). Mutation-tested individually against all
+three forbidden constructs plus a cosmetic control. Sixth criterion to reach this file's strict
+DONE bar.
 **Out of scope:** none — this is a pure grep-widening, no production risk.
 
 ## 6. The ecosystem/contract-kind confinement invariant
@@ -366,13 +367,17 @@ code — do not attempt to close it via test-only scaffolding.
 **Recommend filing a new `D`-number for this before starting**, since it isn't in either ledger yet.
 
 ## 32. Adapter registries total, delegation honest
-**OPEN — 1 sub-clause, already adjudicated.** Ecosystems/manifests coverage is strong. The
-`contracts.discover()` gap is pre-adjudicated by ADR-0065 (`ecosystems/contracts/` deliberately
-does not exist yet) — this criterion self-declares that deviation in SPEC text already (audit row
-32).
-**Done bar:** one test triggering the decoy-`Ecosystem`-member import-time raise (branch exists,
-untested). Do not attempt to build `ecosystems/contracts/` under this item — that's ADR-0065's own
-scope, tracked separately.
+**DONE (landed round N task 3, `7cf3147`, reviewed Approved).** SPEC.md item 32's text has three
+checkable parts plus one explicit carve-out: (1) `discover()` key set equals `set(Ecosystem)`
+exactly, decoy-member-missing raises at import time — closed this round
+(`test_discover_raises_naming_a_decoy_ecosystem_member_with_no_adapter`). (2) decoy double-claim
+raises `RuntimeError` from `@register` — already covered pre-existing
+(`test_ecosystems.py:71-103`). (3) `generate_targets`/`gazelle_config` biconditional — already
+covered pre-existing, parametrized over every `Ecosystem`. The fourth part, `contracts.discover()`
+equality against `set(ContractKind)`, is **self-declared "UNSATISFIABLE AS WRITTEN and NOT a
+passing gate" in the SPEC's own text**, pre-adjudicated by ADR-0065 — the criterion does not
+require it, so its absence doesn't block DONE. Fifth criterion (after §12.7, §12.12, §12.16,
+§12.18) to reach this file's strict DONE bar.
 
 ## 33. Layout is adapter-derived, not hardcoded
 **OPEN — SCALE-FIXTURE.** The hardcoded-dir grep is covered. The ts→js monkeypatch test checks one
