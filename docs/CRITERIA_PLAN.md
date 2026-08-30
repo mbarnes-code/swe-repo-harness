@@ -491,13 +491,13 @@ constructs a real `TierUnavailable` and asserts the message it actually produces
 hand-written string. Case (ii) itself stays blocked on D55/D58.
 
 ## 44. Cache not poisoned across backends
-**OPEN — mostly missing — mixed.** Cache-key tamper detection (recompute `cache_key` from a stored
-row's own columns) doesn't exist — the existing test compares two freshly *computed* keys, never a
-persisted row. No stub OpenAI-compatible server exists to test against (a different test module
-asserts the opposite property on purpose: no test in it may reach a socket) (audit row 44).
-**Done bar:** one test that recomputes `cache_key` from a persisted `llm_cache` row's own columns
-and asserts it matches the stored key (this is TEST-ONLY, no server needed — do not build a stub
-server to satisfy this criterion, it's more than the tamper-detection clause requires).
+**OPEN — this done bar's own scope closed (round O, `70a4398`), criterion overall still mixed.**
+Cache-key tamper detection is now real: `tests/test_llm_cache.py` recomputes `cache_key` from a
+persisted row's own SQL-read-back columns via the real `hashing.cache_key()` primitive and
+proves a direct-tamper mismatch — reviewed Approved, verified non-tautological. The rest of the
+original audit's "1 of 6 full, 4 partial, 1 absent" breakdown is untouched by this round (no stub
+OpenAI-compatible server, per this criterion's remaining sub-clauses). Do not count §12.44 toward
+the `<n> of 48` tally — the criterion as a whole is still open.
 
 ## 45. No code state persisted outside Git
 **OPEN — mostly missing — mixed, needs adjudication first.** SPEC-ADJUDICATION sub-part: the
