@@ -19,7 +19,7 @@ only filesystem contact is a **directory listing** through `interrogate.walk_fil
 every other scan step uses, because §6 persists no path inventory (see PATH UNIVERSE below).
 
 **Per-kind knowledge is a table, not a branch** (§1). Every `ContractKind`-shaped fact lives in one
-of the three `Mapping[ContractKind, …]` tables below; there is no `if kind is …` and no `match`.
+of the four `Mapping[ContractKind, …]` tables below; there is no `if kind is …` and no `match`.
 The `ecosystems/contracts/` `ContractAdapter` registry §1 names does not exist in this tree yet, so
 these tables are the registry in miniature and are what should move into it.
 
@@ -122,6 +122,17 @@ TARGET_PATH: Final[Mapping[ContractKind, str]] = {
 its owner's primary published coordinate; that needs the `EcosystemRegistry` this module has no
 business holding, so such an entry is `REJECTED:hoist_target` with the reason recorded rather than
 sent to a path this module made up."""
+
+KIND_MODIFIERS: Final[Mapping[ContractKind, str]] = {
+    ContractKind.OPENAPI: "openapi_path_identified"
+}
+"""Kind → the `MODIFIERS` key a kind earns automatically, purely by being that kind (§3.1 5b vi).
+
+Only `OPENAPI` is here today: every `OPENAPI` contract pays the `openapi_path_identified` penalty
+because §3.1 5b (i) can only ever identify it by repo-relative path (see `_identify`), never by a
+`Compare` on `kind` — a table with one entry is still the compliant "table, not branch" shape
+(ADR-0100), and `_factors` below reads it with `kind in KIND_MODIFIERS`, not `kind is
+ContractKind.OPENAPI`."""
 
 CONTRACT_SYMBOL_KINDS: Final[tuple[SymbolKind, ...]] = (
     SymbolKind.MODULE,
@@ -755,8 +766,9 @@ def _factors(
         factors["divergent"] = MODIFIERS["divergent"]
     if not by_hint:
         factors["owner_fallback"] = MODIFIERS["owner_fallback"]
-    if kind is ContractKind.OPENAPI:
-        factors["openapi_path_identified"] = MODIFIERS["openapi_path_identified"]
+    if kind in KIND_MODIFIERS:
+        name = KIND_MODIFIERS[kind]
+        factors[name] = MODIFIERS[name]
     if consumers == payload.config.min_consumers:
         factors["min_consumers"] = MODIFIERS["min_consumers"]
     if len(directories) > payload.config.max_source_dirs:
