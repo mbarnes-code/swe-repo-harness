@@ -6883,6 +6883,29 @@ wiring step (in which case this is a wiring gap, closable the way D80 was), or w
 intent has shifted since `task_id`-scoped queries were written and the scoping should instead key
 on something a real write path does populate — that adjudication is not made here.
 
+> **[Traced 2026-08-31, round R research dispatch — findings, not a fix; this is still OPEN.]**
+> The gap is wider than this entry's original text: the `tasks` table itself has **zero
+> production `INSERT`s anywhere** in `src/fleet/` — `upsert_task` (`state/repository.py`) is the
+> only `INSERT INTO tasks` in the tree, and its only callers are in `tests/test_repository.py`.
+> Consequently D87's driving query (`_ARBITRATED_TASKS_SQL`, `cli.py:11838`,
+> `FROM tasks WHERE status='RUNNING'`) always returns zero candidates against a real `fleet
+> resume`, so `_reconcile_tasks_with_git` exits at `candidates: 0` before `_persist_arbitration`
+> is ever invoked. D87's fix is not merely "may not currently fire" — it is **provably always
+> inert against real `fleet resume` traffic today** (the mechanism is correct and reachable only
+> from `tests/test_repository.py`'s direct calls).
+>
+> This is a wiring gap in spirit (D80's shape), but bigger: a real per-unit task identity DOES
+> exist in production — `workers/rewrite.py:107`'s `task_id_for` computes a deterministic UUID5
+> already embedded in real `Fleet-Task-Id` git trailers on every rewrite/relocate commit — it is
+> simply never persisted to SQL. Closing this is not a single missing call, though: there is a
+> genuine cardinality mismatch (`land_patches` runs once per unit but one phase-dispatch
+> `attempts`/`AttemptRow` write can correspond to N per-unit commits/task ids), and HOIST/
+> REVALIDATE task kinds have no insertion path at all — `upsert_task` explicitly refuses those
+> kinds, deferring to an "own path" that does not exist.
+> **Recommend:** scope as its own ADR/task in a future round rather than a quick D87 follow-up
+> patch. Full trace: `.superpowers/sdd/round-R-criteria-closure/research-1-d89-report.md` (session
+> workspace — may be deleted by the time this is read; the paragraph above is the durable record).
+
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
