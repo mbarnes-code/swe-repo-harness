@@ -6878,12 +6878,12 @@ before writing: `\bD90\b` over `docs/` returned 0 occurrences.
 repository.py` redacts `last_error`, `findings.payload`, and `attempts.*_tail` on write." D88
 fixed exactly one of these three, at exactly one of `phases.last_error`'s call sites:
 
-1. `src/fleet/orchestrator/runner.py:963` (`_terminate_uncharged`) and `runner.py:1048`
+1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1204-1209`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1216-1223`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
-   `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:703-710`) and is
+   `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
    **terminal** — the row settles at `REQUIRES_HUMAN_INTERVENTION` with the unredacted value as
    its final persisted state, and `state/projection.py:265` copies `last_error` straight into the
    projected state with no redaction call anywhere in that module (confirmed by grep).
@@ -6938,3 +6938,12 @@ place, do not rewrite what round P wrote.
 > (`llm_cache.response_json`, D88's own column, was not re-verified by this task and is left as
 > D88 left it). The PR-body `«redacted:…»` placeholder clause remains separately unverified, as
 > before.
+>
+> ***Citation corrections made in place — pointers, not records; no claim changed.*** This fix's
+> own `+14` lines (the `redact_text` import plus the two sites' docstring paragraphs) shifted
+> every `runner.py` line citation below it in this entry's own body, caught by
+> `tests/test_integration_honesty_citations.py` going 52/54 on this branch (54/54 on unmodified
+> `main`). Re-derived against this branch's `runner.py`: `:963`→`:964` (`_terminate_uncharged`),
+> `:1048`→`:1055` (`_record_diagnostics`), `:1204-1209`→`:1216-1223` (`_detail()`),
+> `:703-710`→`:704-711` (the non-retryable-TERMINATE dispatch block). `tests/test_integration_honesty_citations.py`
+> back to 54/54 whole-file, no `-k`, after the correction.
