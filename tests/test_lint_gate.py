@@ -62,6 +62,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import tomllib
 import warnings
 from pathlib import Path
@@ -430,3 +431,109 @@ def test_mypy_strict_is_clean_over_src_fleet():
         f"`mypy src/fleet/ --strict` reported checking {checked} source files — that is vacuous, "
         f"not clean.\n--- stdout ---\n{out.stdout}"
     )
+
+
+def _uv() -> str:
+    """The absolute path of the `uv` that will run — same resolution strategy as `_ruff()`.
+
+    Unlike `ruff`/`mypy`, `uv` is NOT a declared dependency anywhere in `pyproject.toml` or
+    `uv.lock` (checked by grep before writing this): it is the external tool that *produces*
+    `uv.lock`, analogous to `bazel`/`git` rather than to a `dev` group package. So absence here
+    is reported as "install `uv` itself", not "reinstall the dev group" — the latter would be a
+    false instruction for this specific tool. See `_ruff()`'s docstring for why PATH-then-
+    interpreter's-own-`bin/` is searched in that order, and why the interpreter's directory is
+    not `.resolve()`-d.
+    """
+    candidates = [sysconfig.get_path("scripts"), str(Path(sys.executable).parent)]
+    found = shutil.which("uv")
+    for candidate in candidates:
+        if found is None:
+            found = shutil.which("uv", path=candidate)
+    if found is None:
+        interpreter_dirs = "\n  ".join(candidates)
+        path_dirs = "\n  ".join(os.get_exec_path())
+        pytest.fail(
+            "`uv` is nowhere this gate can find it, so the offline-sync gate (SPEC §12 item 1) "
+            "cannot run. `uv` is not a declared Python dependency of this project — it is the "
+            f"external tool that produced `uv.lock` — install it into ({sys.executable}).\n"
+            f"interpreter directories searched:\n  {interpreter_dirs}\n"
+            f"PATH searched:\n  {path_dirs}"
+        )
+    return found
+
+
+def test_uv_sync_frozen_is_exit_0_offline_on_py312():
+    """SPEC §12 item 1: `uv sync --frozen` against the committed `uv.lock`, network disabled,
+    exits 0 — and the interpreter running this suite is (3, 12), the criterion's second clause.
+
+    **Why `--offline`, not some other network-disabling mechanism.** Grepped first (this
+    docstring records the negative result): nothing else in `tests/` disables network access
+    for a *subprocess* — every other "offline"/"no socket" test in this codebase (e.g.
+    `test_llm_backend_anthropic.py`, `test_run_context_llm_cache.py`) achieves it by
+    monkeypatching or faking a Python-level transport in-process, which has no subprocess to
+    apply to here. So this uses `uv`'s own documented flag: `--offline` ("Disable network
+    access", `env: UV_OFFLINE=`, per `uv help sync`). `--frozen` ("Sync without updating the
+    `uv.lock` file", `env: UV_FROZEN=`) is passed explicitly rather than relied on as a default,
+    matching the criterion's literal wording and this file's convention of spelling out every
+    flag a gate depends on rather than a tool's default behaviour.
+
+    **Why this test does NOT run against the shared `.venv`, and cannot even by accident.**
+    `uv sync`'s target is normally the project-relative `.venv` next to `pyproject.toml` — safe
+    in a worktree (a worktree has no `.venv` of its own, `tests/conftest.py`'s module docstring),
+    but this file is also the primary checkout's own test file, and running it there with no
+    further care would create/update `REPO_ROOT/.venv` — the SHARED environment other rounds and
+    sessions depend on, which CLAUDE.md's task brief explicitly forbids risking. Two independent
+    guards, so neither alone has to be trusted: (1) `VIRTUAL_ENV` is popped from the subprocess
+    environment, which forecloses the one flag (`--active`, not passed here) that would target an
+    ambient active venv; (2) `UV_PROJECT_ENVIRONMENT` is set to a fresh `tempfile.mkdtemp()`
+    directory for the duration of the call and removed after — an *absolute* path, which per
+    `uv`'s own docs is used as-is rather than nested under the project root, so the sync's target
+    can never resolve to `REPO_ROOT/.venv` regardless of which checkout `REPO_ROOT` is. Verified
+    empirically before writing this test: with this env override, `uv sync --frozen --offline`
+    created and populated only the throwaway directory, and `git status --porcelain` in
+    `REPO_ROOT` before and after was identical (no `uv.lock` rewrite, no stray file).
+
+    **Why offline can be expected to succeed at all: a documented, out-of-band precondition.**
+    `uv sync --frozen --offline` needs every wheel `uv.lock` names already present in `uv`'s own
+    package cache (`uv cache dir`, independent of any particular `.venv`) — offline cannot
+    populate a cold cache. This is exactly the same shape as `_ruff()`/`_mypy()`'s documented
+    precondition ("install the dev group into the environment running this suite"): a one-time,
+    network-using `uv sync --frozen` (no `--offline`) warms that cache; this test then measures
+    whether a *second*, network-disabled sync from the now-warm cache is reproducible — which is
+    the property SPEC §12 item 1 actually names. The test does not warm the cache itself, on
+    purpose: doing so would use the network inside a test whose entire point is proving no
+    network is needed.
+
+    **Mutation proving this discriminates, not vacuous:** with a throwaway copy of `uv.lock`
+    where one package's pinned version was changed to a value inconsistent with its own wheel
+    filename (`mypy` `2.3.1` -> `999.999.999`, wheel filename left naming `2.3.1`), the identical
+    `uv sync --frozen --offline` invocation exited 2 ("Failed to parse `uv.lock` ... malformed
+    wheel") instead of 0 — reproduced by hand before writing this assertion, `uv.lock` restored
+    via `git checkout -- uv.lock` immediately after. A corrupt lock reddens this test; the
+    committed one greens it.
+    """
+    assert sys.version_info[:2] == (3, 12), (
+        f"this test suite is running under Python {sys.version_info[:2]}, not (3, 12) — SPEC "
+        f"§12 item 1's second clause names the interpreter directly, and it is "
+        f"{sys.executable} that is under test."
+    )
+
+    with tempfile.TemporaryDirectory(prefix="fleet-uv-sync-offline-") as throwaway_env:
+        env = dict(os.environ)
+        env.pop("VIRTUAL_ENV", None)
+        env["UV_PROJECT_ENVIRONMENT"] = throwaway_env
+        out = subprocess.run(  # noqa: S603 - absolute path from shutil.which, fixed argv
+            [_uv(), "sync", "--frozen", "--offline"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+            env=env,
+        )
+        assert out.returncode == 0, (
+            f"`uv sync --frozen --offline` exited {out.returncode}, run from {REPO_ROOT} "
+            f"(using {_uv()}) against throwaway UV_PROJECT_ENVIRONMENT={throwaway_env} "
+            f"(0=synced clean, nonzero=either the lock/environment drifted or the local `uv` "
+            f"wheel cache is cold — see this test's docstring for the cache-warming "
+            f"precondition).\n--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
+        )
