@@ -735,7 +735,7 @@ it.
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 4 | 10, 12, 16, 40 (40's AST sub-clause still open — see its entry; counted DONE for its main clause per round-K; 10 added round R final-fix, 2026-08-31 — see its entry) |
+| DONE | 11 | 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 32 (re-derived 2026-08-31 by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading; matches `docs/PROGRESS.md`'s round-R close-out checkpoint of "11 of 48"; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 2 | 27, 37 |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
