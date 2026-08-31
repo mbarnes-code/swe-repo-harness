@@ -2020,6 +2020,141 @@ def test_no_adapter_package_exception_is_named_outside_the_adapter_packages() ->
 
 
 # =======================================================================================
+# §12.6(a) as SPEC.md literally words it: an AST walk over Compare/Subscript/match, not a
+# sixth regex — the ContractKind half the five tests above never covered, plus the match/case
+# half no test covered at all (ADR-0100)
+# =======================================================================================
+
+
+def _module_scope_table_names(tree: object) -> set[str]:
+    """Names bound, at module scope, directly to a `{...}` dict literal.
+
+    ADR-0100's scoped-subscript reading: `SYMBOL_IDENTIFIED[ContractKind.PROTO]` is the
+    compliant "table, not branch" pattern §1 mandates, not an instance of the branch it exists
+    to replace, exactly when `SYMBOL_IDENTIFIED` is a name bound like this — a dict literal,
+    assigned at module scope, in the same file. A name imported from elsewhere, built by a call
+    (`dict(...)`) or comprehension, or bound inside a function does not qualify: the ruling
+    scopes the exemption to that one shape, not to every subscript whose base merely looks
+    table-shaped.
+    """
+    import ast
+
+    assert isinstance(tree, ast.Module)
+    names: set[str] = set()
+    for node in tree.body:
+        target: ast.expr | None = None
+        value: ast.expr | None = None
+        if isinstance(node, ast.Assign) and len(node.targets) == 1:
+            target, value = node.targets[0], node.value
+        elif isinstance(node, ast.AnnAssign):
+            target, value = node.target, node.value
+        if isinstance(target, ast.Name) and isinstance(value, ast.Dict):
+            names.add(target.id)
+    return names
+
+
+def _kind_member_name(node: object) -> str | None:
+    """`ContractKind.X` / `Ecosystem.X` → `"ContractKind.X"`; anything else → `None`."""
+    import ast
+
+    if (
+        isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id in ("ContractKind", "Ecosystem")
+    ):
+        return f"{node.value.id}.{node.attr}"
+    return None
+
+
+def _confined_modules_asts() -> Iterator[tuple[str, object]]:
+    """Every `_python_sources()` module outside the adapter packages and the enum's own
+    definition site, parsed once. Shared by both AST-walk tests below."""
+    import ast
+
+    for path in _python_sources():
+        if not _outside_the_adapter_packages(path):
+            continue
+        rel = path.relative_to(REPO_ROOT).as_posix()
+        if rel == "src/fleet/models/enums.py":
+            continue
+        yield rel, ast.parse(path.read_text(encoding="utf-8"), filename=rel)
+
+
+def test_no_bare_compare_or_subscript_names_a_kind_member_outside_the_adapter_packages() -> None:
+    """§12.6(a), as an AST walk rather than a line scan: no `Compare` or `Subscript` node outside
+    the two adapter packages may name an `Ecosystem` or `ContractKind` member — except a
+    `Subscript` whose base is a module-scope dict-literal table in the same file (ADR-0100).
+
+    **Why this test exists beside the five above.** Those five only ever scanned for
+    `Ecosystem` — `ContractKind` had no equivalent gate at all, and
+    `src/fleet/workers/contracts.py:758`'s `if kind is ContractKind.OPENAPI:` sat there,
+    contradicting the module's own "there is no `if kind is …`" docstring claim, undetected by
+    any test in this file (round Q, ADR-0100). A regex could be widened to catch that one
+    `Compare`, but it cannot make the scoped-subscript judgment ADR-0100 requires:
+    distinguishing `SYMBOL_IDENTIFIED[ContractKind.PROTO]` (a table read, permitted) from a
+    hypothetical subscript on a name that is NOT a module-scope table in the same file (a
+    branch wearing a subscript's clothes, forbidden) needs to know what the base name is bound
+    to — a question only the AST can answer, which is why this is a walk and not a sixth regex.
+    """
+    import ast
+
+    offenders: list[str] = []
+    for rel, tree in _confined_modules_asts():
+        assert isinstance(tree, ast.Module)
+        tables = _module_scope_table_names(tree)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Compare):
+                for operand in (node.left, *node.comparators):
+                    name = _kind_member_name(operand)
+                    if name is not None:
+                        offenders.append(
+                            f"{rel}:{node.lineno}: Compare against {name} — {ast.unparse(node)}"
+                        )
+            elif isinstance(node, ast.Subscript):
+                name = _kind_member_name(node.slice)
+                if name is None:
+                    continue
+                base_is_local_table = isinstance(node.value, ast.Name) and node.value.id in tables
+                if not base_is_local_table:
+                    offenders.append(
+                        f"{rel}:{node.lineno}: Subscript keyed by {name} — {ast.unparse(node)}"
+                    )
+    assert offenders == []
+
+
+def test_no_match_case_names_a_kind_member_outside_the_adapter_packages() -> None:
+    """§12.6(a)'s `match` half. No production code touches either enum through `match`/`case`
+    today — this test is deliberately vacuous on `main`, the same "gap that would pass every
+    existing test" shape the four tests above guard against elsewhere in this file — so its only
+    job is to fail the moment someone writes one, per-kind branching's second syntax after `if`.
+
+    A `case Ecosystem.PYTHON:` line has no `if`/`==`/`is`-adjacent shape any of the five
+    line-scanning tests above look for, so line-scanning cannot reliably catch it; this is an AST
+    walk, matching `tests/test_instruments_are_armed.py`'s style for this codebase's structural
+    tests. The whole `match` statement's subtree (subject AND every `case` pattern) is scanned,
+    not just the subject expression: the mutation this test exists to catch —
+    `match ecosystem: case Ecosystem.PYTHON:` — names the member in the *pattern*, not the
+    subject, which is a bare local variable.
+    """
+    import ast
+
+    offenders: list[str] = []
+    for rel, tree in _confined_modules_asts():
+        assert isinstance(tree, ast.Module)
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Match):
+                continue
+            for sub in ast.walk(node):
+                name = _kind_member_name(sub)
+                if name is not None:
+                    offenders.append(
+                        f"{rel}:{node.lineno}: match/case names {name} — {ast.unparse(node)}"
+                    )
+                    break
+    assert offenders == []
+
+
+# =======================================================================================
 # Determinism across processes
 # =======================================================================================
 
