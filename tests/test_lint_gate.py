@@ -33,10 +33,18 @@ output base. At `f6a2e4e` that made three of these four checks fail in a clean w
 `ruff` installed and runnable, reported by lane W1 and reproduced with no patch applied; see
 `_ruff()` for what searching the running interpreter's own `bin/` does and does not change.
 
-**What is deliberately NOT gated:** `ruff format --check`. Measured whole-repo at `12d3527`,
-117 of 142 files are dirty under it; gating it would redden `main` on the same commit that
-added the gate. It is deferred, not forgotten, and pinning `ruff` does not by itself make it
-ratchetable.
+**What is deliberately NOT gated clean:** `ruff format --check`. Measured whole-repo at
+`12d3527`, 117 of 142 files were dirty under it; gating it *clean* would redden `main` on the
+same commit that added the gate, and reformatting those files is explicitly out of scope for
+this criterion (`docs/CRITERIA_PLAN.md` §2's done bar — a separate, larger, disruptive change).
+Re-measured at `b9524af` (round R, task 3): 123 of 282 files are dirty — both numbers moved
+since `12d3527` in the ordinary course of the repository growing, and `ruff format` in the
+version now pinned also formats Python code fences embedded in `.md` files, which is why `docs/`
+paths appear in the dirty set. `test_ruff_format_check_dirty_count_matches_the_pinned_baseline`
+below turns that measurement into a *baseline* pin, not a clean gate: it fails on drift in
+EITHER direction, so a handful of files silently reformatted (or newly gone dirty) is caught
+even though the whole set staying dirty is not itself a failure. Reformatting down to 0 remains
+out of scope; when it happens, the pin drops to 0 in the same commit, deliberately.
 """
 
 from __future__ import annotations
@@ -270,4 +278,145 @@ def test_ruff_check_is_clean_across_the_whole_repository():
         f"`ruff check --no-cache --output-format=concise .` exited {out.returncode} "
         f"(0=clean, 1=violations, 2=ruff itself failed), run from {REPO_ROOT}.\n"
         f"--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
+    )
+
+
+# `ruff format --check --no-cache .` at `b9524af` (round R, task 3): 123 of 282 files dirty,
+# reproduced identically across two independent runs. This is a BASELINE, not a clean-formatting
+# target — see the module docstring for why reformatting is out of scope. Update this number,
+# deliberately, in the same commit as whatever changes the dirty count (a reformat, a new file
+# added dirty, or new format drift on an existing file).
+_RUFF_FORMAT_DIRTY_BASELINE = 123
+
+_FORMAT_PER_FILE = re.compile(
+    r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE
+)
+_FORMAT_SUMMARY = re.compile(r"^(?P<count>\d+) files? would be reformatted\b", re.MULTILINE)
+
+
+def test_ruff_format_check_dirty_count_matches_the_pinned_baseline():
+    """`ruff format --check` dirty-file count is PINNED, not gated clean (module docstring).
+
+    Two independent derivations of the same run, because one instrument cannot check itself
+    (same pattern as `test_every_declared_ruff_requirement_pins_one_exact_version` above):
+    `--output-format=concise` prints one `path:line:col: unformatted: ...` line per dirty file,
+    counted by `_FORMAT_PER_FILE`; ruff's own summary line ("N files would be reformatted, ...")
+    is counted separately by `_FORMAT_SUMMARY`. If they disagree, one of the two parsers is
+    blind and neither dirty count can be trusted.
+
+    Pinning is what makes this a genuine check rather than a description: without it, this test
+    would pass no matter how many files are dirty, and a handful silently reformatted (or newly
+    gone dirty) would be invisible. Whole repository, `--no-cache` for the same reason
+    `test_ruff_check_is_clean_across_the_whole_repository` uses it — a stale cache entry would
+    hide exactly the file somebody just changed.
+    """
+    out = _run_ruff("format", "--check", "--no-cache", "--output-format=concise", ".")
+    assert out.returncode in (0, 1), (
+        f"`ruff format --check --no-cache --output-format=concise .` exited {out.returncode} "
+        f"(0=clean, 1=some files would be reformatted, anything else means ruff itself failed), "
+        f"run from {REPO_ROOT}.\n--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
+    )
+
+    per_file = _FORMAT_PER_FILE.findall(out.stdout)
+    summary_match = _FORMAT_SUMMARY.search(out.stdout)
+    summary_count = int(summary_match.group("count")) if summary_match else 0
+
+    assert len(set(per_file)) == len(per_file), (
+        f"the per-file derivation found the same path more than once, so it is not one line "
+        f"per dirty file as assumed: {sorted(p for p in per_file if per_file.count(p) > 1)}\n"
+        f"--- stdout ---\n{out.stdout}"
+    )
+    assert len(per_file) == summary_count, (
+        f"two derivations of the same `ruff format --check` run disagree: {len(per_file)} "
+        f"per-file 'unformatted' line(s) vs {summary_count} in ruff's own summary line. One of "
+        f"them is blind; fix the parser before trusting either count.\n"
+        f"--- stdout ---\n{out.stdout}"
+    )
+
+    assert summary_count == _RUFF_FORMAT_DIRTY_BASELINE, (
+        f"`ruff format --check` now reports {summary_count} dirty file(s); the pinned baseline "
+        f"is {_RUFF_FORMAT_DIRTY_BASELINE}. This is deliberately a BASELINE, not a clean-format "
+        f"gate (module docstring) — reformatting the dirty files is out of scope per "
+        f"`docs/CRITERIA_PLAN.md` §2's done bar. But an unpinned count hides drift silently in "
+        f"either direction: fewer dirty files means someone reformatted without this test "
+        f"noticing (update the pin down), more means a change introduced new format drift "
+        f"(investigate before updating the pin up). Re-measure with "
+        f"`ruff format --check --no-cache .` from {REPO_ROOT} and update "
+        f"`_RUFF_FORMAT_DIRTY_BASELINE` deliberately, never to silence this failure.\n"
+        f"dirty files (first 20 of {len(per_file)}): {sorted(per_file)[:20]}"
+    )
+
+
+def _mypy() -> str:
+    """The absolute path of the `mypy` that will run — same resolution strategy as `_ruff()`.
+
+    PATH exactly as `tests/conftest.py` left it, then the running interpreter's own `bin/`, so a
+    detached worktree with no `.venv` of its own still finds the `mypy` beside `sys.executable`
+    rather than nothing. See `_ruff()`'s docstring for why the interpreter's path is not
+    `.resolve()`-d (a `.venv/bin/python` symlink would resolve to the system interpreter's
+    directory, which is not where console scripts live).
+
+    Absence still fails loudly, naming everywhere searched — `mypy` is a declared `dev`
+    dependency, so a missing one is a broken environment, not weather.
+    """
+    candidates = [sysconfig.get_path("scripts"), str(Path(sys.executable).parent)]
+    found = shutil.which("mypy")
+    for candidate in candidates:
+        if found is None:
+            found = shutil.which("mypy", path=candidate)
+    if found is None:
+        interpreter_dirs = "\n  ".join(candidates)
+        path_dirs = "\n  ".join(os.get_exec_path())
+        pytest.fail(
+            "`mypy` is nowhere this gate can find it, so the mypy gate cannot run — and a gate "
+            "that passes when its checker is absent is worse than no gate. `mypy` is a declared "
+            "`dev` dependency in pyproject.toml; install the dev group into the environment "
+            f"running this suite ({sys.executable}).\n"
+            f"interpreter directories searched:\n  {interpreter_dirs}\n"
+            f"PATH searched:\n  {path_dirs}"
+        )
+    return found
+
+
+_MYPY_SUCCESS = re.compile(r"Success: no issues found in (?P<count>\d+) source files?")
+
+
+def test_mypy_strict_is_clean_over_src_fleet():
+    """`mypy src/fleet/ --strict` exits 0 — the invocation `docs/INTEGRATION_HONESTY.md`'s
+    checkpoints have run out-of-band since the `ast-grep` round (`mypy src/fleet/ --strict`
+    clean over 106 files, later 107+), now asserted in-tree instead of only in a checkpoint doc.
+
+    `cwd=REPO_ROOT` matters here, not just for consistency with `_run_ruff`: `[tool.mypy]
+    mypy_path = "src"` in pyproject.toml resolves relative to the process's CWD, not to
+    `pyproject.toml`'s own directory (`CLAUDE.md` §6's documented mypy gotcha) — run with cwd
+    outside the worktree and this could silently fall back to resolving an installed `fleet`
+    package instead of this worktree's own `src/`.
+
+    The file count in mypy's own "Success" line is asserted positive, not just the exit code:
+    an exit-0 mypy run that checked zero files (wrong `cwd`, wrong path argument, a broken
+    `mypy_path`) is the vacuous-pass shape this project's own instruments are written to catch,
+    and an exit-code-only assertion cannot tell that apart from a genuine clean run.
+    """
+    out = subprocess.run(  # noqa: S603 - absolute path from shutil.which, fixed argv, no shell
+        [_mypy(), "src/fleet/", "--strict"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert out.returncode == 0, (
+        f"`mypy src/fleet/ --strict` exited {out.returncode}, run from {REPO_ROOT} "
+        f"(using {_mypy()}):\n--- stdout ---\n{out.stdout}\n--- stderr ---\n{out.stderr}"
+    )
+    match = _MYPY_SUCCESS.search(out.stdout)
+    assert match, (
+        f"mypy exited 0 but its stdout does not confirm how many files it actually checked, so "
+        f"a 0-returncode from a run that resolved zero files (wrong cwd, wrong `mypy_path`) "
+        f"cannot be told apart from a genuine clean run over this worktree's own `src/fleet/`:\n"
+        f"--- stdout ---\n{out.stdout}"
+    )
+    checked = int(match.group("count"))
+    assert checked > 0, (
+        f"`mypy src/fleet/ --strict` reported checking {checked} source files — that is vacuous, "
+        f"not clean.\n--- stdout ---\n{out.stdout}"
     )
