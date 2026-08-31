@@ -570,12 +570,15 @@ than direct parameter injection. Sequence after §12.37, not before — closing 
 re-test the same disconnected parameters.
 
 ## 40. No model string outside `config/`
-**DONE (SPEC + code corrected, round-K).** The criterion's own greps were unsatisfiable as written
-(named a nonexistent `llm/routing.py`, and returned non-zero hits without the backend-file
-exclusion). Round-K applied the exclusion for real and validated it three ways (clean tree /
-exclusion removed / synthetic fault injected). **Remaining, independently small (audit row
-40, M1):** the AST clause — "an AST test asserts only `settings.py` reads `config/models.yaml`" —
-is asserted by no test at all; only the model-id/endpoint greps are covered.
+**DONE (SPEC + code corrected, round-K). Do not count toward the `<n> of 48` tally — see the
+"Remaining" clause below; added 2026-08-31 per round-P's and round-Q-final-review's independent
+flags of this heading/body mismatch (CLAUDE.md's D63 shape).** The criterion's own greps were
+unsatisfiable as written (named a nonexistent `llm/routing.py`, and returned non-zero hits without
+the backend-file exclusion). Round-K applied the exclusion for real and validated it three ways
+(clean tree / exclusion removed / synthetic fault injected). **Remaining, independently small
+(audit row 40, M1):** the AST clause — "an AST test asserts only `settings.py` reads
+`config/models.yaml`" — is asserted by no test at all; only the model-id/endpoint greps are
+covered.
 **Done bar:** write the one AST test the M1 note names. Everything else in this criterion is
 already closed.
 
