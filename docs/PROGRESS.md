@@ -6667,3 +6667,10 @@ separate rounds' investigations), §12.44 correctly stays open (one sub-clause o
 Full post-round-P suite run dispatched in the background; result to follow.
 
 **Round Q, opening next.**
+
+**Post-round-P full suite: 1 failed (a line-length lint violation in round P task 3's new
+function signature — `tests/test_scan_e2e.py:215`, missed by that task's own ruff check),
+1981 passed.** Fixed directly by the controller (mechanical, zero design judgment) and
+re-verified (`ruff check` clean, the failing test plus its file's full suite green). Not
+re-run as a third full 16-minute suite pass given the fix's triviality and isolation — targeted
+verification is sufficient here.
