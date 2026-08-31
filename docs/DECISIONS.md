@@ -11813,3 +11813,60 @@ to hold, and round-K's own marker already warned against doing this "merely to m
 true." *Leave the adjudication open for a future round* — rejected: the decision has no real
 ambiguity once stated plainly (inline synthesis already works and is idiomatic here), and leaving
 it open costs a criterion's closure for no benefit.
+
+---
+
+## ADR-0100 — §12.6 confinement gate: subscript scope, and `contracts.py`'s one real branch
+
+**Decision (2026-08-31, round Q, controller ruling).** SPEC.md §12 item 6 / §1's confinement gate
+(a) reads: "fails on any `Compare`, `match`, or subscript node whose operand is an `Ecosystem` or
+`ContractKind` member." Round Q task 1's implementer, building the `ContractKind` half of this
+gate, found the literal wording is over-broad in one direction and under-enforced in another:
+
+1. **Scope clarification (not a wording change to the criterion's substance — a resolution of a
+   genuine ambiguity in how "subscript node" applies to a registry table read).** A `Subscript`
+   read of a `Mapping[ContractKind, …]`/`Mapping[Ecosystem, …]` table **declared at module scope
+   in the same file**, keyed by a literal member (e.g. `SYMBOL_IDENTIFIED[ContractKind.PROTO]` at
+   `contracts.py:460`), is the compliant "table, not branch" pattern §1 mandates, not a violation
+   of it — the gate exists to forbid per-kind *branching* outside the adapter packages, and a
+   table lookup is definitionally the alternative to a branch, not an instance of one. The AST
+   gate (a) is scoped to exclude this case: a `Subscript` node is only a violation when its base
+   is not a name bound to a dict/mapping literal at module scope in the same file. Dict-literal
+   *key* definitions (`IDENTIFIER_SOURCES = {ContractKind.OPENAPI: …}`) are `ast.Dict` nodes, not
+   `ast.Subscript`, and were never in scope of the literal wording to begin with — no clarification
+   needed there.
+2. **Real defect, fixed.** `src/fleet/workers/contracts.py:758`, inside `_factors`: `if kind is
+   ContractKind.OPENAPI:` is a bare `ast.Compare` against a `ContractKind` member, outside both
+   exempt packages — a genuine violation of the criterion's unambiguous core case (no scope
+   question here at all), and it contradicts the module's own docstring ("there is no `if kind is
+   …`") and `docs/SPEC.md` §1's claim that this module's `ContractKind` knowledge is fully
+   table-derived. Ruled: fix `_factors` to resolve the `openapi_path_identified` modifier through a
+   fourth `Mapping[ContractKind, str]`-shaped table (matching `IDENTIFIER_SOURCES`/
+   `SYMBOL_IDENTIFIED`/`TARGET_PATH`'s existing style), guarded by `kind in <table>` rather than
+   `kind is ContractKind.OPENAPI` — eliminating the bare-member `Compare` while keeping the exact
+   same runtime behavior for the one kind it currently modifies.
+
+**Rationale.** Per `CLAUDE.md` Rule 7 (surface conflicts, pick the cleaner, more tested pattern):
+the three existing tables in `contracts.py` are the established, already-compliant idiom in this
+exact file: extending that idiom to the fourth case is strictly cheaper and more consistent than
+inventing a new shape. The subscript-scope reading is the only one under which §1's own prose
+("three tables … which honour this rule") is not immediately false about code already committed
+and already praised in the same file — reading the gate any more broadly would flag the pattern
+the criterion exists to require. This is a Rule 14 scope adjudication on §12.6's acceptance-bar
+interpretation (not a rewording of the criterion's text): recorded here per that rule, with a
+dated marker to follow at `docs/SPEC.md`'s §12 item 6 citation and in
+`docs/CRITERIA_PLAN.md`'s §6 entry.
+
+**Cost if wrong.** If the subscript scoping is later judged too permissive (e.g. it turns out to
+hide a real per-kind dispatch smuggled through a table alias), the fix is narrow: tighten the AST
+gate to also require the table have >1 entries or that its values are homogeneous, and re-audit
+the (currently zero) other subscript sites this scoping newly permits. Low blast radius — the
+sweep in the task-1 report found exactly one other subscript site (`contracts.py:460`) under the
+old, unscoped reading, and it is the case this ruling exists to permit.
+
+**Alternatives rejected.** *Flag `SYMBOL_IDENTIFIED[ContractKind.PROTO]` as a violation too* —
+rejected: it isn't one under any reading that also wants the three tables to count as compliant,
+which §1's own prose already commits to. *Leave `contracts.py:758` as an accepted, disclosed
+exception rather than fixing it* — rejected: the fix is small (one line, same runtime behavior,
+matches the file's own established pattern), so there is no cost/benefit case for carrying a
+permanent disclosed exception over closing it outright.

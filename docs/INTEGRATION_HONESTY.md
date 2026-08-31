@@ -6866,3 +6866,46 @@ this ledger has recorded before (D56, D57, D80 pre-fix).
 wiring step (in which case this is a wiring gap, closable the way D80 was), or whether the design
 intent has shifted since `task_id`-scoped queries were written and the scoping should instead key
 on something a real write path does populate — that adjudication is not made here.
+
+## D90 — OPEN, SECURITY-RELEVANT. D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
+
+**Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
+rather than searching for a new defect independently — recorded separately from D88 since it is a
+distinct, pre-existing gap D88's fix did not introduce and does not depend on.** Verified free
+before writing: `\bD90\b` over `docs/` returned 0 occurrences.
+
+**The gap, as measured.** `docs/SPEC.md`:6987 (quoted verbatim inside D88's own entry): "`state/
+repository.py` redacts `last_error`, `findings.payload`, and `attempts.*_tail` on write." D88
+fixed exactly one of these three, at exactly one of `phases.last_error`'s call sites:
+
+1. `src/fleet/orchestrator/runner.py:963` (`_terminate_uncharged`) and `runner.py:1048`
+   (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1204-1209`)
+   returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
+   unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
+   `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:703-710`) and is
+   **terminal** — the row settles at `REQUIRES_HUMAN_INTERVENTION` with the unredacted value as
+   its final persisted state, and `state/projection.py:265` copies `last_error` straight into the
+   projected state with no redaction call anywhere in that module (confirmed by grep).
+   `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
+   value in the column for the retry window, permanently if the process dies there.
+2. `record_attempt` (`state/repository.py:2124-2174`) passes `row.stdout_tail`/`row.stderr_tail`
+   into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
+   lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
+   Production caller `cli.py:6441` sets `stderr_tail=error.stderr_tail`, the same
+   `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
+
+**Concrete failure scenario.** A worker raises an exception whose message quotes a
+credential-bearing URL; the retry policy returns a non-retryable TERMINATE; `_terminate_uncharged`
+writes the raw message to `phases.last_error`; the row is terminal at
+`REQUIRES_HUMAN_INTERVENTION`; `fleet status`'s projection surfaces it verbatim. Independently, any
+attempt whose `stderr_tail` quotes a credential persists it verbatim via `record_attempt` regardless
+of how the phase itself resolves.
+
+**Not yet built:** the fix — apply `redact_text` at both `runner.py` UPDATE sites and inside
+`record_attempt` for `stdout_tail`/`stderr_tail`, matching D88's placement pattern — plus tests
+that read the persisted column (not the in-memory `WorkerError` object, which
+`tests/test_workers_scan.py:896` already covers and which does not exercise either gap).
+`docs/CRITERIA_PLAN.md` §12.20 needs a dated annotation correcting its "3 of 4 (already covered
+pre-round)" claim to 2 of 4 pending this fix — per this project's own discipline, annotate in
+place, do not rewrite what round P wrote.

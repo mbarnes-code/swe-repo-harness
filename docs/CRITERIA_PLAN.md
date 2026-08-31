@@ -107,11 +107,19 @@ DONE bar.
 **Out of scope:** none — this is a pure grep-widening, no production risk.
 
 ## 6. The ecosystem/contract-kind confinement invariant
-**OPEN — TEST-ONLY.** All five named tests exist and pass, but only scan for `Ecosystem` patterns,
-never `ContractKind`, and never scan for `match`/`case` statements (audit row 6) — both vacuous
-gaps today, but a regression of either shape would pass every test.
-**Done bar:** extend the existing pattern set to include `ContractKind` comparisons and `match`/
-`case` forms, re-run against the same exemption list.
+**OPEN — real defect found (round Q task 1), fix ruled — TEST-ONLY once the fix lands.** All five
+named tests exist and pass, but only scan for `Ecosystem` patterns, never `ContractKind`, and
+never scan for `match`/`case` statements (audit row 6). The `match`/`case` half is genuinely
+vacuous today (confirmed by sweep). The `ContractKind`-`Compare` half was **not** vacuous: round Q
+task 1 found a live violation, `src/fleet/workers/contracts.py:758` (`if kind is
+ContractKind.OPENAPI:`), contradicting that module's own docstring and `docs/SPEC.md` §1. Ruled
+and recorded — `docs/DECISIONS.md` ADR-0100, `docs/SPEC.md`:7421 dated marker: (1) fix
+`contracts.py:758` to a table-derived form matching its sibling tables, (2) scope gate (a)'s
+subscript clause to exclude registry-table reads (e.g. `SYMBOL_IDENTIFIED[ContractKind.PROTO]`),
+which are the compliant pattern, not a violation of it.
+**Done bar:** land the `contracts.py` fix per ADR-0100, then extend the existing pattern set to
+include `ContractKind` comparisons (scoped per the ADR) and `match`/`case` forms, re-run against
+the same exemption list.
 **Out of scope:** none.
 
 ## 7. Six `ManifestAdapter`s parse fixtures at `tests/fixtures/repos/`
@@ -256,26 +264,39 @@ literally plant 41 repos if the algorithm's complexity class makes a smaller adv
 equally discriminating — state which was used).
 
 ## 20. Secrets never leak
-**OPEN — 3 of 4 named DB columns now covered (round P, `7f56bed`), PR-body placeholder still
-open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL token,
-build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
+**OPEN — 2 of 4 named DB columns actually covered (corrected 2026-08-31, round Q review), PR-body
+placeholder still open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL
+token, build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
 `migration_state.json` AND four named DB columns (`events.payload`, `attempts.stderr_tail`,
 `phases.last_error`, `llm_cache.response_json`) AND the PR-body `«redacted:…»` placeholder.
-`events.payload`/`attempts.stderr_tail` were already covered pre-round. `phases.last_error` and
-`llm_cache.response_json` are now covered — but via targeted per-column tests (each planting one
-secret shape through its own real write path and reading the persisted value back), not the
-literal "one fixture run planting all three named secret shapes" the done-bar originally
-described; the underlying property each column asserts is proven, the combined-fixture
-methodology is not. Investigating `phases.last_error` also found and fixed a real, live gap (D88,
-security-relevant): `complete_phase`'s terminal write wasn't redacting at all, contradicting
-SPEC.md:6987's explicit claim.
-**Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
-unverified, confirmed by two separate rounds' investigations (round M found a different leak on
-the PR path; round P confirms this specific clause remains untouched). Whether the four-column
-grep-sweep methodology also needs a literal combined-fixture test, or whether the now-proven
-per-column properties satisfy the criterion's intent, is worth a brief adjudication before
-attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a precedent
-for accepting equivalent per-column coverage.
+`events.payload` was already covered pre-round. `phases.last_error` and `llm_cache.response_json`
+are now covered — but via targeted per-column tests (each planting one secret shape through its
+own real write path and reading the persisted value back), not the literal "one fixture run
+planting all three named secret shapes" the done-bar originally described; the underlying
+property each column asserts is proven, the combined-fixture methodology is not. Investigating
+`phases.last_error` also found and fixed a real, live gap (D88, security-relevant):
+`complete_phase`'s terminal write wasn't redacting at all, contradicting SPEC.md:6987's explicit
+claim.
+**Dated annotation, 2026-08-31 (round Q whole-branch review):** the line above originally read
+"3 of 4 … `events.payload`/`attempts.stderr_tail` were already covered pre-round" — that
+overclaimed `attempts.stderr_tail`. Measured: no test reads the *persisted* `attempts.stderr_tail`
+column and asserts redaction; the only existing assertion (`tests/test_workers_scan.py:896`) is on
+the in-memory `WorkerError.stderr_tail` object, not the DB column, and `record_attempt`
+(`repository.py:2124-2174`) writes `stdout_tail`/`stderr_tail` with no redaction call at all. This
+is D88's own class, unclosed — tracked as **D90** (`docs/INTEGRATION_HONESTY.md`), alongside two
+further unredacted `phases.last_error` write paths in `orchestrator/runner.py` that bypass
+`complete_phase` (one of them terminal). Per this file's own ground rule 1 discipline, the
+original sentence is left in the paragraph above and corrected here rather than rewritten in
+place.
+**Done bar (remaining):** land D90's fix (redact at the two `runner.py` sites and inside
+`record_attempt`, matching D88's pattern), then a persisted-column test for
+`attempts.stdout_tail`/`stderr_tail`. Separately, the PR-body `«redacted:…»` placeholder clause —
+still entirely unverified, confirmed by two separate rounds' investigations (round M found a
+different leak on the PR path; round P confirms this specific clause remains untouched). Whether
+the four-column grep-sweep methodology also needs a literal combined-fixture test, or whether the
+now-proven per-column properties satisfy the criterion's intent, is worth a brief adjudication
+before attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a
+precedent for accepting equivalent per-column coverage.
 
 ## 21. Determinism — clean re-run, byte-identical digest
 **OPEN — 2 of 3 clauses closed (round O, `daf2a24`), one remains.** SPEC.md item 21 has three
