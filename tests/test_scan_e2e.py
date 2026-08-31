@@ -212,6 +212,17 @@ def _make_repo_with_submodule(root: Path, name: str, target: Path, submodule_pat
     return path
 
 
+def _make_repo_with_default_branch(root: Path, name: str, files: dict[str, str], branch: str) -> Path:
+    """One real git repository whose default branch is `branch`, not `main` — a `git branch -m`
+    rename of the fixture commit `_make_repo` already made, so `symbolic-ref --short HEAD` in the
+    finished mirror genuinely reports `branch` rather than a hand-edited ref with no commit behind
+    it.
+    """
+    path = _make_repo(root, name, files)
+    _git(path, "branch", "-m", branch)
+    return path
+
+
 def _write_config(
     root: Path, sources: dict[str, Path], *, names: Sequence[str], fleet_yaml: str = FLEET_YAML
 ) -> None:
@@ -721,3 +732,55 @@ def test_an_lfs_pointer_file_is_recorded_and_the_repo_still_scans(lfs_fleet: Pat
 
     repos = dict(query(lfs_fleet, "SELECT repo_id, has_lfs FROM repos"))
     assert repos["acme-with-lfs"] == 1
+
+
+# ---------------------------------------------------------------------------------------
+# a non-`main` default branch is recorded, never a crash (§12 item 26, 5th fixture category)
+# ---------------------------------------------------------------------------------------
+#
+# The submodule/LFS section above closed item 26's 3rd and 4th named hazards; this closes the
+# 5th and last — "default-branched to `trunk`". Kept as its own one-repo fleet for the same
+# reason: folding a sixth repo into `FIXTURE_REPOS` would perturb the wave-ordering assertions
+# elsewhere in this file, and a fixture isolating this one variable (real commits, no submodule,
+# no LFS, nothing empty) is what `docs/CRITERIA_PLAN.md` §12.26's done bar asks for.
+
+
+@pytest.fixture
+def trunk_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """A workspace holding one real repo whose default branch is `trunk`, not `main`."""
+    source = _make_repo_with_default_branch(
+        tmp_path / "sources", "acme-on-trunk", {"README.md": "hi\n"}, "trunk"
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, {"acme-on-trunk": source}, names=["acme-on-trunk"])
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    yield workspace
+
+
+def test_a_trunk_default_branch_is_recorded_and_the_repo_still_scans(trunk_fleet: Path) -> None:
+    """A repo default-branched to `trunk` is not a crash — item 26's 5th and last fixture
+    category, and it exercises the PRIMARY resolution path, not the fallback list.
+
+    `clone.py`'s `_default_branch` (`:495-507`) tries `git symbolic-ref --short HEAD` FIRST and
+    only falls through to `payload.branch_fallbacks` — which is `("main", "master", "trunk",
+    "develop")`, `trunk` included — if that symbolic ref does not resolve. This fixture's mirror
+    has a genuine `HEAD` pointing at `refs/heads/trunk` (a real `git branch -m` rename of an
+    actual commit, per `_make_repo_with_default_branch`), so its `symbolic-ref` resolves cleanly
+    on the first try; the fallback tuple containing the same string is never consulted, and
+    `default_branch_source` records that.
+    """
+    result = scan(trunk_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    statuses = dict(query(trunk_fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
+    assert statuses["acme-on-trunk"] == "SUCCEEDED"
+
+    repos = {
+        row[0]: row
+        for row in query(
+            trunk_fleet, "SELECT repo_id, default_branch, default_branch_source FROM repos"
+        )
+    }
+    assert repos["acme-on-trunk"] == ("acme-on-trunk", "trunk", "symbolic-ref")
