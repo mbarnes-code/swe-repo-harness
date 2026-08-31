@@ -3350,24 +3350,6 @@ def test_resume_step4_reports_a_candidate_it_could_not_ask_git_about_instead_of_
     )
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "OPEN DEFECT, found by this test (round P, task 1, §12.15). `_persist_arbitration`'s "
-        "`attempts` UPDATE (`cli.py`, the subquery inside the landed loop) filters "
-        "`commit_sha IS NULL`, so a row whose `commit_sha` is already non-NULL — including a "
-        "FABRICATED off-branch one — matches zero rows and is silently left uncorrected. "
-        "`phases.post_commit_sha` IS corrected in the same unit (verified: this test's `post` "
-        "assertion passes), so the two pointers §11.5's authority table pairs end up disagreeing "
-        "with each other, with the branch itself untouched (verified: `migrate/acme-commons` "
-        "correctly still resolves to the real landed SHA — no reverse `git reset` occurs). "
-        "SPEC.md §12 item 15's own words: fabricating this disagreement 'makes resume correct "
-        "the column' — it does not, for a row whose `commit_sha` did not start NULL. Needs a "
-        "D-number in docs/INTEGRATION_HONESTY.md (assign at dispatch, not here) and a fix "
-        "changing the `IS NULL` guard to key on `attempt_id` (or another row-identity condition) "
-        "instead of on the column being corrected."
-    ),
-)
 def test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_branch(
     workspace: Path,
 ) -> None:
@@ -3381,6 +3363,14 @@ def test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_bra
     (the discard test's scenario, `3079`). §12 item 15's own words: "Fabricating the reverse
     disagreement … makes resume correct the column, never `git reset` the branch to match it,
     which is the mechanical form of the 'Git wins' invariant (§11.5)."
+
+    **It was `xfail(strict=True)` and it is not any more (D87).** `_persist_arbitration`'s
+    `attempts` `UPDATE` used to be a single statement whose subquery filtered `commit_sha IS
+    NULL`, so a row already carrying a value — including this test's fabricated, off-branch one —
+    matched zero rows and was silently left uncorrected, while `phases.post_commit_sha` was
+    corrected in the same unit regardless. The fix selects the target `attempt_id` first, by
+    `task_id` and the same `ORDER BY` alone, then updates that row unconditionally — the marker is
+    deleted rather than left passing, so this is now a guard on the mechanism the fix landed.
 
     Two things must both hold, and the fixture is built so a defect in either one is
     distinguishable from the other:

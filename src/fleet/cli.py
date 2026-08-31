@@ -11660,11 +11660,25 @@ async def _persist_arbitration(
     partial commit would leave `tasks` reconciled against a `phases.post_commit_sha` that is not,
     which is the disagreement this step exists to remove.
 
-    **The `attempts` row updated is the newest rung this task produced.** Inside the subquery's
-    `task_id = ?` scope, the only two columns that can distinguish rows are `attempt` (the ladder
-    rung) and `retry_ordinal` (a re-execution of that same rung, which `schema.sql` makes append
-    rather than collide); both are in the `ORDER BY`, newest first. `commit_sha IS NULL` keeps a
-    row that already recorded its own commit from being overwritten with another's.
+    **The `attempts` row updated is the newest rung this task produced.** Inside the `task_id = ?`
+    scope, the only two columns that can distinguish rows are `attempt` (the ladder rung) and
+    `retry_ordinal` (a re-execution of that same rung, which `schema.sql` makes append rather than
+    collide); both are in the `ORDER BY`, newest first. That `SELECT` is run FIRST, on its own, to
+    fix which row is "the newest rung" *before* deciding what to do with it — and the `UPDATE` that
+    follows targets that specific `attempt_id` unconditionally, never re-running the scan under a
+    `commit_sha IS NULL` filter the way an earlier version of this function did (D87). That filter
+    protected a real hazard — never overwriting a *different* row's already-recorded commit with
+    this one's — but it protected it the wrong way: scope (`task_id = ?`) and the `ORDER BY` are
+    what already guarantee "this row and no other", so filtering by the row's *own* current
+    `commit_sha` cannot sharpen that guarantee and only ever narrows the candidate set further. Its
+    actual, observed effect was to also block correcting THIS row when its own `commit_sha`
+    happened to be non-NULL for any reason — including a corrupted or fabricated one, which is
+    exactly the disagreement §11.5's authority rule exists to resolve in Git's favour. Selecting
+    the `attempt_id` first and updating it unconditionally keeps the hazard closed (still the one
+    row `task_id = ?` and the `ORDER BY` name, never another task's or another rung's) while making
+    the correction unconditional on what that row currently holds, matching SPEC.md §12 item 15's
+    "hand-editing `attempts.commit_sha` to a SHA that is not on the branch — makes resume correct
+    the column."
 
     **`revalidation_round` is in the `ORDER BY` and CANNOT change the answer — it is named, not
     load-bearing, and an earlier version of this docstring claimed the opposite.** That claim was
@@ -11686,12 +11700,13 @@ async def _persist_arbitration(
     below exists for.
 
     **Returns the landed entries whose `attempts` row could not be found**, and that return value
-    is not a courtesy. `attempt_id = (SELECT … LIMIT 1)` over an empty subquery is
-    `attempt_id = NULL`, which matches zero rows *silently* — while `phases.post_commit_sha` is
-    written in the same unit regardless. The two pointers §11.5's authority table pairs would then
-    disagree with nothing saying so, and §11.5 step 5's `evidence_holds` reads one of them. The
-    caller reports every entry by name (Rule 11); the `phases` write is still made, because the
-    commit really is on the branch and Git is what that column points at.
+    is not a courtesy. The `SELECT … LIMIT 1` naming "the newest rung" returns no row exactly when
+    `task_id` has no `attempts` row at all — that is the *only* case left that skips the `UPDATE`,
+    now that the row's own `commit_sha` no longer gates it (D87) — while `phases.post_commit_sha`
+    is written in the same unit regardless. The two pointers §11.5's authority table pairs would
+    then disagree with nothing saying so, and §11.5 step 5's `evidence_holds` reads one of them.
+    The caller reports every entry by name (Rule 11); the `phases` write is still made, because
+    the commit really is on the branch and Git is what that column points at.
     """
     stamp = _iso(_now())
     unwritten: list[tuple[str, str, int, str]] = []
@@ -11704,16 +11719,25 @@ async def _persist_arbitration(
                     "    lease_expires_at = NULL WHERE run_id = ? AND task_id = ?",
                     (run_id, task_id),
                 )
-                cursor = await db.execute(
-                    "UPDATE attempts SET commit_sha = ? WHERE attempt_id = ("
-                    "    SELECT attempt_id FROM attempts "
-                    "     WHERE run_id = ? AND task_id = ? AND commit_sha IS NULL "
-                    "     ORDER BY attempt DESC, revalidation_round DESC, retry_ordinal DESC "
-                    "     LIMIT 1)",
-                    (sha, run_id, task_id),
+                target = await db.execute(
+                    "SELECT attempt_id FROM attempts "
+                    " WHERE run_id = ? AND task_id = ? "
+                    " ORDER BY attempt DESC, revalidation_round DESC, retry_ordinal DESC "
+                    " LIMIT 1",
+                    (run_id, task_id),
                 )
-                if not cursor.rowcount:
+                row = await target.fetchone()
+                if row is None:
                     unwritten.append((task_id, repo_id, phase, sha))
+                else:
+                    # Unconditional: `row` is fixed by `task_id = ?` and the `ORDER BY` alone
+                    # (D87) — the row's OWN `commit_sha`, whatever it currently holds, is not
+                    # part of how it was chosen, so it must not gate whether Git's answer is
+                    # written to it.
+                    await db.execute(
+                        "UPDATE attempts SET commit_sha = ? WHERE attempt_id = ?",
+                        (sha, row[0]),
+                    )
                 await db.execute(
                     "UPDATE phases SET post_commit_sha = ?, updated_at = ? "
                     " WHERE run_id = ? AND repo_id = ? AND phase = ?",
