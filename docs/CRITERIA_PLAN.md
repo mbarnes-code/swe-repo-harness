@@ -107,20 +107,33 @@ DONE bar.
 **Out of scope:** none — this is a pure grep-widening, no production risk.
 
 ## 6. The ecosystem/contract-kind confinement invariant
-**OPEN — real defect found (round Q task 1), fix ruled — TEST-ONLY once the fix lands.** All five
-named tests exist and pass, but only scan for `Ecosystem` patterns, never `ContractKind`, and
-never scan for `match`/`case` statements (audit row 6). The `match`/`case` half is genuinely
-vacuous today (confirmed by sweep). The `ContractKind`-`Compare` half was **not** vacuous: round Q
-task 1 found a live violation, `src/fleet/workers/contracts.py:758` (`if kind is
-ContractKind.OPENAPI:`), contradicting that module's own docstring and `docs/SPEC.md` §1. Ruled
-and recorded — `docs/DECISIONS.md` ADR-0100, `docs/SPEC.md`:7421 dated marker: (1) fix
-`contracts.py:758` to a table-derived form matching its sibling tables, (2) scope gate (a)'s
-subscript clause to exclude registry-table reads (e.g. `SYMBOL_IDENTIFIED[ContractKind.PROTO]`),
-which are the compliant pattern, not a violation of it.
-**Done bar:** land the `contracts.py` fix per ADR-0100, then extend the existing pattern set to
-include `ContractKind` comparisons (scoped per the ADR) and `match`/`case` forms, re-run against
-the same exemption list.
-**Out of scope:** none.
+**DONE (fix landed round Q task 1, `78e5667`; AST gates landed `dbd91d6`, merged `a1f20f5`;
+round-Q-final-review correction `I4` closes the one gap found in the landed gate).** *(Edited
+post-round-Q-final-review: this entry previously read "OPEN — real defect found, fix ruled —
+TEST-ONLY once the fix lands" and its done bar said to "land the `contracts.py` fix … then
+extend" — both halves had already landed and this entry was never refreshed after the merge; see
+round-Q final review finding I1.)* All five original `Ecosystem`-only line-scan tests still exist
+and pass. Round Q task 1 landed both halves this entry's old done bar described as future work:
+`src/fleet/workers/contracts.py:758`'s `if kind is ContractKind.OPENAPI:` was converted to the
+table-derived `KIND_MODIFIERS` form (`78e5667`, `docs/DECISIONS.md` ADR-0100, `docs/SPEC.md:7421`
+dated marker), and a new AST walk
+(`tests/test_ecosystems.py::test_no_bare_compare_or_subscript_names_a_kind_member_outside_the_adapter_packages`
++ `::test_no_match_case_names_a_kind_member_outside_the_adapter_packages`, `dbd91d6`) now covers
+both the `ContractKind`-`Compare`/`Subscript` half the five line-scans never checked and the
+`match`/`case` half (confirmed vacuous in production code today, by sweep).
+**One substantive gap found and closed in the same follow-up as this correction:** the landed AST
+walk's `_kind_member_name` helper matched a bare `ContractKind.X`/`Ecosystem.X` operand but missed
+one nested inside a `Tuple`/`List`/`Set` comparator — the natural `if kind in (ContractKind.X,
+ContractKind.Y):` form the branch this gate forbids would actually take once a second
+kind-specific case exists. Accidentally reachable, not adversarial-only, per Rule 12's stop rule.
+Fixed by recursing `_kind_member_name` into container-literal comparators; gate re-run confirmed 0
+offenders on `src/fleet/`, both before and after.
+**Out of scope (disclosed, not required by SPEC.md:7421's literal wording):** an aliased import
+(`from … import ContractKind as CK`) or an attribute-chain form (`enums.ContractKind.X`) still
+escapes the AST walk even after the I4 fix (`tests/test_ecosystems.py` M4) — I4 closed the
+tuple/list/set-literal container form, not the aliasing/attribute-chain forms. The pre-existing
+`Ecosystem\.[A-Z]` line scans remain in place and are not redundant with the AST walk — they
+still catch the aliased-import form for `Ecosystem` that the walk does not.
 
 ## 7. Six `ManifestAdapter`s parse fixtures at `tests/fixtures/repos/`
 **DONE (ADR-0099, 2026-08-30).** SPEC.md item 7 reworded to name the actual mechanism
@@ -256,16 +269,27 @@ regression-guard sweep test (AST-based, not a hand-maintained list) now asserts 
 bar — full literal text, not a partial reading.**
 
 ## 19. Cycles broken at the stated scale
-**OPEN — SCALE-FIXTURE.** Existing tests use 2-3 node cycles; the criterion states 3/12/41-node
-cases specifically, plus a "no hang" property with zero timeout assertions anywhere (audit row 19).
-**Done bar:** a 12-node fixture asserting shared `scc_id` via a built `PullRequestDraft`, and one
-timeout-bounded test asserting the 41-repo case completes and doesn't hang (does not need to
-literally plant 41 repos if the algorithm's complexity class makes a smaller adversarial case
-equally discriminating — state which was used).
+**OPEN — SCALE-FIXTURE, narrowed (round Q task 3 landed the scale fixtures; one leg remains).**
+*(Edited post-round-Q-final-review: this entry was untouched by round Q task 3 despite the task
+landing exactly the two fixtures the old done bar named — see round-Q final review finding I2.)*
+Round Q task 3 (`13818c1`) landed both scale cases the old done bar called for:
+`test_a_12_repo_cycle_shares_one_scc_id_across_all_members` (12-node fixture, all members share
+one `scc_id`) and `test_a_41_repo_cycle_completes_without_hanging` (timeout-bounded, no-hang
+property). What remains open, and the reason `OPEN` is still the correct status rather than
+`DONE`: the landed 12-node test asserts shared `scc_id` via a `CycleFinding`, not via a built
+`PullRequestDraft` — the round's own task report explicitly scopes `PullRequestDraft.scc_id` out
+("out of this file's scope"), matching `docs/SPEC.md:7434`'s literal wording ("one
+`PullRequestDraft.scc_id`") rather than the looser "assert all 12 members share one `scc_id`"
+phrasing the round plan used to describe the task.
+**Done bar (narrowed to the one remaining leg):** a test asserting the shared `scc_id` specifically
+through a built `PullRequestDraft` for the 12-node cycle case, per `docs/SPEC.md:7434`'s literal
+wording. The 41-node no-hang property is closed and does not need re-doing.
 
 ## 20. Secrets never leak
-**OPEN — 2 of 4 named DB columns actually covered (corrected 2026-08-31, round Q review), PR-body
-placeholder still open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL
+**OPEN — per-column coverage listed in the 2026-08-31 round-Q-final-review dated annotation below
+(the "2 of 4"/"3 of 4" running counts elsewhere in this entry do not reconcile with each other —
+read the per-column list, not either count), PR-body placeholder still open.** SPEC.md item 20's
+literal text wants a combined fixture run (mirror-URL
 token, build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
 `migration_state.json` AND four named DB columns (`events.payload`, `attempts.stderr_tail`,
 `phases.last_error`, `llm_cache.response_json`) AND the PR-body `«redacted:…»` placeholder.
@@ -301,6 +325,19 @@ named DB columns are now actually covered (`events.payload`, `attempts.stderr_ta
 Tests: `tests/test_runner.py::test_terminate_uncharged_redacts_a_credential_in_last_error_before_the_write`,
 `tests/test_runner.py::test_record_diagnostics_redacts_a_credential_in_last_error_before_the_write`,
 `tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`.
+**Dated annotation, 2026-08-31 (round-Q-final-review, finding I3 — reconciling the "2 of 4" /
+"3 of 4" counts).** The two running counts above (this entry's heading originally said "2 of 4";
+the annotation immediately above this one says "3 of 4") do not reconcile with each other: read
+literally, "2 of 4" excludes `llm_cache.response_json` from the covered set while the sentence
+six lines above it says `llm_cache.response_json` "are now covered". Per Guardrail 6, retiring
+both raw totals in favor of the class result — a per-column status list, which is authoritative
+going forward over any "n of 4" phrasing anywhere else in this entry:
+- `events.payload` — covered pre-round.
+- `attempts.stdout_tail` / `attempts.stderr_tail` — covered by D90 (persisted-column test +
+  over-redaction control, mutation-discriminated).
+- `phases.last_error` — covered by D88 (`complete_phase`) and D90
+  (`_terminate_uncharged`, `_record_diagnostics`).
+- `llm_cache.response_json` — covered by D88 only; **not** re-verified by D90's task.
 **Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
 unverified, confirmed by two separate rounds' investigations (round M found a different leak on
 the PR path; round P confirms this specific clause remains untouched). Whether the four-column
