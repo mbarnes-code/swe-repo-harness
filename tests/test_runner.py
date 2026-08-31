@@ -242,7 +242,9 @@ def asks_the_model(role: str = "transform_repair") -> Behaviour:
     return behaviour
 
 
-def fails_with(failure_class: FailureClass, stderr_tail: str) -> Behaviour:
+def fails_with(
+    failure_class: FailureClass, stderr_tail: str, *, retryable: bool = False
+) -> Behaviour:
     """Like `fails`, but with the worker's OWN message — which is what the §13 row 40 finding
     carries, so a test that let `fails` synthesise one would be asserting on the fixture."""
 
@@ -252,7 +254,7 @@ def fails_with(failure_class: FailureClass, stderr_tail: str) -> Behaviour:
         return WorkerResult(
             status="failed",
             error=WorkerError(
-                failure_class=failure_class, retryable=False, stderr_tail=stderr_tail
+                failure_class=failure_class, retryable=retryable, stderr_tail=stderr_tail
             ),
         )
 
@@ -1595,6 +1597,108 @@ async def test_a_non_retryable_failure_does_not_consume_a_rung_a_resume_would_sk
     assert (status_b, attempts_b) == ("REQUIRES_HUMAN_INTERVENTION", 3), (
         "the EXHAUSTING failure terminates too, but it spent its rung and must be charged"
     )
+
+
+# ======================================================================================
+# D90 (§12.20, SECURITY-RELEVANT) — `_terminate_uncharged` and `_record_diagnostics` each
+# issue their own raw `UPDATE phases ... last_error = ?` and bypass `complete_phase` entirely,
+# so D88's fix there (redact `last_error` at the write boundary) never covers either of them.
+# ======================================================================================
+
+_D90_PAT = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+_D90_TAINTED = f"clone failed for remote https://oauth2:{_D90_PAT}@gitea.local:3001/x.git"
+
+
+async def test_terminate_uncharged_redacts_a_credential_in_last_error_before_the_write(
+    harness: Harness,
+) -> None:
+    """D90: a non-retryable TERMINATE reaches `_terminate_uncharged`, not `complete_phase` — the
+    same `error_from_exception`-sourced, unredacted `stderr_tail` D88 traced for
+    `phases.last_error` reaches this column too, and this write is the LAST one the row gets: it
+    lands at REQUIRES_HUMAN_INTERVENTION and a human reads it from there.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [
+        fails_with(FailureClass.DEP_CONFLICT, _D90_TAINTED, retryable=False)
+    ]
+
+    await harness.runner().run_wave(0)
+
+    status, _, _, _, last_error = await harness.phase_row("repo-a")
+    assert status == "REQUIRES_HUMAN_INTERVENTION"
+    assert last_error is not None
+    assert _D90_PAT not in last_error, f"a live PAT reached phases.last_error: {last_error!r}"
+    assert "github_pat_" not in last_error
+    assert "«redacted:" in last_error, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in last_error, "over-redaction destroys the debuggable part too"
+
+
+async def test_terminate_uncharged_leaves_an_innocuous_last_error_unchanged(
+    harness: Harness,
+) -> None:
+    """The control for the test above: this fix is not free to over-redact its way to green."""
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [
+        fails_with(FailureClass.DEP_CONFLICT, "bazel test //...: 3 failures", retryable=False)
+    ]
+
+    await harness.runner().run_wave(0)
+
+    status, _, _, _, last_error = await harness.phase_row("repo-a")
+    assert status == "REQUIRES_HUMAN_INTERVENTION"
+    assert last_error == "bazel test //...: 3 failures"
+
+
+async def test_record_diagnostics_redacts_a_credential_in_last_error_before_the_write(
+    harness: Harness,
+) -> None:
+    """D90: `_record_diagnostics` runs on EVERY failure — retryable or not — before
+    `RetryPolicy`'s decision is acted on, and its own raw `UPDATE` bypasses `complete_phase` too.
+
+    A later `complete_phase`/`_terminate_uncharged` write would overwrite whatever
+    `_record_diagnostics` left behind, masking an unredacted write with a later, fixed one — so
+    this test must read the row BEFORE any such write happens. `_one_dispatch_then_crash` trips
+    the resource guard right after the first failure's diagnostics write and before the retry's
+    second dispatch, so the row read here is exactly what `_record_diagnostics` wrote.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    tainted = f"transient dial to https://oauth2:{_D90_PAT}@gitea.local:3001/x.git failed"
+    BEHAVIOURS["repo-a"] = [fails_with(FailureClass.TRANSIENT_INFRA, tainted, retryable=True)]
+
+    await harness.runner(resource_guard=_one_dispatch_then_crash()).run_wave(0)
+
+    status, _, transient, failure_class, last_error = await harness.phase_row("repo-a")
+    assert status == "RUNNING", "the lease is still held; complete_phase never ran"
+    assert transient == 1, "the diagnostics write this test reads did happen"
+    assert failure_class == "TRANSIENT_INFRA"
+    assert last_error is not None
+    assert _D90_PAT not in last_error, f"a live PAT reached phases.last_error: {last_error!r}"
+    assert "github_pat_" not in last_error
+    assert "«redacted:" in last_error, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in last_error, "over-redaction destroys the debuggable part too"
+
+
+async def test_record_diagnostics_leaves_an_innocuous_last_error_unchanged(
+    harness: Harness,
+) -> None:
+    """The control for the test above."""
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [
+        fails_with(
+            FailureClass.TRANSIENT_INFRA, "dial tcp: connection refused", retryable=True
+        )
+    ]
+
+    await harness.runner(resource_guard=_one_dispatch_then_crash()).run_wave(0)
+
+    status, _, transient, _, last_error = await harness.phase_row("repo-a")
+    assert status == "RUNNING"
+    assert transient == 1
+    assert last_error == "dial tcp: connection refused"
 
 
 async def test_a_tier_outage_halts_the_run_and_leaves_the_repo_untouched(

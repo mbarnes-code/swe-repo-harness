@@ -288,15 +288,26 @@ further unredacted `phases.last_error` write paths in `orchestrator/runner.py` t
 `complete_phase` (one of them terminal). Per this file's own ground rule 1 discipline, the
 original sentence is left in the paragraph above and corrected here rather than rewritten in
 place.
-**Done bar (remaining):** land D90's fix (redact at the two `runner.py` sites and inside
-`record_attempt`, matching D88's pattern), then a persisted-column test for
-`attempts.stdout_tail`/`stderr_tail`. Separately, the PR-body `«redacted:…»` placeholder clause —
-still entirely unverified, confirmed by two separate rounds' investigations (round M found a
-different leak on the PR path; round P confirms this specific clause remains untouched). Whether
-the four-column grep-sweep methodology also needs a literal combined-fixture test, or whether the
-now-proven per-column properties satisfy the criterion's intent, is worth a brief adjudication
-before attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a
-precedent for accepting equivalent per-column coverage.
+**Dated annotation, 2026-08-31 (round Q task, D90 fix landed):** D90's fix is landed —
+`redact_text` now runs at `runner.py`'s `_terminate_uncharged` and `_record_diagnostics` UPDATE
+sites and inside `repository.py`'s `record_attempt` for `stdout_tail`/`stderr_tail`, each proven
+by a persisted-column test (credential-shaped secret planted through the real write path, read
+back off a real SQLite row) plus a companion over-redaction control, and each discriminated by
+mutation (revert the `redact_text` call → the new test goes genuinely RED with the live secret
+visible → restore → green). That closes the `attempts.stdout_tail`/`stderr_tail` gap this
+annotation's prior paragraph named and the two `runner.py` write paths D90 traced — **3 of 4**
+named DB columns are now actually covered (`events.payload`, `attempts.stderr_tail`,
+`phases.last_error`; `llm_cache.response_json` unchanged from D88, not re-verified by this task).
+Tests: `tests/test_runner.py::test_terminate_uncharged_redacts_a_credential_in_last_error_before_the_write`,
+`tests/test_runner.py::test_record_diagnostics_redacts_a_credential_in_last_error_before_the_write`,
+`tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`.
+**Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
+unverified, confirmed by two separate rounds' investigations (round M found a different leak on
+the PR path; round P confirms this specific clause remains untouched). Whether the four-column
+grep-sweep methodology also needs a literal combined-fixture test, or whether the now-proven
+per-column properties satisfy the criterion's intent, is worth a brief adjudication before
+attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a precedent
+for accepting equivalent per-column coverage.
 
 ## 21. Determinism — clean re-run, byte-identical digest
 **DONE (all three clauses landed, round O `daf2a24` + round Q task 2).** SPEC.md item 21 has

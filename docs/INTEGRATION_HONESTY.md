@@ -6867,7 +6867,7 @@ wiring step (in which case this is a wiring gap, closable the way D80 was), or w
 intent has shifted since `task_id`-scoped queries were written and the scoping should instead key
 on something a real write path does populate — that adjudication is not made here.
 
-## D90 — OPEN, SECURITY-RELEVANT. D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
+## D90 — FIXED, LANDED. D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
 rather than searching for a new defect independently — recorded separately from D88 since it is a
@@ -6878,12 +6878,12 @@ before writing: `\bD90\b` over `docs/` returned 0 occurrences.
 repository.py` redacts `last_error`, `findings.payload`, and `attempts.*_tail` on write." D88
 fixed exactly one of these three, at exactly one of `phases.last_error`'s call sites:
 
-1. `src/fleet/orchestrator/runner.py:963` (`_terminate_uncharged`) and `runner.py:1048`
+1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1204-1209`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1216-1223`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
-   `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:703-710`) and is
+   `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
    **terminal** — the row settles at `REQUIRES_HUMAN_INTERVENTION` with the unredacted value as
    its final persisted state, and `state/projection.py:265` copies `last_error` straight into the
    projected state with no redaction call anywhere in that module (confirmed by grep).
@@ -6909,3 +6909,41 @@ that read the persisted column (not the in-memory `WorkerError` object, which
 `docs/CRITERIA_PLAN.md` §12.20 needs a dated annotation correcting its "3 of 4 (already covered
 pre-round)" claim to 2 of 4 pending this fix — per this project's own discipline, annotate in
 place, do not rewrite what round P wrote.
+
+> **[Fixed 2026-08-31, round Q, lane W4. Heading updated above; this is the annotation, not a
+> rewrite of what precedes it.]** Applied `redact_text` at all three sites the "not yet built"
+> paragraph named: `runner.py::_terminate_uncharged`'s and `::_record_diagnostics`'s own raw
+> `UPDATE phases … last_error = ?` params (`None if last_error is None else
+> redact_text(last_error)`, mirroring D88's exact `complete_phase` pattern), and
+> `repository.py::record_attempt`'s `stdout_tail`/`stderr_tail` params
+> (`redact_text(row.stdout_tail)` / `redact_text(row.stderr_tail)` — unconditional, no `None`
+> guard needed, since `AttemptRow.stdout_tail`/`stderr_tail` default to `""` and `redact_text`
+> returns a falsy string unchanged). Three new tests read the *persisted* column off a real
+> SQLite row through the real orchestrator/repository write paths (not the in-memory
+> `WorkerError`), each with a companion over-redaction control and each proven to discriminate by
+> mutation (revert the `redact_text` call → genuine RED with the live `github_pat_…` value
+> visible in the assertion diff → restore → green):
+> `tests/test_runner.py::test_terminate_uncharged_redacts_a_credential_in_last_error_before_the_write`
+> (a non-retryable `DEP_CONFLICT` driven through a real `run_wave`, terminal at
+> `REQUIRES_HUMAN_INTERVENTION`),
+> `tests/test_runner.py::test_record_diagnostics_redacts_a_credential_in_last_error_before_the_write`
+> (a retryable `TRANSIENT_INFRA` failure caught mid-retry via the existing
+> `_one_dispatch_then_crash` resource-guard harness, so the row read is exactly what
+> `_record_diagnostics` wrote and not masked by a later `complete_phase`/`_terminate_uncharged`
+> overwrite), and
+> `tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`.
+> `mypy --strict` clean on both touched source files; `tests/test_runner.py` (45 tests) and
+> `tests/test_repository.py` (47 tests) both pass whole-file, no `-k`. `docs/CRITERIA_PLAN.md`
+> §12.20 updated in the same round: 2 of 4 → 3 of 4 named DB columns covered
+> (`llm_cache.response_json`, D88's own column, was not re-verified by this task and is left as
+> D88 left it). The PR-body `«redacted:…»` placeholder clause remains separately unverified, as
+> before.
+>
+> ***Citation corrections made in place — pointers, not records; no claim changed.*** This fix's
+> own `+14` lines (the `redact_text` import plus the two sites' docstring paragraphs) shifted
+> every `runner.py` line citation below it in this entry's own body, caught by
+> `tests/test_integration_honesty_citations.py` going 52/54 on this branch (54/54 on unmodified
+> `main`). Re-derived against this branch's `runner.py`: `:963`→`:964` (`_terminate_uncharged`),
+> `:1048`→`:1055` (`_record_diagnostics`), `:1204-1209`→`:1216-1223` (`_detail()`),
+> `:703-710`→`:704-711` (the non-retryable-TERMINATE dispatch block). `tests/test_integration_honesty_citations.py`
+> back to 54/54 whole-file, no `-k`, after the correction.

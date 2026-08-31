@@ -2126,7 +2126,15 @@ class SqliteStateRepository:
 
         §6: `DO UPDATE` on the outcome columns when `already_applied = 0`, else `DO NOTHING` —
         under a plain `DO NOTHING` the repair loop would be composed from the first, stale log.
+
+        `stdout_tail`/`stderr_tail` are redacted HERE, at this write boundary (SPEC §11.4, D90) —
+        the same discipline `complete_phase`'s `last_error` param applies (D88), for the sibling
+        columns the same SPEC.md:6987 sentence names. `AttemptRow.stdout_tail`/`stderr_tail`
+        default to `""`, never `None`, and `redact_text` returns a falsy string unchanged, so no
+        `None`-guard is needed here.
         """
+        stdout_tail = redact_text(row.stdout_tail)
+        stderr_tail = redact_text(row.stderr_tail)
         sql = (
             "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, "
             "    revalidation_round, tier, context_policy, approach_signature, command, "
@@ -2158,8 +2166,8 @@ class SqliteStateRepository:
             row.exit_code,
             row.failure_class,
             row.duration_ms,
-            row.stdout_tail,
-            row.stderr_tail,
+            stdout_tail,
+            stderr_tail,
             row.cost_usd,
             int(row.llm_cache_hit),
             row.patch_id,

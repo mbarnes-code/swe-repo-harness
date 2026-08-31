@@ -1063,6 +1063,80 @@ async def test_a_re_executed_command_overwrites_its_own_stale_outcome(
     assert rows[0].stderr_tail == ""
 
 
+async def test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write(
+    repo: SqliteStateRepository,
+) -> None:
+    """D90 (§12.20, SECURITY-RELEVANT): `record_attempt` writes `stdout_tail`/`stderr_tail` with
+    no redaction call — D88's own pattern, in the same file, not applied to the sibling columns
+    `docs/SPEC.md:6987` names in the same sentence ("`state/repository.py` redacts `last_error`,
+    `findings.payload`, and `attempts.*_tail` on write"). Production caller `cli.py:6441` sets
+    `stderr_tail=error.stderr_tail`, the same `WorkerError.stderr_tail` value D88 traced for
+    `phases.last_error` — a credential embedded in a worker's own captured output persists
+    verbatim to this durable, queryable column exactly the way D88's `last_error` gap did.
+
+    The control is `test_a_re_executed_command_overwrites_its_own_stale_outcome` just above: its
+    `stderr_tail`/`stdout_tail` values are innocuous and untouched by this fix.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted_stdout = f"cloning https://oauth2:{pat}@gitea.local:3001/x.git into /tmp/work"
+    tainted_stderr = f"fatal: remote https://oauth2:{pat}@gitea.local:3001/x.git unreachable"
+
+    await repo.record_attempt(
+        AttemptRow(
+            attempt_id="attempt-1",
+            run_id=RUN,
+            repo_id=REPO,
+            phase=Phase.BUILD,
+            attempt=1,
+            started_at=NOW.isoformat(),
+            finished_at=NOW.isoformat(),
+            command='["git","clone"]',
+            exit_code=1,
+            stdout_tail=tainted_stdout,
+            stderr_tail=tainted_stderr,
+        )
+    )
+
+    rows = [row async for row in repo.iter_attempts(RUN)]
+    assert len(rows) == 1
+    stdout_tail, stderr_tail = rows[0].stdout_tail, rows[0].stderr_tail
+    assert pat not in stdout_tail, f"a live PAT reached attempts.stdout_tail: {stdout_tail!r}"
+    assert pat not in stderr_tail, f"a live PAT reached attempts.stderr_tail: {stderr_tail!r}"
+    assert "github_pat_" not in stdout_tail and "github_pat_" not in stderr_tail
+    assert "«redacted:" in stdout_tail and "«redacted:" in stderr_tail, (
+        "the placeholder must survive, or debugging is blind"
+    )
+    assert "gitea.local" in stdout_tail and "gitea.local" in stderr_tail, (
+        "over-redaction destroys the debuggable part too"
+    )
+
+
+async def test_record_attempt_leaves_innocuous_stdout_and_stderr_tail_unchanged(
+    repo: SqliteStateRepository,
+) -> None:
+    """The control for the test above: this fix is not free to over-redact its way to green."""
+    await repo.record_attempt(
+        AttemptRow(
+            attempt_id="attempt-1",
+            run_id=RUN,
+            repo_id=REPO,
+            phase=Phase.BUILD,
+            attempt=1,
+            started_at=NOW.isoformat(),
+            finished_at=NOW.isoformat(),
+            command='["bazel","build","//..."]',
+            exit_code=0,
+            stdout_tail="INFO: Build completed successfully",
+            stderr_tail="",
+        )
+    )
+
+    rows = [row async for row in repo.iter_attempts(RUN)]
+    assert len(rows) == 1
+    assert rows[0].stdout_tail == "INFO: Build completed successfully"
+    assert rows[0].stderr_tail == ""
+
+
 # ======================================================================================
 # the read/write split (§11.5)
 # ======================================================================================
