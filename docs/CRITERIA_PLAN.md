@@ -198,11 +198,17 @@ by design, tracked as D50 (audit row 14).
 **Done bar:** identical to D50's own closure — do not open a separate effort here.
 
 ## 15. Crash safety, Git is the arbiter
-**OPEN — TEST-ONLY.** Step-4 git arbitration (discard vs. adopt) is strongly covered with a
-genuinely discriminating fixture. Missing: the fabricated reverse-disagreement case (hand-edited
-`attempts.commit_sha` pointing off-branch) is never constructed (audit row 15).
-**Done bar:** one fixture constructing that specific divergence and asserting the arbitration
-resolves it correctly.
+**DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
+(i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely
+discriminating fixture. (ii) adopt-the-landed-commit-without-charging — already covered
+pre-round. (iii) the fabricated-reverse-disagreement case (hand-edited `attempts.commit_sha`
+pointing off-branch) — closed this round. Building the fixture found the property did NOT fully
+hold (D87, now fixed): the column was not being corrected when it already carried a value. Fixed
+and reviewed with elevated scrutiny given it touches crash-recovery state reconciliation — row
+selection confirmed identical to the pre-fix query minus the removed guard, transaction atomicity
+confirmed, cross-task/cross-rung stomping hazard confirmed structurally impossible. Eighth
+criterion (after §12.5, §12.7, §12.12, §12.16, §12.18, §12.26, §12.32) to reach this file's strict
+DONE bar. Also surfaced D89 (pre-existing, disclosed, does not affect this fix's correctness).
 
 ## 16. Checkpoint integrity on corruption
 **DONE (SPEC corrected, `12be741`).** The SPEC said corruption "raises `ValidationError`"; the
@@ -310,21 +316,17 @@ Python only) and assert it builds; fix or split the `kind` conflation into two s
 assertions.
 
 ## 26. Preflight gates rather than crashes
-**OPEN — submodule/LFS closed (round O, `1c8e0ef`), one sub-case this file's original done-bar
-missed remains.** SPEC.md item 26's full text (`:7441`) names **five** fixture categories: empty,
-shallow, submodule-bearing, LFS-bearing, and **default-branched to `trunk`**. This file's earlier
-done-bar named only submodule/LFS — an incomplete reading, caught only now. Empty-repo and shallow
-were already covered pre-round; submodule/LFS are now covered with real fixtures
-(`tests/test_scan_e2e.py`, reviewed Approved — genuine `git submodule add`, genuine LFS pointer
-format, driven through real preflight, `SUCCEEDED` + documented columns + `SubmodulePresent`
-finding, matching the criterion's own "either proceed or produce a `PreflightFailed` finding"
-wording verbatim). **`trunk`-default-branch has zero fixture coverage anywhere** — confirmed by
-grep, not yet attempted. D41 covers a different defect (never-ran vs. settled-negative), not this
-gap. Do not count §12.26 toward the `<n> of 48` tally until the fifth case lands.
-**Done bar (remaining):** one fixture repo whose default branch is named `trunk` (not `main`),
-driven through preflight, asserted to proceed or gate per the same criterion text — read
-`workers/clone.py`'s actual handling of a non-`main` default branch before writing the assertion,
-don't assume.
+**DONE (all five fixture categories landed, round O `1c8e0ef` + round P `659d4d5`).** SPEC.md
+item 26's full text (`:7441`) names five fixture categories: empty, shallow, submodule-bearing,
+LFS-bearing, and default-branched to `trunk` — this file's own earlier done-bar missed the fifth,
+caught only while closing round O. Empty-repo and shallow were already covered pre-round;
+submodule/LFS landed round O with real fixtures (genuine `git submodule add`, genuine LFS pointer
+format); `trunk`-default-branch landed round P (genuine `git branch -m trunk`, confirmed to
+exercise the primary `symbolic-ref` resolution path, not merely coincide with the fallback list).
+All five reviewed Approved, each asserting `SUCCEEDED` + the documented `repos` columns, matching
+the criterion's own "either proceed or produce a `PreflightFailed` finding" wording verbatim. D41
+covers a different defect (never-ran vs. settled-negative), not this gap. Seventh criterion (after
+§12.5, §12.7, §12.12, §12.16, §12.18, §12.32) to reach this file's strict DONE bar.
 **Also flagged, separate future item (not this criterion's scope):** `require_lfs_binary: true` +
 no `git-lfs` on `PATH` → `PREFLIGHT` failure has zero test coverage anywhere (found by round O
 task 3, correctly left out of scope).
