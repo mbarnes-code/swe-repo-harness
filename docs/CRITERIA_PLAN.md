@@ -278,21 +278,32 @@ attempting — check whether SPEC's own "either/or" language elsewhere in §12 o
 for accepting equivalent per-column coverage.
 
 ## 21. Determinism — clean re-run, byte-identical digest
-**OPEN — 2 of 3 clauses closed (round O, `daf2a24`), one remains.** SPEC.md item 21 has three
-clauses: (1) clean re-run under `--llm-cache read-only` produces a byte-identical digest — **now
-covered** (`tests/test_cli.py`, reviewed Approved through one fix round; two real from-scratch
-runs, cache warmed then seeded cross-run per `schema.sql`'s own documented "NOT scoped to
-run_id" design, second run forced through an exploding backend so success requires a genuine
-cache hit; the digest's `waves`/`edges` sections are non-trivially exercised, the other 5 are
-honestly disclosed as structurally empty-but-equal in this fixture, not silently overclaimed).
-(2) `--llm-cache read-only` with a cleared cache fails loudly — **already covered pre-existing**
-(`test_llm_cache.py:454`, `test_run_context_llm_cache.py:279`). (3) **mutating one fixture source
-file changes the digest — still untested**, confirmed by grep, not attempted this round. Do not
-count §12.21 toward the `<n> of 48` tally until clause 3 lands.
-**Done bar (remaining):** one test that mutates a single fixture source file (any real content
-change) between two otherwise-identical runs and asserts the digest *differs* — the inverse of
-this round's test, proving the digest is actually sensitive to source content, not just stable
-when nothing changes.
+**DONE (all three clauses landed, round O `daf2a24` + round Q task 2).** SPEC.md item 21 has
+three clauses: (1) clean re-run under `--llm-cache read-only` produces a byte-identical digest —
+**covered** (`tests/test_cli.py::test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_llm_cache`,
+reviewed Approved through one fix round; two real from-scratch runs, cache warmed then seeded
+cross-run per `schema.sql`'s own documented "NOT scoped to run_id" design, second run forced
+through an exploding backend so success requires a genuine cache hit; the digest's `waves`/`edges`
+sections are non-trivially exercised, the other 5 are honestly disclosed as structurally
+empty-but-equal in this fixture, not silently overclaimed). (2) `--llm-cache read-only` with a
+cleared cache fails loudly — **covered pre-existing** (`test_llm_cache.py:454`,
+`test_run_context_llm_cache.py:279`). (3) **mutating one fixture source file changes the digest —
+now covered** (round Q task 2:
+`tests/test_cli.py::test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_clean_db_runs`),
+the direct inverse of clause 1's test, same two-workspace/warm-cache/forced-read-only harness,
+with `acme-app`'s `package.json` dependency spec on `@acme/lib` rewritten from an open range
+(`^1.0.0`) to a pinned exact release (`1.0.0`) — committed to the shared source git repo between
+run 1 and run 2 — which `graph/infer.py`'s `_is_pinned` reads to choose the edge `kind`
+(`DECLARED_DEP` vs `PUBLISHED_ARTIFACT`), a value `state/digest.py`'s `edges` section hashes. The
+mutation is confirmed non-cosmetic via `git diff --numstat` inside the test (Rule 12's
+zero-change gate), confirmed to land specifically in the `edges` section (per-section digests
+compared, not just the whole-run digest), and confirmed discriminating by an explicit control:
+with the mutation commit skipped, the same test fails at the pre-mutation-state assertion rather
+than passing vacuously. `.ts` source content was deliberately NOT the mutation target — the
+classify prompt (`ClassifyWorker._messages`) sends a path listing only, never file bytes, and the
+npm ecosystem adapter parses only `package.json`, so a `.ts` edit would not move the graph at
+all in this fixture and risked a false-negative test. `docs/PROGRESS.md`'s `<n> of 48` tally may
+now count §12.21.
 
 ## 22. Memory + disk ceilings
 **OPEN — mostly missing — NEW-MECHANISM.** `resource_guard` defaults to a no-op
