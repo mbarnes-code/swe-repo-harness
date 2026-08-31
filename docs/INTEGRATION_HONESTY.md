@@ -6754,3 +6754,45 @@ After the fix: remove the `xfail` marker so the test becomes the green proof, an
 `tests/test_cli.py -k step4` to confirm both precedent tests and the `provenance_missing` test
 (`with_attempt_row=False`) still pass unchanged — that one's zero-match case must remain reported,
 not start silently "succeeding" against a row that was never there.
+
+---
+
+## D88 — OPEN, SECURITY-RELEVANT. `phases.last_error` is written unredacted by the only real `complete_phase` implementation, contradicting `docs/SPEC.md`:6987's explicit claim that `state/repository.py` redacts it on write — a secret embedded in an exception's `str()` persists verbatim to a durable, queryable SQLite column
+
+**Found by round P task 2 (2026-08-31), while building §12.20's redaction-coverage tests for
+`phases.last_error`.** Verified free before writing: `\bD88\b` over `docs/` returned **0**
+occurrences.
+
+**The contradiction, quoted.** `docs/SPEC.md:6987` (§11.4, "Redaction — mandatory, at the write
+boundary, not at review time"): *"`state/repository.py` redacts `last_error`, `findings.payload`,
+and `attempts.*_tail` on write."* The only concrete `complete_phase` implementation
+(`src/fleet/state/repository.py:1358`, on `SqliteStateRepository` — the sibling declaration at
+`:498` is an abstract Protocol method, `...` body, not an implementation) takes `last_error` as a
+plain parameter and writes it directly into the `UPDATE phases SET ... last_error = ? ...`
+statement's params tuple, with **no `redact_text`/`redact()` call anywhere in the function**.
+
+**The unredacted path, traced end to end.** `workers/base.py::error_from_exception` (the
+generic catch-all for any exception escaping any worker's `run()`) builds
+`WorkerError.stderr_tail=str(exc)` — its own docstring cites §11.4 by name and correctly avoids a
+full traceback ("a traceback carries local variables, and locals carry credentials"), but `str(exc)`
+itself is not redacted either, and an exception message can just as easily echo a credential
+(a failed HTTP call embedding an auth header in its message, a subprocess error echoing a URL with
+embedded token, etc.). `orchestrator/runner.py::_complete` (`:937`) passes `last_error` straight
+through to `repository.complete_phase` with no redaction call in between.
+
+**Reproduced against a real, persisted row, not asserted.** A `github_pat_…`-shaped credential
+embedded in a raised exception's message was driven through this path end-to-end and read back
+from a real SQLite `phases` row: the credential persisted verbatim. Two mutation-proven regression
+tests were added this round for the *other* two redaction gaps §12.20 named (`_abandon_repo`'s
+`phases.last_error` write in `cli.py`, and `CachingModelClient`'s `llm_cache.response_json` write)
+— both of those write paths DO redact correctly and are now covered. This third path
+(`complete_phase`'s own terminal write, the one every phase transition goes through) is the one
+that doesn't, and per the task's TEST-ONLY scope no test asserting it as safe was written (it
+isn't), and no production code was touched.
+
+**Not yet built:** a fix adding a `redact_text`/`redact()` call to `complete_phase`'s `last_error`
+parameter (or to `_complete`'s call site, or to `error_from_exception` itself — three viable
+insertion points, not yet adjudicated) before it reaches the `UPDATE` statement, plus a
+discriminating test proving a planted secret does not survive this specific path (the pattern the
+two sibling tests already established this round). The PR-body `«redacted:…»` placeholder clause
+of §12.20 remains separately unverified (out of this entry's scope).
