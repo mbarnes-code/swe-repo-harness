@@ -212,7 +212,9 @@ def _make_repo_with_submodule(root: Path, name: str, target: Path, submodule_pat
     return path
 
 
-def _make_repo_with_default_branch(root: Path, name: str, files: dict[str, str], branch: str) -> Path:
+def _make_repo_with_default_branch(
+    root: Path, name: str, files: dict[str, str], branch: str
+) -> Path:
     """One real git repository whose default branch is `branch`, not `main` — a `git branch -m`
     rename of the fixture commit `_make_repo` already made, so `symbolic-ref --short HEAD` in the
     finished mirror genuinely reports `branch` rather than a hand-edited ref with no commit behind
