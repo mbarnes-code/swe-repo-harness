@@ -6778,7 +6778,7 @@ not start silently "succeeding" against a row that was never there.
 
 ---
 
-## D88 — OPEN, SECURITY-RELEVANT. `phases.last_error` is written unredacted by the only real `complete_phase` implementation, contradicting `docs/SPEC.md`:6987's explicit claim that `state/repository.py` redacts it on write — a secret embedded in an exception's `str()` persists verbatim to a durable, queryable SQLite column
+## D88 — FIXED, LANDED (`c410999`), SECURITY-RELEVANT. `phases.last_error` is written unredacted by the only real `complete_phase` implementation, contradicting `docs/SPEC.md`:6987's explicit claim that `state/repository.py` redacts it on write — a secret embedded in an exception's `str()` persists verbatim to a durable, queryable SQLite column
 
 **Found by round P task 2 (2026-08-31), while building §12.20's redaction-coverage tests for
 `phases.last_error`.** Verified free before writing: `\bD88\b` over `docs/` returned **0**
@@ -6817,6 +6817,21 @@ insertion points, not yet adjudicated) before it reaches the `UPDATE` statement,
 discriminating test proving a planted secret does not survive this specific path (the pattern the
 two sibling tests already established this round). The PR-body `«redacted:…»` placeholder clause
 of §12.20 remains separately unverified (out of this entry's scope).
+
+> **[Fixed 2026-08-31, `c410999`, round P task 2. Heading updated above; this is the annotation,
+> not a rewrite of what precedes it.]** Controller ruled on the insertion point: inside
+> `complete_phase` itself, in `state/repository.py`, immediately before `last_error` enters the
+> `UPDATE` params tuple — `None if last_error is None else redact_text(last_error)` — matching
+> `docs/SPEC.md:6987`'s literal "`state/repository.py` redacts... on write" and giving
+> defense-in-depth over every current and future caller of `complete_phase`, not only
+> `runner.py`'s. Reviewed Approved across two rounds (one fix round, for a docstring claim that
+> overstated `redact_text`'s general idempotency — narrowed to what was actually verified, with
+> the `authorization`-kind self-collision counterexample named rather than hidden). Both reviews
+> independently reproduced the fix location, the `None`-handling, the mutation check (revert →
+> genuine RED with the raw PAT visible → restore → green), and confirmed no other `complete_phase`
+> caller exists that would need separate treatment. Test:
+> `tests/test_repository.py::test_complete_phase_redacts_a_credential_in_last_error_before_the_write`.
+> The PR-body `«redacted:…»` placeholder clause remains separately unverified, as before.
 
 ---
 

@@ -256,11 +256,26 @@ literally plant 41 repos if the algorithm's complexity class makes a smaller adv
 equally discriminating — state which was used).
 
 ## 20. Secrets never leak
-**OPEN — TEST-ONLY.** Redaction primitive and two of the named leak sites (`events.payload`,
-`attempts.stderr_tail`) are covered. `phases.last_error` and `llm_cache.response_json` have no
-redaction test; the PR-body `«redacted:…»` placeholder is unverified (audit row 20).
-**Done bar:** one fixture run planting all three named secret shapes, sweeping the two uncovered
-columns plus the PR-body placeholder.
+**OPEN — 3 of 4 named DB columns now covered (round P, `7f56bed`), PR-body placeholder still
+open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL token,
+build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
+`migration_state.json` AND four named DB columns (`events.payload`, `attempts.stderr_tail`,
+`phases.last_error`, `llm_cache.response_json`) AND the PR-body `«redacted:…»` placeholder.
+`events.payload`/`attempts.stderr_tail` were already covered pre-round. `phases.last_error` and
+`llm_cache.response_json` are now covered — but via targeted per-column tests (each planting one
+secret shape through its own real write path and reading the persisted value back), not the
+literal "one fixture run planting all three named secret shapes" the done-bar originally
+described; the underlying property each column asserts is proven, the combined-fixture
+methodology is not. Investigating `phases.last_error` also found and fixed a real, live gap (D88,
+security-relevant): `complete_phase`'s terminal write wasn't redacting at all, contradicting
+SPEC.md:6987's explicit claim.
+**Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
+unverified, confirmed by two separate rounds' investigations (round M found a different leak on
+the PR path; round P confirms this specific clause remains untouched). Whether the four-column
+grep-sweep methodology also needs a literal combined-fixture test, or whether the now-proven
+per-column properties satisfy the criterion's intent, is worth a brief adjudication before
+attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a precedent
+for accepting equivalent per-column coverage.
 
 ## 21. Determinism — clean re-run, byte-identical digest
 **OPEN — 2 of 3 clauses closed (round O, `daf2a24`), one remains.** SPEC.md item 21 has three
