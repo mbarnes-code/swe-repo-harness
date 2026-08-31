@@ -57,12 +57,14 @@ audit or re-derived from `docs/SPEC.md` directly, not invented here.
 ---
 
 ## 1. `uv sync --frozen` offline on py3.12
-**OPEN — unit-level standing in for the criterion — TEST-ONLY.** Every `uv` reference in `tests/`
-drives the Python ecosystem *adapter* running `uv pip compile` against target repos, never `uv
-sync` on this harness's own environment (spec12 audit row 1).
-**Done bar:** one test that shells `uv sync --frozen` against the committed `uv.lock` with network
-disabled and asserts exit 0, plus an assertion that `sys.version_info[:2] == (3, 12)`.
-**Out of scope:** does not require touching the adapter's own `uv pip compile` tests.
+**DONE (round S, `3ef2b9a`, reviewed Approved).** `tests/test_lint_gate.py`'s
+`test_uv_sync_frozen_is_exit_0_offline_on_py312` shells `uv sync --frozen --offline` against the
+committed `uv.lock`, redirected to a throwaway `tempfile.mkdtemp()` target via `UV_PROJECT_ENVIRONMENT`
+(shared `.venv` empirically confirmed untouched by the reviewer — `git status`/mtime identical
+before and after), and asserts exit 0 plus `sys.version_info[:2] == (3, 12)`. Mutation-verified
+(a corrupted `uv.lock` flips exit 0 → 2). Found, not fixed (correctly out of scope): the shared
+`.venv` has `mypy 2.3.0` installed against `uv.lock`'s pinned `2.3.1` — pre-existing drift,
+orthogonal to this test by construction (throwaway sync target).
 
 ## 2. `ruff check` / `ruff format --check` / `mypy --strict`
 **OPEN — PARTLY (round R, `5c4204c`) — SPEC-ADJUDICATION needed for the remaining leg.** `ruff
@@ -424,10 +426,21 @@ disk-ceiling sub-clause, which is smaller and already mostly done (needs only th
 validity assertion).
 
 ## 23. Idempotency — re-scan, re-transform
-**OPEN — SCALE-FIXTURE.** Re-transform is fully covered. Re-scan covers 6 of 8 named tables. No
-9-repo vendored-contract fixture exists (audit row 23).
-**Done bar:** extend the re-scan test to the remaining 2 tables, and add the 9-repo fixture the
-criterion names for the vendored-contract case.
+**OPEN — one sub-clause blocked on D23, otherwise DONE (round S, `4e1975d`).** Re-transform is
+fully covered. Re-scan now covers 6 of the 8 named tables (`edges, contracts, symbols, manifests,
+findings, collisions, waves, wave_members` per `docs/SPEC.md:7438`) directly in
+`tests/test_scan_e2e.py`, plus `tests/test_sequence_e2e.py`'s pre-existing, narrower `contracts`
+coverage — `symbols, edges, manifests, findings` extended in-place, `waves, wave_members` and
+`contracts, collisions` (via a genuine 9-repo, real-git, real-CLI vendored-contract fixture) newly
+added this round. **Correction, 2026-08-31:** this entry's prior "6 of 8" line predates round S
+and had no citation; re-measured against `tests/test_scan_e2e.py` at round S's start, the true
+pre-round figure was **3 of 8** (`edges, symbols, manifests`) — round S closed the remaining 5.
+**Remaining, genuinely unclosable by a test:** `edges.retargeted_from_repo_id` is never persisted
+(`state/repository.py`'s `insert_edges`/`EdgeRow` carry no such column/field at all — the value
+`graph/cycles.py:736` computes in memory is structurally dropped before it reaches SQL) — this is
+`D23` (`docs/INTEGRATION_HONESTY.md`), OPEN, not something a TEST-ONLY task can close.
+**Done bar:** fix D23 (persist `retargeted_from_repo_id` for real), then one test asserting it
+survives a second scan unchanged. Everything else in this criterion is already closed.
 
 ## 24. Fail-closed budgets, ledger moves correctly
 **OPEN — mixed, 7 sub-clauses — TEST-ONLY + known D62.** Wave-breach, over-reserve-refused, and
@@ -487,19 +500,13 @@ single one-shot task.
 **Out of scope:** do not re-implement or duplicate a second COORDINATE call site.
 
 ## 28. Single writer, pool children have no DB handle
-**OPEN — TEST-ONLY, narrower than the original wording (round-K correction).** The single-writer
-half is covered. The pool-children-no-handle half is **true in the tree today** by inspection
-(`orchestrator/budgets.py:947-949` passes only `max_workers=`/`mp_context=`) but not asserted by
-any test that inspects the initializer arguments, as the criterion's own evidence clause requires.
-200-repo zero-`SQLITE_BUSY` is untested at scale (largest today is 50 coroutines) (audit row 28,
-corrected `docs/SPEC.md:34` per round-K — this is NOT the retired `D86` clause).
-**Done bar:** one test inspecting `budgets.py:947-949`'s actual `ProcessPoolExecutor(...)` call
-arguments and asserting no DB-handle-bearing kwarg is present, plus a coroutine-count test at closer
-to the stated 200-repo scale (or a documented, adjudicated smaller number if 200 real coroutines is
-impractical — state the number chosen and why).
-**Out of scope:** do **not** add an `initializer=` — that would satisfy the retired §12.47
-sentence, not this one, and SPEC.md's own round-K correction explicitly forbids it as "inverting
-Rule 11 to buy a property nothing needs."
+**DONE (round S, `0742a0f`, reviewed Approved).** `tests/test_budgets.py`'s
+`test_new_cpu_pool_passes_no_db_handle_bearing_kwarg` calls the real `new_cpu_pool` through a spy
+on `ProcessPoolExecutor` and asserts the only kwargs present are `max_workers`/`mp_context` — no
+`initializer`/`initargs`. `tests/test_db.py`'s existing concurrency test was scaled from 50 to the
+full 200 coroutines the criterion names (no adjudicated-smaller-number fallback needed). Both
+mutation-verified (a spurious `initializer=` kwarg, and a real `await`→`create_task` concurrency
+bug reproducing a genuine `sqlite3.OperationalError`).
 
 ## 29. Contracts extracted once, deterministically
 **OPEN — mixed, 9 sub-clauses — SCALE-FIXTURE + one structurally-unreachable clause.** Most
