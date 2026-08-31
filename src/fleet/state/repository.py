@@ -1376,6 +1376,14 @@ class SqliteStateRepository:
 
         Raises `LeaseStolenError` on `rowcount == 0` (CLAUDE.md Rule 11 — the caller must abort
         without touching git).
+
+        `last_error` is redacted HERE, at the write boundary (SPEC §11.4, D88): a caller's
+        `stderr_tail` is redacted at subprocess-capture time (`util/proc.py`), but the generic
+        `except Exception` path (`workers/base.py::error_from_exception`, `stderr_tail=str(exc)`)
+        carries no such guarantee, so a credential-shaped exception message reached this column
+        unredacted until this call was added. Redacting again here is idempotent — `redact_text`
+        matches no already-`«redacted:…»` text — so a caller that already redacted (`cli.py`'s
+        `_abandon_repo`, a different write path in a different file) pays only a cheap re-scan.
         """
         escalates = 1 if status is RepoStatus.PENDING else 0
         sql = (
@@ -1391,7 +1399,7 @@ class SqliteStateRepository:
         params = (
             escalates,
             str(status),
-            last_error,
+            None if last_error is None else redact_text(last_error),
             _iso(now),
             run_id,
             repo_id,

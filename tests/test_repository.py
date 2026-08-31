@@ -301,6 +301,45 @@ async def test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_state
     assert row.last_error == "bazel test //...: 3 failures"
 
 
+async def test_complete_phase_redacts_a_credential_in_last_error_before_the_write(
+    repo: SqliteStateRepository,
+) -> None:
+    """D88 (§12.20, SECURITY-RELEVANT): `complete_phase` is the write boundary SPEC.md:6987
+    names — "`state/repository.py` redacts `last_error`... on write" — and until this test's
+    companion fix it did not. The gap is real, not hypothetical: `workers/base.py`'s generic
+    `except Exception` catch-all (`error_from_exception`) builds `WorkerError.stderr_tail =
+    str(exc)` with no redaction, and that string reaches this exact `last_error` parameter on
+    every retry/terminal path through `orchestrator/runner.py`. A raised exception whose message
+    happens to quote a credential-bearing URL — plausible for any network or git failure, not an
+    adversarial input — is the shape planted here.
+
+    The control is `test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_statement`
+    just above: it asserts an innocuous `last_error` ("bazel test //...: 3 failures") survives
+    UNCHANGED, so this test is not free to over-redact its way to green.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted = f"clone failed for remote https://oauth2:{pat}@gitea.local:3001/x.git"
+
+    await repo.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+    fence = await repo.acquire_phase_lease(
+        RUN, REPO, Phase.TRANSFORM, owner=WORKER, now=NOW, lease_ttl_s=60
+    )
+    assert fence is not None
+
+    await repo.complete_phase(
+        RUN, REPO, Phase.TRANSFORM, fence=fence, status=RepoStatus.PENDING, now=NOW,
+        last_error=tainted,
+    )
+
+    row = await repo.get_phase(RUN, REPO, Phase.TRANSFORM)
+    assert row is not None
+    assert row.last_error is not None
+    assert pat not in row.last_error, f"a live PAT reached phases.last_error: {row.last_error!r}"
+    assert "github_pat_" not in row.last_error
+    assert "«redacted:" in row.last_error, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in row.last_error, "over-redaction destroys the debuggable part too"
+
+
 # ======================================================================================
 # primitive 4 — the fail-closed ledger
 # ======================================================================================
