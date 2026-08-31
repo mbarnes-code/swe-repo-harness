@@ -65,6 +65,7 @@ from pydantic import Field
 
 from fleet.models.enums import FailureClass, Phase, RepoStatus
 from fleet.models.tasks import MAX_ATTEMPTS
+from fleet.obs.redact import redact_text
 from fleet.orchestrator.budgets import (
     RUN_BUDGET_EXIT_CODE,
     ZERO_COST,
@@ -980,10 +981,16 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         reason `_record_diagnostics` is, is still the single writer (§11.5), and is still fenced.
         There is no `max_attempts` escalation branch because there is no increment to reach it —
         the status being written is already terminal.
+
+        `last_error` is redacted HERE, at this write boundary (SPEC §11.4, D90): this raw
+        `UPDATE` bypasses `complete_phase` entirely, so D88's fix there never covers it — the
+        same `error_from_exception`-sourced, unredacted `stderr_tail` that D88 traced can reach
+        this terminal write for a non-retryable failure, and this is the LAST write the row
+        gets.
         """
         params = (
             str(status),
-            last_error,
+            None if last_error is None else redact_text(last_error),
             # UTC, and fixed-width: the reaper compares these instants as TEXT (§11.5).
             self.ctx.clock().astimezone(UTC).isoformat(timespec="microseconds"),
             self._run_id,
@@ -1053,11 +1060,17 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         A separate statement from `complete_phase` only because the §6 CAS does not carry these
         columns; it is still the single writer, still fenced, and `False` here means the same
         thing it means everywhere else — the lease is gone, discard.
+
+        `last_error` is redacted HERE, at this write boundary (SPEC §11.4, D90): this raw
+        `UPDATE` bypasses `complete_phase` entirely, so D88's fix there never covers it, and
+        this write runs on EVERY failure — retryable or not — before `RetryPolicy`'s decision
+        is even acted on.
         """
+        detail = self._detail(error)
         params = (
             str(error.failure_class),
             ladder.transient_retries,
-            self._detail(error),
+            None if detail is None else redact_text(detail),
             # UTC, and fixed-width: the reaper compares these instants as TEXT (§11.5).
             self.ctx.clock().astimezone(UTC).isoformat(timespec="microseconds"),
             self._run_id,

@@ -256,19 +256,43 @@ literally plant 41 repos if the algorithm's complexity class makes a smaller adv
 equally discriminating — state which was used).
 
 ## 20. Secrets never leak
-**OPEN — 3 of 4 named DB columns now covered (round P, `7f56bed`), PR-body placeholder still
-open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL token,
-build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
+**OPEN — 2 of 4 named DB columns actually covered (corrected 2026-08-31, round Q review), PR-body
+placeholder still open.** SPEC.md item 20's literal text wants a combined fixture run (mirror-URL
+token, build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
 `migration_state.json` AND four named DB columns (`events.payload`, `attempts.stderr_tail`,
 `phases.last_error`, `llm_cache.response_json`) AND the PR-body `«redacted:…»` placeholder.
-`events.payload`/`attempts.stderr_tail` were already covered pre-round. `phases.last_error` and
-`llm_cache.response_json` are now covered — but via targeted per-column tests (each planting one
-secret shape through its own real write path and reading the persisted value back), not the
-literal "one fixture run planting all three named secret shapes" the done-bar originally
-described; the underlying property each column asserts is proven, the combined-fixture
-methodology is not. Investigating `phases.last_error` also found and fixed a real, live gap (D88,
-security-relevant): `complete_phase`'s terminal write wasn't redacting at all, contradicting
-SPEC.md:6987's explicit claim.
+`events.payload` was already covered pre-round. `phases.last_error` and `llm_cache.response_json`
+are now covered — but via targeted per-column tests (each planting one secret shape through its
+own real write path and reading the persisted value back), not the literal "one fixture run
+planting all three named secret shapes" the done-bar originally described; the underlying
+property each column asserts is proven, the combined-fixture methodology is not. Investigating
+`phases.last_error` also found and fixed a real, live gap (D88, security-relevant):
+`complete_phase`'s terminal write wasn't redacting at all, contradicting SPEC.md:6987's explicit
+claim.
+**Dated annotation, 2026-08-31 (round Q whole-branch review):** the line above originally read
+"3 of 4 … `events.payload`/`attempts.stderr_tail` were already covered pre-round" — that
+overclaimed `attempts.stderr_tail`. Measured: no test reads the *persisted* `attempts.stderr_tail`
+column and asserts redaction; the only existing assertion (`tests/test_workers_scan.py:896`) is on
+the in-memory `WorkerError.stderr_tail` object, not the DB column, and `record_attempt`
+(`repository.py:2124-2174`) writes `stdout_tail`/`stderr_tail` with no redaction call at all. This
+is D88's own class, unclosed — tracked as **D90** (`docs/INTEGRATION_HONESTY.md`), alongside two
+further unredacted `phases.last_error` write paths in `orchestrator/runner.py` that bypass
+`complete_phase` (one of them terminal). Per this file's own ground rule 1 discipline, the
+original sentence is left in the paragraph above and corrected here rather than rewritten in
+place.
+**Dated annotation, 2026-08-31 (round Q task, D90 fix landed):** D90's fix is landed —
+`redact_text` now runs at `runner.py`'s `_terminate_uncharged` and `_record_diagnostics` UPDATE
+sites and inside `repository.py`'s `record_attempt` for `stdout_tail`/`stderr_tail`, each proven
+by a persisted-column test (credential-shaped secret planted through the real write path, read
+back off a real SQLite row) plus a companion over-redaction control, and each discriminated by
+mutation (revert the `redact_text` call → the new test goes genuinely RED with the live secret
+visible → restore → green). That closes the `attempts.stdout_tail`/`stderr_tail` gap this
+annotation's prior paragraph named and the two `runner.py` write paths D90 traced — **3 of 4**
+named DB columns are now actually covered (`events.payload`, `attempts.stderr_tail`,
+`phases.last_error`; `llm_cache.response_json` unchanged from D88, not re-verified by this task).
+Tests: `tests/test_runner.py::test_terminate_uncharged_redacts_a_credential_in_last_error_before_the_write`,
+`tests/test_runner.py::test_record_diagnostics_redacts_a_credential_in_last_error_before_the_write`,
+`tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`.
 **Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
 unverified, confirmed by two separate rounds' investigations (round M found a different leak on
 the PR path; round P confirms this specific clause remains untouched). Whether the four-column
