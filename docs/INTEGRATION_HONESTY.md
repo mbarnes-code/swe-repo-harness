@@ -6695,7 +6695,7 @@ real entry with a `## D85 — OPEN` heading. Per `CLAUDE.md` §3 no census total
 
 ---
 
-## D87 — OPEN. A fabricated (or merely stale, non-NULL) `attempts.commit_sha` is never corrected by `fleet resume`'s git arbitration, only `phases.post_commit_sha` is — the two pointers §11.5's authority table pairs can disagree with each other after a resume the harness reports as a clean, applied reconciliation
+## D87 — FIXED, LANDED (`41fdfa1`). A fabricated (or merely stale, non-NULL) `attempts.commit_sha` is never corrected by `fleet resume`'s git arbitration, only `phases.post_commit_sha` is — the two pointers §11.5's authority table pairs can disagree with each other after a resume the harness reports as a clean, applied reconciliation
 
 **Found by round P task 1 (2026-08-31), while building the fabricated-reverse-disagreement
 positive fixture SPEC.md §12 item 15 names.** `D86`'s allocation was verified free the same way
@@ -6755,6 +6755,27 @@ After the fix: remove the `xfail` marker so the test becomes the green proof, an
 (`with_attempt_row=False`) still pass unchanged — that one's zero-match case must remain reported,
 not start silently "succeeding" against a row that was never there.
 
+> **[Fixed 2026-08-31, `41fdfa1`, round P task 1. Heading updated above; this is the annotation,
+> not a rewrite of what precedes it.]** `_persist_arbitration`'s `attempts` write is now a
+> select-then-update: the target `attempt_id` is fetched via the unchanged `task_id` scope +
+> `ORDER BY attempt DESC, revalidation_round DESC, retry_ordinal DESC LIMIT 1` (no `commit_sha`
+> filter), then that specific row is updated unconditionally — exactly the shape described above.
+> Reviewed Approved: the row-selection SQL confirmed identical to the pre-fix query minus the
+> dropped `NULL` predicate, the two-statement form confirmed atomic within `StateWriter`'s single
+> `BEGIN IMMEDIATE` transaction, the `provenance_missing` absent-row test re-verified unchanged,
+> and a reviewer-reproduced (not just implementer-reported) revert-based mutation check failed at
+> the identical original assertion. `xfail` marker removed; the test is now the green proof
+> (`tests/test_cli.py::test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_branch`).
+> **A pre-existing, disclosed limit found during review, not introduced by this fix:** the
+> `task_id` scope this fix (and the original query) depends on is populated by zero production
+> write sites — every `AttemptRow` construction in `src/fleet/` leaves `task_id` at its `None`
+> default, and the per-unit task queue (`upsert_task`/`claim_next_task`) that would populate it is
+> fully built and unit-tested but has no production caller. So step 4's "correct `attempts.commit_sha`"
+> mechanism, as written and as now fixed, may not currently fire against any row a real `fleet
+> resume` produces — every test exercising it, including this fix's own, seeds rows directly via
+> raw SQL. Tracked separately as D89; this entry's own fix is correct and complete for the
+> mechanism as specified, independent of whether that mechanism is reachable today.
+
 ---
 
 ## D88 — OPEN, SECURITY-RELEVANT. `phases.last_error` is written unredacted by the only real `complete_phase` implementation, contradicting `docs/SPEC.md`:6987's explicit claim that `state/repository.py` redacts it on write — a secret embedded in an exception's `str()` persists verbatim to a durable, queryable SQLite column
@@ -6796,3 +6817,37 @@ insertion points, not yet adjudicated) before it reaches the `UPDATE` statement,
 discriminating test proving a planted secret does not survive this specific path (the pattern the
 two sibling tests already established this round). The PR-body `«redacted:…»` placeholder clause
 of §12.20 remains separately unverified (out of this entry's scope).
+
+---
+
+## D89 — OPEN. `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
+
+**Found by round P task 1's reviewer (2026-08-31), disclosed while verifying D87's fix rather than
+searched for independently — recorded here rather than left inside D87's own entry, since it is a
+different, pre-existing defect D87 did not introduce and does not depend on.** Verified free
+before writing: `\bD89\b` over `docs/` returned **0** occurrences.
+
+**The gap, as measured.** Every `AttemptRow(...)` construction in `src/fleet/` was swept
+(`grep -rn "AttemptRow(" src/fleet/`) — exactly two production write sites exist,
+`cli.py`'s `_TransformSink.__call__` and `record()` — and **neither ever sets `task_id`**; both
+leave it at the dataclass default (`None`, per `state/repository.py`'s `AttemptRow` definition).
+The per-unit task queue that would populate a real `task_id` — `upsert_task`/`claim_next_task`
+(`state/repository.py`) — is itself fully implemented and covered by its own unit tests, but
+`claim_next_task(` occurs nowhere in `src/fleet/` outside its own definition; its only callers in
+the whole tree are in `tests/test_repository.py`. Every test that exercises a `task_id`-scoped
+mechanism (D87's `_persist_arbitration`/`_reconcile_tasks_with_git` among them) seeds `tasks`/
+`attempts` rows directly via raw SQL rather than through any code path a real run would take.
+
+**What this does and does not mean.** It does not make D87's fix wrong — the fix is a correct,
+complete implementation of the mechanism exactly as `§11.5` specifies it, and the reviewer
+confirmed this independently. What's open is whether that mechanism is *reachable* at all in a
+real run: if nothing ever populates `task_id`, the `task_id = ?` scope every version of this query
+(before and after D87's fix) relies on may never match a real `attempts` row, meaning git
+arbitration's correction step could be permanently inert in production despite being correct and
+tested in isolation — the same "declared and unit-tested but never wired to a real caller" shape
+this ledger has recorded before (D56, D57, D80 pre-fix).
+
+**Not yet built:** trace whether `task_id` is genuinely meant to be populated by a currently-missing
+wiring step (in which case this is a wiring gap, closable the way D80 was), or whether the design
+intent has shifted since `task_id`-scoped queries were written and the scoping should instead key
+on something a real write path does populate — that adjudication is not made here.
