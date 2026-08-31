@@ -31,6 +31,7 @@ import pytest
 from pydantic import BaseModel
 
 from fleet.models.enums import PHASE_DEMOTED_KIND, Phase, RepoStatus, TaskKind
+from fleet.obs.redact import redact_text
 from fleet.state import checkpoints
 from fleet.state import db as dbmod
 from fleet.state.db import StateWriter, connect_ro, initialize_database
@@ -338,6 +339,23 @@ async def test_complete_phase_redacts_a_credential_in_last_error_before_the_writ
     assert "github_pat_" not in row.last_error
     assert "«redacted:" in row.last_error, "the placeholder must survive, or debugging is blind"
     assert "gitea.local" in row.last_error, "over-redaction destroys the debuggable part too"
+
+
+def test_redacting_a_github_pat_twice_is_idempotent() -> None:
+    """The narrower claim `complete_phase`'s docstring now makes: for the `github_pat_…` shape
+    this fix's own test plants, a second `redact_text` pass is a no-op — NOT a general property
+    of every `PATTERNS` entry (the `authorization` kind's own placeholder text re-triggers its
+    own pattern on a second pass, per code review; deliberately not tested here — out of this
+    fix's scope). Proven directly against `redact_text`, with no database involved, because the
+    property under test is about the function, not about `complete_phase`'s wiring of it."""
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted = f"clone failed for remote https://oauth2:{pat}@gitea.local:3001/x.git"
+
+    once = redact_text(tainted)
+    twice = redact_text(once)
+
+    assert once == twice, "a second pass over an already-redacted PAT must change nothing"
+    assert pat not in once
 
 
 # ======================================================================================

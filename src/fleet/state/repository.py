@@ -1381,9 +1381,14 @@ class SqliteStateRepository:
         `stderr_tail` is redacted at subprocess-capture time (`util/proc.py`), but the generic
         `except Exception` path (`workers/base.py::error_from_exception`, `stderr_tail=str(exc)`)
         carries no such guarantee, so a credential-shaped exception message reached this column
-        unredacted until this call was added. Redacting again here is idempotent — `redact_text`
-        matches no already-`«redacted:…»` text — so a caller that already redacted (`cli.py`'s
-        `_abandon_repo`, a different write path in a different file) pays only a cheap re-scan.
+        unredacted until this call was added. Redacting again here is idempotent for the
+        credential shapes this fix targets (verified: a `github_pat_…`-style token survives a
+        second pass unchanged) — so a caller that already redacted (`cli.py`'s `_abandon_repo`, a
+        different write path in a different file) pays only a cheap re-scan. This is NOT a
+        general property of every `PATTERNS` entry: the `authorization` kind's own placeholder
+        text (`«redacted:authorization:…»`) can re-trigger its own pattern on a second pass,
+        nesting a second placeholder — the result still never contains the original secret, but
+        it is not byte-identical to a single pass. Out of scope here; see `tests/test_obs.py`.
         """
         escalates = 1 if status is RepoStatus.PENDING else 0
         sql = (
