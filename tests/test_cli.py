@@ -5014,6 +5014,45 @@ async def test_a_timed_out_resolve_routes_to_abandon_not_a_branch_reset(
     )
 
 
+async def test_abandon_repo_redacts_a_credential_in_detail_before_writing_last_error(
+    workspace: Path,
+) -> None:
+    """§12.20 — `_abandon_repo` is a `phases.last_error` write site with its OWN redaction call
+    (`redact_text(detail)`, right above the `UPDATE phases` in cli.py) rather than relying on
+    `SqliteStateRepository.complete_phase`'s. `detail` here is `str(exc)` from a git/OS failure
+    that escaped `_prepare_repo` — exactly the shape that can quote a clone URL with embedded
+    creds. Driven through the real write path — a real SQLite `phases` row, the real
+    `_abandon_repo` coroutine, no mock of `redact_text` — so a regression that dropped the call
+    would fail this test rather than only a unit test of `redact_text` itself.
+    """
+    repo_id = "acme-commons"
+    db_path = workspace / "state" / "fleet.db"
+    _seed_phase_row(db_path, repo_id)
+
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    detail = f"fatal: could not read from remote https://oauth2:{pat}@gitea.local:3001/x.git"
+
+    async with StateWriter(db_path, owner="test-redact-abandon") as writer:
+        await _abandon_repo(writer, RUN_ID, repo_id, detail=detail, now=datetime.now(UTC))
+
+    read_conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        last_error, finding_payload = read_conn.execute(
+            "SELECT p.last_error, f.payload FROM phases p "
+            "JOIN findings f ON f.run_id = p.run_id AND f.repo_id = p.repo_id "
+            "WHERE p.run_id = ? AND p.repo_id = ? AND p.phase = ?",
+            (RUN_ID, repo_id, int(Phase.TRANSFORM)),
+        ).fetchone()
+    finally:
+        read_conn.close()
+
+    for persisted in (last_error, finding_payload):
+        assert pat not in persisted, f"a live PAT reached a persisted column: {persisted!r}"
+        assert "github_pat_" not in persisted
+        assert "«redacted:" in persisted, "the placeholder must survive, or debugging is blind"
+    assert "gitea.local" in last_error, "the host must survive — over-redaction is a bug too"
+
+
 async def test_a_genuinely_absent_branch_still_takes_the_checkout_b_path(
     workspace: Path,
 ) -> None:
