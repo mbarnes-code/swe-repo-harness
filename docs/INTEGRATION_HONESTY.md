@@ -6906,6 +6906,32 @@ on something a real write path does populate — that adjudication is not made h
 > patch. Full trace: `.superpowers/sdd/round-R-criteria-closure/research-1-d89-report.md` (session
 > workspace — may be deleted by the time this is read; the paragraph above is the durable record).
 
+> **[Fix design scoped 2026-08-31, round S research dispatch — a design, not a fix; still OPEN.
+> This is the most consequential thing found about D89 to date: a naive fix would make it worse.]**
+> The right value for `attempts.task_id` and the right value for D87's `find_task_commit`
+> git-trailer lookup are **different quantities**. A coarse UUID4 minted once per phase-dispatch
+> (right after `acquire_phase_lease` succeeds, `runner.py:511-518`) is the correct grain for
+> `attempts.task_id` — but REWRITE/RELOCATE commits carry `task_id_for`'s **per-unit** UUID5 in
+> their real `Fleet-Task-Id` git trailers, not the coarse dispatch-level id. Swept: only
+> `rewrite.py`/`relocate.py` ever write that trailer at all. So **D87's arbitration mechanism is
+> reachable-and-correct for zero task kinds today** — not merely inert. Populating `tasks` at the
+> coarse per-dispatch grain (the natural-looking fix) would make the mechanism *reachable* while
+> feeding it the *wrong* identity for REWRITE/RELOCATE — `find_task_commit` would fail to match a
+> real landed commit's trailer, and D87's own logic ("Git is authoritative and the SQLite row is
+> corrected") would then correct a genuinely-landed row back toward "not landed," discarding real
+> work on crash recovery. **A naive close of D89 would be a regression, not a fix.**
+> Confirmed out of scope, not merely unwired: HOIST/REVALIDATE task kinds have no commit-producing
+> path anywhere in the tree that could carry a trailer, so no fix needs to cover them.
+> **Recommended shape (two gated phases, genuinely too large for one task):** Phase 1 — populate
+> `attempts.task_id`/the `tasks` lifecycle for real, in the real dispatch loop, at the coarse
+> per-dispatch grain (new repository method, a `Phase`→`TaskKind` mapping that does not exist
+> yet). Phase 2 — rebuild `_reconcile_tasks_with_git`'s REWRITE/RELOCATE branch to loop **per-unit**
+> over `tasks.target_paths` using `task_id_for`'s per-unit identity, including a new "partially
+> landed" third verdict state (today's arbitration is binary: landed or not). Full design:
+> `.superpowers/sdd/round-S-criteria-closure/research-1-d89-fix-design.md` (session workspace —
+> may be deleted; this paragraph is the durable summary). Recommend its own dedicated round, not
+> folded into a general TEST-ONLY round's task list.
+
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
