@@ -1364,6 +1364,331 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
     )
 
 
+def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_clean_db_runs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.21 clause 3 — the direct inverse of the test above.
+
+    That test proves the digest is *stable* across two clean runs of an UNCHANGED fleet. It does
+    not prove the digest is *sensitive* to real content: a digest section accidentally computed
+    from something that never varies (a constant, a path that never changes) would pass it just
+    as cleanly as a genuinely content-derived one. This test closes that gap by mutating one real
+    fixture source file between the two runs and asserting the digest MOVES.
+
+    Same two-workspace, warm-cache, forced-read-only harness as the precedent test, with one
+    difference inserted between run 1 and run 2: `acme-app`'s `package.json` dependency on
+    `@acme/lib` is rewritten from an open range (`^1.0.0`) to a pinned exact version (`1.0.0`),
+    committed to the SAME source git repository both workspaces clone from. `graph/infer.py`'s
+    `_manifest_edges` (`_is_pinned`) reads exactly that string to choose the edge `kind`:
+    `DECLARED_DEP` for an open range, `PUBLISHED_ARTIFACT` for a pin — so this one-line manifest
+    edit is a genuine, minimal change to a value `state/digest.py`'s `edges` section hashes
+    (`src_kind, src_id, dst_kind, dst_id, kind`), not a cosmetic touch of the file.
+
+    The mutation is deliberately NOT a `.ts` source edit: `ClassifyWorker._messages` (§ precedent
+    test above) sends the model a PATH LISTING, never file bytes, and `manifests/npm.py` parses
+    only `package.json` — the ecosystem adapters here never read `.ts` file content for the graph
+    at all (`workers/symbolindex.py` does extract import symbols from `.ts` sources by regex, but
+    `acme-app` already declares `@acme/lib` in `package.json`, so an edit to the import statement
+    itself would be dead-lettered by `_import_edges`'s `declared` dedup and move nothing). A
+    `package.json` version-spec edit is therefore the smallest change that is (a) real fixture
+    source content, (b) provably read by the scan/graph path, and (c) INVISIBLE to the classify
+    prompt — the two runs' `llm_cache.cache_key`s stay identical, so run 2 can still succeed
+    under `--llm-cache read-only` against the exploding backend, exactly as run 1's cache-hit
+    proof requires. If the mutation touched a path the prompt lists (add/remove a file) or the
+    prompt's content (it doesn't — only paths are sent), that guarantee would not hold.
+    """
+    from fleet.llm import client as client_module
+    from fleet.llm.client import BackendReply, StructuredOutputMode
+    from fleet.models.tasks import ModelCapabilities, TokenUsage
+
+    class _ScriptedClassify:
+        """Same fixture backend as the precedent test — what it says does not matter
+        (ADR-0008), only that both runs get the one model-bearing step answered identically."""
+
+        name = "anthropic"
+        version = 1
+
+        def declared_capabilities(self, target: Any) -> ModelCapabilities:
+            return ModelCapabilities(
+                supports_json_schema=True,
+                max_output_tokens=4096,
+                structured_output_modes=(StructuredOutputMode.JSON_SCHEMA,),
+            )
+
+        async def invoke(self, target: Any, *args: Any, **kwargs: Any) -> BackendReply:
+            return BackendReply(
+                text=json.dumps(
+                    {
+                        "ecosystem": "npm",
+                        "is_library": False,
+                        "confidence": 0.9,
+                        "rationale": "fixture backend for the §12.21 digest-sensitivity test",
+                    }
+                ),
+                usage=TokenUsage(input_tokens=10, output_tokens=5, model_id=target.model_id),
+                finish_reason="stop",
+            )
+
+    class _ExplodingClassify:
+        """Registered for run 2 only. Reaching `invoke` means the mutation below disturbed the
+        classify cache key — the prompt is path-listing-only (see docstring), so it should not
+        — and this run would then be a live-model run rather than the intended cache replay."""
+
+        name = "anthropic"
+        version = 1
+
+        def declared_capabilities(self, target: Any) -> ModelCapabilities:
+            return _ScriptedClassify().declared_capabilities(target)
+
+        async def invoke(self, *args: Any, **kwargs: Any) -> BackendReply:
+            raise AssertionError(
+                "run 2 must replay repo_classify from the warm §11.6 cache; reaching the "
+                "backend means the package.json mutation changed the classify prompt/cache key"
+            )
+
+    def make_repo(root: Path, name: str, files: dict[str, str]) -> Path:
+        """Identical helper to the precedent test's, kept local for the same reason: no shared
+        module to import it from without a circular import."""
+        path = root / name
+        path.mkdir(parents=True)
+        env = {
+            "GIT_AUTHOR_NAME": "Fleet Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fleet Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(path),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        }
+        subprocess.run(
+            ["git", "init", "--initial-branch=main"],  # noqa: S607
+            cwd=path, check=True, capture_output=True, env=env,
+        )
+        for rel, text in sorted(files.items()):
+            target = path / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "-A"], cwd=path, check=True, capture_output=True, env=env  # noqa: S607
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "fixture"],  # noqa: S607
+            cwd=path, check=True, capture_output=True, env=env,
+        )
+        return path
+
+    def commit_pinned_dependency(repo_path: Path) -> None:
+        """Mutates `package.json` in place, commits it, and — Rule 12's zero-change gate
+        discipline — proves via `git diff --numstat` that the commit actually changed a file
+        before the caller trusts the digest comparison built on top of it."""
+        env = {
+            "GIT_AUTHOR_NAME": "Fleet Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fleet Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(repo_path),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        }
+        before_sha = subprocess.run(
+            ["git", "rev-parse", "HEAD"],  # noqa: S607
+            cwd=repo_path, check=True, capture_output=True, env=env, text=True,
+        ).stdout.strip()
+
+        manifest_path = repo_path / "package.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["dependencies"]["@acme/lib"] == "^1.0.0", (
+            "fixture package.json no longer has the open-range spec this mutation assumes"
+        )
+        manifest["dependencies"]["@acme/lib"] = "1.0.0"  # open range -> pinned exact release
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+        subprocess.run(
+            ["git", "add", "-A"],  # noqa: S607
+            cwd=repo_path, check=True, capture_output=True, env=env,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", "pin @acme/lib to an exact release"],  # noqa: S607
+            cwd=repo_path, check=True, capture_output=True, env=env,
+        )
+
+        numstat = subprocess.run(  # noqa: S603 - fixed argv, before_sha is our own rev-parse
+            ["git", "diff", "--numstat", before_sha, "HEAD"],  # noqa: S607
+            cwd=repo_path, check=True, capture_output=True, env=env, text=True,
+        ).stdout
+        assert numstat.strip(), (
+            "the mutation commit produced a zero-line diff (Rule 12's zero-change gate) — the "
+            "digest-differs assertion below would not be testing source sensitivity at all"
+        )
+        assert "package.json" in numstat, (
+            f"the mutation diff does not touch package.json as expected: {numstat!r}"
+        )
+
+    def llm_cache_snapshot(root: Path) -> tuple[tuple[str, ...], list[tuple[Any, ...]]]:
+        conn = sqlite3.connect(root / "state" / "fleet.db")
+        try:
+            cols = tuple(row[1] for row in conn.execute("PRAGMA table_info(llm_cache)"))
+            rows = [
+                tuple(row)
+                for row in conn.execute(
+                    f"SELECT {', '.join(cols)} FROM llm_cache"  # noqa: S608 — cols is PRAGMA
+                ).fetchall()
+            ]
+            return cols, rows
+        finally:
+            conn.close()
+
+    def seed_llm_cache(
+        root: Path, snapshot: tuple[tuple[str, ...], list[tuple[Any, ...]]]
+    ) -> None:
+        cols, rows = snapshot
+        conn = sqlite3.connect(root / "state" / "fleet.db")
+        try:
+            placeholders = ", ".join("?" for _ in cols)
+            conn.executemany(
+                f"INSERT INTO llm_cache ({', '.join(cols)}) VALUES ({placeholders})",  # noqa: S608
+                rows,
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def edge_kinds(root: Path) -> list[str]:
+        conn = sqlite3.connect(root / "state" / "fleet.db")
+        try:
+            return sorted(
+                str(kind) for (kind,) in conn.execute("SELECT kind FROM edges").fetchall()
+            )
+        finally:
+            conn.close()
+
+    # Same minimal npm dependency-edge fixture as the precedent test.
+    repo_files = {
+        "acme-lib": {
+            "package.json": json.dumps({"name": "@acme/lib", "version": "1.0.0"}, indent=2),
+            "src/index.ts": "export const value = 1;\n",
+        },
+        "acme-app": {
+            "package.json": json.dumps(
+                {
+                    "name": "@acme/app",
+                    "version": "1.0.0",
+                    "dependencies": {"@acme/lib": "^1.0.0"},
+                },
+                indent=2,
+            ),
+            "src/main.ts": (
+                "import { value } from '@acme/lib';\nexport const doubled = value * 2;\n"
+            ),
+        },
+    }
+    sources = {
+        name: make_repo(tmp_path / "sources", name, files)
+        for name, files in repo_files.items()
+    }
+
+    fleet_yaml = (
+        "run:\n  monorepo_path: ../acme-monorepo\n  cache_dir: cache/\n  work_dir: work/\n"
+        "concurrency:\n  cpu_pool_workers: 1\n"
+        "preflight:\n  min_free_bytes: 1048576\n"
+    )
+    repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
+        f"  - name: {name}\n    url: {path}\n" for name, path in sources.items()
+    )
+
+    def build_workspace(label: str) -> Path:
+        ws = tmp_path / label
+        write_config(ws, fleet=fleet_yaml, repos=repos_yaml)
+        fresh_db(ws / "state" / "fleet.db")
+        return ws
+
+    ws1 = build_workspace("run1")
+    ws2 = build_workspace("run2")
+
+    monkeypatch.chdir(ws1)
+
+    # Run 1: clean DB, classify live, default cache mode (read-write) — warms the cache, and
+    # captures the digest of the UNMUTATED fixture.
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ScriptedClassify()})
+    scan1 = runner.invoke(app, [*base_args(ws1), "scan"], catch_exceptions=False)
+    assert scan1.exit_code == ExitCode.SUCCESS, scan1.output
+    seq1 = runner.invoke(app, [*base_args(ws1), "sequence"], catch_exceptions=False)
+    assert seq1.exit_code == ExitCode.SUCCESS, seq1.output
+
+    digest1_result = runner.invoke(
+        app, [*base_args(ws1), "--json", "status", "--digest"], catch_exceptions=False
+    )
+    assert digest1_result.exit_code == ExitCode.SUCCESS, digest1_result.output
+    payload1 = json.loads(digest1_result.stdout)
+    digest1, sections1 = payload1["digest"], payload1["sections"]
+
+    snapshot = llm_cache_snapshot(ws1)
+    assert snapshot[1], "run 1 made no repo_classify call — the fake backend was never reached"
+
+    kinds1 = edge_kinds(ws1)
+    assert kinds1 == ["DECLARED_DEP"], (
+        f"run 1's fixture is not in the expected pre-mutation state, got {kinds1!r}"
+    )
+
+    # THE MUTATION: a real, committed content change to a fixture source file, between the two
+    # otherwise-identical runs — confirmed non-cosmetic via `git diff --numstat` above.
+    commit_pinned_dependency(sources["acme-app"])
+
+    # Seed run 2's fresh DB with the warm cache BEFORE scanning, exactly as the precedent test
+    # does: `llm_cache` is run-unscoped, and the mutation above does not touch anything the
+    # classify prompt sends (paths only, never content), so the same cache rows are still a
+    # legitimate replay for run 2's classify calls.
+    seed_llm_cache(ws2, snapshot)
+
+    # Run 2: a SEPARATE clean workspace and DB, over the MUTATED source tree, classify forced
+    # read-only against an exploding backend — success is only possible via the cache hit.
+    monkeypatch.chdir(ws2)
+    monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ExplodingClassify()})
+    scan2 = runner.invoke(
+        app, [*base_args(ws2), "--llm-cache", "read-only", "scan"], catch_exceptions=False
+    )
+    assert scan2.exit_code == ExitCode.SUCCESS, scan2.output
+    seq2 = runner.invoke(app, [*base_args(ws2), "sequence"], catch_exceptions=False)
+    assert seq2.exit_code == ExitCode.SUCCESS, seq2.output
+
+    digest2_result = runner.invoke(
+        app, [*base_args(ws2), "--json", "status", "--digest"], catch_exceptions=False
+    )
+    assert digest2_result.exit_code == ExitCode.SUCCESS, digest2_result.output
+    payload2 = json.loads(digest2_result.stdout)
+    digest2, sections2 = payload2["digest"], payload2["sections"]
+
+    kinds2 = edge_kinds(ws2)
+    assert kinds2 == ["PUBLISHED_ARTIFACT"], (
+        f"the mutation did not flip the edge kind as expected, got {kinds2!r} — the fixture "
+        "assumption behind this test (an open-range spec pinned to an exact release) no longer "
+        "holds, and the digest-differs assertion below would not be testing what it claims to"
+    )
+
+    assert digest2 != digest1, (
+        "the run_digest did not change when a real fixture source file was mutated between two "
+        "otherwise-identical clean-DB runs — §12.21's digest-sensitivity claim does not hold: "
+        "either a digest section is computed from something that never varies, or the mutation "
+        "above is not reaching it"
+    )
+    # Localize the difference: the ONE section a pinned-vs-open-range edge kind can move is
+    # `edges` (`state/digest.py`'s per-section hashing, `edge_kinds` above confirms the DB-level
+    # cause). Every other section stayed empty-but-equal in both runs (same acyclic, no-contract,
+    # no-collision, no-repair, no-PR fixture as the precedent test), so this is not a case where
+    # the whole digest moved for an unexplained reason.
+    assert sections2["edges"] != sections1["edges"], (
+        "the digests differ, but not in the edges section — the mutation moved something other "
+        "than what this test intends to prove sensitive"
+    )
+    for name in ("waves", "cycles", "contracts", "collisions", "patch_trailers", "attempts"):
+        assert sections2[name] == sections1[name], (
+            f"section {name!r} moved too — the mutation's blast radius is wider than the single "
+            "edge-kind change this test's fixture assumptions rely on"
+        )
+
+
 def test_models_list_renders_an_undeclared_effort_as_a_dash(
     workspace: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
