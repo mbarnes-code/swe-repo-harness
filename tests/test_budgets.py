@@ -31,6 +31,7 @@ import pytest
 
 from fleet.models.enums import ModelTier
 from fleet.models.tasks import BackendTarget, Price
+from fleet.orchestrator import budgets as budgets_mod
 from fleet.orchestrator.budgets import (
     P95_MIN_SAMPLES,
     RUN_BUDGET_EXIT_CODE,
@@ -51,6 +52,7 @@ from fleet.orchestrator.budgets import (
     TokenEstimator,
     WaveBudgetExhausted,
     estimate_cost,
+    new_cpu_pool,
 )
 from fleet.settings import BudgetsSection, ConcurrencySection, StubsSection
 from fleet.state import db as dbmod
@@ -726,6 +728,41 @@ async def test_limits_key_llm_semaphores_by_tier_not_by_backend(harness: Harness
     assert await slots(limits.for_tier(ModelTier.CHEAP)) == 16
     assert await slots(limits.git_net) == 8
     assert await slots(limits.docker) == 4
+
+
+def test_new_cpu_pool_passes_no_db_handle_bearing_kwarg(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12.28: pool children get no DB handle — assert the actual `ProcessPoolExecutor` call.
+
+    `forkserver` children never inherit an open SQLite connection unless one is handed to them
+    explicitly — `initializer=`/`initargs=` is exactly that door (a picklable initargs value
+    carrying a connection or its path+handle), and so is any other kwarg that hands the pool a
+    live file handle. This spies on the real `ProcessPoolExecutor(...)` call `new_cpu_pool` makes
+    rather than reading the source text, so a regression that adds either kwarg fails the test
+    that reads it, not just an inspection someone has to remember to redo.
+    """
+    calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+
+    class _SpyExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            calls.append((args, kwargs))
+
+    monkeypatch.setattr(budgets_mod, "ProcessPoolExecutor", _SpyExecutor)
+
+    pool = new_cpu_pool(4)
+
+    assert isinstance(pool, _SpyExecutor)
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args == (), "every argument must be a keyword, or a future addition slips by unnamed"
+    assert kwargs["max_workers"] == 4
+    assert "mp_context" in kwargs
+    # The whole point: no DB-handle-bearing kwarg reaches the child, named or not. A future
+    # addition of ANY third kwarg — not just the two named below — must fail this assertion.
+    assert set(kwargs) == {"max_workers", "mp_context"}
+    assert "initializer" not in kwargs
+    assert "initargs" not in kwargs
 
 
 # --------------------------------------------------------------------------------------
