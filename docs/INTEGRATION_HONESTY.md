@@ -6692,3 +6692,65 @@ occurrences. Its only occurrence anywhere in the working tree was in a git-ignor
 report reading "D86+ free" — a negative mention, not an allocation. That is the D71 trap named in
 `CLAUDE.md` §3, avoided by reading the body rather than trusting the match. `D85` was confirmed a
 real entry with a `## D85 — OPEN` heading. Per `CLAUDE.md` §3 no census total or range is quoted.
+
+---
+
+## D87 — OPEN. A fabricated (or merely stale, non-NULL) `attempts.commit_sha` is never corrected by `fleet resume`'s git arbitration, only `phases.post_commit_sha` is — the two pointers §11.5's authority table pairs can disagree with each other after a resume the harness reports as a clean, applied reconciliation
+
+**Found by round P task 1 (2026-08-31), while building the fabricated-reverse-disagreement
+positive fixture SPEC.md §12 item 15 names.** `D86`'s allocation was verified free the same way
+this one was: `\bD87\b` over `docs/` returned **0** occurrences before this entry was written.
+
+**The claim, and what it is not.** §12 item 15 requires: "Fabricating the reverse disagreement —
+hand-editing `attempts.commit_sha` to a SHA that is not on the branch — makes resume correct the
+column, never `git reset` the branch to match it." The second half holds — measured directly, not
+assumed: the landed/discarded verdict is driven by Git alone (a `_reconcile_tasks_with_git` read
+never consults `attempts.commit_sha`), and the branch is never reset to agree with a fabricated
+pointer. **The first half does not hold** for the specific case where `attempts.commit_sha`
+already carries *some* value — right or wrong — rather than `NULL`.
+
+**Mechanism, in `src/fleet/cli.py::_persist_arbitration`:**
+
+```sql
+UPDATE attempts SET commit_sha = ? WHERE attempt_id = (
+    SELECT attempt_id FROM attempts
+     WHERE run_id = ? AND task_id = ? AND commit_sha IS NULL
+     ORDER BY attempt DESC, revalidation_round DESC, retry_ordinal DESC
+     LIMIT 1)
+```
+
+The `commit_sha IS NULL` predicate is deliberate and correctly guards a real, different hazard
+(picking the wrong `attempts` row among several for the same `task_id` when one already recorded
+its own commit — `docs/DECISIONS.md` §5b). Its zero-match case is already handled for the
+*absent-row* scenario: `cursor.rowcount == 0` is reported by name as `provenance_missing`, and
+`test_resume_step4_reports_a_landed_commit_no_attempts_row_could_record` covers exactly that
+(`with_attempt_row=False` — no row exists at all). **The same predicate produces the identical
+zero-match outcome for a second, unhandled scenario: a row exists, and its `commit_sha` is
+already non-NULL** (fabricated, or merely stale from an earlier, unrelated write) — here there
+*is* a row that needs correcting, and the SPEC's criterion says correcting it is exactly what
+must happen, but the guard silently declines the same way it does for "nothing to correct."
+`phases.post_commit_sha` carries no equivalent guard and is corrected unconditionally in the same
+transaction, so the two pointers diverge from each other, and **no `provenance_missing` entry is
+emitted for this case either** — that finding was built to disclose the absent-row scenario, not
+this one, so a resumed run reports `applied: true` with nothing surfacing the disagreement.
+
+**Reproduced by a genuinely discriminating fixture, not merely asserted.** A real, divergent
+commit (`git checkout -b rogue`, one commit, off the `migrate/<repo>` branch entirely — not
+"not yet landed", which is the existing discard test's scenario) is hand-written via raw SQL into
+`attempts.commit_sha` — never through `_land_task_commit` or any path `fleet resume` itself uses.
+Driving `fleet resume --no-continue --json` against this fixture: the verdict is correctly
+unaffected by the corruption (`landed` reports the real `sha`, not the fabricated `rogue_sha`),
+the branch is correctly never reset, but `attempts.commit_sha` measures `rogue_sha` (uncorrected)
+while `phases.post_commit_sha` measures `sha` (corrected) — the exact divergence this entry
+describes. Test: `tests/test_cli.py::test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_branch`,
+committed as `@pytest.mark.xfail(strict=True, ...)` (this codebase's established convention for a
+known, open, executable-proof defect — `tests/test_build_e2e.py` history uses the same pattern).
+
+**Shape of the fix, not yet built:** key the guard on `attempt_id` — "is this the row the
+arbitration scan's own candidate selection chose" — rather than "is `commit_sha` currently
+`NULL`", so an already-wrong value in the *targeted* row is still corrected while a *different*
+row's already-recorded commit is still left alone (the hazard the `NULL` guard exists to prevent).
+After the fix: remove the `xfail` marker so the test becomes the green proof, and re-run
+`tests/test_cli.py -k step4` to confirm both precedent tests and the `provenance_missing` test
+(`with_attempt_row=False`) still pass unchanged — that one's zero-match case must remain reported,
+not start silently "succeeding" against a row that was never there.
