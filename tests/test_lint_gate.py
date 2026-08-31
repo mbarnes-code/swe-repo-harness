@@ -45,6 +45,13 @@ below turns that measurement into a *baseline* pin, not a clean gate: it fails o
 EITHER direction, so a handful of files silently reformatted (or newly gone dirty) is caught
 even though the whole set staying dirty is not itself a failure. Reformatting down to 0 remains
 out of scope; when it happens, the pin drops to 0 in the same commit, deliberately.
+
+**Note, added at `54b2c80` (round R final-fix):** the `282` denominator above went stale on the
+very commit that landed it — `5f8fa73` (round R's own plan-file commit) added one new,
+format-clean `.md` file to the tree. Re-measured at `54b2c80`: **123 dirty, 160 clean, 283
+scanned.** The `123` dirty count and the pinned assertion below are unaffected; only the clean
+count and the total moved. Per this project's annotate-in-place convention, the `b9524af` figure
+above is left as written and this note states the current one beside it rather than overwriting.
 """
 
 from __future__ import annotations
@@ -286,6 +293,9 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # target — see the module docstring for why reformatting is out of scope. Update this number,
 # deliberately, in the same commit as whatever changes the dirty count (a reformat, a new file
 # added dirty, or new format drift on an existing file).
+# Note, added at `54b2c80` (round R final-fix): re-measured at this commit, 123 dirty / 160 clean
+# / 283 scanned — the denominator moved (see module docstring note); the pinned count below did
+# not.
 _RUFF_FORMAT_DIRTY_BASELINE = 123
 
 _FORMAT_PER_FILE = re.compile(

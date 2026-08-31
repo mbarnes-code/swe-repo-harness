@@ -56,6 +56,15 @@ same criterion also names (`spent_usd == 0`, every attempts row has non-empty `b
 `llm_cache_hit = 0` under the local profile) is separately blocked on D62 (`llm_backend` column
 never populated in the local profile) — do not attempt it, it will not close cleanly.
 
+**Annotation, added 2026-08-31 (round R final-fix, per the round R final review's I3 finding):**
+the D62-blocked clause above is not the only residual this task leaves for §12.24. This file's own
+done bar in `docs/CRITERIA_PLAN.md` §24 also names "one CLI-level test that organically breaches
+the run ceiling (not a direct call into the budgets module) and asserts exit 3" — that clause was
+untouched by this task (`RunBudgetExhausted` still had zero refs in `cli.py`/`test_cli.py` at the
+end of round R) and was not mentioned in the "Out of scope" note above. Recorded here in place,
+per this project's annotate-in-place convention, rather than rewriting the original note — see
+`docs/CRITERIA_PLAN.md` §24's entry for the current, correct statement of both residuals.
+
 **Report:** DONE / DONE_WITH_CONCERNS / NEEDS_CONTEXT / BLOCKED, commits, one-line test summary,
 concerns.
 
