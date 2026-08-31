@@ -65,15 +65,35 @@ disabled and asserts exit 0, plus an assertion that `sys.version_info[:2] == (3,
 **Out of scope:** does not require touching the adapter's own `uv pip compile` tests.
 
 ## 2. `ruff check` / `ruff format --check` / `mypy --strict`
-**OPEN — mixed — TEST-ONLY.** `ruff check` is covered. `ruff format --check` is *deliberately* not
-gated (self-disclosed, 117/142 files dirty). `mypy --strict` has no test at all, though it is
-independently checkpointed clean over 106 files in `INTEGRATION_HONESTY.md` (audit row 2).
+**OPEN — PARTLY (round R, `5c4204c`) — SPEC-ADJUDICATION needed for the remaining leg.** `ruff
+check` is covered. `mypy --strict` is now gated: `tests/test_lint_gate.py:384` shells `mypy
+--strict src/fleet/` and asserts exit 0 (`tests/test_lint_gate.py:297` is the `ruff format
+--check` test discussed below). Two of the three legs SPEC §12 item 2 names are closed.
+
+The third leg — `ruff format --check src/ tests/` exits 0 — is **not met**. The landed test
+(`test_ruff_format_check_dirty_count_matches_the_pinned_baseline`,
+`tests/test_lint_gate.py:297`) deliberately pins a baseline dirty count instead of requiring exit
+0 (its own docstring says so); `docs/SPEC.md:7417` item 2 requires exit 0 with no baseline
+carve-out. Measured in the criterion's own scope, not the whole-repo scope the pinned test
+actually runs: `ruff format --check --no-cache src/ tests/` → **116 dirty / 72 clean = 188
+scanned** (re-measured 2026-08-31, round R final-fix, in an isolated worktree at `54b2c80`) —
+materially different from the whole-repo pin's 123/283.
+
+This baseline-instead-of-clean relaxation predates round R (it is in this file's wording at
+`b9524af` already) and has **no ADR and no "adjudication pending" flag** anywhere in this
+section (`grep 'adjudication pending\|ADR-'` over this entry returns no hit) — a Rule 14 gap.
+Per Rule 14, a criterion's done bar cannot relax "exit 0" to "pinned baseline" without one of
+those two markers, so §2 cannot count DONE under its *current* wording until either an ADR
+adjudicates the relaxation, or the `ruff format` leg is actually driven to clean. This entry now
+carries the flag Rule 14 requires: **adjudication pending** for the baseline-vs-clean relaxation
+on the `ruff format --check` leg.
 **Done bar:** one test asserting `ruff format --check` exit code with the current dirty count
 pinned as an `xfail`/known-baseline (do not silently require reformatting 142 files as a side
 effect of closing this criterion), and one test that shells `mypy --strict src/fleet/` and asserts
-exit 0.
-**Out of scope:** reformatting the 117-142 dirty files is a separate, larger, and disruptive
-change — track it as its own item if wanted, not folded into closing §12.2.
+exit 0. **Not yet sufficient to count §12.2 DONE** — see the adjudication-pending flag above;
+closing §2 for real needs either the ADR or driving the `ruff format` leg to actual exit 0.
+**Out of scope:** reformatting the 116-188 (criterion-scoped) dirty files is a separate, larger,
+and disruptive change — track it as its own item if wanted, not folded into closing §12.2.
 
 ## 3. Coverage gate + `tests/unit` isolation
 **OPEN — SPEC was aspirational — NEW-MECHANISM (small).** No `pytest-cov`/`coverage` dependency,
@@ -176,10 +196,13 @@ criterion stays PARTLY ADDRESSED, not DONE — do not round up the `<n> of 48` c
 touched further — already correct.
 
 ## 10. Phase 2 exit condition — `_transform_criterion`
-**OPEN — TEST-ONLY.** All three violation branches (probe-returns-False, empty-diff,
-outside-`dest_path`) are unexercised; every fake `parse_probe` in tests returns True or raises
-(audit row 10).
-**Done bar:** three tests, one per branch, each driving `_transform_criterion` to the specific
+**DONE (round R, `320bee9`).** All three violation branches (probe-returns-False, empty-diff,
+outside-`dest_path`) are now exercised by three discriminating tests —
+`tests/test_cli.py:4893`, `:4983`, `:5034` — each driving `_transform_criterion` to its specific
+violation and asserting the correct rejection (the probe-returns-False test plants a fake
+`parse_probe` that returns `False`, closing the gap the prior wording described). SPEC §12 item
+10 names exactly these three branches and nothing else, so the done bar below is fully met.
+**Done bar (met):** three tests, one per branch, each driving `_transform_criterion` to the specific
 violation and asserting the correct rejection.
 
 ## 11. Phase 3 exit condition — real bazel + sandboxed, together
@@ -408,13 +431,18 @@ criterion names for the vendored-contract case.
 
 ## 24. Fail-closed budgets, ledger moves correctly
 **OPEN — mixed, 7 sub-clauses — TEST-ONLY + known D62.** Wave-breach, over-reserve-refused, and
-in-flight-wait are covered. `spent_usd == sum(cost_usd)` is entirely untested (no e2e queries
-`budget_ledger`). Local-profile row completeness is D62 (`llm_backend` etc. are NULL — do not
-re-open, it's tracked). Run-ceiling ledger mechanism is proven but never through an organic CLI
-breach (`RunBudgetExhausted` has zero refs in `cli.py`/`test_cli.py`) (audit row 24).
-**Done bar:** one e2e test asserting the ledger-sum invariant, and one CLI-level test that
-organically breaches the run ceiling (not a direct call into the budgets module) and asserts exit
-3.
+in-flight-wait are covered. `spent_usd == sum(cost_usd)` is **now covered (round R,
+`5d8f282`)** — `tests/test_runner.py:2250` queries `budget_ledger` via
+`harness.repo.get_budget(RUN)` under a priced hosted profile and asserts it equals the direct sum
+of `attempts.cost_usd`, closing this clause. Local-profile row completeness is D62 (`llm_backend`
+etc. are NULL — do not re-open, it's tracked). **Two done-bar items remain open:** (1) the D62
+clause above (`--profile local` row completeness — blocked on D62, do not duplicate), and (2) the
+run-ceiling clause — the ledger mechanism is proven but never exercised through an organic CLI
+breach (`RunBudgetExhausted` still has zero refs in `cli.py`/`test_cli.py`, unchanged by round R).
+Round R closed one of ~7 sub-clauses; the criterion stays OPEN.
+**Done bar:** one e2e test asserting the ledger-sum invariant **(met, round R)**, and one
+CLI-level test that organically breaches the run ceiling (not a direct call into the budgets
+module) and asserts exit 3 **(not yet met — see residual (2) above)**.
 
 ## 25. The unknown repo survives the pipeline
 **OPEN — SCALE-FIXTURE.** The `no-manifest` finding and `misc/<repo_id>` destination are covered.
@@ -707,7 +735,7 @@ it.
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 3 | 12, 16, 40 (40's AST sub-clause still open — see its entry; counted DONE for its main clause per round-K) |
+| DONE | 4 | 10, 12, 16, 40 (40's AST sub-clause still open — see its entry; counted DONE for its main clause per round-K; 10 added round R final-fix, 2026-08-31 — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 2 | 27, 37 |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
@@ -722,7 +750,7 @@ figure, count §12.40 as OPEN until M1 lands, and prefer under-counting to over-
 **Recommended dispatch order, cheapest-and-highest-leverage first (updated 2026-08-30 — §12.27's
 COORDINATE leg closed by round L, superseding the original §12.27+§12.37 pairing below):**
 §12.9, §12.37, §12.18 (all now confirmed-open pure WIRING, zero new logic — round M's picks) →
-§12.7 (one-line SPEC correction, substance already passes) → the TEST-ONLY items (5, 6, 10, 15, 20,
+§12.7 (one-line SPEC correction, substance already passes) → the TEST-ONLY items (5, 6, 15, 20,
 21, 24, 26, 32, 33, 40's AST clause, 42, 44, 47's sub-clauses, 48) → SCALE-FIXTURE items →
 SPEC-ADJUDICATION items (17, 41, 45's regex half already done) → NEW-MECHANISM items (22's RSS
 half, 27's DEST_PATH/FILE_PATH legs — each needs its own D-number first, 31, 34) last, since
