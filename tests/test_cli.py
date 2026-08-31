@@ -3349,6 +3349,110 @@ def test_resume_step4_reports_a_candidate_it_could_not_ask_git_about_instead_of_
         "a candidate Git was never asked about was reconciled anyway"
     )
 
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "OPEN DEFECT, found by this test (round P, task 1, §12.15). `_persist_arbitration`'s "
+        "`attempts` UPDATE (`cli.py`, the subquery inside the landed loop) filters "
+        "`commit_sha IS NULL`, so a row whose `commit_sha` is already non-NULL — including a "
+        "FABRICATED off-branch one — matches zero rows and is silently left uncorrected. "
+        "`phases.post_commit_sha` IS corrected in the same unit (verified: this test's `post` "
+        "assertion passes), so the two pointers §11.5's authority table pairs end up disagreeing "
+        "with each other, with the branch itself untouched (verified: `migrate/acme-commons` "
+        "correctly still resolves to the real landed SHA — no reverse `git reset` occurs). "
+        "SPEC.md §12 item 15's own words: fabricating this disagreement 'makes resume correct "
+        "the column' — it does not, for a row whose `commit_sha` did not start NULL. Needs a "
+        "D-number in docs/INTEGRATION_HONESTY.md (assign at dispatch, not here) and a fix "
+        "changing the `IS NULL` guard to key on `attempt_id` (or another row-identity condition) "
+        "instead of on the column being corrected."
+    ),
+)
+def test_resume_step4_corrects_a_fabricated_attempts_commit_sha_pointing_off_branch(
+    workspace: Path,
+) -> None:
+    """SPEC §12 item 15's fabricated reverse disagreement — a CORRUPTED pointer, not an absent one.
+
+    `test_resume_step4_reports_a_landed_commit_no_attempts_row_could_record` (~3288) covers the
+    divergence where no `attempts` row exists to record the SHA at all. This is a different
+    divergence: an `attempts` row exists and its `commit_sha` is hand-edited (raw SQL, never the
+    normal write path — nothing in this harness produces this organically) to a SHA that is
+    **real but not on `migrate/<repo>` at all** — divergent history, not merely "not yet landed"
+    (the discard test's scenario, `3079`). §12 item 15's own words: "Fabricating the reverse
+    disagreement … makes resume correct the column, never `git reset` the branch to match it,
+    which is the mechanical form of the 'Git wins' invariant (§11.5)."
+
+    Two things must both hold, and the fixture is built so a defect in either one is
+    distinguishable from the other:
+
+    * **The verdict itself must be unaffected.** `_reconcile_tasks_with_git` never reads
+      `attempts.commit_sha` to decide landed/discarded — it asks Git directly via
+      `find_task_commit`, scoped to the phase anchor. So the fabricated pointer must not change
+      what Git is asked, only what SQLite currently (wrongly) claims.
+    * **The column, not the branch.** §11.5's authority rule is one-directional: SQLite is
+      corrected to match Git, and "the harness never writes to Git to make it agree with a row."
+      The DISCRIMINATING assertion is therefore on `migrate/<repo>`'s tip, not only on the SQLite
+      row: a resume that `git reset --hard`-ed the branch onto the fabricated SHA would leave the
+      row and the branch agreeing with each other and disagreeing with what Git actually recorded
+      before the corruption — the exact inversion item 15 rules out.
+    """
+    db = workspace / "state" / "fleet.db"
+    worktree, anchor = _arbitration_worktree(workspace)
+    # A REAL commit, reachable in this repo, but never merged onto `migrate/acme-commons` —
+    # divergent history the trailer search scoped to `<phase anchor>..migrate/acme-commons` will
+    # never see.
+    _git_in(worktree, "checkout", "-b", "rogue", anchor)
+    (worktree / "rogue.java").write_text("class Rogue {}\n", encoding="utf-8")
+    _git_in(worktree, "add", "-A")
+    _git_in(worktree, "commit", "-m", "unrelated divergent history, never on migrate/acme-commons")
+    rogue_sha = _git_out(worktree, "rev-parse", "HEAD")
+    _git_in(worktree, "checkout", "migrate/acme-commons")
+
+    sha = _land_task_commit(worktree)
+    assert rogue_sha != sha, "the fixture's fabricated SHA coincides with the real landed one"
+    _seed_running_task(db, task_anchor=anchor, phase_anchor=anchor)
+
+    # The corruption: raw SQL, not `_land_task_commit` or any write path resume itself uses —
+    # simulating bit-rot or a discrepancy nothing in this harness produced organically.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE attempts SET commit_sha = ? WHERE attempt_id = ?", (rogue_sha, ARB_ATTEMPT)
+        )
+    finally:
+        conn.close()
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    report = json.loads(result.stdout)["git_arbitration"]
+    assert report["candidates"] == 1
+    assert [entry["commit_sha"] for entry in report["landed"]] == [sha], (
+        "the fabricated SQLite pointer changed what Git was asked about, rather than being "
+        "overruled by what Git actually shows"
+    )
+    assert report["discarded"] == [] and report["unresolved"] == []
+
+    status, fence, attempt_sha, attempts, post = _arbitration_state(db)
+    assert status == "DONE"
+    assert (attempt_sha, post) == (sha, sha), (
+        "the SQLite row kept the fabricated, off-branch SHA instead of being corrected to match "
+        "Git — the reverse of §11.5's authority rule"
+    )
+    assert attempts == 2, "step 4 charged an attempt for work Git says already landed"
+    assert fence == 4, "an adopted task's fence was bumped; nothing was handed back"
+
+    # The negative half of the invariant: the BRANCH must not have been reset to agree with the
+    # fabricated pointer. Both the tip and the file the true landing produced are asserted.
+    assert _git_out(worktree, "rev-parse", "migrate/acme-commons") == sha, (
+        "the branch was moved to reconcile with a fabricated SQLite pointer instead of the "
+        "column being corrected to match the branch"
+    )
+    assert (worktree / "dest.java").exists(), "the real landed work was discarded"
+    assert not (worktree / "rogue.java").exists(), (
+        "the worktree was checked out onto the fabricated, off-branch commit"
+    )
+
 # --------------------------------------------------------------------------------------
 # exit 9 — the disk ceiling the spec declared and nothing enforced
 # --------------------------------------------------------------------------------------
