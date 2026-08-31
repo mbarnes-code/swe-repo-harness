@@ -71,7 +71,7 @@ from fleet.orchestrator.budgets import (
 from fleet.orchestrator.context import RunContext, default_logger
 from fleet.orchestrator.findings import BACKEND_UNAVAILABLE, CAPABILITY_DRIFT
 from fleet.orchestrator.retry import RetryAction, RetryDecision, RetryPolicy
-from fleet.orchestrator.runner import HaltReason, PhaseCheckpoint, PhaseRunner
+from fleet.orchestrator.runner import HaltReason, PhaseCheckpoint, PhaseRunner, ResultSink
 from fleet.orchestrator.scheduler import (
     SqliteSchedulerStore,
     WaveNotReadyError,
@@ -82,7 +82,7 @@ from fleet.settings import BudgetsSection, FleetConfig, RunSection
 from fleet.state import checkpoints
 from fleet.state import db as dbmod
 from fleet.state.db import StateWriter, connect_ro, initialize_database
-from fleet.state.repository import LeaseStolenError, SqliteStateRepository
+from fleet.state.repository import AttemptRow, LeaseStolenError, SqliteStateRepository
 from fleet.workers.base import (
     BaseWorker,
     WorkerContext,
@@ -238,6 +238,29 @@ def asks_the_model(role: str = "transform_repair") -> Behaviour:
     ) -> WorkerResult[ScriptedOutput]:
         answer = await ctx.llm.complete(role, [Message(role="user", content="go")], Verdict)
         return WorkerResult(status="ok", output=ScriptedOutput(note=answer.value.summary))
+
+    return behaviour
+
+
+def asks_the_model_and_bills_it(role: str = "transform_repair") -> Behaviour:
+    """Like `asks_the_model`, but propagates the call's real `TokenUsage` onto the returned
+    result.
+
+    `reservation.record()` (`runner.py:804-811`) bills `execution.usage`, which `BaseWorker.execute`
+    accumulates FROM the `WorkerResult` a behaviour returns (`workers/base.py:741`) — it is never
+    read back off `ctx.llm` independently. `asks_the_model` leaves `usage` at its zero default,
+    which is fine for the drift-path tests it exists for, but would make a ledger-movement
+    assertion vacuous: without this, `budget_ledger.spent_usd` would stay 0 regardless of how many
+    priced calls the worker made.
+    """
+
+    async def behaviour(
+        ctx: WorkerContext, payload: ScriptedInput
+    ) -> WorkerResult[ScriptedOutput]:
+        answer = await ctx.llm.complete(role, [Message(role="user", content="go")], Verdict)
+        return WorkerResult(
+            status="ok", output=ScriptedOutput(note=answer.value.summary), usage=answer.usage
+        )
 
     return behaviour
 
@@ -436,6 +459,7 @@ class Harness:
         policy: RetryPolicy | None = None,
         estimate: Callable[[str], CostEstimate] | None = None,
         resource_guard: Callable[[], Any] | None = None,
+        sink: ResultSink[ScriptedOutput] | None = None,
     ) -> PhaseRunner[ScriptedInput, ScriptedOutput]:
         async def payloads(
             *,
@@ -460,6 +484,7 @@ class Harness:
             estimate=estimate or (lambda _repo_id: CostEstimate(0, 0, 0.0)),
             resource_guard=resource_guard or (lambda: None),
             sleep=sleep,
+            sink=sink,
         )
 
     async def set_attempts(self, repo_id: str, attempts: int) -> None:
@@ -2185,4 +2210,86 @@ async def test_a_mid_wave_wall_clock_breach_names_the_elapsed_the_withholding_sa
     assert float(elapsed.group(1)) > report.admission.elapsed_s, (
         "THE discriminator: on the mid-wave path the pre-wave snapshot is strictly smaller, "
         "and it is the number the defect printed"
+    )
+
+
+# ======================================================================================
+# §12.24: budget_ledger.spent_usd == SUM(attempts.cost_usd)
+# ======================================================================================
+
+
+def _cost_recording_sink(harness: Harness) -> ResultSink[ScriptedOutput]:
+    """Wires each landed dispatch's `WorkerResult.usage.cost_usd` into a real `attempts` row via
+    the real `record_attempt` (`state/repository.py:2124`) — the sink §12.24 needs and that no
+    existing fixture in this file wires. `PhaseRunner`'s `sink=None` default means none of this
+    file's other tests ever write an `attempts` row at all.
+    """
+    counts: dict[str, int] = {}
+
+    async def sink(
+        *, repo_id: str, phase: Phase, fence: int, result: WorkerResult[ScriptedOutput]
+    ) -> None:
+        counts[repo_id] = counts.get(repo_id, 0) + 1
+        stamp = harness.clock().isoformat()
+        await harness.repo.record_attempt(
+            AttemptRow(
+                attempt_id=f"{repo_id}-{counts[repo_id]}",
+                run_id=RUN,
+                repo_id=repo_id,
+                phase=phase,
+                attempt=counts[repo_id],
+                started_at=stamp,
+                finished_at=stamp,
+                cost_usd=result.usage.cost_usd,
+            )
+        )
+
+    return sink
+
+
+async def test_budget_ledger_spent_usd_equals_the_sum_of_attempts_cost_usd(
+    harness: Harness,
+) -> None:
+    """§12.24's ledger-sum invariant, under a real priced dispatch: `budget_ledger.spent_usd ==
+    SUM(attempts.cost_usd)`.
+
+    Both columns share one source value (`TokenUsage.cost_usd`, `client.py:965-994`'s `_stamp`),
+    traced through `runner.py:804-811` (which bills `reservation.record()` off `execution.usage`)
+    and `budgets.py:637-663` (`CostLedger.settle`, which grows `budget_ledger.spent_usd` by the
+    settled reservation's actual cost) on one side, and this test's own sink → `record_attempt` on
+    the other. Two repos, each with one real `ctx.llm.complete` call through `make_router()`'s
+    priced `fake-1` target (`Price(in=1.0, out=2.0)`, `ScriptedBackend`'s fixed
+    `TokenUsage(input_tokens=12, output_tokens=4)`), so the SUM has two real addends rather than
+    one — a single-repo fixture cannot tell "the ledger equals the one attempt it made" apart from
+    "the ledger equals the SUM of all attempts", and those are the same number when there is only
+    one row.
+    """
+    await _seed(harness, "repo-a", "repo-b")
+    await harness.plan(("repo-a", "repo-b"))
+    BEHAVIOURS["repo-a"] = [asks_the_model_and_bills_it()]
+    BEHAVIOURS["repo-b"] = [asks_the_model_and_bills_it()]
+
+    report = await harness.runner(sink=_cost_recording_sink(harness)).run_wave(0)
+
+    assert report.halt is None
+    for repo_id in ("repo-a", "repo-b"):
+        status, attempts, _, _, _ = await harness.phase_row(repo_id)
+        assert (status, attempts) == ("SUCCEEDED", 1), (
+            f"{repo_id} must actually have dispatched and billed, or the sums below are vacuous"
+        )
+
+    budget = await harness.repo.get_budget(RUN)
+    assert budget is not None
+    async with harness.read_conn.execute(
+        "SELECT SUM(cost_usd) FROM attempts WHERE run_id = ?", (RUN,)
+    ) as cursor:
+        row = await cursor.fetchone()
+    attempts_total = float(row[0]) if row is not None and row[0] is not None else 0.0
+
+    assert budget.spent_usd > 0, (
+        "the fixture must actually be priced and actually have dispatched, or an untested-but-"
+        "equal 0.0 == 0.0 would pass this test for the wrong reason"
+    )
+    assert abs(budget.spent_usd - attempts_total) < 1e-9, (
+        f"ledger spent ${budget.spent_usd} but attempts.cost_usd sums to ${attempts_total}"
     )
