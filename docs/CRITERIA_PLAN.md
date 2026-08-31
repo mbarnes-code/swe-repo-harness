@@ -230,6 +230,21 @@ selection confirmed identical to the pre-fix query minus the removed guard, tran
 confirmed, cross-task/cross-rung stomping hazard confirmed structurally impossible. Eighth
 criterion (after §12.5, §12.7, §12.12, §12.16, §12.18, §12.26, §12.32) to reach this file's strict
 DONE bar. Also surfaced D89 (pre-existing, disclosed, does not affect this fix's correctness).
+**Dated annotation, 2026-08-31 (documentation-accuracy review):** "row selection confirmed
+identical to the pre-fix query minus the removed guard" overclaims. Read against `41fdfa1`'s diff:
+pre-fix, the `commit_sha IS NULL` filter sat *inside* the row-selection subquery, so among rows for
+a given `task_id` it selected the newest-by-`ORDER BY` row **among those already holding a NULL
+`commit_sha`** — the selection is not the same scan with one predicate subtracted, because that
+predicate was part of what rows the `ORDER BY` ran over. Post-fix, the `ORDER BY` runs over *all*
+of the task's rows, unfiltered, so it always names the true newest rung regardless of what that
+rung's `commit_sha` currently holds. The two selections diverge in one concrete case: the newest
+rung already holds a non-NULL (e.g. fabricated) `commit_sha` and an older rung holds NULL. There,
+the pre-fix query excludes the newest rung and instead selects and overwrites the **older**, NULL
+rung's `commit_sha`; the post-fix query selects and overwrites the **newest** rung's — a different
+row, not the same row reached by a looser scan. Post-fix is the correct direction — the newest rung
+is the one §12 item 15's fabricated-reverse-disagreement clause requires be corrected — so this is
+not a defect, only an imprecise description of what the fix changed. Original sentence left in
+place per this file's own annotate-in-place convention.
 
 ## 16. Checkpoint integrity on corruption
 **DONE (SPEC corrected, `12be741`).** The SPEC said corruption "raises `ValidationError`"; the

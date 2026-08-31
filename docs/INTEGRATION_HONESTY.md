@@ -6734,6 +6734,22 @@ transaction, so the two pointers diverge from each other, and **no `provenance_m
 emitted for this case either** — that finding was built to disclose the absent-row scenario, not
 this one, so a resumed run reports `applied: true` with nothing surfacing the disagreement.
 
+> **[Dated annotation, 2026-08-31, documentation-accuracy review — the sentence above overclaims
+> the severity; body left untouched, this is the correction.]** "No `provenance_missing` entry is
+> emitted for this case either" is false against the pre-fix code. The pre-fix branch, read from
+> `41fdfa1`'s diff, was `if not cursor.rowcount: unwritten.append((task_id, repo_id, phase, sha))`,
+> and every `unwritten` entry the caller receives is appended to `report["provenance_missing"]`
+> unconditionally (`src/fleet/cli.py`, the loop after `_persist_arbitration` returns). The
+> `UPDATE ... WHERE attempt_id = (SELECT ... AND commit_sha IS NULL ...)` subquery matches zero
+> rows in the fabricated-non-NULL-`commit_sha` case just as it does in the absent-row case — same
+> `cursor.rowcount == 0`, same code path, same append. So this case's disagreement **was**
+> surfaced pre-fix, via a `provenance_missing` entry — just one carrying a misleading label,
+> reporting "no `attempts` row could record this commit" for a row that demonstrably existed and
+> already held a (wrong) commit. That is real and worth having fixed, but it is materially milder
+> than "nothing surfacing the disagreement": an operator reading `provenance_missing` pre-fix would
+> have seen an entry naming this `task_id`/`repo_id`/`phase`, even if its label pointed at the
+> wrong cause.
+
 **Reproduced by a genuinely discriminating fixture, not merely asserted.** A real, divergent
 commit (`git checkout -b rogue`, one commit, off the `migrate/<repo>` branch entirely — not
 "not yet landed", which is the existing discard test's scenario) is hand-written via raw SQL into
