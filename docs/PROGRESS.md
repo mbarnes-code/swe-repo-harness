@@ -6741,3 +6741,66 @@ kwarg and a small `ResultSink` closure recording real `attempts` rows, then asse
 collision with any file this round touched. This becomes round R's first task.
 
 **Round R, opening next.**
+
+### Checkpoint — 2026-08-31 (round R controller, close-out)
+
+**§12 criteria met: 11 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, `§12.40` excluded via its existing "do not count" marker — up from
+10 at round Q's close). Added this round: **§12.10** only (Phase 2 exit condition — the three
+named violation branches of `_transform_criterion`, all landed and mutation-verified). §12.2 and
+§12.24 each had real, well-built work land — a `ruff format --check` baseline test + `mypy
+--strict` exit-0 test for §12.2, and the `budget_ledger.spent_usd == SUM(attempts.cost_usd)`
+invariant for §12.24 — but **neither criterion counts toward the tally**, both correctly still
+`OPEN`:
+
+- **§12.2** — SPEC.md:7417 requires `ruff format --check src/ tests/` at **exit 0**; the landed
+  test deliberately pins a baseline (116 dirty / 188 in the criterion's own scope) instead. This
+  criterion's own final-review catch (I2, below) is the first time this session measured the gap
+  in the criterion's own scope rather than the whole repo — the two numbers (116/188 vs. the
+  whole-repo 123/283) are materially different, and reporting the whole-repo figure would have
+  been the wrong quantity for this specific criterion. `docs/CRITERIA_PLAN.md` §2 now states this
+  explicitly and carries a Rule-14 "adjudication pending" flag: the baseline-instead-of-clean
+  relaxation predates this round but had no ADR before now.
+- **§12.24** — SPEC.md:7439 is a 6-7 clause criterion; this round closed exactly one (the
+  ledger-sum invariant). Two residuals remain and are now both named in `docs/CRITERIA_PLAN.md`
+  §24: the D62-blocked `--profile local` clause, and a still-untouched run-ceiling/exit-3 clause
+  (`RunBudgetExhausted` has zero refs in `cli.py`/`test_cli.py`).
+
+**A round-Q pattern repeated, caught the same way.** Round R's own final whole-branch review found
+the identical shape round Q's final review found in round Q's own work one round earlier:
+`docs/CRITERIA_PLAN.md` entries left un-updated after a merge, each now containing a sentence the
+round's own commits had made false (§2, §10, §24 all stale at the same time). Worth naming as a
+recurring failure mode rather than a one-off: **the controller's per-task and whole-branch reviews
+verify the code; nothing structurally forces a symmetric check that the backlog document was
+updated to match**, so this is the second round running where that specific gap needed a
+dedicated fix-wave to close. One fix dispatch (this round, `bbeb94f`) closed all three findings
+plus one Minor; scoped re-review independently re-measured every number rather than trusting the
+fix's own report, confirmed all addressed, zero new breakage.
+
+**D89 traced, not fixed (research dispatch, not a round target):** the gap this session's D89
+entry names turned out wider than its own text disclosed — the `tasks` table has **zero
+production `INSERT`s anywhere** in `src/fleet/`, so D87's git-arbitration fix (round P) is
+**provably always-inert** against real `fleet resume` traffic, not merely "may not fire." A real
+per-unit task identity already exists in production (`workers/rewrite.py`'s `task_id_for`, in real
+git trailers) but is never persisted, and a genuine cardinality mismatch (per-unit commits vs.
+per-dispatch `AttemptRow` writes) makes this bigger than a single missing wiring call. Recorded as
+a dated trace on D89 (`e87ae57`); correctly scoped as its own future round rather than patched
+hastily. Candidate for round S.
+
+**Two pre-existing overclaims corrected** (dated annotations, originals left in place):
+`docs/CRITERIA_PLAN.md` §12.15's "row selection identical to the pre-fix query minus the removed
+guard" — the removed predicate sat *inside* the selection subquery, so the fix can select a
+genuinely different row (a strict improvement, not merely the same query with a guard removed);
+and `docs/INTEGRATION_HONESTY.md` D87's "no `provenance_missing` entry is emitted for this case
+either" — a `provenance_missing` entry *was* emitted pre-fix, under a misleading label, which is
+real but materially milder than the entry's original claim (`4e0f66c`).
+
+**Full suite, pre-final-fix-wave: 1999 passed, 0 failed, 0 errors, clean `bazel disk` line**
+(confirms the three workstream merges — §12.24/§12.10/§12.2 — integrate cleanly together, up from
+1993 at round Q's close). The final-review fix wave (`bbeb94f`) was comment/docstring-only across
+three doc/test files (confirmed by the scoped re-reviewer: zero `-` lines in the pinned assertion
+logic); re-verified with a targeted run of the three files this round touched (194/194) rather
+than a third full 16-minute pass, consistent with round P/Q's own precedent for isolated,
+low-risk fixes.
+
+**Round S, opening next.**
