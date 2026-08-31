@@ -473,8 +473,9 @@ def test_a_second_scan_clones_nothing_and_duplicates_no_row(fleet: Path) -> None
     assert scan(fleet).exit_code == ExitCode.SUCCESS
     before = {
         table: query(fleet, f"SELECT COUNT(*) FROM {table}")[0][0]  # noqa: S608
-        for table in ("repos", "manifests", "coordinates", "symbols", "edges", "phases")
+        for table in ("repos", "manifests", "coordinates", "symbols", "edges", "phases", "findings")
     }
+    assert before["findings"] > 0, "the empty repo's EmptyRepo finding must exist to be re-tested"
     heads = dict(query(fleet, "SELECT repo_id, head_sha FROM repos"))
     attempts = dict(query(fleet, "SELECT repo_id, attempts FROM phases WHERE phase = 1"))
 
@@ -489,6 +490,48 @@ def test_a_second_scan_clones_nothing_and_duplicates_no_row(fleet: Path) -> None
     assert after == before, "a re-scan duplicated rows"
     assert dict(query(fleet, "SELECT repo_id, head_sha FROM repos")) == heads
     assert dict(query(fleet, "SELECT repo_id, attempts FROM phases WHERE phase = 1")) == attempts
+
+
+def test_a_second_sequence_leaves_waves_and_wave_members_unchanged(fleet: Path) -> None:
+    """`fleet scan && fleet sequence && fleet sequence` (§12 item 23) is a no-op for `waves` and
+    `wave_members`: same row counts, same wave assignment per node, the second time as the first.
+
+    Why these two tables specifically: the earlier re-scan test above proves `edges`, `symbols`
+    and `manifests` survive a repeated `fleet scan` untouched, but that test never calls
+    `fleet sequence` — so it cannot see a defect where `assign_waves` or its persistence layer
+    reruns and reassigns wave indices, or duplicates a `wave_members` row, on a plan that was
+    already laid out. `waves`/`wave_members` are written only by `sequence`, so this is the table
+    pair that test structurally cannot reach.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+    first = sequence(fleet)
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    before_counts = {
+        table: query(fleet, f"SELECT COUNT(*) FROM {table}")[0][0]  # noqa: S608
+        for table in ("waves", "wave_members")
+    }
+    assert before_counts["waves"] > 0 and before_counts["wave_members"] > 0, (
+        "the fixture must really produce waves for a re-sequence to have anything to duplicate"
+    )
+    before_members = dict(
+        query(fleet, "SELECT node_kind || ':' || node_id, wave_index FROM wave_members")
+    )
+    before_waves = query(fleet, "SELECT wave_index, max_usd FROM waves ORDER BY wave_index")
+
+    second = sequence(fleet)
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+    after_counts = {
+        table: query(fleet, f"SELECT COUNT(*) FROM {table}")[0][0]  # noqa: S608
+        for table in before_counts
+    }
+    assert after_counts == before_counts, "a re-sequence duplicated a wave or a wave member"
+    assert (
+        dict(query(fleet, "SELECT node_kind || ':' || node_id, wave_index FROM wave_members"))
+        == before_members
+    ), "a re-sequence reassigned a node to a different wave"
+    assert (
+        query(fleet, "SELECT wave_index, max_usd FROM waves ORDER BY wave_index") == before_waves
+    )
 
 
 def test_an_interrupted_scan_resumes_without_losing_completed_work(fleet: Path) -> None:
@@ -786,3 +829,110 @@ def test_a_trunk_default_branch_is_recorded_and_the_repo_still_scans(trunk_fleet
         )
     }
     assert repos["acme-on-trunk"] == ("acme-on-trunk", "trunk", "symbolic-ref")
+
+
+# ---------------------------------------------------------------------------------------
+# a contract vendored into nine repos: the scale case §12 item 23 names explicitly
+# ---------------------------------------------------------------------------------------
+#
+# `state/schema.sql`'s own comment on `contracts` states the property in these terms — "nine
+# repos vendoring one proto package => exactly one row" — and SPEC.md item 23 gives the same
+# number. Every carrier below sits under `third_party/`, one of `scan.vendor_globs`' default
+# patterns, so none is the "real" (non-vendored) owner; `workers/contracts.py::_owner`'s
+# `eligible = [... not vendored ...] or list(sources)` fallback is exactly what makes a node with
+# an owner still exist when EVERY carrier is a vendored copy, which is the shape the criterion
+# names ("a contract vendored into nine fixture repos"), not nine-vendored-plus-one-canonical.
+
+_VENDORED_PROTO = """\
+syntax = "proto3";
+
+package acme.vendored.v1;
+
+message Widget {
+  string id = 1;
+}
+"""
+
+_VENDOR_REPO_NAMES = tuple(f"acme-vendor-{i:02d}" for i in range(1, 10))
+"""Nine repos, `acme-vendor-01` .. `acme-vendor-09` — the scale SPEC item 23 names."""
+
+VENDORED_CONTRACT_ID = "proto:acme.vendored.v1"
+
+
+@pytest.fixture
+def vendored_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+    """Nine real git repos, each vendoring a byte-identical copy of the same `.proto` package
+    under `third_party/`, plus a config bundle and a fresh db."""
+    sources = {
+        name: _make_repo(
+            tmp_path / "sources",
+            name,
+            {
+                "third_party/acme/vendored/v1/vendored.proto": _VENDORED_PROTO,
+                "package.json": json.dumps({"name": f"@acme/{name}", "version": "1.0.0"}),
+            },
+        )
+        for name in _VENDOR_REPO_NAMES
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(_VENDOR_REPO_NAMES))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    yield workspace
+
+
+def test_a_contract_vendored_into_nine_repos_stays_one_row_across_a_second_scan(
+    vendored_contract_fleet: Path,
+) -> None:
+    """§12 item 23, literally: nine repos vendoring one `.proto` package produce exactly ONE
+    `contracts` row, both after the first `fleet scan` and — unchanged — after a second.
+
+    The `CONTRACT` collision this fleet also raises (nine claimants of one contract_id, §3.1 step
+    8) is checked the same way, for the same reason: `audit_collisions`' `_contract_collisions`
+    fires whenever `len(repo_ids) >= 2` for one `contract_id` regardless of vendored status, so
+    nine identical vendored copies are a real, non-trivial collision row — not the zero-collision
+    case the five-repo `fleet` fixture elsewhere in this file exercises. A defect that re-derives
+    the graph on a second scan and, say, dropped or re-created either row would be invisible to a
+    test built on a fixture with only one or two carriers, where "one row" is true almost by
+    construction; nine independent carriers is what makes the identity key — not the carrier
+    count — the thing actually under test.
+    """
+    first = scan(vendored_contract_fleet)
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+
+    contracts_before = query(
+        vendored_contract_fleet,
+        "SELECT contract_id, owning_repo_id, content_sha256, extractable FROM contracts",
+    )
+    assert len(contracts_before) == 1, f"nine vendored copies produced {contracts_before}"
+    contract_id, owner_before = contracts_before[0][0], contracts_before[0][1]
+    assert contract_id == VENDORED_CONTRACT_ID
+    assert owner_before in _VENDOR_REPO_NAMES, "the ladder must still crown SOME carrier as owner"
+
+    collisions_before = query(
+        vendored_contract_fleet, "SELECT kind, key, repo_ids, severity FROM collisions"
+    )
+    assert len(collisions_before) == 1, f"nine claimants produced {collisions_before}"
+    kind, key, repo_ids_json, severity = collisions_before[0]
+    assert (kind, key) == ("CONTRACT", VENDORED_CONTRACT_ID)
+    assert sorted(json.loads(repo_ids_json)) == sorted(_VENDOR_REPO_NAMES)
+    assert severity == "warn", "byte-identical vendored copies must not read as a real conflict"
+
+    # Proved absent by DELETING the source repositories first, exactly as the five-repo re-scan
+    # test above does: a re-scan that touches the network at all cannot succeed from here.
+    shutil.rmtree(vendored_contract_fleet.parent / "sources")
+
+    second = scan(vendored_contract_fleet)
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+
+    contracts_after = query(
+        vendored_contract_fleet,
+        "SELECT contract_id, owning_repo_id, content_sha256, extractable FROM contracts",
+    )
+    assert contracts_after == contracts_before, "a re-scan changed the one vendored contract row"
+
+    collisions_after = query(
+        vendored_contract_fleet, "SELECT kind, key, repo_ids, severity FROM collisions"
+    )
+    assert collisions_after == collisions_before, "a re-scan changed the vendored collision row"
