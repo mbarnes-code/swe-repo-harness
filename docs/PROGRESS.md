@@ -6619,3 +6619,51 @@ more surface area.
 
 **Post-round-O full suite: 1976 passed, 0 failed, 0 errors, clean `bazel disk` line.** Confirms
 rounds M/N/O's nine merged branches (three regression fixes included) all integrate cleanly.
+
+### Checkpoint — 2026-08-31 (round P controller, close-out)
+
+**§12 criteria met: 8 of 48** (added this round: §12.15 — all three clauses, including the
+fabricated-reverse-disagreement case that surfaced a real defect while being built). Up from 6 at
+round P's open.
+
+Round P was the first round to find *and fix* real production defects rather than only closing
+test gaps — both through the same pattern: build the fixture the criterion literally describes,
+discover the property doesn't fully hold, stop rather than paper over it, get a controller-ruled
+fix location, land the fix, get it independently re-verified with elevated scrutiny.
+
+- **D87** (fixed, `41fdfa1`): `fleet resume`'s git arbitration never corrected a fabricated
+  `attempts.commit_sha` when the row already held a value — only `phases.post_commit_sha` was,
+  leaving the two pointers §11.5's authority table pairs silently disagreeing after a resume
+  reported as clean. Fixed by re-keying the UPDATE guard on `attempt_id` (via the existing
+  candidate-selection scan) instead of `commit_sha IS NULL`. Reviewed with elevated scrutiny
+  given it touches crash-recovery state reconciliation — the reviewer independently reproduced
+  the revert-based mutation check rather than trusting the report, and confirmed the atomicity
+  and cross-task-stomping-hazard claims against `StateWriter`'s actual transaction handling.
+- **D88** (fixed, `c410999`, **security-relevant**): `phases.last_error`'s only real write path
+  (`complete_phase`, the terminal write every phase transition goes through) wrote completely
+  unredacted, contradicting `docs/SPEC.md:6987`'s explicit claim. Reproduced against a real
+  persisted row — a `github_pat_…`-shaped credential survived verbatim. Fixed at the write
+  boundary inside `state/repository.py`, per SPEC's own wording and for defense-in-depth over
+  every caller. One fix round: a docstring's idempotency claim was found to overstate what was
+  verified (a real counterexample existed, not a live bug) — narrowed and backed with a test
+  rather than left as unverified prose.
+- **D89** (opened, not yet fixed): D87's reviewer found `attempts.task_id` — the column
+  `_persist_arbitration`'s fix (and the pre-fix query before it) scopes its correction on — is
+  never populated by any production write site. The per-unit task queue that would populate it
+  is fully built and unit-tested but has zero production callers. Does not make D87's fix wrong
+  (confirmed correct for the mechanism as specified); means the mechanism may be structurally
+  unreachable in a real run today. Tracked for a future round, not attempted this one.
+
+**A real merge conflict, the first this session** (`tests/test_llm_cache.py`): round O's task 1
+and round P's task 2 both inserted a complete, independent test function at the same location in
+independently-forked branches. Resolved by hand — both functions kept in full, sequentially — and
+verified before completing the merge: zero conflict markers remained, `py_compile` clean, and the
+combined file plus its two neighboring test files passed 208/208 together.
+
+§12.15, §12.20, §12.26, §12.44 entries in `docs/CRITERIA_PLAN.md` all updated to reflect exactly
+what landed — §12.20 correctly stays open (PR-body placeholder clause still unverified after two
+separate rounds' investigations), §12.44 correctly stays open (one sub-clause of six).
+
+Full post-round-P suite run dispatched in the background; result to follow.
+
+**Round Q, opening next.**
