@@ -4796,6 +4796,291 @@ def test_no_rule_match_and_missing_engine_are_separate_unprobed_entries(
     assert any("dest/collateral.json" in line for line in unprobed), unprobed
 
 
+# --------------------------------------------------------------------------------------
+# SPEC.md §12 item 10, `_transform_criterion`'s three named violation branches: an explicit
+# `parse_probe` -> `False` verdict, an empty diff, and a write outside the wave's `dest_path`.
+# --------------------------------------------------------------------------------------
+
+#: Every probe RUNS and returns an explicit verdict — `False` for `bad.ts`, `True` for everything
+#: else. Distinct from `_INDETERMINATE_ENGINE_MODULE` (ran, no verdict, raises) and from
+#: `_UNAVAILABLE_ENGINE_MODULE` (never ran at all, raises before returning). Until this module,
+#: no fake `parse_probe` in this suite ever returned `False` explicitly.
+_PROBE_FALSE_ENGINE_MODULE = """\
+from __future__ import annotations
+
+CALLS: list[str] = []
+
+
+class FakeRewriter:
+    engine = "fake"
+
+    async def apply(self, rule, path, source, params):
+        return None
+
+    async def parse_probe(self, path: str) -> bool:
+        CALLS.append(path)
+        return not path.endswith("bad.ts")
+
+
+REWRITER = FakeRewriter()
+"""
+
+
+def _init_repo_with_one_commit(repo: Path) -> str:
+    """A real one-commit git repo: `dest/good.ts` at HEAD. Returns HEAD's own sha, so a caller
+    diffing `<this sha>..<branch>` gets a genuinely EMPTY range — §12 item 10's "non-empty diff"
+    clause has to be driven by real git history producing zero entries, not a fake."""
+
+    def git(*args: str) -> None:
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), *args],  # noqa: S607 - "git" from PATH, as every suite does
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    repo.mkdir(parents=True)
+    git("init", "--initial-branch=main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "fleet-test")
+    (repo / "dest").mkdir()
+    (repo / "dest" / "good.ts").write_text("export const good = 1;\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "pre")
+    return subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],  # noqa: S607 - "git" from PATH
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _init_repo_with_write_outside_dest(repo: Path) -> str:
+    """Like `_init_repo_with_two_commits`, but the second commit's changes include a file OUTSIDE
+    `dest/` (`other/rogue.ts`) alongside the legitimate `dest/good.ts` edit. Returns the HEAD~1
+    sha the caller diffs against."""
+
+    def git(*args: str) -> None:
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), *args],  # noqa: S607 - "git" from PATH, as every suite does
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+
+    repo.mkdir(parents=True)
+    git("init", "--initial-branch=main")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "fleet-test")
+    (repo / "dest").mkdir()
+    (repo / "dest" / "good.ts").write_text("export const good = 1;\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "pre")
+    pre_sha = subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],  # noqa: S607 - "git" from PATH
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    (repo / "dest" / "good.ts").write_text("export const good = 2;\n", encoding="utf-8")
+    (repo / "other").mkdir()
+    (repo / "other" / "rogue.ts").write_text("export const rogue = 1;\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-m", "rewrite, plus a write outside dest/")
+    return pre_sha
+
+
+def test_parse_probe_returning_false_is_a_genuine_violation_not_unprobed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """SPEC.md §12 item 10: "parse probe 0 for every touched file" — a probe that RAN and
+    explicitly said "this does not parse" (`False`, no raise) is the plain positive case the
+    criterion names, distinct from `ProbeIndeterminateError` (ran, no verdict) and
+    `EngineUnavailableError` (never ran at all) — both already covered above. Until this test,
+    every fake `parse_probe` in this suite returned `True` or raised; none ever returned `False`,
+    so cli.py:4736-4737 (`if not probed: violations.append(...)`) was unexercised.
+
+    Discriminating mutation: folding the `if not probed:` branch into `unprobed.append(...)`
+    instead of `violations.append(...)` (or deleting the branch outright) turns this red —
+    `violations` comes back `[]` and `unprobed` gains the entry instead, which the old shape
+    (asserting only "some list is non-empty") would not have caught but this test's explicit
+    `unprobed == []` / `len(violations) == 1` pair does.
+    """
+    from fleet.cli import TransformOutput, _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.rewrite.rules import RewriteRule
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_two_commits(repo)
+
+    engine_dir = tmp_path / "engines"
+    engine_dir.mkdir()
+    (engine_dir / "fake_probe_false_engine.py").write_text(
+        _PROBE_FALSE_ENGINE_MODULE, encoding="utf-8"
+    )
+    monkeypatch.syspath_prepend(str(engine_dir))
+    monkeypatch.delitem(__import__("sys").modules, "fake_probe_false_engine", raising=False)
+
+    config = write_config(
+        tmp_path,
+        fleet=FLEET_YAML
+        + "transform:\n  rules_dir: config/rules\n  engines:\n    fake: "
+        "fake_probe_false_engine\n",
+    )
+    settings = FleetSettings.load(config.parent)
+
+    rule = RewriteRule(
+        id="fake-rule",
+        engine="fake",
+        languages=["typescript"],
+        applies_to=["**/*.ts"],
+        rule={"pattern": "x"},
+    )
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+    evidence.record(
+        TransformOutput(
+            repo_id="repo1", rewritten=["dest/bad.ts", "dest/good.ts"], unresolved=[]
+        )
+    )
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[rule],
+        )
+    )
+
+    from fake_probe_false_engine import CALLS  # type: ignore[import-not-found]
+
+    assert any(call.endswith("good.ts") for call in CALLS), (
+        "good.ts must still be probed alongside the file whose probe explicitly failed"
+    )
+    assert any(call.endswith("bad.ts") for call in CALLS)
+    assert len(violations) == 1, violations
+    assert "the parse probe failed for" in violations[0]
+    assert "dest/bad.ts" in violations[0]
+    assert unprobed == [], (
+        "an explicit `False` verdict is a genuine violation of §12 item 10's parse-probe "
+        f"clause, not a non-blocking `unprobed` warning: {unprobed}"
+    )
+
+
+def test_empty_diff_is_rejected_as_a_violation(tmp_path: Path) -> None:
+    """SPEC.md §12 item 10: "non-empty diff" — a repo whose phase reports SUCCEEDED but whose
+    `git diff <pre_commit_sha>..<branch>` is empty must be a violation (cli.py:4678-4682), not
+    silently accepted. Until this test, no existing test drove `_changed_entries` to return zero
+    entries; every fixture repo in this module had real changes between the two commits it
+    diffs.
+
+    Discriminating mutation: deleting the `if not changed:` branch, or inverting it to
+    `if changed:`, turns this red — `violations` comes back `[]` instead of carrying the
+    EMPTY-diff message.
+    """
+    from fleet.cli import _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    head_sha = _init_repo_with_one_commit(repo)
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=head_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[],
+        )
+    )
+
+    assert len(violations) == 1, violations
+    assert "is EMPTY" in violations[0], violations
+    assert head_sha[:12] in violations[0], violations
+    assert "repo1" in violations[0], violations
+    assert unprobed == []
+
+
+def test_a_write_outside_dest_path_is_rejected_as_a_violation(tmp_path: Path) -> None:
+    """SPEC.md §12 item 10: "zero changed paths outside the repo's `dest_path`" — a patch that
+    touches a file outside the wave's `dest_path` (here `other/rogue.ts`, alongside a legitimate
+    `dest/good.ts` edit) must be reported (cli.py:4691-4697), even though the diff is otherwise
+    non-empty. Until this test, no existing test planted a changed path outside `dest_path` at
+    all — every fixture's changes in this module landed entirely under `dest/`.
+
+    Discriminating mutation: deleting the `elif not post.startswith(f"{plan.dest_path}/"):`
+    branch, or the `if outside:` violation append, turns this red — `violations` comes back
+    `[]` instead of naming `other/rogue.ts`.
+    """
+    from fleet.cli import _transform_criterion, _TransformEvidence, _TransformPlan
+    from fleet.models.enums import RepoStatus
+    from fleet.settings import FleetSettings
+
+    repo = tmp_path / "repo1"
+    pre_sha = _init_repo_with_write_outside_dest(repo)
+
+    config = write_config(tmp_path)
+    settings = FleetSettings.load(config.parent)
+
+    plan = _TransformPlan(
+        repo_id="repo1",
+        worktree=repo,
+        branch="main",
+        dest_path="dest",
+        import_specifier="",
+        pre_commit_sha=pre_sha,
+        base_ref="main",
+        sources=(),
+        targets=(),
+    )
+    evidence = _TransformEvidence()
+
+    violations, unprobed = asyncio.run(
+        _transform_criterion(
+            settings,
+            plans={"repo1": plan},
+            evidence=evidence,
+            statuses={"repo1": RepoStatus.SUCCEEDED},
+            rules=[],
+        )
+    )
+
+    assert len(violations) == 1, violations
+    assert "outside dest/" in violations[0], violations
+    assert "other/rogue.ts" in violations[0], violations
+    assert unprobed == []
+
+
 def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
     tmp_path: Path,
 ) -> None:
