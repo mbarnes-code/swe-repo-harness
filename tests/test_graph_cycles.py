@@ -28,6 +28,7 @@ import subprocess
 import sys
 from hashlib import sha256
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -47,6 +48,7 @@ from fleet.graph.cycles import (
     scc_id_for,
     supersede_findings,
 )
+from fleet.graph.sequence import condense_for_ordering, ordering_is_acyclic
 from fleet.models.enums import (
     BreakStrategy,
     ContractKind,
@@ -63,6 +65,14 @@ REPO_ROOT = Path(fleet.__file__).resolve().parents[2]
 
 K1 = "proto:acme.k1"
 K2 = "proto:acme.k2"
+
+# §12.19's "no hang" property, bounded by wall clock rather than by an iteration count: the SCC
+# detection is Tarjan's algorithm (`nx.strongly_connected_components`, O(V+E)) and the MANUAL
+# path taken past `scc_hard_max` returns immediately with no hoist/break loop, so a 41-member
+# ring is expected to resolve in milliseconds. 5s is generous headroom for CI, not a measured
+# runtime; it exists to catch a genuine hang (or an accidental exponential blowup), not to be a
+# tight budget.
+NO_HANG_DEADLINE_S = 5.0
 
 
 # =======================================================================================
@@ -168,6 +178,18 @@ def multi_chord_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[Con
         ),
     ]
     return graph_nodes, edges, contracts
+
+
+def ring_cycle(n: int) -> tuple[list[GraphNode], list[DependencyEdge], tuple[str, ...]]:
+    """`n` repos in one ring — `acme-00 -> acme-01 -> ... -> acme-{n-1} -> acme-00` — all
+    `DECLARED_DEP` at confidence 1.0 and no contract anywhere: a genuine SCC of `n` members, not a
+    chain. Every edge is load-bearing — removing any single one turns the ring into a path and the
+    SCC stops existing at all, which is what makes this shape (rather than, say, a chain plus one
+    back edge) a real n-member cycle instead of a smaller cycle wearing extra nodes.
+    """
+    repo_ids = tuple(f"acme-{i:02d}" for i in range(n))
+    edges = [edge(repo_ids[i], repo_ids[(i + 1) % n]) for i in range(n)]
+    return nodes(*repo_ids), edges, repo_ids
 
 
 def implementation_cycle() -> CycleReport:
@@ -413,6 +435,33 @@ def test_a_genuine_implementation_cycle_reaches_atomic_wave() -> None:
     assert res.broken_edge_keys == (), "6e is reached without spending a break here"
 
 
+def test_a_12_repo_cycle_shares_one_scc_id_across_all_members() -> None:
+    """§12.19 / SPEC.md:7434: "a planted 12-repo cycle likewise contract-free produces
+    break_strategy = ATOMIC_WAVE with all 12 members sharing one wave_index and one
+    PullRequestDraft.scc_id." `SccResolution.scc_id` and the `CycleFinding.scc_id` /
+    `atomic_wave_index` `to_finding` derives from it are each a single scalar on the one
+    resolution/finding covering every member, so "all 12 share one" is a guarantee of the type
+    once the fixture really is a 12-member SCC — what this test proves is that a genuine 12-node
+    ring reaches that resolution intact, with no member silently dropped along the way.
+    (`PullRequestDraft.scc_id`, one layer up in `models/tasks.py`, is copied verbatim from
+    `CycleFinding.scc_id` there and is out of this file's scope, which stops at the finding.)
+    """
+    graph_nodes, edges, repo_ids = ring_cycle(12)
+    report = break_cycles(build_graph(graph_nodes, edges))
+
+    assert len(report.resolutions) == 1, "one 12-member SCC, one resolution -- never split"
+    res = report.resolutions[0]
+    assert res.break_strategy is BreakStrategy.ATOMIC_WAVE
+    assert len(res.members) == 12
+    assert res.members == tuple(sorted(repo_ids)), "all 12 members -- none silently excluded"
+    assert res.scc_id == scc_id_for(res.members), "content-derived over the full 12-member set"
+
+    finding = res.to_finding(atomic_wave_index=0)
+    assert finding.members == sorted(repo_ids)
+    assert finding.scc_id == res.scc_id, "the one scc_id every member shares"
+    assert finding.atomic_wave_index == 0, "the one wave_index that covers all 12 members"
+
+
 def test_atomic_wave_emits_one_target_for_the_whole_scc() -> None:
     """§3.1 6e: **one** library target per `(ecosystem, scc_id)` at `//<scc_dest>:<scc_id>`.
 
@@ -494,6 +543,58 @@ def test_beyond_scc_hard_max_the_harness_refuses() -> None:
     res = report.resolutions[0]
     assert res.break_strategy is BreakStrategy.MANUAL
     assert report.manual_repo_ids == ("acme-a", "acme-b", "acme-c")
+
+
+def test_a_41_repo_cycle_completes_without_hanging() -> None:
+    """§12.19 / SPEC.md:7434: "a planted 41-repo cycle produces break_strategy = MANUAL with all
+    members REQUIRES_HUMAN_INTERVENTION and the rest of the fixture fleet still completing. In
+    every case `nx.is_directed_acyclic_graph` holds over the final ordering subgraph, and the run
+    terminates — no hang."
+
+    41 is one past `graph.scc_hard_max`'s default of 40 (`GraphSection.scc_hard_max`,
+    `src/fleet/settings.py`), so this is the literal stated scale, not a substitute: `_resolve_scc`
+    refuses an SCC that size before it ever reaches the hoist saturating-trial or the 6d break
+    loop (`len(member_ids) > cfg.scc_hard_max` returns `MANUAL` immediately, `src/fleet/graph/
+    cycles.py`), so a real 41-node ring is also the *cheapest* of the three named scales to run —
+    there is no smaller adversarial case that exercises more of the algorithm's actual complexity
+    for this specific clause, since MANUAL is a short-circuit rather than an iterative rung. The
+    hoist loop (bounded by `len(candidates)`, i.e. contracts, not repos) and the 6d break loop
+    (bounded by `max_breaks_per_scc`) are both already-bounded loops elsewhere in the ladder, not
+    reachable from this path, so a wall-clock bound here is a genuine no-hang property test rather
+    than a disguised iteration-count assertion.
+    """
+    graph_nodes, edges, repo_ids = ring_cycle(41)
+    bystander = "zzz-bystander"  # "the rest of the fixture fleet still completing" (SPEC.md:7434)
+    graph_nodes = [*graph_nodes, *nodes(bystander)]
+    edges = [*edges, edge(bystander, repo_ids[0])]
+    graph = build_graph(graph_nodes, edges)
+
+    started = monotonic()
+    report = break_cycles(graph)
+    elapsed = monotonic() - started
+
+    assert elapsed < NO_HANG_DEADLINE_S, (
+        f"break_cycles took {elapsed:.3f}s on a 41-repo cycle, exceeding the "
+        f"{NO_HANG_DEADLINE_S}s no-hang deadline"
+    )
+    assert len(report.resolutions) == 1
+    res = report.resolutions[0]
+    assert res.break_strategy is BreakStrategy.MANUAL
+    assert len(res.members) == 41
+    assert res.members == tuple(sorted(repo_ids)), "all 41 members -- none silently dropped"
+    assert report.manual_repo_ids == tuple(sorted(repo_ids))
+
+    # `report.graph.G_dag` itself still carries the un-suppressed MANUAL cycle (§3.1 6e's MANUAL
+    # branch returns before any edge is broken) -- it is `condense_for_ordering`'s output, not the
+    # raw graph, that SPEC.md:7434 means by "the final ordering subgraph". `assign_waves` builds
+    # exactly this condensation (`src/fleet/graph/sequence.py`), which is why this is the same
+    # instrument `test_manual_members_are_absent_from_the_ordering_subgraph` in
+    # `tests/test_graph_sequence.py` uses for the 3-node MANUAL case.
+    condensed = condense_for_ordering(report.graph, report.resolutions)
+    assert sorted(condensed.nodes) == [("REPO", bystander)], (
+        "all 41 MANUAL members are dropped outright; only the bystander remains"
+    )
+    assert ordering_is_acyclic(condensed), "the final ordering subgraph is acyclic -- no hang"
 
 
 # =======================================================================================
