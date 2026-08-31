@@ -648,6 +648,64 @@ def test_the_sqlite_store_round_trips_through_the_single_writer(tmp_path: Path) 
 
 
 @pytest.mark.integration
+def test_a_credential_in_the_model_answer_never_reaches_llm_cache_response_json(
+    tmp_path: Path,
+) -> None:
+    """§12.20 — `llm_cache.response_json` is the other named write site, redacted in
+    `CachingModelClient._store_response` (cache.py: "the one write boundary this module owns")
+    before the `INSERT INTO llm_cache` in `SqliteLlmCacheStore.put`. A model's own prose can quote
+    repo content verbatim — a `.env` line, a build log line — so a validated `RepoClassification`
+    answer with a `github_pat_…`-shaped string in `rationale` is the realistic shape of the leak,
+    not an adversarial one. Driven through the real client and the real SQLite-backed store, with
+    a raw SQL read of the persisted column — never the model's own re-validated round trip, which
+    would just prove the redaction placeholder itself parses as a `Rationale`.
+    """
+    pat = "github_pat_11ABCDEFG0abcdefghijklmnopqrstuvwxyz0123456789ABCDEF"
+    tainted = RepoClassification(
+        ecosystem="maven",
+        is_library=True,
+        confidence=0.9,
+        rationale=f"pom.xml's <scm> block still points at https://oauth2:{pat}@gitea.local/x.git",
+    )
+
+    async def drive() -> None:
+        db = tmp_path / "state" / "fleet.db"
+        await initialize_database(db)
+        async with StateWriter(db, owner="llm-cache-redact-test") as writer:
+            read = await connect_ro(db)
+            try:
+                store = SqliteLlmCacheStore(writer=writer, read_conn=read)
+                client = CachingModelClient(
+                    FakeClient(value=tainted),
+                    router(),
+                    store,
+                    now=Clock(),
+                    harness_version="0.1.0",
+                )
+                response = await client.complete(ROLE, MESSAGES, RepoClassification)
+                assert response.value == tainted, "the caller must still see the real answer"
+
+                raw = await read.execute_fetchall(
+                    "SELECT response_json FROM llm_cache WHERE cache_key = ?",
+                    (_parts().compute(),),
+                )
+                assert len(raw) == 1
+                persisted = str(raw[0][0])
+                assert pat not in persisted, f"a live PAT reached llm_cache.response_json: " \
+                    f"{persisted!r}"
+                assert "github_pat_" not in persisted
+                assert "«redacted:" in persisted
+                assert "gitea.local" in persisted, "over-redaction destroys the debuggable part"
+            finally:
+                await read.close()
+
+    try:
+        asyncio.run(drive())
+    finally:
+        release_write_slot()
+
+
+@pytest.mark.integration
 def test_no_declared_effort_persists_as_empty_string_in_a_not_null_check_free_column(
     tmp_path: Path,
 ) -> None:
