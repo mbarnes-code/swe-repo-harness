@@ -755,3 +755,14 @@ COORDINATE leg closed by round L, superseding the original §12.27+§12.37 pairi
 SPEC-ADJUDICATION items (17, 41, 45's regex half already done) → NEW-MECHANISM items (22's RSS
 half, 27's DEST_PATH/FILE_PATH legs — each needs its own D-number first, 31, 34) last, since
 they're the most expensive and least likely to be quick wins.
+
+**Correction, 2026-08-31 (round S, controller — this list was never refreshed as items closed
+across rounds M-R and had drifted into re-dispatch risk):** §5, §6, §7, §12, §15, §16, §18, §21,
+§26, §32 above are now **DONE** — do not re-dispatch them. Of the TEST-ONLY group's original
+membership, the still-genuinely-open items are: **20** (PR-body placeholder clause only — the
+four-DB-column part is now covered), **24** (two residuals — D62-blocked local-profile clause,
+and the run-ceiling/exit-3 clause — the ledger-sum clause is closed), **33**, **40's AST clause**,
+**42**, **44**, **47's sub-clauses**, **48**. §10 (closed round R) and §23/§28/§1 (round S, this
+round — see this round's own plan/checkpoint for final status) are not part of the original list
+above and should be checked against their own `docs/PROGRESS.md` checkpoints before re-dispatch,
+not against this stale sentence.
