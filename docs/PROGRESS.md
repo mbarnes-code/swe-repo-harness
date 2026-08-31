@@ -6674,3 +6674,70 @@ function signature — `tests/test_scan_e2e.py:215`, missed by that task's own r
 re-verified (`ruff check` clean, the failing test plus its file's full suite green). Not
 re-run as a third full 16-minute suite pass given the fix's triviality and isolation — targeted
 verification is sufficient here.
+
+### Checkpoint — 2026-08-31 (round Q controller, close-out)
+
+**§12 criteria met: 10 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, `§12.40` excluded via its new "do not count" marker — up from 8 at
+round P's close). Added this round: **§12.6** (confinement gate: real defect found and fixed,
+`contracts.py:758`'s bare `ContractKind` branch converted to a table lookup, ADR-0100; both AST
+gates landed) and **§12.21** (determinism: the third and final clause — digest sensitivity to
+source mutation — closes all three clauses).
+
+Round Q dispatched all five agent roles in parallel per this round's cadence: three workers
+(§12.6, §12.21, §12.19), one research agent, one code-review agent — the pattern held for the
+whole round, including two follow-on dispatches the round's own findings required.
+
+- **§12.19** (`13818c1`) — 12-node and 41-node cycle-scale fixtures landed, matching the
+  criterion's literal named scales. Correctly stays **OPEN**: the done bar's
+  `PullRequestDraft.scc_id` leg specifically (not the scale itself) remains — the landed test
+  asserts shared `scc_id` via a `CycleFinding`, one layer below where `docs/SPEC.md:7434` names
+  the assertion. `docs/CRITERIA_PLAN.md` §19 corrected to disclose exactly this, found stale by
+  the round's own final review (finding I2).
+- **D90 opened and fixed** (security-relevant, `8e16653`/`cdfa557`): a whole-branch review of the
+  *prior* round (P) caught that D88's redaction fix left two `phases.last_error` write paths in
+  `orchestrator/runner.py` unredacted (one of them terminal) and the sibling
+  `attempts.stdout_tail`/`stderr_tail` columns unredacted despite the same SPEC sentence naming
+  all three. Fixed at all three sites, each with a persisted-column test and an over-redaction
+  control, mutation-proven. One fix round: the fix's own `+14`-line shift rotted its own ledger
+  entry's citations (`runner.py:963`→`964` etc.) — caught by `tests/test_integration_honesty_citations.py`
+  going 52/54, corrected, back to 54/54. `docs/CRITERIA_PLAN.md` §12.20 stays **OPEN** — 3 of 4
+  named DB columns now covered (corrected to a per-column status list, not a raw count, after the
+  round's own final review found the running "2 of 4"/"3 of 4" figures self-contradicted); the
+  PR-body `«redacted:…»` placeholder clause remains untouched, confirmed by three separate rounds'
+  investigations now (M, P, Q).
+- **A controller misdirection, caught before it did harm:** a fix-round message was sent to the
+  wrong agent ID (a copy/paste mix-up reading back two agentIds from one parallel dispatch — the
+  message landed on the task-3 reviewer instead of the D90 fix worker). The misdirected agent
+  correctly declined (out of its declared read-only role, task already complete) and took no
+  action; the message was re-sent to the correct agent with no rework needed. Recorded because the
+  save was the agent's own scope discipline, not anything upstream catching the mistake first.
+- **Final whole-branch review found 6 Important, 0 Critical** — all either doc-accuracy
+  (`CRITERIA_PLAN.md` §6/§19/§20 under- or self-contradictorily reporting what had landed, a stale
+  ADR-0100 line citation, a `runner.py` docstring still asserting the exact property D88/D90 exist
+  to fix) or one real, accidentally-reachable gap in the round's own new AST gate (missed
+  `if kind in (ContractKind.X, ContractKind.Y):`, the container-literal form of the branch the
+  gate exists to forbid). One fix dispatch closed all six plus one bundled Minor; scoped re-review
+  confirmed all seven addressed independently against source, zero new breakage. No second fix
+  wave needed.
+
+**Merge conflicts:** two, both in the D90 branch's merge (`docs/CRITERIA_PLAN.md`,
+`docs/INTEGRATION_HONESTY.md`) — predicted in advance by the D90 branch's own reviewer, since that
+worktree had hand-reconstructed doc text from a `main` commit its base predated. Resolved by
+taking the D90 branch's side in both conflicted hunks; verified against both merge parents that
+nothing was silently dropped from either side (confirmed independently by the final whole-branch
+reviewer, not just by the controller who performed the resolution).
+
+**Full suite, pre-final-fix-wave: 1993 passed, 0 failed, 0 errors, clean `bazel disk` line**
+(confirms the four workstream merges — task 1/2/3 + D90 — integrate cleanly together). The
+final-review fix wave (`9690c51`) touched one test file and four doc files; not re-run as a third
+full pass given its isolation — the scoped re-review independently reproduced 89/89, 54/54,
+181/181 combined, and `mypy --strict` clean instead.
+
+Research dispatched this round (§12.24's ledger-sum plumbing) found a concrete, entirely
+TEST-ONLY path — extend `tests/test_runner.py`'s `Harness.runner()` with an optional `sink=`
+kwarg and a small `ResultSink` closure recording real `attempts` rows, then assert
+`budget_ledger.spent_usd == SUM(attempts.cost_usd)`. No `src/fleet/` change needed; zero
+collision with any file this round touched. This becomes round R's first task.
+
+**Round R, opening next.**
