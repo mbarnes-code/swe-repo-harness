@@ -2054,7 +2054,9 @@ def _module_scope_table_names(tree: object) -> set[str]:
 
 
 def _kind_member_name(node: object) -> str | None:
-    """`ContractKind.X` / `Ecosystem.X` → `"ContractKind.X"`; anything else → `None`."""
+    """`ContractKind.X` / `Ecosystem.X` → `"ContractKind.X"`; a `Tuple`/`List`/`Set` literal
+    containing one (e.g. `kind in (ContractKind.X, ContractKind.Y)`) → the first such member's
+    name; anything else → `None`."""
     import ast
 
     if (
@@ -2063,6 +2065,11 @@ def _kind_member_name(node: object) -> str | None:
         and node.value.id in ("ContractKind", "Ecosystem")
     ):
         return f"{node.value.id}.{node.attr}"
+    if isinstance(node, ast.Tuple | ast.List | ast.Set):
+        for element in node.elts:
+            name = _kind_member_name(element)
+            if name is not None:
+                return name
     return None
 
 

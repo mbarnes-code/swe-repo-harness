@@ -6867,7 +6867,7 @@ wiring step (in which case this is a wiring gap, closable the way D80 was), or w
 intent has shifted since `task_id`-scoped queries were written and the scoping should instead key
 on something a real write path does populate — that adjudication is not made here.
 
-## D90 — FIXED, LANDED. D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
+## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
 rather than searching for a new defect independently — recorded separately from D88 since it is a

@@ -11827,7 +11827,7 @@ gate, found the literal wording is over-broad in one direction and under-enforce
    genuine ambiguity in how "subscript node" applies to a registry table read).** A `Subscript`
    read of a `Mapping[ContractKind, …]`/`Mapping[Ecosystem, …]` table **declared at module scope
    in the same file**, keyed by a literal member (e.g. `SYMBOL_IDENTIFIED[ContractKind.PROTO]` at
-   `contracts.py:460`), is the compliant "table, not branch" pattern §1 mandates, not a violation
+   `contracts.py:471`), is the compliant "table, not branch" pattern §1 mandates, not a violation
    of it — the gate exists to forbid per-kind *branching* outside the adapter packages, and a
    table lookup is definitionally the alternative to a branch, not an instance of one. The AST
    gate (a) is scoped to exclude this case: a `Subscript` node is only a violation when its base
@@ -11861,7 +11861,7 @@ dated marker to follow at `docs/SPEC.md`'s §12 item 6 citation and in
 hide a real per-kind dispatch smuggled through a table alias), the fix is narrow: tighten the AST
 gate to also require the table have >1 entries or that its values are homogeneous, and re-audit
 the (currently zero) other subscript sites this scoping newly permits. Low blast radius — the
-sweep in the task-1 report found exactly one other subscript site (`contracts.py:460`) under the
+sweep in the task-1 report found exactly one other subscript site (`contracts.py:471`) under the
 old, unscoped reading, and it is the case this ruling exists to permit.
 
 **Alternatives rejected.** *Flag `SYMBOL_IDENTIFIED[ContractKind.PROTO]` as a violation too* —

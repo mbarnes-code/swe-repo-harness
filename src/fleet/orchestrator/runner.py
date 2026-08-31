@@ -1216,8 +1216,19 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
 
     @staticmethod
     def _detail(error: WorkerError | None) -> str | None:
-        """`last_error` is never prose the harness composed: it is the worker's own bounded,
-        redacted `stderr_tail`, or the exception type when there was no output at all."""
+        """`last_error` is never prose the harness composed: it is the worker's own bounded
+        `stderr_tail`, or the exception type when there was no output at all.
+
+        NOT guaranteed redacted at this point. `workers/base.py::error_from_exception`
+        (`:544-556`) sets `stderr_tail=str(exc)` with no redaction for any exception that
+        escapes a worker's `run()`, and this helper returns that value unchanged. Redaction
+        happens later, at each write boundary that persists the result of this call (SPEC
+        §11.4, D88/D90): `state/repository.py::complete_phase` (`:1407`),
+        `orchestrator/runner.py::_terminate_uncharged` (`:993`) and `::_record_diagnostics`
+        (`:1073`, the caller of this method), and `state/repository.py::record_attempt`
+        (`:2136-2137`, for the sibling `attempts.stdout_tail`/`stderr_tail` columns). Do not
+        remove those `redact_text` calls on the strength of this docstring — they are not
+        redundant."""
         if error is None:
             return None
         return error.stderr_tail or error.exception_type or str(error.failure_class)
