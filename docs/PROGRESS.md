@@ -6934,3 +6934,89 @@ fix wave; adjudicate residuals at the breaker).
 **Round U, opening next** — lead task: D89 Phase 2 (research already dispatched, per-unit
 REWRITE/RELOCATE reconciliation rebuild), plus §12.33 (layout adapter-derived) and §12.24's
 run-ceiling residual as the round's other two workers.
+
+### Checkpoint — 2026-09-01 (round U controller, close-out)
+
+**§12 criteria met: 15 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived twice by the final whole-branch reviewer
+and matching the committed table exactly — §12.40 excluded via its own marker — up from 14 at
+round T's close). Added this round: **§12.33** only (layout is adapter-derived — both remaining
+sub-clauses closed: the ts→js monkeypatch test now drives a real `BuildTarget.package`
+assertion, and the config-override e2e now proves the "identical tree" claim via a real
+tree-comparison, both mutation-proven and independently re-reproduced by task review). §12.24's
+run-ceiling residual also closed this round (a CLI-level test that organically breaches the run
+budget ceiling and asserts exit 3), but does **not** move the tally — D62's local-profile clause
+is the criterion's sole remaining residual, correctly still `OPEN`.
+
+**D89 fully closed** (`docs/INTEGRATION_HONESTY.md`, `FIXED, LANDED (1739453)`) — the first
+defect-ledger item closed end-to-end this project has tracked across three rounds (traced round
+R, design-scoped round S, Phase 1 landed round T, Phase 2 landed this round). Phase 2 split into
+two dependent tasks (Task A: TRANSFORM coarse `tasks` row gets a real claim lifecycle via a new
+`PhaseRunner.pre_dispatch` hook, ADR-0102; Task B: `_reconcile_tasks_with_git`'s REWRITE branch
+rebuilt to loop per-unit using `task_id_for`'s per-unit identity, adding a "partially landed"
+verdict, ADR-0103) and — because Task A alone would have reopened a narrower, TRANSFORM-scoped
+version of D89's own original crash-recovery hazard — the two were deliberately built on stacked
+branches and held off `main` together until both landed as one merge. **The core safety
+guarantee (`discard_task` is never called when some-but-not-all units landed) was independently
+re-derived against landed source three separate times**: Task A's own task review (confirmed the
+hazard was real and adequately disclosed), a combined opus-model review of A+B+fix1 (traced all
+seven steps of the crash-recovery mechanism end to end, confirmed CLOSED), and a scoped
+re-review of the resulting fix wave (re-verified all 13 findings independently). D87's
+git-arbitration mechanism — reachable-and-correct for **zero** task kinds when this project
+started tracking D89 — is now reachable-and-correct for real TRANSFORM/REWRITE production
+traffic for the first time.
+
+**A genuinely new measurement corrected the hazard's own severity, mid-fix.** The combined
+review measured, two independent ways (a full source sweep and a runtime probe), that
+`tasks.pre_commit_sha` has no production writer anywhere in `src/fleet/` — meaning the *real*
+pre-Task-B failure mode was `_unresolved` + a row stuck `RUNNING` forever, not `discard_task`
+destroying commits as ADR-0102/ADR-0103/D89's own addendum originally described. This is Guardrail
+6's "measured is not the same as reproducible" and "the fix is a new artefact and needs its own
+measurement" landing twice in the same defect's history: the *first* measurement (at fix-wave
+time) corrected the pre-Task-B mechanism, and the round's own **final whole-branch review then
+measured the corrected fix wave's D91 entry and found it had overcorrected** — the
+`task_anchor is None` guard blocks only the discard path, not the DONE/partially-landed verdicts
+that are Task B's actual new, production-reachable behavior. Both corrections landed as dated
+annotations, never rewrites, on the historical record.
+
+**A "main is red" defect surfaced only at the whole-round scope, not any single lane's.** All
+three of this round's lanes branched from the same base and were each individually
+`ruff check`-clean on their own branch tip; nobody ran the gate on the merged tree until the
+final whole-branch review did. Two violations from two different lanes (an import-sort issue and
+a line-length issue) sat on `main` between the merges and the final review. This is the identical
+staleness shape `tests/test_lint_gate.py`'s own docstring already records one scope level down
+(a claim scoped to one file, reported as if repo-wide) — round U reproduced it one level up
+(a claim scoped to one branch, true of neither sibling, silently read as true of `main`). Worth
+naming plainly since this project's Rollup-table staleness class has recurred 3 of 4 rounds:
+**a fully-green branch is not evidence of a green merge**, and no round to date has run the gate
+on the actually-merged tree before its final review does. A future round might consider whether
+the final whole-branch review should routinely open with the lint/format gate specifically,
+before any deeper diff reading, given how cheaply it would have caught this here.
+
+**Rulings made this round:**
+1. D89 Phase 2 Task A held off `main` standalone (self-disclosed hazard); Task B dispatched
+   against Task A's branch rather than main, both merged together in one unit once independently
+   re-verified. Cost if wrong: none identified — the property was re-derived against landed
+   source at least twice before merge.
+2. Combined-review Critical (4 red tests) and Important findings routed into one fix wave with
+   controller rulings on every judgment call (write-ordering fix in `_TransformSink`, SPEC
+   dated-marker reconciliation citing ADR-0103, hazard-severity dated annotations on 3 locations,
+   new D91 allocation). Cost if wrong: would have shipped 4 known test regressions and an
+   undisclosed correctness gap — avoided by not merging until the wave landed.
+3. Final-review Critical (main red) and Important findings routed into a second fix wave. Cost
+   if wrong: `main` would have stayed red past this round's close.
+
+**Deferred to the ledger (Minor, not blocking):** a pre-existing Rollup row miscount (predates
+this round); D49's heading should move to `FIXED, LANDED` — its sole remaining open leg (a
+citation claiming `_record` "still appends `unit`... never `edit.path`") was falsified by an
+earlier, unrelated commit (`9a7148c`) and needs its own investigation before the heading moves,
+not a hasty edit; `claim_task_by_id`'s return value is discarded by its only caller (real,
+small, reachable when a worker raises with no output); D89's heading claim doesn't mention
+`claim_next_task` being superseded by `claim_task_by_id` (nitpick).
+
+**Full suite, post-final-review-fix: 2059 passed, 0 failed, 0 errors** (up from 2033 at round
+T's close). `ruff check`/`ruff format --check`/`mypy --strict` all clean on the merged tree —
+confirmed by the final whole-branch review after its own fix wave, not inherited from any single
+lane's self-report.
+
+**Round V, opening next.**
