@@ -778,18 +778,20 @@ and coverage for the remaining 3 trailers.
 **Out of scope:** the `collisions.blob_shas` regex fix is already done — do not re-touch it.
 
 ## 46. Model-layer invariants
-**OPEN — mixed, 13 sub-clauses, mostly strong — TEST-ONLY + known D77.** 8 of 13 are solidly
+**OPEN — mixed, 13 sub-clauses, mostly strong — TEST-ONLY.** 8 of 13 are solidly
 covered (illegal transitions raise, abandoned-reopen gating, stale-lease rejection, reap-in-flight
 discard, 32 KiB truncation, zero-duplicate-commit re-entry). Gaps: round-trip is asserted by object
 equality, which is the exact form the criterion says *not* to use ("via `model_fields`, not object
 comparison"); `Resolution` (in `models/build.py`) is covered by nothing though built by all three
 ecosystem adapters; the reaper's RHI leg writes raw SQL bypassing `transition()` entirely so
-`ALLOWED_TRANSITIONS` tests never bind it (the D77 bypass shape, recurring — D77 itself is
-`docs/INTEGRATION_HONESTY.md:5061`, OPEN, one-shot-sized: `SqliteSchedulerStore.append_blocked_by`
-takes DEGRADED→BLOCKED via raw SQL bypassing `transition()`; re-measure `scheduler.py` line
-anchors before touching, the file has moved); `edges.edge_key` stability is tested only at the
-inference layer, never on persisted values; `acquire_phase_lease` is never driven concurrently
-(audit row 46). **Corrected 2026-09-01 (round X research): `stub_reconcile` is no longer D80's
+`ALLOWED_TRANSITIONS` tests never bind it — **the D77 bypass shape this sub-clause names as
+"recurring" is now FIXED at its own site** (`docs/INTEGRATION_HONESTY.md:5061`,
+`FIXED, LANDED (c4a1532)`, round Y task 2: `SqliteSchedulerStore.append_blocked_by` now refuses
+DEGRADED→BLOCKED via a real `transition()` call instead of a raw-SQL bypass) — but the reaper's
+RHI leg named here is a **different, still-open** site (`state/repository.py`'s `complete_phase`,
+its own inline raw-SQL `CASE WHEN`, confirmed distinct by round Y task 2's own report); `edges.edge_key`
+stability is tested only at the inference layer, never on persisted values; `acquire_phase_lease`
+is never driven concurrently (audit row 46). **Corrected 2026-09-01 (round X research): `stub_reconcile` is no longer D80's
 scope — D80 is now `FIXED, LANDED` (`5377969`/`9c20eeb`, round M), see §38's entry for the same
 correction.** Whether this sub-clause needs its own new coverage or is already satisfied by
 `stub_reconcile`'s landed tests has not been re-audited.
@@ -896,11 +898,11 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 18 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round W, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §44 this round (all 6 sub-clauses closed, the last 5 without needing the stub OpenAI-compatible server the entry previously assumed was required); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 19 | 1, 5, 6, 7, 10, 12, 15, 16, 17, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round Y, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §17 this round (byte-identity restored via a deterministic `updated_at` derivation, ADR-0106); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
-| OPEN — SPEC-ADJUDICATION needed before work starts | 2 | 17, 45 (partial) |
-| OPEN — blocked on an existing D-number, don't duplicate | 8 | 13 (partial), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial), 46 (partial, D77 only — D80 leg closed, see §46's entry) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
+| OPEN — SPEC-ADJUDICATION needed before work starts | 1 | 45 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), 46 (TEST-ONLY now that its D77 leg closed round Y — see §46's own entry), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
