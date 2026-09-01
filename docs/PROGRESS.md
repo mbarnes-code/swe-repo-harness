@@ -7349,3 +7349,105 @@ coverage of this round's final state without needing a third full 15-minute pass
 comment-only correction.
 
 **Round Z, opening next.**
+
+### Checkpoint — 2026-09-01 (round Z controller, close-out)
+
+**§12 criteria met: 21 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived by the final whole-branch reviewer and
+matching the committed table exactly — up from 20 at round Y's close). Added this round: **§12.46**
+(the RHI-blast-containment criterion) — all 13 sub-clauses closed across three tasks plus a
+post-review fix wave: four independent TEST-ONLY gaps (round-trip-via-`model_fields`, a
+`Resolution`-shaped edge, `edge_key` persisted-value stability, concurrent `acquire_phase_lease`),
+a `stub_reconcile`-cannot-move-a-repo-out-of-RHI test, and a real production fix (D95, below) for
+the reaper's own RHI-escalation leg. §12.38 stays OPEN but its blocker was corrected from a stale
+D80 citation to the three real gaps (D92/D93/D94, below) round Z's own task 2 disclosed while
+writing tests, not chasing them.
+
+**Three new defects opened, one fully closed, as a byproduct of test-writing work rather than a
+dedicated audit — disclosed rather than papered over.** Round Z task 2 was scoped as "re-audit
+§12.38/§12.46's `stub_reconcile` question against D80's landed fix," an investigate-first brief.
+Its investigation surfaced three real, independently-confirmed production gaps outside a
+test-writing task's scope to fix: **D92** (`PrState.HELD` is documented but never written by any
+production code), **D93** (no exit-code path reads `RepoStatus.DEGRADED` for exit 7, despite both
+`docs/SPEC.md` §3.5.1 and `HumanInterventionError`'s own docstring claiming it — a real
+doc/code mismatch, not a missing nice-to-have), and **D94** (no PR-promotion mechanism exists —
+`§12.38`'s "resolution" sub-clause has no code to test at all, confirmed NEW-MECHANISM sized). All
+three were independently re-traced by task review before allocation, not accepted on the
+implementer's word. Task 3 then found and closed **D95** — `state/repository.py::complete_phase`'s
+RHI-escalation leg wrote raw SQL bypassing `transition()`, letting D77's own landed fix
+(`append_blocked_by`'s legal `RUNNING→BLOCKED` move) race a stale-but-not-reclaimed fence into
+silently corrupting `ALLOWED_TRANSITIONS`'s own invariant. The implementer argued no new D-number
+was needed ("same bypass shape D77 documents"); task review independently traced the claim against
+`ALLOWED_TRANSITIONS` and D77's actual landed code, found a distinct call site with a genuinely new
+reachable race, and recommended a number. **The controller sided with the reviewer** — this
+project's Central Number Allocation discipline is to allocate generously when a reviewer's
+independent trace disagrees with an implementer's own account of its own fix.
+
+**The final whole-branch review found a real Critical overclaim in the round's own closing commit,
+caught before it could stand uncorrected — the pattern this project's Guardrail 6 exists to catch,
+working as intended.** §12.46's DONE marking (committed at `bca0861`) claimed all 13 sub-clauses
+closed; the review found two genuinely untested: the reaper's own SQL guard had never actually been
+driven against an RHI-status row (nine existing call sites all seeded `RUNNING` rows only — the
+`complete_phase` legality check D95 closed is a *different* sweep from the reaper's own
+`WHERE status = 'RUNNING'` guard), and `InternalDep` was never re-exported through
+`fleet.models.__all__`, so the population clause's own registry-driven round-trip test never ran
+against it. It also found a false uniqueness claim: `complete_phase`'s docstring and D95's own
+ledger entry both said D77's `append_blocked_by` race was "the one theoretical window" a certain
+refusal fires for, when `cli.py::_quarantine_impl` — an operator command, not a race — reaches the
+same refusal by a more concretely reachable route with a broader blast radius (any completion
+target on a just-quarantined phase, not only RHI-escalation), undisclosed. One fix wave (8 commits)
+closed both C1 gaps with genuine Rule-12 mutation discrimination and corrected the docstring plus
+appended (never rewrote) a disclosure to D95's ledger entry, alongside five Minor citation/
+attribution fixes.
+
+**The fix wave's own scoped re-review then found the fix wave had repeated the exact shape of
+mistake it was dispatched to correct, one level down — closing the *reported* site without
+sweeping the *class*.** `InternalDep`'s fix (added to `__all__`, given a `SAMPLES` entry) closed
+the one model the final review had named. An independent re-derivation the re-reviewer ran anyway
+— a runtime walk of every `FleetModel` subclass across `fleet.models`'s submodules, cross-checked
+against a textual grep sweep, both agreeing on 36 total — found a second model in the same
+condition: `Resolution` (`src/fleet/models/build.py:189`), whose only existing round-trip assertion
+used object equality, the exact form §12.46(i)'s literal text rules out. The controller closed it
+directly rather than dispatching a third round-trip: mechanically identical to the fix that had
+already been reviewed once (export + a non-degenerate `SAMPLES` entry), verified with the same
+test file plus its neighbor (213 passed) and the citation gate (54/54), and both independent
+36-model derivations were recorded in `docs/CRITERIA_PLAN.md` itself so a future sweep starts from
+a reproducible number instead of re-deriving it. **Worth stating plainly: this is the third time
+in this project's history a "sweep the class, not the reported site" gap surfaced inside the very
+fix meant to close a prior instance of it** (Guardrail 7 was written after two earlier ones) — a
+single named model missing from an export list is a cheap, mechanical thing to check exhaustively,
+and neither the implementer nor (on its first pass) the checklist the brief gave it did so by
+construction; only an independent re-derivation caught it. Also noted, non-blocking: 4 of the fix
+wave's 8 commits were individually `ruff`-dirty before the final gate ran (HEAD itself was and
+remains clean) — a per-commit gate would have caught this earlier; flagged for whoever next revisits
+this project's self-gating discipline, not acted on this round.
+
+**Rulings made this round:**
+1. D95 allocated over the implementer's own "no new number needed" argument, siding with task
+   review's independent trace against `ALLOWED_TRANSITIONS` and D77's landed code.
+2. §12.38's blocker corrected from a stale D80 citation to D92/D93/D94 — the three real gaps this
+   round's own investigation found, not carried forward from a prior round's framing.
+3. The final review's C1 finding routed through exactly one fix wave (per this project's
+   "no second fix wave" rule for final reviews) plus one scoped re-review; the re-review's own
+   residual (the `Resolution` gap) was closed directly by the controller rather than triggering a
+   second full fix-wave-plus-re-review cycle, since it was mechanically identical to an
+   already-reviewed fix and independently re-verified before commit.
+4. D95's ledger entry corrected by **append**, never rewrite, per this file's own "annotate never
+   rewrite" convention for `docs/INTEGRATION_HONESTY.md` — independently confirmed by the
+   re-review as a byte-clean append (`+19/-0` at D95, original prose and `FIXED, LANDED` status
+   field untouched).
+
+**Full suite, post-close: verified clean on all touched surfaces across the round's full arc** —
+final whole-branch review's own run (2090 passed, 0 failed, 883s, ruff clean, `bazel disk` clean);
+fix wave's self-gate (278 passed, ruff clean); re-review's independent reproduction of those same
+278 (exact match, no scope drift) plus its own mutation-proof reproduction; controller's own
+closing fix (213 passed across `test_state_models.py`+`test_ecosystems.py`, citation gate 54/54,
+ruff clean). No step in this chain trusted a pass-count claim it could instead re-run.
+
+**Round AA, opening next.** Candidates pre-scoped by round Z's own research (not yet acted on): §13's
+5-rung ladder test (top pick — TEST-ONLY, one-shot, concrete recipe already written into §13's own
+`docs/CRITERIA_PLAN.md` entry), §22's disk-ceiling post-exit `migration_state.json` validity test
+(TEST-ONLY, one-shot, reuses an idiom already used 3× in the suite), 2-3 of §45's independently-small
+mechanical sub-clauses, §35's two worker-level gaps. A stale note on D50's own ledger entry (its
+"16 of 37" framing contradicted by keys wired 2026-08-22) remains unfixed, flagged for whichever
+round next touches D50.
