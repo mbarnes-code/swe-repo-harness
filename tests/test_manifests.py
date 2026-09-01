@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+import random
 import subprocess
 import sys
 import textwrap
@@ -593,24 +594,34 @@ def _make_adapter(adapter_name: str, adapter_priority: int) -> type[ManifestAdap
     return _Fake  # type: ignore[return-value]
 
 
-@pytest.mark.parametrize(
-    "order",
-    [("alpha", "beta", "gamma"), ("gamma", "alpha", "beta"), ("beta", "gamma", "alpha")],
-)
-def test_tiebreak_is_total_under_shuffled_import_order(
-    order: tuple[str, ...], isolated_registry: None
-) -> None:
-    """THE run-equivalence guard (§12.21). `list.sort` is stable, so a bare `priority` key leaves
-    equal-priority adapters in `pkgutil` import order — filesystem order, effectively — and the
-    same repo then dispatches to different adapters across runs and yields different
-    `Coordinate`s. Sorting by `(priority, name)` makes the order a function of the registry
-    contents alone, not of how they got there."""
-    base.reset_adapters()
-    for adapter_name in order:
-        register(_make_adapter(adapter_name, 100))  # type: ignore[type-var]
-    register(_make_adapter("last", 10_000))  # type: ignore[type-var]
+def test_tiebreak_is_total_under_shuffled_import_order(isolated_registry: None) -> None:
+    """THE run-equivalence guard (§12.21), exercised with a GENUINE shuffle rather than 3
+    hand-written permutations standing in for one. `list.sort` is stable, so a bare `priority`
+    key leaves equal-priority adapters in `pkgutil` import order — filesystem order,
+    effectively — and the same repo then dispatches to different adapters across runs and
+    yields different `Coordinate`s. Sorting by `(priority, name)` makes the order a function of
+    the registry's CONTENTS alone, not of how they got there — which a 3-of-6-possible-orderings
+    parametrize (the old form) cannot distinguish from a coincidence: 6 equal-priority names give
+    720 orderings, and 20 real `random.shuffle` draws from a fixed seed (reproducible, not
+    flaky) is what actually stresses that claim rather than re-describing it.
+    """
+    names = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta"]
+    rng = random.Random(20260901)
+    tables: set[tuple[str, ...]] = set()
+    orders_seen: set[tuple[str, ...]] = set()
+    for _ in range(20):
+        order = names.copy()
+        rng.shuffle(order)
+        orders_seen.add(tuple(order))
 
-    assert [a.name for a in adapters()] == ["alpha", "beta", "gamma", "last"]
+        base.reset_adapters()
+        for adapter_name in order:
+            register(_make_adapter(adapter_name, 100))  # type: ignore[type-var]
+        register(_make_adapter("last", 10_000))  # type: ignore[type-var]
+        tables.add(tuple(a.name for a in adapters()))
+
+    assert len(orders_seen) > 1, "the shuffle produced only one distinct order — not a real test"
+    assert tables == {(*sorted(names), "last")}
 
 
 def test_every_registered_adapter_is_stateless() -> None:
