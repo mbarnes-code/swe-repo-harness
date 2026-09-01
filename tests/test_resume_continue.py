@@ -403,6 +403,14 @@ async def test_the_continuation_refuses_while_another_live_run_owns_the_mirror(
     Unique discriminator of: swallowing the guard's `UsageError` in `_continue_impl` (e.g.
     wrapping the call in `contextlib.suppress`). Every other mutex case replaces the guard with
     a recorder that never raises and is blind to that by construction.
+
+    **`exit_code == 2` is asserted separately from the `pytest.raises` match**, because SPEC §12
+    item 48 states the exit code itself ("exits 2 on the `integration:<run_id>` mutex"), not just
+    that a message containing the words "mirror mutex" is raised -- `UsageError.exit_code` is a
+    class attribute (`cli.py::UsageError`, `exit_code = ExitCode.USAGE`), so this is a real
+    discriminator of a hypothetical future refusal that raised the right message under the wrong
+    exception type (any `FleetCliError` subclass with a different `exit_code`, e.g.
+    `HumanInterventionError`'s 7) and would still satisfy the `match=` alone.
     """
     settings = _settings(tmp_path)
     lock = cli._mirror_lock_path(settings, "run-1")
@@ -411,7 +419,7 @@ async def test_the_continuation_refuses_while_another_live_run_owns_the_mirror(
     fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
     calls: list[Any] = []
     try:
-        with pytest.raises(UsageError, match="mirror mutex"):
+        with pytest.raises(UsageError, match="mirror mutex") as excinfo:
             await _drive(
                 monkeypatch,
                 {"t": Phase.TRANSFORM},
@@ -423,6 +431,7 @@ async def test_the_continuation_refuses_while_another_live_run_owns_the_mirror(
         fcntl.flock(held, fcntl.LOCK_UN)
         os.close(held)
     assert calls == []
+    assert excinfo.value.exit_code == ExitCode.USAGE == 2
 
 
 # --------------------------------------------------------------------------------------

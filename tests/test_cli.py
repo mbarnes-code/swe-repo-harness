@@ -70,6 +70,8 @@ from fleet.util.proc import ProcResult
 from fleet.util.proc import run as proc_run
 from fleet.vcs.git import Git, GitCommandError, GitError
 from fleet.workers.base import WorkerContext
+from fleet.workers.classify import ClassifyWorker
+from fleet.workers.clone import CloneWorker
 from tests.test_migrations import _v6_database
 
 runner = CliRunner()
@@ -336,23 +338,143 @@ def test_context_policy_refuses_unknown_policy(workspace: Path) -> None:
     assert "EVIDENCE_PLUS_PRIORS" in result.output
 
 
+#: Every command whose function body reads `PRAGMA user_version` and refuses on a mismatch,
+#: paired with the minimal extra argv Click's OWN required-argument parsing needs before it will
+#: even invoke the command function. A missing required arg is Click's `UsageError`, raised
+#: during parameter processing -- BEFORE the function body (and therefore before
+#: `_check_schema_version`) ever runs -- so a case here that omitted a required arg would still
+#: get exit 2 and the string "Missing argument", and the test below would falsely read that as
+#: this refusal firing. `command_paths()` (derived from the click group, `cli.py::command_paths`)
+#: is the source of truth for the full surface; `test_schema_checked_commands_cover_the_db_touching_surface`
+#: below cross-checks this tuple against it so a verb added later cannot go silently uncovered.
+_SCHEMA_CHECKED_COMMANDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
+    (("status",), ()),
+    (("scan",), ()),
+    (("plan",), ()),
+    (("build",), ()),
+    (("verify",), ()),
+    (("migrate",), ()),
+    (("sequence",), ()),
+    (("transform",), ()),
+    (("pr",), ()),
+    (("quarantine",), ("acme-commons", "--reason", "operator")),
+    (("abort",), ()),
+    (("resume",), ()),
+    (("gc",), ()),
+    (("contracts", "list"), ()),
+    (("contracts", "inspect"), ("some-contract",)),
+    (("stubs", "list"), ()),
+    (("stubs", "resolve"), ("some-provider",)),
+    (("stubs", "abandon"), ("some-consumer", "some-coord", "--reason", "operator")),
+)
+
+#: The three verbs `_SCHEMA_CHECKED_COMMANDS` deliberately excludes, and why. `migrate-db` is
+#: SPEC §12 item 48's own carve-out -- it APPLIES the pending DDL rather than refusing on a
+#: mismatch, and its ladder is covered by `tests/test_migrations.py`, out of this task's scope.
+#: The three `models` subcommands never call `_require_db`/`_check_schema_version` at all
+#: (`cli.py::models_list`/`models_profiles`/`models_check` read only `config/models.yaml` through
+#: `_load_settings`) -- they cannot need a refusal for a database they never open.
+_SCHEMA_CHECK_EXCLUDED: dict[tuple[str, ...], str] = {
+    ("migrate-db",): "applies the pending DDL itself; SPEC §12 item 48's documented exception",
+    ("models", "list"): "reads config/models.yaml only; never opens state/fleet.db",
+    ("models", "profiles"): "reads config/models.yaml only; never opens state/fleet.db",
+    ("models", "check"): "reads config/models.yaml only; never opens state/fleet.db",
+}
+
+
+def test_schema_checked_commands_cover_the_db_touching_surface() -> None:
+    """`_SCHEMA_CHECKED_COMMANDS` plus its three named exclusions equal the full CLI surface.
+
+    Why: SPEC §12 item 48 says "every command" refuses on a stale schema, and the fixture that
+    drives the parametrized refusal test below is hand-maintained -- a verb added to the CLI
+    tomorrow that touches the DB would silently escape it unless something checks the fixture
+    against `command_paths()`, itself derived from the click group rather than listed by hand.
+    """
+    checked = {path for path, _ in _SCHEMA_CHECKED_COMMANDS}
+    assert checked.isdisjoint(_SCHEMA_CHECK_EXCLUDED), (
+        "a path is in both the checked and the excluded set: "
+        f"{checked & set(_SCHEMA_CHECK_EXCLUDED)}"
+    )
+    all_paths = set(command_paths())
+    covered = checked | set(_SCHEMA_CHECK_EXCLUDED)
+    assert covered == all_paths, (
+        f"uncovered by either set: {all_paths - covered}; "
+        f"covered but no longer a real command: {covered - all_paths}"
+    )
+
+
+@pytest.mark.parametrize(
+    "path,extra_args", _SCHEMA_CHECKED_COMMANDS, ids=lambda v: " ".join(v)
+)
 def test_schema_version_mismatch_is_exit_2_not_a_silent_upgrade(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    path: tuple[str, ...],
+    extra_args: tuple[str, ...],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A database behind the harness refuses with exit 2 naming `fleet migrate-db` (§6).
+    """Every DB-touching command refuses with exit 2, naming BOTH the actual and the expected
+    schema version, before doing any work (§6, SPEC §12 item 48).
 
     Why: "every other command reads `user_version` and refuses on a mismatch rather than
-    upgrading underneath a live run". An implicit upgrade is a table rebuild racing live workers.
+    upgrading underneath a live run" -- SPEC §12 item 48 says "every command", not "status", so
+    this is parametrized over `_SCHEMA_CHECKED_COMMANDS` rather than driving one verb. The
+    both-versions assertion is a real discriminator of `cli.py::_check_schema_version`'s f-string:
+    a message that named only one of `version`/`SCHEMA_VERSION` (or hard-coded either number)
+    would fail it while still containing "migrate-db".
     """
     write_config(tmp_path)
     db = fresh_db(tmp_path / "state" / "fleet.db")
+    stale = SCHEMA_VERSION - 1
     conn = sqlite3.connect(db, isolation_level=None)
-    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    conn.execute(f"PRAGMA user_version = {stale}")
     conn.close()
     monkeypatch.chdir(tmp_path)
-    result = runner.invoke(app, [*base_args(tmp_path), "status"])
-    assert result.exit_code == ExitCode.USAGE
+    result = runner.invoke(app, [*base_args(tmp_path), *path, *extra_args])
+    assert result.exit_code == ExitCode.USAGE, result.output
     assert "migrate-db" in result.output
+    assert str(stale) in result.output, result.output
+    assert str(SCHEMA_VERSION) in result.output, result.output
+
+
+def test_schema_version_refusal_precedes_clone_or_classify_side_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`fleet scan` refuses on a stale schema before its clone step or its ONE model-bearing
+    step ever run (§6, SPEC §12 item 48's "before a clone or an LLM call").
+
+    Why `scan` and not `status`: `status` is read-only projection and never reaches a clone or an
+    LLM call on ANY input, so it cannot discriminate this clause -- a refusal that fired after
+    those side effects would look identical to one that fired before, from `status`. `scan`'s
+    `_ScanDriver` dispatches `CloneWorker` (a `git clone --mirror` subprocess) as its first step
+    and `ClassifyWorker` as "the ONE model-bearing step" (ADR-0008, `cli.py::scan`'s own
+    docstring) later in the same run. Both are patched to RAISE if invoked, rather than to a
+    silent no-op recorder: a no-op could report zero calls for an unrelated reason (e.g. the
+    command crashing before reaching either), which is exactly the failure mode CLAUDE.md's
+    Guardrail 6 warns a validated-instrument check must rule out. `cli.py::scan` calls
+    `_check_schema_version` immediately after `_require_db`, strictly before `_scan_impl` (and
+    therefore before either worker) is ever constructed or dispatched.
+    """
+    write_config(tmp_path)
+    db = fresh_db(tmp_path / "state" / "fleet.db")
+    stale = SCHEMA_VERSION - 1
+    conn = sqlite3.connect(db, isolation_level=None)
+    conn.execute(f"PRAGMA user_version = {stale}")
+    conn.close()
+    monkeypatch.chdir(tmp_path)
+
+    def _boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError(
+            "a clone or classify worker ran before the schema-version refusal fired"
+        )
+
+    monkeypatch.setattr(CloneWorker, "run", _boom)
+    monkeypatch.setattr(ClassifyWorker, "run", _boom)
+
+    result = runner.invoke(app, [*base_args(tmp_path), "scan"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "migrate-db" in result.output
+    assert str(stale) in result.output, result.output
+    assert str(SCHEMA_VERSION) in result.output, result.output
 
 
 # --------------------------------------------------------------------------------------
