@@ -5058,7 +5058,7 @@ clause a home (subtask 8, subtask 10, or a documented gap) or bind it with a tes
 
 ---
 
-## D77 — OPEN, recorded only. `append_blocked_by` takes a DEGRADED phase to BLOCKED via raw SQL, bypassing `ALLOWED_TRANSITIONS`
+## D77 — FIXED, LANDED (`c4a1532`). `append_blocked_by` takes a DEGRADED phase to BLOCKED via raw SQL, bypassing `ALLOWED_TRANSITIONS`
 
 **Re-measured from the primary source, not inherited from R1's one-line summary.** There are four
 textual definitions of `append_blocked_by`; two (`cli.py:1419`, `cli.py:3622`) are pass-through
@@ -5181,6 +5181,48 @@ future lane should re-measure before touching `scheduler.py` again.
 > still opens on `def _fold_repos(`; `models/state.py:188-193` still covers
 > `RepoState._stub_invariants`. The one that has rotted is **`scheduler.py:255`**: cite
 > **`SqliteSchedulerStore.append_blocked_by`**, which `da45a43` moved further down the file.
+
+### Fixed (2026-09-01, round Y task 2), `c4a1532` — body above left as written, per this file's own convention
+
+**`DEGRADED`→`BLOCKED` was NOT added to `ALLOWED_TRANSITIONS`.** The state-model comments this
+entry already quotes (`models/enums.py:27-29`, `:42-46`) say a `DEGRADED` phase leaves the machine
+only via a budgeted revalidation round (`RUNNING`), outright success, or human intervention — never
+by being blocked — so widening the allowed set would be a semantic change, not a bugfix. The fix
+instead makes `append_blocked_by`'s loop consult the real gate before writing:
+`transition(current, RepoStatus.BLOCKED)` inside a `try`/`except ValueError: continue`, so a
+`DEGRADED` row is skipped (not counted in `touched`, `blocked_by` and `status` both left alone) and
+`PENDING`/`RUNNING`/`BLOCKED` rows are unaffected (all three are already in
+`ALLOWED_TRANSITIONS` for a transition to `BLOCKED`, so their behaviour is unchanged). The gate is
+the real `transition()`, not a hand-rolled `is RepoStatus.DEGRADED` check — this stays correct if
+`ALLOWED_TRANSITIONS[DEGRADED]` is ever revisited without a second edit to this method. The write
+itself is still raw SQL: the `SchedulerStore` surface stays deliberately narrower than the full
+repository (module docstring, unchanged by this fix).
+
+**Test:** `tests/test_scheduler.py::test_append_blocked_by_does_not_move_a_degraded_phase_to_blocked`
+drives a phase to `DEGRADED` through the real `acquire_phase_lease`/`complete_phase` CAS pair (the
+same helper the rest of this file's suite uses, never a hand-edited row), calls
+`append_blocked_by`, and asserts `touched == 0` and the row still reads `status='DEGRADED'`,
+`blocked_by='[]'`. Rule 12: reverting the guard (deleting the `try`/`transition`/`except` block)
+was confirmed to change the file (`git diff --numstat --no-index` against a pre-mutation backup,
+non-empty) and reddened exactly this test — 1 failed / 12 passed in `tests/test_scheduler.py`, no
+other test in that file affected, so this is not a module-wide outage wearing a discriminator's
+clothes.
+
+**Honest limit, unchanged from the OPEN entry above:** whether this ever changed the run's exit
+code was not established there and is not re-derived here — only the projection-level consequence
+(`_fold_repos` reading the phase's own `status` column) was traced, and that is what this fix
+closes: a `DEGRADED` phase this method touches now keeps reporting as degraded in
+`state.degraded`/`state.unresolved_stubs` rather than silently disappearing from both.
+
+**Scope, checked before closing this out — the reaper's RHI leg is a SEPARATE site, not fixed
+here.** `docs/CRITERIA_PLAN.md` §46 names "the reaper's RHI leg writes raw SQL bypassing
+`transition()` entirely... the D77 bypass shape, recurring" as one of §46's gaps. `complete_phase`
+(`src/fleet/state/repository.py`) sets `REQUIRES_HUMAN_INTERVENTION` via its own inline `CASE WHEN`
+SQL and never calls `transition()` either — a textually distinct site, a different function, and a
+different destination status (`REQUIRES_HUMAN_INTERVENTION`, not `BLOCKED`) from the one this entry
+fixes. Not touched by `c4a1532`. Whether §46's mention refers to that site or another was not
+resolved further here — left for the controller/a future task, per this task's brief, which scoped
+fixing it out explicitly.
 
 ---
 

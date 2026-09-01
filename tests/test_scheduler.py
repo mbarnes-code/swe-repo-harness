@@ -266,6 +266,36 @@ async def test_blocked_by_is_a_set_union_over_exactly_the_transitive_dependents(
     assert batch is not None and batch.status is RepoStatus.PENDING
 
 
+async def test_append_blocked_by_does_not_move_a_degraded_phase_to_blocked(
+    wired: Wired,
+) -> None:
+    """D77 (`docs/INTEGRATION_HONESTY.md`): `ALLOWED_TRANSITIONS[DEGRADED]` (`models/enums.py`)
+    deliberately does not contain `BLOCKED` — a degraded repo leaves the machine only via a
+    budgeted revalidation round, outright success, or human intervention (§3.5.1). Before the
+    fix, `append_blocked_by`'s raw-SQL fall-through swept a `DEGRADED` phase in anyway (it is
+    neither `SUCCEEDED` nor in `TERMINAL_STATUSES`), silently taking it to `BLOCKED` via a write
+    the real `transition()` gate rejects — and `state/projection.py::_fold_repos` derives
+    `stubbed_deps`/`degraded`/`unresolved_stubs` conditionally on the phase status reading
+    `DEGRADED`, so the repo vanished from both operator-facing lists with nothing else about its
+    unresolved stub changing.
+    """
+    repo, store, read_conn = wired
+    clock = SteppableClock()
+    await _set_status(repo, "acme-auth", RepoStatus.DEGRADED, clock)
+
+    touched = await store.append_blocked_by(RUN, "acme-auth", "acme-commons", now=clock())
+
+    assert touched == 0
+    async with read_conn.execute(
+        "SELECT status, blocked_by FROM phases WHERE run_id = ? AND repo_id = ?",
+        (RUN, "acme-auth"),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None
+    assert row[0] == "DEGRADED"
+    assert json.loads(str(row[1])) == []
+
+
 # --------------------------------------------------------------------------------------
 # the cumulative wall clock
 # --------------------------------------------------------------------------------------
