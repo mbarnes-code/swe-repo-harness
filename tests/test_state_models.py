@@ -373,6 +373,9 @@ SAMPLES: dict[str, FleetModel] = {
         external_coordinates=[Coordinate(ecosystem=Ecosystem.MAVEN, group="org.slf4j", name="api")],
         contract_deps=[CONTRACT_ID],
     ),
+    "InternalDep": InternalDep(
+        label="//libs/com/acme/base:base", dest="libs/com/acme/base", published=COORD,
+    ),
     "BuildTarget": BuildTarget(
         package="libs/com/acme/commons", name="commons", rule="java_library",
         load_from="@rules_java//java:defs.bzl", srcs=["Commons.java"], deps=["@maven//:api"],
