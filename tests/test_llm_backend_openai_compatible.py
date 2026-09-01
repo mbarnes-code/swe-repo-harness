@@ -31,6 +31,7 @@ from fleet.llm.cache import (
     MemoryLlmCacheStore,
     _as_effort,
 )
+from fleet.llm.calls import prompt_sha256, prompt_template_version
 from fleet.llm.client import (
     BackendReply,
     CallPolicy,
@@ -43,8 +44,8 @@ from fleet.llm.client import (
     negotiate,
     promised_mode,
 )
-from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter
-from fleet.llm.schemas import RESPONSE_SCHEMAS
+from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter, Role
+from fleet.llm.schemas import RESPONSE_SCHEMAS, response_schema_sha256
 from fleet.models.enums import ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget
 from fleet.settings import ConfigValidationError, FleetSettings
@@ -592,6 +593,51 @@ def test_a_prompted_only_target_answers_a_validated_value_through_the_client() -
     # The schema reached the model the only way PROMPTED can carry it: inside the prompt.
     rendered = json.dumps(sent["messages"])
     assert "verdict" in rendered
+
+
+def test_a_local_profile_run_through_the_cache_reports_a_miss_not_conflated_with_free(
+) -> None:
+    """SPEC §12.44 sub-clause F (§11.2, §11.6). `TokenUsage.all_served_from_llm_cache` is the
+    value `attempts.llm_cache_hit` actually takes (`models/tasks.py`), and it must not go True
+    merely because `cost_usd` is 0.0: a free local target and a cache hit are two different
+    reasons for the same number, and conflating them would make a fully-local, fully FRESH run
+    look fully cached in the ledger. Driven through the SHIPPED `local` profile
+    (`config/models.yaml`), not a fixture target, for the same reason the module docstring gives:
+    a profile that only ever loads in a fixture is a profile no operator can select.
+    """
+    settings = FleetSettings.load(SHIPPED_CONFIG, env={}, cli_overrides={"llm.profile": "local"})
+    router = LlmRouter.from_models_config(settings.models, profile="local")
+    fake = FakeTransport(body(content='```json\n{"verdict": "ok"}\n```'))
+    backend = oc.OpenAICompatibleBackend(fake, env={})
+    inner = LadderModelClient(router, {"openai_compatible": backend})
+    store = MemoryLlmCacheStore()
+    client = CachingModelClient(inner, router, store)
+    messages = [Message(role="user", content="q")]
+
+    response = asyncio.run(
+        client.complete("escalation", messages, Answer, tier_override=ModelTier.CHEAP),
+    )
+
+    assert response.value.verdict == "ok"
+    assert response.usage.backend == "openai_compatible"
+    assert response.usage.cost_usd == 0.0  # `price: free`, declared
+    assert response.usage.all_served_from_llm_cache is False  # a FRESH call, not a hit
+
+    tgt = router.resolve("escalation", tier_override=ModelTier.CHEAP).targets[0]
+    key = CacheKeyParts(
+        role="escalation",
+        tier=ModelTier.CHEAP,
+        backend=tgt.backend,
+        model_id=tgt.model_id,
+        effort=tgt.effort,
+        prompt_sha256=prompt_sha256(messages),
+        prompt_template_version=prompt_template_version(Role.ESCALATION),
+        response_schema_sha256=response_schema_sha256(Answer),
+    ).compute()
+    row = asyncio.run(store.get(key))
+    assert row is not None
+    assert row.record.backend == "openai_compatible"
+    assert row.record.usage.cost_usd == 0.0  # persisted row: the same two zeros, together
 
 
 def test_the_registry_holds_this_backend_under_its_config_name() -> None:
