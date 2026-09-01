@@ -2598,7 +2598,10 @@ re-verify the whole entry against one fresh SHA rather than patch citations one 
 
 ---
 
-**D49 — OPEN. The model-repair rewrite path lands patches that are neither size-checked nor
+**D49 — FIXED, LANDED (`9a7148c`; the fix is split across three commits — `c5ab3b1`, `82654e8`,
+`9a7148c` — closing three legs in sequence, `9a7148c` closes the last one; round W research
+verified all three legs closed against `HEAD`, dated 2026-09-01, see the dated note at the end of
+this entry). The model-repair rewrite path lands patches that are neither size-checked nor
 path-checked, and the one advertised size ceiling is unreachable code. `check_diff` has exactly one
 call site — the *deterministic* branch (`workers/rewrite.py:332`) — and it omits the `max_bytes`
 argument, so `transform.max_patch_bytes` is enforced nowhere while `docs/SPEC.md` asserts in three
@@ -2755,6 +2758,22 @@ not `RewriteInput`'s real default of `1_048_576`. Nothing in the tree asserts th
 (`workers/rewrite.py:212`) still equals `TransformSection.max_patch_bytes`'s default
 (`settings.py:452`) — the two literals could drift apart with no test noticing, on top of neither
 ever being reachable from a config file per point 1 above.
+
+> **[Dated note, 2026-09-01, round W research — heading moved to FIXED, LANDED, this is not a
+> new leg.]** Re-verified against `HEAD` independently of this entry's own prose: `9a7148c`
+> ("fix(D49): `_record` appends landed `FilePatch.path`, not the unit name") is an ancestor of
+> `HEAD`, `_record` (`workers/rewrite.py:584-600`) now appends `patch.path` at both call sites,
+> and the fix is pinned by a genuinely discriminating multi-file test
+> (`tests/test_workers_transform.py:918-957`,
+> `test_a_multi_file_repair_records_every_landed_path_not_just_the_unit`). This closes the
+> "evidence-domain half" the second correction above (`82654e8`) explicitly left as D49's one
+> remaining open leg. Nothing else this entry describes as an open leg remains open — the two
+> "deferred minors" immediately above (no boundary-value accept-at-exactly-`max_bytes` test; no
+> assertion binding `RewriteInput.max_patch_bytes`'s default to `TransformSection.
+> max_patch_bytes`'s default) are still true and still real, but the entry's own author already
+> framed them as minors separate from D49's "legs," not reasons to keep the heading open — if a
+> future round wants to close them, that is a small standalone TEST-ONLY task, not a reopening of
+> D49.
 
 ---
 

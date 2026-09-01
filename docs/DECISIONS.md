@@ -12337,3 +12337,43 @@ would be pure test-harness churn (Rule 2) for a methodology difference, not a pr
 ambiguous once stated (independent proof of the same property, direct precedent in ADR-0099), and
 leaving it open would cost this criterion's closure for no benefit, the same reasoning ADR-0099
 gave for its own alternatives.
+
+## ADR-0105 — §12.41's CHEAP-tier wording: "declares false" corrected to "omits, falls through to the declared floor"
+
+**Decision.** `docs/SPEC.md`'s §12 item 41 says the local profile's `CHEAP` targets "declare
+`supports_json_schema: false` and `supports_tools: false`." `config/models.yaml`'s actual `CHEAP`
+entry omits both keys from `capabilities_override` entirely — deliberately, per its own in-file
+comment. The SPEC sentence is adjudicated as a wording-precision issue, not a behavior gap, and
+corrected via a dated marker on the SPEC sentence rather than a config change.
+
+**Rationale.** Traced the full mechanism, not assumed: `ModelCapabilities`
+(`src/fleet/models/tasks.py:94-108`) declares `supports_tools`/`supports_json_schema` as `False`
+Pydantic field defaults. `openai_compatible.declared_capabilities()`
+(`src/fleet/llm/backends/openai_compatible.py:286-296`) returns a bare `ModelCapabilities()` — the
+honest floor, both fields `False` by default, per its own docstring ("the floor, always: PROMPTED
+and nothing else"). `merge_capabilities(declared, target)` (`src/fleet/llm/client.py:487-494`)
+does a dict overlay: keys present in `capabilities_override` replace the declared value, keys
+**absent** fall through to whatever `declared` already had. `CHEAP`'s `capabilities_override` is
+`{max_output_tokens: 8192}` — it names neither field, so both fall through to the already-`False`
+floor. The merged result is byte-identical to an explicit `false` declaration. `negotiate()`
+(`client.py:466-476`) only ever reads the final merged booleans; nothing in the pipeline
+distinguishes "declared false" from "defaulted false because omitted." The distinction SPEC's
+wording implies does not exist as an observable behavior anywhere in this pipeline for this
+target. `docs/SPEC.md:6605` (an unrelated example block) does spell the same non-declaration out
+explicitly as `false` — SPEC is internally inconsistent in how it presents the identical
+non-declaration, which is further evidence this is a wording slip, not two different designs.
+
+**What changed and what didn't.** The SPEC sentence's mechanism description ("declare... false")
+is corrected to describe the real mechanism (omit, fall through to the backend's declared floor).
+The criterion's substantive claim — CHEAP genuinely lacks structured-output capability at
+negotiation time, forcing every classification call down to `PROMPTED` — is unchanged and holds
+exactly as stated; nothing about the pipeline's actual behavior changes, and `config/models.yaml`
+is not touched (its omission was already correct and is now correctly described).
+
+**Alternatives rejected.** *Add explicit `false` declarations to `config/models.yaml`'s CHEAP
+entry to match SPEC's literal wording* — rejected: the omission is deliberate and already
+documented in-file with a real architectural rationale (the comment beside `CHEAP` in
+`config/models.yaml` explains why declaring vs. omitting doesn't matter here); adding two
+redundant explicit-`false` keys would be pure churn to make code match a SPEC sentence that was
+imprecise, the wrong direction per this project's own stated rule ("building to match the
+criterion is the only legitimate closure direction — the reverse... is not").
