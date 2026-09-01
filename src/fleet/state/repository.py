@@ -467,6 +467,12 @@ class StateRepository(ReadOnlyRepository, Protocol):
         max_attempts: int = 3,
     ) -> str: ...
 
+    async def set_task_target_paths(self, task_id: str, target_paths: Sequence[str]) -> None: ...
+
+    async def claim_task_by_id(
+        self, task_id: str, *, worker: str, now: datetime, lease_ttl_s: int
+    ) -> bool: ...
+
     # -- primitive 1: the claim --------------------------------------------------------
     async def claim_next_task(
         self, run_id: str, *, worker: str, now: datetime, lease_ttl_s: int
