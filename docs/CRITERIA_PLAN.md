@@ -656,15 +656,22 @@ scenario in SPEC.md item 37 becomes testable for the first time.
 change — it's correct and tested; the remaining gap is purely on the creation side.
 
 ## 38. No ready-for-review while a stub is unresolved
-**OPEN — mixed, 20 sub-clauses — mostly D80 + TEST-ONLY.** The headline refusal (exit 2 + PrState
-unchanged) is well covered by two independent tests. `stub_reconcile` has no implementation
-(`cli.py:10771` is a comment) — that's D80, which already names this gap nearly verbatim. Sharpest
-independent finding: deleting `'SUPERSEDED'` from `cli.py:9902` passes the whole suite, and the
+**OPEN — mixed, 20 sub-clauses — TEST-ONLY.** The headline refusal (exit 2 + PrState unchanged) is
+well covered by two independent tests. **Stale note, corrected 2026-09-01 (round X research):**
+this entry's "D80" citation is out of date — `stub_reconcile` had no implementation when this was
+written (`cli.py:10771` was a comment), but **D80 is now `FIXED, LANDED` (`5377969`/`9c20eeb`,
+round M)**: `stub_reconcile` runs unconditionally inside `fleet resume`, reviewed Approved,
+mutation-proven. The resolution/sweep/exit-7 sub-clauses are no longer blocked on an open
+D-number, but their SPEC-level test coverage has not been re-audited against the landed fix —
+`tests/test_cli.py:2535-2701` already exercises `abandoned`/`held_for_merge` scenarios that may
+satisfy part of this, but that needs verifying, not assuming. Sharpest independent finding
+(unrelated to D80): deleting `'SUPERSEDED'` from `cli.py:9902` passes the whole suite, and the
 guard's positive half (readiness correctly granted) is asserted nowhere (audit row 38).
-**Done bar:** the resolution/sweep/exit-7 sub-clauses are D80's scope — closing D80 closes them.
-Independently and immediately actionable: one test exercising the `SUPERSEDED` arm specifically
-(so deleting it reddens), and one test asserting the positive case (stub genuinely resolved →
-ready-for-review succeeds).
+**Done bar:** verify the resolution/sweep/exit-7 sub-clauses against D80's now-landed
+`stub_reconcile` (may already be substantially covered by `test_cli.py:2535-2701` — re-check
+before writing new tests). Independently and immediately actionable regardless: one test
+exercising the `SUPERSEDED` arm specifically (so deleting it reddens), and one test asserting the
+positive case (stub genuinely resolved → ready-for-review succeeds).
 
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
@@ -754,20 +761,27 @@ and coverage for the remaining 3 trailers.
 **Out of scope:** the `collisions.blob_shas` regex fix is already done — do not re-touch it.
 
 ## 46. Model-layer invariants
-**OPEN — mixed, 13 sub-clauses, mostly strong — TEST-ONLY + known D77/D80.** 8 of 13 are solidly
+**OPEN — mixed, 13 sub-clauses, mostly strong — TEST-ONLY + known D77.** 8 of 13 are solidly
 covered (illegal transitions raise, abandoned-reopen gating, stale-lease rejection, reap-in-flight
 discard, 32 KiB truncation, zero-duplicate-commit re-entry). Gaps: round-trip is asserted by object
 equality, which is the exact form the criterion says *not* to use ("via `model_fields`, not object
 comparison"); `Resolution` (in `models/build.py`) is covered by nothing though built by all three
 ecosystem adapters; the reaper's RHI leg writes raw SQL bypassing `transition()` entirely so
-`ALLOWED_TRANSITIONS` tests never bind it (the D77 bypass shape, recurring); `stub_reconcile` is
-D80; `edges.edge_key` stability is tested only at the inference layer, never on persisted values;
-`acquire_phase_lease` is never driven concurrently (audit row 46).
+`ALLOWED_TRANSITIONS` tests never bind it (the D77 bypass shape, recurring — D77 itself is
+`docs/INTEGRATION_HONESTY.md:5061`, OPEN, one-shot-sized: `SqliteSchedulerStore.append_blocked_by`
+takes DEGRADED→BLOCKED via raw SQL bypassing `transition()`; re-measure `scheduler.py` line
+anchors before touching, the file has moved); `edges.edge_key` stability is tested only at the
+inference layer, never on persisted values; `acquire_phase_lease` is never driven concurrently
+(audit row 46). **Corrected 2026-09-01 (round X research): `stub_reconcile` is no longer D80's
+scope — D80 is now `FIXED, LANDED` (`5377969`/`9c20eeb`, round M), see §38's entry for the same
+correction.** Whether this sub-clause needs its own new coverage or is already satisfied by
+`stub_reconcile`'s landed tests has not been re-audited.
 **Done bar:** switch the round-trip test to compare via `model_fields` as the criterion literally
 requires; add a test for `Resolution`; drive the reaper against a real RHI row and assert it goes
 through `transition()` (this is the same shape as D77 — check whether closing this closes D77 or
 vice versa before doing both); add a persisted-value `edge_key` stability test; add a concurrent
-`acquire_phase_lease` test. `stub_reconcile` stays D80's scope.
+`acquire_phase_lease` test; re-audit the `stub_reconcile` sub-clause against D80's landed state
+(see §38's entry) rather than treating it as still blocked.
 
 ## 47. Registries stateless, total, order-independent
 **OPEN (reverted 2026-09-01, controller ruling C1 on this round's own final review — the `**DONE`
@@ -868,7 +882,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | DONE | 18 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round W, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §44 this round (all 6 sub-clauses closed, the last 5 without needing the stub OpenAI-compatible server the entry previously assumed was required); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 2 | 17, 45 (partial) |
-| OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
+| OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14 (D50 attribution corrected 2026-09-01 — real blocker is the same NEW-MECHANISM `--stub-blocked` gap §37 already names, not D50), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial), 46 (partial, D77 only — D80 leg closed, see §46's entry) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
