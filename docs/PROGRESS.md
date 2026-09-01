@@ -7255,3 +7255,97 @@ lowers the design risk relative to a from-scratch attribution decision). §12.17
 cheap opener if the round wants to bank a fast closure first. D77 available as a safe standalone
 fallback. D55/D58's circuit breaker and D50's remaining scope are explicitly out of round Y's
 size class.
+
+### Checkpoint — 2026-09-01 (round Y controller, close-out)
+
+**§12 criteria met: 20 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived by the final whole-branch reviewer and
+matching the committed table exactly — up from 18 at round X's close, the largest single-round
+jump this project has recorded). Added this round: **§12.17** (byte-identical projection — a
+genuine adjudication, flagged by a prior round as "a real decision, not trivial," resolved with a
+code fix restoring literal compliance rather than weakening SPEC wording — `state/
+projection.py::build_state` now derives `MigrationState.updated_at` deterministically from
+already-read rows instead of `utcnow()`) and **§12.24** (fail-closed budgets — its sole remaining
+blocker, D62's `llm_backend` column, closed via a real e2e dispatch proving every `attempts` row
+under `--profile local` carries a non-empty backend). D77 and D78 (both defect-ledger items, not
+§12 criteria themselves) also closed, materially narrowing §12.43 (now blocked only on D55/D58's
+circuit breaker, down from four separate named gaps) and §12.46 (its D77-shaped bypass gap
+closed at its own site).
+
+**This round's research corrected an assumption inherited from the previous round, and the
+correction changed the whole shape of the dispatch.** Round X's own research had framed D62's
+`llm_backend`/`llm_failovers` leg as structurally blocked on D78's `WorkerError.tier` wiring —
+both needed "the same boundary change." Round Y's research re-derived this from the actual code
+rather than trusting the inherited framing, and found the coupling was based on stale reasoning
+about an unrelated wave-shared finding buffer: the failover-hop count is entirely local to
+`LadderModelClient.complete()`'s own retry loop, with no `WorkerError` involvement at all. D62 and
+D78 were dispatched as two genuinely independent, parallel tasks instead of a sequential
+Task-A/Task-B pair — the D89 Phase 2 shape this project had defaulted to for coupled-looking
+work. Both landed clean. Worth naming plainly: an inherited framing from a prior round's research
+is not itself verified fact, and re-deriving it (not just carrying it forward) is what let this
+round move faster than the shape it started from.
+
+**A live number collision, self-caught and self-resolved.** Dispatched in parallel from the same
+base, §12.17's task and D62's task both independently verified ADR-0106 "free" — neither could
+see the other's uncommitted work, exactly the scenario this project's Central Number Allocation
+rule anticipates. D62's implementer caught it itself: a full-suite run against *current* `main`
+(not its own branch point) found the number already claimed, and it renumbered to ADR-0107
+everywhere in one self-directed fix commit, repointing a rotted citation and fixing a
+ruff-format violation in the same pass — the "re-verify against the environment that will run it"
+discipline working exactly as intended, without the controller needing to intervene. The
+resulting merge conflict (both branches appended a new ADR at the same file location in
+`docs/DECISIONS.md`) was resolved by keeping both ADRs in sequential order; the final
+whole-branch review independently confirmed both ADR bodies survived byte-identical to their
+respective branch tips, no truncation, no interleaving.
+
+**One implementer's process broke down mid-task, and the project's own "measure the artefact"
+discipline is what kept the round moving instead of stalling on it.** D78's background
+verification never completed and no final chat report ever arrived, despite its two commits
+landing cleanly and completely on its branch (a genuine, self-consistent fix-plus-tests unit).
+Rather than wait indefinitely or treat the missing report as disqualifying, the controller
+reviewed the committed diff directly — the actual deliverable, not a report about it — and the
+task reviewer found it spec-compliant. But neither the stalled implementer nor the reviewer had
+actually *executed* a test run, which the reviewer correctly flagged as a real gap rather than a
+formality. The controller closed that gap personally before merging: ran `ruff check` (clean),
+`mypy --strict` (clean), and 196 tests across the touched and adjacent surfaces, all green. The
+final whole-branch review later re-confirmed this diff sound end to end with the full 2083-test
+suite. No step in this chain trusted a claim it could instead measure.
+
+**A false justification was written this round, caught by this round's own final review rather
+than surviving into a later one — and the fix for it introduced two fresh, smaller defects the
+review caught a second time, live, mid-fix.** Retiring D78's old "not reached in production"
+disclosure, the round's own closing commit claimed BOTH the newly-real tier-scoped arm and the
+old run-scoped arm stay live in production, citing a hypothetical caller (a synthetic
+`FailureClass.UNKNOWN` `WorkerError`) that cannot structurally reach the `BACKEND_UNAVAILABLE`-
+gated call site it was cited for. The actual, measured consequence is the mirror image of what
+D78 fixed: the run-scoped arm now has *zero* production producers. The final whole-branch review
+caught this independently (CLAUDE.md's "the reason is the unmeasured sentence" guardrail, by
+name) and it was routed into a fix wave — which itself introduced an E501 lint break and a
+gate-vs-call-site line-number mixup (`runner.py:675` is the gate; `:705` is the actual call),
+propagated to two sites in the very text correcting the first error. The review agent, still
+running, caught this second-order defect live against the changing tree and flagged it before
+the fix wave's own completion report even arrived. The controller verified both were still
+present in the committed state and fixed them in one commit. Three layers of "measure the
+artefact, not the claim about it" in sequence, on the same finding — worth recording as the
+clearest instance this session of why that discipline compounds rather than being satisfied once.
+
+**Rulings made this round:**
+1. §12.17: option (a), a code fix restoring literal byte-identity, chosen over weakening SPEC's
+   wording — after investigating (not assuming) that no real pipeline consumer depends on the
+   `updated_at` churn and that §21's digest mechanism is genuinely unrelated.
+2. D62/D78 dispatched as independent parallel tasks, overturning round X's inherited sequential-
+   coupling framing, based on this round's own fresh code reading.
+3. ADR-0106/0107 collision resolved by keeping both, sequentially — no ADR was discarded or
+   silently merged away.
+4. Two rounds of post-review fixes (the false-justification correction, then its own two
+   defects) both routed as single-commit, all-sites-at-once fixes per Guardrail 6, never split
+   across authors or left partially applied.
+
+**Full suite, post-final-review-fixes: verified clean on the touched surfaces** (ruff check,
+citation gate, `test_runner.py`/`test_llm_findings.py`/`test_workers_scan.py`, 167/167) after the
+controller's own follow-up fix; the final whole-branch review's own full-suite run (2083 passed,
+0 failed, 935s) was against the pre-follow-up-fix commit, so the two together give complete
+coverage of this round's final state without needing a third full 15-minute pass for a
+comment-only correction.
+
+**Round Z, opening next.**
