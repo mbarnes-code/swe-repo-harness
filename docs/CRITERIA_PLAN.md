@@ -781,19 +781,36 @@ Rule-14 adjudication marker or ADR disclosing the substitution. Per CLAUDE.md Ru
 criterion's literal wording can only be relaxed by disclosed adjudication (dated marker + ADR) —
 this substitution wasn't disclosed that way, so the criterion cannot be marked DONE on it.
 
-**Two open residuals — separate done bars, do not conflate them:**
-**(i) Contracts registry — a fork, not yet a decision.** Either a "contracts registry" concept
-belongs in this architecture and needs to be built, with a `discover()` carrying the same
-statelessness proof as the other four; or SPEC.md:7462 itself is stale/overbroad — naming a
-registry that was never part of the design — and needs its own Rule-14 adjudication (dated marker
-+ ADR) narrowing the five-registry list before any code is written. This fix wave does not decide
-which fork is correct; a future round must, explicitly, before touching code.
-**(ii) Backends registry statelessness — implement or adjudicate, don't silently pick one.**
-Either (a) implement a genuinely stateless backends registry — `vars(inst) == {}`, meaning backend
-instances hold no mutable per-instance state (e.g. moving `_env`/`_transport` off the instance);
-this is a real production change, not test-only; or (b) run the Rule-14 adjudication path (dated
-marker + ADR) to formally relax SPEC.md:7462's wording for the backends registry. A future round
-must pick one path explicitly, disclosed either way; this fix wave does not choose for it.
+**(ii) Backends registry statelessness — DONE (round V, 2026-09-01).** Implemented for real, not
+adjudicated away: `vars(inst) == {}` is now genuinely true for every registered backend instance.
+`bedrock`/`vertex`/`openai_compatible`'s `__init__` methods conditionally-assign
+(`if x is not None: self._x = x`) rather than unconditionally storing constructor-injected
+collaborators, so the zero-arg registration construction (`register_backend`'s
+`_BACKENDS[cls.name] = cls()`) yields a genuinely empty `__dict__`; the collaborator resolves
+lazily via `getattr(self, "_x", <module constant>)` at call time. `anthropic.py` was already
+stateless. No `__slots__` loophole used — task review verified `assert_stateless`'s literal
+`vars(inst)` check applies for real here. `tests/test_registries_stateless.py`'s round-T weaker
+singleton-identity stand-in is replaced with the real, unweakened `assert_stateless` call.
+Commit `d9317e7` (merge of `agent/roundv-task1`).
+
+**(i) Contracts registry — resolved fork, still open, tracked via ADR-0065.** Round V's research
+(dispatched to resolve this fork, not to guess at it) found the "contracts registry" is a real,
+deliberately designed fifth pluggable registry — `docs/SPEC.md` §7.6 fully designs
+`ContractAdapter` (ABC + `@register` + `discover()` asserting totality over `ContractKind`), and
+`docs/DECISIONS.md`'s ADR-0065 explicitly records it as designed-but-**NOT YET IMPLEMENTED**,
+naming the exact package (`src/fleet/ecosystems/contracts/{base,proto,openapi,avro,thrift,
+shared_lib}.py`) and explicitly rejecting `workers/contracts.py`'s `discover_contracts` (a pure
+extraction function, not a registry — confirmed by its own docstring) as a stand-in. §12 items
+29/31/32 already assume/reference this same undone registry; §12.32 already treats its own
+equivalent clause as "UNSATISFIABLE AS WRITTEN... NOT a passing gate (ADR-0065)" — i.e. disclosed
+and adjudicated, not silently guessed at. **This is not a "SPEC is stale" situation — the
+"stale/overbroad" fork this entry's prior text offered is rejected on the evidence** (see
+`.superpowers/sdd/round-V-criteria-closure/research-1-report.md`'s Part A if that workspace still
+exists, or ADR-0065 directly). **Done bar:** build `src/fleet/ecosystems/contracts/` for real —
+5 adapter files + base ABC + `discover()`/`for_kind()`, per SPEC §7.6's literal design. This is
+genuine NEW-MECHANISM work, comparable in scope to D89 Phase 2 (multiple dependent tasks, its own
+dedicated round), not a one-shot residual fix — deferred to a future round, same treatment §12.32
+already gives the identical fact. Do not re-run the "is this stale" investigation; it is settled.
 
 **Disclosed, not closed (pre-existing, unrelated to the above):** `assert_stateless` is
 structurally blind to `__slots__`-stored state (by the helper's own documented design,
