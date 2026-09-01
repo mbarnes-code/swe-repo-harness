@@ -12399,3 +12399,92 @@ declaring vs. omitting the two booleans has no observable effect is this ADR's o
 way, adding two redundant explicit-`false` keys would be pure churn to make code match a SPEC
 sentence that was imprecise, the wrong direction per this project's own stated rule ("building to
 match the criterion is the only legitimate closure direction — the reverse... is not").
+
+## ADR-0106 — §12.17's byte-identity restored by deriving `MigrationState.updated_at` from durable state, not `utcnow()`
+
+**Decision.** `docs/SPEC.md` §12 item 17 requires that `migration_state.json` regenerated from an
+unchanged SQLite database be byte-identical to the file already on disk. Round-K's 2026-08-28
+marker on that criterion disclosed this as FALSE BY CONSTRUCTION: `MigrationState.updated_at`
+(`src/fleet/models/state.py:236`, `Field(default_factory=utcnow)`) was left unsupplied by
+`state/projection.py::build_state`, so the field was stamped fresh with wall-clock time on every
+call, and two projections of an untouched database differed in that one field alone. The marker
+priced two options without choosing between them: (a) drop `updated_at` from the compared value
+(code change, cheap); (b) weaken the criterion to "structurally identical modulo `updated_at`"
+plus a field-scoped equality test (SPEC-only edit). **Option (a) is chosen and implemented.**
+
+**Investigation, per `docs/CRITERIA_PLAN.md` §17's "real decision, not trivial" flag.** Two
+questions had to be answered before treating (a) as safe: does anything in the pipeline read
+`updated_at` off `MigrationState` for a real purpose (staleness detection, cache invalidation),
+and is §21's `fleet status --digest` the same mechanism as this criterion's byte-identity check.
+
+*Same mechanism as §21?* No. `state/digest.py::run_digest` is a wholly separate code path from
+`state/projection.py::build_state` — it reads directly from SQLite (waves, edges, cycles,
+contracts, collisions, patch trailers, attempts) and explicitly excludes "no timestamps, no ids
+that are reassigned on rebuild" by design (its own module docstring). It never touches
+`MigrationState` or `migration_state.json` at all. §17 and §21 are unrelated obligations that
+happen to share the word "byte-identical."
+
+*Real pipeline consumer of the churn?* No production code reads `MigrationState.updated_at` for
+cache invalidation, staleness, or any decision — `fleet status` (`cli.py:10526`) calls
+`build_state` only to render a human-facing table, and `fleet resume` never reads the projection
+back (§11.5; `migration_state.json` is a write-only human artefact by the module's own
+docstring). `PhaseRecord.updated_at` and `RepoState.updated_at` are unaffected: both are already
+populated from the real `phases.updated_at` DB column in `build_state`, not from
+`default_factory`, so this defect was always confined to the one top-level field.
+
+*The one real complication found:* not a pipeline dependency, but a deliberately-authored
+regression test. `tests/test_wave_composition_projects_mid_wave.py`'s
+`test_a_rebuild_from_an_unchanged_database_moves_the_bytes_and_not_the_vector` asserted
+`first != second` on two back-to-back untouched-database rebuilds, specifically *because*
+`updated_at` churned — it used that churn as the discriminating case proving why that file reads
+a `_status_vector` rather than a whole-file digest (a round-F failure mode: a digest-keyed
+instrument passed 3 of 4 validation checks by mistaking "bytes moved" for "state moved"). Fixing
+§12.17 makes that test's premise false: two untouched rebuilds are now byte-identical, so
+`first != second` fails under the fix exactly as it would under the very mutation the test was
+built to catch (a frozen `default=` replacing `default_factory=utcnow`) — the test could not
+tell a principled fix from the bad mutation from the outside, because both produce the same
+observable (`first == second`). This is not a functional dependency on the old bug and does not
+argue for option (b): it is a test that needs updating because production behavior legitimately
+changed. Renamed to
+`test_a_rebuild_from_an_unchanged_database_moves_neither_bytes_nor_vector`, flipped to
+`assert first == second`, and its docstring — and the file's header commentary at the two sites
+that stated the old churn as current fact — annotated with a dated correction rather than
+silently rewritten (CLAUDE.md §7's "annotate, never rewrite" convention for a record of what was
+true then).
+
+**Implementation.** `state/projection.py::build_state` now derives the top-level `updated_at` via
+a new `_derive_updated_at()`: the lexicographic maximum of `runs.started_at` and every
+`phases.updated_at` / `waves.computed_at` / `contracts.detected_at` / `collisions.detected_at`
+value already read into `phase_rows`/`wave_rows`/`contract_rows`/`collision_rows` for the
+snapshot — no new query. Lexicographic comparison is valid because every one of those columns is
+written through `state/repository.py::_iso()`, whose own docstring states the fixed-width
+rendering exists precisely so instants can be "compared as TEXT" (the reaper already relies on
+this). The result is a deterministic function of already-read SQLite content: unchanged database,
+unchanged `updated_at`, exactly matching every other field in the projection. It does not scan
+`budget_ledger`, `events`, `stubs`, or `attempts` — those tables' own values already carry
+whatever difference they make to the JSON dump, so `updated_at` only needs to avoid being a FALSE
+source of difference when nothing changed, which a deterministic function of already-read rows
+does by construction. `PhaseRecord.updated_at` and `RepoState.updated_at` are untouched (already
+correct, see above).
+
+**Why not delete `default_factory=utcnow` from the model field** (the reconciliation round-K's
+marker explicitly forbade): that class of fix removes the write-timestamp semantics from the
+artefact entirely — the field would carry a fixed/empty value regardless of when the run last
+wrote anything, "a worse artefact than a non-reproducible byte string" per that marker. The
+`default_factory` stays exactly as-is for every other model construction path (a freshly built
+`PhaseRecord`/`RepoState` outside `build_state`); only the one projection code path now supplies
+a real value instead of leaving the field to default.
+
+**Why not option (b):** nothing in the investigation showed a genuine functional need for the
+churn, so weakening the criterion's literal wording would have papered over a fixable defect
+rather than fixing it — the cheaper-looking option was in fact the correct one once the one real
+complication (a test, not a pipeline dependency) was identified and resolved as a test update.
+
+**Verification.** `tests/test_projection.py::test_two_projections_of_an_untouched_database_are_byte_identical`
+proves the criterion directly (`out_path.read_bytes()` equality, not an object or field-scoped
+comparison — the criterion's own wording is literal byte-identity). Mutation-proved: reverting
+`_derive_updated_at`'s call site (restoring the old unsupplied-key behavior) reddens both this
+test and the renamed wave-composition test while every other test in both files stays green;
+restoring the fix greens both again. Full suite run recorded in the round Y task 1 report.
+
+See `docs/SPEC.md` §12 item 17's dated correction marker and `docs/CRITERIA_PLAN.md` §17.

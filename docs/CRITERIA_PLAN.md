@@ -287,17 +287,26 @@ as the audit. No further code or test work — verify the corrected SPEC.md word
 in Rule 13's checkpoint count, and mark done.
 
 ## 17. Projection fidelity — "byte-identical"
-**OPEN — false as written — SPEC-ADJUDICATION (real decision, not trivial).** `MigrationState`'s
-`updated_at` uses `Field(default_factory=utcnow)`, so an untouched rebuild always differs. This is
-the same class of bug CLAUDE.md's own Guardrail 6 "Round F" entry independently documents for a
-different detector — never previously connected to this criterion (audit row 17). Round-K added a
-marker but explicitly left the replacement wording unchosen.
-**Two real options, cost stated for both (this is the adjudication, not a decision made here):**
-(a) drop `updated_at` from the value compared for equality (code change to `projection.py`,
-restores literal byte-identity, cheap); (b) weaken the SPEC clause to "structurally identical
-modulo `updated_at`" and add a field-scoped equality test (SPEC edit only, no code change).
-**Done bar:** whichever option is chosen, via Rule 14 (dated marker + ADR), then one test proving
-the chosen invariant across two regenerations of an untouched database.
+**DONE (round Y task 1, 2026-09-01, ADR-0106).** Option (a) chosen over (b) after investigating
+both the §21 digest question and the "real pipeline consumer" question the entry below used to
+pose: `state/digest.py::run_digest` (§21) is a wholly separate mechanism from `build_state`/
+`migration_state.json` and was never affected either way, and nothing in the pipeline reads
+`MigrationState.updated_at` for a real purpose (staleness/cache invalidation) — `fleet status`
+only renders it, `fleet resume` never reads the projection back. The one real complication found
+was a test, not a pipeline dependency: `tests/test_wave_composition_projects_mid_wave.py` had a
+regression case deliberately keyed on the churn (`updated_at` differing was its discriminator for
+"digest-keyed instruments are wrong"); updated in the same commit (renamed, assertion flipped,
+docstring corrected) rather than treated as a reason to prefer (b). Implemented:
+`state/projection.py::build_state` now derives `MigrationState.updated_at` from the latest of the
+already-read `phases.updated_at`/`waves.computed_at`/`contracts.detected_at`/
+`collisions.detected_at` timestamps (falling back to `runs.started_at`), a deterministic function
+of already-fetched rows — no new query, no schema change, and `default_factory=utcnow` is left
+untouched for every other model-construction path. **Done bar met:**
+`tests/test_projection.py::test_two_projections_of_an_untouched_database_are_byte_identical`
+asserts raw-byte equality across two `project_once` calls on an untouched database; mutation-
+proved (reverting the fix reddens it and the renamed wave-composition case, restoring it greens
+both). See `docs/SPEC.md` §12 item 17's dated correction marker and ADR-0106 for the full
+investigation.
 
 ## 18. Observability — `llm_call` event, `latency_ms`, `logs/errors-<run_id>.jsonl`
 **DONE (landed round M task 3, `5f31fd3`/`agent/roundm-task3`, reviewed Approved, fix round 1

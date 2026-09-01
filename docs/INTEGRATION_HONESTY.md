@@ -5104,7 +5104,8 @@ never writes that table.
 `RepoState`.** With the ACTIVE stub row present throughout, `build_state()` after the bypass
 reports: `state.repos["acme-degraded"].status == BLOCKED`, `.stubbed_deps == []`,
 `state.degraded == []`, `state.unresolved_stubs == {}`. The mechanism is `_fold_repos`
-(`state/projection.py:241-277`), which derives `stubbed_deps`/`stub_states` **conditionally on the
+(`state/projection.py:275-318`, moved from `:241-277` by ADR-0106's `_derive_updated_at`
+addition), which derives `stubbed_deps`/`stub_states` **conditionally on the
 phase row's own `status` being `DEGRADED`** (`degraded_stubs = dict(stub_states[repo_id]) if
 status is RepoStatus.DEGRADED else {}`) — so the invariant `RepoState._stub_invariants`
 (`models/state.py:188-193`, `stubbed_deps is non-empty iff status is DEGRADED`) is never violated;
@@ -5915,7 +5916,8 @@ only read transaction and is debounce-bounded, and drops *"until the disk fills 
   W13's static figures reproduce.
 * Exactly **three** executed `BEGIN` sites under `src/`: `migrations/__init__.py:228` EXCLUSIVE,
   `state/db.py:459` IMMEDIATE, `state/projection.py:194` `BEGIN DEFERRED` — the only reader.
-  `project_once` (`state/projection.py:341-353`) opens and closes that handle around one snapshot.
+  `project_once` (`state/projection.py:375-389`, moved from `:341-353` by ADR-0106's
+  `_derive_updated_at` addition) opens and closes that handle around one snapshot.
 * **Runtime, own fixture** (SQLite 3.45.1, ext4, 1 000-row `phases` table, 8 000 write transactions
   per arm, a **unique** 400-byte payload per transaction): shipped pragmas with no reader plateau at
   **4 120 032 B**, flat from txn 1 000; `wal_autocheckpoint = 0` grows linearly to **33 437 952 B**
@@ -7109,7 +7111,8 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
    **terminal** — the row settles at `REQUIRES_HUMAN_INTERVENTION` with the unredacted value as
-   its final persisted state, and `state/projection.py:265` copies `last_error` straight into the
+   its final persisted state, and `state/projection.py:301` (moved from `:265` by ADR-0106's
+   `_derive_updated_at` addition) copies `last_error` straight into the
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
