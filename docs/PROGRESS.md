@@ -6804,3 +6804,58 @@ than a third full 16-minute pass, consistent with round P/Q's own precedent for 
 low-risk fixes.
 
 **Round S, opening next.**
+
+### Checkpoint — 2026-09-01 (round S controller, close-out)
+
+**§12 criteria met: 13 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, `§12.40` excluded via its own marker — up from 11 at round R's
+close). Added this round: **§12.1** (`uv sync --frozen` offline exit-0 on py3.12) and **§12.28**
+(single writer, pool children have no DB handle — both sub-clauses, with both substitutions from
+SPEC's literal wording disclosed honestly in the entry rather than silently narrowed: clause (c)'s
+200-repo simulated run is met by 200 concurrent `StateWriter.submit()` coroutines, an adjudicated
+stand-in; clause (a)'s runner-level integration test is met at the `StateWriter` level by a
+pre-existing test).
+
+- **§12.23** (idempotency, re-scan/re-transform) had real, substantial work land this round — 5 of
+  8 SPEC-named tables newly covered (a genuine 9-repo, real-git, real-CLI vendored-contract
+  fixture among them) — but **correctly stays OPEN**, not counted toward the tally. One sub-clause
+  (`edges.retargeted_from_repo_id`) is structurally unclosable by any test: the column exists in
+  `state/schema.sql` and a value is computed in memory (`graph/cycles.py:736`), but
+  `repository.py`'s `insert_edges`/`EdgeRow` never carry it through to persistence — this is the
+  pre-existing, already-open **D23**, not a gap this round introduced. The task's own
+  self-measurement corrected a stale, uncited "6 of 8" claim in `docs/CRITERIA_PLAN.md` to the
+  true pre-round figure of 3 of 8 — the criterion was further from closed than believed, not
+  closer.
+- **D89 escalated, not fixed.** This round's research dispatch found the consequential half of
+  the gap two rounds' worth of tracing had been building toward: `attempts.task_id`'s correct
+  grain (coarse, one per phase-dispatch) and D87's git-trailer arbitration lookup's correct grain
+  (per-unit, `task_id_for`'s UUID5) are **different quantities**. A naive fix — populating `tasks`
+  at the coarse grain, the obvious-looking closure — would make D87's mechanism *reachable* while
+  feeding it the *wrong* identity for REWRITE/RELOCATE commits, causing it to discard genuinely
+  landed work on crash recovery. **D87's arbitration is reachable-and-correct for zero task kinds
+  today; a naive close of D89 would be a regression, not a fix.** Recorded as a two-phase design on
+  D89 (`docs/INTEGRATION_HONESTY.md`), not attempted — this needs its own dedicated round, gated,
+  not folded into a general TEST-ONLY closure round. Strong candidate for round T.
+- **The Rollup/backlog-currency gap that rounds Q and R each found and fixed once, recurred a
+  third time — and this time it recurred *within the same round that fixed it*.** This round's
+  own documentation pass corrected `docs/CRITERIA_PLAN.md`'s stale Rollup table (4→11) and stale
+  dispatch-order prose early in the round; four commits later, the round's own close-out commit
+  (moving §1 and §28 to DONE) left that same Rollup table stale again (still showing 11, missing
+  §1/§28) — caught by this round's own final whole-branch review, not by the earlier fix. Worth
+  naming plainly: **per-task and whole-branch code review verifies the code; nothing yet
+  structurally forces a symmetric, mechanical check that the Rollup table was updated in the same
+  commit as any `**DONE` heading change** — three rounds in a row needed a dedicated fix pass for
+  a variant of this exact gap. A future round might consider whether the Rollup table should be
+  generated (a small script deriving it from the `**DONE` headings, run in CI or as a pre-commit
+  check) rather than hand-maintained prose, since hand-maintenance has now failed three times
+  running under otherwise-careful process.
+
+**Full suite, pre-final-fix-wave: 2003 passed, 0 failed, 0 errors, clean `bazel disk` line**
+(confirms the three workstream merges — §12.1/§12.23/§12.28 — integrate cleanly together, up from
+1999 at round R's close). The final-review fix wave (`292e3f5`) was documentation plus two
+targeted test-file changes (a `--python` interpreter pin closing a real, if narrow, correctness
+gap in the new `uv sync` test; disclosure comments); re-verified with a targeted run of the three
+files this round touched (41/41) rather than a third full 15-minute pass, consistent with prior
+rounds' precedent for isolated, low-risk fixes.
+
+**Round T, opening next.**
