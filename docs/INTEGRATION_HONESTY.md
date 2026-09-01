@@ -7586,3 +7586,13 @@ body (small, mechanical, identical to `build`/`verify`'s own pattern) closes the
 The Phase 2 per-repo/per-worker wiring `_require_disk_headroom`'s docstring claims exists is a
 separate, larger piece — sizing it (a one-shot call-site addition, or something needing new
 plumbing through `relocate.py`/`rewrite.py`/`buildgen.py`'s worker payloads) is not done here.
+
+**Correction, 2026-09-01 (round AA final review): the grep residue for Phase 2's disk-check sweep
+was misattributed above — the material claim reproduces exactly, the supporting detail did
+not.** Re-running this entry's own stated predicate (`min_free_bytes|require_free|disk`) over the
+three Phase 2 workers returns exactly one hit, `buildgen.py:625` — a docstring reading "Put every
+file the generated text NAMES on disk," unrelated to a disk-floor check. `scoped_tempdir` is
+imported at `relocate.py:36` and `rewrite.py:53` (two sites, not one), and is NOT imported by
+`buildgen.py` at all — the reverse of what this entry originally said. Neither correction changes
+the finding: no Phase 2 worker carries any disk-floor check, confirmed independently by the
+round's own final review.
