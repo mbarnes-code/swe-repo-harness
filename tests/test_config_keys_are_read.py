@@ -55,7 +55,7 @@ consequences remain worth knowing before trusting a pass:
    `transform.ladder.tier` stays undecidable because `orchestrator/runner.py:655` calls
    `ladder.tier(attempt)` where `ladder` is `orchestrator/retry.py`'s `LadderState` — a *different*
    object with its own `tier` **method**, built from `workers/base.TIER_LADDER`, not
-   `config.transform.ladder`. `LadderState(...)` at `runner.py:428` takes no `ladder=`, so the
+   `config.transform.ladder`. `LadderState(...)` at `runner.py:512` takes no `ladder=`, so the
    configured ladder never reaches a rung, but the text `ladder.tier` is genuinely there, naming
    genuinely unrelated code — no textual scan, qualified or not, tells "attribute of a config
    model" from "method of an unrelated same-named object" apart.
@@ -305,7 +305,7 @@ UNVERIFIABLE: frozenset[str] = frozenset(
         # — `ladder.tier(attempt)` — but `ladder` there is `orchestrator/retry.py`'s `LadderState`
         # (`retry.py:79`), whose OWN `tier` is a method (`retry.py:95`) derived from
         # `workers/base.TIER_LADDER`, not from `config.transform.ladder`. `LadderState(...)` at
-        # `runner.py:428` takes no `ladder=` kwarg, so the configured ladder never reaches a rung
+        # `runner.py:512` takes no `ladder=` kwarg, so the configured ladder never reaches a rung
         # — but "attribute of a Pydantic model" vs. "method of an unrelated same-named object" is
         # not a distinction a text scan, qualified or bare, can draw. Its siblings `.role` and
         # `.context_policy` ARE decided (see `QUALIFIED_MATCH_KEYS`) — this is the genuine

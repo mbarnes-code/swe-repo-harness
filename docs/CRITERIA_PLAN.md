@@ -229,8 +229,14 @@ No further work; do not touch.
 transient-vs-attempt counting, and 3-rung tier escalation to RHI are all covered. **Corrected
 2026-09-01 (round Z research): the "5-rung variant blocked on D50" framing is stale and was
 re-verified false, not merely re-stated.** `LadderState` (`orchestrator/retry.py:79-93`) DOES take
-a `ladder=` kwarg — the "takes no `ladder=` kwarg" claim was a stale copy of a comment in
-`tests/test_config_keys_are_read.py` citing an old line number. More substantively, the row-count/
+a `ladder=` kwarg — the "`LadderState` lacks a `ladder=` parameter" framing was false, and made
+elsewhere/orally, not sourced from `tests/test_config_keys_are_read.py:58,308`'s comment
+(**correction, round Z final review + fix wave, 2026-09-01**: an earlier version of this sentence
+misattributed it there). That comment makes a different, narrower, and still-TRUE claim: that
+`LadderState(...)` AT THAT SPECIFIC CALL SITE (`orchestrator/runner.py`, now line 512, was ~428)
+is invoked with no `ladder=` argument passed — not that the `LadderState` *class* lacks such a
+parameter. Conflating "this call site doesn't pass it" with "the class can't take it" is the
+error; the call-site claim needed no correction, only the class-level one. More substantively, the row-count/
 stop-at-5 half of this sub-clause (5-rung config → 5 attempts rows → stop, and a
 declared-length-mismatch → `ValidationError` at construction) does not depend on
 `context_policy_for_attempt`'s `KNOWN_INERT` wiring gap at all: `TransformSection.
