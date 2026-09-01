@@ -494,9 +494,10 @@ class LlmFindingSink:
         `isinstance(exc, TierUnavailable)`, whose `tier` constructor parameter is non-optional —
         so every production `BACKEND_UNAVAILABLE` `WorkerError` now carries a `tier`. The
         synthetic "worker returned no result" `WorkerError` (`runner.py:621-624`) cannot take this
-        arm either: it is built with `FailureClass.UNKNOWN`, and the only `record_backend_unavailable`
-        call site (`runner.py:675`) is gated on `failure.failure_class is
-        FailureClass.BACKEND_UNAVAILABLE`, so that synthetic error never reaches it. The
+        arm either: it is built with `FailureClass.UNKNOWN`, and the gate on the only
+        `record_backend_unavailable` call site (`runner.py:675` guarding `runner.py:705`) checks
+        `failure.failure_class is FailureClass.BACKEND_UNAVAILABLE`, so that synthetic error
+        never reaches it. The
         run-scoped arm stays real only as a guard against a *future* `BACKEND_UNAVAILABLE`
         `WorkerError` constructed without going through `_error_for` — which is why the test
         covering it is still worth keeping, even though nothing in `src/` exercises it today.

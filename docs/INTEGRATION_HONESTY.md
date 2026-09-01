@@ -5528,9 +5528,10 @@ further than where round X already left it.
 synthetic no-result `WorkerError` in `runner.py`'s `_drive` is a live production producer of the
 tier-less `BACKEND_UNAVAILABLE` arm; both are false, left in place per this file's own convention.**
 The synthetic `WorkerError` at `runner.py:621-624` is constructed with `FailureClass.UNKNOWN`, not
-`BACKEND_UNAVAILABLE`, and `runner.py`'s only `record_backend_unavailable` call site (`:675`) is
-gated on `failure.failure_class is FailureClass.BACKEND_UNAVAILABLE` — so that synthetic error can
-never reach it. Separately, `classify.py::_error_for` (`:248`) is the sole site in `src/` that
+`BACKEND_UNAVAILABLE`, and the gate on `runner.py`'s only `record_backend_unavailable` call site
+(`:705`, guarded by the check at `:675`) is `failure.failure_class is
+FailureClass.BACKEND_UNAVAILABLE` — so that synthetic error can never reach it. Separately,
+`classify.py::_error_for` (`:248`) is the sole site in `src/` that
 assigns `FailureClass.BACKEND_UNAVAILABLE` to a `WorkerError`, and it does so only via
 `isinstance(exc, TierUnavailable)`, whose `tier` constructor parameter is non-optional — so every
 production `BACKEND_UNAVAILABLE` `WorkerError` now carries a `tier`. Net effect: as of this fix,
