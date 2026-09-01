@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import ClassVar
 
 import pytest
+from pydantic import ValidationError
 
 from fleet import ecosystems
 from fleet.bazel.generators import coarse_build_targets, render_build_bazel, render_module_bazel
@@ -1185,6 +1186,57 @@ def test_a_resolution_declares_no_environment_unless_it_needs_one() -> None:
     dumped = pinned.model_dump(mode="json")
     assert dumped["env"] == {"GOTOOLCHAIN": "go1.24.12"}
     assert Resolution.model_validate(json.loads(pinned.model_dump_json())) == pinned
+
+
+def test_a_resolution_built_by_a_real_adapter_round_trips_and_validates() -> None:
+    """`Resolution` (SPEC §12.46(ii)) is built by all three ecosystem adapters that need one
+    (py/js/go) and had zero coverage of its own — the tests above exercise `adapter.resolution()`
+    for its argv/inputs/env shape, but never round-trip or validate the instance the adapter
+    actually hands back. Built via the real `PyAdapter.resolution()` path (not raw construction),
+    so this proves the object the driver receives — not a hand-shaped stand-in of it — survives
+    its own checkpoint format.
+
+    Compared field-by-field via `model_fields`, per the same §12.46(i) mechanism `test_state_
+    models.py` uses for every other durable model — `Resolution` is not exported by `fleet.models`
+    (adapters import it directly from `fleet.models.build`, ADR-0020 §7.5's adapter-purity seam),
+    so it never entered that file's `SAMPLES`/`EXPORTED` registry; this is its dedicated coverage.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    unit = _unit(
+        "acme-svc",
+        Ecosystem.PYPI,
+        "py/acme-svc",
+        srcs=["acme_svc/__init__.py"],
+        external=[
+            Coordinate(ecosystem=Ecosystem.PYPI, name="requests", version_spec=">=2.31"),
+            Coordinate(ecosystem=Ecosystem.PYPI, name="httpx", version_spec=">=0.27"),
+        ],
+    )
+    built = adapter.resolution([unit])
+    assert built is not None
+
+    payload = json.loads(built.model_dump_json())
+    reloaded = Resolution.model_validate(payload)
+    for field_name in Resolution.model_fields:
+        original_value = getattr(built, field_name)
+        reloaded_value = getattr(reloaded, field_name)
+        assert reloaded_value == original_value, (
+            f"Resolution.{field_name} did not round-trip: {reloaded_value!r} != {original_value!r}"
+        )
+
+    # Validation properties: `argv` (the resolver command) and `lock_path` (what it writes) are
+    # both `min_length=1` — an adapter-built `Resolution` with either emptied is not a real
+    # instance a driver could act on, and must be rejected on the way back in exactly as a
+    # hand-constructed one would be (§12.46(i)'s round-trip boundary applies here too).
+    with pytest.raises(ValidationError):
+        Resolution.model_validate(payload | {"argv": []})
+    with pytest.raises(ValidationError):
+        Resolution.model_validate(payload | {"lock_path": ""})
+
+    # extra="forbid" (FleetModel, ADR-0002) — an adapter-built Resolution is no more tolerant of
+    # a renamed/unknown field on the way back in than any hand-constructed one.
+    with pytest.raises(ValidationError):
+        Resolution.model_validate(payload | {"totally_unknown": 1})
 
 
 def test_the_go_resolver_pins_the_toolchain_to_the_sdk_bazel_will_fetch() -> None:
