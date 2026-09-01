@@ -6859,3 +6859,78 @@ files this round touched (41/41) rather than a third full 15-minute pass, consis
 rounds' precedent for isolated, low-risk fixes.
 
 **Round T, opening next.**
+
+### Checkpoint — 2026-09-01 (round T controller, close-out)
+
+**§12 criteria met: 14 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, `§12.40` excluded via its own marker — up from 13 at round S's
+close). Added this round: **§12.48** only (startup + version refusals, all 5 independent claims:
+schema-version refusal parametrized over all 18 DB-touching commands with the 4 exclusions
+stated and reasoned; both-versions-in-message assertion; a genuine before-clone/LLM-call proof
+via a call-recording spy; a DDL AST test matching the criterion's literal text; mirror-mutex
+exit-2 assertion). §12.47 (registries stateless/total/order-independent) had substantial real
+work land — 4 of its 6 sub-clauses genuinely closed (workers registry statelessness, structural
+`preconditions_hold` abstractness proof, genuine 20-shuffle order-independence, backends registry
+instance-shaped check) — but was marked DONE prematurely mid-round and **correctly reverted to
+OPEN by this round's own final whole-branch review**: SPEC.md:7462's literal text requires a
+contracts registry (none exists in the codebase) and `vars(inst) == {}` for the backends registry
+(provably false — `openai_compatible` holds `_env`/`_transport`), and the round had silently
+substituted a weaker property for the latter without any Rule-14 disclosed adjudication. Both
+residuals are now named in `docs/CRITERIA_PLAN.md` §47 with their own done bars (build a real
+contracts registry or Rule-14-adjudicate SPEC as stale; implement genuinely stateless backends or
+Rule-14-adjudicate the wording) rather than silently decided either way.
+
+**D89 Phase 1 landed** (`docs/INTEGRATION_HONESTY.md`, ADR-0101, commit `1b0d3c1`) — the
+highest-leverage defect-ledger item this round targeted, not a §12 criterion by itself.
+`attempts.task_id`/the `tasks` lifecycle is now populated at a coarse per-dispatch grain for
+TRANSFORM/BUILD/VERIFY, moving D89 from OPEN to **PARTLY ADDRESSED**. The core safety property —
+a Phase-1 `tasks` row can never leave `status='PENDING'`, hence is permanently invisible to
+`_ARBITRATED_TASKS_SQL`'s `status='RUNNING'` filter — was mutation-proven by the implementer and
+independently re-proven by task review (identical 4-failed/49-passed result under the same
+mutation, reproduced fresh). D87's git-arbitration mechanism was reachable-and-correct for
+**zero** task kinds in production before this round; Phase 1 does not yet make it fire for real
+traffic (it deliberately never reaches `RUNNING`), but closes the regression risk a naive fix
+would have introduced — a coarse per-dispatch task_id is the wrong identity for REWRITE/RELOCATE
+commits, which carry `task_id_for`'s per-unit UUID5 in their real git trailers instead. Phase 2
+(rebuild `_reconcile_tasks_with_git`'s REWRITE/RELOCATE branch to loop per-unit, plus a new
+"partially landed" verdict state) remains unbuilt — round U's lead task, research already
+dispatched.
+
+**A new failure-mode class surfaced and was caught this round, not by a per-task review but by
+the final whole-branch review: a criterion marked DONE mid-round while its literal SPEC text was
+still unmet on two clauses, one of which (the contracts-registry requirement) was dropped from
+the CRITERIA_PLAN entry's prose entirely rather than disclosed as an exclusion.** This is
+distinct from the Rollup-table-staleness class rounds Q/R/S each found (a mechanical bookkeeping
+lag) — this was a substantive premature-DONE marking. The controller's own per-task review dispatch
+for that task did not catch it because the task reviewer was scoped to the task's own brief
+(which itself under-scoped the criterion's literal text, omitting the contracts-registry clause
+and the exact `vars(inst) == {}` wording) rather than to SPEC.md's literal text directly — worth
+naming as a possible future process gap: a task reviewer scoped only to a controller-written brief
+inherits any gap in that brief's own transcription of the SPEC. The final whole-branch review, by
+design the one pass that reads the SPEC and the CRITERIA_PLAN entry together rather than trusting
+either, is what caught it. Ruling: §12.47 reverted OPEN, Rollup corrected 15→14; recorded in this
+round's SDD ledger as Ruling C1, with the two residuals given their own done bars rather than
+either silently closed or silently dropped.
+
+**Rollup table**: this round's own two DONE-marking commits (§47, §48) each updated the Rollup
+table in the same commit as their heading change, and the final review's independent re-derivation
+matched the committed table exactly before the C1 correction — the mechanical drift class that
+recurred in 3 of the previous 4 rounds did **not** recur this round for the table itself (only the
+substantive §47 overclaim did, a different failure mode). The final-review fix wave also corrected
+a stale WIRING-row mention (§27/§37, reclassified NEW-MECHANISM by an earlier round but never
+swept from two prose paragraphs) while already touching the file.
+
+**Full suite, pre-final-review: 2033 passed, 0 failed, 0 errors, clean `bazel disk` line** (confirms
+the three workstream merges — D89 Phase 1 / §12.47 / §12.48 — integrate cleanly together, up from
+2003 at round S's close). The final-review fix wave (`b88de6c`) was docs/comment-only across 5
+files (2 citation corrections, 1 status-heading field update, 1 disclosure paragraph, 3 minor
+citation/comment fixes); re-verified with the full suite rather than a targeted subset given the
+fix wave touched a file (`tests/test_integration_honesty_citations.py`'s target,
+`docs/INTEGRATION_HONESTY.md`) that a real test mechanically parses — 2033 passed again, unchanged.
+One residual finding (I2, a second stale-list mention of already-DONE §48) was parked with a
+ruling rather than triggering a second fix wave, per the skill's final-review process (no second
+fix wave; adjudicate residuals at the breaker).
+
+**Round U, opening next** — lead task: D89 Phase 2 (research already dispatched, per-unit
+REWRITE/RELOCATE reconciliation rebuild), plus §12.33 (layout adapter-derived) and §12.24's
+run-ceiling residual as the round's other two workers.
