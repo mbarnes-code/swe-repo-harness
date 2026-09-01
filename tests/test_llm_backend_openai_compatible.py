@@ -605,8 +605,10 @@ def test_no_test_in_this_module_can_reach_a_socket() -> None:
     """WHY: every test above injects `FakeTransport`, which is a convention a future edit could
     break silently. `_SdkTransport` is the ONLY path to a socket, so asserting the seam exists and
     that the default backend is the only thing holding one is the mechanical form of that claim."""
-    assert isinstance(oc.OpenAICompatibleBackend()._transport, oc._SdkTransport)
-    assert not isinstance(oc.OpenAICompatibleBackend(FakeTransport())._transport, oc._SdkTransport)
+    assert isinstance(oc.OpenAICompatibleBackend()._resolve_transport(), oc._SdkTransport)
+    assert not isinstance(
+        oc.OpenAICompatibleBackend(FakeTransport())._resolve_transport(), oc._SdkTransport
+    )
 
     source = textwrap.dedent(Path(oc.__file__).read_text(encoding="utf-8"))
     sdk_class = source.split("class _SdkTransport", 1)[1].split("\n@register_backend", 1)[0]

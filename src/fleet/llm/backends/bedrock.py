@@ -299,6 +299,14 @@ class _Boto3Transport:
         return cast(Mapping[str, object], response)
 
 
+#: The transport a default-constructed (registered) backend uses: the module's own retry
+#: constant, nothing per-call. Static across every instance, so built ONCE at module scope rather
+#: than per-instance (SPEC §12 item 47 — `register_backend`'s `cls()` must leave
+#: `vars(inst) == {}`) — `_Boto3Transport.__call__` builds a fresh `boto3` client per call
+#: regardless, so sharing this wrapper costs nothing and changes no behaviour.
+_DEFAULT_TRANSPORT: Final[ConverseTransport] = _Boto3Transport()
+
+
 def _from_client_error(region: str, exc: ClientError) -> LlmError:
     """A botocore `ClientError` → either a §11.8 failover trigger or a loud task failure.
 
@@ -342,10 +350,14 @@ class BedrockBackend:
     version: ClassVar[int] = 1
 
     def __init__(self, transport: ConverseTransport | None = None) -> None:
-        """`register_backend` constructs this with no arguments (`cls()`), so the collaborator
-        defaults — but it is injectable, which is how a test drives the adapter with no socket and
-        no credentials (CLAUDE.md guardrail 3)."""
-        self._transport: ConverseTransport = _Boto3Transport() if transport is None else transport
+        """`register_backend` constructs this with no arguments (`cls()`), so the collaborator is
+        not stored on `self` in the registered case — `vars(inst) == {}` (SPEC §12 item 47) — and
+        `invoke` resolves the shared default (`_DEFAULT_TRANSPORT`) lazily instead. Still
+        injectable, which is how a test drives the adapter with no socket and no credentials
+        (CLAUDE.md guardrail 3): passing a value stores it on `self`, but that instance was built
+        for exactly one test and is never the registry's singleton."""
+        if transport is not None:
+            self._transport = transport
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
         """Declared, never probed. Validates the target's own fields FIRST (§13 row 36), so a
@@ -368,7 +380,8 @@ class BedrockBackend:
         schema failure, no decision taken from `finish_reason`."""
         region = _require_region(target)
         request = build_request(target, messages, schema, mode, max_output_tokens)
-        raw = await self._transport(region=region, request=request, timeout_s=timeout_s)
+        transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
+        raw = await transport(region=region, request=request, timeout_s=timeout_s)
         return parse_reply(raw, target)
 
 

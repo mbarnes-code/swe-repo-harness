@@ -240,6 +240,14 @@ class _SdkTransport:
         return cast(Mapping[str, object], dumped)
 
 
+#: The transport a default-constructed (registered) backend uses: no `http_client` override, the
+#: module's own retry constant. Both are static across every call and every instance, so this is
+#: built ONCE at module scope rather than per-instance (SPEC §12 item 47 — `register_backend`'s
+#: `cls()` must leave `vars(inst) == {}`) — `_SdkTransport.__call__` builds a fresh `AsyncOpenAI`
+#: client per call regardless, so sharing this wrapper costs nothing and changes no behaviour.
+_DEFAULT_TRANSPORT: Final[ChatTransport] = _SdkTransport()
+
+
 # ---------------------------------------------------------------------------------------------
 # The backend
 # ---------------------------------------------------------------------------------------------
@@ -258,11 +266,22 @@ class OpenAICompatibleBackend:
         transport: ChatTransport | None = None,
         env: Mapping[str, str] | None = None,
     ) -> None:
-        """`register_backend` constructs this with no arguments, so both collaborators default —
-        but both are injectable, which is how a test drives it with no socket and no environment
-        (CLAUDE.md guardrail 3)."""
-        self._transport: ChatTransport = _SdkTransport() if transport is None else transport
-        self._env = env
+        """`register_backend` constructs this with no arguments, so neither collaborator is stored
+        on `self` in the registered case — `vars(inst) == {}` (SPEC §12 item 47) — and `invoke`/
+        `_api_key` resolve the default (`_DEFAULT_TRANSPORT`/`os.environ`) lazily instead. Both
+        stay constructor-injectable, which is how a test drives this with no socket and no
+        environment (CLAUDE.md guardrail 3): passing a value stores it on `self`, but that instance
+        was built for exactly one test and is never the registry's singleton."""
+        if transport is not None:
+            self._transport = transport
+        if env is not None:
+            self._env = env
+
+    def _resolve_transport(self) -> ChatTransport:
+        """The transport this instance calls: the injected collaborator if one was passed at
+        construction, else the shared stateless default. Exposed as its own method so a test can
+        ask "which transport would this backend use" without provoking a real call."""
+        return getattr(self, "_transport", _DEFAULT_TRANSPORT)
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
         """The floor, always: PROMPTED and nothing else.
@@ -292,7 +311,7 @@ class OpenAICompatibleBackend:
         if not base_url:
             raise MissingBaseUrl(target)
         payload = build_payload(target, messages, schema, mode, max_output_tokens)
-        raw = await self._transport(
+        raw = await self._resolve_transport()(
             base_url=base_url,
             api_key=self._api_key(target),
             payload=payload,
@@ -307,7 +326,9 @@ class OpenAICompatibleBackend:
         env_name = target.api_key_env
         if not env_name:
             return _PLACEHOLDER_API_KEY
-        environ = os.environ if self._env is None else self._env
+        environ = getattr(self, "_env", None)
+        if environ is None:
+            environ = os.environ
         value = environ.get(env_name, "")
         if not value:
             raise MissingApiKey(target, env_name)
