@@ -7461,3 +7461,55 @@ resolution mechanism to write a test against.
 logic deciding when an existing open PR should be re-examined for promotion. This is
 NEW-MECHANISM sized, not a caller-wiring gap — genuinely new logic, not a one-shot. That design
 choice is not made here.
+
+## D95 — FIXED, LANDED (`00b9e68`, merge of `agent/roundz-task3`; component commit `f9df242`). `state/repository.py::complete_phase`'s RHI-escalation leg wrote raw SQL bypassing `transition()`, letting a stale-but-not-reclaimed fence corrupt the state model's own `ALLOWED_TRANSITIONS` invariant
+
+**Found and fixed in the same task, round Z task 3 (2026-09-01), closing the specific
+`state/repository.py::complete_phase` sub-clause D77's own "Scope" note names as a separate site
+without pre-deciding a number for it.** Verified free before writing: highest allocated number
+was `D94`. **Controller allocation, not self-assigned by the implementer** — the implementer's
+own report argued this was "the same bypass shape D77 documents" and needed no new number; task
+review independently traced the claim against `ALLOWED_TRANSITIONS` and D77's actual landed code,
+found it a distinct call site with a distinct destination-status pair and a genuinely new
+reachable race, and recommended a number; the controller sided with the reviewer.
+
+**The gap, as measured — verified two ways, independently by the implementer and re-verified by
+task review, not accepted on either party's word alone.** `ALLOWED_TRANSITIONS[RepoStatus.BLOCKED]
+= frozenset({PENDING, SKIPPED})` (`src/fleet/models/enums.py:41`) — `BLOCKED →
+REQUIRES_HUMAN_INTERVENTION` is not a legal transition. D77's own landed fix
+(`orchestrator/scheduler.py::append_blocked_by`) legally moves a `RUNNING` phase to `BLOCKED`
+(legal per `ALLOWED_TRANSITIONS[RUNNING]`) via an `UPDATE` touching only `blocked_by`/`status`/
+`updated_at` — confirmed by grep that it never touches `lease_fence`. The pre-fix
+`complete_phase` raw SQL guarded its RHI-escalation write with `WHERE ... AND lease_fence = ?`
+only — no check of current status — so a worker holding a stale-but-not-reclaimed fence on a row
+that had since flipped to `BLOCKED` (via `append_blocked_by`, racing concurrently) would land its
+`REQUIRES_HUMAN_INTERVENTION` write unconditionally, silently corrupting the state model's own
+`ALLOWED_TRANSITIONS` invariant. This is `§12.46`'s "the reaper's RHI leg writes raw SQL bypassing
+`transition()` entirely" sub-clause — the "D77 bypass shape, recurring," but at a genuinely
+distinct site.
+
+**The fix.** `complete_phase` now reads current status inside its fenced write transaction and
+validates the escalation target through the real `transition()` gate. On an illegal transition it
+raises `PhaseTransitionRefusedError(LeaseStolenError)` — a subclass, so all three existing
+`except LeaseStolenError:` sites in `orchestrator/runner.py` catch it transparently with no caller
+changes; task review confirmed only one of the three (`_complete`) can actually receive it (the
+other two call `renew_phase_lease`, not `complete_phase`, and are unaffected), and that the raised
+message ("the fence was NOT bumped and no lease was reclaimed") is genuinely distinguishable from
+`_stolen()`'s true-stale-fence message, not a misleading reuse of it. Rule 11 (fail loud): the
+illegal-transition case raises a typed, caught exception in the reaper completion path rather than
+crashing or silently corrupting state.
+
+**Verification.** `tests/test_repository.py::test_complete_phase_refuses_an_illegal_transition_instead_of_writing_it`
+proves the fix directly. Mutation-proved, independently reproduced by task review in a fresh
+worktree: reverting to the raw-SQL bypass reddens exactly this one test (1 failed / 117 passed
+across `test_repository.py`+`test_runner.py`+`test_scheduler.py`), restoring the fix greens all
+118.
+
+**Disclosed residual, out of this fix's scope (not a regression — unchanged from the pre-fix
+behavior).** The fix only refuses when the *target* status is illegal from the raced current
+status. A worker racing `append_blocked_by`'s `RUNNING→BLOCKED` but completing with a legal
+`BLOCKED→PENDING` target (e.g. before hitting `max_attempts`) still silently overwrites the
+propagated block — `ALLOWED_TRANSITIONS` permits it, so `transition()` correctly allows it; no
+current-status check existed in the old raw SQL for this case either, so this is not a new gap,
+just an edge this fix does not close. Flagged by task review for whoever next touches this area,
+not itself a defect worth its own D-number.
