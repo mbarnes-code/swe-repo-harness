@@ -581,11 +581,15 @@ require it, so its absence doesn't block DONE. Fifth criterion (after §12.7, §
 §12.18) to reach this file's strict DONE bar.
 
 ## 33. Layout is adapter-derived, not hardcoded
-**OPEN — SCALE-FIXTURE.** The hardcoded-dir grep is covered. The ts→js monkeypatch test checks one
-synthetic node, not a full fixture run or `BuildTarget.package`. The config-override e2e exists but
-nothing compares the two resulting trees for the "identical tree" claim (audit row 33).
-**Done bar:** widen the monkeypatch test to a full fixture run with a `BuildTarget.package`
-assertion, and add the tree-comparison assertion to the config-override e2e.
+**DONE (round U, 2026-09-01) — SCALE-FIXTURE.** The hardcoded-dir grep was already covered. Round
+U closed the remaining two gaps: the ts→js monkeypatch test now drives a real
+`NpmAdapter().publishes()` → `BuildUnit` → `BuildTarget.package` assertion (exercises the
+scoped-package `path_tail`, not just the old bare unscoped case); the config-override e2e now
+runs a full second scan→sequence→transform→build pipeline under the default layout and diffs its
+output tree against the override run's (destination-string masked for the one legitimate
+self-referencing difference, ADR-0048's npm hub link), proving the "identical tree" claim. Both
+mutation-proven, independently reproduced by task review from scratch (matching
+`AssertionError`s, clean reverts) — commit `7427626`, merge of `agent/roundu-task2`.
 
 ## 34. New-language cost is exactly the documented touchpoints
 **OPEN — mechanism doesn't exist — NEW-MECHANISM.** `tests/fixtures/adapters/` doesn't exist; no
@@ -808,7 +812,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 14 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 48 (re-derived 2026-09-01, round T close-out, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 and §48 this round, then §47 was reverted to OPEN the same round by controller ruling C1 on final review: its `vars(inst) == {}` claim for the backends registry is measurably false and its contracts-registry clause has no implementation at all — see §47's own entry for the two residuals; §48's DONE stands, the review found it clean; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| DONE | 15 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 33, 48 (re-derived 2026-09-01, round U, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §33 this round; §47 stayed OPEN this round per round T's controller ruling C1 (its `vars(inst) == {}` claim for the backends registry is measurably false and its contracts-registry clause has no implementation at all — see §47's own entry for the two residuals); §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
