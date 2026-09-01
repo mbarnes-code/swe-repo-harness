@@ -138,6 +138,88 @@ async def test_the_sqlite_store_satisfies_the_protocol_the_orchestrator_depends_
 
 
 # ======================================================================================
+# `upsert_task` — D89 Phase 1 (ADR-0101): idempotent identity, RETURNING, never a claim
+# ======================================================================================
+
+
+async def test_upsert_task_returns_the_canonical_id_not_the_freshly_passed_one(
+    repo: SqliteStateRepository,
+) -> None:
+    """Two UPSERTs of the same `(run_id, repo_id, phase, kind)` tuple, two different UUID4s: the
+    row's ORIGINAL `task_id` wins both times, and `RETURNING task_id` is what lets a caller learn
+    that rather than silently keeping the discarded id it passed on the second call.
+
+    Why this matters for D89 Phase 1: `_coarse_task_id` mints a fresh UUID4 on every dispatch and
+    relies on this idempotent-identity behavior to get back the SAME `task_id` on every retry rung
+    of one phase — without it, `attempts.task_id` would point at a different `tasks` row per rung.
+    """
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+    assert first_id != second_id
+
+    won_first = await repo.upsert_task(
+        first_id,
+        run_id=RUN,
+        repo_id=REPO,
+        phase=Phase.TRANSFORM,
+        kind=TaskKind.REWRITE,
+        dest_path="libs/com/acme/commons",
+        created_at=NOW,
+    )
+    won_second = await repo.upsert_task(
+        second_id,
+        run_id=RUN,
+        repo_id=REPO,
+        phase=Phase.TRANSFORM,
+        kind=TaskKind.REWRITE,
+        dest_path="libs/com/acme/commons",
+        created_at=NOW,
+    )
+
+    assert won_first == first_id
+    assert won_second == first_id, "a re-plan must not silently switch the row's identity"
+
+
+async def test_upsert_task_never_writes_a_status_other_than_the_schema_default(
+    repo: SqliteStateRepository, db_path: Path
+) -> None:
+    """§6: `upsert_task` UPSERTs the plan columns only. `status` is never in its SET list, so a
+    row it creates OR re-plans sits at the schema default `'PENDING'` forever — this is the
+    property D89 Phase 1 (ADR-0101) leans on to stay invisible to `_ARBITRATED_TASKS_SQL`'s
+    `status = 'RUNNING'` scan, closing a misfire risk broader than REWRITE/RELOCATE (see the ADR).
+    """
+    task_id = str(uuid.uuid4())
+    await repo.upsert_task(
+        task_id,
+        run_id=RUN,
+        repo_id=REPO,
+        phase=Phase.TRANSFORM,
+        kind=TaskKind.REWRITE,
+        dest_path="libs/com/acme/commons",
+        created_at=NOW,
+    )
+    # a second UPSERT of the same identity is a re-plan, not a fresh insert
+    await repo.upsert_task(
+        str(uuid.uuid4()),
+        run_id=RUN,
+        repo_id=REPO,
+        phase=Phase.TRANSFORM,
+        kind=TaskKind.REWRITE,
+        dest_path="libs/com/acme/commons",
+        created_at=NOW,
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT status FROM tasks WHERE task_id = ?", (task_id,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row == ("PENDING",)
+
+
+# ======================================================================================
 # primitive 1 — the atomic claim
 # ======================================================================================
 

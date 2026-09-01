@@ -11870,3 +11870,98 @@ which §1's own prose already commits to. *Leave `contracts.py:758` as an accept
 exception rather than fixing it* — rejected: the fix is small (one line, same runtime behavior,
 matches the file's own established pattern), so there is no cost/benefit case for carrying a
 permanent disclosed exception over closing it outright.
+
+## ADR-0101 — D89 Phase 1: coarse `tasks` rows never leave `PENDING`
+
+**Decision (2026-09-01, round T, task 1).** `attempts.task_id` was never populated by any
+production write site (`docs/INTEGRATION_HONESTY.md` D89, OPEN), which left D87's git-arbitration
+mechanism (`_reconcile_tasks_with_git` / `_ARBITRATED_TASKS_SQL`) permanently inert — it can only
+ever act on a `tasks` row it can reach through `attempts.task_id`, and nothing wrote one. D89's
+ledger scoped the regression risk of a naive fix to REWRITE/RELOCATE, because those are the kinds
+`workers/rewrite.py::apply_and_commit` writes `Fleet-Task-Id` git trailers for. Re-derivation for
+this task (`.superpowers/sdd/round-T-criteria-closure/research-1-d89-phase1-plan.md`) found that
+framing too narrow: `_ARBITRATED_TASKS_SQL` (`src/fleet/cli.py`) has **no `kind` filter at all** —
+it selects every `tasks` row at `status = 'RUNNING'` with a dead phase lease, regardless of kind.
+The BUILD phase's own commit ("Generate Bazel targets") carries **no `Fleet-Task-Id` trailer at
+all**. So **any** coarse per-dispatch `tasks` row — TRANSFORM, BUILD, or VERIFY — left at
+`status = 'RUNNING'` by a crash would, on the next `fleet resume`, have `find_task_commit` fail to
+match anything and `discard_task` `reset --hard` + `clean -fdx` the `migrate/<repo>` branch back to
+`tasks.pre_commit_sha` — discarding real, landed work. This is structural to *any* coarse task_id
+reaching `RUNNING`, not a REWRITE/RELOCATE-specific hazard, because no production code writes a
+matching trailer for that identity space at all.
+
+**What Phase 1 builds.** `src/fleet/cli.py` gains `_COARSE_TASK_KIND` (a `Phase -> TaskKind` table:
+`TRANSFORM -> REWRITE`, `BUILD -> BUILDGEN`, `VERIFY -> RDEP_VERIFY`; SCAN has no entry — it never
+writes an `attempts` row at all) and `_coarse_task_id`, a helper called from `_TransformSink.
+__call__` and `_AttemptWriter.record` (shared by `_BuildSink`/`_VerifySink`) immediately before
+each constructs its `AttemptRow`. It calls `repository.upsert_task(...)` — and **nothing else** —
+to mint or reuse one `tasks` row per `(run_id, repo_id, phase)`, then stamps the returned
+`task_id` onto every `attempts` row that dispatch writes. `upsert_task` (`src/fleet/state/
+repository.py`) gains `RETURNING task_id` and its return type changes `None -> str`, so a caller
+always learns the CANONICAL id — the one actually stored, which on a re-plan of an existing
+`(run_id, repo_id, phase, kind)` tuple is the row's original id, not the freshly-passed one
+(`ux_tasks_ident`'s uniqueness key is what gives "one task_id, stable across every retry rung of
+one phase" for free). `runner.py` is unchanged: `PhaseRunner` is phase-and-kind-agnostic by
+design, and `upsert_task`'s own idempotency gives the identical "one task_id per phase-dispatch,
+reused on retry" grain one call-frame lower, in the sinks that already know the `Phase -> TaskKind`
+mapping — a smaller, more surgical diff (CLAUDE.md Rule 3) than threading a task_id through the
+shared `ResultSink` Protocol.
+
+**The safety property, and why it is airtight regardless of `TaskKind`.** `upsert_task` never
+writes `status` — its `SET` list on conflict touches only `dest_path`/`max_attempts`/`ladder`, and
+a fresh `INSERT` relies on the schema default (`status = 'PENDING'`). `_coarse_task_id` calls
+`upsert_task` and nothing else — critically, **never `claim_next_task`** (the only other write to
+`tasks.status` in the whole tree with zero production callers). Every write to `tasks.status` in
+the codebase was traced (`grep -n "UPDATE tasks" src/fleet/cli.py src/fleet/state/repository.py`):
+`claim_next_task`'s CAS (unreached), `_persist_arbitration`'s landed/discarded UPDATEs (only
+reached for rows `_ARBITRATED_TASKS_SQL` already selected — i.e. gated by the same
+`status = 'RUNNING'` filter this decision keeps a Phase-1 row out of), and `_ARBITRATED_TASKS_SQL`
+itself (read-only). `fleet resume` step 3 (`_reset_stale_running`) touches only `phases` rows, not
+`tasks`. So there is no path, direct or via any resume-step normalization, by which a Phase-1
+coarse `tasks` row's status ever becomes anything other than `PENDING`. Since
+`_ARBITRATED_TASKS_SQL`'s `WHERE t.status = 'RUNNING'` can therefore never match a Phase-1-written
+row, `find_task_commit`/`discard_task` are never invoked against one, regardless of which
+`TaskKind` it is labelled with and regardless of crash timing. This is a stronger, simpler
+guarantee than a REWRITE/RELOCATE kind-guard would have been — it closes the hazard for BUILD/
+VERIFY too, generalizing beyond what D89's ledger text named. `_reconcile_tasks_with_git`,
+`task_id_for` and REWRITE/RELOCATE's own per-unit trailer identity are all untouched — zero lines
+changed in either.
+
+**Proof, not argument.** `tests/test_d89_phase1_task_lifecycle.py`'s scenario E directly executes
+the PRODUCTION `_ARBITRATED_TASKS_SQL` query object against a real Phase-1 dispatch's row and
+asserts zero rows returned; a sibling test proves the same query is not vacuously empty by forcing
+`status = 'RUNNING'` via a raw UPDATE and asserting the row then IS selected. Both were also proven
+under a real code mutation (Rule 12): temporarily making `upsert_task`'s SQL write `status =
+'RUNNING'` on insert and on conflict reddened scenario E, the `PENDING`-status unit tests in
+`tests/test_repository.py`, and (unprompted) the pre-existing `test_exactly_one_of_many_
+concurrent_claimers_wins_the_task` — 4 of 53 tests failed, not a module-wide outage, confirming the
+mutation perturbed behavior rather than breaking import; reverting restored a byte-identical file.
+
+**What Phase 1 explicitly does NOT do — Phase 2, future round, unbuilt.** No per-unit REWRITE/
+RELOCATE `tasks` rows are created; D87's arbitration mechanism remains inert for the per-unit
+reconciliation it was designed for, because nothing ever puts a matching row at `status =
+'RUNNING'`. D89 stays OPEN (see the dated addendum on its ledger entry). `ux_tasks_ident`'s
+identity key (`run_id, repo_id, phase, kind, contract_id, revalidation_key` — no unit
+discriminator) will collide with a future per-unit REWRITE/RELOCATE row for the same
+`(run_id, repo_id, phase=TRANSFORM)` Phase 1 already gave a coarse `kind='REWRITE'` row to; Phase 2
+will need to widen the identity key or give per-unit rows a different `kind`/discriminator. Not
+resolved here — recorded so it isn't rediscovered from scratch.
+
+**Rationale.** CLAUDE.md's "A magic bound... must derive, or fail loudly" and Rule 11 both push
+toward closing a hazard *by construction* rather than by a kind-based guard that the next reader
+would have to re-verify is exhaustive; "never leaves `PENDING`" is a single, structurally-checkable
+invariant (one column, one method) rather than an enumerated list of "safe" kinds that a future
+`TaskKind` addition could silently fall outside of.
+
+**Cost if wrong.** If a future change makes `_coarse_task_id` or `upsert_task` reach
+`status = 'RUNNING'` (e.g. someone "helpfully" wires `claim_next_task` into a sink), scenario E in
+`tests/test_d89_phase1_task_lifecycle.py` goes red immediately, and the blast radius is a Phase-1
+row becoming eligible for the same `discard_task` misfire this decision closes — i.e. the original
+D89 hazard reopens, not a new one.
+
+**Alternatives rejected.** *Guard the sink call sites to only mint TRANSFORM/REWRITE coarse rows
+(the brief's fallback)* — rejected: narrower and no cheaper than the structural guarantee, and it
+leaves BUILD/VERIFY exposed to the identical hazard the headline finding measured. *Call
+`claim_next_task` after `upsert_task` to give the row a "real" lifecycle* — rejected: this is
+exactly the per-unit rebuild D89 defers to Phase 2, and is also the one path that could ever put a
+Phase-1 row at `status = 'RUNNING'`, i.e. it would reopen the hazard this decision exists to close.

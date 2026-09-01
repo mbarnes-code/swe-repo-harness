@@ -465,7 +465,7 @@ class StateRepository(ReadOnlyRepository, Protocol):
         dest_path: str,
         created_at: datetime,
         max_attempts: int = 3,
-    ) -> None: ...
+    ) -> str: ...
 
     # -- primitive 1: the claim --------------------------------------------------------
     async def claim_next_task(
@@ -1187,8 +1187,8 @@ class SqliteStateRepository:
         dest_path: str,
         created_at: datetime,
         max_attempts: int = 3,
-    ) -> None:
-        """Re-planning UPSERTs the **plan** columns only.
+    ) -> str:
+        """Re-planning UPSERTs the **plan** columns only. Returns the CANONICAL `task_id`.
 
         §6: never `status`/`claimed_by`/`fence_token` — those move solely through the claim CAS.
         A re-plan that reset `status` to PENDING would hand a live task to a second worker.
@@ -1196,6 +1196,12 @@ class SqliteStateRepository:
         HOIST and REVALIDATE carry a `contract_id`/`revalidation_key` the schema CHECKs demand;
         planting one through this method would raise an opaque IntegrityError, so it is refused
         here with the reason (CLAUDE.md Rule 11).
+
+        `task_id` is the INSERT value but is NOT in the `SET` list: on a conflict (a re-plan of an
+        existing `(run_id, repo_id, phase, kind)` tuple) the row's ORIGINAL id survives untouched
+        and the freshly-passed id is silently discarded — `RETURNING task_id` is what lets a
+        caller learn which id actually won, which D89 Phase 1's coarse-task minting depends on
+        (docs/DECISIONS.md ADR-0101).
         """
         if kind in (TaskKind.HOIST, TaskKind.REVALIDATE):
             raise RepositoryError(
@@ -1210,7 +1216,8 @@ class SqliteStateRepository:
             "ON CONFLICT (run_id, repo_id, phase, kind, IFNULL(contract_id, ''), "
             "             IFNULL(revalidation_key, '')) DO UPDATE SET "
             "    dest_path = excluded.dest_path, max_attempts = excluded.max_attempts, "
-            "    ladder = excluded.ladder"
+            "    ladder = excluded.ladder "
+            "RETURNING task_id"
         )
         params = (
             task_id,
@@ -1224,10 +1231,14 @@ class SqliteStateRepository:
             _iso(created_at),
         )
 
-        async def unit(conn: aiosqlite.Connection) -> None:
-            await conn.execute(sql, params)
+        async def unit(conn: aiosqlite.Connection) -> str:
+            async with conn.execute(sql, params) as cursor:
+                row = await cursor.fetchone()
+            if row is None:  # pragma: no cover - RETURNING on a successful UPSERT always yields one
+                raise RepositoryError("upsert_task RETURNING produced no row")
+            return str(row[0])
 
-        await self._writer.submit(unit)
+        return await self._writer.submit(unit)
 
     # -- primitive 1 -------------------------------------------------------------------
 

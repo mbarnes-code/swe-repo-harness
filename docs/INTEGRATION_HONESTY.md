@@ -6932,6 +6932,36 @@ on something a real write path does populate — that adjudication is not made h
 > may be deleted; this paragraph is the durable summary). Recommend its own dedicated round, not
 > folded into a general TEST-ONLY round's task list.
 
+> **[Phase 1 LANDED 2026-09-01, round T task 1 — ADR-0101. D89 remains OPEN; this is a partial
+> fix, not a close.]** `attempts.task_id`/the `tasks` lifecycle is now populated at the coarse
+> per-dispatch grain the round-S design above scoped as Phase 1: `src/fleet/cli.py`'s
+> `_coarse_task_id` (called from `_TransformSink.__call__` and `_AttemptWriter.record`, shared by
+> `_BuildSink`/`_VerifySink`) mints/reuses one `tasks` row per `(run_id, repo_id, phase)` via
+> `upsert_task` — now `RETURNING task_id`, `state/repository.py` — and stamps it onto every
+> `attempts` row that dispatch writes. Re-derivation for this task found the round-S design's own
+> regression-risk framing too narrow: `_ARBITRATED_TASKS_SQL` has no `kind` filter, so the
+> "naive fix would make it worse" hazard is structural to **any** coarse `tasks` row that reaches
+> `status = 'RUNNING'` (TRANSFORM/BUILD/VERIFY alike), not just REWRITE/RELOCATE. Phase 1 closes
+> this by construction rather than by a kind-guard: `_coarse_task_id` calls `upsert_task` and
+> nothing else, `upsert_task` never writes `status` (schema default `PENDING` survives every
+> UPSERT), and `claim_next_task` — the only other write to `tasks.status` in the tree, still zero
+> production callers — is never invoked. Proof, not argument: `tests/
+> test_d89_phase1_task_lifecycle.py` scenario E executes the PRODUCTION `_ARBITRATED_TASKS_SQL`
+> query against a real Phase-1 row and asserts zero candidates, a sibling test proves that same
+> query is not vacuously empty (forces `RUNNING` via raw SQL, asserts the row then IS selected),
+> and both were proven under a real code mutation of `upsert_task` (Rule 12) that reddened
+> scenario E plus 3 other tests, 49/53 unaffected — not a module-wide outage. Full argument:
+> `docs/DECISIONS.md` ADR-0101.
+>
+> **What is still OPEN and unbuilt (Phase 2, per the round-S design above, still a future round):**
+> no per-unit REWRITE/RELOCATE `tasks` rows exist, so D87's arbitration mechanism remains inert for
+> the per-unit reconciliation it was built for — nothing puts a matching row at `status =
+> 'RUNNING'` for `_reconcile_tasks_with_git`'s per-unit REWRITE/RELOCATE branch to act on, and that
+> branch is unchanged (zero lines). `task_id_for`'s per-unit UUID5 git-trailer identity is also
+> unchanged and still not persisted to SQL anywhere. Closing D89 fully still needs Phase 2's
+> per-unit rebuild, including the new "partially landed" third verdict state the round-S design
+> names.
+
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
@@ -6954,7 +6984,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2124-2174`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2135-2185`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `cli.py:6441` sets `stderr_tail=error.stderr_tail`, the same
