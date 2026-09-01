@@ -582,6 +582,103 @@ def test_raise_wave_budget_clears_the_halt_and_is_audited(workspace: Path) -> No
 
 
 # --------------------------------------------------------------------------------------
+# exit 3 — the run ledger, breached organically through a real dispatch
+# --------------------------------------------------------------------------------------
+
+
+def _seed_halted_run(db: Path, *, spent: float = 400.0) -> None:
+    """A run whose ledger already recorded a RUN-ceiling breach (`halted=1`), durably — the state
+    `CostLedger.halt()` (`orchestrator/budgets.py:528`) leaves behind once `spent_usd` reaches
+    `max_usd`. `spent_usd == max_usd` (never `>`): `budget_ledger`'s own
+    `CHECK (spent_usd + reserved_usd <= max_usd)` (`state/schema.sql:555`) makes a row where
+    `spent_usd > max_usd` UNREPRESENTABLE at rest — every real breach is discovered and recorded
+    at the instant `spent_usd` reaches the ceiling, never after, so this is the durably true shape
+    of "this run's cumulative spend has crossed `run_max_cost_usd`", not a workaround for it.
+    `max_usd` matches `BudgetsSection.run_max_cost_usd`'s own default (400.0, `settings.py:264`)
+    so `fleet scan`'s `open_budget_ledger` — which unconditionally overwrites `max_usd` from live
+    config on every invocation (`ON CONFLICT ... DO UPDATE SET max_usd = excluded.max_usd`,
+    `state/repository.py:1794`) — writes back the SAME number, and no `config/fleet.yaml` edit
+    (and no `_reseal_config_digests` dance) is needed to keep the row internally consistent.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO budget_ledger (run_id, spent_usd, reserved_usd, max_usd, halted, "
+            "                           updated_at) VALUES (?, ?, 0.0, ?, 1, ?)",
+            (RUN_ID, spent, spent, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+
+def test_run_cost_exhausted_exits_3(workspace: Path) -> None:
+    """§12 item 24's run-ceiling clause: a real `fleet scan` dispatch — not a direct call into
+    `orchestrator.budgets`, and not `resume --raise-budget`'s dedicated read-only checks — is what
+    discovers `budget_ledger.halted = 1` and halts with exit 3.
+
+    Why this needed its own test: `RunBudgetExhausted`/`LedgerHalted` had ZERO references in
+    `cli.py` or `test_cli.py` before this test (round R). Every existing `_halt_ledger`-seeded
+    test (`test_raise_budget_clears_the_sticky_halt_and_is_audited` and its sibling) drives
+    `fleet resume --raise-budget`, which reads and clears `budget_ledger` through its OWN
+    dedicated SQL (`_refuse_bad_raise_budget`, `cli.py:13156`) — a code path that never calls
+    `PhaseRunner.run_wave` or `CostLedger.reserve()` at all. Nothing proved that a PLAIN phase
+    verb, given no special flag, actually reaches the real dispatch path and gets refused by it
+    rather than, say, silently dispatching against a halted ledger.
+
+    `fleet scan`'s two admitted repos carry no `phases` row yet (fresh `workspace` fixture), so
+    both are `PENDING` candidates in wave 0 and both attempt a real reservation.
+    `PhaseRunner._dispatch` (`orchestrator/runner.py:762`) calls `ledger.dispatch()` BEFORE
+    constructing a payload or touching a worker, so this is reached without a working clone or
+    LLM backend. `CostLedger.reserve()`'s CAS (`_RESERVE_RUN_DERIVED_SQL`, `state/repository.py`)
+    carries `AND halted = 0` in its `WHERE`, so it refuses the FIRST repo's attempt regardless of
+    the (`ZERO_COST`) amount requested; `reserve()`'s `_interpret_refusal`
+    (`orchestrator/budgets.py:793`) reads the durable row back, sees `halted=True`, and raises
+    `LedgerHalted`. Mutation-tested (not shipped as a mutant, see the round's report): removing
+    that `WHERE` predicate alone still leaves this test green, because `_interpret_refusal`'s
+    read ALSO flips the ledger's in-process `self._halted` flag, which the SECOND repo's
+    `reserve()` then finds set at `_refuse_if_halted`'s in-process check
+    (`orchestrator/budgets.py:740`) before it ever reaches the CAS — the two repos this fixture
+    dispatches give the mechanism two independent, redundant discovery paths. Disabling BOTH (the
+    `WHERE` predicate AND the `if row.halted` branches in `refresh()`/`_interpret_refusal`) turns
+    this test red (exit 7, both repos fail a real clone against `REPOS_YAML`'s placeholder URLs
+    instead) — never reaching a git clone or a model call.
+    """
+    db = workspace / "state" / "fleet.db"
+    _seed_halted_run(db)
+
+    result = runner.invoke(app, [*base_args(workspace), "scan"])
+    assert result.exit_code == ExitCode.RUN_COST_EXHAUSTED == 3, result.output
+    # Two repos are admitted and dispatch concurrently, sharing ONE `CostLedger`, so which one's
+    # `reserve()` call discovers the durable halt first (and so which of `_refuse_if_halted`'s or
+    # `_interpret_refusal`'s two differently-worded `LedgerHalted` messages wins the race, both
+    # `orchestrator/budgets.py`) is not deterministic — assert on what both share, not on either
+    # one's exact wording.
+    assert "LedgerHalted" in result.output and "is halted" in result.output, (
+        "the message must be a `LedgerHalted` (`orchestrator/budgets.py`) wrapped by `_on_breach`'s "
+        "`RunHalted` (`orchestrator/runner.py:1118-1124`) — pinned so a future refactor that swaps "
+        "in some OTHER exit-3 producer is caught here, not just by the exit code, which several of "
+        "the ledger's `RunBudgetExhausted` raise sites share"
+    )
+
+    conn = sqlite3.connect(db)
+    try:
+        row = conn.execute(
+            "SELECT spent_usd, max_usd, halted FROM budget_ledger WHERE run_id = ?", (RUN_ID,)
+        ).fetchone()
+    finally:
+        conn.close()
+    assert row is not None, "the breach must not have skipped opening the durable ledger row"
+    spent_usd, max_usd, halted = row
+    assert spent_usd == pytest.approx(400.0), (
+        "a halted ledger must refuse BEFORE any reservation is granted or settled — a ZERO_COST "
+        "estimate silently dispatched and settled would leave this number unchanged too, so this "
+        "assertion alone cannot discriminate; the exit code and the halted flag below are what do"
+    )
+    assert max_usd == pytest.approx(400.0)
+    assert halted == 1, "still halted — nothing in this path may clear it (only --raise-budget)"
+
+
+# --------------------------------------------------------------------------------------
 # exit 11 — sequence refused mid-run
 # --------------------------------------------------------------------------------------
 
