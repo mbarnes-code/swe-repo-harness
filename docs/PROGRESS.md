@@ -7020,3 +7020,87 @@ confirmed by the final whole-branch review after its own fix wave, not inherited
 lane's self-report.
 
 **Round V, opening next.**
+
+### Checkpoint — 2026-09-01 (round V controller, close-out)
+
+**§12 criteria met: 17 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived twice by the final whole-branch reviewer
+and matching the committed table exactly — up from 15 at round U's close). Added this round:
+**§12.20** (secrets never leak — the PR-body `«redacted:…»` placeholder clause closed,
+mutation-proven, real production write path exercised; the per-column-vs-combined-fixture
+methodology question was adjudicated properly this time — a dated `docs/SPEC.md` marker plus
+ADR-0104, citing the real precedent it follows, §12.7/ADR-0099, by name) and **§12.40** (no model
+string outside `config/` — its long-standing AST-clause exclusion marker retired for the first
+time; a real AST walk, not a grep, now asserts only `settings.py` reads `config/models.yaml`).
+§12.47's residual (ii) also closed this round (backends registry is now genuinely stateless,
+`vars(inst) == {}` verified true by reading committed code, no `__slots__` loophole used), but
+does not move the tally — the criterion's other residual (a contracts registry SPEC §7.6 designs
+in full and ADR-0065 records as never built) is genuine NEW-MECHANISM work, correctly deferred to
+a future dedicated round rather than rushed or adjudicated away.
+
+**A research dispatch resolved a real fork rather than confirming a guess.** Going in, §12.47's
+contracts-registry residual looked like it might be stale SPEC wording (a documentation slip
+naming a component that was never really designed). Research found the opposite: SPEC §7.6 fully
+designs `ContractAdapter` (ABC + `@register` + `discover()` totaling over `ContractKind`), ADR-0065
+explicitly records it as designed-but-unbuilt, and three other §12 items (29, 31, 32) already
+assume/reference this same undone registry — §12.32 already treats its own equivalent clause as
+"unsatisfiable as written... not a passing gate (ADR-0065)," i.e. already disclosed and
+adjudicated the identical fact. §12.47's entry now gets the same treatment rather than a fresh,
+inconsistent one. Worth naming as the value of dispatching research to *investigate* rather than
+to confirm a hypothesis the controller already favored — the "stale SPEC" fork this round expected
+to rule for was the wrong one.
+
+**The "main is red" defect class recurred, one notch worse than round U's version.** Round U found
+a *merge-integration* gap (three individually-clean lanes, nobody gated the merged tree). This
+round's final review — which opened with the lint/format gate FIRST specifically because of that
+lesson — found the SAME lane never gated itself at all: `tests/test_pr_body_redaction.py`'s E501
+violation was present from the moment its branch was first committed, task 2's own task review
+never ran `ruff check`, and it stayed on `main` through both the task merge and the doc-update
+commit until the final review caught it. Two rounds running, this class has been caught only by
+the final whole-branch review, never by a task-scoped review — worth treating as a standing
+process gap rather than two independent one-off misses: **a task-scoped review should run the
+lint/format gate as a matter of course, not as an optional check**, the same way it already runs
+the test suite. This round's own final review adopted "gate first" as a discipline for itself;
+extending that discipline to task-scoped reviews is the more precise fix, tracked here rather than
+fixed inside this checkpoint.
+
+**A second Rule-14 gap surfaced and was corrected in the same round it was made** — worth naming
+since it's the more encouraging half of the "two bars, one round" finding. §12.47's DONE marking
+was reverted last round specifically because a criterion's wording was relaxed without a disclosed
+marker+ADR; this round's own §12.20 closure repeated the identical shape (a methodology relaxation
+disclosed only in `CRITERIA_PLAN.md`, with an unattributed "precedent" claim) — but this time the
+round's own final review caught it before the round closed, rather than needing a subsequent
+round's review to catch it as happened with §47. The fix (a dated SPEC marker + ADR-0104,
+explicitly naming §12.7/ADR-0099 as the actual precedent) matches the form that closed §12.7
+correctly the first time.
+
+**Rulings made this round:**
+1. §12.20's per-column-vs-combined-fixture methodology: per-column accepted as satisfying intent
+   — formalized via ADR-0104 (not just asserted) after the final review flagged the informal
+   version as insufficiently disclosed.
+2. §12.47 residual (ii): implement for real (not adjudicate away) — a real production change
+   moving mutable state off backend instances.
+3. §12.47 residual (i): the contracts registry is real and deferred (not stale SPEC to be
+   adjudicated narrower) — building it is out of scope for a residual fix-wave, deferred to a
+   future dedicated round, tracked via the existing ADR-0065 disclosure rather than a new one.
+
+**Full suite, post-final-review-fix: 2062 passed, 2 failed (pre-existing real-bazel/rust
+network-dependent order-dependent flakiness, reproduced passing in isolation both before and after
+this round's changes, files outside anything this round touched), 1 error** (same class). `ruff
+check`/`ruff format --check`/`mypy --strict` all clean on the merged tree, confirmed by the final
+whole-branch review after its own fix wave.
+
+**Deferred to the ledger (Minor, not blocking):** invocation-dependent backend-registration test
+coverage (a standalone run of `test_registries_stateless.py` only registers 2 of 4 backends absent
+their SDK stubs — sound under full-suite collection, undisclosed under isolation); the Vertex ADC
+transport's cache lifetime widened to process-scope (justified for the registry path, not fully
+for bare `VertexBackend()` construction in tests); a cosmetic naming asymmetry between backends'
+transport-resolution helpers; a test-control-purity nitpick in `test_models_yaml_ast.py`; no
+mechanical binding yet between the Rollup table and the entries it summarizes (repeated staleness
+across rounds argues for one, per the `test_floor_rule_statements.py` prose-binding pattern already
+used elsewhere).
+
+**Round W, opening next** — candidate identified by this round's own research, not yet dispatched:
+§12.44 sub-clauses A-D + F (cache not poisoned across backends — cross-profile poisoning tests),
+TEST-ONLY, no new infrastructure needed (an existing two-client/one-cache-store harness in
+`tests/test_llm_cache.py` is structurally almost identical to what's needed).
