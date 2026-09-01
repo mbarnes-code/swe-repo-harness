@@ -440,7 +440,31 @@ def test_every_exported_model_round_trips_through_its_own_json(name: str) -> Non
     assert isinstance(inst, model), f"SAMPLES[{name}] is not a {name}"
 
     payload = json.loads(inst.model_dump_json())
-    assert model.model_validate(payload) == inst
+
+    # §12.46(i)'s literal text: a round-trip that re-supplies a computed field is a schema bug.
+    # `model_dump_json()` DOES emit every `@computed_field` (that is exactly what makes this
+    # assertion mean something rather than being vacuously true for models with none), so any
+    # computed key must actually be present in the raw payload before we can claim the reload
+    # exercised dropping it.
+    computed = set(model.model_computed_fields)
+    if computed:
+        assert computed <= payload.keys(), (
+            f"{name}'s computed fields {computed} never appeared in its own model_dump_json() "
+            "output, so this test would not exercise §12.46(i)'s 'computed fields dropped' clause"
+        )
+
+    reloaded = model.model_validate(payload)
+
+    # Compared via `model_fields`, per §12.46(i)'s literal wording — NOT via object equality.
+    # `model_fields` is the FleetModel's own declared-field registry, disjoint from
+    # `model_computed_fields` by construction, so iterating it can never re-admit a computed key
+    # into what is being asserted.
+    for field_name in model.model_fields:
+        original_value = getattr(inst, field_name)
+        reloaded_value = getattr(reloaded, field_name)
+        assert reloaded_value == original_value, (
+            f"{name}.{field_name} did not round-trip: {reloaded_value!r} != {original_value!r}"
+        )
 
     # A genuinely unknown key must still be a hard error: `extra="forbid"` is what stops a
     # renamed field from being silently dropped on the way in.

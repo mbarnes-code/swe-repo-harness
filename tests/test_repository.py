@@ -30,7 +30,8 @@ import aiosqlite
 import pytest
 from pydantic import BaseModel
 
-from fleet.models.enums import PHASE_DEMOTED_KIND, Phase, RepoStatus, TaskKind
+from fleet.models.enums import PHASE_DEMOTED_KIND, EdgeKind, Phase, RepoStatus, TaskKind
+from fleet.models.graph import NodeKind, edge_key_for
 from fleet.obs.redact import redact_text
 from fleet.state import checkpoints
 from fleet.state import db as dbmod
@@ -264,6 +265,37 @@ async def test_claiming_an_empty_queue_returns_none_rather_than_inventing_work(
 # ======================================================================================
 # primitives 2 and 3 — fencing, renewal, the reaper
 # ======================================================================================
+
+
+async def test_exactly_one_of_many_concurrent_acquirers_wins_the_phase_lease(
+    repo: SqliteStateRepository,
+) -> None:
+    """§12.46(vi)'s phase-lease sibling of `test_exactly_one_of_many_concurrent_claimers_wins_
+    the_task` above: fire eight concurrent `acquire_phase_lease` calls at one PENDING phase, one
+    wins, seven get `None`.
+
+    Why: `acquire_phase_lease`'s `UPDATE phases SET status='RUNNING', ... WHERE status='PENDING'
+    RETURNING lease_fence` is the phase-lease CAS (§6 CLAIM/FENCING), and until now it was only
+    ever driven serially — sequential calls that never contend, which cannot exercise the WHERE
+    clause's exclusivity at all. Two workers that both win the same phase's lease both start
+    `fleet migrate` against the same repo/phase worktree and both commit — the exact double-spend
+    §6 exists to rule out, and this is the first test to actually contend for one.
+    """
+    await repo.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+
+    results = await asyncio.gather(
+        *(
+            repo.acquire_phase_lease(
+                RUN, REPO, Phase.TRANSFORM, owner=f"{WORKER}-{i}", now=NOW, lease_ttl_s=300
+            )
+            for i in range(8)
+        )
+    )
+
+    winners = [fence for fence in results if fence is not None]
+    assert len(winners) == 1, f"{len(winners)} acquirers won the same phase lease"
+    assert results.count(None) == 7
+    assert winners[0] == 1, "the lease CAS must bump the fence exactly once"
 
 
 async def test_a_stolen_lease_cannot_write(repo: SqliteStateRepository) -> None:
@@ -1031,6 +1063,61 @@ async def test_iter_symbols_streams_every_row_of_a_large_batch(
         assert row.symbol_id is not None and row.symbol_id > last_id
         last_id = row.symbol_id
     assert seen == total
+
+
+async def test_edge_key_is_byte_stable_through_a_persisted_write_read_and_rebuild(
+    repo: SqliteStateRepository,
+) -> None:
+    """§12.46(v): `edge_key` is byte-stable across a full graph rebuild — asserted here against
+    the REAL `edges` table, not just two in-memory calls of `edge_key_for` (that half is
+    `tests/test_state_models.py::test_edge_key_is_stable_across_a_rebuild_and_ignores_the_rowid`).
+
+    Why the persisted case is a separate risk: `edges` is rebuilt from scratch on resume
+    (ADR-0004), which means every edge is INSERTed a second time through SQLite's text affinity,
+    the `ON CONFLICT (run_id, edge_key) DO UPDATE` upsert, and a round trip through `iter_edges`'s
+    own `str(row[1])` coercion — none of which the in-memory test touches. A key that is stable in
+    Python but gets truncated, re-encoded, or collated differently by SQLite would pass the
+    in-memory test and still silently repoint a `CycleFinding`'s `broken_edge_keys` after a real
+    resume, which is exactly the failure content-addressing exists to prevent.
+    """
+    key = edge_key_for(
+        src_kind=NodeKind.REPO, src_id=REPO, dst_kind=NodeKind.REPO, dst_ref="maven:com.acme:lib",
+        kind=EdgeKind.DECLARED_DEP, evidence_path="pom.xml", evidence_line=42,
+    )
+    first_scan = EdgeRow(
+        edge_key=key, run_id=RUN, src_id=REPO, dst_coord_key="maven:com.acme:lib",
+        kind=EdgeKind.DECLARED_DEP, base_confidence=1.0, confidence=0.9,
+        evidence_path="pom.xml", evidence_line=42, detected_at=NOW.isoformat(),
+    )
+    assert await repo.insert_edges([first_scan]) == 1
+
+    written = [edge async for edge in repo.iter_edges(RUN)]
+    assert [e.edge_key for e in written] == [key]
+    assert written[0].edge_key == key, (
+        "the persisted key must be byte-identical to the computed one"
+    )
+
+    # Simulate the rebuild ADR-0004 describes: `edges` is re-derived from scratch, so inference
+    # recomputes the SAME semantic tuple independently — a fresh `edge_key_for` call, not the
+    # Python string reused — and writes it again under a different rowid and detection timestamp.
+    rebuilt_key = edge_key_for(
+        src_kind=NodeKind.REPO, src_id=REPO, dst_kind=NodeKind.REPO, dst_ref="maven:com.acme:lib",
+        kind=EdgeKind.DECLARED_DEP, evidence_path="pom.xml", evidence_line=42,
+    )
+    assert rebuilt_key == key, "a rebuild recomputing the same tuple must yield the same key"
+    second_scan = EdgeRow(
+        edge_key=rebuilt_key, run_id=RUN, src_id=REPO, dst_coord_key="maven:com.acme:lib",
+        kind=EdgeKind.DECLARED_DEP, base_confidence=1.0, confidence=0.9,
+        evidence_path="pom.xml", evidence_line=42,
+        detected_at=(NOW + timedelta(days=1)).isoformat(),
+    )
+    assert await repo.insert_edges([second_scan]) == 1  # UPSERT: still one row, not a duplicate
+
+    rewritten = [edge async for edge in repo.iter_edges(RUN)]
+    assert len(rewritten) == 1, "the rebuild must upsert onto the same row, not duplicate it"
+    assert rewritten[0].edge_key == key, (
+        "edge_key drifted across a persisted write/read/rebuild cycle"
+    )
 
 
 async def test_iter_edges_streams_every_row_of_a_large_batch(
