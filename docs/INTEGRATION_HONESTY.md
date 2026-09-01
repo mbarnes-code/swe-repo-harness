@@ -6851,7 +6851,7 @@ of §12.20 remains separately unverified (out of this entry's scope).
 
 ---
 
-## D89 — PARTLY ADDRESSED (Phase 1 landed at `1b0d3c1`; see below for what it covers and what is still open). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
+## D89 — FIXED, LANDED (`91daa25`, Phase 2 Task B; Phase 1 at `1b0d3c1`, Phase 2 Task A at `agent/roundu-task1a`'s `09bc0f8` — see the dated addenda below for what each landed). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
 
 **Found by round P task 1's reviewer (2026-08-31), disclosed while verifying D87's fix rather than
 searched for independently — recorded here rather than left inside D87's own entry, since it is a
@@ -6989,6 +6989,26 @@ on something a real write path does populate — that adjudication is not made h
 > `discard_task` would `reset --hard`/`clean -fdx` real landed unit commits away. Task B (the
 > per-unit `task_id_for`-keyed reconciliation loop and the "partially landed" verdict) must land
 > before this path is safe for real crash recovery — see ADR-0102's "Cost if wrong".
+
+> **[Phase 2 Task B landed 2026-09-01, round U task 1B — commit `91daa25` on branch
+> `agent/roundu-task1b`, based on Task A's `agent/roundu-task1a` at `09bc0f8` (not yet merged to
+> `main` as of this addendum — the heading above cites this branch-tip sha per this task's brief;
+> if the eventual `main` merge sha differs, the controller should update the heading to match).
+> D89's two-phase fix is now COMPLETE.** `_reconcile_tasks_with_git`'s REWRITE-kind branch is
+> rebuilt to loop per unit over `tasks.target_paths`, asking git about each unit's own
+> `task_id_for_ids`-derived synthetic trailer identity instead of the row's own (never-written-as-
+> a-trailer) coarse `task_id` — closing exactly the hazard the Task A addendum above named. Three
+> outcomes: every unit landed → the existing `DONE` path (last landed unit's sha onto
+> `attempts.commit_sha`/`phases.post_commit_sha`); zero units landed → the existing discard path,
+> unchanged; some-but-not-all landed → the **new** third verdict — `discard_task` is NEVER called,
+> the row resets to re-claimable `PENDING` with the fence bumped, and the report names the
+> landed/missing unit split (`report["partially_landed"]`). Non-REWRITE kinds
+> (HOIST/BUILDGEN/RDEP_VERIFY/PR_EMIT/REVALIDATE) are unaffected — verified by a dedicated
+> regression test, not merely asserted. Full design rationale, the mutation proof, and what was
+> re-verified against Task A's actual landed diff (the round-U research plan's own line numbers
+> had shifted): `docs/DECISIONS.md` ADR-0103. Tests: `tests/test_d89_phase2_reconciliation.py`,
+> 8 cases against a real git repository with real `Fleet-Task-Id` trailers (no raw SQL
+> fabrication of the git side, per CLAUDE.md Rule 9).
 
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
