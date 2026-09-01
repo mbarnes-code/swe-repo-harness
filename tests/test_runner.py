@@ -566,7 +566,12 @@ async def harness(tmp_path: Path) -> AsyncIterator[Harness]:
 
 
 async def _build(
-    tmp_path: Path, config: FleetConfig, *, max_usd: float, reservation_ttl_s: float | None = None
+    tmp_path: Path,
+    config: FleetConfig,
+    *,
+    max_usd: float,
+    reservation_ttl_s: float | None = None,
+    router: LlmRouter | None = None,
 ) -> AsyncIterator[Harness]:
     path = tmp_path / "state" / "fleet.db"
     await initialize_database(path)
@@ -606,7 +611,7 @@ async def _build(
                 read_conn=read_conn,
                 ledger=ledger,
                 limits=limits,
-                llm=make_router(),
+                llm=router or make_router(),
                 backends={"fake": backend},
                 log=default_logger("test.runner"),
                 work_dir=tmp_path / "work",
@@ -2334,6 +2339,116 @@ async def test_budget_ledger_spent_usd_equals_the_sum_of_attempts_cost_usd(
     assert abs(budget.spent_usd - attempts_total) < 1e-9, (
         f"ledger spent ${budget.spent_usd} but attempts.cost_usd sums to ${attempts_total}"
     )
+
+
+def free_target(model_id: str = "local-cheap") -> BackendTarget:
+    """ADR-0023's local-profile shape: `price: free`, the one thing that distinguishes a
+    `--profile local` target from `make_router()`'s priced one. `backend="fake"` — not the real
+    `openai_compatible` — to match the ONE `ModelBackend` this harness's `_build` registers
+    (`ScriptedBackend`, `name = "fake"`); §12.24's clause is about the `backend` COLUMN being
+    non-empty at zero cost, not about which backend name answered, and
+    `tests/test_cli.py::LOCAL_PROFILE_YAML` already covers the real `openai_compatible` name at
+    the config-loading layer.
+    """
+    return BackendTarget(backend="fake", model_id=model_id, price="free")
+
+
+def make_local_router() -> LlmRouter:
+    """Every tier resolves to one FREE target — the real `config/models.yaml` `local` profile's
+    shape (`tests/test_cli.py`'s `LOCAL_PROFILE_YAML`), reproduced here without a live HTTP
+    server: `LlmRouter` itself is profile-agnostic, and what makes a profile "local" is the
+    priced-vs-free target it is built from, not anything the router does differently.
+    """
+    return LlmRouter(dict(SPEC_ROLE_TIERS), dict.fromkeys(ModelTier, (free_target(),)), profile="local")
+
+
+def _local_profile_sink(harness: Harness) -> ResultSink[ScriptedOutput]:
+    """Mirrors `cli.py`'s real `_TransformSink.__call__`/`_AttemptWriter.record` derivation —
+    `llm_backend=result.usage.backend or None`, `llm_failovers=result.usage.llm_failovers`,
+    `input_tokens=result.usage.input_tokens`, `output_tokens=result.usage.output_tokens` — the
+    same four kwargs those two shipped call sites pass, not a different formula invented for this
+    test. §12.24's local-profile clause is a claim about what THAT derivation produces under a
+    free target, so the sink has to be the real one."""
+    counts: dict[str, int] = {}
+
+    async def sink(
+        *, repo_id: str, phase: Phase, fence: int, result: WorkerResult[ScriptedOutput]
+    ) -> None:
+        counts[repo_id] = counts.get(repo_id, 0) + 1
+        stamp = harness.clock().isoformat()
+        await harness.repo.record_attempt(
+            AttemptRow(
+                attempt_id=f"{repo_id}-{counts[repo_id]}",
+                run_id=RUN,
+                repo_id=repo_id,
+                phase=phase,
+                attempt=counts[repo_id],
+                started_at=stamp,
+                finished_at=stamp,
+                cost_usd=result.usage.cost_usd,
+                llm_backend=result.usage.backend or None,
+                llm_cache_hit=result.usage.all_served_from_llm_cache,
+                llm_failovers=result.usage.llm_failovers,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
+            )
+        )
+
+    return sink
+
+
+async def test_a_local_profile_run_writes_a_non_empty_backend_on_every_row_at_zero_cost(
+    tmp_path: Path,
+) -> None:
+    """SPEC §12.24's local-profile clause, the criterion's own literal text: "the same run under
+    `--profile local` ends with `spent_usd == 0` and every row carrying a non-empty `backend` and
+    `llm_cache_hit = 0`."
+
+    Sibling to `test_budget_ledger_spent_usd_equals_the_sum_of_attempts_cost_usd` above — same
+    real `PhaseRunner.run_wave` dispatch through the same `_build` harness, with the one variable
+    `--profile local` actually changes: `make_local_router()`'s free `openai_compatible` target in
+    place of `make_router()`'s priced one. Before this task there was no fixture anywhere in the
+    suite for this half of §12.24 (`AttemptRow` had no `llm_backend` field at all — D62), and
+    `docs/CRITERIA_PLAN.md` names it "the only remaining open item" blocking §12.24's closure.
+    """
+    async for harness in _build(tmp_path, FleetConfig(), max_usd=1000.0, router=make_local_router()):
+        await _seed(harness, "repo-a", "repo-b")
+        await harness.plan(("repo-a", "repo-b"))
+        # Different ROLES, not the sibling test's identical default for both repos: `role` is
+        # part of the §11.6 cache key (`llm/cache.py::_key_parts`), so two repos asking the
+        # IDENTICAL role+messages would make the second a legitimate cache hit off the first —
+        # which would make `llm_cache_hit is False` fail for the wrong reason (real caching, not
+        # a defect) rather than proving the local-profile clause this test exists for.
+        BEHAVIOURS["repo-a"] = [asks_the_model_and_bills_it(role="transform_repair")]
+        BEHAVIOURS["repo-b"] = [asks_the_model_and_bills_it(role="build_diagnosis")]
+
+        report = await harness.runner(sink=_local_profile_sink(harness)).run_wave(0)
+
+        assert report.halt is None
+        for repo_id in ("repo-a", "repo-b"):
+            status, attempts, _, _, _ = await harness.phase_row(repo_id)
+            assert (status, attempts) == ("SUCCEEDED", 1), (
+                f"{repo_id} must actually have dispatched, or the assertions below are vacuous"
+            )
+
+        budget = await harness.repo.get_budget(RUN)
+        assert budget is not None
+        assert budget.spent_usd == pytest.approx(0.0), (
+            "a free target must leave the ledger at $0.00 — §12.24's `spent_usd == 0` half"
+        )
+
+        rows = [r async for r in harness.repo.iter_attempts(RUN)]
+        assert len(rows) == 2, "one attempt row per repo, or the fixture did not actually dispatch"
+        for row in rows:
+            assert row.llm_backend, (
+                f"attempt {row.attempt_id} carries an empty/NULL llm_backend under --profile local"
+            )
+            assert row.llm_backend == "fake"
+            assert row.llm_cache_hit is False, (
+                "no cache was ever consulted here, so ALL-hit must read False, not True — a free "
+                "call is NOT a cache hit (models/tasks.py's cost_usd comment, §11.2)"
+            )
+            assert row.cost_usd == pytest.approx(0.0)
 
 
 # ======================================================================================

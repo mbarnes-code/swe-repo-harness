@@ -270,6 +270,26 @@ def test_schema_violation_buys_one_repair_then_fails_the_target_over() -> None:
     assert failovers[0].trigger == "SCHEMA_UNSATISFIED"
     assert (failovers[0].from_model_id, failovers[0].to_model_id) == ("m1", "m2")
     assert response.usage.model_id == "m2"
+    # ADR-0106, §12.43(i): one hop was spent inside THIS call before it succeeded on m2.
+    assert response.usage.llm_failovers == 1
+
+
+def test_a_transport_failover_also_counts_as_one_hop_on_the_returned_usage() -> None:
+    """WHY (§12.43 case (i)'s exact shape): a CONNECTION-triggered failover must count the same
+    as a SCHEMA_UNSATISFIED one — `llm_failovers` is about backend hops, not about which of the
+    two failover triggers caused them."""
+    backend = FakeBackend([TransportError("connection refused"), ok_reply()])
+    failovers: list[BackendFailover] = []
+    client = build(backend, [target("m1"), target("m2")], failovers=failovers)
+
+    response = call(client)
+
+    assert [c["model_id"] for c in backend.calls] == ["m1", "m2"]
+    assert len(failovers) == 1
+    assert failovers[0].trigger == "CONNECTION"
+    assert response.usage.backend == "fake"
+    assert response.usage.model_id == "m2"
+    assert response.usage.llm_failovers == 1
 
 
 def test_a_repair_that_succeeds_is_counted_and_carries_the_validator_error_verbatim() -> None:
