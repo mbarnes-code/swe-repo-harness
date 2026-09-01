@@ -125,8 +125,8 @@ from tests.conftest import (
 from tests.test_bazel import _a_lockfile, _fail_if_registry_unreachable
 from tests.test_scan_e2e import FIXTURE_REPOS, _fresh_db, _make_repo
 from tests.test_transform_e2e import (  # noqa: F401  (`fleet` is a fixture, used by injection)
-    TS_IMPORT_RULE,
     DESTINATIONS,
+    TS_IMPORT_RULE,
     _write_config,
     _write_engine,
     base_args,

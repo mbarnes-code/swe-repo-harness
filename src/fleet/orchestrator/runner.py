@@ -817,7 +817,22 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 # REJECTED rebuild above, never on the COMPLETE early-return, since the worker
                 # is not about to run in that case and there is nothing to claim a dispatch for.
                 if self._pre_dispatch is not None:
-                    await self._pre_dispatch(repo_id=repo_id, phase=self.phase, payload=payload)
+                    try:
+                        await self._pre_dispatch(
+                            repo_id=repo_id, phase=self.phase, payload=payload
+                        )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # Same shape as `_re_entry`'s guard above: a hook that raises has
+                        # answered neither way, the worker never ran, and swallowing it or
+                        # letting it escape uncaught are both wrong (Rule 11). It is this
+                        # repo's typed failure and goes to the ladder like any other.
+                        # `re_entry` is threaded through (not defaulted to FRESH) so a REJECTED
+                        # checkpoint decided above is not silently forgotten by `_drive`.
+                        return _Dispatched(
+                            execution=self._unknown(repo_id, exc), re_entry=re_entry
+                        )
                 try:
                     execution = await self.worker.execute(worker_ctx, payload, max_attempts=1)
                 except asyncio.CancelledError:

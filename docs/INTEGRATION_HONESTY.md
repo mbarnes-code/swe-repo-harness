@@ -7039,7 +7039,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1239-1246`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1254-1261`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
@@ -7145,6 +7145,26 @@ destroying landed commits; the real pre-Task-B mechanism was `_unresolved` firin
 hanging `RUNNING` forever) — corrected in place, dated 2026-09-01, at ADR-0102's "Cost if wrong",
 ADR-0103's opening paragraph (`docs/DECISIONS.md`), and the D89 Task-A ledger addendum above; this
 entry is the underlying defect those corrections point back to.
+
+**Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
+the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
+(`cli.py:12183-12262`), not the pre-Task-B code the paragraph above was describing.** The
+`if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12217` (REWRITE's
+`elif not landed_units:` nothing-landed branch) and `:12259` (the non-REWRITE discard branch) —
+both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
+never reach the `DONE`/discard/partially-landed verdicts" is false for two of those three verdicts.
+Task B's `if units and not missing_units:` DONE branch (`:12205-12213`) and its `else:`
+partially-landed branch (`:12230-12246`) never read `task_anchor` at all — neither is gated by
+this guard, and both are production-reachable: `phases.pre_commit_sha` (a *different* column,
+read into `anchor`/`phase_anchor` above, not `task_anchor`) DOES have a real production writer
+(`cli.py:4474`, `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
+`find_task_commit` can genuinely locate a landed unit's commit and route into DONE or
+partially-landed with `task_anchor` still `NULL` throughout. The heading's claim stays true as far
+as it goes — the discard path (what §12.15(i)/§12.45(i) actually need guarded, since discarding
+without a real anchor is the destructive case) is correctly blocked at both its sites — but the
+generalization to "any of the DONE/discard/partially-landed verdicts" was wrong the moment Task B
+landed the DONE and partially-landed branches, because it was never re-measured against them in
+the same commit that made them reachable.
 
 **Not yet built:** a production write path for `tasks.pre_commit_sha` — most naturally, having
 `_TransformClaimHook` (or an equivalent `pre_dispatch` hook for whichever kinds need it) persist

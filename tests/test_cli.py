@@ -597,7 +597,7 @@ def _seed_halted_run(db: Path, *, spent: float = 400.0) -> None:
     `max_usd` matches `BudgetsSection.run_max_cost_usd`'s own default (400.0, `settings.py:264`)
     so `fleet scan`'s `open_budget_ledger` — which unconditionally overwrites `max_usd` from live
     config on every invocation (`ON CONFLICT ... DO UPDATE SET max_usd = excluded.max_usd`,
-    `state/repository.py:1794`) — writes back the SAME number, and no `config/fleet.yaml` edit
+    `state/repository.py:1853`) — writes back the SAME number, and no `config/fleet.yaml` edit
     (and no `_reseal_config_digests` dance) is needed to keep the row internally consistent.
     """
     conn = sqlite3.connect(db, isolation_level=None)
@@ -620,14 +620,14 @@ def test_run_cost_exhausted_exits_3(workspace: Path) -> None:
     `cli.py` or `test_cli.py` before this test (round R). Every existing `_halt_ledger`-seeded
     test (`test_raise_budget_clears_the_sticky_halt_and_is_audited` and its sibling) drives
     `fleet resume --raise-budget`, which reads and clears `budget_ledger` through its OWN
-    dedicated SQL (`_refuse_bad_raise_budget`, `cli.py:13156`) — a code path that never calls
+    dedicated SQL (`_refuse_bad_raise_budget`, `cli.py:13390`) — a code path that never calls
     `PhaseRunner.run_wave` or `CostLedger.reserve()` at all. Nothing proved that a PLAIN phase
     verb, given no special flag, actually reaches the real dispatch path and gets refused by it
     rather than, say, silently dispatching against a halted ledger.
 
     `fleet scan`'s two admitted repos carry no `phases` row yet (fresh `workspace` fixture), so
     both are `PENDING` candidates in wave 0 and both attempt a real reservation.
-    `PhaseRunner._dispatch` (`orchestrator/runner.py:762`) calls `ledger.dispatch()` BEFORE
+    `PhaseRunner._dispatch` (`orchestrator/runner.py:780`) calls `ledger.dispatch()` BEFORE
     constructing a payload or touching a worker, so this is reached without a working clone or
     LLM backend. `CostLedger.reserve()`'s CAS (`_RESERVE_RUN_DERIVED_SQL`, `state/repository.py`)
     carries `AND halted = 0` in its `WHERE`, so it refuses the FIRST repo's attempt regardless of
@@ -654,10 +654,10 @@ def test_run_cost_exhausted_exits_3(workspace: Path) -> None:
     # `orchestrator/budgets.py`) is not deterministic — assert on what both share, not on either
     # one's exact wording.
     assert "LedgerHalted" in result.output and "is halted" in result.output, (
-        "the message must be a `LedgerHalted` (`orchestrator/budgets.py`) wrapped by `_on_breach`'s "
-        "`RunHalted` (`orchestrator/runner.py:1118-1124`) — pinned so a future refactor that swaps "
-        "in some OTHER exit-3 producer is caught here, not just by the exit code, which several of "
-        "the ledger's `RunBudgetExhausted` raise sites share"
+        "the message must be a `LedgerHalted` (`orchestrator/budgets.py`) wrapped by "
+        "`_on_breach`'s `RunHalted` (`orchestrator/runner.py:1141-1147`) — pinned so a future "
+        "refactor that swaps in some OTHER exit-3 producer is caught here, not just by the exit "
+        "code, which several of the ledger's `RunBudgetExhausted` raise sites share"
     )
 
     conn = sqlite3.connect(db)

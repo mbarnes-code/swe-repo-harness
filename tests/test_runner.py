@@ -2435,3 +2435,37 @@ async def test_pre_dispatch_hook_absent_is_byte_identical_to_before_this_change(
     assert report.halt is None
     assert (await harness.phase_row("repo-a"))[0] == "SUCCEEDED"
     assert [call[3] for call in CALLS] == [UNITS]
+
+
+async def _exploding_pre_dispatch(*, repo_id: str, phase: Phase, payload: ScriptedInput) -> None:
+    raise RuntimeError(f"pre_dispatch exploded for {repo_id}")
+
+
+async def test_a_pre_dispatch_hook_that_raises_is_a_typed_failure_not_a_crash(
+    harness: Harness,
+) -> None:
+    """`_dispatch` (`runner.py`) now guards `await self._pre_dispatch(...)` in the same shape as
+    its neighbors immediately above it, `_re_entry` and `worker.execute` — both already tested
+    elsewhere in this file via `ExplodingPreconditionWorker`/`ExplodingExecuteWorker`
+    (`test_a_precondition_that_raises_is_a_typed_failure_not_a_verdict`,
+    `test_an_exception_from_execute_itself_is_also_contained`). Before this guard existed, a raise
+    from a real `pre_dispatch` hook (D89 Phase 2 Task A: `claim_task_by_id`/
+    `set_task_target_paths`, both SQLite writes through the shared writer) would escape `_dispatch`
+    uncaught — a crash, not isolation. The worker must never run behind a raising hook, the
+    failure must be typed `UNKNOWN` rather than swallowed or misclassified, and the row must be
+    left NO WORSE than before the guard was added: it degrades through the ladder exactly like
+    the sibling guards' failures, ending `REQUIRES_HUMAN_INTERVENTION` once exhausted rather than
+    stuck in some intermediate state the guard itself introduced.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [ok()]
+
+    report = await harness.runner(pre_dispatch=_exploding_pre_dispatch).run_wave(0)
+
+    assert CALLS == [], "worker.execute must never run behind a raising pre_dispatch hook"
+    assert report.outcomes["repo-a"].failure_class is FailureClass.UNKNOWN
+    status, _, _, failure_class, last_error = await harness.phase_row("repo-a")
+    assert status == "REQUIRES_HUMAN_INTERVENTION"
+    assert failure_class == "UNKNOWN"
+    assert last_error is not None and "pre_dispatch exploded" in last_error

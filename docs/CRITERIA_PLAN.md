@@ -843,10 +843,11 @@ across rounds M-R and had drifted into re-dispatch risk); further corrected 2026
 close-out, controller ruling C1 — §48 landed DONE this round and §47 was reverted from a
 same-round DONE marking back to OPEN, so both needed their "still open" framing fixed here too):**
 §5, §6, §7, §12, §15, §16, §18, §21, §26, §32 above are now **DONE** — do not re-dispatch them.
-**§48 is now DONE too** (round T, 2026-09-01) — do not re-dispatch it. Of the TEST-ONLY group's
-original membership, the still-genuinely-open items are: **20** (PR-body placeholder clause only
-— the four-DB-column part is now covered), **24** (two residuals — D62-blocked local-profile
-clause, and the run-ceiling/exit-3 clause — the ledger-sum clause is closed), **33**, **40's AST
+**§48 is now DONE too** (round T, 2026-09-01) — do not re-dispatch it. **§33 is now DONE too**
+(round U, 2026-09-01) — do not re-dispatch it. Of the TEST-ONLY group's original membership, the
+still-genuinely-open items are: **20** (PR-body placeholder clause only — the four-DB-column part
+is now covered), **24** (one residual — the D62-blocked local-profile clause; both the
+ledger-sum clause and the run-ceiling/exit-3 clause are closed, round U), **40's AST
 clause**, **42**, **44**. **§47 is OPEN again**, but no longer as a plain TEST-ONLY item — see its
 entry for the two residuals (contracts-registry fork; backends-statelessness implement-or-
 adjudicate) a future round must pick up. §10 (closed round R) and §23/§28/§1 (round S) are not
