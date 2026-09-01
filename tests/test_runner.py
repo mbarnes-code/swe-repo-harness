@@ -2359,7 +2359,9 @@ def make_local_router() -> LlmRouter:
     server: `LlmRouter` itself is profile-agnostic, and what makes a profile "local" is the
     priced-vs-free target it is built from, not anything the router does differently.
     """
-    return LlmRouter(dict(SPEC_ROLE_TIERS), dict.fromkeys(ModelTier, (free_target(),)), profile="local")
+    return LlmRouter(
+        dict(SPEC_ROLE_TIERS), dict.fromkeys(ModelTier, (free_target(),)), profile="local"
+    )
 
 
 def _local_profile_sink(harness: Harness) -> ResultSink[ScriptedOutput]:
@@ -2411,7 +2413,8 @@ async def test_a_local_profile_run_writes_a_non_empty_backend_on_every_row_at_ze
     suite for this half of §12.24 (`AttemptRow` had no `llm_backend` field at all — D62), and
     `docs/CRITERIA_PLAN.md` names it "the only remaining open item" blocking §12.24's closure.
     """
-    async for harness in _build(tmp_path, FleetConfig(), max_usd=1000.0, router=make_local_router()):
+    local_router = make_local_router()
+    async for harness in _build(tmp_path, FleetConfig(), max_usd=1000.0, router=local_router):
         await _seed(harness, "repo-a", "repo-b")
         await harness.plan(("repo-a", "repo-b"))
         # Different ROLES, not the sibling test's identical default for both repos: `role` is
