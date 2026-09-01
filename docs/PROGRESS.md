@@ -7184,3 +7184,74 @@ and replace a hand-written `TierUnavailable` message literal with a real constru
 `test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halts` (`:1755`), binding the
 fixture to the real producer so the two can never silently diverge. TEST-ONLY, no new
 infrastructure, comparable size to this round's Task 2.
+
+### Checkpoint — 2026-09-01 (round X controller, close-out)
+
+**§12 criteria met: 18 of 48** (unchanged from round W's close — this was a process-hardening
+round, not a criteria-closing one, correctly disclosed as such per Rule 13; it does not follow
+another such round, round W closed §12.44). Task 1 strengthened two existing `tests/test_runner.py`
+tests for §12.43's done bar (real status assertion instead of a discarded column; a real
+`TierUnavailable` construction instead of a hand-written message literal) — §12.43 stays
+correctly OPEN, blocked on the much larger D55/D58 circuit-breaker gap for its case (ii).
+
+**A routed finding rotted between filing and fix, and the implementer caught it rather than
+implementing it blind.** The task brief's literal instruction — assert a repo's status is
+`PENDING` immediately after a tier-outage halt, matching the test's own docstring — was measured
+false against the actual runner: the halt path deliberately leaves the phase lease to expire
+rather than writing a status, so the row genuinely reads `RUNNING` until a `fleet resume`-shaped
+reap runs. The implementer substituted two accurate assertions instead and flagged the deviation
+explicitly for the controller. Task review independently re-traced the claim against
+`runner.py`/`repository.py` source (not the implementer's account) and confirmed it exactly —
+this is CLAUDE.md's "a finding is a hypothesis, including the parts you accept, and it perishes
+between filing and fix" guardrail working as intended, from a fresh angle (a controller-authored
+brief instruction rotting, not a routed review finding).
+
+**Research this round declined to force a false parallel, and that declination is itself the
+useful finding.** Tasked with finding a D89-shaped multiplier among the seven D-number-blocked
+§12 criteria, it reported plainly that none exists at that scale — D62+D78 is the closest
+analogue (closes D78 outright, plausibly closes §12.24 outright since D62 is its sole remaining
+blocker, materially advances §12.43) but is smaller in blast radius, and said so explicitly rather
+than overselling it as "the next D89." Recommended as round Y's lead task on that honest basis.
+Also recommended §12.17 as a cheap quick-win opener (same shape as §12.41's adjudication this
+session already worked through: two costed options already stated in `docs/CRITERIA_PLAN.md`,
+just needs a pick) and D77 as the safest standalone fallback if round Y wants something
+self-contained. D55/D58's circuit breaker and D50's remaining scope were explicitly sized as NOT
+round-Y-sized — each needs its own dedicated round with a research pass first, the same shape
+D89 Phase 2 needed.
+
+**A second stale-attribution class surfaced and was corrected, and the correction itself repeated
+the class it was fixing.** Research found D80 (`docs/INTEGRATION_HONESTY.md`) has been
+`FIXED, LANDED` since round M, but `docs/CRITERIA_PLAN.md`'s Rollup row and the §38/§46 entries
+citing it as an open blocker were last touched 33 minutes *before* it landed and never revisited
+— three separate document locations, one fact, none swept when the fact changed. Also found §14's
+"(c)/(d) tracked as D50" was a flat misattribution, verified directly against `src/fleet/cli.py`:
+the real blocker is §37's already-named `--stub-blocked` stub-creation-worker gap, not D50's
+config-key thesis. The controller's own fix for both, landed in one commit, then repeated the
+exact failure mode one level down: the commit's subject line claimed it corrected §14, but the
+edit only reached the Rollup row's parenthetical — §14's own entry, the text a future worker
+actually reads for its done bar, stayed unedited and now contradicted the Rollup row landed in
+the same commit. The round's own final review caught this (finding I1) and it was fixed in a
+follow-up commit, independently verified against source rather than re-derived from the original
+research. Three rounds running now, "sweep for the class, not the reported site" has produced a
+finding — this is not a new failure mode, it is the same one recurring inside the act of fixing
+a previous instance of itself, worth naming plainly rather than treated as resolved.
+
+**Rulings made this round:**
+1. D80's stale attribution corrected without prematurely marking any sub-clause DONE — the
+   framing changed from "blocked, don't dispatch" to "unblocked, but the test coverage against
+   the landed fix needs re-auditing before either dispatching new work or claiming closure."
+2. §14 moved from "blocked on a D-number" to "everything else" (NEW-MECHANISM, same item §37
+   already names) — not a new D-number, no duplicate tracking.
+
+**Full suite: 2068 passed, 0 failed, 0 skipped.** `ruff check`/`mypy --strict` clean on the merged
+tree. `ruff format --check` remains the known pre-existing non-passing gate (123 dirty files,
+stable across several rounds now — not this round's concern, §12.2 stays correctly OPEN on this
+basis).
+
+**Round Y, opening next** — lead task per this round's own research: D62's `llm_backend`/
+`llm_failovers` leg paired with D78's `WorkerError.tier` wiring (closes D78 outright, plausibly
+closes §12.24 outright, materially advances §12.43 — the ADR-0094 `llm_cache_hit` precedent
+lowers the design risk relative to a from-scratch attribution decision). §12.17 available as a
+cheap opener if the round wants to bank a fast closure first. D77 available as a safe standalone
+fallback. D55/D58's circuit breaker and D50's remaining scope are explicitly out of round Y's
+size class.
