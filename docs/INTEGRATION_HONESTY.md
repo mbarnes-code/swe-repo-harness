@@ -7435,6 +7435,13 @@ meant to fold `RepoStatus.DEGRADED` into the "human attention needed" determinat
 `REQUIRES_HUMAN_INTERVENTION`. That design choice — and confirming which of the four sites is the
 authoritative one vs. which are derived/duplicated — is not made here.
 
+**Re-verified, round Z final review + fix wave (2026-09-01): the hedge above resolves.** `grep -n
+"RepoStatus.REQUIRES_HUMAN_INTERVENTION" src/fleet/cli.py` at current `HEAD` confirms all four
+cited lines are exact and unchanged since the original measurement — `1863`, `5060`, `8985`,
+`9201` — each an `attention = sorted(... if status is RepoStatus.REQUIRES_HUMAN_INTERVENTION)`
+exit-code determination site, each reading `RepoStatus.REQUIRES_HUMAN_INTERVENTION` only, no
+`RepoStatus.DEGRADED` check at any of the four.
+
 ## D94 — OPEN. No mechanism exists to promote an already-open PR to ready (rebase, force-push, body regeneration) — §12.38's "resolution" sub-clause has no code to test
 
 **Found by round Z task 2 (2026-09-01), same investigation as D92/D93 — disclosed, not fixed, out
