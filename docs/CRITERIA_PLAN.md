@@ -743,22 +743,22 @@ this round; four remain open (not this round's scope). Do not count §12.42 towa
 tally — the criterion as a whole is still open.
 
 ## 43. Failover layered, bounded, fail-closed
-**OPEN — mixed, sub-clauses closing incrementally — TEST-ONLY + known D55/D58; D62/D78 legs
-closed.** Case (ii) is entirely absent, blocked on D55/D58's circuit-breaker gap (explicitly out
-of round-Y's size class, needs its own dedicated round). **`llm_failovers` recording (D62) is now
-closed** (round Y task 4, ADR-0107): `TokenUsage.llm_failovers` is stamped from
-`LadderModelClient.complete()`'s own retry-loop index, wired through `AttemptRow`/
-`record_attempt`, with a §12.43-case-(i)-shaped test in
-`tests/test_llm_backend_failover_attribution.py` proving the CONNECTION-trigger shape. **The two
-independently-actionable gaps this entry previously named are also closed** (round X task 1):
-`tests/test_runner.py`'s outage test now destructures and asserts the status column instead of
-discarding it, and a sibling test constructs a real `TierUnavailable` and asserts the message it
-actually produces. `TierUnavailable`'s message-provenance/tier-attribution honesty fields
-(D78) status pending final confirmation — check D78's own entry once it lands before updating
-this line further.
-**Done bar (remaining):** case (ii) stays blocked on D55/D58 — the large remaining piece. Re-check
-whether D78's landed fix (once confirmed) also closes any part of this criterion's honesty-field
-sub-clauses, per that task's own report.
+**OPEN — case (ii) is the sole remaining blocker, everything else in this entry closed.** Case
+(ii) is entirely absent, blocked on D55/D58's circuit-breaker gap (explicitly out of round-Y's
+size class, needs its own dedicated round). `llm_failovers` recording (D62) closed round Y task 4
+(ADR-0107): `TokenUsage.llm_failovers` is stamped from `LadderModelClient.complete()`'s own
+retry-loop index, wired through `AttemptRow`/`record_attempt`, with a §12.43-case-(i)-shaped test
+in `tests/test_llm_backend_failover_attribution.py` proving the CONNECTION-trigger shape. The two
+independently-actionable status/message tests this entry previously named closed round X task 1.
+**`TierUnavailable`'s message-provenance/tier-attribution honesty fields (D78) closed round Y
+task 3**: `WorkerError` gained a `tier` field, `_error_for` populates it from a real
+`TierUnavailable`, `PhaseRunner._drive` forwards it into `record_backend_unavailable` —
+`payload["failover_triggers_scope"]` can now genuinely read `"tier"` in production instead of
+always `"run"`, independently confirmed by task review inferring the closure straight from the
+diff's own data flow (no separate end-to-end test drives a real `TierUnavailable` through the
+whole `_drive` path in one run; the two halves — `_error_for` populates, `_drive` forwards — are
+proven separately, which is sufficient since neither has untested branching between them).
+**Done bar (remaining):** case (ii) only — the D55/D58 circuit-breaker gap.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
