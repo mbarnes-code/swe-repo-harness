@@ -42,6 +42,7 @@ from fleet.state.repository import (
     EventRow,
     FloorSnapshotStaleError,
     LeaseStolenError,
+    PhaseTransitionRefusedError,
     ReadOnlyRepository,
     RepoBudgetRefusedError,
     RepositoryError,
@@ -382,6 +383,76 @@ async def test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_state
     assert row.attempts == 2
     assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
     assert row.last_error == "bazel test //...: 3 failures"
+
+
+async def test_complete_phase_refuses_an_illegal_transition_instead_of_writing_it(
+    db_path: Path,
+) -> None:
+    """§12 item 46 / D77-shape: the reaper's RHI leg (`complete_phase`'s escalation to
+    `REQUIRES_HUMAN_INTERVENTION`) must be validated against `ALLOWED_TRANSITIONS` through
+    `transition()`, not written as raw SQL no legality gate ever sees.
+
+    The race this proves against is not hypothetical, and is reproduced with the real production
+    write it names: D77's own fix, `SqliteSchedulerStore.append_blocked_by`, legally moves a
+    still-`RUNNING` phase to `BLOCKED` (`ALLOWED_TRANSITIONS[RUNNING]` contains `BLOCKED`)
+    WITHOUT bumping `lease_fence` — the fence is the worker's identity for its *own* fenced
+    writes, and `append_blocked_by` is not one of them. So a worker's completion, still holding
+    that fence, can race it. `ALLOWED_TRANSITIONS[BLOCKED]` is `{PENDING, SKIPPED}`, so
+    `BLOCKED -> REQUIRES_HUMAN_INTERVENTION` — exactly the RHI-escalation leg — is illegal, and
+    `complete_phase` must refuse it rather than silently write it.
+    """
+    from fleet.orchestrator.scheduler import SqliteSchedulerStore
+
+    async with StateWriter(db_path, owner="test-writer") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            store = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            scheduler_store = SqliteSchedulerStore(writer=writer, read_conn=read_conn)
+            await store.upsert_run(
+                RUN, started_at=NOW, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await store.upsert_repo(
+                REPO, name=REPO, url=f"https://example.invalid/{REPO}.git", now=NOW
+            )
+            await store.upsert_phase(RUN, REPO, Phase.VERIFY, now=NOW, max_attempts=1)
+
+            fence = await store.acquire_phase_lease(
+                RUN, REPO, Phase.VERIFY, owner=WORKER, now=NOW, lease_ttl_s=300
+            )
+            assert fence is not None
+
+            touched = await scheduler_store.append_blocked_by(
+                RUN, REPO, "acme-abandoned-ancestor", now=NOW
+            )
+            assert touched == 1, "the race requires the RUNNING phase to actually flip to BLOCKED"
+            raced = await store.get_phase(RUN, REPO, Phase.VERIFY)
+            assert raced is not None
+            assert raced.status is RepoStatus.BLOCKED
+            assert raced.lease_fence == fence, "the race must not have touched the fence"
+
+            # The worker, unaware, completes under its still-valid fence. `attempts=0`,
+            # `max_attempts=1` makes this the RHI-escalation leg: `complete_phase` computes
+            # target=REQUIRES_HUMAN_INTERVENTION, and BLOCKED -> REQUIRES_HUMAN_INTERVENTION is
+            # not in ALLOWED_TRANSITIONS[BLOCKED].
+            with pytest.raises(PhaseTransitionRefusedError):
+                await store.complete_phase(
+                    RUN,
+                    REPO,
+                    Phase.VERIFY,
+                    fence=fence,
+                    status=RepoStatus.PENDING,
+                    now=NOW,
+                    last_error="bazel test //...: 1 failure",
+                )
+
+            after = await store.get_phase(RUN, REPO, Phase.VERIFY)
+            assert after is not None
+            assert after.status is RepoStatus.BLOCKED, "the illegal write must not have landed"
+            assert after.attempts == 0, "a refused transition must not spend a ladder rung"
+            assert after.last_error is None, "a refused transition must not overwrite last_error"
+            assert after.lease_fence == fence, "a refusal must not touch the fence either"
+        finally:
+            await read_conn.close()
 
 
 async def test_complete_phase_redacts_a_credential_in_last_error_before_the_write(

@@ -158,6 +158,21 @@ class LeaseStolenError(RepositoryError):
     """
 
 
+class PhaseTransitionRefusedError(LeaseStolenError):
+    """`complete_phase` found its fenced row, but `transition()` refuses old status -> target.
+
+    A subclass, not a sibling, so every existing `except LeaseStolenError:` caller (§6's "abort
+    without touching git" contract) still catches this without a code change — the safe response
+    is identical: something wrote this row out from under the held fence (D77's shape, e.g.
+    `SqliteSchedulerStore.append_blocked_by` legally moving a still-RUNNING phase to `BLOCKED`
+    per `ALLOWED_TRANSITIONS[RUNNING]`), so the caller's assumed prior state no longer holds and
+    it must not proceed as if this completion landed. Kept distinct from `LeaseStolenError`
+    itself, and not raised with `LeaseStolenError`'s own message, because the fence was NOT
+    bumped and the lease was NOT reclaimed here — the row simply moved, so a message claiming
+    either would be false (Rule 11 fail-loud discipline: never mislabel a refusal's cause).
+    """
+
+
 class BudgetRefusedError(RepositoryError):
     """A budget CAS matched zero rows (§6 "RESERVATION (normative)").
 
@@ -1450,10 +1465,28 @@ class SqliteStateRepository:
         `status='REQUIRES_HUMAN_INTERVENTION'` in the same statement". That escalation applies
         to the retry hand-back (`status=PENDING`) only — a phase that SUCCEEDED on its last
         allowed attempt succeeded. Doing it in one statement is the point: a read-then-decide
-        would let the ladder run one rung past its ceiling.
+        would let the ladder run one rung past its ceiling — the SELECT and the UPDATE below
+        still run inside the SAME `unit`, i.e. the same `BEGIN IMMEDIATE`, so no other write can
+        interleave between reading `attempts`/`max_attempts` and landing the increment.
 
-        Raises `LeaseStolenError` on `rowcount == 0` (CLAUDE.md Rule 11 — the caller must abort
-        without touching git).
+        Raises `LeaseStolenError` on `rowcount == 0` — a genuinely stale fence (CLAUDE.md Rule
+        11 — the caller must abort without touching git). Raises `PhaseTransitionRefusedError`
+        (a `LeaseStolenError` subclass, same "abort without touching git" contract) when the
+        fenced row IS found but `transition()` refuses old status -> target: this is §12 item
+        46's "reaper RHI leg", closed the D77 way — the escalation target (whatever `status`
+        resolves to, including the `REQUIRES_HUMAN_INTERVENTION` escalation below) is validated
+        against `ALLOWED_TRANSITIONS` through the real gate rather than written as raw SQL that
+        no `ALLOWED_TRANSITIONS` test binds. In ordinary operation the row is `RUNNING` here —
+        `acquire_phase_lease` is the only writer of this fence and it only ever grants one from
+        `PENDING`, and every legal target this method is ever called with (`PENDING`, `SUCCEEDED`,
+        `REQUIRES_HUMAN_INTERVENTION`) is in `ALLOWED_TRANSITIONS[RUNNING]` — so this refusal is
+        not expected to fire in the field. It exists because it is not IMPOSSIBLE: D77's own fix
+        (`SqliteSchedulerStore.append_blocked_by`) can legally move a still-`RUNNING` phase to
+        `BLOCKED` (also in `ALLOWED_TRANSITIONS[RUNNING]`) without bumping this fence, and
+        `ALLOWED_TRANSITIONS[BLOCKED]` does not contain `REQUIRES_HUMAN_INTERVENTION` or
+        `SUCCEEDED` — so a worker's completion racing that propagation is the one theoretical
+        window where this leg fires. Refusing loudly (via the existing `LeaseStolenError` catch
+        every caller already has) beats writing a status the state model forbids.
 
         `last_error` is redacted HERE, at the write boundary (SPEC §11.4, D88): a caller's
         `stderr_tail` is redacted at subprocess-capture time (`util/proc.py`), but the generic
@@ -1468,35 +1501,51 @@ class SqliteStateRepository:
         nesting a second placeholder — the result still never contains the original secret, but
         it is not byte-identical to a single pass. Out of scope here; see `tests/test_obs.py`.
         """
-        escalates = 1 if status is RepoStatus.PENDING else 0
-        sql = (
+        stamp = _iso(now)
+        redacted = None if last_error is None else redact_text(last_error)
+        select_sql = (
+            "SELECT status, attempts, max_attempts FROM phases "
+            " WHERE run_id = ? AND repo_id = ? AND phase = ? AND lease_fence = ?"
+        )
+        update_sql = (
             "UPDATE phases "
-            "   SET attempts = attempts + 1, "
-            "       status = CASE WHEN ? = 1 AND attempts + 1 >= max_attempts "
-            "                     THEN 'REQUIRES_HUMAN_INTERVENTION' ELSE ? END, "
-            "       last_error = ?, lease_owner = NULL, lease_expires_at = NULL, "
-            "       heartbeat_at = NULL, updated_at = ? "
-            " WHERE run_id = ? AND repo_id = ? AND phase = ? AND lease_fence = ? "
-            "RETURNING status"
-        )
-        params = (
-            escalates,
-            str(status),
-            None if last_error is None else redact_text(last_error),
-            _iso(now),
-            run_id,
-            repo_id,
-            int(phase),
-            fence,
+            "   SET attempts = attempts + 1, status = ?, last_error = ?, lease_owner = NULL, "
+            "       lease_expires_at = NULL, heartbeat_at = NULL, updated_at = ? "
+            " WHERE run_id = ? AND repo_id = ? AND phase = ? AND lease_fence = ?"
         )
 
-        async def unit(conn: aiosqlite.Connection) -> str | None:
-            async with conn.execute(sql, params) as cursor:
-                rows = list(await cursor.fetchall())
-            return None if not rows else str(rows[0][0])
+        async def unit(conn: aiosqlite.Connection) -> tuple[str | None, bool]:
+            async with conn.execute(
+                select_sql, (run_id, repo_id, int(phase), fence)
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None:
+                return None, False
+            current = RepoStatus(str(row[0]))
+            attempts, max_attempts = int(row[1]), int(row[2])
+            escalate = status is RepoStatus.PENDING and attempts + 1 >= max_attempts
+            target = RepoStatus.REQUIRES_HUMAN_INTERVENTION if escalate else status
+            try:
+                transition(current, target)
+            except ValueError:
+                return None, True
+            await conn.execute(
+                update_sql,
+                (str(target), redacted, stamp, run_id, repo_id, int(phase), fence),
+            )
+            return str(target), False
 
-        written = await self._writer.submit(unit)
+        written, illegal = await self._writer.submit(unit)
         if written is None:
+            if illegal:
+                raise PhaseTransitionRefusedError(
+                    f"phase transition REFUSED: complete on phases({run_id}, {repo_id}, "
+                    f"phase={int(phase)}) with fence {fence} found the row but the completion's "
+                    "target status is not reachable from its current status per "
+                    "ALLOWED_TRANSITIONS — the fence was NOT bumped and no lease was reclaimed; "
+                    "something else (legally) moved this row's status under the held fence. "
+                    "Abort NOW, without touching git or the worktree (§6 FENCING)."
+                )
             raise LeaseStolenError(_stolen(run_id, repo_id, phase, fence, "complete"))
         return RepoStatus(written)
 
