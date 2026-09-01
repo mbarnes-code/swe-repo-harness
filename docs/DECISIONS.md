@@ -12342,9 +12342,12 @@ gave for its own alternatives.
 
 **Decision.** `docs/SPEC.md`'s §12 item 41 says the local profile's `CHEAP` targets "declare
 `supports_json_schema: false` and `supports_tools: false`." `config/models.yaml`'s actual `CHEAP`
-entry omits both keys from `capabilities_override` entirely — deliberately, per its own in-file
-comment. The SPEC sentence is adjudicated as a wording-precision issue, not a behavior gap, and
-corrected via a dated marker on the SPEC sentence rather than a config change.
+entry omits both keys from `capabilities_override` entirely. Its in-file comment documents that
+CHEAP deliberately lacks structured-output *support* (the capability) — it does not speak to the
+declare-vs-omit wording choice itself; that the choice is immaterial is this ADR's own finding
+(traced below via `merge_capabilities`), not something the comment states. The SPEC sentence is
+adjudicated as a wording-precision issue, not a behavior gap, and corrected via a dated marker on
+the SPEC sentence rather than a config change.
 
 **Rationale.** Traced the full mechanism, not assumed: `ModelCapabilities`
 (`src/fleet/models/tasks.py:94-108`) declares `supports_tools`/`supports_json_schema` as `False`
@@ -12356,24 +12359,43 @@ does a dict overlay: keys present in `capabilities_override` replace the declare
 **absent** fall through to whatever `declared` already had. `CHEAP`'s `capabilities_override` is
 `{max_output_tokens: 8192}` — it names neither field, so both fall through to the already-`False`
 floor. The merged result is byte-identical to an explicit `false` declaration. `negotiate()`
-(`client.py:466-476`) only ever reads the final merged booleans; nothing in the pipeline
+(`client.py:467-477`) only ever reads the final merged booleans; nothing in the pipeline
 distinguishes "declared false" from "defaulted false because omitted." The distinction SPEC's
 wording implies does not exist as an observable behavior anywhere in this pipeline for this
-target. `docs/SPEC.md:6605` (an unrelated example block) does spell the same non-declaration out
-explicitly as `false` — SPEC is internally inconsistent in how it presents the identical
-non-declaration, which is further evidence this is a wording slip, not two different designs.
+target.
+
+`docs/SPEC.md`'s own `config/models.yaml` **listing** (the `local` profile's `CHEAP` target,
+currently around lines 6602-6606, explicitly cross-referenced to §12.41 a few lines above at line
+6588 — "§12.41 asserts a full fixture pipeline completes under this profile with no network")
+does spell the same non-declaration out explicitly as `false`. This is **not** merely SPEC being
+internally inconsistent about the same non-declaration, as an earlier draft of this ADR framed
+it — it is SPEC-listing-vs-shipped-config **drift**. The real `config/models.yaml` differs from
+that SPEC listing in several fields beyond the two capabilities keys: `model_id` (`local-cheap` in
+the SPEC listing vs. `qwen3-1.7b` in the shipped file), the `base_url` port (`:8001` in the SPEC
+listing vs. `:8000` in the shipped file), `api_key_env` (declared `LOCAL_LLM_API_KEY` in the SPEC
+listing, absent from the shipped file's target), and `max_context` (declared `8192` in the SPEC
+listing's `capabilities_override`, absent from the shipped file's `capabilities_override`, which
+declares only `max_output_tokens`). The SPEC listing is a stale illustrative example that has
+drifted from the shipped file's exact contents in general, not a second, differently-adjudicated
+design for these two capability fields specifically — the capabilities-key wording slip §12.41
+names is one instance of that broader drift.
 
 **What changed and what didn't.** The SPEC sentence's mechanism description ("declare... false")
 is corrected to describe the real mechanism (omit, fall through to the backend's declared floor).
 The criterion's substantive claim — CHEAP genuinely lacks structured-output capability at
 negotiation time, forcing every classification call down to `PROMPTED` — is unchanged and holds
 exactly as stated; nothing about the pipeline's actual behavior changes, and `config/models.yaml`
-is not touched (its omission was already correct and is now correctly described).
+is not touched (its omission was already correct and is now correctly described). A second dated
+marker, in the same style as the §12.41 marker, is added at the `config/models.yaml` example
+listing itself (`docs/SPEC.md`, the `local` profile's `CHEAP` target) pointing at this ADR, since
+that listing is the site that is actually stale relative to the shipped file — the criterion text
+was imprecise, but the listing has drifted outright.
 
 **Alternatives rejected.** *Add explicit `false` declarations to `config/models.yaml`'s CHEAP
-entry to match SPEC's literal wording* — rejected: the omission is deliberate and already
-documented in-file with a real architectural rationale (the comment beside `CHEAP` in
-`config/models.yaml` explains why declaring vs. omitting doesn't matter here); adding two
-redundant explicit-`false` keys would be pure churn to make code match a SPEC sentence that was
-imprecise, the wrong direction per this project's own stated rule ("building to match the
-criterion is the only legitimate closure direction — the reverse... is not").
+entry to match SPEC's literal wording* — rejected: the comment beside `CHEAP` in
+`config/models.yaml` documents that the target deliberately lacks structured-output support; that
+declaring vs. omitting the two booleans has no observable effect is this ADR's own traced finding
+(`merge_capabilities`'s dict overlay, above), not something the comment itself asserts. Either
+way, adding two redundant explicit-`false` keys would be pure churn to make code match a SPEC
+sentence that was imprecise, the wrong direction per this project's own stated rule ("building to
+match the criterion is the only legitimate closure direction — the reverse... is not").

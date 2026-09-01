@@ -6599,6 +6599,12 @@ profiles:
       - { backend: openai_compatible, model_id: local-workhorse, effort: medium, price: free,
           base_url: "http://localhost:11434/v1", api_key_env: LOCAL_LLM_API_KEY,
           weight: 0 }                             # standby: a second local server, e.g. Ollama
+    # DATED MARKER, 2026-09-01 (round W, ADR-0105): this CHEAP target is an illustrative EXAMPLE
+    # that has drifted from the real config/models.yaml — model_id, the base_url port,
+    # api_key_env, and max_context all differ from the shipped file, and the shipped file OMITS
+    # supports_json_schema/supports_tools rather than declaring them false (byte-identical
+    # negotiated behavior either way, traced in ADR-0105). Do not read this listing as the
+    # shipped file's exact current contents.
     CHEAP:
       - { backend: openai_compatible, model_id: local-cheap,     effort: low,  price: free,
           base_url: "http://localhost:8001/v1", api_key_env: LOCAL_LLM_API_KEY,

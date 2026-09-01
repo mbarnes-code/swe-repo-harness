@@ -2762,7 +2762,7 @@ ever being reachable from a config file per point 1 above.
 > **[Dated note, 2026-09-01, round W research — heading moved to FIXED, LANDED, this is not a
 > new leg.]** Re-verified against `HEAD` independently of this entry's own prose: `9a7148c`
 > ("fix(D49): `_record` appends landed `FilePatch.path`, not the unit name") is an ancestor of
-> `HEAD`, `_record` (`workers/rewrite.py:584-600`) now appends `patch.path` at both call sites,
+> `HEAD`, `_record` (`workers/rewrite.py:584-602`) now appends `patch.path` at both call sites,
 > and the fix is pinned by a genuinely discriminating multi-file test
 > (`tests/test_workers_transform.py:918-957`,
 > `test_a_multi_file_repair_records_every_landed_path_not_just_the_unit`). This closes the
@@ -2773,7 +2773,11 @@ ever being reachable from a config file per point 1 above.
 > max_patch_bytes`'s default) are still true and still real, but the entry's own author already
 > framed them as minors separate from D49's "legs," not reasons to keep the heading open — if a
 > future round wants to close them, that is a small standalone TEST-ONLY task, not a reopening of
-> D49.
+> D49. **See D52:** `9a7148c` — the very commit this note cites as closing D49's last leg — itself
+> caused a Critical regression (silently reopened `check_diff`'s §3.2 subtree-escape gate for one
+> commit), fixed two commits later in `2976a7e`. D52 is closed and does not reopen D49, but a
+> reader following this note's citation to `9a7148c` should know the commit's own history before
+> treating it as an unqualified good state.
 
 ---
 

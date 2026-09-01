@@ -871,11 +871,14 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
-Note on §12.40's DONE marking: its dominant clause (no model string outside `config/`, structurally)
-is closed; the AST sub-clause (M1) is still open and small. This file counts criteria as DONE only
-when their full stated text passes — §12.40 is the one deliberate exception, flagged here rather
-than silently overstating the Rule 13 checkpoint count. If in doubt when reporting the `<n> of 48`
-figure, count §12.40 as OPEN until M1 lands, and prefer under-counting to over-counting.
+Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
+this file used to count §12.40 as DONE only for its dominant clause (no model string outside
+`config/`, structurally) while the AST sub-clause (M1) was still open, and flagged it as the one
+deliberate exception to this file's "DONE only when the full stated text passes" rule, instructing
+readers to count §12.40 as OPEN until M1 landed. **M1 landed round V, 2026-09-01**
+(`tests/test_models_yaml_ast.py` — see §12.40's own entry above, which now reads DONE in full and
+retires the exclusion marker itself). §12.40 is counted normally as DONE in the Rollup table above;
+there is no longer any reason to exclude it when reporting the `<n> of 48` figure.
 
 **Recommended dispatch order, cheapest-and-highest-leverage first (updated 2026-08-30 — §12.27's
 COORDINATE leg closed by round L, superseding the original §12.27+§12.37 pairing below;
@@ -886,7 +889,7 @@ table's WIRING row above — leave it out of any WIRING batch, it needs its own 
 §12.7 (one-line SPEC correction, substance already passes) → the TEST-ONLY items (5, 6, 15, 20,
 21, 24, 26, 32, 33, 40's AST clause, 42, 44, 48) → §47's two residuals (contracts-registry fork
 and backends-statelessness implement-or-adjudicate — see §47's entry, neither is plain TEST-ONLY
-any more per controller ruling C1) → SCALE-FIXTURE items → SPEC-ADJUDICATION items (17, 41, 45's
+any more per controller ruling C1) → SCALE-FIXTURE items → SPEC-ADJUDICATION items (17, 45's
 regex half already done) → NEW-MECHANISM items (22's RSS half, 27's DEST_PATH/FILE_PATH legs,
 37 — each needs its own D-number first, 31, 34) last, since they're the most expensive and least
 likely to be quick wins.
@@ -898,10 +901,11 @@ same-round DONE marking back to OPEN, so both needed their "still open" framing 
 §5, §6, §7, §12, §15, §16, §18, §21, §26, §32 above are now **DONE** — do not re-dispatch them.
 **§48 is now DONE too** (round T, 2026-09-01) — do not re-dispatch it. **§33 is now DONE too**
 (round U, 2026-09-01) — do not re-dispatch it. Of the TEST-ONLY group's original membership, the
-still-genuinely-open items are: **20** (PR-body placeholder clause only — the four-DB-column part
-is now covered), **24** (one residual — the D62-blocked local-profile clause; both the
-ledger-sum clause and the run-ceiling/exit-3 clause are closed, round U), **40's AST
-clause**, **42**, **44**. **§47 is OPEN again**, but no longer as a plain TEST-ONLY item — see its
+still-genuinely-open items are: **24** (one residual — the D62-blocked local-profile clause; both
+the ledger-sum clause and the run-ceiling/exit-3 clause are closed, round U) and **42** (5 of 9
+sub-clauses, per its own entry). **20** and **40's AST clause** closed round V and **44** closed
+round W — all three are now DONE, see the Rollup table and their own entries; they are no longer
+part of this "still-genuinely-open" list. **§47 is OPEN again**, but no longer as a plain TEST-ONLY item — see its
 entry for the two residuals (contracts-registry fork; backends-statelessness implement-or-
 adjudicate) a future round must pick up. §10 (closed round R) and §23/§28/§1 (round S) are not
 part of the original list above and should be checked against their own `docs/PROGRESS.md`
