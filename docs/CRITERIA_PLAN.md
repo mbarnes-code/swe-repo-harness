@@ -260,6 +260,26 @@ parts are independently actionable now, neither blocked on D50.
 NOT retire any of D50's `KNOWN_INERT` keys — `transform.ladder.context_policy` genuinely stays
 inert; §13 simply never needed it wired to prove this sub-clause.
 
+**Closed, round AA task 1 (2026-09-01, `bca81a1`).** The 5-rung sub-clause and the
+`ValidationError`-at-construction test are both landed. The `ValidationError` test was NOT
+"likely already covered" as this entry previously guessed — `grep -rn "TransformSection"
+tests/*.py` returned nothing before this task; `tests/test_settings.py` now covers both the
+length-mismatch and the rung-0-shape refusal, plus the positive case, via real construction
+(not the config loader). The row-count test could not be built as a `fleet transform` CLI e2e
+test as this Done bar originally suggested: investigation found `--deterministic-only`
+structurally caps a run at exactly 1 attempt regardless of configured ladder length
+(`cli.py:3485-3489`,`:3588`), so a real 5-attempt run cannot be driven through the CLI without a
+live LLM backend. Built instead at the `PhaseRunner`+`RetryPolicy` level
+(`tests/test_runner.py`), matching the existing 3-rung escalation tests' own architecture —
+Rule-12 mutation-proven (`LadderState.exhausted`'s `>=`→`>`, task review independently
+reproduced the same failure). **Disclosed residual, not itself part of this sub-clause and not
+fixed here:** a REAL (non-`--deterministic-only`) 5-rung run would still repeat rung 3's tier for
+rungs 4-5, since `TIER_LADDER`/`DEFAULT_LADDER` are hardcoded 3-tuples reading no config —
+flagged for a possible future sub-clause or D-number, orthogonal to the row-count property this
+task closed (confirmed independent by both the implementer and task review).
+**§13 stays OPEN**: only the atomicity sub-clause (a real interruption test) remains — its own
+Done bar text above is unchanged and still accurate.
+
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
 and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
