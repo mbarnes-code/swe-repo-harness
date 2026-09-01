@@ -895,6 +895,7 @@ def test_layout_resolves_a_real_destination_through_the_registry() -> None:
 
 
 def test_repointing_one_adapters_monorepo_dir_moves_every_destination(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """§13 row 33's mechanical form: re-point `NPM`'s `monorepo_dir` from `ts` to `js` and every
@@ -903,19 +904,54 @@ def test_repointing_one_adapters_monorepo_dir_moves_every_destination(
     **Why:** this is the only executable version of §1's claim that language knowledge lives in
     one file. If any caller had copied the string, this test would still pass for `layout()` and
     fail for the SCC label — which is exactly the drift it is here to catch.
+
+    **Why the `BuildTarget.package` leg too, and why it is driven off a real fixture repo:**
+    `layout()` and `scc_label()` are two independent computations that could still both read
+    `monorepo_dir` correctly while the actual `BuildUnit` a driver builds for Phase 3 carried a
+    hand-typed or stale `dest` — `BuildTarget.package` is `unit.dest` verbatim
+    (`ecosystems/js.py:683` etc.), copied with no re-derivation, so nothing here would notice a
+    caller that stopped threading `layout()`'s answer into the unit it builds. Driving `dest`
+    through a REAL `package.json` parsed by the real `NpmAdapter` — the same style
+    `tests/test_manifests.py` uses for every adapter's parse tests — and then into
+    `adapter.generate_targets()` closes that gap: this only passes if `layout()`,
+    `generate_targets()` and `scc_label()` all resolve through the SAME re-pointed adapter, on a
+    node built from bytes on disk rather than a synthetic string.
     """
     from fleet.ecosystems.js import JsAdapter
+    from fleet.manifests.npm import NpmAdapter
 
-    node = LayoutNode(node_id="ui", ecosystem=Ecosystem.NPM)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "index.ts").write_text(
+        "export const version = '1.0.0';\n", encoding="utf-8"
+    )
+    package_json = tmp_path / "package.json"
+    package_json.write_text(
+        json.dumps({"name": "@acme/ui", "version": "1.0.0"}), encoding="utf-8"
+    )
+    coordinate = NpmAdapter().publishes(package_json)
+    assert coordinate is not None, "a real package.json must yield a real published Coordinate"
+
+    node = LayoutNode(node_id="ui", ecosystem=Ecosystem.NPM, published=coordinate)
     scc_id = "scc:0f3a1b2c3d4e5f60"
-    assert layout(node, ecosystems).startswith("ts/")
+
+    def _package_of(dest: str) -> str:
+        unit = _unit("ui", Ecosystem.NPM, dest, srcs=["src/index.ts"], published=coordinate)
+        library = ecosystems.for_ecosystem(Ecosystem.NPM).generate_targets(unit)[0]
+        assert library.rule == "ts_project"
+        return library.package
+
+    dest = layout(node, ecosystems)
+    assert dest == "ts/acme/ui"
     assert scc_label(Ecosystem.NPM, scc_id, ecosystems).startswith("//ts/_scc/")
+    assert _package_of(dest) == "ts/acme/ui"
 
     monkeypatch.setattr(JsAdapter, "monorepo_dir", "js")
-    assert layout(node, ecosystems) == "js/ui"
+    dest = layout(node, ecosystems)
+    assert dest == "js/acme/ui"
     assert scc_label(Ecosystem.NPM, scc_id, ecosystems) == (
         "//js/_scc/scc_0f3a1b2c3d4e5f60:scc_0f3a1b2c3d4e5f60"
     )
+    assert _package_of(dest) == "js/acme/ui"
     assert ecosystems.monorepo_dirs()[Ecosystem.NPM] == "js"
 
 
