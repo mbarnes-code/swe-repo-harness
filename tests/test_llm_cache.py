@@ -371,6 +371,104 @@ def test_a_failover_answer_is_stored_under_the_target_that_actually_answered() -
     assert stored.record.backend == STANDBY.backend
 
 
+def _profile_router(profile_target: BackendTarget) -> LlmRouter:
+    """A router for ONE `--profile`: a single target for the role, never a failover pair. §12.44
+    sub-clauses A-D are about an operator switching `--profile default` / `--profile local` —
+    two DIFFERENT `LlmRouter`s over the same role — which is a distinct hazard from the failover
+    case above (one route, two targets) that `test_a_failover_answer_is_stored_under_the_target_
+    that_actually_answered` already covers."""
+    return LlmRouter(
+        {ROLE: ModelTier.CHEAP}, {ModelTier.CHEAP: (profile_target,)}, required_roles=(),
+    )
+
+
+# `model_id` and `effort` are IDENTICAL across the two profiles, deliberately: PRIMARY/STANDBY
+# above differ in `model_id` too, so a defect that dropped `backend` from the key alone would
+# still be caught by `model_id` and stay invisible. These two isolate `backend` as the SOLE
+# difference, matching §12 item 44's own wording ("two distinct `llm_cache` rows exist (distinct
+# because `backend` is a cache-key component)") — a real discriminator for that one component.
+DEFAULT_PROFILE_TARGET = target("anthropic", "shared-model-id")
+LOCAL_PROFILE_TARGET = target("openai_compatible", "shared-model-id")
+
+LOCAL_ANSWER = RepoClassification(
+    ecosystem="npm", is_library=False, confidence=0.4, rationale="package.json present"
+)
+
+
+def test_two_profiles_share_no_cache_row_and_neither_leaks_into_the_other() -> None:
+    """SPEC §12.44 sub-clauses A-D (ADR-0023, §11.6). One fixture call issued under
+    `--profile default` (routed to `DEFAULT_PROFILE_TARGET`, the `anthropic` backend), then the
+    IDENTICAL call under `--profile local` (routed to `LOCAL_PROFILE_TARGET`, the
+    `openai_compatible` backend) — two separate `LlmRouter`s sharing one `llm_cache` store,
+    exactly as an operator's `--profile` switch would share the on-disk table between runs.
+
+    The two profiles are given DIFFERENT canned answers (`ANSWER` / `LOCAL_ANSWER`) so "neither
+    response is ever served under the other profile" (C) is checked by VALUE, not merely by call
+    count — a poisoned cache that happened to return an equal-looking object would still pass a
+    count-only check.
+    """
+    store = MemoryLlmCacheStore()
+    default_router = _profile_router(DEFAULT_PROFILE_TARGET)
+    local_router = _profile_router(LOCAL_PROFILE_TARGET)
+    default_inner = FakeClient(answered_by=DEFAULT_PROFILE_TARGET, value=ANSWER)
+    local_inner = FakeClient(answered_by=LOCAL_PROFILE_TARGET, value=LOCAL_ANSWER)
+    default_client = CachingModelClient(default_inner, default_router, store, now=Clock())
+    local_client = CachingModelClient(local_inner, local_router, store, now=Clock())
+
+    # First run, `--profile default`: a cold cache, so the backend is actually called. B (half 1):
+    # a fresh call is a miss — `attempts.llm_cache_hit` is `TokenUsage.all_served_from_llm_cache`
+    # (`models/tasks.py`), the value that column actually takes.
+    first = asyncio.run(default_client.complete(ROLE, MESSAGES, RepoClassification))
+    assert default_inner.calls == [ROLE]
+    assert first.value == ANSWER
+    assert first.usage.all_served_from_llm_cache is False
+
+    # The identical call, `--profile local`: MUST still call its own backend, not replay
+    # `default`'s stored answer (B half 2: also a miss; C: no cross-profile leak).
+    second = asyncio.run(local_client.complete(ROLE, MESSAGES, RepoClassification))
+    assert local_inner.calls == [ROLE], (
+        "the local profile must miss, not replay the default's answer"
+    )
+    assert second.value == LOCAL_ANSWER, "the local profile's own answer, not the default's"
+    assert second.usage.all_served_from_llm_cache is False
+
+    # A: two DISTINCT `llm_cache` rows exist, keyed apart by `backend` ALONE — `model_id` and
+    # `effort` are identical between the two targets (see the module-level comment above).
+    default_key = _parts(
+        backend=DEFAULT_PROFILE_TARGET.backend,
+        model_id=DEFAULT_PROFILE_TARGET.model_id,
+        effort=DEFAULT_PROFILE_TARGET.effort,
+    ).compute()
+    local_key = _parts(
+        backend=LOCAL_PROFILE_TARGET.backend,
+        model_id=LOCAL_PROFILE_TARGET.model_id,
+        effort=LOCAL_PROFILE_TARGET.effort,
+    ).compute()
+    assert default_key != local_key
+    default_row = asyncio.run(store.get(default_key))
+    local_row = asyncio.run(store.get(local_key))
+    assert default_row is not None
+    assert local_row is not None
+    assert len(store) == 2
+    assert default_row.record.backend == DEFAULT_PROFILE_TARGET.backend
+    assert local_row.record.backend == LOCAL_PROFILE_TARGET.backend
+
+    # D: re-running EITHER profile a second time is a hit — cost_usd = 0 and the backend is not
+    # called again — and still returns that profile's own answer, not the other's (C, restated
+    # on the replay path rather than the fresh-call path).
+    third = asyncio.run(default_client.complete(ROLE, MESSAGES, RepoClassification))
+    assert default_inner.calls == [ROLE], "a hit must not call the backend again"
+    assert third.usage.cost_usd == 0.0
+    assert third.usage.all_served_from_llm_cache is True
+    assert third.value == ANSWER
+
+    fourth = asyncio.run(local_client.complete(ROLE, MESSAGES, RepoClassification))
+    assert local_inner.calls == [ROLE], "a hit must not call the backend again"
+    assert fourth.usage.cost_usd == 0.0
+    assert fourth.usage.all_served_from_llm_cache is True
+    assert fourth.value == LOCAL_ANSWER
+
+
 def test_a_route_cannot_send_one_model_at_two_efforts() -> None:
     """The failover attribution above works because `(backend, model_id)` identifies the target
     that answered. It stops working the moment a route declares that pair twice at two `effort`
