@@ -1484,8 +1484,15 @@ class SqliteStateRepository:
         (`SqliteSchedulerStore.append_blocked_by`) can legally move a still-`RUNNING` phase to
         `BLOCKED` (also in `ALLOWED_TRANSITIONS[RUNNING]`) without bumping this fence, and
         `ALLOWED_TRANSITIONS[BLOCKED]` does not contain `REQUIRES_HUMAN_INTERVENTION` or
-        `SUCCEEDED` — so a worker's completion racing that propagation is the one theoretical
-        window where this leg fires. Refusing loudly (via the existing `LeaseStolenError` catch
+        `SUCCEEDED` — so a worker's completion racing that propagation is ONE reachable window
+        where this leg fires — NOT the only one (correction, round Z final review + fix wave,
+        2026-09-01: an earlier version of this docstring claimed uniqueness here; that was false).
+        `cli.py::_quarantine_impl` writes `status = 'SKIPPED'` directly via raw SQL with no
+        status guard at all and no `lease_fence` bump either, and `ALLOWED_TRANSITIONS[SKIPPED]`
+        is the empty set — so `fleet quarantine`, an explicit operator command against a live
+        fleet (not a hypothetical race), refuses a worker completing under a still-valid fence on
+        a phase an operator just quarantined for ANY completion target, not only the
+        RHI-escalation case above. Refusing loudly (via the existing `LeaseStolenError` catch
         every caller already has) beats writing a status the state model forbids.
 
         `last_error` is redacted HERE, at the write boundary (SPEC §11.4, D88): a caller's

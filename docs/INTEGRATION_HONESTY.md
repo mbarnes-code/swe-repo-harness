@@ -7257,7 +7257,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2251-2311`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2255-2323`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (`cli.py:6611`) sets
@@ -7513,3 +7513,19 @@ propagated block — `ALLOWED_TRANSITIONS` permits it, so `transition()` correct
 current-status check existed in the old raw SQL for this case either, so this is not a new gap,
 just an edge this fix does not close. Flagged by task review for whoever next touches this area,
 not itself a defect worth its own D-number.
+
+**Correction, round Z final review + fix wave (2026-09-01): the docstring's uniqueness claim was
+false.** `complete_phase`'s docstring (as landed above) said D77's `append_blocked_by` race was
+"the one theoretical window where this leg fires." A whole-branch review found a second, more
+concretely reachable route to the same `PhaseTransitionRefusedError` outcome:
+`cli.py::_quarantine_impl` writes `status = 'SKIPPED'` directly via raw SQL with no status guard
+at all and no `lease_fence` bump, and `ALLOWED_TRANSITIONS[RepoStatus.SKIPPED]` is the empty set
+(`src/fleet/models/enums.py`) — so `fleet quarantine`, an explicit operator command against a live
+fleet, not a hypothetical race, causes a worker completing under a still-valid fence on a
+just-quarantined phase to be refused for ANY completion target, not only the RHI-escalation case
+D77's route is framed around. This does not change the fix's logic or its landed status — the
+refuse-loudly behavior above is still correct and still real — it corrects only what the
+docstring claimed about how many routes reach it. The docstring itself has been corrected in the
+same fix wave; other `cli.py` writers noted as sharing the same "no fence bump" shape
+(approximately lines 2094, 2123, 4533) were not individually confirmed as concretely reachable as
+the quarantine path and are not claimed here.
