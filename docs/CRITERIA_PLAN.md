@@ -225,17 +225,34 @@ sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven
 No further work; do not touch.
 
 ## 13. Retry semantics — ladder, ceiling, atomicity, transient budget
-**OPEN — mixed — TEST-ONLY + known D50.** Ladder-length validation, transient-vs-attempt counting,
-and 3-rung tier escalation to RHI are all covered. The 5-rung ladder variant is untestable today
-because `transform.ladder.*` is `KNOWN_INERT` (D50) — `LadderState` takes no `ladder=` kwarg.
-Atomicity is asserted by end-state only; nothing is ever interrupted mid-write, so it can't
-distinguish one atomic UPDATE from two sequential ones (audit row 13).
-**Done bar:** the 5-rung sub-clause is blocked on D50 and should not be worked independently —
-closing D50 closes it. The atomicity sub-clause needs a real interruption test (kill/inject
-between increment and terminal write, assert no torn state) — that part is independently
-actionable now.
+**OPEN — mixed — TEST-ONLY, not actually blocked on D50.** Ladder-length validation,
+transient-vs-attempt counting, and 3-rung tier escalation to RHI are all covered. **Corrected
+2026-09-01 (round Z research): the "5-rung variant blocked on D50" framing is stale and was
+re-verified false, not merely re-stated.** `LadderState` (`orchestrator/retry.py:79-93`) DOES take
+a `ladder=` kwarg — the "takes no `ladder=` kwarg" claim was a stale copy of a comment in
+`tests/test_config_keys_are_read.py` citing an old line number. More substantively, the row-count/
+stop-at-5 half of this sub-clause (5-rung config → 5 attempts rows → stop, and a
+declared-length-mismatch → `ValidationError` at construction) does not depend on
+`context_policy_for_attempt`'s `KNOWN_INERT` wiring gap at all: `TransformSection.
+_ladder_matches_attempts` (`settings.py:476-484`) already enforces the ladder-length invariant as
+a real `model_validator`, and the attempt-count ceiling is already sourced from config end to end
+(`cli._validate_transform_flags` → `repository.upsert_phase(..., max_attempts=...)` →
+`orchestrator/runner.py:512`'s `LadderState(...)` → `LadderState.exhausted`) with no dependency on
+`context_policy`'s content — an un-wired `DEFAULT_LADDER` still produces exactly 5 attempts for a
+5-rung config, since `LadderState.context_policy(attempt)` clamps and repeats past ladder length
+rather than raising. Atomicity is asserted by end-state only; nothing is ever interrupted
+mid-write, so it can't distinguish one atomic UPDATE from two sequential ones (audit row 13).
+**Done bar:** the 5-rung sub-clause is a plain TEST-ONLY one-shot — build a fixture with a
+5-rung `transform.max_attempts`/`transform.ladder`, drive `fleet transform --max-attempts 5`
+against a repo whose deterministic build keeps failing, assert exactly 5 `attempts` rows and no
+6th. Add the (separately trivial, likely already covered) `ValidationError`-at-construction test
+against `TransformSection` if not already present. The atomicity sub-clause needs a real
+interruption test (kill/inject between increment and terminal write, assert no torn state) — both
+parts are independently actionable now, neither blocked on D50.
 **Out of scope:** do not fake the 5-rung test against inert config; that reproduces the Rule 12
-"assertion weaker than its name" failure mode this file exists to prevent.
+"assertion weaker than its name" failure mode this file exists to prevent. This correction does
+NOT retire any of D50's `KNOWN_INERT` keys — `transform.ladder.context_policy` genuinely stays
+inert; §13 simply never needed it wired to prove this sub-clause.
 
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
@@ -778,10 +795,16 @@ new mutations independently reproduced by task review in the implementer's own w
 trusted from the report. TEST-ONLY, no production code touched. Commit `e526f07` (merge of `agent/roundw-task1`).
 
 ## 45. No code state persisted outside Git
-**OPEN — mostly missing — mixed, needs adjudication first.** SPEC-ADJUDICATION sub-part: the
-forbidden-column regex was corrected (`collisions.blob_shas` no longer false-matches); M2 records
-the "five vs. one" count is predicate-dependent and the SPEC marker already carries that
-distinction, so no further SPEC edit is owed there. Substantively, 5 of 7 sub-clauses are
+**OPEN — mostly missing — TEST-ONLY, no adjudication remains.** **Corrected 2026-09-01 (round Z
+research): the "needs adjudication first" framing is stale — this entry's own next sentence
+already discloses the adjudication is done.** SPEC-ADJUDICATION sub-part: the forbidden-column
+regex was corrected (`collisions.blob_shas` no longer false-matches); M2 records the "five vs.
+one" count is predicate-dependent and the SPEC marker already carries that distinction (see
+`docs/SPEC.md` §12 item 45's dated marker), so no further SPEC edit is owed there. What remains
+is 5 of 7 sub-clauses of mechanical build work, each independently small: a real `PRAGMA
+table_list`/`table_info` sweep, the 40-hex enumeration fix, a hunk-header scan, a
+delete-artifacts-then-resume test, and coverage for 3 of 6 git trailers — none needs new
+production code or a design decision, all read existing state. Substantively, 5 of 7 sub-clauses are
 uncovered: no `PRAGMA table_list`/`table_info` sweep exists; the 40-hex enumeration omits
 `repos.head_sha` and `tasks.pre_commit_sha`; no hunk-header (`@@`) scan of the DB exists; no
 delete-artifacts-then-resume test exists; only 3 of 6 git trailers are read by any test (audit row
@@ -915,9 +938,9 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 |---|---|---|
 | DONE | 20 | 1, 5, 6, 7, 10, 12, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round Y, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §17 (byte-identity restored via a deterministic `updated_at` derivation, ADR-0106) and §24 (D62's `llm_backend` leg closed, local-profile clause proven by a real e2e dispatch, ADR-0107) this round; §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
-| OPEN — SPEC-ADJUDICATION needed before work starts | 1 | 45 (partial) |
-| OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), 46 (TEST-ONLY now that its D77 leg closed round Y — see §46's own entry), plus all others not listed in a row above — see individual entries |
+| OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — §45 moved out 2026-09-01 (round Z research): its own body already disclosed the adjudication was done, the row's label was stale, see §45's own entry |
+| OPEN — blocked on an existing D-number, don't duplicate | 5 | 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 43 (partial) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 13 (not actually blocked on D50 — corrected 2026-09-01, round Z research, see §13's own entry), 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 13/39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), 45 (TEST-ONLY, see above), 46 (TEST-ONLY now that its D77 leg closed round Y — see §46's own entry), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
