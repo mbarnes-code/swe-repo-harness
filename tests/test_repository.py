@@ -487,6 +487,99 @@ async def test_complete_phase_refuses_an_illegal_transition_instead_of_writing_i
             await read_conn.close()
 
 
+async def test_the_reaper_never_reclaims_a_requires_human_intervention_row(
+    db_path: Path,
+) -> None:
+    """§12 item 46(ii)(c): none of the four named sweeps — the reaper, `fleet resume`,
+    `stub_reconcile`, `blocked_by` recomputation — may ever move a repo OUT of
+    `REQUIRES_HUMAN_INTERVENTION`. The other three were covered by round Z task 2's work; the
+    reaper leg was not — every one of the nine existing `reap_expired_phase_leases` call sites in
+    this file seeds only `RUNNING` rows, so nothing had actually driven the reaper over an
+    RHI-status row until this test.
+
+    The row is landed for real via `complete_phase`'s escalation path (same shape as
+    `test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_statement`,
+    `max_attempts=1` so the retry hand-back escalates), not hand-written SQL.
+
+    `complete_phase`'s own `update_sql` unconditionally sets `lease_expires_at = NULL`, and no
+    writer ever re-acquires a lease on an already-RHI row (`acquire_phase_lease` only ever grants
+    from `PENDING`) — so a row can never LEGITIMATELY be both `REQUIRES_HUMAN_INTERVENTION` and
+    carry a non-NULL, expired `lease_expires_at`. In real operation the reaper's
+    `status = 'RUNNING'` guard is therefore never the only thing standing between an RHI row and
+    reclaim — `lease_expires_at IS NOT NULL AND lease_expires_at < ?` already excludes it. That
+    makes the natural post-`complete_phase` state a non-discriminating case for a mutation of the
+    `status` guard alone (dropping it would still filter zero rows, since `lease_expires_at` is
+    NULL). So after asserting the natural state, this test pokes `lease_expires_at` back to an
+    expired timestamp with one raw UPDATE through the shared writer — a combination no legitimate
+    writer produces, constructed deliberately to isolate the `status = 'RUNNING'` guard so a
+    mutation weakening it has something real to catch.
+    """
+    async with StateWriter(db_path, owner="test-writer") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            store = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await store.upsert_run(
+                RUN, started_at=NOW, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await store.upsert_repo(
+                REPO, name=REPO, url=f"https://example.invalid/{REPO}.git", now=NOW
+            )
+            await store.upsert_phase(RUN, REPO, Phase.VERIFY, now=NOW, max_attempts=1)
+
+            fence = await store.acquire_phase_lease(
+                RUN, REPO, Phase.VERIFY, owner=WORKER, now=NOW, lease_ttl_s=60
+            )
+            assert fence is not None
+
+            final = await store.complete_phase(
+                RUN,
+                REPO,
+                Phase.VERIFY,
+                fence=fence,
+                status=RepoStatus.PENDING,
+                now=NOW,
+                last_error="bazel test //...: 1 failure",
+            )
+            assert final is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+
+            row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+            assert row is not None
+            assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+            assert row.lease_expires_at is None, (
+                "complete_phase always nulls lease fields on write — confirms the natural "
+                "post-escalation state has nothing left for a bare status-guard mutation to catch"
+            )
+
+            later = NOW + timedelta(seconds=120)
+
+            # Natural state: the reaper must not touch it.
+            assert await store.reap_expired_phase_leases(RUN, now=later) == 0
+            row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+            assert row is not None
+            assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+
+            # Isolate the `status = 'RUNNING'` guard: plant an expired `lease_expires_at` on the
+            # RHI row directly (see docstring — no legitimate writer produces this combination).
+            async def _poke_expired_lease(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "UPDATE phases SET lease_expires_at = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    ((NOW - timedelta(seconds=1)).isoformat(), RUN, REPO, int(Phase.VERIFY)),
+                )
+
+            await writer.submit(_poke_expired_lease)
+
+            assert await store.reap_expired_phase_leases(RUN, now=later) == 0, (
+                "an RHI row must not be reclaimed even carrying an expired lease_expires_at"
+            )
+            row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+            assert row is not None
+            assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+            assert row.attempts == 1, "the reaper must not touch attempts on a row it must not touch"
+        finally:
+            await read_conn.close()
+
+
 async def test_complete_phase_redacts_a_credential_in_last_error_before_the_write(
     repo: SqliteStateRepository,
 ) -> None:
