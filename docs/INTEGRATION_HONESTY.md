@@ -3056,6 +3056,43 @@ ADR, not this ledger. The other four groups are individually small, but batching
 config sections into one fix would violate Rule 2 (no speculative abstraction) for what is, in
 each case, a single-purpose branch or accessor.
 
+**Fourth correction, 2026-09-01 (round BB, controller — docs-only, no code touched, per Rule 6/
+Rule 7's "annotate never rewrite" convention this entry already uses for
+`budgets.build_timeout_s`'s "PARTLY DISCHARGED" marker above).** This entry's counts and its
+"Group 1" narrative are stale a second time, found by round AA's research and re-verified here by
+`ast`-parsing `tests/test_config_keys_are_read.py`'s frozenset literals directly (not by eye, not
+by grep-count) at current `HEAD`: **`KNOWN_INERT`=38, `QUALIFIED_MATCH_KEYS`=11, `UNVERIFIABLE`=1,
+`DECLARATIVE`=6** (this entry's third correction had pinned 46/11/1/6). The −8 drop is real
+further wiring, not measurement error — `git log --oneline -- tests/test_config_keys_are_read.py`
+shows commit `1963ca9` (2026-08-22, "context+config-keys: derive `CallPolicy` from `config.llm`,
+so `llm.failover.*` reaches the client") landed after this entry's last correction and moved
+`llm.max_schema_repairs`, `llm.failover.enabled`, and `llm.failover.max_targets_per_call` from
+`KNOWN_INERT` to `QUALIFIED_MATCH_KEYS`-only, plus removed the `fleet.yaml:llm.failover` section
+key from `KNOWN_INERT` entirely. (`budgets.build_timeout_s`'s removal was already correctly
+annotated above; `pr.merge_wait_timeout_s`'s removal, round M/D80, was not previously noted here.)
+
+**This is a factual-accuracy correction to the headline claim, not just a count refresh.** The
+opening sentence above states `RunContext.llm_policy` is never assigned, so `LadderModelClient`
+"always falls back to `CallPolicy()`'s own defaults no matter what `fleet.yaml`'s `llm:` block
+says" — that is now **false**. `orchestrator/context.py`'s `RunContext.__post_init__` (landed in
+`1963ca9`) reads `policy = call_policy_for(self.config.llm) if self.llm_policy is None else
+self.llm_policy`: no call site passes `llm_policy=` (still true, re-verified `git grep
+"llm_policy=" -- src/` empty at `HEAD`), but that no longer means "all defaults" — it means
+"derive from config." This exact mechanism is correctly recorded in the separate entry **D58**
+("PARTLY ADDRESSED (`1963ca9`)"), which this entry already cross-references once, but "Group 1 —
+the sharp one" above still describes the pre-`1963ca9` world: 3 of its stated 12 keys
+(`llm.rate_limit`'s 9 + `llm.failover`'s 3) are now demonstrably wired via `call_policy_for`.
+**Group 1's true remaining size is 9, not 12** — `llm.rate_limit.*` only, untouched by
+`call_policy_for`, which maps solely `max_schema_repairs` and `failover.max_targets_per_call`/
+`.enabled`. Group 1's core complaint ("rate limiting doesn't work") stays true for those 9.
+
+The **"16 of 37" figure** carried elsewhere in this project (e.g. round Z's own research summary)
+traces to this entry's *first* correction (`KNOWN_INERT` first re-measured at 37, "bringing that
+cause's count to 16 of 37"). Both halves have since moved twice (denominator 37→46→38, numerator
+shrunk by the 3 keys `1963ca9` wired) — doubly stale, not merely off-by-a-little; do not cite
+"16 of 37" going forward. Groups 2/3/5 are unaffected — no key named in those groups appears in
+the diff between this entry's third correction and `HEAD` for `tests/test_config_keys_are_read.py`.
+
 ---
 
 **D51 — OPEN, narrowly. `workers/relocate.py` lands its patches through the exact same
