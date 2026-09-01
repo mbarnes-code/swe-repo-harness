@@ -1347,7 +1347,7 @@ invoke it does not exist**. Every one of these has tests that pass. None of thos
 evidence, because the thing they exercise is not the thing that ships.
 
 **D20 — OPEN. Commits are not probe-gated in production; the ast-grep parse probe is wired only in
-tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:252`) constructs its `RewritePipeline`
+tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:267`) constructs its `RewritePipeline`
 with `rules`, an `EngineRegistry`, `max_passes`, `params`, `tier` and `repo_id` — and **no
 `probe=`**. The only `probe=` in `src/` is `workers/rewrite.py:456`, an unrelated local in the
 repair-evidence renderer. Separately, `rewrite/apply.apply_patch` — the function whose docstring
@@ -2716,7 +2716,7 @@ is under a sixth agent's concurrent, uncommitted edit as this correction is writ
    describe the identical gap from opposite ends: D50 found the dead key; this correction found
    the live check it was supposed to feed.
 5. **Leg 3 (the evidence-domain half) — untouched, remains open.** `_record`
-   (`workers/rewrite.py:567-573`) still appends `unit` — the deterministic target name — to
+   (`workers/rewrite.py:596-602`) still appends `unit` — the deterministic target name — to
    `output.rewritten`, never `edit.path` from the landed patch. Nothing in `c5ab3b1` touches
    `_record` or its call sites (`:381`, `:453`). The original entry's description of this leg is
    unchanged and still accurate.
@@ -2740,7 +2740,7 @@ own catalog was never built on this key in the first place (`transform.max_patch
 never one of its 26/37 `KNOWN_INERT` entries) and needs no correction from this. **D49's status
 is therefore: legs 1–3 (as originally numbered) all closed in code and pinned by tests; leg 5
 above (`_record`, the evidence-domain half) is the only remaining open piece** — re-confirmed at
-this same `82654e8`: `_record` (`workers/rewrite.py:568-573`) still appends `unit`, not
+this same `82654e8`: `_record` (`workers/rewrite.py:596-602`) still appends `unit`, not
 `edit.path`. Not itself re-titled OPEN/CLOSED here, since the entry already carries two prior
 corrections layered on the original text per this file's convention; a future pass should read
 all three before citing this entry's status.
@@ -6851,7 +6851,7 @@ of §12.20 remains separately unverified (out of this entry's scope).
 
 ---
 
-## D89 — PARTLY ADDRESSED (Phase 1 landed at `1b0d3c1`; see below for what it covers and what is still open). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
+## D89 — FIXED, LANDED (`91daa25`, Phase 2 Task B; Phase 1 at `1b0d3c1`, Phase 2 Task A at `agent/roundu-task1a`'s `09bc0f8` — see the dated addenda below for what each landed). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
 
 **Found by round P task 1's reviewer (2026-08-31), disclosed while verifying D87's fix rather than
 searched for independently — recorded here rather than left inside D87's own entry, since it is a
@@ -6962,6 +6962,70 @@ on something a real write path does populate — that adjudication is not made h
 > per-unit rebuild, including the new "partially landed" third verdict state the round-S design
 > names.
 
+> **[Phase 2 Task A landed 2026-09-01, round U task 1A — ADR-0102. D89 remains OPEN/PARTLY
+> ADDRESSED; this is one of two Phase-2 sub-tasks, not a close.]** The TRANSFORM coarse `tasks`
+> row (Phase 1's `kind = 'REWRITE'` row) now gets a real `PENDING -> RUNNING -> {DONE, PENDING}`
+> claim lifecycle, scoped to one dispatch window: `orchestrator/runner.py`'s `PhaseRunner` gains an
+> optional `pre_dispatch: PreDispatchHook[I]` collaborator (mirrors the existing `sink=` shape),
+> called once in `_dispatch` on the final payload, before the worker executes; `cli.py`'s TRANSFORM
+> `PhaseRunner(...)` site (only) wires in `_TransformClaimHook`, which populates
+> `tasks.target_paths` and claims the row `RUNNING` via two new `state/repository.py` primitives
+> (`set_task_target_paths`, `claim_task_by_id`); `_TransformSink.__call__` resolves the row to
+> `DONE` on `status == "ok"` or back to re-claimable `PENDING` (fence bumped) otherwise. Identity
+> design: reuses Phase 1's single coarse row (populating the schema's pre-existing
+> `target_paths` JSON column) rather than minting N per-unit rows — full rationale in
+> `docs/DECISIONS.md` ADR-0102 §"Identity-key decision". BUILD/VERIFY/SCAN are unaffected by
+> construction (their `PhaseRunner(...)` sites pass no `pre_dispatch`) — verified both structurally
+> (an AST census of all four `PhaseRunner(...)` call sites) and functionally (a hookless coarse row
+> stays invisible to `_ARBITRATED_TASKS_SQL`, re-running Phase 1's own scenario-E pattern).
+>
+> **What is still OPEN — Task B, future, unbuilt.** `_reconcile_tasks_with_git`'s REWRITE/RELOCATE
+> branch is UNCHANGED (zero lines): it still treats a candidate row's own `task_id` as the git
+> trailer identity, which was never true for REWRITE/RELOCATE (`task_id_for`'s per-unit UUID5 is
+> the real trailer identity — see the round-S design note above). **This makes Task A alone a NEW
+> way to reach the pre-existing hazard**, not a fix for it: a TRANSFORM dispatch that crashes
+> mid-flight now leaves a genuinely `RUNNING` row that `_ARBITRATED_TASKS_SQL` WILL select on the
+> next `fleet resume`, `find_task_commit` will almost always find nothing (wrong identity), and
+> `discard_task` would `reset --hard`/`clean -fdx` real landed unit commits away. Task B (the
+> per-unit `task_id_for`-keyed reconciliation loop and the "partially landed" verdict) must land
+> before this path is safe for real crash recovery — see ADR-0102's "Cost if wrong".
+
+> **[Correction 2026-09-01, fix wave: the mechanism named just above is overstated —
+> `discard_task` could not actually have fired.]** A source sweep of `src/fleet/` for every writer
+> of `tasks.pre_commit_sha` (the sole `INSERT INTO tasks`, `state/repository.py:1219`, omits the
+> column; every `UPDATE tasks` site was checked and none names it either) plus a runtime probe
+> both found **no production writer of `tasks.pre_commit_sha` anywhere in `src/fleet/`** — see
+> `D91` below. `_reconcile_tasks_with_git` reads that column to build `task_anchor` and guards
+> `if task_anchor is None: _unresolved(...); continue` **before** any branch that could call
+> `discard_task`, for both the REWRITE and non-REWRITE paths. So a crashed TRANSFORM dispatch
+> under Task-A-alone would not have had its landed unit commits deleted — `task_anchor` is always
+> `None` in production, so the row would instead have gone permanently `unresolved` and stuck
+> `RUNNING` forever, never re-examined. The underlying point this addendum makes — that Task A
+> alone is a new way to reach a real hazard, and Task B must land before this path is trustworthy
+> — still holds; only the specific mechanism (commit destruction vs. permanent hang) was wrong.
+> Same correction applied to ADR-0102's "Cost if wrong" and ADR-0103's opening paragraph
+> (`docs/DECISIONS.md`).
+
+> **[Phase 2 Task B landed 2026-09-01, round U task 1B — commit `91daa25` on branch
+> `agent/roundu-task1b`, based on Task A's `agent/roundu-task1a` at `09bc0f8` (not yet merged to
+> `main` as of this addendum — the heading above cites this branch-tip sha per this task's brief;
+> if the eventual `main` merge sha differs, the controller should update the heading to match).
+> D89's two-phase fix is now COMPLETE.** `_reconcile_tasks_with_git`'s REWRITE-kind branch is
+> rebuilt to loop per unit over `tasks.target_paths`, asking git about each unit's own
+> `task_id_for_ids`-derived synthetic trailer identity instead of the row's own (never-written-as-
+> a-trailer) coarse `task_id` — closing exactly the hazard the Task A addendum above named. Three
+> outcomes: every unit landed → the existing `DONE` path (last landed unit's sha onto
+> `attempts.commit_sha`/`phases.post_commit_sha`); zero units landed → the existing discard path,
+> unchanged; some-but-not-all landed → the **new** third verdict — `discard_task` is NEVER called,
+> the row resets to re-claimable `PENDING` with the fence bumped, and the report names the
+> landed/missing unit split (`report["partially_landed"]`). Non-REWRITE kinds
+> (HOIST/BUILDGEN/RDEP_VERIFY/PR_EMIT/REVALIDATE) are unaffected — verified by a dedicated
+> regression test, not merely asserted. Full design rationale, the mutation proof, and what was
+> re-verified against Task A's actual landed diff (the round-U research plan's own line numbers
+> had shifted): `docs/DECISIONS.md` ADR-0103. Tests: `tests/test_d89_phase2_reconciliation.py`,
+> 8 cases against a real git repository with real `Fleet-Task-Id` trailers (no raw SQL
+> fabrication of the git side, per CLAUDE.md Rule 9).
+
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
@@ -6975,7 +7039,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1216-1223`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1239-1246`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
@@ -6984,10 +7048,10 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2135-2185`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2191-2241`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:6519`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:6611`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7043,3 +7107,46 @@ place, do not rewrite what round P wrote.
 > `:1048`→`:1055` (`_record_diagnostics`), `:1204-1209`→`:1216-1223` (`_detail()`),
 > `:703-710`→`:704-711` (the non-retryable-TERMINATE dispatch block). `tests/test_integration_honesty_citations.py`
 > back to 54/54 whole-file, no `-k`, after the correction.
+
+## D91 — OPEN. `tasks.pre_commit_sha` has no production writer anywhere in `src/fleet/`, so §12.15(i) and §12.45(i) cannot currently be exercised against a real production-populated value
+
+**Found reviewing D89 Phase 2 Task B (2026-09-01, round U fix wave), while checking the hazard
+mechanism ADR-0102's "Cost if wrong", ADR-0103's opening paragraph, and the D89 Task-A ledger
+addendum above all describe.** Verified free before writing: a form-agnostic sweep of this file's
+`D<n>` headings (`**D<n> — `, `### D<n> — `, `## D<n> — `) found no `D91` heading; the highest
+allocated number is `D90`.
+
+**The gap, as measured — two independent ways.** A source sweep of `src/fleet/` for every writer
+of the `tasks` table's `pre_commit_sha` column: the sole `INSERT INTO tasks`
+(`state/repository.py:1219`, `upsert_task`) omits the column entirely (its column list is
+`task_id, run_id, repo_id, phase, kind, dest_path, max_attempts, ladder, created_at`); every
+`UPDATE tasks` site in the tree was checked (`state/repository.py:1259` `set_task_target_paths`,
+`:1284` `claim_task_by_id`, `:1311` `claim_next_task`, `cli.py:4262`/`:4269`/`:12412`/`:12447` the
+two `_TransformSink`/`_persist_arbitration` DONE/PENDING resolutions) and none names
+`pre_commit_sha`. A runtime probe against a real database corroborates: after a real
+`_TransformClaimHook` claim and a real `_TransformSink` dispatch, `tasks.pre_commit_sha` reads
+`NULL`. The one place a real per-unit anchor value is computed at all —
+`workers/rewrite.py:182`'s `record_task_anchor(git, branch)` call inside `land_patches` — is
+used only in-process, passed directly to a same-call `discard_task` on a caught `PatchApplyError`;
+it is never written to SQL.
+
+**Consequence.** `_reconcile_tasks_with_git` (`cli.py`) reads `t.pre_commit_sha` off
+`_ARBITRATED_TASKS_SQL` to build `task_anchor`, and guards `if task_anchor is None:
+_unresolved(...); continue` before any branch that could call `discard_task`, for both the REWRITE
+per-unit path and the non-REWRITE single-`task_id` path. Since the column is always `NULL` in
+production, that guard always fires: a real crashed `RUNNING` task row is reported `unresolved`
+and left exactly as it was, forever — it can never reach the `DONE`/discard/partially-landed
+verdicts this mechanism exists to compute. `docs/SPEC.md` §12.15(i) and §12.45(i) both depend on
+`fleet resume` discarding a worktree onto `tasks.pre_commit_sha` for a crash-mid-mutation scenario
+with nothing landed; neither criterion can currently be exercised against a value a real
+production write path populates, because no such path exists. This also means three existing
+documents overstated the pre-Task-B hazard's mechanism (they described `discard_task` firing and
+destroying landed commits; the real pre-Task-B mechanism was `_unresolved` firing and the row
+hanging `RUNNING` forever) — corrected in place, dated 2026-09-01, at ADR-0102's "Cost if wrong",
+ADR-0103's opening paragraph (`docs/DECISIONS.md`), and the D89 Task-A ledger addendum above; this
+entry is the underlying defect those corrections point back to.
+
+**Not yet built:** a production write path for `tasks.pre_commit_sha` — most naturally, having
+`_TransformClaimHook` (or an equivalent `pre_dispatch` hook for whichever kinds need it) persist
+the git tip it reads at claim time, mirroring `_TransformSink`'s own `pre_dispatch`/`sink` pairing.
+That design choice is not made here.

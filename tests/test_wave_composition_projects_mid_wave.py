@@ -287,6 +287,24 @@ class _StubSink:
     async def __call__(self, **_kwargs: Any) -> None: ...
 
 
+class _StubClaimHook:
+    """Accepts `_TransformClaimHook`'s constructor shape and does nothing (D89 Phase 2 Task A,
+    ADR-0102).
+
+    `_TransformClaimHook` is TRANSFORM's own phase labour — it reads `payload.sources`/
+    `.targets`, which only a real `TransformInput` carries — so it belongs beside `_StubWorker`/
+    `_StubSink` in the stub set, not among "everything else" this file keeps real. Without this,
+    `_drive_transform`'s `_StubInput` payload (no `.sources`) makes the real hook raise
+    `AttributeError` inside `_dispatch`, which the runner's isolation swallows into a per-repo
+    failure and the wave never reaches `SUCCEEDED` — a regression this file's own DB-truth
+    control (see the module docstring) is what caught.
+    """
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None: ...
+
+    async def __call__(self, **_kwargs: Any) -> None: ...
+
+
 # ======================================================================================
 # the fixture — real everything below the phase's labour
 # ======================================================================================
@@ -426,6 +444,7 @@ async def _drive_transform(bed: _Bed, monkeypatch: pytest.MonkeyPatch) -> None:
             "sink": "_TransformSink",
         },
     )
+    monkeypatch.setattr(cli, "_TransformClaimHook", _StubClaimHook)
     await cli._run_transform_wave(
         bed.settings,
         repository=bed.repository,

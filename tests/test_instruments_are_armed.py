@@ -107,6 +107,12 @@ NOT_OVERRIDES: dict[str, str] = {
         "a classmethod that clears the fake's ClassVar recorders between tests; BaseWorker has "
         "no reset and is not expected to grow one"
     ),
+    "test_d89_phase2_claim_lifecycle.py:Visitor.visit_Call": (
+        "an ast.NodeVisitor dispatch hook, not an override in this checker's sense: "
+        "NodeVisitor.visit() finds visit_Call via getattr('visit_' + node type) at runtime, so "
+        "the base class never literally defines visit_Call for this checker's static resolver "
+        "to find — a rename here disarms the AST walk silently, but not by this mechanism"
+    ),
 }
 
 

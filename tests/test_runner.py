@@ -71,7 +71,13 @@ from fleet.orchestrator.budgets import (
 from fleet.orchestrator.context import RunContext, default_logger
 from fleet.orchestrator.findings import BACKEND_UNAVAILABLE, CAPABILITY_DRIFT
 from fleet.orchestrator.retry import RetryAction, RetryDecision, RetryPolicy
-from fleet.orchestrator.runner import HaltReason, PhaseCheckpoint, PhaseRunner, ResultSink
+from fleet.orchestrator.runner import (
+    HaltReason,
+    PhaseCheckpoint,
+    PhaseRunner,
+    PreDispatchHook,
+    ResultSink,
+)
 from fleet.orchestrator.scheduler import (
     SqliteSchedulerStore,
     WaveNotReadyError,
@@ -460,6 +466,7 @@ class Harness:
         estimate: Callable[[str], CostEstimate] | None = None,
         resource_guard: Callable[[], Any] | None = None,
         sink: ResultSink[ScriptedOutput] | None = None,
+        pre_dispatch: PreDispatchHook[ScriptedInput] | None = None,
     ) -> PhaseRunner[ScriptedInput, ScriptedOutput]:
         async def payloads(
             *,
@@ -485,6 +492,7 @@ class Harness:
             resource_guard=resource_guard or (lambda: None),
             sleep=sleep,
             sink=sink,
+            pre_dispatch=pre_dispatch,
         )
 
     async def set_attempts(self, repo_id: str, attempts: int) -> None:
@@ -2293,3 +2301,137 @@ async def test_budget_ledger_spent_usd_equals_the_sum_of_attempts_cost_usd(
     assert abs(budget.spent_usd - attempts_total) < 1e-9, (
         f"ledger spent ${budget.spent_usd} but attempts.cost_usd sums to ${attempts_total}"
     )
+
+
+# ======================================================================================
+# D89 Phase 2 Task A (ADR-0102): `PreDispatchHook` ordering, at the `PhaseRunner` layer
+# ======================================================================================
+#
+# The claim-lifecycle mechanics (repository CAS, the TRANSFORM-only wiring in `cli.py`, the
+# happy-path DONE/PENDING resolution) are proven in `tests/test_d89_phase2_claim_lifecycle.py`.
+# What belongs HERE, in the driver's own test file, is the one property `_dispatch` itself owns
+# and that no `cli.py`-level test can see: a hook passed as `pre_dispatch` runs EXACTLY ONCE per
+# dispatch, strictly BEFORE `worker.execute`, carrying the FINAL payload — and is not invoked at
+# all when `ReEntry.COMPLETE` means the worker never runs.
+
+
+def _pre_dispatch_recorder(
+    events: list[str], calls: list[tuple[str, Phase, tuple[str, ...]]]
+) -> PreDispatchHook[ScriptedInput]:
+    async def hook(*, repo_id: str, phase: Phase, payload: ScriptedInput) -> None:
+        events.append(f"pre_dispatch:{repo_id}")
+        calls.append((repo_id, phase, tuple(payload.units)))
+
+    return hook
+
+
+def marks(events: list[str], label: str) -> Behaviour:
+    """A behaviour that appends to the SAME event log the hook writes to, so ordering between
+    the two collaborators is one list's order and not two lists a reader has to interleave."""
+
+    async def behaviour(
+        ctx: WorkerContext, payload: ScriptedInput
+    ) -> WorkerResult[ScriptedOutput]:
+        events.append(label)
+        return WorkerResult(status="ok", output=ScriptedOutput(note=label))
+
+    return behaviour
+
+
+async def test_pre_dispatch_hook_fires_once_before_worker_execute_with_final_payload(
+    harness: Harness,
+) -> None:
+    """The core ordering contract `_dispatch` (`runner.py`) must hold for D89 Phase 2 Task A's
+    coarse-row claim to be sound: the hook has to see the units the worker is ABOUT to run, and
+    it has to run BEFORE `worker.execute`, so a crash between the two leaves the coarse row
+    genuinely `RUNNING` for `_ARBITRATED_TASKS_SQL` to find — a hook that fired after execute (or
+    not at all) would make the row's `RUNNING` window a fiction.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    events: list[str] = []
+    calls: list[tuple[str, Phase, tuple[str, ...]]] = []
+    BEHAVIOURS["repo-a"] = [marks(events, "run:repo-a")]
+
+    report = await harness.runner(pre_dispatch=_pre_dispatch_recorder(events, calls)).run_wave(0)
+
+    assert report.halt is None
+    assert events == ["pre_dispatch:repo-a", "run:repo-a"], (
+        "the hook must fire exactly once, strictly before the worker ran"
+    )
+    assert calls == [("repo-a", PHASE, UNITS)], (
+        "the hook must observe this repo's phase and the FINAL payload the worker was given"
+    )
+
+
+async def test_pre_dispatch_hook_sees_the_rebuilt_payload_after_a_rejected_checkpoint(
+    harness: Harness,
+) -> None:
+    """A `REJECTED` checkpoint (§7.1) makes `_dispatch` rebuild `payload` a second time BEFORE
+    the worker runs (`runner.py`, the `re_entry is ReEntry.REJECTED` branch). The hook must see
+    THAT rebuilt payload — the whole units set, not the stale checkpoint-scoped one it was first
+    called with — or a claim hook downstream (`cli.py`'s `_TransformClaimHook`) would populate
+    `target_paths` with a partial unit list while the worker is about to run the phase whole.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    await _checkpoint(harness, "repo-a", completed=["u1", "u2"], remaining=["u3"])
+    PRECONDITIONS["repo-a"] = [False]  # refused: re-runs whole, rebuilding the payload
+    events: list[str] = []
+    calls: list[tuple[str, Phase, tuple[str, ...]]] = []
+    BEHAVIOURS["repo-a"] = [marks(events, "run:repo-a")]
+
+    report = await harness.runner(pre_dispatch=_pre_dispatch_recorder(events, calls)).run_wave(0)
+
+    assert report.halt is None
+    assert report.outcomes["repo-a"].checkpoint_rejected is True
+    assert events == ["pre_dispatch:repo-a", "run:repo-a"]
+    assert calls == [("repo-a", PHASE, UNITS)], (
+        "the hook was called with the STALE (checkpoint-scoped) payload instead of the "
+        "REJECTED-rebuilt whole-phase one"
+    )
+
+
+async def test_pre_dispatch_hook_is_not_called_when_reentry_is_already_complete(
+    harness: Harness,
+) -> None:
+    """`ReEntry.COMPLETE` means the checkpoint owes nothing and the worker is NEVER dispatched
+    (`runner.py`'s `_already_complete` early return, before the hook call site). A hook that
+    fired here would claim a coarse row for a dispatch that is never going to happen — a phantom
+    `RUNNING` row nothing will ever resolve to `DONE` or back to `PENDING`.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    await _checkpoint(harness, "repo-a", completed=list(UNITS), remaining=[])
+    events: list[str] = []
+    calls: list[tuple[str, Phase, tuple[str, ...]]] = []
+    BEHAVIOURS["repo-a"] = [boom("completed work must not be re-dispatched, hook included")]
+
+    report = await harness.runner(pre_dispatch=_pre_dispatch_recorder(events, calls)).run_wave(0)
+
+    assert report.halt is None
+    assert report.outcomes["repo-a"].skipped_complete is True
+    assert events == [] and calls == [], (
+        "the pre-dispatch hook fired for a repo the runner never actually dispatched"
+    )
+
+
+async def test_pre_dispatch_hook_absent_is_byte_identical_to_before_this_change(
+    harness: Harness,
+) -> None:
+    """BUILD/VERIFY/SCAN's `PhaseRunner(...)` sites (`cli.py`) pass no `pre_dispatch` — this is
+    their exact call shape. Every OTHER assertion in this file already runs `harness.runner()`
+    with no `pre_dispatch` and must keep passing unmodified; this test additionally pins that a
+    default-`pre_dispatch` dispatch reaches `SUCCEEDED` with the untouched call/units shape, so a
+    future default-value regression (e.g. `pre_dispatch` defaulting to something callable) would
+    show up here even in isolation from the rest of the suite.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [ok()]
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is None
+    assert (await harness.phase_row("repo-a"))[0] == "SUCCEEDED"
+    assert [call[3] for call in CALLS] == [UNITS]
