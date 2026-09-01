@@ -650,6 +650,23 @@ def test_a_role_routed_to_an_empty_tier_is_a_startup_error(tmp_path: Path) -> No
     assert "repo_classify" in str(excinfo.value) and "CHEAP" in str(excinfo.value)
 
 
+def test_a_role_routed_to_a_tier_that_is_not_a_modeltier_member_is_a_startup_error(
+    tmp_path: Path,
+) -> None:
+    """§12.42's fourth `RunContext`-construction refusal: "a role whose tier is not a `ModelTier`
+    member". `ModelsConfig.roles` is typed `dict[str, ModelTier]` (settings.py), so a bogus tier
+    string fails Pydantic's own type validation before `_check_routing` ever runs — refused at
+    `FleetSettings.load()`, not deferred to wave dispatch. The raised type is
+    `ConfigValidationError` (verified against the real load path, not assumed), and the message
+    names the offending role."""
+    models = MODELS_YAML.replace("escalation: HEAVY", "escalation: NUCLEAR")
+    with pytest.raises(ConfigValidationError) as excinfo:
+        load(write_config(tmp_path, models=models))
+    message = str(excinfo.value)
+    assert "roles.escalation" in message           # names the offending role/field
+    assert "HEAVY" in message and "WORKHORSE" in message and "CHEAP" in message  # legal members
+
+
 def test_a_rule_naming_an_unregistered_engine_is_a_startup_error(tmp_path: Path) -> None:
     """§9 `transform.engines`: "An engine a rule names and this map does not resolve is a STARTUP
     error, exactly as an unknown `backend` is" — the fourth engine is data, but not a typo."""
