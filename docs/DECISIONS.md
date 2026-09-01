@@ -11965,3 +11965,31 @@ leaves BUILD/VERIFY exposed to the identical hazard the headline finding measure
 `claim_next_task` after `upsert_task` to give the row a "real" lifecycle* — rejected: this is
 exactly the per-unit rebuild D89 defers to Phase 2, and is also the one path that could ever put a
 Phase-1 row at `status = 'RUNNING'`, i.e. it would reopen the hazard this decision exists to close.
+
+**Disclosed hazard, not yet live: `task_id` is not reproducible across runs, and the §11.6 digest
+sorts on it first.** `_coarse_task_id` (`src/fleet/cli.py:4043-4076`) mints a fresh `str(uuid4())`
+on every call and passes it to `upsert_task`; for a genuinely fresh `(run_id, repo_id, phase)` key
+that random value becomes the row's `task_id`. Two runs over byte-identical input therefore mint
+different, unrelated `task_id` values for what are logically the same phase-dispatches — nothing
+ties the UUID to the run's content, only to `uuid4()`'s process-local randomness. This matters
+because `src/fleet/state/digest.py`'s `run_digest` (the §11.6 run-equivalence proof) reads
+`attempts.task_id` as the **first** SELECT column of its `_SQL_ATTEMPTS` query and sorts the
+attempts section on `(task_id, attempt, approach_signature)` — `task_id` is the primary sort key
+(`digest.py:189-198`). A digest section keyed first on a value that is random per run rather than
+a pure function of the run's outcome-determining inputs violates this module's own stated
+requirement (`digest.py`'s module docstring: "no ids that are reassigned on rebuild... and nothing
+else that changes between two runs that decided the same things") — two equivalent runs would
+produce different row orderings, and potentially different digests, purely from `task_id`
+randomness.
+
+**Why this is currently inert, and what must be checked before it isn't.** `_SQL_ATTEMPTS` filters
+on `approach_signature <> ''`, and `approach_signature` defaults to `''` with no production writer
+anywhere in `src/fleet/` today (confirmed by this round's review, not re-derived here) — so the
+attempts section of `run_digest` is unconditionally empty and this hazard cannot yet manifest.
+Whoever wires `approach_signature` (or otherwise makes the `attempts` digest section
+non-vacuous) must address `task_id` reproducibility first — e.g. deriving it deterministically
+from `(run_id, repo_id, phase, kind)` rather than `uuid4()`, or excluding `task_id` from the sort/
+hash and using only fields that are already pure functions of run content. Not fixed here: this is
+a disclosure, per CLAUDE.md's guardrail on documenting known limitations rather than silently
+carrying them forward, not a code change — this decision's own headline change does not touch
+`digest.py` or make the attempts section live.

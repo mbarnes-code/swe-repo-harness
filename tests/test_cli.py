@@ -369,7 +369,7 @@ _SCHEMA_CHECKED_COMMANDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = 
     (("stubs", "abandon"), ("some-consumer", "some-coord", "--reason", "operator")),
 )
 
-#: The three verbs `_SCHEMA_CHECKED_COMMANDS` deliberately excludes, and why. `migrate-db` is
+#: The four verbs `_SCHEMA_CHECKED_COMMANDS` deliberately excludes, and why. `migrate-db` is
 #: SPEC §12 item 48's own carve-out -- it APPLIES the pending DDL rather than refusing on a
 #: mismatch, and its ladder is covered by `tests/test_migrations.py`, out of this task's scope.
 #: The three `models` subcommands never call `_require_db`/`_check_schema_version` at all

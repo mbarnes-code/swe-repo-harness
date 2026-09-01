@@ -6851,7 +6851,7 @@ of §12.20 remains separately unverified (out of this entry's scope).
 
 ---
 
-## D89 — OPEN. `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
+## D89 — PARTLY ADDRESSED (Phase 1 landed at `1b0d3c1`; see below for what it covers and what is still open). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
 
 **Found by round P task 1's reviewer (2026-08-31), disclosed while verifying D87's fix rather than
 searched for independently — recorded here rather than left inside D87's own entry, since it is a
@@ -6987,7 +6987,8 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2135-2185`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `cli.py:6441` sets `stderr_tail=error.stderr_tail`, the same
+   Production caller `_AttemptWriter.record` (`cli.py:6519`) sets
+   `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
 **Concrete failure scenario.** A worker raises an exception whose message quotes a

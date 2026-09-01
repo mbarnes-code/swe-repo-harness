@@ -733,26 +733,52 @@ vice versa before doing both); add a persisted-value `edge_key` stability test; 
 `acquire_phase_lease` test. `stub_reconcile` stays D80's scope.
 
 ## 47. Registries stateless, total, order-independent
-**DONE (round T, 2026-09-01) — TEST-ONLY, narrower than original wording (round-K correction
-retired the `discover()` initializer clause entirely — see §12.28's entry above for why it stays
-retired).** Manifests/ecosystems statelessness and the rule-engine/backend-name startup refusals
-were already covered. Round T closed the four remaining gaps, all in
-`tests/test_registries_stateless.py` (new) and `tests/test_manifests.py`: `workers` registry now
-has an `assert_stateless` call site via the real `discover()`; the `backends` registry (which
-registers instances, not classes) gets a statelessness check shaped to its instance semantics
-(singleton identity across repeated `discover()` calls + no new/replaced attributes across two
-`declared_capabilities()` calls) rather than a force-fit of the class-based check; a structural
-test proves `preconditions_hold` is abstract on `BaseWorker` (walks `discover()`, fails on any
-class using the base default — mutation-proven: deleting `@abstractmethod` reddens it); the
-3-hand-written-orders test was replaced with a genuine `random.Random` 20-shuffle test over a
-6-item set with an anti-vacuous distinctness check. All four assertions mutation-proven per Rule
-12; two of the four independently reproduced by task review (commit `09b1929`, merge of
-`agent/roundt-task2`).
-**Disclosed, not closed:** `assert_stateless` is structurally blind to `__slots__`-stored state
-(by the helper's own documented design, `src/fleet/workers/base.py:577` — a `__slots__` class has
-no `__dict__` for the check to inspect). Pre-existing property of the shared helper, not
-introduced by round T's diff; flagged for a possible future D-number if it ever needs closing, not
-part of this criterion's literal text.
+**OPEN (reverted 2026-09-01, controller ruling C1 on this round's own final review — the `**DONE`
+marking below was retracted the same round it was made; see "Why reverted" below).**
+`tests/test_registries_stateless.py` (new) and `tests/test_manifests.py` are real work and 3 of
+round T's 4 claimed closures stay credited: `workers` registry now has an `assert_stateless` call
+site via the real `discover()`; a structural test proves `preconditions_hold` is abstract on
+`BaseWorker` (walks `discover()`, fails on any class using the base default — mutation-proven:
+deleting `@abstractmethod` reddens it); the 3-hand-written-orders test was replaced with a genuine
+`random.Random` 20-shuffle test over a 6-item set with an anti-vacuous distinctness check. These
+three are mutation-proven per Rule 12 and stay closed (commit `09b1929`, merge of
+`agent/roundt-task2`). Manifests/ecosystems statelessness and the rule-engine/backend-name startup
+refusals were already covered before round T and are unaffected by this reversion.
+
+**Why reverted:** SPEC.md:7462's literal text requires "Every `discover()` asserts
+`vars(inst) == {}` for every registered instance across all five registries (workers, manifests,
+ecosystems, contracts, backends)." Review of round T's close-out found two problems: (a) there is
+no contracts registry anywhere in `src/fleet/` (`grep 'def discover(' src/ --include=*.py` finds
+exactly 4: `llm/client.py`, `orchestrator/registry.py`, `manifests/base.py`, `ecosystems/base.py`
+— no contracts one); (b) `vars(inst) == {}` is measurably FALSE for the backends registry —
+`openai_compatible`'s instance holds `_env`/`_transport` (`src/fleet/llm/backends/openai_compatible.py:264-265`).
+Round T's 4th claimed closure substituted a weaker property for the backends registry (singleton
+identity across repeated `discover()` calls + no new/replaced attributes across two
+`declared_capabilities()` calls) in place of the criterion's literal `vars(inst) == {}`, with no
+Rule-14 adjudication marker or ADR disclosing the substitution. Per CLAUDE.md Rule 14, a §12
+criterion's literal wording can only be relaxed by disclosed adjudication (dated marker + ADR) —
+this substitution wasn't disclosed that way, so the criterion cannot be marked DONE on it.
+
+**Two open residuals — separate done bars, do not conflate them:**
+**(i) Contracts registry — a fork, not yet a decision.** Either a "contracts registry" concept
+belongs in this architecture and needs to be built, with a `discover()` carrying the same
+statelessness proof as the other four; or SPEC.md:7462 itself is stale/overbroad — naming a
+registry that was never part of the design — and needs its own Rule-14 adjudication (dated marker
++ ADR) narrowing the five-registry list before any code is written. This fix wave does not decide
+which fork is correct; a future round must, explicitly, before touching code.
+**(ii) Backends registry statelessness — implement or adjudicate, don't silently pick one.**
+Either (a) implement a genuinely stateless backends registry — `vars(inst) == {}`, meaning backend
+instances hold no mutable per-instance state (e.g. moving `_env`/`_transport` off the instance);
+this is a real production change, not test-only; or (b) run the Rule-14 adjudication path (dated
+marker + ADR) to formally relax SPEC.md:7462's wording for the backends registry. A future round
+must pick one path explicitly, disclosed either way; this fix wave does not choose for it.
+
+**Disclosed, not closed (pre-existing, unrelated to the above):** `assert_stateless` is
+structurally blind to `__slots__`-stored state (by the helper's own documented design,
+`src/fleet/workers/base.py:559-571` — a `__slots__` class has no `__dict__` for the check to
+inspect). Pre-existing property of the shared helper, not introduced by round T's diff; flagged
+for a possible future D-number if it ever needs closing, not part of this criterion's literal
+text.
 **Out of scope:** do not add a `ProcessPoolExecutor` initializer — that clause is retired, see
 §12.28's entry.
 
@@ -780,7 +806,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 15 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 47, 48 (re-derived 2026-09-01, round T close-out, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 and §48 this round; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| DONE | 14 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 48 (re-derived 2026-09-01, round T close-out, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 and §48 this round, then §47 was reverted to OPEN the same round by controller ruling C1 on final review: its `vars(inst) == {}` claim for the backends registry is measurably false and its contracts-registry clause has no implementation at all — see §47's own entry for the two residuals; §48's DONE stands, the review found it clean; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
@@ -793,21 +819,30 @@ than silently overstating the Rule 13 checkpoint count. If in doubt when reporti
 figure, count §12.40 as OPEN until M1 lands, and prefer under-counting to over-counting.
 
 **Recommended dispatch order, cheapest-and-highest-leverage first (updated 2026-08-30 — §12.27's
-COORDINATE leg closed by round L, superseding the original §12.27+§12.37 pairing below):**
-§12.9, §12.37, §12.18 (all now confirmed-open pure WIRING, zero new logic — round M's picks) →
+COORDINATE leg closed by round L, superseding the original §12.27+§12.37 pairing below;
+§12.37's WIRING framing below corrected 2026-09-01 — see the note after this paragraph):**
+§12.9, §12.37, §12.18 (originally all confirmed-open pure WIRING, zero new logic — round M's
+picks; §12.37 was reclassified NEW-MECHANISM by round K's 2026-08-30 correction, see the Rollup
+table's WIRING row above — leave it out of any WIRING batch, it needs its own D-number first) →
 §12.7 (one-line SPEC correction, substance already passes) → the TEST-ONLY items (5, 6, 15, 20,
-21, 24, 26, 32, 33, 40's AST clause, 42, 44, 47's sub-clauses, 48) → SCALE-FIXTURE items →
-SPEC-ADJUDICATION items (17, 41, 45's regex half already done) → NEW-MECHANISM items (22's RSS
-half, 27's DEST_PATH/FILE_PATH legs — each needs its own D-number first, 31, 34) last, since
-they're the most expensive and least likely to be quick wins.
+21, 24, 26, 32, 33, 40's AST clause, 42, 44, 48) → §47's two residuals (contracts-registry fork
+and backends-statelessness implement-or-adjudicate — see §47's entry, neither is plain TEST-ONLY
+any more per controller ruling C1) → SCALE-FIXTURE items → SPEC-ADJUDICATION items (17, 41, 45's
+regex half already done) → NEW-MECHANISM items (22's RSS half, 27's DEST_PATH/FILE_PATH legs,
+37 — each needs its own D-number first, 31, 34) last, since they're the most expensive and least
+likely to be quick wins.
 
 **Correction, 2026-08-31 (round S, controller — this list was never refreshed as items closed
-across rounds M-R and had drifted into re-dispatch risk):** §5, §6, §7, §12, §15, §16, §18, §21,
-§26, §32 above are now **DONE** — do not re-dispatch them. Of the TEST-ONLY group's original
-membership, the still-genuinely-open items are: **20** (PR-body placeholder clause only — the
-four-DB-column part is now covered), **24** (two residuals — D62-blocked local-profile clause,
-and the run-ceiling/exit-3 clause — the ledger-sum clause is closed), **33**, **40's AST clause**,
-**42**, **44**, **47's sub-clauses**, **48**. §10 (closed round R) and §23/§28/§1 (round S, this
-round — see this round's own plan/checkpoint for final status) are not part of the original list
-above and should be checked against their own `docs/PROGRESS.md` checkpoints before re-dispatch,
-not against this stale sentence.
+across rounds M-R and had drifted into re-dispatch risk); further corrected 2026-09-01 (round T
+close-out, controller ruling C1 — §48 landed DONE this round and §47 was reverted from a
+same-round DONE marking back to OPEN, so both needed their "still open" framing fixed here too):**
+§5, §6, §7, §12, §15, §16, §18, §21, §26, §32 above are now **DONE** — do not re-dispatch them.
+**§48 is now DONE too** (round T, 2026-09-01) — do not re-dispatch it. Of the TEST-ONLY group's
+original membership, the still-genuinely-open items are: **20** (PR-body placeholder clause only
+— the four-DB-column part is now covered), **24** (two residuals — D62-blocked local-profile
+clause, and the run-ceiling/exit-3 clause — the ledger-sum clause is closed), **33**, **40's AST
+clause**, **42**, **44**. **§47 is OPEN again**, but no longer as a plain TEST-ONLY item — see its
+entry for the two residuals (contracts-registry fork; backends-statelessness implement-or-
+adjudicate) a future round must pick up. §10 (closed round R) and §23/§28/§1 (round S) are not
+part of the original list above and should be checked against their own `docs/PROGRESS.md`
+checkpoints before re-dispatch, not against this stale sentence.

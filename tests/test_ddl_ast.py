@@ -9,6 +9,12 @@ baseline `initialize_database()` executes verbatim via `SCHEMA_PATH.read_text()`
 `cli.py::_check_schema_version`'s sibling `state/db.py::initialize_database`) is not a `.py`
 file, so the `*.py` glob excludes it structurally rather than through an exception list --
 exactly as `src/fleet/` already holds one non-Python file per `tests/test_proc.py`'s own note.
+
+Disclosed blind spot: this walks `ast.Constant` string-literal nodes, so it cannot recognize a DDL
+keyword split across a string-concatenation boundary (e.g. `"ALTER " + "TABLE t"`, two separate
+`ast.Constant` nodes joined at runtime, neither of which spells `ALTER TABLE` on its own) -- an
+f-string's literal parts, by contrast, ARE covered, because `ast.JoinedStr`'s literal segments are
+themselves `ast.Constant` nodes that `ast.walk` visits like any other.
 """
 
 from __future__ import annotations
