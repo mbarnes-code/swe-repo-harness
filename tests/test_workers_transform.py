@@ -915,6 +915,100 @@ def test_the_repair_prompt_carries_this_failures_verbatim_stderr_and_no_prior_tr
     )
 
 
+def test_the_repair_prompt_omits_every_line_of_a_rejected_diff_and_the_prior_failure_class(
+    tmp_path: Path,
+) -> None:
+    """§12.35's two worker-level gaps beyond the marker test above (round AA task 3).
+
+    1. The test above never asserts a prior `RejectedApproach.failure_class` token is absent —
+       only its `reason` summary (`REJECTED_APPROACH_SUMMARY_MARKER`). `failure_class` travels
+       through a SEPARATE rendering branch (`rewrite.py`'s `_evidence`, the `prior.failure_class`
+       leg vs. the `prior.reason` leg), so a leak there would pass the test above undetected.
+    2. The test above checks diff-absence via one anchor string (`ANCHOR_ME_PRIOR_DIFF`). A bug
+       that filtered out that exact marker while still leaking OTHER lines of the same rejected
+       diff would pass that test. Here every line of a real multi-line diff is captured with
+       `make_unified_diff` — the same call the production code makes — and swept individually.
+    """
+    one, two, clean = f"{DEST}/one.py", f"{DEST}/two.py", f"{DEST}/clean.py"
+    committed = "L1\nL2\nL3\nL4\n"
+    dirty = "L1 DIRTY\nL2\nL3\nL4\n"
+    after = (
+        "REJECTED_LINE_1_UNIQUE\nREJECTED_LINE_2_UNIQUE\n"
+        "REJECTED_LINE_3_UNIQUE\nREJECTED_LINE_4_UNIQUE\n"
+    )
+    repo, anchor = make_repo(tmp_path, {one: committed, two: committed, clean: "keep\n"})
+
+    # The literal diff the production rule/engine would build for this rejected patch, captured
+    # with the SAME helper (`make_unified_diff`) the pipeline calls internally — a real multi-line
+    # diff, not a hand-typed guess at git's unified-diff format.
+    rejected_diff = make_unified_diff(one, dirty, after)
+    assert rejected_diff, "fixture sanity: the rule actually changes the file"
+    rejected_lines = [line for line in rejected_diff.splitlines() if line.strip()]
+    assert len(rejected_lines) >= 8, "fixture sanity: a genuine multi-line diff, not one line"
+
+    # `r1` always rewrites to `after` regardless of the file it's given, so BOTH `one.py`'s
+    # attempt (a separate, earlier `worker.run()`) and `two.py`'s own deterministic pre-repair
+    # pass (inside THIS `worker.run()`) produce and then fail to apply the SAME rejected diff —
+    # the strongest form of the property: neither a genuinely prior invocation's diff nor the
+    # CURRENT rung's own just-rejected diff may reach the repair prompt.
+    engine = FakeRewriter({"r1": lambda _source: after})
+    worker = worker_with(engine)
+
+    # A worktree that does not match the index is a patch `git apply --index` refuses, verbatim.
+    (repo / one).write_text(dirty, encoding="utf-8")
+    attempt_one = asyncio.run(worker.run(make_ctx(repo), rewrite_payload(anchor, [one])))
+    assert attempt_one.status == "failed" and attempt_one.error is not None
+
+    (repo / two).write_text(dirty, encoding="utf-8")
+
+    client = FakeModelClient(_proposal(clean, "keep\n", "kept\n", marker="repair"))
+    ctx = make_ctx(
+        repo,
+        attempt=2,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+    payload = rewrite_payload(
+        anchor,
+        [two],
+        rejected_approaches=[
+            RejectedApproach(
+                approach_signature="c" * 64,
+                reason="an unrelated approach; no diff text lives here (schema forbids it)",
+                failure_class=FailureClass.BUDGET_EXHAUSTED,
+                attempt=1,
+                tier=TransformTier.DETERMINISTIC,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.TRANSFORM_REPAIR)], "attempt 2 is the WORKHORSE rung"
+    prompt = client.prompts[0]
+
+    # gap 1: the PRIOR RejectedApproach's `failure_class` token never leaks. `FailureClass` is a
+    # `StrEnum` whose `.name`/`.value`/`str()` all coincide (`PATCH_REJECTED` etc, checked against
+    # `src/fleet/models/enums.py`), and `rewrite.py::_evidence` renders priors with `str(prior.
+    # failure_class)` (line ~563) — so `str()` is the discriminating form to assert against, the
+    # one the production code would actually emit if this leaked.
+    assert str(FailureClass.BUDGET_EXHAUSTED) not in prompt, (
+        "a prior RejectedApproach's failure_class token leaked into the repair prompt"
+    )
+    # BUDGET_EXHAUSTED is distinctive from this attempt's OWN current failure_class
+    # (PATCH_REJECTED, from the git-apply refusal above), which the prompt legitimately DOES show
+    # as evidence of the failure being repaired right now — so this is not a duplicate check.
+    assert result.error is None or "BUDGET_EXHAUSTED" not in (result.error.stderr_tail or "")
+
+    # gap 2: EVERY line of a real multi-line rejected diff is absent — not just one marker.
+    for line in rejected_lines:
+        assert line not in prompt, f"a rejected diff line leaked into the prompt: {line!r}"
+
+    assert result.status == "ok", "the repair patch still landed despite the rejected diffs"
+    assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
+
+
 def test_a_multi_file_repair_records_every_landed_path_not_just_the_unit(
     tmp_path: Path,
 ) -> None:
