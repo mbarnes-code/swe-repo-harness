@@ -691,14 +691,21 @@ fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` a
 four.
 
 ## 35. No raw prior diff reaches a prompt
-**OPEN — mostly covered, one structurally-blocked sub-clause.** Worker-level coverage is strong.
-Missing: the prior `FailureClass` token is never asserted; diff-absence is checked via a
-marker/header-string proxy, not the full per-line sweep the criterion specifies. CLI-level proof is
-currently impossible — `cli.py` refuses `--context-policy` for any value at all (audit row 35).
-Downstream of D50.
-**Done bar:** add the `FailureClass` assertion and the real per-line sweep at the worker level now
-(both are TEST-ONLY, independent of D50). The CLI-level proof is blocked on D50's `--context-policy`
-work — don't force it before that lands.
+**OPEN — worker level now fully covered; one structurally-blocked sub-clause remains.**
+**Closed, round AA task 3 (2026-09-01, `7e982d6`).** `tests/test_workers_transform.py::
+test_the_repair_prompt_omits_every_line_of_a_rejected_diff_and_the_prior_failure_class` closes
+both worker-level gaps in one test: the prior `FailureClass` token (`str(FailureClass.
+BUDGET_EXHAUSTED)`, chosen distinct from the current attempt's own legitimate `PATCH_REJECTED` to
+avoid a false-positive collision) is asserted absent, and diff-absence is now a real per-line
+sweep over a genuine multi-line diff built via the same `make_unified_diff` helper production
+code uses (`workers/rewrite.py`) — not the single marker/header-string proxy this entry
+previously described. Task review independently reproduced two separate mutations (leaking
+`failure_class` in `_evidence()`; leaking rejected-patch content via `_apply_stderr`'s
+`GitCommandError` branch) and confirmed each reddens only its own assertion — two genuine,
+independent discriminators, not one riding on the other's mutation.
+**Remains OPEN**: the CLI-level proof is still blocked on D50's `--context-policy` work (`cli.py`
+refuses `--context-policy` for any value at all, audit row 35) — do not attempt it before D50
+lands; this is the only sub-clause left.
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
