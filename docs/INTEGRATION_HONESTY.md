@@ -5226,7 +5226,7 @@ fixing it out explicitly.
 
 ---
 
-## D78 — OPEN, recorded only. `LlmFindingSink.record_backend_unavailable`'s `tier=` arm has zero producers, so every `BackendUnavailable` row this harness ships is run-scoped and both derived fields refuse to answer
+## D78 — FIXED, LANDED (`6c3c014`). `LlmFindingSink.record_backend_unavailable`'s `tier=` arm has zero producers, so every `BackendUnavailable` row this harness ships is run-scoped and both derived fields refuse to answer
 
 **Measured in round E by lane W18 against `main` at `da45a43`.** Carried from a round-D backlog
 item that lane W1 re-measured at `47df73d`; it reproduces unchanged. Class result rather than a
@@ -5404,6 +5404,81 @@ built, tested, and one boundary field away from being reachable.
 **Related:** D55 (throttling vs outage), D59 (the sink itself; its aside is the prior record of this
 claim), D60 (why `failover_triggers_recorded` can never read `"complete"`), D62
 (`attempts.llm_failovers`, the paired unwritten field), D56/D57 (the defect class and its precedent).
+
+### Fixed (2026-09-01, round Y task 3), `6c3c014` — body above left as written, per this file's own convention
+
+**The section "What would have to exist for the arm to become reachable" named exactly option 1,
+and that is the option built.** `WorkerError` (`src/fleet/workers/base.py`) gains `tier: ModelTier
+| None = None`; `_error_for` (`src/fleet/workers/classify.py`) sets it to `exc.tier` on the
+`TierUnavailable` branch and `None` on every other branch; `PhaseRunner._drive`
+(`src/fleet/orchestrator/runner.py`) forwards `tier=failure.tier` into
+`record_backend_unavailable`. `failure` was already bound at that point in `_drive` (the synthetic
+no-result `WorkerError` at the top of the same function still carries no `tier`, so that path
+correctly keeps forwarding `None`). Option 2 (routing the tier some other way) was not needed.
+
+**Both tests this entry's own "Would a test catch it?" section named as pinning the zero-producer
+state were updated in the same commit** — that section undercounted by one: it named only
+`test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_exist`, but
+`test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halts` asserts the identical
+`failover_triggers_recorded == "unknown"` claim and pins the same state. Both are **kept**, not
+deleted or mutated in place — each still exercises a real, still-reachable tier-less arm (a
+`WorkerError` built without going through `_error_for`, e.g. the synthetic no-result one in
+`_drive` itself), with their docstrings corrected to stop calling that "the SHIPPED arm" now that
+a second, tier-scoped arm also ships. Each gets a new sibling test
+(`test_a_tier_outage_with_a_real_tier_writes_a_tier_scoped_finding`,
+`test_a_real_tier_scoped_halt_excludes_a_different_tiers_contamination`) driving the identical
+scenario with `tier=` supplied, asserting `failover_triggers_scope == "tier"` and the correctly
+narrowed `failover_triggers_recorded`/`throttling_observed` — including the exact cross-tier
+contamination scenario this entry's body describes (a CHEAP 429 planted, a HEAVY outage halts),
+now proven CORRECTLY EXCLUDED once a real tier is known.
+`tests/test_workers_scan.py::test_classify_takes_no_model_client_by_constructor_and_calls_the_one_on_the_context`
+gets one new assertion, `result.error.tier is ModelTier.CHEAP`, on the real
+`ClassifyWorker.run()` → `UnavailableModelClient` → `_error_for` path — the `_error_for`-population
+half; the `test_runner.py` additions are the `_drive`-forwarding half, since `fails_with` bypasses
+`_error_for` entirely.
+
+**Rule 12, mutation-proved, not merely run.** Reverting `runner.py`'s `tier=failure.tier` forward
+(restoring the pre-fix `record_backend_unavailable(repo_id=..., phase=..., observed=...)` call)
+was confirmed to change the file (`git diff --numstat --no-index` against a pre-mutation backup,
+non-empty) and reddened both new `test_runner.py` scenarios exactly (`failover_triggers_scope`
+read `"run"` where each asserts `"tier"`), no other test in that file affected. Separately,
+reverting `classify.py`'s `tier=exc.tier if isinstance(exc, TierUnavailable) else None` line was
+confirmed to change the file and reddened the new `test_workers_scan.py` assertion exactly
+(`result.error.tier` read `None` against an asserted `ModelTier.CHEAP`), no other test in that file
+affected.
+
+**`findings.py`'s own docstring corrected in the same commit (Guardrail 7).** Its "NOT REACHED IN
+PRODUCTION TODAY" section asserted "nothing in `src/` passes `tier=`" and cited the pre-fix
+`WorkerError` field list (`workers/base.py:359-374`, six fields, no tier) as the reason it could
+not — both became false the moment this fix landed, so the section was rewritten to state the
+narrowed arm is now live and to name the two callers (the synthetic no-result `WorkerError`, and
+any future `BACKEND_UNAVAILABLE` `WorkerError` built without `_error_for`) that keep the run-scoped
+arm real rather than dead.
+
+**Scope, checked before closing this out.** Only D78 (this entry) is closed here. D62
+(`attempts.llm_failovers`, `llm_backend`, `input_tokens`, `output_tokens`) is a separate task
+(round Y task, disjoint files: `src/fleet/models/tasks.py`, `src/fleet/llm/client.py`,
+`src/fleet/state/repository.py`, `src/fleet/cli.py`) and is untouched here, per this task's brief —
+the research report this task followed (§4) established D78 and D62's `llm_failovers` leg are
+independent fixes, not a dependency chain, despite sharing ADR-0094's "carry attribution on
+`TokenUsage`" precedent.
+
+**§12.43 (`docs/CRITERIA_PLAN.md` item 43) — checked, does not close any further sub-clause here.**
+That entry's "audit row 43, D78" gap is about **message provenance**: *"`TierUnavailable.__init__`,
+the sole producer of the 'names the tier and every target tried' message, is asserted by nothing;
+every test checking that message writes the string itself rather than reading it from the
+producer."* That gap is a DIFFERENT sub-clause from the `tier=` parameter this fix wires, and it
+was already closed before this task started — `tests/test_runner.py` already constructed a real
+`TierUnavailable` and read `str(tier_exc)` rather than a hand-written string in both tests this fix
+touches, confirmed present at this task's base commit before any edit here. `docs/CRITERIA_PLAN.md`
+item 43's "Done bar" prose (naming `test_runner.py:1613` and "add one test that constructs a real
+`TierUnavailable`" as still-open work) is stale for that reason — a pre-existing doc-sync gap, not
+introduced or corrected by this task, flagged for whoever's commit next legitimately touches that
+entry. This fix's OWN new production-path coverage
+(`test_classify_takes_no_model_client_by_constructor_and_calls_the_one_on_the_context`'s new
+`tier` assertion) exercises the real `TierUnavailable` → `_error_for` chain but does not add a new
+assertion on the message text itself, so it does not move item 43's message-provenance sub-clause
+further than where round X already left it.
 
 ---
 
@@ -7104,7 +7179,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1254-1261`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1255-1262`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
