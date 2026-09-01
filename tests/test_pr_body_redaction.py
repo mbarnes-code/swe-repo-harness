@@ -1,7 +1,8 @@
 """SPEC §12 item 20's remaining residual (`docs/CRITERIA_PLAN.md` §20's "Done bar (remaining)"):
 *"the generated PR body contains the `«redacted:…»` placeholder rather than the value"* — the one
 clause of the secrets-never-leak criterion left entirely untested after D88/D90 closed the other
-three named DB columns (`events.payload`, `attempts.stdout_tail`/`stderr_tail`, `phases.last_error`).
+three named DB columns (`events.payload`, `attempts.stdout_tail`/`stderr_tail`,
+`phases.last_error`).
 
 This follows the same pattern those two defects established
 (`tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`):
@@ -127,13 +128,15 @@ async def _persisted_payload(db_path: Path) -> str:
 async def test_write_pr_record_redacts_a_credential_that_reached_the_pr_body(
     writer: StateWriter, db_path: Path
 ) -> None:
-    """D-pending (§12.20, SECURITY-RELEVANT): the PR-body `«redacted:…»` placeholder clause,
-    confirmed untested by two prior rounds' investigations (`docs/CRITERIA_PLAN.md` §20). A
-    credential-shaped secret planted in `relocation_summary` — real content a transform worker
-    can legitimately hand `PrwriterInput`, e.g. a relocation note quoting the mirror URL it moved
-    a path from — reaches `render_body`'s rendered PR body verbatim (`render_body` never redacts:
-    its output is also the `gh`/Gitea `body_file`). The persistence boundary is
-    `cli.py::_write_pr_record`, which must strip it before the `findings` INSERT.
+    """Criterion-closure test (§12.20, SECURITY-RELEVANT): the PR-body `«redacted:…»` placeholder
+    clause, confirmed untested by two prior rounds' investigations (`docs/CRITERIA_PLAN.md` §20)
+    but not a live defect — `_write_pr_record` already redacted correctly; this test closes the
+    coverage gap, it does not disclose a new one. A credential-shaped secret planted in
+    `relocation_summary` — real content a transform worker can legitimately hand `PrwriterInput`,
+    e.g. a relocation note quoting the mirror URL it moved a path from — reaches `render_body`'s
+    rendered PR body verbatim (`render_body` never redacts: its output is also the `gh`/Gitea
+    `body_file`). The persistence boundary is `cli.py::_write_pr_record`, which strips it before
+    the `findings` INSERT.
 
     The control is the test below: an innocuous body must survive unredacted.
     """

@@ -389,8 +389,13 @@ precedent for accepting equivalent per-column coverage.
 
 **Dated annotation, 2026-09-01 (round V controller ruling):** adjudicated the methodology
 question above — per-column coverage (not a literal combined multi-secret fixture) is accepted
-as satisfying this criterion's intent, consistent with this project's precedent elsewhere in §12
-for equivalent per-property coverage standing in for one combined test. Round V then closed the
+as satisfying this criterion's intent. Per CLAUDE.md Rule 14, this adjudication is now disclosed
+at its actual site rather than only here: `docs/SPEC.md`'s §12 item 20 sentence carries a dated
+2026-09-01 in-place marker recording the same ruling, and the decision itself is recorded in
+**ADR-0104**, which names the actual precedent this follows — **§12.7 / ADR-0099** (a committed-
+fixture-repo methodology named literally, not built, because the underlying property already held
+via a different, self-contained proof mechanism; §12.20 is the same shape one level down). Round V
+then closed the
 PR-body placeholder clause: `tests/test_pr_body_redaction.py` plants a credential-shaped secret
 in `relocation_summary`, drives the real `render_body` → `PullRequestDraft.body` →
 `_write_pr_record` → `redact_text` path, and asserts the persisted `findings.payload` carries the
@@ -774,6 +779,11 @@ no contracts registry anywhere in `src/fleet/` (`grep 'def discover(' src/ --inc
 exactly 4: `llm/client.py`, `orchestrator/registry.py`, `manifests/base.py`, `ecosystems/base.py`
 — no contracts one); (b) `vars(inst) == {}` is measurably FALSE for the backends registry —
 `openai_compatible`'s instance holds `_env`/`_transport` (`src/fleet/llm/backends/openai_compatible.py:264-265`).
+**Citation-drift disclosure (2026-09-01, fix wave):** this claim was true when made (round-V's
+final-review measurement, pre-task-1-fix) and is left as-is per CLAUDE.md's "annotate never
+rewrite" discipline. Task 1's fix (the "(ii)" entry below) moved the code: `:264-265` is now the
+`__init__` signature's `transport`/`env` parameters, and the conditional `self._transport =
+transport` / `self._env = env` assignments this claim describes now sit at `:276`/`:278`.
 Round T's 4th claimed closure substituted a weaker property for the backends registry (singleton
 identity across repeated `discover()` calls + no new/replaced attributes across two
 `declared_capabilities()` calls) in place of the criterion's literal `vars(inst) == {}`, with no

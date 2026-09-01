@@ -12283,3 +12283,57 @@ own `target_paths` would read `'[]'`, so this branch's `units = json.loads(targe
 would compute `units == []` and take the zero-units discard path — deleting that row's own landed
 commit, the exact failure this task exists to prevent. Watch for this if per-unit REWRITE rows are
 ever revisited.
+
+## ADR-0104 — §12.20's PR-body/DB-column secret redaction: per-property coverage accepted in place of one combined fixture
+
+**Decision (2026-09-01, round V controller, fix wave).** `docs/SPEC.md` §12 item 20's literal text
+asks for one combined fixture run — a repo set carrying three named secret shapes (a mirror-URL
+token, a build-script-echoed token, a tracked `.env`) planted simultaneously — grepped in a single
+pass across `logs/`/`artifacts/`/`migration_state.json`, four named DB columns (`events.payload`,
+`attempts.stdout_tail`/`stderr_tail`, `phases.last_error`, `llm_cache.response_json`), and the
+generated PR body's `«redacted:…»` placeholder. What is actually built and tested is five
+independently-proven properties, each through its own real write path rather than one shared
+fixture: `events.payload` (pre-round coverage), `attempts.stdout_tail`/`stderr_tail` (D90,
+`tests/test_repository.py::test_record_attempt_redacts_a_credential_in_stdout_and_stderr_tail_before_the_write`),
+`phases.last_error` (D88 + D90, `tests/test_runner.py`'s two `_terminate_uncharged`/
+`_record_diagnostics` tests), `llm_cache.response_json` (D88), and the PR-body placeholder
+(`tests/test_pr_body_redaction.py::test_write_pr_record_redacts_a_credential_that_reached_the_pr_body`,
+added this round). This ADR adjudicates that per-property coverage satisfies §12.20's intent; the
+SPEC sentence carries a dated marker to this effect rather than being silently reworded.
+
+**Rationale.** The property §12.20 actually checks is *a planted secret never survives to a
+persisted or rendered artefact, and a debuggable placeholder survives in its place* — not the
+specific mechanics of one shared fixture run. Every one of the five named sites (four DB columns
+plus the PR body) is proven to hold that property independently: each test plants a
+credential-shaped secret through the real production write path (never a string match against
+source), reads back the persisted or rendered value, asserts the secret is gone and the
+`«redacted:…»` placeholder is present, and is paired with an over-redaction control asserting an
+innocuous value survives unchanged. Four of the five (`attempts.stdout_tail`/`stderr_tail`,
+`phases.last_error`'s two write paths) are additionally mutation-discriminated: reverting the
+`redact_text` call turns the test genuinely RED with the live secret visible, then restoring it
+turns the test green again (`docs/CRITERIA_PLAN.md` §20's 2026-08-31 annotations). A single
+combined fixture run would exercise these same five properties simultaneously rather than
+independently — it would not catch any defect class the per-property tests miss, since redaction
+at each site is applied by an independent call site (`redact_text` at each of the five write
+boundaries) with no shared state between them that only a combined run could expose. Building a
+combined fixture on top of coverage that already proves the property at every site would be
+`CLAUDE.md` Rule 2 churn: added test-harness surface with no additional defect class caught.
+
+**Precedent.** This follows §12.7 / **ADR-0099** directly: `docs/SPEC.md`'s §12 item 7 named a
+specific committed-fixture-repo methodology (`tests/fixtures/repos/`) that the codebase never
+built, while the underlying property (all six `ManifestAdapter`s parse and produce a correct
+`Coordinate.key`) already held and was already proven through a different, self-contained
+methodology (`tests/test_manifests.py`'s inline `tmp_path` synthesis). ADR-0099 adjudicated that
+the already-proven property satisfies the criterion's intent and dated-marked the SPEC sentence
+rather than building a redundant fixture mechanism to match the old wording literally. §12.20 is
+the same shape one level down: the named *methodology* (one combined fixture) is not what proves
+the property, and the property is already proven a different way that this ADR accepts as
+equivalent, exactly as ADR-0099 did for §12.7.
+
+**Alternatives rejected.** *Build the literal combined fixture* — rejected: no defect class it
+would catch is missed by the five independent per-property tests already in place, and building it
+would be pure test-harness churn (Rule 2) for a methodology difference, not a property gap.
+*Leave the adjudication open for a future round* — rejected: the equivalence is not genuinely
+ambiguous once stated (independent proof of the same property, direct precedent in ADR-0099), and
+leaving it open would cost this criterion's closure for no benefit, the same reasoning ADR-0099
+gave for its own alternatives.
