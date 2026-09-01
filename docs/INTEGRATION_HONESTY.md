@@ -7379,3 +7379,85 @@ the same commit that made them reachable.
 `_TransformClaimHook` (or an equivalent `pre_dispatch` hook for whichever kinds need it) persist
 the git tip it reads at claim time, mirroring `_TransformSink`'s own `pre_dispatch`/`sink` pairing.
 That design choice is not made here.
+
+## D92 — OPEN. `PrState.HELD` is declared and documented but never written anywhere in `src/fleet/`
+
+**Found by round Z task 2 (2026-09-01), while re-auditing §12.38/§12.46's `stub_reconcile` test
+coverage against D80's landed fix — a disclosed-but-out-of-scope finding, not this task's own
+job to fix.** Verified free before writing: a form-agnostic sweep of this file's `D<n>` headings
+found no `D92` heading; the highest allocated number was `D91`.
+
+**The gap, as measured, independently confirmed by task review.** `enums.py` documents
+`PrState.HELD` as "entered ONLY by `stub_reconcile`" — the state a PR sits in while its stub is
+still unresolved and readiness must stay withheld. A sweep of `src/` for every write/assignment
+of `PrState.HELD` finds exactly two hits, neither a write: `forge.py:59` is a set-membership
+check reading the value, and `orchestrator/stubs.py:195` is a comment explicitly stating the
+state is deliberately excluded from that function's own write paths. `_apply_stub_reconcile`
+(read in full by task review) touches only the `stubs` and `findings` tables — it never writes
+`PrState` at all. Every other `'HELD'` string hit in the tree is the unrelated budget-ledger
+`reservations.state` column, not `PrState`.
+
+**Consequence.** The state machine `enums.py` documents has a declared, named state with zero
+production writer — the same "declared but never wired" shape this ledger has recorded before
+(D56, D57, D80 pre-fix, D89 pre-Phase-1). Whatever downstream logic is meant to read `PrState ==
+HELD` (readiness gating, a PR-status render, an operator-facing report) can never observe it
+under real traffic.
+
+**Not yet built:** the write site. Most naturally this belongs inside `_apply_stub_reconcile` or
+a sibling function in `orchestrator/stubs.py`, transitioning a PR's state to `HELD` when its
+stub_reconcile pass finds the stub still unresolved (mirroring how `ACTIVE`/`SUPERSEDED` are
+presumably set — not traced here). That design choice is not made here.
+
+## D93 — OPEN. No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
+
+**Found by round Z task 2 (2026-09-01), same investigation as D92 — disclosed, not fixed, out of
+a test-writing task's scope.** Verified free before writing: highest allocated number was `D92`
+(allocated in this same commit, immediately above).
+
+**The gap, as measured, independently confirmed by task review.** All four exit-code
+determination sites in `cli.py` (approximately lines 1863, 5060, 8985, 9201 — re-verify against
+current `HEAD` before citing further, these were read once during this investigation and not
+independently re-anchored since) compute `attention`/`exit_code` from
+`RepoStatus.REQUIRES_HUMAN_INTERVENTION` only — none checks `RepoStatus.DEGRADED`.
+`_resume_impl`'s own docstring confirms `--no-continue` always exits 0 regardless of DEGRADED/
+unresolved-stub state ("the reconciliation is WRITTEN... at exit 0"). `HumanInterventionError`'s
+own docstring claims coverage of both `REQUIRES_HUMAN_INTERVENTION` and `DEGRADED`, but the code
+checks only the former — a real doc/code mismatch, not merely a missing feature.
+
+**Consequence.** `docs/SPEC.md` §3.5.1 point 5's claim that a run with any DEGRADED repo exits 7
+does not hold today — a run can complete with degraded repos present and still exit 0, silently.
+This is a real, observable divergence between what the SPEC and a docstring both claim and what
+the code does — worth prioritizing over D92 if only one gets picked up next, since it's an
+operator-facing exit-code contract, not an internal state-machine gap.
+
+**Not yet built:** whichever exit-code site (or a shared helper all four could route through) is
+meant to fold `RepoStatus.DEGRADED` into the "human attention needed" determination alongside
+`REQUIRES_HUMAN_INTERVENTION`. That design choice — and confirming which of the four sites is the
+authoritative one vs. which are derived/duplicated — is not made here.
+
+## D94 — OPEN. No mechanism exists to promote an already-open PR to ready (rebase, force-push, body regeneration) — §12.38's "resolution" sub-clause has no code to test
+
+**Found by round Z task 2 (2026-09-01), same investigation as D92/D93 — disclosed, not fixed, out
+of a test-writing task's scope.** Verified free before writing: highest allocated number was
+`D93` (allocated in this same commit, immediately above).
+
+**The gap, as measured, independently confirmed by task review.** `_pr_candidates`/`_pr_impl` (or
+wherever PR emission's candidate-selection lives — re-verify the exact function name/location
+against current `HEAD`) builds its candidate set fresh each run and, for any repo that already
+has an open PR record, appends it to an `already`-tracking list and `continue`s — skipping it
+entirely rather than checking whether the underlying stub has since resolved and the PR should be
+promoted (rebased onto the latest target branch, force-pushed if the draft content changed,
+body regenerated to drop the stub-pending notice). §12.38's own criterion text describes this
+resolution path as part of what "no ready-for-review while a stub is unresolved" requires — the
+mechanism to ever LEAVE the held state for an already-open PR does not exist in code today.
+
+**Consequence.** A stub that resolves after its PR was already opened (in the draft/held state)
+has no code path that ever promotes that PR to ready — only a fresh, not-yet-opened PR can reach
+the `RESOLVED`-triggers-ready-non-draft path round Z task 2's new positive-case test proves.
+§12.38's resolution sub-clause is untestable as a consequence, not merely untested — there is no
+resolution mechanism to write a test against.
+
+**Not yet built:** the rebase/force-push/body-regeneration mechanism itself, and the trigger
+logic deciding when an existing open PR should be re-examined for promotion. This is
+NEW-MECHANISM sized, not a caller-wiring gap — genuinely new logic, not a one-shot. That design
+choice is not made here.
