@@ -586,7 +586,7 @@ class LadderModelClient:
             mode = negotiate(caps)
             self._emit_drift(role, route.tier, target, caps, mode)
             try:
-                return await self._call_target(
+                response = await self._call_target(
                     role=role,
                     tier=route.tier,
                     target=target,
@@ -610,6 +610,15 @@ class LadderModelClient:
                 )
                 if index + 1 < len(targets):
                     self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
+                continue
+            # ADR-0106, §11.8: `index` at the point `_call_target` succeeded IS the failover-hop
+            # count for this call — 0 for the first target, 1 for one hop, etc. Stamped only when
+            # non-zero so the common (zero-hop) case allocates nothing extra.
+            if index > 0:
+                response = response.model_copy(
+                    update={"usage": response.usage.model_copy(update={"llm_failovers": index})}
+                )
+            return response
         raise TierUnavailable(route.tier, tried) from last
 
     def stream[T: BaseModel](

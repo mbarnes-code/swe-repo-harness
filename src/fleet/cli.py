@@ -4220,6 +4220,10 @@ class _TransformSink:
                 # flag and the cost it constrains (`schema.sql`: `1 => cost_usd = 0`) cannot drift
                 # apart, because neither is read from anywhere the other is not.
                 llm_cache_hit=result.usage.all_served_from_llm_cache,
+                llm_backend=result.usage.backend or None,
+                llm_failovers=result.usage.llm_failovers,
+                input_tokens=result.usage.input_tokens,
+                output_tokens=result.usage.output_tokens,
                 commit_sha=commit,
                 # §3.2 step 6.1's `already_applied` event: at least one unit of this dispatch was
                 # skipped because the guard found its effect already in the tree. It is what makes
@@ -6587,6 +6591,10 @@ class _AttemptWriter:
         error: WorkerError | None,
         cost_usd: float = 0.0,
         llm_cache_hit: bool = False,
+        llm_backend: str | None = None,
+        llm_failovers: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
     ) -> list[str]:
         stamp = _iso(self._clock())
         written: list[str] = []
@@ -6629,6 +6637,13 @@ class _AttemptWriter:
                     # carry the flag beside a `cost_usd` that is 0 only because the first row took
                     # it, which reads as a cache hit on a step that made no LLM call.
                     llm_cache_hit=llm_cache_hit if not written else False,
+                    # ADR-0106. Same "first row only" rule as `cost_usd`/`llm_cache_hit` above: a
+                    # later step row must not independently repeat the SAME backend/token counts
+                    # as if it made its own separate call.
+                    llm_backend=llm_backend if not written else None,
+                    llm_failovers=llm_failovers if not written else 0,
+                    input_tokens=input_tokens if not written else 0,
+                    output_tokens=output_tokens if not written else 0,
                 )
             )
             written.append(attempt_id)
@@ -6701,6 +6716,10 @@ class _BuildSink:
             error=result.error,
             cost_usd=result.usage.cost_usd,
             llm_cache_hit=result.usage.all_served_from_llm_cache,
+            llm_backend=result.usage.backend or None,
+            llm_failovers=result.usage.llm_failovers,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
         )
         if output.module_lock_foreign_registry:
             # The durable half of `_publish_module_lock`'s decision. The publish already happened
@@ -6786,6 +6805,10 @@ class _VerifySink:
             error=result.error,
             cost_usd=result.usage.cost_usd,
             llm_cache_hit=result.usage.all_served_from_llm_cache,
+            llm_backend=result.usage.backend or None,
+            llm_failovers=result.usage.llm_failovers,
+            input_tokens=result.usage.input_tokens,
+            output_tokens=result.usage.output_tokens,
         )
         if output.report is not None:
             await _record_verification(

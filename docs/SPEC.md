@@ -2982,6 +2982,11 @@ class TokenUsage(FleetModel):
     # These two fields and the property below are NORMATIVE and this listing must not shrink to
     # match a shorter reading of §11.6 — a reconciler who deletes them so this listing matches an
     # older copy of `models/tasks.py` restores D62 leg (b), leaving the column silently at 0.
+    llm_failovers: int = Field(default=0, ge=0)
+    # ADR-0106, §11.8, §12.43(i). Backend hops spent inside the call that produced THIS usage,
+    # summed by `accumulate` exactly like the two counters above. NORMATIVE for the same reason:
+    # deleting this field to match a shorter reading of `models/tasks.py` reopens D62's
+    # `llm_failovers` leg, leaving `attempts.llm_failovers` silently at 0.
 
     @property
     def all_served_from_llm_cache(self) -> bool:
