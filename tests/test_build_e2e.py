@@ -78,6 +78,7 @@ Each test says why it matters. Together:
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
 import re
@@ -88,7 +89,7 @@ import tempfile
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Final
 from urllib.parse import urlsplit
 
 import pytest
@@ -122,15 +123,19 @@ from tests.conftest import (
     reap_bazel_state,
 )
 from tests.test_bazel import _a_lockfile, _fail_if_registry_unreachable
-from tests.test_scan_e2e import FIXTURE_REPOS, _make_repo
+from tests.test_scan_e2e import FIXTURE_REPOS, _fresh_db, _make_repo
 from tests.test_transform_e2e import (  # noqa: F401  (`fleet` is a fixture, used by injection)
+    TS_IMPORT_RULE,
     DESTINATIONS,
+    _write_config,
+    _write_engine,
     base_args,
     fleet,
     git,
     query,
     scanned,
     transform,
+    write_rules,
 )
 
 runner = CliRunner()
@@ -2817,14 +2822,75 @@ def test_an_unknown_ecosystem_still_falls_back_visibly(
     assert "ts_project(" in sibling and "filegroup(" not in sibling, sibling
 
 
+def _second_fleet_workspace(
+    tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
+) -> Path:
+    """A second, fully independent fleet workspace — its own temp root, sources, DB and
+    monorepo — built the same way the `fleet` fixture builds one (`tests/test_transform_e2e.py`).
+
+    Not a second call to the `fleet` fixture: that fixture is bound to one `tmp_path` per test, so
+    the only way to run the pipeline twice inside one test with no shared state between the runs
+    (no shared commits, no shared `phases` rows) is a second independent root. `--config`/`--db`
+    are passed explicitly on every CLI invocation (`base_args`), but `scan`'s own `--repos`
+    defaults to a CWD-relative `config/repos.yaml` and is refused if it disagrees with
+    `--config`'s directory (`cli._validate_scan_flags`) — so this still needs its OWN `chdir`,
+    same as the `fleet` fixture's. The caller is responsible for `chdir`-ing back to whichever
+    workspace it invokes against next; `monkeypatch.chdir` only tracks the last call for teardown.
+    """
+    root = tmp_path_factory.mktemp("second-fleet")
+    sources = {
+        name: _make_repo(root / "sources", name, files) for name, files in FIXTURE_REPOS.items()
+    }
+    workspace = root / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, engine_module="fleet_fixture_engine")
+    _write_engine(workspace, "fleet_fixture_engine", probe_available=True)
+    _write_engine(workspace, "fleet_fixture_blind_engine", probe_available=False)
+    write_rules(workspace, TS_IMPORT_RULE)
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    monkeypatch.syspath_prepend(str(workspace))
+    importlib.invalidate_caches()
+    make_monorepo(workspace)
+    return workspace
+
+
+_DEST_MARKER: Final = b"<DEST>"
+
+
+def _tree_under(root: Path, dest: str) -> dict[str, bytes]:
+    """Every regular file below `root`, keyed by its POSIX path relative to `root`, with every
+    occurrence of `dest` in a file's own bytes replaced by a neutral marker.
+
+    Rooting the walk AT a repo's own destination directory (`ts/acme/ui`, `vendored_ts/acme/ui`)
+    rather than at the build worktree is what makes two such trees directly comparable: the
+    overridden segment is the walk's root and never appears in a returned KEY, so a plain set
+    comparison of the keys is already scoped to "everything but the overridden path segment(s)".
+
+    The byte replacement is the same scoping applied to file CONTENT: a unit that references its
+    own npm hub link (`//<dest>:node_modules/<pkg>`, ADR-0048) writes its own destination into its
+    own `BUILD.bazel` — a legitimate difference the override exists to make, not drift. Only the
+    exact `dest` string is masked, so any OTHER, unrelated difference still fails the comparison.
+    """
+    needle = dest.encode("utf-8")
+    return {
+        str(path.relative_to(root).as_posix()): path.read_bytes().replace(needle, _DEST_MARKER)
+        for path in sorted(root.rglob("*"))
+        if path.is_file()
+    }
+
+
 def test_a_monorepo_dir_override_really_moves_the_destination(
     fleet: Path,  # noqa: F811
     monorepo: Path,
     bazel: FakeBazel,
     filter_repo: FakeFilterRepo,
+    tmp_path_factory: pytest.TempPathFactory,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`build.monorepo_dir_overrides` moves an adapter-computed destination, and every artifact
-    that names the destination moves with it.
+    that names the destination moves with it — and produces the IDENTICAL tree §12 item 33
+    claims, not merely a tree at a different path.
 
     **Why:** `EcosystemAdapter.monorepo_dir` is a `ClassVar` on a shared singleton, so §9's
     override has no way to reach it without a global mutation — which is exactly the shape of a
@@ -2832,9 +2898,25 @@ def test_a_monorepo_dir_override_really_moves_the_destination(
     is therefore applied in the driver, and this test is what stops it from being applied nowhere:
     the assertion is on the relocation argv and on the generated package, not on the config
     object that was read.
+
+    **Why a second, independent fleet run:** "moved to `vendored_ts/acme/ui`" alone does not show
+    the tree AT that destination is the same tree the default layout would have produced — a
+    driver could apply the override and, say, drop `tsconfig` generation along some code path only
+    the overridden branch takes, and every assertion above would still pass. A full SECOND
+    `scan → sequence → transform → build` of the identical fixture repo, under the DEFAULT layout,
+    gives a real `ts/acme/ui` tree to diff `vendored_ts/acme/ui` against.
     """
     ecosystems.discover()
     npm = repo_ecosystem(fleet, "acme-app-ts")  # never spelled: read back from the inventory
+
+    baseline = _second_fleet_workspace(tmp_path_factory, monkeypatch)
+    add_repos(baseline, ["acme-ui-ts"])
+    transformed(baseline)
+    assert build(baseline, "--no-sandbox").exit_code == ExitCode.SUCCESS
+    baseline_dests = relocations(filter_repo)
+    assert baseline_dests["acme-ui-ts"] == "ts/acme/ui", baseline_dests
+    monkeypatch.chdir(fleet)
+
     config = fleet / "config" / "fleet.yaml"
     config.write_text(
         config.read_text(encoding="utf-8")
@@ -2855,6 +2937,20 @@ def test_a_monorepo_dir_override_really_moves_the_destination(
     # The repos that carry an explicit `dest:` are NOT moved: §9's override governs the directory
     # the adapter chose, and an operator who wrote a path is not overruled by it.
     assert dests["acme-app-ts"] == DESTINATIONS["acme-app-ts"], dests
+
+    # The "identical tree" claim itself: everything the default layout put under `ts/acme/ui`
+    # is, byte for byte, what the override put under `vendored_ts/acme/ui` — the destination
+    # directory is the ONLY thing that differs, and it is the walk's root on both sides, so it
+    # cannot appear inside either dict below.
+    baseline_tree = _tree_under(build_worktree(baseline, "acme-ui-ts") / "ts/acme/ui", "ts/acme/ui")
+    override_tree = _tree_under(
+        build_worktree(fleet, "acme-ui-ts") / "vendored_ts/acme/ui", "vendored_ts/acme/ui"
+    )
+    assert baseline_tree, "the baseline tree must be non-empty or the comparison proves nothing"
+    assert set(override_tree) == set(baseline_tree), (
+        set(override_tree) ^ set(baseline_tree)
+    )
+    assert override_tree == baseline_tree
 
 
 def test_an_override_colliding_with_another_adapters_directory_is_refused(
