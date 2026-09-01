@@ -427,14 +427,15 @@ validity assertion).
 
 ## 23. Idempotency — re-scan, re-transform
 **OPEN — one sub-clause blocked on D23, otherwise DONE (round S, `4e1975d`).** Re-transform is
-fully covered. Re-scan now covers 6 of the 8 named tables (`edges, contracts, symbols, manifests,
-findings, collisions, waves, wave_members` per `docs/SPEC.md:7438`) directly in
-`tests/test_scan_e2e.py`, plus `tests/test_sequence_e2e.py`'s pre-existing, narrower `contracts`
-coverage — `symbols, edges, manifests, findings` extended in-place, `waves, wave_members` and
-`contracts, collisions` (via a genuine 9-repo, real-git, real-CLI vendored-contract fixture) newly
-added this round. **Correction, 2026-08-31:** this entry's prior "6 of 8" line predates round S
-and had no citation; re-measured against `tests/test_scan_e2e.py` at round S's start, the true
-pre-round figure was **3 of 8** (`edges, symbols, manifests`) — round S closed the remaining 5.
+fully covered. Re-scan now covers all 8 of the named tables (`edges, contracts, symbols,
+manifests, findings, collisions, waves, wave_members` per `docs/SPEC.md:7438`): 6 under re-scan
+directly in `tests/test_scan_e2e.py` (`symbols, edges, manifests, findings` extended in-place,
+`waves, wave_members` newly added this round), and 2 under re-sequence (`contracts, collisions`,
+via a genuine 9-repo, real-git, real-CLI vendored-contract fixture newly added this round, plus
+`tests/test_sequence_e2e.py`'s pre-existing, narrower `contracts` coverage). **Correction,
+2026-08-31:** this entry's prior "6 of 8" line predates round S and had no citation; re-measured
+against `tests/test_scan_e2e.py` at round S's start, the true pre-round figure was **3 of 8**
+(`edges, symbols, manifests`) — round S closed the remaining 5.
 **Remaining, genuinely unclosable by a test:** `edges.retargeted_from_repo_id` is never persisted
 (`state/repository.py`'s `insert_edges`/`EdgeRow` carry no such column/field at all — the value
 `graph/cycles.py:736` computes in memory is structurally dropped before it reaches SQL) — this is
@@ -500,13 +501,40 @@ single one-shot task.
 **Out of scope:** do not re-implement or duplicate a second COORDINATE call site.
 
 ## 28. Single writer, pool children have no DB handle
-**DONE (round S, `0742a0f`, reviewed Approved).** `tests/test_budgets.py`'s
-`test_new_cpu_pool_passes_no_db_handle_bearing_kwarg` calls the real `new_cpu_pool` through a spy
-on `ProcessPoolExecutor` and asserts the only kwargs present are `max_workers`/`mp_context` — no
-`initializer`/`initargs`. `tests/test_db.py`'s existing concurrency test was scaled from 50 to the
-full 200 coroutines the criterion names (no adjudicated-smaller-number fallback needed). Both
-mutation-verified (a spurious `initializer=` kwarg, and a real `await`→`create_task` concurrency
-bug reproducing a genuine `sqlite3.OperationalError`).
+**DONE (round S, `0742a0f`; disclosure corrected 2026-08-31, see round S's final review, finding
+I3).** `docs/SPEC.md:7443` states three clauses: (a) an integration test that starts the runner
+and shows a second writable `aiosqlite` connection in the same process raises; (b) pool children
+constructed with no DB handle, verified by inspecting the initializer arguments; (c) a 200-repo
+simulated run produces zero `SQLITE_BUSY` errors.
+
+* Clause (b) is met literally: `tests/test_budgets.py`'s `test_new_cpu_pool_passes_no_db_handle_bearing_kwarg`
+  calls the real `new_cpu_pool` through a spy on `ProcessPoolExecutor` and asserts the only kwargs
+  present are `max_workers`/`mp_context` — no `initializer`/`initargs`. Mutation-verified (a
+  spurious `initializer=` kwarg reddens it).
+* Clause (a) is met at the `StateWriter` level, not the runner level — a disclosed substitution.
+  `tests/test_db.py`'s `test_second_writable_connection_raises_while_the_writer_is_live` starts a
+  `StateWriter` (not the runner) and shows a second writable connection raises
+  `SingleWriterViolationError`. This is a pre-existing test, not round S's doing, but it is
+  load-bearing for this DONE marking; no runner-level integration test of this property exists.
+* Clause (c) is met by 200 concurrent `writer.submit()` coroutines against the `StateWriter`
+  actor (`tests/test_db.py::test_concurrent_submits_all_land_and_each_result_reaches_its_own_caller`,
+  scaled from 50 this round) — an adjudicated stand-in for the SPEC's 200-*repo* simulated run,
+  disclosed here rather than attributed to the SPEC's literal wording. Reason the stand-in is
+  accepted: each `writer.submit()` is exactly the primitive one repo's dispatch loop calls, so 200
+  of them landed concurrently (~50ms observed, gapless `seq` 1..200, zero `SQLITE_BUSY`) proves the
+  single-writer actor's concurrency-safety property at real scale — the property clause (c) exists
+  to protect. It is not literally a 200-repo run: `src/fleet/` has 62 `.submit(` call sites, and a
+  real repo run issues far more than 200 total `.submit()` calls across many repos' phases, so this
+  test proves the actor handles 200 concurrent callers, not that a 200-repo run in particular stays
+  `SQLITE_BUSY`-free end to end. Mutation-verified (a real `await`→`create_task` concurrency bug
+  reproducing a genuine `sqlite3.OperationalError`).
+
+Kept DONE rather than downgraded to OPEN, per this file's own remedy-of-choice: the property each
+clause exists to protect is genuinely exercised (writer-actor concurrency safety at scale, no-DB-handle
+pool children, and a single-writer violation raising rather than queueing), even though (a) and (c)
+are met one layer below the SPEC's literal unit (writer instead of runner; concurrent coroutines
+instead of concurrent repos). If a future round wants the literal runner-level and repo-level forms,
+treat that as new scope, not as evidence this entry was wrong.
 
 ## 29. Contracts extracted once, deterministically
 **OPEN — mixed, 9 sub-clauses — SCALE-FIXTURE + one structurally-unreachable clause.** Most
@@ -742,7 +770,7 @@ it.
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 11 | 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 32 (re-derived 2026-08-31 by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading; matches `docs/PROGRESS.md`'s round-R close-out checkpoint of "11 of 48"; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| DONE | 13 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32 (re-derived 2026-08-31, post round-S finalfix, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading; the previous "11" row was stale in the very commit (`d70e8a4`) that moved §1 and §28 to `**DONE` headings — see round S's final review, finding I1; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 2 | 27, 37 |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |

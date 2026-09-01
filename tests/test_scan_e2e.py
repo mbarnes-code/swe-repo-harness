@@ -469,6 +469,12 @@ def test_a_second_scan_clones_nothing_and_duplicates_no_row(fleet: Path) -> None
     that re-clones 250 mirrors is a re-scan nobody dares run. The clone is proved absent by
     DELETING the source repositories first — the mirrors and worktrees are already on disk, so a
     run that touches the network at all cannot succeed.
+
+    Not covered here: `edges.retargeted_from_repo_id` stability across a re-scan. This test only
+    checks the `edges` row COUNT is unchanged; the `retargeted_from_repo_id` value itself is never
+    persisted at all (`state/repository.py`'s `insert_edges`/`EdgeRow` carry no such column/field),
+    so its idempotency is untestable until D23 (`docs/INTEGRATION_HONESTY.md`) is fixed. See
+    `docs/CRITERIA_PLAN.md` §23's "Remaining, genuinely unclosable by a test" note.
     """
     assert scan(fleet).exit_code == ExitCode.SUCCESS
     before = {
