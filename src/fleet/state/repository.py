@@ -401,6 +401,12 @@ class AttemptRow:
                                   #   from `llm_cache`. Derived by
                                   #   `TokenUsage.all_served_from_llm_cache`, never from
                                   #   `cost_usd == 0` — a free local target costs 0 too.
+    llm_backend: str | None = None   # ADR-0023/ADR-0107; NULL for DETERMINISTIC rows
+                                      #   (schema.sql:732)
+    llm_failovers: int = 0            # ADR-0023/ADR-0107, §11.8; backend hops spent inside
+                                       #   THIS attempt
+    input_tokens: int = 0
+    output_tokens: int = 0
     patch_id: str | None = None
     commit_sha: str | None = None
     already_applied: bool = False
@@ -1096,7 +1102,8 @@ class SqliteStateRepository:
             "SELECT attempt_id, run_id, repo_id, task_id, phase, attempt, revalidation_round, "
             "       tier, context_policy, approach_signature, command, command_sha256, "
             "       retry_ordinal, exit_code, failure_class, duration_ms, stdout_tail, "
-            "       stderr_tail, cost_usd, llm_cache_hit, patch_id, commit_sha, "
+            "       stderr_tail, cost_usd, llm_cache_hit, llm_backend, llm_failovers, "
+            "       input_tokens, output_tokens, patch_id, commit_sha, "
             "       already_applied, started_at, finished_at "
             "  FROM attempts WHERE run_id = ? ORDER BY repo_id, phase, attempt, retry_ordinal"
         )
@@ -1125,11 +1132,15 @@ class SqliteStateRepository:
                         stderr_tail=str(row[17]),
                         cost_usd=float(row[18]),
                         llm_cache_hit=bool(row[19]),
-                        patch_id=_opt_str(row[20]),
-                        commit_sha=_opt_str(row[21]),
-                        already_applied=bool(row[22]),
-                        started_at=str(row[23]),
-                        finished_at=str(row[24]),
+                        llm_backend=_opt_str(row[20]),
+                        llm_failovers=int(row[21]),
+                        input_tokens=int(row[22]),
+                        output_tokens=int(row[23]),
+                        patch_id=_opt_str(row[24]),
+                        commit_sha=_opt_str(row[25]),
+                        already_applied=bool(row[26]),
+                        started_at=str(row[27]),
+                        finished_at=str(row[28]),
                     )
 
     # ==================================================================================
@@ -2206,9 +2217,11 @@ class SqliteStateRepository:
             "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, "
             "    revalidation_round, tier, context_policy, approach_signature, command, "
             "    command_sha256, retry_ordinal, exit_code, failure_class, duration_ms, "
-            "    stdout_tail, stderr_tail, cost_usd, llm_cache_hit, patch_id, commit_sha, "
+            "    stdout_tail, stderr_tail, cost_usd, llm_cache_hit, llm_backend, llm_failovers, "
+            "    input_tokens, output_tokens, patch_id, commit_sha, "
             "    already_applied, started_at, finished_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+            "?, ?, ?, ?) "
             "ON CONFLICT (run_id, repo_id, phase, attempt, revalidation_round, tier, "
             "             command_sha256, approach_signature, retry_ordinal) DO UPDATE SET "
             "    exit_code = excluded.exit_code, failure_class = excluded.failure_class, "
@@ -2237,6 +2250,10 @@ class SqliteStateRepository:
             stderr_tail,
             row.cost_usd,
             int(row.llm_cache_hit),
+            row.llm_backend,
+            row.llm_failovers,
+            row.input_tokens,
+            row.output_tokens,
             row.patch_id,
             row.commit_sha,
             int(row.already_applied),

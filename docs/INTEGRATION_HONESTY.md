@@ -3892,7 +3892,7 @@ shipped run for the first time. **No claim in this entry changes** — the cache
 
 ---
 
-**D62 — PARTLY ADDRESSED. `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
+**D62 — FIXED, LANDED (`f88e105`). `record_attempt`'s `INSERT` omits five declared columns, so `llm_failovers`,
 `llm_backend`, `input_tokens`, `output_tokens` and `llm_cache_hit` are dead in shipped code.**
 Verified against `7a8bfbb`; **re-verified OPEN on `main` at `6a41840`**.
 
@@ -4131,6 +4131,49 @@ suite-wide certification is claimed here (a sibling held the primary checkout's 
 while this was written); and `docs/SPEC.md` §11.2's "written in **one** transaction" claim about
 six columns is still inaccurate for `integration_ref`, which W15 recorded and this change neither
 worsens nor repairs.)*
+
+*(2026-09-01, round Y task 4 — **the status FIELD moves `PARTLY ADDRESSED` -> `FIXED, LANDED
+(f88e105)`; not one word above is rewritten, W11's, W13's, W15's, W4's and W2's markers
+included.** The four columns round H lane W2's marker left open — `llm_backend`, `llm_failovers`,
+`input_tokens`, `output_tokens` — are now written. Of this entry's originally-named five columns,
+all five are closed: `llm_cache_hit` by ADR-0094 (round H), the remaining four by `f88e105`.*
+
+***`llm_failovers` — new `TokenUsage` counter, stamped in `LadderModelClient.complete()`'s target
+loop from the hop index at the point the call succeeded, summed by `accumulate` exactly like the
+two ADR-0094 cache counters.*** No semantics ruling needed: §11.8's "backend hops spent inside
+THIS attempt" is unambiguous once the field exists. This also closes the last code gap for
+§12.43(i)'s literal fixture assertion (`attempts.llm_failovers = 1`) — a criterion this entry did
+not previously name, found by round Y task 4's own re-verification of D62 against current `main`.
+
+***`llm_backend` needed a ruling, not just wiring — recorded as ADR-0107.*** `accumulate` drops
+`backend` by explicit, reasoned design (a ladder rung can answer from more than one tier across
+several role-routed calls), so writing the column required saying which value wins when an
+attempt's usage spans more than one backend. ADR-0107 rules **last-non-empty-wins**,
+order-preserving over the fold's call order — the same shape round G lane W4's ALL-HIT ruling
+took for `llm_cache_hit` before ADR-0094 could write it, smaller in scope (one field, no rejected
+alternative needing its own investigation).
+
+***`input_tokens`/`output_tokens` — pure wiring, exactly as W13's leg (a) measurement implied.***
+`TokenUsage` already had both fields and `accumulate` already summed both; no ruling was needed,
+only `AttemptRow`/`record_attempt`/`iter_attempts`/`cli.py`'s two `AttemptRow` sites and
+`_AttemptWriter.record` (plus its two callers) naming them.
+
+***`docs/SPEC.md`'s `TokenUsage` listing moved in the same commit as the code (`f88e105`)***, per
+this project's "Documents Are Inputs to Future Edits" guardrail and the same discipline ADR-0094
+already established for this exact listing — `llm_failovers` is now present in both places.
+
+***What this annotation does not establish.*** `integration_ref` and `container_id` — the two
+columns W13's `PRAGMA table_info` measurement found beyond this entry's own five, making the
+class "declared and never nameable by `record_attempt`" seven rather than five — are **explicitly
+untouched by `f88e105`** and are **not** part of this entry's own heading claim (which has always
+named five columns, not seven). `integration_ref` is written by a separate `UPDATE`
+(`cli._AttemptWriter._stamp_ref`) and was already reachable before this change; `container_id` has
+no producer anywhere in `src/` and remains a distinct, unscoped gap — closing it is not this
+entry's defect and this task deliberately did not touch either column (round Y task 4's own brief,
+§7). Seven tests were added covering the four columns closed here
+(`tests/test_llm_client.py`, the new `tests/test_llm_backend_failover_attribution.py`, and
+`tests/test_runner.py`'s new local-profile e2e test) — no suite-wide certification beyond those
+files is claimed here.)*
 
 ---
 
@@ -7116,7 +7159,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2191-2241`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2202-2262`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (`cli.py:6611`) sets

@@ -229,12 +229,24 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
     """Sum the countable fields of several `TokenUsage` records.
 
     A free function rather than a `TokenUsage.merged()` method, because the sum is NOT a
-    `TokenUsage` in the same sense as its parts: `role`, `tier`, `backend` and `model_id`
+    `TokenUsage` in the same sense as its parts: `role`, `tier` and `model_id`
     identify ONE dispatch, and a ladder that escalates DETERMINISTIC → WORKHORSE → HEAVY has
     three of each. They are dropped rather than silently taking the last writer's value, which
     would attribute the whole run's spend to whichever tier happened to answer last.
+
+    `backend` is the one exception (ADR-0107): last-non-empty-wins, order-preserving over the
+    fold's argument order (every caller passes `accumulate(seed, *results_in_call_order)`, so
+    "last" means "the target that answered most recently"). §12.24 needs a non-empty `backend`
+    on the attempt row for the common single-call-per-rung case, and last-non-empty degrades
+    gracefully rather than incorrectly for the rare multi-role rung: the column reports *a*
+    backend that genuinely answered during the attempt, never a fabricated or averaged one.
     """
+    backend = ""
+    for u in usages:
+        if u.backend:
+            backend = u.backend
     return TokenUsage(
+        backend=backend,
         input_tokens=sum(u.input_tokens for u in usages),
         output_tokens=sum(u.output_tokens for u in usages),
         cache_read_tokens=sum(u.cache_read_tokens for u in usages),
@@ -246,6 +258,10 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
         # `TokenUsage.all_served_from_llm_cache` derives the flag from the pair.
         llm_cache_lookups=sum(u.llm_cache_lookups for u in usages),
         llm_cache_hits=sum(u.llm_cache_hits for u in usages),
+        # ADR-0107. Total backend hops across the whole attempt, matching `schema.sql`'s
+        # `llm_failovers` comment ("backend hops spent inside THIS attempt") directly — no
+        # identity-element hazard, exactly like the two cache counters above.
+        llm_failovers=sum(u.llm_failovers for u in usages),
     )
 
 

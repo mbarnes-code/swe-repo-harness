@@ -482,21 +482,31 @@ against `tests/test_scan_e2e.py` at round S's start, the true pre-round figure w
 survives a second scan unchanged. Everything else in this criterion is already closed.
 
 ## 24. Fail-closed budgets, ledger moves correctly
-**OPEN — mixed, 7 sub-clauses — blocked on D62 only now.** Wave-breach, over-reserve-refused,
-in-flight-wait, and the ledger-sum invariant were already covered. Round U (`3f089a4`)
-closed the run-ceiling clause: `tests/test_cli.py::test_run_cost_exhausted_exits_3` drives a real
-`fleet scan` through `PhaseRunner`'s actual `reserve()`/`dispatch()` path to exit 3. The brief's
-literal scenario (seed `run_max_cost_usd` below a known cost) is architecturally unrepresentable —
+**DONE (round Y task 4, `f88e105`/`193c319`).** Wave-breach, over-reserve-refused, in-flight-wait,
+the ledger-sum invariant, and the run-ceiling clause were already covered (rounds R and U — see
+below). The **only** remaining open item was local-profile row completeness, tracked as D62
+(`llm_backend` etc. were NULL — nothing wrote them). D62 closed in full: `f88e105` wires
+`llm_backend` (ADR-0107's last-non-empty-wins ruling in `accumulate`), `llm_failovers` (new
+`TokenUsage` counter, stamped in `LadderModelClient.complete()`), and `input_tokens`/
+`output_tokens` (pure wiring) into `AttemptRow`/`record_attempt`/`iter_attempts`/`cli.py`'s
+writers. `193c319` adds
+`tests/test_runner.py::test_a_local_profile_run_writes_a_non_empty_backend_on_every_row_at_zero_cost`
+— a real `PhaseRunner.run_wave` dispatch under a free-priced target, sibling to the round R
+ledger-sum test and using the same harness, proving the criterion's own literal text: the run
+ends with `spent_usd == 0` and every `attempts` row carries a non-empty `llm_backend` and
+`llm_cache_hit == 0`. See `docs/INTEGRATION_HONESTY.md` D62 (now `FIXED, LANDED`) and ADR-0107
+for the full design and rationale.
+**Done bar (met in full):** one e2e test asserting the ledger-sum invariant **(met, round R)**;
+one CLI-level test that organically breaches the run ceiling and asserts exit 3 **(met, round
+U)**; one e2e test proving the local-profile row-completeness clause **(met, round Y task 4)**. Do
+not re-dispatch any of the three sub-clauses above — all three are done.
+**Historical note on the run-ceiling clause (round U, `3f089a4`):** the brief's literal scenario
+(seed `run_max_cost_usd` below a known cost) is architecturally unrepresentable —
 `schema.sql`'s `CHECK (spent_usd + reserved_usd <= max_usd)` makes `spent_usd > max_usd`
 unseedable, and every CLI `PhaseRunner` site reserves $0 (no production `TokenEstimator` callers)
-— so the test uses the durably-true equivalent (a pre-seeded halted ledger), verified by task
-review via a full call-chain trace against source to be a legitimate, organic exercise of the
-exit-3 path, not a synthetic shortcut. Local-profile row completeness is D62 (`llm_backend` etc.
-are NULL — do not re-open, it's tracked) — the **only** remaining open item.
-**Done bar:** one e2e test asserting the ledger-sum invariant **(met, round R)**, and one
-CLI-level test that organically breaches the run ceiling and asserts exit 3 **(met, round U)**.
-Criterion stays OPEN pending D62 only — do not count toward the `<n> of 48` tally until D62
-closes; do not re-dispatch the ledger-sum or run-ceiling clauses, both are done.
+— so `tests/test_cli.py::test_run_cost_exhausted_exits_3` uses the durably-true equivalent (a
+pre-seeded halted ledger), verified by task review via a full call-chain trace against source to
+be a legitimate, organic exercise of the exit-3 path, not a synthetic shortcut.
 
 ## 25. The unknown repo survives the pipeline
 **OPEN — SCALE-FIXTURE.** The `no-manifest` finding and `misc/<repo_id>` destination are covered.

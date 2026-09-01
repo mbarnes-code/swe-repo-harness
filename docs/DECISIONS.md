@@ -12488,3 +12488,96 @@ test and the renamed wave-composition test while every other test in both files 
 restoring the fix greens both again. Full suite run recorded in the round Y task 1 report.
 
 See `docs/SPEC.md` §12 item 17's dated correction marker and `docs/CRITERIA_PLAN.md` §17.
+
+## ADR-0107 — `attempts.llm_backend` is LAST-NON-EMPTY-WINS in `accumulate`, order-preserving over call order
+
+**Status:** ACCEPTED. Landed round Y task 4, alongside the code it decides.
+
+**Context.** D62 (`docs/INTEGRATION_HONESTY.md`) records that `record_attempt`'s `INSERT` omits
+`llm_backend` (among four other columns) so the column has been dead in shipped code since it was
+declared. `workers/base.py::accumulate` currently drops `backend` on purpose: its docstring gives
+an explicit, reasoned argument for dropping `role`/`tier`/`backend`/`model_id` together — they
+"identify ONE dispatch, and a ladder that escalates DETERMINISTIC → WORKHORSE → HEAVY has three of
+each," and are dropped "rather than silently taking the last writer's value, which would attribute
+the whole run's spend to whichever tier happened to answer last." Writing the column therefore
+cannot be "stop dropping it" without saying which value wins when an attempt's accumulated usage
+spans more than one backend — a rung can make several different-role calls that route to
+different tiers via `RoleRouter.resolve(role)`, a static per-role mapping independent of the
+rung's own `ctx.tier`, so multi-backend attempts are a real, if uncommon, shape. Reversing part of
+an existing, reasoned docstring is a design decision a future reader of that docstring needs
+recorded, exactly as round G's ALL-HIT ruling (ADR-0094, `attempts.llm_cache_hit`) was needed
+before that column could be written truthfully. This ADR is written in the same commit as the
+code that implements it, so the doc cannot spend a round forbidding what the code does.
+
+**Decision.** `attempts.llm_backend` is **LAST-NON-EMPTY-WINS**, order-preserving over the fold's
+argument order. Every caller invokes `accumulate(seed, *results_in_call_order)`, so "last" means
+the target that answered most recently within the attempt:
+
+```python
+def accumulate(*usages: TokenUsage) -> TokenUsage:
+    backend = ""
+    for u in usages:
+        if u.backend:
+            backend = u.backend
+    return TokenUsage(backend=backend, ...)
+```
+
+`input_tokens`, `output_tokens`, `cache_read_tokens`, `cost_usd`, `llm_cache_lookups`,
+`llm_cache_hits` and `llm_failovers` (ADR-0107's own new field, §12.43(i)) continue to be summed,
+unchanged. `role`, `tier` and `model_id` continue to be dropped, unchanged — this decision touches
+`backend` alone.
+
+**Why last-non-empty, and not the alternatives.**
+
+1. *It matches `_stamp`'s existing per-call semantics, extended forward.* `client.py::_stamp`
+   already attributes a single call's usage "to the target that actually answered" (its own
+   docstring). Folding several calls' usages and reporting the LAST one to answer is the natural
+   extension of that same rule to a multi-call attempt: the freshest fact about "what answered
+   this attempt" is what the attempt's row should say.
+2. *It satisfies §12.24's literal text trivially in the common case, and degrades gracefully — not
+   incorrectly — in the rare one.* §12.24 requires "every row carrying a non-empty `backend`"
+   under a `--profile local` run. The overwhelming majority of rungs (classify, most transform
+   rungs) make exactly one LLM call, where first-wins, last-wins and any other non-dropping rule
+   coincide. For the rare multi-role rung, last-non-empty-wins still reports *a* backend that
+   genuinely answered during the attempt — never a fabricated or averaged one — which is the
+   property that matters: the column is honest, even when it is not exhaustive.
+3. *It costs nothing extra.* The loop already visits every usage in the fold; recording the last
+   non-empty `backend` is one branch inside a loop `accumulate` already runs.
+
+**Rejected.**
+
+* *Keep dropping `backend` in `accumulate`* — fails §12.24 outright; this is the status quo D62
+  exists to close.
+* *First-non-empty-wins* — no stated advantage over last-wins, and reads less naturally for the
+  case this decision actually has to handle: a schema-repair failover mid-rung that lands on a
+  second model (`m2`) after the first (`m1`) answered unsatisfactorily reports as "answered by
+  `m2`," which is the target whose output the attempt actually shipped, not the one it discarded.
+  First-wins would report `m1` — the target that did NOT produce the attempt's result.
+* *A set/list column* — `attempts.llm_backend` is declared `TEXT` in `state/schema.sql`, not
+  JSON; widening it to hold a set of backends is a schema/type change out of this task's size
+  class, and no consumer in `src/` needs multi-backend attribution today (the same "no consumer
+  yet, and the price is disclosed rather than paid silently" posture ADR-0094 took for
+  `llm_cache_hit`'s own cost).
+* *A boolean or enum flag distinguishing single- from multi-backend attempts* — adds a second
+  column to explain the first without changing what any consumer can do with either; not proposed
+  by the research this ADR is drawn from and not adopted here for the same reason the set/list
+  column is not: nothing in `src/` reads it.
+
+**Consequences.** (i) `accumulate`'s docstring is corrected to name the one field it no longer
+drops for the reason given above, rather than silently falling out of sync with the code the way
+D62 itself records happening to a different column. (ii) `AttemptRow.llm_backend`,
+`record_attempt`'s `INSERT` and `iter_attempts`' `SELECT` all gain the column in the same round;
+`cli.py`'s two `AttemptRow` construction sites and `_AttemptWriter.record` (plus its two callers,
+`_BuildSink`/`_VerifySink`) pass `result.usage.backend or None` — `accumulate`'s empty-string
+default is coalesced to SQL `NULL` at the writer boundary, matching `schema.sql`'s own comment
+("NULL for DETERMINISTIC rows") rather than storing an empty string for a rung that made no LLM
+call at all. (iii) §12.24's local-profile clause is closable: a `--profile local` fixture's rows
+now carry a non-empty `backend` whenever the rung dispatched at least one LLM call, satisfying the
+criterion's literal text. (iv) D62 moves toward closure: of its five originally-named columns,
+`llm_cache_hit` was already closed by ADR-0094; this ADR's code change closes `llm_backend`,
+`llm_failovers`, `input_tokens` and `output_tokens` together (the latter three needed no ruling —
+see the accompanying commit's docstrings). (v) This decision is deliberately narrower in scope
+than ADR-0094: one field, one clear answer, no rejected alternative that itself required separate
+investigation — foldable into a single small ADR rather than needing a round-length adjudication,
+but, per this project's Central Number Allocation rule and the precedent ADR-0094 set for
+`llm_cache_hit`, written down rather than silently coded.
