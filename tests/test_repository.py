@@ -575,7 +575,7 @@ async def test_the_reaper_never_reclaims_a_requires_human_intervention_row(
             row = await store.get_phase(RUN, REPO, Phase.VERIFY)
             assert row is not None
             assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
-            assert row.attempts == 1, "the reaper must not touch attempts on a row it must not touch"
+            assert row.attempts == 1, "the reaper must not touch attempts on a row it must skip"
         finally:
             await read_conn.close()
 

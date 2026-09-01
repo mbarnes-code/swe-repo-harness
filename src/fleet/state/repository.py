@@ -1536,10 +1536,24 @@ class SqliteStateRepository:
                 transition(current, target)
             except ValueError:
                 return None, True
-            await conn.execute(
+            cursor = await conn.execute(
                 update_sql,
                 (str(target), redacted, stamp, run_id, repo_id, int(phase), fence),
             )
+            # Defense-in-depth, not a live guard: the SELECT above, in this same BEGIN IMMEDIATE,
+            # already confirmed the row exists at this exact (run_id, repo_id, phase, lease_fence)
+            # key, so the UPDATE's WHERE (identical key) cannot legitimately match zero or more
+            # than one row. A mismatch here means the SELECT and UPDATE stopped agreeing on the
+            # row they name — fail loud (CLAUDE.md Rule 11) rather than return a status that was
+            # never actually written.
+            if cursor.rowcount != 1:
+                raise RepositoryError(
+                    f"complete_phase: UPDATE matched {cursor.rowcount} rows for "
+                    f"phases({run_id}, {repo_id}, phase={int(phase)}) fence={fence}, expected "
+                    "exactly 1 — the fenced SELECT above found the row but the UPDATE's own WHERE "
+                    "(the same key) did not; this should be structurally impossible inside one "
+                    "BEGIN IMMEDIATE"
+                )
             return str(target), False
 
         written, illegal = await self._writer.submit(unit)
