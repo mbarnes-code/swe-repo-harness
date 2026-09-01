@@ -7451,3 +7451,91 @@ ruff clean). No step in this chain trusted a pass-count claim it could instead r
 mechanical sub-clauses, §35's two worker-level gaps. A stale note on D50's own ledger entry (its
 "16 of 37" framing contradicted by keys wired 2026-08-22) remains unfixed, flagged for whichever
 round next touches D50.
+
+### Checkpoint — 2026-09-01 (round AA controller, close-out)
+
+**§12 criteria met: 21 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings — unchanged from round Z's close). **This was a disclosed non-criterion-flipping round
+from dispatch, not discovered afterwards**: all three of round AA's tasks closed genuine
+sub-clauses of criteria that remain OPEN (§12.13, §12.22, §12.35 each still carry one smaller
+remaining piece), never claiming a whole criterion. Rule 13's "no two consecutive non-flipping
+rounds" is not triggered — round Z flipped §12.46 from OPEN to DONE.
+
+**Three independent TEST-ONLY tasks, one real production defect found as a byproduct.**
+- **Task 1 (§12.13)**: closed the retry ladder's "5-rung variant" — a `ValidationError`-at-
+  construction test for `TransformSection._ladder_matches_attempts` (confirmed genuinely absent
+  before this task, not "likely already covered" as a prior round's text guessed), plus a
+  row-count test proving a 5-rung config produces exactly 5 `attempts` rows and stops. The task's
+  own investigation found the brief's suggested CLI-e2e route structurally foreclosed
+  (`--deterministic-only` caps every run at 1 attempt regardless of ladder length) and built the
+  test at the `PhaseRunner`+`RetryPolicy` level instead — the correct call per the brief's own
+  fallback branch, independently confirmed by task review. **The final whole-branch review then
+  ran its own, different mutation and found the new test is stronger than reported**: severing
+  the wiring from `phases.max_attempts` to the ladder (`runner.py:513`) makes the new test the
+  suite's ONLY guard on any non-default ladder length — a genuinely new coverage class, not
+  redundant with the pre-existing 3-rung tests as a shallower check might have suggested.
+- **Task 2 (§12.22)**: proved a disk-ceiling exit-9 refusal leaves a prior `migration_state.json`
+  byte-identical, not corrupted — the one missing piece of an otherwise-covered sub-clause.
+- **Task 3 (§12.35)**: closed two worker-level gaps ("no raw prior diff reaches a prompt") in one
+  new test — a `FailureClass` token assertion and a real per-line diff sweep replacing a
+  single-marker proxy — with two independently-reproduced mutations proving each assertion is a
+  genuine, separate discriminator rather than one riding on the other's.
+- **D96 opened**: task 2's investigation surfaced that `_require_disk_headroom` — called by
+  `scan`/`build`/`verify`/`fleet resume` — is never called by `transform`'s command body, and task
+  review's own further trace found Phase 2's workers carry none of the per-repo `min_free_bytes`
+  wiring Phase 1/3/4's workers do, despite `_require_disk_headroom`'s own docstring claiming that
+  coverage exists. **`fleet transform` — plausibly the single most disk-hungry phase in the
+  fleet — has zero disk-headroom enforcement anywhere in its path.** The controller independently
+  re-verified every citation (the 4 call sites, `transform`'s function body, the `sequence`
+  exemption, the Phase 2 grep) before allocating D96, rather than trusting task review's trace on
+  its word. `sequence` was confirmed genuinely exempt (pure computation, no `project_once` call)
+  and explicitly excluded from D96's scope, not folded in by generalization.
+
+**The final whole-branch review found this round repeated, at smaller scale, the exact overclaim
+shape round Z's own final review found — worth naming plainly rather than treating as a one-off.**
+`docs/CRITERIA_PLAN.md`'s §35 entry claimed "worker level now fully covered." A measured sweep
+(not a guess) found 3 header/marker-proxy diff-absence sites in `tests/test_workers_transform.py`
+before this round and 2 remaining after — and the 2 survivors sit on the
+`EVIDENCE_PLUS_REJECTED_APPROACHES` context policy, the rung that actually carries prior-approach
+data and is therefore the MORE plausible leak path, while this round's new test covers only the
+`EVIDENCE_ONLY` rung. The underlying risk is mitigated by a real schema constraint
+(`RejectedApproach` has no diff-capable field, `reason` capped at 280 chars) — but the entry's
+claim was still wrong before that mitigation was stated. Two Low findings rode alongside it: a
+miscited production call site for `make_unified_diff` (`workers/rewrite.py` instead of the actual
+`rewrite/pipeline.py:397`), and D96's own Phase 2 grep residue attributing a `scoped_tempdir`
+import to the wrong file (the material finding — no Phase 2 worker has a disk check — reproduced
+exactly; only the supporting citation was wrong). All three were mechanical, already-verified
+corrections the review itself supplied in full; the controller applied them directly rather than
+dispatching a second fix-wave-plus-re-review cycle, the same judgment call round Z's close made
+for its own smaller residual.
+
+**Rulings made this round:**
+1. D96 allocated on task review's disclosed finding, after the controller's own independent
+   re-verification of every citation — not accepted on the trace alone, matching this project's
+   standing discipline for controller-side D-number allocation.
+2. `sequence` explicitly excluded from D96's scope on the strength of a structural check (no
+   `project_once` call), not lumped in with `transform` by proximity.
+3. The final review's three doc findings (one Medium, two Low) were fixed directly by the
+   controller rather than triggering a second review cycle — judged mechanical and
+   already-independently-verified, the same bar round Z's close applied to its own residual.
+4. §35's correction states the mitigating schema constraint alongside the residual gap, so the
+   entry argues its own risk acceptance rather than silently narrowing what "OPEN" covers.
+
+**Full suite, post-close: verified clean on all touched surfaces** — final whole-branch review's
+own run (ruff clean; `test_settings.py` 52, `test_runner.py` 56, `test_cli.py` 164,
+`test_workers_transform.py` 23, citation gate 54 — all passed, all exact matches to each task's
+own self-gate); controller's own closing fix re-ran the citation gate (54/54) and ruff after the
+doc corrections. No step in this chain trusted a pass-count claim it could instead re-run.
+
+**Round BB, opening next.** Candidates pre-scoped by round AA's own research (not yet acted on):
+§45's 5 mechanical sub-clauses, batched as two workers — Worker A (sub-clauses 1+3: the `PRAGMA
+table_list`/`table_info` sweep plus the 40-hex-column enumeration fix, which reuses sub-clause 1's
+column-enumeration code) and Worker B (sub-clauses 2+4+5: the hunk-header scan, the
+delete-artifacts-then-resume test, and the remaining 3 git trailers, sharing one extended
+fixture) — together closing §12.45 in full, the round's lead candidate. D50's ledger entry
+confirmed stale a second time (`KNOWN_INERT=38`, not 37/46 as previously pinned; its headline
+claim is now factually false as of `1963ca9`, 2026-08-22) — a fourth dated correction is owed,
+docs-only, non-criterion-moving filler if picked up alongside §45. §14 confirmed still accurate
+(identical to §37's done bar). No multiplier found for §45/D50; a real one exists for
+§37→§14+§39 but §37 stays NEW-MECHANISM-sized, a future dedicated round's target, not round BB
+material.
