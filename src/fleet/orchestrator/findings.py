@@ -482,17 +482,15 @@ class LlmFindingSink:
           of them belongs to the tier that died, and answering would be the mirror-image of the
           cross-tier contamination this parameter exists to prevent.
 
-        **NOT REACHED IN PRODUCTION TODAY — read this before treating the narrowed arm as live.**
-        Nothing in `src/` passes `tier=`. The one production caller is `PhaseRunner`'s halt path,
-        and it *cannot*: `TierUnavailable.tier` is lost at the exception→`WorkerError` boundary
-        (`WorkerError`, `workers/base.py:359-374`, carries `failure_class`, `retryable`,
-        `exit_code`, `stderr_tail`, `artifact_ref`, `exception_type` — no tier), and `observed`,
-        the only carrier left, must not be parsed. **So every row this harness ships today is
-        `scope: "run"` / `"unknown"` / `null`,** and the narrowed arm is exercised only by tests.
-        It is built rather than deferred because it is what makes the run-scoped arm's refusals
-        legible as refusals rather than as absent features — but it goes live only when
-        `WorkerError` (or `TierUnavailable`'s raise sites) carries the tier, which is another
-        lane's change and is tracked as such in the FD1 report.
+        **D78 (FIXED): the narrowed arm is now live in production.** `WorkerError`
+        (`workers/base.py`) carries a `tier` field, `classify.py::_error_for` populates it from
+        `TierUnavailable.tier` on the `BACKEND_UNAVAILABLE` branch, and `PhaseRunner._drive`
+        forwards `failure.tier` into this call's `tier=` kwarg — so the production caller
+        supplies it whenever the halt originated from a real `TierUnavailable`. The run-scoped
+        arm (`tier` omitted) is not dead code: the synthetic "worker returned no result"
+        `WorkerError` (`runner.py`, constructed with no `tier=`) and any future
+        `BACKEND_UNAVAILABLE` `WorkerError` built without going through `_error_for` still take
+        it, so both arms remain real and both remain tested.
 
         The operator cross-references by eye in the meantime: `observed` names the exhausted tier
         and the map's keys are tier names.

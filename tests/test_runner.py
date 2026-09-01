@@ -273,10 +273,19 @@ def asks_the_model_and_bills_it(role: str = "transform_repair") -> Behaviour:
 
 
 def fails_with(
-    failure_class: FailureClass, stderr_tail: str, *, retryable: bool = False
+    failure_class: FailureClass,
+    stderr_tail: str,
+    *,
+    retryable: bool = False,
+    tier: ModelTier | None = None,
 ) -> Behaviour:
     """Like `fails`, but with the worker's OWN message — which is what the §13 row 40 finding
-    carries, so a test that let `fails` synthesise one would be asserting on the fixture."""
+    carries, so a test that let `fails` synthesise one would be asserting on the fixture.
+
+    `tier` mirrors D78's `WorkerError.tier`: omitted, this fixture reproduces the tier-less arm
+    (a `WorkerError` built without going through `classify.py::_error_for`); supplied, it lets a
+    test drive `PhaseRunner._drive`'s tier-forwarding without needing a real `TierUnavailable`.
+    """
 
     async def behaviour(
         ctx: WorkerContext, payload: ScriptedInput
@@ -284,7 +293,10 @@ def fails_with(
         return WorkerResult(
             status="failed",
             error=WorkerError(
-                failure_class=failure_class, retryable=retryable, stderr_tail=stderr_tail
+                failure_class=failure_class,
+                retryable=retryable,
+                stderr_tail=stderr_tail,
+                tier=tier,
             ),
         )
 
@@ -1832,14 +1844,51 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
     # nowhere in `src/`. The log line scrolls away — the finding is what a human reads later.
     assert payload["asserts_outage"] is False
     assert payload["failover_triggers_recorded"] == "unknown", (
-        "this is the SHIPPED arm: `WorkerError` carries no tier, so the row cannot say whether "
-        "the triggers it holds (here, none) belong to the tier that died. See "
-        "`test_the_finding_reports_the_partial_trigger_set_it_actually_holds` for the narrowed "
-        "arm, which is reachable only when a caller can supply `tier=`"
+        "this fixture's `WorkerError` (built via `fails_with`, bypassing `_error_for`) carries no "
+        "tier, so the row cannot say whether the triggers it holds (here, none) belong to the "
+        "tier that died. Since D78, the REAL production path (a `TierUnavailable` raised through "
+        "`classify.py::_error_for`) DOES forward `tier=` — see "
+        "`test_a_tier_outage_with_a_real_tier_writes_a_tier_scoped_finding` for that arm. This "
+        "no-tier arm stays real too: the synthetic no-result `WorkerError` in `runner.py`'s "
+        "`_drive` still constructs one with no tier."
     )
     assert "down" not in json.dumps(
         {k: v for k, v in payload.items() if k != "caveat"}
     ).lower(), "`decision.reason`'s DOWN claim must not be copied into the row"
+
+
+async def test_a_tier_outage_with_a_real_tier_writes_a_tier_scoped_finding(
+    harness: Harness,
+) -> None:
+    """D78: proves `_drive` reads `failure.tier` and forwards it into `record_backend_unavailable`.
+
+    `fails_with(..., tier=tier_exc.tier)` bypasses `_error_for` (it builds the `WorkerError`
+    directly, exactly like the sibling no-tier test above), but it now supplies the SAME field a
+    real `TierUnavailable` -> `_error_for` -> `_drive` chain populates today, so this is the
+    `_drive`-forwarding half of D78's proof (the `_error_for`-population half is
+    `test_classify_takes_no_model_client_by_constructor_and_calls_the_one_on_the_context` in
+    `tests/test_workers_scan.py`, which drives the real exception path end to end).
+
+    No triggers are planted for WORKHORSE in this scenario, so the narrowed map is empty and
+    `failover_triggers_recorded` reads `"none"` (not `"unknown"`) and `throttling_observed` is a
+    real `False` (not `None`) — see `LlmFindingSink.record_backend_unavailable`'s `tier is not
+    None` branch.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    tier_exc = TierUnavailable(ModelTier.WORKHORSE, ("fake:fake-1", "fake:fake-2"))
+    BEHAVIOURS["repo-a"] = [
+        fails_with(FailureClass.BACKEND_UNAVAILABLE, str(tier_exc), tier=tier_exc.tier)
+    ]
+
+    report = await harness.runner().run_wave(0)
+
+    assert report.halt is not None and report.halt.exit_code == 8
+    _, _, payload = (await harness.findings(BACKEND_UNAVAILABLE))[0]
+    assert payload["failover_triggers_scope"] == "tier"
+    assert payload["failover_triggers_recorded"] == "none"
+    assert payload["failover_triggers"] == {}
+    assert payload["throttling_observed"] is False
 
 
 async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harness) -> None:
@@ -1889,17 +1938,21 @@ async def test_a_drift_during_a_dispatch_is_flushed_by_the_runner(harness: Harne
 async def test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_exist(
     harness: Harness,
 ) -> None:
-    """The arm that ACTUALLY SHIPS, with a contaminated map — the case N9 said was untested.
+    """The run-scoped arm, with a contaminated map — the case N9 said was untested.
 
-    Nothing in `src/` passes `tier=`: `PhaseRunner`'s halt path is the only production caller and
-    `WorkerError` (`workers/base.py:359-374`) carries no tier, so every row this harness writes
-    today is `scope: "run"`. That arm must refuse BOTH derived fields, and the refusal only means
-    anything when the map is non-empty — an empty map would make `"unknown"` indistinguishable
-    from `"none"` and hide a regression that answered from run-wide data.
+    This fixture's `WorkerError` (built via `fails_with`, no `tier=` supplied) reproduces the
+    tier-less arm, which stays reachable since D78 — the synthetic no-result `WorkerError` in
+    `runner.py`'s `_drive` still constructs one with no tier, and a caller building a
+    `BACKEND_UNAVAILABLE` `WorkerError` without going through `classify.py::_error_for` still
+    produces one. That arm must refuse BOTH derived fields, and the refusal only means anything
+    when the map is non-empty — an empty map would make `"unknown"` indistinguishable from
+    `"none"` and hide a regression that answered from run-wide data.
 
     So a CHEAP-tier 429 is planted before the wave, exactly as one would arrive hours earlier in a
     real run, and then a HEAVY-ish outage halts it. The row must hand over the raw map keyed by
-    tier and decline to summarise it.
+    tier and decline to summarise it. See
+    `test_a_real_tier_scoped_halt_excludes_a_different_tiers_contamination` for the tier-scoped
+    sibling, where the SAME planted CHEAP trigger is correctly excluded once a real tier is known.
     """
     await _seed(harness, "repo-a")
     await harness.plan(("repo-a",))
@@ -1937,6 +1990,51 @@ async def test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_e
     assert payload["throttling_observed"] is None, (
         "the only 429 in this run belongs to CHEAP and the outage names HEAVY — answering `true` "
         "here is the cross-tier contamination, and `false` is its mirror image"
+    )
+
+
+async def test_a_real_tier_scoped_halt_excludes_a_different_tiers_contamination(
+    harness: Harness,
+) -> None:
+    """D78's tier-scoped sibling of `test_the_shipped_halt_path_refuses_both_derived_claims_when_
+    triggers_exist`: the identical planted CHEAP trigger, but this time the halting `WorkerError`
+    carries `tier=HEAVY` (as a real `TierUnavailable` -> `_error_for` -> `_drive` chain now
+    produces), so the row narrows to HEAVY and correctly answers "none"/`False` rather than
+    refusing to answer — proving the exact cross-tier contamination the run-scoped arm's docstring
+    describes is now closed for any caller that supplies a real tier.
+    """
+    await _seed(harness, "repo-a")
+    await harness.plan(("repo-a",))
+    harness.ctx.llm_findings.on_failover(
+        BackendFailover(
+            role="repo_classify",
+            tier=ModelTier.CHEAP,
+            from_backend="fake",
+            from_model_id="cheap-1",
+            to_backend="fake",
+            to_model_id="cheap-2",
+            trigger="RATE_LIMIT",
+        )
+    )
+    BEHAVIOURS["repo-a"] = [
+        fails_with(
+            FailureClass.BACKEND_UNAVAILABLE,
+            "tier HEAVY exhausted after targets: fake:heavy-1, fake:heavy-2",
+            tier=ModelTier.HEAVY,
+        )
+    ]
+
+    report = await harness.runner().run_wave(0)
+    assert report.halt is not None and report.halt.exit_code == 8
+
+    _, _, payload = (await harness.findings(BACKEND_UNAVAILABLE))[0]
+    assert payload["failover_triggers_scope"] == "tier"
+    assert payload["failover_triggers"] == {}, (
+        "narrowed to HEAVY, the CHEAP-only trigger planted above must not appear"
+    )
+    assert payload["failover_triggers_recorded"] == "none"
+    assert payload["throttling_observed"] is False, (
+        "the CHEAP 429 must not contaminate a HEAVY-scoped answer"
     )
 
 

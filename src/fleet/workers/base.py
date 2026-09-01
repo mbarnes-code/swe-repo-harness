@@ -73,6 +73,7 @@ from fleet.models.base import FleetModel, TruncatedStr
 from fleet.models.enums import (
     ContextPolicy,
     FailureClass,
+    ModelTier,
     Phase,
     RepoStatus,
     TransformTier,
@@ -395,6 +396,10 @@ class WorkerError(FleetModel):
     #                                  The repair prompt reads THIS verbatim, never a summary and
     #                                  never a transcript (Constraint 5, §3.2)
     exception_type: str | None = None   # qualified name only; never a formatted traceback
+    tier: ModelTier | None = None       # D78: the tier TierUnavailable named, when known. Lets
+    #                                    # `record_backend_unavailable`'s `tier=` arm narrow its
+    #                                    # derived fields to the ACTUAL exhausted tier instead of
+    #                                    # falling back to a whole-run map (findings.py:421-423).
 
 
 class WorkerResult[O: WorkerOutput](FleetModel):

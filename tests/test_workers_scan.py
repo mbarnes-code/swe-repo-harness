@@ -1509,6 +1509,10 @@ def test_classify_takes_no_model_client_by_constructor_and_calls_the_one_on_the_
     assert result.error.failure_class is FailureClass.BACKEND_UNAVAILABLE
     assert result.error.retryable is False
     assert result.error.exception_type == "fleet.llm.client.TierUnavailable"
+    assert result.error.tier is ModelTier.CHEAP, (
+        "D78: `_error_for` must populate `WorkerError.tier` from the real "
+        "`TierUnavailable.tier` this fixture raises"
+    )
 
 
 def test_classify_preconditions_and_reentry_spend_no_second_call(tmp_path: Path) -> None:

@@ -261,4 +261,5 @@ def _error_for(exc: BaseException) -> WorkerError:
         retryable=retryable,
         stderr_tail=redact_text(str(exc)),
         exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+        tier=exc.tier if isinstance(exc, TierUnavailable) else None,
     )
