@@ -67,6 +67,19 @@ NOT registered in either ledger. Strongest candidate for D86.
 | 23 | idempotency | PARTIAL | Re-transform FULLY covered: test_transform_e2e.py::test_re_running_transform_over_a_landed_branch_duplicates_nothing:459-500. scan-twice covers 6 of 8 named tables (test_scan_e2e.py:423). No 9-repo vendored-contract fixture. `edges.retargeted_from_repo_id` correctness tested, stability across re-sequence not. |
 | 24 | fail-closed budgets, ledger moves | PARTIAL (7 sub-clauses) | COVERED: wave breach exit 10 + `--raise-wave-budget` clears/audits (test_cli.py:389-439); over-reserve refused not clamped (test_schema_sql.py:196; test_budgets.py:286); in-flight wait-then-proceed (test_budgets.py:258). NOT: priced-run `spent_usd==sum(cost_usd)` — no e2e test queries `budget_ledger` AT ALL. local-profile row assertions = ALREADY KNOWN D62 (record_attempt omits llm_backend/llm_cache_hit/llm_failovers/input_tokens/output_tokens; `llm_backend` is NULL so "non-empty" cannot hold). run-ceiling exit 3: ledger mechanism proven (test_budgets.py:440) but **RunBudgetExhausted has 0 refs in cli.py/test_cli.py** — no CLI-level organic breach test. |
 
+> **[Marker 2026-08-31, round-S finalfix — read this before row 23 above. That row is left exactly
+> as its author wrote it; this is the annotation, not a rewrite.]**
+>
+> Row 23's "scan-twice covers 6 of 8 named tables (test_scan_e2e.py:423)" is falsified by
+> `4e1975d`/`d70e8a4` (round S). Root cause, identified during round S's final review (finding
+> M3): the "6" here was never 6 of the criterion's 8 *named* tables (`edges, contracts, symbols,
+> manifests, findings, collisions, waves, wave_members` per `docs/SPEC.md:7438`) — it was the
+> **six-element tuple** the pre-round test measured (`repos, manifests, coordinates, symbols,
+> edges, phases`), of which only three (`manifests, symbols, edges`) actually overlap the named
+> eight. The true pre-round figure was 3 of 8; round S closed the remaining 5, and
+> `docs/CRITERIA_PLAN.md` §23 now carries the corrected count. This row is kept as written per
+> this project's convention for dated historical audit text — do not edit the row itself.
+
 ## Criteria 47-48 (lane A10)
 | # | paraphrase | verdict | evidence |
 |---|---|---|---|

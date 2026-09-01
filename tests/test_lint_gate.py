@@ -466,6 +466,14 @@ def test_uv_sync_frozen_is_exit_0_offline_on_py312():
     """SPEC §12 item 1: `uv sync --frozen` against the committed `uv.lock`, network disabled,
     exits 0 — and the interpreter running this suite is (3, 12), the criterion's second clause.
 
+    **Why the subprocess passes `--python sys.executable`.** The `sys.version_info` assertion
+    below only proves the *pytest runner's own* interpreter is 3.12 — it says nothing about which
+    interpreter `uv sync` itself resolves to, since `uv`'s interpreter search is independent of
+    the calling process. Without pinning, a host where `uv` finds a different Python first could
+    green this test while the sync it measures ran under the wrong version, and SPEC's clause
+    names 3.12 for the *sync*, not for the runner. Passing `--python sys.executable` closes that
+    gap by forcing `uv sync` onto the exact interpreter already asserted to be 3.12.
+
     **Why `--offline`, not some other network-disabling mechanism.** Grepped first (this
     docstring records the negative result): nothing else in `tests/` disables network access
     for a *subprocess* — every other "offline"/"no socket" test in this codebase (e.g.
@@ -523,7 +531,7 @@ def test_uv_sync_frozen_is_exit_0_offline_on_py312():
         env.pop("VIRTUAL_ENV", None)
         env["UV_PROJECT_ENVIRONMENT"] = throwaway_env
         out = subprocess.run(  # noqa: S603 - absolute path from shutil.which, fixed argv
-            [_uv(), "sync", "--frozen", "--offline"],
+            [_uv(), "sync", "--frozen", "--offline", "--python", sys.executable],
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,

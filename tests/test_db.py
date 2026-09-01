@@ -264,10 +264,14 @@ async def test_concurrent_submits_all_land_and_each_result_reaches_its_own_calle
 ) -> None:
     """200 coroutines write at once: nothing is lost, `seq` is gapless 1..200, results are keyed.
 
-    §12.28's stated scale is 200 repos submitting concurrently with zero `SQLITE_BUSY`; 200 real
-    coroutines here is that scale, not a stand-in for it — each `writer.submit()` is exactly what
-    a repo's dispatch loop calls, and 200 real ones landed at once (~50ms observed) has no
-    practicality reason to scale down. `events.seq` is allocated in-statement from `MAX(seq)+1`.
+    §12.28's stated scale is a 200-repo simulated run producing zero `SQLITE_BUSY`; 200 real
+    `writer.submit()` coroutines here is an adjudicated stand-in for that — each call is exactly
+    what one repo's dispatch loop issues, at the criterion's stated count, and 200 real ones
+    landed at once (~50ms observed) has no practicality reason to scale down. It is not literally
+    a 200-repo run (a real run issues far more than 200 `.submit()` calls in total, across many
+    SQL units and phases per repo); see `docs/CRITERIA_PLAN.md` §28 for the disclosed adjudication
+    and why this scale still proves the writer-actor's concurrency-safety property that the
+    criterion cares about. `events.seq` is allocated in-statement from `MAX(seq)+1`.
     Any concurrency that is not genuinely serialized either loses a row to `UNIQUE (run_id, seq)`
     or hands a caller another caller's answer — both of which are invisible to a test that only
     counts rows. The single-writer actor is what makes 200 concurrent submits produce zero
