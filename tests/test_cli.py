@@ -61,7 +61,7 @@ from fleet.llm.roles import SPEC_ROLE_TIERS
 from fleet.migrations import LATEST_VERSION
 from fleet.models.build import BuildUnit, SupportFile
 from fleet.models.enums import Ecosystem, Phase
-from fleet.models.state import SCHEMA_VERSION
+from fleet.models.state import SCHEMA_VERSION, MigrationState
 from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import WorktreeManager
 from fleet.state import db as dbmod
@@ -4646,6 +4646,68 @@ def test_a_reachable_floor_lets_the_phase_proceed(
 
     outcome: dict[str, object] = _require_disk_headroom(settings)
     assert outcome["disk_bytes_freed"] == 0, "nothing to evict, and the floor was cleared"
+
+
+def test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.22: an exit-9 refusal must not corrupt or truncate a `migration_state.json` a PRIOR
+    successful phase already wrote.
+
+    `_require_disk_headroom` runs at the very top of `scan`'s command body — before `_require_db`
+    even opens the database, let alone before `_scan_impl` reaches `project_once` — so a run that
+    hits the ceiling mid-fleet cannot leave a truncated or invalid state file behind. This is
+    proven against a REAL prior projection, not a contrived one: a real `fleet scan` runs first
+    (over `tests/test_scan_e2e.FIXTURE_REPOS`, local git repos, no network) and writes a genuine
+    `migration_state.json`; only THEN is the volume dropped below `preflight.min_free_bytes` and
+    a second `fleet scan` invoked against the SAME state dir. The projection must come out of the
+    refusal byte-for-byte identical to the baseline, not merely "still parses".
+    """
+    from tests.test_scan_e2e import FIXTURE_REPOS, _make_repo, _write_config
+    from tests.test_scan_e2e import FLEET_YAML as E2E_FLEET_YAML
+    from tests.test_scan_e2e import _fresh_db as e2e_fresh_db
+
+    sources = {
+        name: _make_repo(tmp_path / "sources", name, files)
+        for name, files in FIXTURE_REPOS.items()
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(FIXTURE_REPOS))
+    e2e_fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    args = base_args(workspace)
+
+    # 1. A real, successful phase — the known-good baseline.
+    baseline = runner.invoke(app, [*args, "scan", "--skip-classify"], catch_exceptions=False)
+    assert baseline.exit_code == ExitCode.SUCCESS, baseline.output
+
+    projection = workspace / "migration_state.json"
+    assert projection.exists(), "scan wrote no projection"
+    baseline_bytes = projection.read_bytes()
+    baseline_state = MigrationState.model_validate_json(baseline_bytes.decode("utf-8"))
+    assert set(baseline_state.repos) == set(FIXTURE_REPOS)
+
+    # 2. Drop the volume below any floor a real disk could clear, then re-invoke the SAME phase
+    # command against the SAME state dir — one that, unrefused, would re-run `_scan_impl` and
+    # rewrite the projection (`cli.py`'s `scan` calls `project_once` unconditionally inside
+    # `_scan_impl` on success).
+    impossible_floor_yaml = E2E_FLEET_YAML.replace(
+        "min_free_bytes: 1048576", f"min_free_bytes: {IMPOSSIBLE_FLOOR}"
+    )
+    assert impossible_floor_yaml != E2E_FLEET_YAML, "the floor substitution did not match"
+    (workspace / "config" / "fleet.yaml").write_text(impossible_floor_yaml, encoding="utf-8")
+
+    refused = runner.invoke(app, [*args, "scan", "--skip-classify"])
+    assert refused.exit_code == ExitCode.DISK_EXHAUSTED == 9, refused.output
+    assert str(IMPOSSIBLE_FLOOR) in refused.output, refused.output
+    assert "min_free_bytes" in refused.output, refused.output
+
+    # 3. The prior projection is untouched: byte-identical, not merely re-parseable.
+    assert projection.read_bytes() == baseline_bytes, (
+        "the disk-ceiling refusal touched migration_state.json from the prior successful phase"
+    )
+    MigrationState.model_validate_json(projection.read_text(encoding="utf-8"))
 
 
 def test_a_missing_rules_dir_is_refused_not_silently_zero_rules(
