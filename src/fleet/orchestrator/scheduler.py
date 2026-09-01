@@ -45,7 +45,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 
-from fleet.models.enums import TERMINAL_STATUSES, Phase, RepoStatus
+from fleet.models.enums import TERMINAL_STATUSES, Phase, RepoStatus, transition
 
 if TYPE_CHECKING:
     import aiosqlite
@@ -274,11 +274,23 @@ class SqliteSchedulerStore:
     async def append_blocked_by(
         self, run_id: str, repo_id: str, blocker: str, *, now: datetime
     ) -> int:
-        """Set-union `blocker` into every non-`SUCCEEDED` phase of `repo_id` and mark it BLOCKED.
+        """Set-union `blocker` into every non-`SUCCEEDED`, non-terminal, transition-legal phase of
+        `repo_id` and mark it BLOCKED.
 
         Union, never replacement (§3.5): a repo blocked by three abandoned ancestors lists all
         three, and the whole operation is idempotent, so a resume that re-derives propagation
         writes the same rows rather than doubling them.
+
+        `DEGRADED` phases are skipped, not swept in with the rest (D77,
+        `docs/INTEGRATION_HONESTY.md`): `ALLOWED_TRANSITIONS[DEGRADED]` deliberately does not
+        contain `BLOCKED` (`models/enums.py`) — a degraded repo leaves the machine only via a
+        budgeted revalidation round, outright success, or human intervention (§3.5.1), never by
+        being blocked, so this is not a gap to close by widening the allowed set. The legality
+        check is `transition()` itself, not a hand-rolled `is RepoStatus.DEGRADED` skip, so this
+        stays correct if `ALLOWED_TRANSITIONS` ever changes without a second edit here. This
+        method still performs the write as raw SQL rather than through `transition()` — the
+        `SchedulerStore` surface is deliberately narrower than the full repository (module
+        docstring) — but the legality gate itself is the real one, not reimplemented.
         """
         stamp = _iso(now)
 
@@ -292,6 +304,10 @@ class SqliteSchedulerStore:
             for phase, status, blocked_by in rows:
                 current = RepoStatus(str(status))
                 if current is RepoStatus.SUCCEEDED or current in TERMINAL_STATUSES:
+                    continue
+                try:
+                    transition(current, RepoStatus.BLOCKED)
+                except ValueError:
                     continue
                 names = set(json.loads(str(blocked_by) or "[]"))
                 names.add(blocker)
