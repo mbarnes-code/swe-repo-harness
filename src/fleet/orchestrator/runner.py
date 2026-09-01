@@ -706,6 +706,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                         repo_id=repo_id,
                         phase=self.phase,
                         observed=self._detail(failure) or str(failure.failure_class),
+                        tier=failure.tier,
                     )
                 except Exception as exc:
                     self.ctx.log.error(  # noqa: TRY400 - §11.4: no formatted traceback
