@@ -6851,7 +6851,7 @@ of §12.20 remains separately unverified (out of this entry's scope).
 
 ---
 
-## D89 — FIXED, LANDED (`91daa25`, Phase 2 Task B; Phase 1 at `1b0d3c1`, Phase 2 Task A at `agent/roundu-task1a`'s `09bc0f8` — see the dated addenda below for what each landed). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
+## D89 — FIXED, LANDED (`1739453`, merge of `agent/roundu-task1-fix2` — the landed, post-merge commit on `main`; component work: Phase 1 at `1b0d3c1`, Phase 2 Task A at `09bc0f8`, Task B at `91daa25`, fix waves at `615b5ba`/`7d2d0da` — see the dated addenda below for what each landed). `attempts.task_id` is never populated by any production write site — the per-unit task queue (`upsert_task`/`claim_next_task`) it depends on is fully built and unit-tested but has zero production callers, so any mechanism scoped by `task_id` (D87's git-arbitration fix among them) may not currently fire against a row a real `fleet resume` produces
 
 **Found by round P task 1's reviewer (2026-08-31), disclosed while verifying D87's fix rather than
 searched for independently — recorded here rather than left inside D87's own entry, since it is a
