@@ -7104,3 +7104,83 @@ used elsewhere).
 §12.44 sub-clauses A-D + F (cache not poisoned across backends — cross-profile poisoning tests),
 TEST-ONLY, no new infrastructure needed (an existing two-client/one-cache-store harness in
 `tests/test_llm_cache.py` is structurally almost identical to what's needed).
+
+### Checkpoint — 2026-09-01 (round W controller, close-out)
+
+**§12 criteria met: 18 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived twice by the final whole-branch reviewer
+and matching the committed table exactly — up from 17 at round V's close). Added this round:
+**§12.44** only — all 6 sub-clauses now closed (tamper detection was already real, round O; this
+round's two research-identified test additions closed sub-clauses A-D and F without needing the
+stub OpenAI-compatible server the entry had assumed was required for two rounds — a genuine
+two-profile scenario, built from an existing lightweight harness, sufficed). §12.42's
+ModelTier-not-a-member sub-clause also closed but does not move the tally — its parent criterion
+needs a fixture-run harness that doesn't exist yet, correctly still OPEN.
+
+**This round's process change — requiring every task-scoped worker to self-gate `ruff check .`
+before reporting DONE — worked on its first try.** Rounds U and V each found `main` red on the
+lint gate: round U from a merge-integration gap (three individually-clean lanes, nobody gated the
+merged tree), round V one notch worse (a single lane that was never gated even on its own branch).
+This round's final review opened with the lint gate first, as it has every round since round U's
+finding, and for the first time found it green — both workers' self-reported "ruff check clean"
+claims held on the actually-merged tree, not just their own lanes. Two data points is not proof a
+process fix holds, but it is the first round this specific gate passed clean on the first try
+since the class was discovered, worth recording as the reason to keep the self-gating instruction
+standard going forward rather than reverting it.
+
+**Two pieces of doc-only work landed without a task-scoped subagent review, and both held up
+under the final review's deliberately heavier scrutiny of exactly that gap.** D49
+(`docs/INTEGRATION_HONESTY.md`) — a defect this project's own ledger had carried since before
+round P, corrected twice by intervening rounds — was closed to `FIXED, LANDED (9a7148c)` after
+research verified its own entry's last-recorded open leg was closed by a commit that predated
+this round's own investigation. The final review re-derived all four of the claim's load-bearing
+facts independently (ancestor check, source read, a live mutation-discrimination proof with the
+zero-change gate read first, and confirmation of the annotate-never-rewrite form) rather than
+trusting either the research report or the controller's own edit, and it held — including
+surfacing a nuance neither the controller nor the research caught cleanly the first time: the
+very commit that closes D49 (`9a7148c`) itself caused a Critical regression, correctly tracked
+separately as **D52** (already `CLOSED, FIXED in 2976a7e`) rather than reopening D49. The fix
+wave added the missing cross-reference so a future reader following D49's heading learns this.
+Separately, §12.41's SPEC-vs-config wording question (ADR-0105) was adjudicated and closed the
+same way — but the final review caught that the ADR's own supporting evidence was mis-framed
+(a SPEC.md example block cited as "unrelated" was in fact SPEC's own config listing, explicitly
+cross-referenced to §12.41, meaning the real finding is SPEC-vs-shipped-config drift broader than
+the two capability fields the ADR named). Both worth naming together: doc-only work skipping a
+task-scoped review is not free of the risk code changes carry, and this round's evidence is that
+the final whole-branch review is not a redundant formality for it — it caught a real, if
+non-blocking, mis-framing in exactly the piece that had no other gate.
+
+**A "sweep for the class" gap recurred inside the very act of fixing an unrelated staleness
+finding.** This round's own edits moved §41 out of the SPEC-ADJUDICATION bucket and §44 to DONE in
+the Rollup table, but three separate prose sentences elsewhere in the same file — a stale §40
+exclusion note predating this round, a dispatch-order sentence still naming §41, and a
+"still-open" sentence still naming §20/§40's-AST-clause/§44 — were never swept to match, each
+found only by the final review's independent scan rather than by the edit that created or sat
+next to the inconsistency. All four were routed into one fix wave and independently re-verified
+closed by a scoped re-review. Consistent with this project's now well-established pattern:
+editing one true statement about a criterion's status does not, on its own, sweep every other
+prose copy of that same fact in the same document.
+
+**Rulings made this round:**
+1. D49's heading moves to `FIXED, LANDED (9a7148c)` — the entry's own most recent correction
+   named this as its last open leg, independently re-verified closed against `HEAD`.
+2. §12.41's SPEC wording ("declares false") corrected to describe the real mechanism (omits,
+   falls through to the declared floor) via a dated marker + ADR-0105 — wording-precision, not a
+   behavior change; the criterion's substantive claim holds either way.
+3. Final-review Important findings (4, all doc-consistency) and their attached Minors routed into
+   one fix wave, independently re-verified addressed by a scoped re-review.
+
+**Full suite, post-final-review-fix: 2067 passed, 0 failed, 0 skipped** (up from 2062 at round
+V's close). `ruff check`/`mypy --strict` clean on the merged tree — `ruff format --check` remains
+a known pre-existing non-passing gate (123 dirty files, unchanged since before this round;
+`docs/SPEC.md`'s own §12.2 criterion text names this gate literally, which is why §12.2 correctly
+stays out of the DONE list rather than the tally reflecting a false green).
+
+**Round X, opening next** — candidate identified by round W's own research, not yet dispatched:
+§12.43's independently-actionable done-bar slice (not blocked on D55/D58/D62, distinct from D78)
+— two localized edits in `tests/test_runner.py`: destructure and assert the currently-discarded
+`status` column in `test_a_tier_outage_halts_the_run_and_leaves_the_repo_untouched` (`:1737`),
+and replace a hand-written `TierUnavailable` message literal with a real constructed exception in
+`test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halts` (`:1755`), binding the
+fixture to the real producer so the two can never silently diverge. TEST-ONLY, no new
+infrastructure, comparable size to this round's Task 2.
