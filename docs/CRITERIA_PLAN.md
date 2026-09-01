@@ -733,19 +733,26 @@ vice versa before doing both); add a persisted-value `edge_key` stability test; 
 `acquire_phase_lease` test. `stub_reconcile` stays D80's scope.
 
 ## 47. Registries stateless, total, order-independent
-**OPEN — TEST-ONLY, narrower than original wording (round-K correction retired the `discover()`
-initializer clause entirely — see §12.28's entry above for why it stays retired).** Manifests/
-ecosystems statelessness and the rule-engine/backend-name startup refusals are covered. Missing:
-`workers` registry has zero `assert_stateless` call sites; `backends` registry registers
-*instances*, not classes, with no statelessness check at all; "abstract on `BaseWorker`" is
-unasserted — deleting `@abstractmethod` and defaulting to `return True` passes the whole suite; the
-"20 shuffled import orders" claim is really 3 hand-written orders comparing an adapter list, not a
-genuine shuffle (audit row 47).
-**Done bar:** add `assert_stateless` calls (or an equivalent check) for the `workers` and `backends`
-registries; add a test asserting `preconditions_hold` is abstract on `BaseWorker` by walking
-`workers.discover()` and failing on any class inheriting the base implementation (SPEC.md's own
-`:53` text names this exact mechanism — build it); replace the 3-hand-written-orders test with a
-genuine randomized-order test across ~20 real shuffles.
+**DONE (round T, 2026-09-01) — TEST-ONLY, narrower than original wording (round-K correction
+retired the `discover()` initializer clause entirely — see §12.28's entry above for why it stays
+retired).** Manifests/ecosystems statelessness and the rule-engine/backend-name startup refusals
+were already covered. Round T closed the four remaining gaps, all in
+`tests/test_registries_stateless.py` (new) and `tests/test_manifests.py`: `workers` registry now
+has an `assert_stateless` call site via the real `discover()`; the `backends` registry (which
+registers instances, not classes) gets a statelessness check shaped to its instance semantics
+(singleton identity across repeated `discover()` calls + no new/replaced attributes across two
+`declared_capabilities()` calls) rather than a force-fit of the class-based check; a structural
+test proves `preconditions_hold` is abstract on `BaseWorker` (walks `discover()`, fails on any
+class using the base default — mutation-proven: deleting `@abstractmethod` reddens it); the
+3-hand-written-orders test was replaced with a genuine `random.Random` 20-shuffle test over a
+6-item set with an anti-vacuous distinctness check. All four assertions mutation-proven per Rule
+12; two of the four independently reproduced by task review (commit `09b1929`, merge of
+`agent/roundt-task2`).
+**Disclosed, not closed:** `assert_stateless` is structurally blind to `__slots__`-stored state
+(by the helper's own documented design, `src/fleet/workers/base.py:577` — a `__slots__` class has
+no `__dict__` for the check to inspect). Pre-existing property of the shared helper, not
+introduced by round T's diff; flagged for a possible future D-number if it ever needs closing, not
+part of this criterion's literal text.
 **Out of scope:** do not add a `ProcessPoolExecutor` initializer — that clause is retired, see
 §12.28's entry.
 
@@ -770,11 +777,11 @@ it.
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 13 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32 (re-derived 2026-08-31, post round-S finalfix, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading; the previous "11" row was stale in the very commit (`d70e8a4`) that moved §1 and §28 to `**DONE` headings — see round S's final review, finding I1; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
-| OPEN — WIRING (cheapest, do first) | 2 | 27, 37 |
+| DONE | 14 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 47 (re-derived 2026-09-01, round T, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 this round; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | see individual entries |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37 (both NEW-MECHANISM, see above), plus all others not listed in a row above — see individual entries |
 
 Note on §12.40's DONE marking: its dominant clause (no model string outside `config/`, structurally)
 is closed; the AST sub-clause (M1) is still open and small. This file counts criteria as DONE only
