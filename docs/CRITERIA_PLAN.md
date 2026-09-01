@@ -856,6 +856,19 @@ task 2**: `tests/test_cli.py:2535-2701` already covered the T4 abandon path and 
 carve-out; task 2 added the genuinely missing piece, a new test proving `stub_reconcile` cannot
 move a repo out of `REQUIRES_HUMAN_INTERVENTION` (§12.46(ii)) — independently reproduced by task
 review. See §38's entry for the same investigation's other findings.
+
+**Correction, round Z final review + fix wave (2026-09-01): two of the 13 sub-clauses this DONE
+marking assumed closed were not actually driven by any test.** A whole-branch review found (a)
+§12.46(ii)(c)'s reaper leg — none of the nine existing `reap_expired_phase_leases` call sites in
+`tests/` ever seeded an RHI-status row, so nothing had actually exercised the reaper's own SQL
+guard against it (the "reaper's RHI leg" language in Task 3 above describes `complete_phase`'s
+legality check, a different sweep); and (b) §12.46(i)'s population clause — `InternalDep`
+(`src/fleet/models/build.py:15`) was not re-exported through `fleet.models.__all__` at all, so the
+existing parametrized round-trip test never ran against it. Both closed for real in the same fix
+wave: `tests/test_repository.py::test_the_reaper_never_reclaims_a_requires_human_intervention_row`
+(Rule-12 mutation-proven — dropping the reaper SQL's `status = 'RUNNING'` guard reddens it) and
+`InternalDep` added to `fleet.models.__all__` + `SAMPLES["InternalDep"]` (the round-trip test now
+covers it automatically). The DONE marking stands, now for real.
 **Done bar:** met in full. Nothing remains open for §12.46.
 
 ## 47. Registries stateless, total, order-independent
