@@ -124,7 +124,14 @@ def _sink(
     )
 
 
-async def _dispatch(sink: _TransformSink, *, status: str = "ok", attempt: int = 1) -> None:
+async def _dispatch(
+    sink: _TransformSink,
+    *,
+    status: str = "ok",
+    attempt: int = 1,
+    fence: int = 1,
+    commits: list[str] | None = None,
+) -> None:
     error = (
         None
         if status == "ok"
@@ -133,10 +140,12 @@ async def _dispatch(sink: _TransformSink, *, status: str = "ok", attempt: int = 
     await sink(
         repo_id=REPO,
         phase=Phase.TRANSFORM,
-        fence=1,
+        fence=fence,
         result=WorkerResult[TransformOutput](
             status=status,  # type: ignore[arg-type]
-            output=TransformOutput(repo_id=REPO, attempt=attempt),
+            output=TransformOutput(
+                repo_id=REPO, attempt=attempt, commits=commits if commits is not None else []
+            ),
             error=error,
         ),
     )
@@ -432,6 +441,92 @@ async def test_the_done_assertion_is_not_vacuous_a_row_never_resolved_is_not_don
         "a row whose resolution step never ran must read RUNNING, not DONE — if it already "
         "read DONE here, the happy-path test's DONE assertion would prove nothing"
     )
+
+
+async def _phase_post_commit_sha(read_conn: aiosqlite.Connection) -> str | None:
+    async with read_conn.execute(
+        "SELECT post_commit_sha FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+        (RUN, REPO, int(Phase.TRANSFORM)),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "the phases row must exist for this test's own seeding to be valid"
+    return None if row[0] is None else str(row[0])
+
+
+class _CrashAfterFirstSubmit:
+    """Wraps a real `StateWriter` and raises before its SECOND `submit()` call, simulating a
+    process crash landing between the two writer units `_TransformSink.__call__` now submits.
+    Proves the corrected order (`phases.post_commit_sha` write first, coarse `tasks` resolution
+    second) leaves the row RUNNING with the commit pointer already written, rather than the
+    pre-fix order's falsely-DONE-with-a-NULL-pointer hazard this task corrects.
+    """
+
+    def __init__(self, real: StateWriter) -> None:
+        self._real = real
+        self.calls = 0
+
+    async def submit(self, unit: object) -> object:
+        self.calls += 1
+        if self.calls == 2:
+            raise RuntimeError("simulated crash between the two writer units")
+        return await self._real.submit(unit)  # type: ignore[arg-type]
+
+
+async def test_a_crash_between_the_two_writer_units_leaves_post_commit_sha_written_and_task_running(
+    wired: _Wired,
+) -> None:
+    """The ordering fix itself (found reviewing D89 Phase 2 Task B, corrected 2026-09-01):
+    `_TransformSink.__call__` used to resolve the coarse row to DONE in a separate writer unit
+    BEFORE writing `phases.post_commit_sha`, so a crash in that window left `tasks.status='DONE'`
+    (invisible to `_ARBITRATED_TASKS_SQL`, which only asks about RUNNING rows) with the commit
+    pointer still NULL — a landed commit whose pointer was lost and whose row would never be
+    re-examined. This proves the fix: with a real commit and a writer that fails on its second
+    `submit()` (simulating the crash), the FIRST unit to run must be the `phases.post_commit_sha`
+    write, so it lands before the crash, and `tasks.status` must still read RUNNING — correctly
+    re-arbitrated by D89 Phase 2 Task B's own sweep — not falsely DONE.
+    """
+    writer, read_conn, repo = wired
+    await repo.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+    hook = _TransformClaimHook(
+        repository=repo,
+        read_conn=read_conn,
+        run_id=RUN,
+        owner=OWNER,
+        clock=lambda: NOW,
+        lease_ttl_s=600,
+    )
+    await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
+    _, status_before, _, _, _, _ = await _task_row(read_conn)
+    assert status_before == "RUNNING", "the claim hook must have run before the crash scenario"
+    assert await _phase_post_commit_sha(read_conn) is None, "nothing has landed yet"
+
+    crashy = _CrashAfterFirstSubmit(writer)
+    sink = _TransformSink(
+        writer=crashy,  # type: ignore[arg-type]
+        repository=repo,
+        read_conn=read_conn,
+        run_id=RUN,
+        evidence=_TransformEvidence(),
+        clock=lambda: NOW,
+    )
+    sha = "c" * 40
+
+    with pytest.raises(RuntimeError, match="simulated crash"):
+        await _dispatch(sink, status="ok", fence=0, commits=[sha])
+
+    assert crashy.calls == 2, (
+        "the crash must land between the two submits, not before the first ran at all — "
+        "otherwise this proves nothing about ORDER"
+    )
+    assert await _phase_post_commit_sha(read_conn) == sha, (
+        "the commit pointer write must be the FIRST unit submitted, so it survives the crash"
+    )
+    _, status_after, _, _, fence_after, _ = await _task_row(read_conn)
+    assert status_after == "RUNNING", (
+        "the coarse row must NOT have been resolved DONE — the crash landed before that write, "
+        "and a falsely-DONE row here is exactly the hazard this ordering fix closes"
+    )
+    assert fence_after == 1, "the claim's own fence is untouched by the aborted resolution"
 
 
 # ======================================================================================

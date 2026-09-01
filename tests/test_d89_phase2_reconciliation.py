@@ -61,8 +61,8 @@ from uuid import UUID
 
 import pytest
 
-from fleet.cli import _persist_arbitration, _reconcile_tasks_with_git
-from fleet.models.enums import Phase, TaskKind
+from fleet.cli import _arbitration_lines, _reconcile_tasks_with_git
+from fleet.models.enums import Phase
 from fleet.settings import FleetSettings
 from fleet.state.db import SCHEMA_PATH
 from fleet.util.proc import ProcResult, run
@@ -105,7 +105,7 @@ def _swap_text(target: Path, new_text: str) -> str:
 
 
 async def _init_repo(path: Path, *, files: Mapping[str, str]) -> None:
-    path.mkdir(parents=True, exist_ok=True)
+    _write_files(path, {})  # sync mkdir, kept out of the async body (ruff ASYNC240)
     await _sh(path, "init", "--initial-branch=main", ".")
     await _sh(path, "config", "user.email", "fleet@example.invalid")
     await _sh(path, "config", "user.name", "Fleet Test")
@@ -142,7 +142,11 @@ async def _land_unit(
         patch=patch,
         subject=f"fleet: rewrite {unit}",
         trailers=C.FleetTrailers(
-            run_id=RUN_ID, repo_id=REPO, phase=int(PHASE), task_id=synth_id, attempt=1,
+            run_id=RUN_ID,
+            repo_id=REPO,
+            phase=int(PHASE),
+            task_id=synth_id,
+            attempt=1,
             patch_id=pid,
         ),
         branch=f"migrate/{REPO}",
@@ -203,7 +207,7 @@ def _seed(
             "                   status, claimed_by, lease_expires_at, fence_token, "
             "                   pre_commit_sha, ladder, created_at) "
             "VALUES (?, ?, ?, ?, 'REWRITE', ?, ?, 'RUNNING', 'test-owner', ?, 1, ?, "
-            "        '[null,\"EVIDENCE_ONLY\",\"EVIDENCE_PLUS_REJECTED_APPROACHES\"]', ?)",
+            '        \'[null,"EVIDENCE_ONLY","EVIDENCE_PLUS_REJECTED_APPROACHES"]\', ?)',
             (
                 task_id,
                 RUN_ID,
@@ -339,14 +343,14 @@ async def test_all_units_landed_marks_done_with_last_unit_sha_and_writes_post_co
     assert report["partially_landed"] == []
     landed = report["landed"]
     assert isinstance(landed, list) and len(landed) == 1
-    assert landed[0]["commit_sha"] == sha_b, (
+    assert landed[0]["commit_sha"] == sha_b != sha_a, (
         "the LAST landed unit's sha is what attempts.commit_sha/phases.post_commit_sha get — "
-        "the same convention _TransformSink uses for output.commits[-1]"
+        "the same convention _TransformSink uses for output.commits[-1], not the first unit's"
     )
 
     status, claimed_by, _fence = _tasks_row(fx.db_path)
     assert (status, claimed_by) == ("DONE", None)
-    phase_status, post_commit_sha = _phases_row(fx.db_path)
+    _phase_status, post_commit_sha = _phases_row(fx.db_path)
     assert post_commit_sha == sha_b
     assert _attempts_commit_sha(fx.db_path) == sha_b
 
@@ -425,12 +429,15 @@ async def test_some_units_landed_never_calls_discard_task_and_resets_to_pending(
     # the tip is STILL sha_a, not reset back to phase_anchor.
     tip = await fx.git.rev_parse(fx.branch)
     assert tip == sha_a
-    assert await C.find_task_commit(
-        fx.git,
-        branch=fx.branch,
-        pre_commit_sha=fx.phase_anchor,
-        task_id=task_id_for_ids(RUN_ID, REPO, int(PHASE), UNIT_A),
-    ) == sha_a
+    assert (
+        await C.find_task_commit(
+            fx.git,
+            branch=fx.branch,
+            pre_commit_sha=fx.phase_anchor,
+            task_id=task_id_for_ids(RUN_ID, REPO, int(PHASE), UNIT_A),
+        )
+        == sha_a
+    )
 
     # And the row is genuinely re-claimable, exactly as Task A's claim CAS expects.
     conn = sqlite3.connect(fx.db_path, isolation_level=None)
@@ -477,6 +484,38 @@ async def test_partial_landing_survives_a_third_unit_untouched_all_around(fx: _F
     tip = await fx.git.rev_parse(fx.branch)
     assert tip == sha_c
     assert await fx.git.resolve(sha_a) == sha_a
+
+
+async def test_partially_landed_verdict_renders_a_human_readable_line_not_only_json(
+    fx: _Fixture,
+) -> None:
+    """`_arbitration_lines` (cli.py) had no case for `partially_landed` — the function's own
+    docstring says a silent count must not let a partial reconciliation read as a complete one,
+    and printing nothing for this verdict was exactly that gap. The other tests in this file
+    assert the `--json` payload's `report["partially_landed"]`; this proves the rendered,
+    human-readable CLI line surfaces the same verdict too, against the real report
+    `_reconcile_tasks_with_git` produces (not a hand-built stand-in for it).
+    """
+    await _land_unit(
+        fx.git, unit=UNIT_A, phase_anchor=fx.phase_anchor, patch_dir=fx.patch_dir, ordinal=1
+    )
+    _seed(
+        fx.db_path,
+        task_id=fx.task_id,
+        task_anchor=fx.phase_anchor,
+        phase_anchor=fx.phase_anchor,
+        target_paths=[UNIT_A, UNIT_B],
+    )
+
+    report = await _reconcile_tasks_with_git(
+        fx.settings, fx.db_path, RUN_ID, horizons=HORIZONS, dry_run=False
+    )
+
+    lines = _arbitration_lines({"git_arbitration": report}, dry=False)
+    joined = " ".join(lines)
+    assert f"task {fx.task_id} PARTIALLY landed" in joined
+    assert "1 of 2 units" in joined
+    assert UNIT_B in joined, "the missing unit must be named, not just counted"
 
 
 # ======================================================================================
@@ -538,7 +577,11 @@ async def test_non_rewrite_kind_ignores_target_paths_and_uses_the_coarse_task_id
         patch=patch,
         subject="fleet: buildgen",
         trailers=C.FleetTrailers(
-            run_id=RUN_ID, repo_id=REPO, phase=int(PHASE), task_id=coarse_id, attempt=1,
+            run_id=RUN_ID,
+            repo_id=REPO,
+            phase=int(PHASE),
+            task_id=coarse_id,
+            attempt=1,
             patch_id=pid,
         ),
         branch=fx.branch,
@@ -568,7 +611,7 @@ async def test_non_rewrite_kind_ignores_target_paths_and_uses_the_coarse_task_id
             "                   status, claimed_by, lease_expires_at, fence_token, "
             "                   pre_commit_sha, ladder, created_at) "
             "VALUES (?, ?, ?, ?, 'BUILDGEN', ?, '[]', 'RUNNING', 'test-owner', ?, 1, ?, "
-            "        '[null,\"EVIDENCE_ONLY\",\"EVIDENCE_PLUS_REJECTED_APPROACHES\"]', ?)",
+            '        \'[null,"EVIDENCE_ONLY","EVIDENCE_PLUS_REJECTED_APPROACHES"]\', ?)',
             (
                 str(coarse_id),
                 RUN_ID,

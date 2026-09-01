@@ -4057,12 +4057,18 @@ async def _coarse_task_id(
     this call site since it never writes an `AttemptRow` at all — see `_COARSE_TASK_KIND`).
 
     D89 Phase 1 (ADR-0101): this calls `upsert_task` and NOTHING ELSE. `upsert_task` never writes
-    `status` (it stays at the schema default, `'PENDING'`, forever), and this helper never calls
-    `claim_next_task` or any other status-mutating path — that is what keeps a Phase-1 row
-    permanently invisible to `_ARBITRATED_TASKS_SQL`'s `status = 'RUNNING'` scan, closing the
-    misfire risk ADR-0101 records (generalized across BUILD/VERIFY/TRANSFORM, not just
-    REWRITE/RELOCATE). Populating `attempts.task_id` from a row that never leaves PENDING is
-    D89 Phase 1's entire scope; per-unit REWRITE/RELOCATE reconciliation is Phase 2, unbuilt.
+    `status` (it stays at the schema default, `'PENDING'`, forever), and this helper itself never
+    calls `claim_next_task` or any other status-mutating path — that is what kept EVERY Phase-1
+    row invisible to `_ARBITRATED_TASKS_SQL`'s `status = 'RUNNING'` scan at the time ADR-0101
+    landed, closing the misfire risk it records (generalized across BUILD/VERIFY/TRANSFORM, not
+    just REWRITE/RELOCATE). That is no longer the whole story for TRANSFORM: D89 Phase 2 Task A
+    (ADR-0102) wired `_TransformClaimHook` as a `pre_dispatch` hook that claims the row `RUNNING`
+    on top of what this function mints, so a TRANSFORM row is invisible only until that hook
+    fires — once claimed, it is a genuine `_ARBITRATED_TASKS_SQL` candidate. Task B (ADR-0103)
+    handles it correctly once reached: non-REWRITE kinds via the original single-`task_id` path,
+    REWRITE via a per-unit loop with its own three-verdict (landed/discarded/partially-landed)
+    logic. BUILD/VERIFY pass no `pre_dispatch`, so their rows (if any coarse mapping existed for
+    them) remain permanently `PENDING` exactly as Phase 1 left them.
     """
     kind = _COARSE_TASK_KIND.get(phase)
     if kind is None:
@@ -4221,9 +4227,28 @@ class _TransformSink:
                 already_applied=bool(output.skipped),
             )
         )
+        # Ordering hazard (found reviewing D89 Phase 2 Task B, corrected 2026-09-01): this used to
+        # resolve the coarse row to DONE in a separate writer unit BEFORE writing
+        # `phases.post_commit_sha` below. A crash in that window left `tasks.status = 'DONE'`
+        # (invisible to `_ARBITRATED_TASKS_SQL`, which only asks about RUNNING rows) with
+        # `post_commit_sha` still NULL — a real commit whose pointer never got written and whose
+        # row would never be re-examined. Fixed by submitting the `phases.post_commit_sha` write
+        # FIRST: a crash between the two now leaves the row `RUNNING`, which D89 Phase 2 Task B's
+        # per-unit/coarse arbitration re-examines correctly, rather than falsely `DONE`.
+        if commit is not None:
+            params = (commit, stamp, self._run_id, repo_id, int(phase), fence)
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "UPDATE phases SET post_commit_sha = ?, updated_at = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ? AND lease_fence = ?",
+                    params,
+                )
+
+            await self._writer.submit(unit)
         # D89 Phase 2 Task A (ADR-0102): resolve the coarse row's claim on the HAPPY path — the
         # sink ran, so this dispatch definitely finished (crash paths never reach here and leave
-        # the row `RUNNING` for D89 Phase 1's own reconciliation sweep, Task B, unbuilt, to find).
+        # the row `RUNNING` for D89 Phase 2 Task B's own reconciliation sweep to find).
         # `status == "ok"` is definitive success; anything else (partial/failed/timeout/cancelled)
         # goes back to PENDING re-claimable, fence bumped, mirroring `claim_task_by_id`'s own CAS
         # in reverse. Gated on `task_id is not None` for the same reason `_coarse_task_id` itself
@@ -4248,18 +4273,6 @@ class _TransformSink:
                     )
 
             await self._writer.submit(resolve_task)
-        if commit is None:
-            return
-        params = (commit, stamp, self._run_id, repo_id, int(phase), fence)
-
-        async def unit(conn: aiosqlite.Connection) -> None:
-            await conn.execute(
-                "UPDATE phases SET post_commit_sha = ?, updated_at = ? "
-                " WHERE run_id = ? AND repo_id = ? AND phase = ? AND lease_fence = ?",
-                params,
-            )
-
-        await self._writer.submit(unit)
 
     async def _next_ordinal(self, repo_id: str, phase: Phase, attempt: int) -> int:
         rows = await _rows(
@@ -11505,14 +11518,17 @@ def _stub_reconcile_lines(result: Mapping[str, object], *, dry: bool) -> list[st
 
 
 def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
-    """§11.5 step 4, reported so the two verdicts can never read as each other.
+    """§11.5 step 4, reported so the verdicts can never read as each other.
 
     "reconciled 2 tasks" is the line this function refuses to print. Adopting landed work and
     discarding an unlanded worktree are opposite corrections, and an operator reading the second
-    as the first goes looking for commits that were deliberately thrown away. Every `unresolved`
-    entry is printed with its reason for the same reason `_reap_lines` prints every `failed`
-    entry (docs/INTEGRATION_HONESTY.md D44): a candidate Git could not be asked about is still
-    open work, and a silent count would let a partial reconciliation read as a complete one.
+    as the first goes looking for commits that were deliberately thrown away. A REWRITE task that
+    lands some but not all of its units (D89 Phase 2 Task B, ADR-0103) is a third verdict, neither
+    of those two: nothing is discarded and nothing is adopted as DONE, so it gets its own line too
+    — a silent count here would let that partial reconciliation read as a complete one. Every
+    `unresolved` entry is printed with its reason for the same reason `_reap_lines` prints every
+    `failed` entry (docs/INTEGRATION_HONESTY.md D44): a candidate Git could not be asked about is
+    still open work.
     """
     report = result["git_arbitration"]
     if not isinstance(report, Mapping):  # pragma: no cover - the payload always carries it
@@ -11524,6 +11540,7 @@ def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
         return []
     landed = cast(Sequence[Mapping[str, object]], report["landed"])
     discarded = cast(Sequence[Mapping[str, object]], report["discarded"])
+    partially_landed = cast(Sequence[Mapping[str, object]], report["partially_landed"])
     unresolved = cast(Sequence[Mapping[str, object]], report["unresolved"])
     recreated = cast(Sequence[Mapping[str, object]], report["anchors_recreated"])
     verb = "would ask" if dry else "asked"
@@ -11549,6 +11566,15 @@ def _arbitration_lines(result: Mapping[str, object], *, dry: bool) -> list[str]:
         out.append(
             f"  step 4: {made} the missing anchor {entry['ref']} at "
             f"{str(entry['commit_sha'])[:12]}"
+        )
+    for entry in partially_landed:
+        landed_units = cast(Sequence[str], entry["landed_units"])
+        missing_units = cast(Sequence[str], entry["missing_units"])
+        out.append(
+            f"  step 4: {entry['repo_id']} phase {entry['phase']} task {entry['task_id']} "
+            f"PARTIALLY landed ({len(landed_units)} of {len(landed_units) + len(missing_units)} "
+            "units) — kept the landed commit(s), row back to PENDING for re-dispatch of "
+            f"{', '.join(missing_units)}, no attempt charged, no worktree discarded"
         )
     out.extend(
         f"  step 4: PROVENANCE {entry['repo_id']} phase {entry['phase']} task "
@@ -12036,19 +12062,36 @@ async def _reconcile_tasks_with_git(
     the phase anchor, which is why `_recreate_phase_anchor` runs first. Nothing here
     re-implements a git read.
 
-    **Two branches, because Git has two answers**, and the SPEC's "there is no third branch and no
-    tree-SHA comparison" is about the *verdict*, not about the ask:
+    **Two branches for non-REWRITE kinds, because Git has two answers to one question** — the
+    SPEC's "there is no third branch and no tree-SHA comparison" is about the *verdict* for a
+    single identity asked about once, not about the ask:
 
     * a SHA came back ⇒ the work is durable in Git. The task row goes `DONE`, the SHA is copied
       onto `attempts.commit_sha` and `phases.post_commit_sha`, and nothing re-runs.
     * nothing came back ⇒ nothing landed. `discard_task` resets the worktree to **the task's own
       anchor**, the row goes back to `PENDING`, and the rung re-runs.
 
+    **Three branches for REWRITE, because D89 Phase 2 Task B (ADR-0102 + ADR-0103) asks Git a
+    separate question per unit, not one question for the whole row.** A REWRITE coarse row's own
+    `task_id` was never written as any commit's `Fleet-Task-Id` trailer — only each unit's own
+    synthetic id (`task_id_for_ids`) was, one per landed commit (ADR-0024) — so this kind loops
+    `target_paths` and asks `find_task_commit` once per unit instead:
+
+    * every unit landed ⇒ identical to the non-REWRITE `DONE` branch above, using the LAST landed
+      unit's sha.
+    * zero units landed ⇒ identical to the non-REWRITE discard branch above.
+    * some but not all units landed (**the new, third verdict — "partially landed"**) ⇒
+      `discard_task` is NEVER called, because some of those units are real, durable commits and
+      `reset --hard` + `clean -fdx` would delete them. The row goes back to `PENDING`/unclaimed
+      with the fence bumped and NO git mutation; the report's `partially_landed` entry names the
+      landed and missing units, and `cli._arbitration_lines` renders it as its own line.
+
     A candidate Git could not be *asked* about at all — no worktree on disk, no anchor to scope
-    the range to, an unsettled probe — is reported in `unresolved` and left exactly as it was.
-    That is not a third verdict; it is the absence of one, and collapsing it into either branch is
-    the four-state collapse `RollbackIndeterminateError` exists to refuse one layer down. It would
-    be a `DONE` row claiming a commit nobody found, or a discarded worktree on a hunch.
+    the range to, an unsettled probe — is reported in `unresolved` and left exactly as it was, for
+    every kind. That is not a fourth verdict (a third, for non-REWRITE); it is the absence of one,
+    and collapsing it into a landed/discarded branch is the four-state collapse
+    `RollbackIndeterminateError` exists to refuse one layer down. It would be a `DONE` row
+    claiming a commit nobody found, or a discarded worktree on a hunch.
 
     **`phases.attempts` is never written by this function, in either branch.** §11.5 step 4 says
     so twice ("do not increment `attempts`" / "again without incrementing `attempts`"): a crash is
