@@ -743,17 +743,22 @@ this round; four remain open (not this round's scope). Do not count §12.42 towa
 tally — the criterion as a whole is still open.
 
 ## 43. Failover layered, bounded, fail-closed
-**OPEN — mixed, 8 of 16 sub-clauses — TEST-ONLY + known D55/D58/D62/D78.** Case (ii) is entirely
-absent (D55/D58). `llm_failovers` recording is D62. Independently and newly found: an existing test
-(`test_runner.py:1613`) discards the status column entirely, so "zero repos land in RHI" is never
-actually checked — it would pass with the repo marked RHI. `TierUnavailable.__init__`, the sole
-producer of the "names the tier and every target tried" message, is asserted by nothing; every test
-checking that message *writes the string itself* rather than reading it from the producer (audit
-row 43, D78).
-**Done bar (independently actionable now, not blocked on D55/D58):** fix `test_runner.py:1613` to
-destructure and assert the status column instead of discarding it, and add one test that
-constructs a real `TierUnavailable` and asserts the message it actually produces rather than a
-hand-written string. Case (ii) itself stays blocked on D55/D58.
+**OPEN — mixed, sub-clauses closing incrementally — TEST-ONLY + known D55/D58; D62/D78 legs
+closed.** Case (ii) is entirely absent, blocked on D55/D58's circuit-breaker gap (explicitly out
+of round-Y's size class, needs its own dedicated round). **`llm_failovers` recording (D62) is now
+closed** (round Y task 4, ADR-0107): `TokenUsage.llm_failovers` is stamped from
+`LadderModelClient.complete()`'s own retry-loop index, wired through `AttemptRow`/
+`record_attempt`, with a §12.43-case-(i)-shaped test in
+`tests/test_llm_backend_failover_attribution.py` proving the CONNECTION-trigger shape. **The two
+independently-actionable gaps this entry previously named are also closed** (round X task 1):
+`tests/test_runner.py`'s outage test now destructures and asserts the status column instead of
+discarding it, and a sibling test constructs a real `TierUnavailable` and asserts the message it
+actually produces. `TierUnavailable`'s message-provenance/tier-attribution honesty fields
+(D78) status pending final confirmation — check D78's own entry once it lands before updating
+this line further.
+**Done bar (remaining):** case (ii) stays blocked on D55/D58 — the large remaining piece. Re-check
+whether D78's landed fix (once confirmed) also closes any part of this criterion's honesty-field
+sub-clauses, per that task's own report.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
@@ -908,7 +913,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 19 | 1, 5, 6, 7, 10, 12, 15, 16, 17, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round Y, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §17 this round (byte-identity restored via a deterministic `updated_at` derivation, ADR-0106); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 20 | 1, 5, 6, 7, 10, 12, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round Y, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §17 (byte-identity restored via a deterministic `updated_at` derivation, ADR-0106) and §24 (D62's `llm_backend` leg closed, local-profile clause proven by a real e2e dispatch, ADR-0107) this round; §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 1 | 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial) |
