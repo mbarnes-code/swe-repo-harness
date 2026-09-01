@@ -486,11 +486,20 @@ class LlmFindingSink:
         (`workers/base.py`) carries a `tier` field, `classify.py::_error_for` populates it from
         `TierUnavailable.tier` on the `BACKEND_UNAVAILABLE` branch, and `PhaseRunner._drive`
         forwards `failure.tier` into this call's `tier=` kwarg — so the production caller
-        supplies it whenever the halt originated from a real `TierUnavailable`. The run-scoped
-        arm (`tier` omitted) is not dead code: the synthetic "worker returned no result"
-        `WorkerError` (`runner.py`, constructed with no `tier=`) and any future
-        `BACKEND_UNAVAILABLE` `WorkerError` built without going through `_error_for` still take
-        it, so both arms remain real and both remain tested.
+        supplies it whenever the halt originated from a real `TierUnavailable`. **The run-scoped
+        arm (`tier` omitted) is, as of this fix, UNREACHED IN PRODUCTION** — corrected here after
+        an earlier version of this note claimed both arms were live, which does not hold up:
+        `classify.py::_error_for` is the sole site in `src/` that assigns
+        `FailureClass.BACKEND_UNAVAILABLE` to a `WorkerError`, and it reaches that branch only via
+        `isinstance(exc, TierUnavailable)`, whose `tier` constructor parameter is non-optional —
+        so every production `BACKEND_UNAVAILABLE` `WorkerError` now carries a `tier`. The
+        synthetic "worker returned no result" `WorkerError` (`runner.py:621-624`) cannot take this
+        arm either: it is built with `FailureClass.UNKNOWN`, and the only `record_backend_unavailable`
+        call site (`runner.py:675`) is gated on `failure.failure_class is
+        FailureClass.BACKEND_UNAVAILABLE`, so that synthetic error never reaches it. The
+        run-scoped arm stays real only as a guard against a *future* `BACKEND_UNAVAILABLE`
+        `WorkerError` constructed without going through `_error_for` — which is why the test
+        covering it is still worth keeping, even though nothing in `src/` exercises it today.
 
         The operator cross-references by eye in the meantime: `observed` names the exhausted tier
         and the map's keys are tier names.

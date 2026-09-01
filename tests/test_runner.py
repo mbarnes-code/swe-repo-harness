@@ -1849,8 +1849,11 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
         "tier that died. Since D78, the REAL production path (a `TierUnavailable` raised through "
         "`classify.py::_error_for`) DOES forward `tier=` — see "
         "`test_a_tier_outage_with_a_real_tier_writes_a_tier_scoped_finding` for that arm. This "
-        "no-tier arm stays real too: the synthetic no-result `WorkerError` in `runner.py`'s "
-        "`_drive` still constructs one with no tier."
+        "no-tier arm is UNREACHED IN PRODUCTION today: the synthetic no-result `WorkerError` in "
+        "`runner.py`'s `_drive` is built with `FailureClass.UNKNOWN`, not `BACKEND_UNAVAILABLE`, "
+        "so it never reaches `record_backend_unavailable`'s gated call site. This fixture (and "
+        "the test) guard against a hypothetical future `BACKEND_UNAVAILABLE` `WorkerError` built "
+        "without going through `_error_for`."
     )
     assert "down" not in json.dumps(
         {k: v for k, v in payload.items() if k != "caveat"}
@@ -1941,12 +1944,13 @@ async def test_the_shipped_halt_path_refuses_both_derived_claims_when_triggers_e
     """The run-scoped arm, with a contaminated map — the case N9 said was untested.
 
     This fixture's `WorkerError` (built via `fails_with`, no `tier=` supplied) reproduces the
-    tier-less arm, which stays reachable since D78 — the synthetic no-result `WorkerError` in
-    `runner.py`'s `_drive` still constructs one with no tier, and a caller building a
-    `BACKEND_UNAVAILABLE` `WorkerError` without going through `classify.py::_error_for` still
-    produces one. That arm must refuse BOTH derived fields, and the refusal only means anything
-    when the map is non-empty — an empty map would make `"unknown"` indistinguishable from
-    `"none"` and hide a regression that answered from run-wide data.
+    tier-less arm, which is UNREACHED IN PRODUCTION as of D78 — the synthetic no-result
+    `WorkerError` in `runner.py`'s `_drive` is built with `FailureClass.UNKNOWN`, so it never
+    reaches `record_backend_unavailable`'s gated call site; only a hypothetical future caller
+    building a `BACKEND_UNAVAILABLE` `WorkerError` without going through `classify.py::_error_for`
+    would take it. That arm must still refuse BOTH derived fields, and the refusal only means
+    anything when the map is non-empty — an empty map would make `"unknown"` indistinguishable
+    from `"none"` and hide a regression that answered from run-wide data.
 
     So a CHEAP-tier 429 is planted before the wave, exactly as one would arrive hours earlier in a
     real run, and then a HEAVY-ish outage halts it. The row must hand over the raw map keyed by

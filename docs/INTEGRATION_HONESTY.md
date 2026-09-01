@@ -5524,6 +5524,25 @@ entry. This fix's OWN new production-path coverage
 assertion on the message text itself, so it does not move item 43's message-provenance sub-clause
 further than where round X already left it.
 
+**Correction (2026-09-01, final-fix round) — two sentences in the "Fixed" addendum above claim the
+synthetic no-result `WorkerError` in `runner.py`'s `_drive` is a live production producer of the
+tier-less `BACKEND_UNAVAILABLE` arm; both are false, left in place per this file's own convention.**
+The synthetic `WorkerError` at `runner.py:621-624` is constructed with `FailureClass.UNKNOWN`, not
+`BACKEND_UNAVAILABLE`, and `runner.py`'s only `record_backend_unavailable` call site (`:675`) is
+gated on `failure.failure_class is FailureClass.BACKEND_UNAVAILABLE` — so that synthetic error can
+never reach it. Separately, `classify.py::_error_for` (`:248`) is the sole site in `src/` that
+assigns `FailureClass.BACKEND_UNAVAILABLE` to a `WorkerError`, and it does so only via
+`isinstance(exc, TierUnavailable)`, whose `tier` constructor parameter is non-optional — so every
+production `BACKEND_UNAVAILABLE` `WorkerError` now carries a `tier`. Net effect: as of this fix,
+the run-scoped (`tier=None`) arm has ZERO production producers — the exact mirror image of the
+pre-fix state this entry closes. This does not reopen D78 (the tier-scoped arm this entry proves
+is genuinely wired and live) and does not mean the tests naming the synthetic `WorkerError` as
+their reachable case should be deleted — they remain legitimate regression guards for a
+hypothetical future caller that constructs a `BACKEND_UNAVAILABLE` `WorkerError` without going
+through `_error_for`. `src/fleet/orchestrator/findings.py`'s docstring and the two
+`tests/test_runner.py` sites this addendum describes as having been "corrected" have themselves
+been corrected again, in this round, to state this accurately.
+
 ---
 
 ## D79 — FIXED, LANDED (`cac537d`). SPEC §11.6's LLM response cache is entirely inert: no `LlmCacheStore` implementation is constructed anywhere in `src/`, so every production call is billed and no `llm_cache` row is ever written
@@ -6033,7 +6052,8 @@ only read transaction and is debounce-bounded, and drops *"until the disk fills 
   control finds the one `wal_autocheckpoint` literal (`state/db.py:98`). `tests/` → **0**. All of
   W13's static figures reproduce.
 * Exactly **three** executed `BEGIN` sites under `src/`: `migrations/__init__.py:228` EXCLUSIVE,
-  `state/db.py:459` IMMEDIATE, `state/projection.py:194` `BEGIN DEFERRED` — the only reader.
+  `state/db.py:459` IMMEDIATE, `state/projection.py:227` `BEGIN DEFERRED` (moved from `:194` by
+  ADR-0106's `_derive_updated_at` addition) — the only reader.
   `project_once` (`state/projection.py:375-389`, moved from `:341-353` by ADR-0106's
   `_derive_updated_at` addition) opens and closes that handle around one snapshot.
 * **Runtime, own fixture** (SQLite 3.45.1, ext4, 1 000-row `phases` table, 8 000 write transactions
