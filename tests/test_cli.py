@@ -2637,11 +2637,31 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
     assert resolved_at is not None, "schema.sql CHECKs a non-ACTIVE row carries one"
     assert finding == ("UnresolvedStub", "warn")
 
+    # §3.5.1 point 2 / §12.38: "their consumers stay DEGRADED — never promoted, never quietly
+    # re-labelled SUCCEEDED." `_apply_stub_reconcile` writes only `stubs` and `findings` (see its
+    # docstring), never `phases`, so this is true by construction — asserted explicitly here
+    # because nothing in this test block checked it before.
+    conn = sqlite3.connect(db)
+    try:
+        phase_status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert phase_status == "DEGRADED", (
+        "stub_reconcile must never promote the consumer out of DEGRADED"
+    )
+
     published = json.loads((workspace / "migration_state.json").read_text())
     assert published["unresolved_stubs"] == {"acme-commons": ["acme-billing@1.0.0"]}
     assert published["repos"]["acme-commons"]["stub_states"] == {
         "acme-billing@1.0.0": "ABANDONED"
     }
+    assert published["repos"]["acme-commons"]["status"] == "DEGRADED", (
+        "the projection must not quietly re-label the consumer either"
+    )
 
 
 def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
@@ -2715,6 +2735,77 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
         conn.close()
     assert state == "ACTIVE", "held, not abandoned — the provider's PR is still open"
     assert finding == 0
+
+
+def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
+    """Phases 1-3 `SUCCEEDED`, phase 4 `REQUIRES_HUMAN_INTERVENTION` — a repo an operator must
+    already triage for a reason unrelated to any stub (§12.14: only `fleet retry`'s audited
+    `operator=True` door reopens it). Paired with an `ACTIVE` stub row on the SAME repo below, so
+    `stub_reconcile`'s sweep has something to reconcile for a repo that is simultaneously RHI.
+    """
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase, status in (
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"),
+            (4, "REQUIRES_HUMAN_INTERVENTION"),
+        ):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (RUN_ID, repo, phase, status, "2026-08-08T12:00:00.000000+00:00"),
+            )
+    finally:
+        conn.close()
+
+
+def test_resume_stub_reconcile_never_moves_a_repo_out_of_requires_human_intervention(
+    workspace: Path,
+) -> None:
+    """§12.46(ii): "a test that drives every automatic sweep — the reaper, `fleet resume`,
+    `stub_reconcile`, `blocked_by` recomputation — finds none of them able to move a repo out of
+    `REQUIRES_HUMAN_INTERVENTION`." Named explicitly by symbol in that criterion's text, and never
+    driven behaviourally before D80 landed `stub_reconcile`'s wiring (round M, `5377969`/`9c20eeb`)
+    — this is the re-audit CRITERIA_PLAN.md §46 asks for.
+
+    `acme-commons` is `REQUIRES_HUMAN_INTERVENTION` at phase 4 (an unrelated triage, not a stub
+    issue) AND carries an open `ACTIVE` stub row. `stub_reconcile` still walks `ix_stubs_open` —
+    its own SQL filters on `stubs.state`, never on the consumer's `phases.status` — and abandons
+    the row exactly as the plain-DEGRADED case does (T4, `END_OF_RUN`). What it must NOT do is
+    touch the consumer's phase 4 row: `_apply_stub_reconcile` writes only `stubs` and `findings`,
+    so `REQUIRES_HUMAN_INTERVENTION` survives the sweep unconditionally rather than by any check
+    that reads it.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db)
+    _put_stub(db)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    # The sweep does not special-case an RHI consumer: it still reconciles the open row.
+    assert payload["stub_reconcile"]["abandoned"] == ["acme-commons→acme-billing@1.0.0"]
+
+    conn = sqlite3.connect(db)
+    try:
+        stub_state = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "   AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+        phase_status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert stub_state == "ABANDONED", "the stub sweep itself is unaffected by the consumer's RHI"
+    assert phase_status == "REQUIRES_HUMAN_INTERVENTION", (
+        "no automatic sweep — stub_reconcile included — may move a repo out of RHI (§12.46(ii))"
+    )
+
+    published = json.loads((workspace / "migration_state.json").read_text())
+    assert published["repos"]["acme-commons"]["status"] == "REQUIRES_HUMAN_INTERVENTION"
 
 
 # ---- --raise-budget -----------------------------------------------------------------

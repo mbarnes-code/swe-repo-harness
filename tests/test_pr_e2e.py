@@ -250,12 +250,16 @@ def body_of(root: Path, repo_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def degrade(root: Path, repo_id: str) -> None:
-    """Put one repo in the §3.5 escape hatch: DEGRADED, with a live `ACTIVE` stub row.
+def degrade(root: Path, repo_id: str, *, state: str = "ACTIVE") -> None:
+    """Put one repo in the §3.5 escape hatch: DEGRADED, with a live `ACTIVE`/`SUPERSEDED` stub row.
 
     Written straight to SQLite because `--stub-blocked` is refused by `fleet build` (no worker
     emits a stub in this tree), and refusing to test the draft/banner rule until that worker
     exists would leave §3.5.1's most consequential PR rule unproven.
+
+    `state` defaults to `ACTIVE` (the original fixture shape) and also accepts `SUPERSEDED` — the
+    OTHER member of `_HELD_STATES`/§12.38's refusal set, so a caller can prove the guard holds on
+    both open states, not only the one every prior test exercised.
     """
     run_id = run_id_of(root)
     conn = sqlite3.connect(root / "state" / "fleet.db")
@@ -268,9 +272,9 @@ def degrade(root: Path, repo_id: str) -> None:
         conn.execute(
             "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
             "                   provider_repo_id, pinned_version, bazel_label, state, "
-            "                   stub_fidelity, state_changed_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'acme-empty', '1.2.3', ?, 'ACTIVE', 'PUBLISHED_ARTIFACT', "
-            "        ?, ?)",
+            "                   stub_fidelity, resolved_at, state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'acme-empty', '1.2.3', ?, ?, 'PUBLISHED_ARTIFACT', "
+            "        ?, ?, ?)",
             (
                 "stub-gone",
                 run_id,
@@ -278,6 +282,11 @@ def degrade(root: Path, repo_id: str) -> None:
                 STUB_COORD,
                 repo_id,
                 f"//third_party/stubs/{STUB_COORD}",
+                state,
+                # `schema.sql`'s CHECK requires `resolved_at` on any non-ACTIVE row (it is set "on
+                # entry to SUPERSEDED/RESOLVED/ABANDONED"). `None` for ACTIVE preserves the
+                # original fixture's row exactly.
+                None if state == "ACTIVE" else "2026-08-09T00:00:00+00:00",
                 "2026-08-09T00:00:00+00:00",
                 "2026-08-09T00:00:00+00:00",
             ),
@@ -486,6 +495,106 @@ def test_a_degraded_repos_pr_is_a_draft_with_the_stub_banner_and_is_never_marked
     assert refused.exit_code == ExitCode.USAGE, refused.output
     assert not forge.commands("pr", "ready"), forge.calls
     assert pr_states(fleet)["acme-app-ts"] == PrState.DRAFTED.value, pr_states(fleet)
+
+
+def test_pr_ready_refuses_a_superseded_stub_the_same_as_an_active_one(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """§12.38's refusal set is `{ACTIVE, SUPERSEDED}`, not `ACTIVE` alone (§3.5.1: `SUPERSEDED`
+    is a stub whose provider merged but whose revalidation round has not yet PASSed — the label
+    was swapped, and the round is still pending). `cli._refuse_unresolved_stubs` names both in one
+    `state IN ('ACTIVE','SUPERSEDED')` clause; every other test in this file (and in
+    `tests/test_cli.py`) only ever seeds `ACTIVE`, so deleting `'SUPERSEDED'` from that clause
+    would still pass the whole suite. This test seeds `SUPERSEDED` alone and asserts the identical
+    refusal: exit 2, `gh pr ready` never invoked, state stays `DRAFTED`.
+    """
+    verified(fleet)
+    assert run_pr(fleet).exit_code == ExitCode.SUCCESS
+    forge.merge(*LIBRARIES)
+    assert run_pr(fleet, "--sync").exit_code == ExitCode.SUCCESS
+    degrade(fleet, "acme-app-ts", state="SUPERSEDED")
+
+    result = run_pr(fleet, "--repo", "acme-app-ts")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert payload(result)["draft"] == ["acme-app-ts"], payload(result)
+    assert pr_states(fleet)["acme-app-ts"] == PrState.DRAFTED.value, pr_states(fleet)
+
+    refused = run_pr(fleet, "--ready", "--repo", "acme-app-ts")
+    assert refused.exit_code == ExitCode.USAGE, refused.output
+    assert "SUPERSEDED" in refused.output, refused.output
+    assert not forge.commands("pr", "ready"), forge.calls
+    assert pr_states(fleet)["acme-app-ts"] == PrState.DRAFTED.value, pr_states(fleet)
+
+
+def resolve_stub(root: Path, repo_id: str) -> None:
+    """Attach one `RESOLVED` `stubs` row to a repo whose Phase-4 verification is otherwise clean.
+
+    `RESOLVED` is the terminal state a revalidation round leaves once it PASSes against the real
+    dependency (`orchestrator.stubs.settle_revalidation`'s T2) — this repo's stub history is real,
+    but nothing about it is open any more. Unlike `degrade()`, this does NOT touch `phases.status`
+    or `stubbed_deps`: `cli._pr_candidates`'s own stub query is `state IN ('ACTIVE','SUPERSEDED')`
+    (`cli.py`, `_pr_candidates`), so a `RESOLVED` row is invisible to `stub_states`/`_must_be_draft`
+    by construction, and the repo ships as a plain, non-draft PR.
+    """
+    run_id = run_id_of(root)
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, revalidation_round, resolved_at, "
+            "                   state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'acme-empty', '1.2.3', ?, 'RESOLVED', 'PUBLISHED_ARTIFACT', "
+            "        1, ?, ?, ?)",
+            (
+                "stub-settled",
+                run_id,
+                repo_id,
+                STUB_COORD,
+                repo_id,
+                f"//third_party/stubs/{STUB_COORD}",
+                "2026-08-09T00:00:00+00:00",
+                "2026-08-09T00:00:00+00:00",
+                "2026-08-09T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_pr_ready_succeeds_once_a_stub_is_genuinely_resolved(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """§12.38's positive half: `fleet pr --ready` succeeds — not merely "does not refuse" — once
+    every `stubs` row for the repo is `RESOLVED`. The refusal test above (and every prior test in
+    this file) only ever asserts the negative; the guard's positive half — readiness correctly
+    GRANTED — was asserted nowhere (round-Z audit, CRITERIA_PLAN.md §38).
+
+    `acme-lib-py` is a graph source (wave 0, no dependencies, so nothing can HOLD it) with a real
+    `RESOLVED` stub row attached. `_refuse_unresolved_stubs` does not fire (its query never
+    matches `RESOLVED`), `_must_be_draft` does not force a draft (`RESOLVED` is not in
+    `prwriter._HELD_STATES` and is filtered out of `stub_states` entirely by `_pr_candidates`'s own
+    `ACTIVE`/`SUPERSEDED` query), so the PR opens WITHOUT `--draft` and `PrwriterWorker` issues the
+    `READY_UNIT` — `gh pr ready` — in the same invocation, landing `PrState.OPEN` rather than
+    `DRAFTED`.
+    """
+    verified(fleet)
+    resolve_stub(fleet, "acme-lib-py")
+
+    result = run_pr(fleet, "--ready", "--repo", "acme-lib-py")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    assert payload(result)["opened"] == {"acme-lib-py": forge.url_for("acme-lib-py")}, payload(
+        result
+    )
+    assert payload(result)["draft"] == [], payload(result)
+
+    argv = forge.created()["migrate/acme-lib-py"]
+    assert "--draft" not in argv, argv
+    assert forge.commands("pr", "ready"), (
+        "the READY_UNIT must fire: a genuinely resolved stub is the positive half of §12.38"
+    )
+    assert pr_states(fleet)["acme-lib-py"] == PrState.OPEN.value, pr_states(fleet)
 
 
 # ---------------------------------------------------------------------------------------
