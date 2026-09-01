@@ -27,8 +27,9 @@ import tomllib
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
-from fleet.models.enums import ModelTier
+from fleet.models.enums import ContextPolicy, ModelTier, TransformTier
 from fleet.models.tasks import BackendTarget, Price
 from fleet.settings import (
     _BACKEND_EXTRAS,
@@ -39,7 +40,9 @@ from fleet.settings import (
     ConfigFileError,
     ConfigValidationError,
     FleetSettings,
+    LadderRung,
     SecretInConfigError,
+    TransformSection,
     UnpricedTargetError,
     UnresolvedReferenceError,
     canonical_json,
@@ -823,6 +826,81 @@ def test_ladder_length_must_equal_max_attempts(tmp_path: Path) -> None:
     with pytest.raises(ConfigValidationError) as excinfo:
         load(write_config(tmp_path, fleet=fleet))
     assert "max_attempts" in str(excinfo.value)
+
+
+def _five_rungs(*, first_bare: bool = True) -> tuple[LadderRung, ...]:
+    """A genuinely 5-rung, correctly-shaped ladder — `first_bare=False` corrupts rung 0 only."""
+    first = (
+        LadderRung(tier=TransformTier.DETERMINISTIC)
+        if first_bare
+        else LadderRung(
+            tier=TransformTier.DETERMINISTIC,
+            role="transform_repair",
+            context_policy=ContextPolicy.EVIDENCE_ONLY,
+        )
+    )
+    return (
+        first,
+        LadderRung(
+            tier=TransformTier.LLM_REPAIR,
+            role="transform_repair",
+            context_policy=ContextPolicy.EVIDENCE_ONLY,
+        ),
+        LadderRung(
+            tier=TransformTier.LLM_REPAIR,
+            role="transform_repair",
+            context_policy=ContextPolicy.EVIDENCE_ONLY,
+        ),
+        LadderRung(
+            tier=TransformTier.LLM_ESCALATION,
+            role="escalation",
+            context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        ),
+        LadderRung(
+            tier=TransformTier.LLM_ESCALATION,
+            role="escalation",
+            context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        ),
+    )
+
+
+def test_transform_section_ladder_length_mismatch_is_refused_at_construction() -> None:
+    """§12.13's 5-rung variant: `TransformSection._ladder_matches_attempts` is a
+    `@model_validator(mode="after")` that has never been exercised by constructing the `Section`
+    directly (only indirectly, through the loader, in
+    `test_ladder_length_must_equal_max_attempts` above). A 4-rung ladder under `max_attempts=5`
+    must be refused at construction, naming the mismatch."""
+    four_rungs = _five_rungs()[:4]
+    with pytest.raises(ValidationError, match="4 rungs but max_attempts is 5"):
+        TransformSection(max_attempts=5, ladder=four_rungs)
+
+    six_rungs = (
+        *_five_rungs(),
+        LadderRung(
+            tier=TransformTier.LLM_ESCALATION,
+            role="escalation",
+            context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        ),
+    )
+    with pytest.raises(ValidationError, match="6 rungs but max_attempts is 5"):
+        TransformSection(max_attempts=5, ladder=six_rungs)
+
+
+def test_transform_section_first_rung_must_be_bare_deterministic() -> None:
+    """§9: rung 0 is the deterministic rewrite pass and takes no `role`/`context_policy` — a
+    caller who gives it one has smuggled an LLM call into the attempt the ladder promises is
+    free and offline."""
+    corrupted = _five_rungs(first_bare=False)
+    with pytest.raises(ValidationError, match="deterministic"):
+        TransformSection(max_attempts=5, ladder=corrupted)
+
+
+def test_transform_section_five_rung_ladder_constructs_cleanly() -> None:
+    """The positive case: a genuinely 5-rung, correctly-shaped ladder under `max_attempts=5` must
+    NOT raise — this is what round AA's e2e test below configures."""
+    section = TransformSection(max_attempts=5, ladder=_five_rungs())
+    assert len(section.ladder) == 5
+    assert section.max_attempts == 5
 
 
 def test_monorepo_dir_overrides_must_be_a_bijection(tmp_path: Path) -> None:

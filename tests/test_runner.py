@@ -644,12 +644,14 @@ async def _build(
             await read_conn.close()
 
 
-async def _seed(harness: Harness, *repo_ids: str, blast_radius: int = 0) -> None:
+async def _seed(
+    harness: Harness, *repo_ids: str, blast_radius: int = 0, max_attempts: int = 3
+) -> None:
     for repo_id in repo_ids:
         await harness.repo.upsert_repo(
             repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=NOW
         )
-        await harness.repo.upsert_phase(RUN, repo_id, PHASE, now=NOW)
+        await harness.repo.upsert_phase(RUN, repo_id, PHASE, now=NOW, max_attempts=max_attempts)
         if blast_radius:
             async def unit(conn: aiosqlite.Connection, rid: str = repo_id) -> None:
                 await conn.execute(
@@ -1551,6 +1553,70 @@ async def test_the_ladder_escalates_across_crash_and_resume_and_never_repeats_a_
     status, attempts, _, _, _ = await harness.phase_row("repo-a")
     assert (status, attempts) == ("REQUIRES_HUMAN_INTERVENTION", 3), (
         "three rungs ran, so three attempts must be on the row a human now reads"
+    )
+
+
+async def test_a_five_rung_ladder_produces_exactly_five_attempts_and_no_sixth(
+    harness: Harness,
+) -> None:
+    """§12.13's 5-rung variant: a `transform.max_attempts=5` config (with a matching 5-rung
+    `transform.ladder`, validated separately at construction by
+    `tests/test_settings.py::test_transform_section_five_rung_ladder_constructs_cleanly`) must
+    drive exactly 5 real `attempts` rows against a repeatedly-failing repo, land the 5th
+    `REQUIRES_HUMAN_INTERVENTION`, and never dispatch a 6th.
+
+    NOT an e2e/CLI test: `fleet transform`'s only precedent for "keeps failing all the way to
+    REQUIRES_HUMAN_INTERVENTION" (`tests/test_transform_e2e.py::
+    test_a_failing_repo_does_not_stop_its_siblings_or_the_wave`) always passes
+    `--deterministic-only`, and `cli.py::_validate_transform_flags` returns
+    `1 if deterministic_only else max_attempts` as the effective ladder length fed to
+    `upsert_phase(..., max_attempts=...)` — i.e. `--deterministic-only` does not cap rungs 2+ at
+    the DETERMINISTIC tier, it caps the RUN at exactly one attempt, structurally, regardless of
+    the configured ladder length. A 5-rung config driven that way would produce 1 `attempts` row,
+    not 5 — an inert-config test that would pass for a reason unrelated to the ladder actually
+    running 5 real rungs. Confirmed by reading `cli.py:3485-3489` (docstring) and `:3588`
+    (`return 1 if deterministic_only else max_attempts`).
+
+    So this drives `PhaseRunner` directly, at the level `_drive` actually reads `max_attempts`
+    from (`runner.py:512-514`: `LadderState(max_attempts=row.max_attempts)`, sourced from
+    `phases.max_attempts` — exactly the column `_seed(..., max_attempts=5)` below sets). Rungs 4
+    and 5 repeat rung 3's tier/context-policy (`LadderState.tier`/`.context_policy` clamp past
+    the declared `TIER_LADDER`/`DEFAULT_LADDER` length — the explicitly out-of-scope, correct
+    behaviour this task must not touch), but the ROW COUNT under test — attempts charged and the
+    ladder stopping at exactly `max_attempts` — is governed entirely by `LadderState.max_attempts`
+    / `.exhausted`, which is wired to `phases.max_attempts` independently of the tier repetition.
+    """
+    await _seed(harness, "repo-a", max_attempts=5)
+    await harness.plan(("repo-a",))
+    BEHAVIOURS["repo-a"] = [fails(FailureClass.RULE_MISS)]  # substantive; repeats every dispatch
+
+    await harness.runner(policy=RecordingPolicy()).run_wave(0)
+
+    assert [call[1] for call in CALLS] == [1, 2, 3, 4, 5], (
+        f"expected rungs 1..5 in order, got {[call[1] for call in CALLS]}"
+    )
+    assert len(CALLS) == 5, f"a 6th dispatch happened: {CALLS}"
+    assert [d.action for d in DECISIONS] == [
+        RetryAction.ADVANCE_LADDER,
+        RetryAction.ADVANCE_LADDER,
+        RetryAction.ADVANCE_LADDER,
+        RetryAction.ADVANCE_LADDER,
+        RetryAction.TERMINATE,
+    ], "the ladder must charge all 5 attempts and terminate on the 5th, not before or after"
+    assert all(d.charges_attempt for d in DECISIONS[:4]), "attempts 1-4 must each charge a rung"
+
+    status, attempts, _, _, _ = await harness.phase_row("repo-a")
+    assert (status, attempts) == ("REQUIRES_HUMAN_INTERVENTION", 5), (
+        "five rungs ran, so five attempts must be on the row a human now reads"
+    )
+
+    # A 6th call never happens: re-driving the same wave after exhaustion must not add a 6th
+    # CALL — the repo is no longer PENDING for this phase, so the scheduler does not re-admit it.
+    await harness.runner(policy=RecordingPolicy()).run_wave(0)
+    assert len(CALLS) == 5, "a 6th rung ran after the ladder was already exhausted at attempt 5"
+    status_again, attempts_again, _, _, _ = await harness.phase_row("repo-a")
+    assert (status_again, attempts_again) == ("REQUIRES_HUMAN_INTERVENTION", 5), (
+        "re-driving an exhausted ladder must not advance attempts past max_attempts"
     )
 
 
