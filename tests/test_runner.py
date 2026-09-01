@@ -49,6 +49,7 @@ from fleet.llm.client import (
     CallBudget,
     Message,
     StructuredOutputMode,
+    TierUnavailable,
 )
 from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter, Role
 from fleet.models.enums import (
@@ -1738,8 +1739,11 @@ async def test_a_tier_outage_halts_the_run_and_leaves_the_repo_untouched(
     harness: Harness,
 ) -> None:
     """§11.8: `BACKEND_UNAVAILABLE` is terminal for the RUN and never for the repo. The repos are
-    fine and the infrastructure is not, so they stay `PENDING` for `fleet resume` with no attempt
-    charged — a two-hour outage must not burn 250 ladders."""
+    fine and the infrastructure is not, so no attempt is charged and the repo is never marked
+    `REQUIRES_HUMAN_INTERVENTION` — a two-hour outage must not burn 250 ladders. The lease is
+    left to expire rather than released here, so the row reads `RUNNING` until `fleet resume`
+    reclaims it; this test drives that reclaim and checks it lands on `PENDING`, exactly what the
+    SPEC §12.43(iv) 'a `fleet resume` that finds those repos still `PENDING`' promises."""
     await _seed(harness, "repo-a")
     await harness.plan(("repo-a",))
     BEHAVIOURS["repo-a"] = [fails(FailureClass.BACKEND_UNAVAILABLE)]
@@ -1748,8 +1752,37 @@ async def test_a_tier_outage_halts_the_run_and_leaves_the_repo_untouched(
 
     assert report.halt is not None
     assert report.halt.exit_code == 8
-    _, attempts, _, _, _ = await harness.phase_row("repo-a")
+    status, attempts, _, _, _ = await harness.phase_row("repo-a")
     assert attempts == 0, "an outage consumed one of the repo's three chances"
+    assert status != "REQUIRES_HUMAN_INTERVENTION", (
+        "the repo is fine; only the infrastructure is not, so it must never be marked RHI"
+    )
+
+    # The runner leaves the lease to expire rather than releasing it (`runner.py`'s
+    # BACKEND_UNAVAILABLE branch), so the row reads RUNNING here, not PENDING yet —
+    # `reap_expired_phase_leases` is exactly what `fleet resume` runs before re-dispatch, and is
+    # what makes the docstring's "stay PENDING for `fleet resume`" claim literally true.
+    reaped = await harness.repo.reap_expired_phase_leases(RUN, now=NOW + timedelta(hours=1))
+    assert reaped == 1, "fleet resume must find a reclaimable lease, not a burned repo"
+    status, attempts, _, _, _ = await harness.phase_row("repo-a")
+    assert (status, attempts) == ("PENDING", 0), "fleet resume must find the repo still PENDING"
+
+
+async def test_tier_unavailable_names_the_tier_and_every_target_tried() -> None:
+    """`TierUnavailable.__init__` (client.py) is the sole real producer of the §13 row 40 finding's
+    message. Every test that seeds a `BACKEND_UNAVAILABLE` fixture writes that message by hand as
+    a literal string, so a format drift in the real producer would go unnoticed forever — this
+    test constructs the real exception and checks its message against an expectation built
+    independently (from the same tier/targets inputs, via a separately-written template) rather
+    than a copy-pasted literal, so the two cannot silently diverge."""
+    targets = ("fake:fake-1", "fake:fake-2")
+
+    exc = TierUnavailable(ModelTier.WORKHORSE, targets)
+
+    expected = "tier {} exhausted after targets: {}".format(
+        ModelTier.WORKHORSE, ", ".join(targets)
+    )
+    assert str(exc) == expected
 
 
 async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halts(
@@ -1763,14 +1796,14 @@ async def test_a_tier_outage_writes_a_backend_unavailable_finding_before_it_halt
     `targets_tried` carries the worker's own `stderr_tail` verbatim, which on the real path is
     `TierUnavailable`'s message (client.py:151-155) — the tier and, in order, every target the
     ladder spent. Verbatim rather than parsed: nothing in this codebase branches on message text.
+    The fixture below constructs a real `TierUnavailable` rather than hand-writing its message, so
+    this test cannot silently diverge from the real producer.
     """
     await _seed(harness, "repo-a")
     await harness.plan(("repo-a",))
+    tier_exc = TierUnavailable(ModelTier.WORKHORSE, ("fake:fake-1", "fake:fake-2"))
     BEHAVIOURS["repo-a"] = [
-        fails_with(
-            FailureClass.BACKEND_UNAVAILABLE,
-            "tier WORKHORSE exhausted after targets: fake:fake-1, fake:fake-2",
-        )
+        fails_with(FailureClass.BACKEND_UNAVAILABLE, str(tier_exc))
     ]
 
     report = await harness.runner().run_wave(0)
