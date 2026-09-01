@@ -444,19 +444,21 @@ against `tests/test_scan_e2e.py` at round S's start, the true pre-round figure w
 survives a second scan unchanged. Everything else in this criterion is already closed.
 
 ## 24. Fail-closed budgets, ledger moves correctly
-**OPEN — mixed, 7 sub-clauses — TEST-ONLY + known D62.** Wave-breach, over-reserve-refused, and
-in-flight-wait are covered. `spent_usd == sum(cost_usd)` is **now covered (round R,
-`5d8f282`)** — `tests/test_runner.py:2250` queries `budget_ledger` via
-`harness.repo.get_budget(RUN)` under a priced hosted profile and asserts it equals the direct sum
-of `attempts.cost_usd`, closing this clause. Local-profile row completeness is D62 (`llm_backend`
-etc. are NULL — do not re-open, it's tracked). **Two done-bar items remain open:** (1) the D62
-clause above (`--profile local` row completeness — blocked on D62, do not duplicate), and (2) the
-run-ceiling clause — the ledger mechanism is proven but never exercised through an organic CLI
-breach (`RunBudgetExhausted` still has zero refs in `cli.py`/`test_cli.py`, unchanged by round R).
-Round R closed one of ~7 sub-clauses; the criterion stays OPEN.
+**OPEN — mixed, 7 sub-clauses — blocked on D62 only now.** Wave-breach, over-reserve-refused,
+in-flight-wait, and the ledger-sum invariant were already covered. Round U (`3f089a4`)
+closed the run-ceiling clause: `tests/test_cli.py::test_run_cost_exhausted_exits_3` drives a real
+`fleet scan` through `PhaseRunner`'s actual `reserve()`/`dispatch()` path to exit 3. The brief's
+literal scenario (seed `run_max_cost_usd` below a known cost) is architecturally unrepresentable —
+`schema.sql`'s `CHECK (spent_usd + reserved_usd <= max_usd)` makes `spent_usd > max_usd`
+unseedable, and every CLI `PhaseRunner` site reserves $0 (no production `TokenEstimator` callers)
+— so the test uses the durably-true equivalent (a pre-seeded halted ledger), verified by task
+review via a full call-chain trace against source to be a legitimate, organic exercise of the
+exit-3 path, not a synthetic shortcut. Local-profile row completeness is D62 (`llm_backend` etc.
+are NULL — do not re-open, it's tracked) — the **only** remaining open item.
 **Done bar:** one e2e test asserting the ledger-sum invariant **(met, round R)**, and one
-CLI-level test that organically breaches the run ceiling (not a direct call into the budgets
-module) and asserts exit 3 **(not yet met — see residual (2) above)**.
+CLI-level test that organically breaches the run ceiling and asserts exit 3 **(met, round U)**.
+Criterion stays OPEN pending D62 only — do not count toward the `<n> of 48` tally until D62
+closes; do not re-dispatch the ledger-sum or run-ceiling clauses, both are done.
 
 ## 25. The unknown repo survives the pipeline
 **OPEN — SCALE-FIXTURE.** The `no-manifest` finding and `misc/<repo_id>` destination are covered.
