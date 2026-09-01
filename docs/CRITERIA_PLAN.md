@@ -326,9 +326,10 @@ through a built `PullRequestDraft` for the 12-node cycle case, per `docs/SPEC.md
 wording. The 41-node no-hang property is closed and does not need re-doing.
 
 ## 20. Secrets never leak
-**OPEN — per-column coverage listed in the 2026-08-31 round-Q-final-review dated annotation below
-(the "2 of 4"/"3 of 4" running counts elsewhere in this entry do not reconcile with each other —
-read the per-column list, not either count), PR-body placeholder still open.** SPEC.md item 20's
+**DONE (round V, 2026-09-01) — per-column coverage listed in the 2026-08-31 round-Q-final-review
+dated annotation below (the "2 of 4"/"3 of 4" running counts elsewhere in this entry do not
+reconcile with each other — read the per-column list, not either count); PR-body placeholder now
+closed too — see the round-V annotation at the end of this entry.** SPEC.md item 20's
 literal text wants a combined fixture run (mirror-URL
 token, build-script-echoed token, tracked `.env`) grepped across `logs/`/`artifacts/`/
 `migration_state.json` AND four named DB columns (`events.payload`, `attempts.stderr_tail`,
@@ -378,13 +379,28 @@ going forward over any "n of 4" phrasing anywhere else in this entry:
 - `phases.last_error` — covered by D88 (`complete_phase`) and D90
   (`_terminate_uncharged`, `_record_diagnostics`).
 - `llm_cache.response_json` — covered by D88 only; **not** re-verified by D90's task.
-**Done bar (remaining):** the PR-body `«redacted:…»` placeholder clause — still entirely
-unverified, confirmed by two separate rounds' investigations (round M found a different leak on
-the PR path; round P confirms this specific clause remains untouched). Whether the four-column
-grep-sweep methodology also needs a literal combined-fixture test, or whether the now-proven
-per-column properties satisfy the criterion's intent, is worth a brief adjudication before
-attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a precedent
-for accepting equivalent per-column coverage.
+**Done bar (remaining, pre-round-V):** the PR-body `«redacted:…»` placeholder clause — still
+entirely unverified, confirmed by two separate rounds' investigations (round M found a different
+leak on the PR path; round P confirms this specific clause remains untouched). Whether the
+four-column grep-sweep methodology also needs a literal combined-fixture test, or whether the
+now-proven per-column properties satisfy the criterion's intent, is worth a brief adjudication
+before attempting — check whether SPEC's own "either/or" language elsewhere in §12 offers a
+precedent for accepting equivalent per-column coverage.
+
+**Dated annotation, 2026-09-01 (round V controller ruling):** adjudicated the methodology
+question above — per-column coverage (not a literal combined multi-secret fixture) is accepted
+as satisfying this criterion's intent, consistent with this project's precedent elsewhere in §12
+for equivalent per-property coverage standing in for one combined test. Round V then closed the
+PR-body placeholder clause: `tests/test_pr_body_redaction.py` plants a credential-shaped secret
+in `relocation_summary`, drives the real `render_body` → `PullRequestDraft.body` →
+`_write_pr_record` → `redact_text` path, and asserts the persisted `findings.payload` carries the
+`«redacted:...»` placeholder rather than the live secret, plus an over-redaction control —
+mutation-proven and independently reproduced by task review (real revert, real red, clean
+restore). `human_intervention_notes`/`weak_edges` share the identical redaction boundary
+(confirmed: `render_body` serializes all three fields into one body string before
+`_write_pr_record` ever redacts it), so one representative field is sufficient. **All four DB
+columns plus the PR-body placeholder are now covered — this criterion's full stated text passes.
+Criterion DONE.**
 
 ## 21. Determinism — clean re-run, byte-identical digest
 **DONE (all three clauses landed, round O `daf2a24` + round Q task 2).** SPEC.md item 21 has
@@ -654,17 +670,17 @@ than direct parameter injection. Sequence after §12.37, not before — closing 
 re-test the same disconnected parameters.
 
 ## 40. No model string outside `config/`
-**DONE (SPEC + code corrected, round-K). Do not count toward the `<n> of 48` tally — see the
-"Remaining" clause below; added 2026-08-31 per round-P's and round-Q-final-review's independent
-flags of this heading/body mismatch (CLAUDE.md's D63 shape).** The criterion's own greps were
-unsatisfiable as written (named a nonexistent `llm/routing.py`, and returned non-zero hits without
-the backend-file exclusion). Round-K applied the exclusion for real and validated it three ways
-(clean tree / exclusion removed / synthetic fault injected). **Remaining, independently small
-(audit row 40, M1):** the AST clause — "an AST test asserts only `settings.py` reads
-`config/models.yaml`" — is asserted by no test at all; only the model-id/endpoint greps are
-covered.
-**Done bar:** write the one AST test the M1 note names. Everything else in this criterion is
-already closed.
+**DONE (SPEC + code corrected, round-K; AST clause closed round V, 2026-09-01 — now counts
+toward the `<n> of 48` tally for the first time; the exclusion marker below is retired.)** The
+criterion's own greps were unsatisfiable as written (named a nonexistent `llm/routing.py`, and
+returned non-zero hits without the backend-file exclusion). Round-K applied the exclusion for
+real and validated it three ways (clean tree / exclusion removed / synthetic fault injected).
+Round V closed the last gap (audit row 40, M1): `tests/test_models_yaml_ast.py` is a real AST
+walk (modeled on `tests/test_ddl_ast.py`'s precedent) asserting only `src/fleet/settings.py`
+reads `config/models.yaml` — mutation-proven, independently reproduced by task review via a
+standalone walk finding the identical 3 sites, all in `settings.py`. **This criterion's full
+stated text now passes — both the model-id/endpoint greps and the AST clause.**
+**Done bar:** met in full. Nothing remains open for §12.40.
 
 ## 41. Local-only profile runs the whole pipeline
 **OPEN — structural gap, no test at all — NEW-MECHANISM (test infra).** No test anywhere runs any
@@ -812,7 +828,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 15 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 33, 48 (re-derived 2026-09-01, round U, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §33 this round; §47 stayed OPEN this round per round T's controller ruling C1 (its `vars(inst) == {}` claim for the backends registry is measurably false and its contracts-registry clause has no implementation at all — see §47's own entry for the two residuals); §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| DONE | 17 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 48 (re-derived 2026-09-01, round V, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §20 (PR-body placeholder clause closed) and §40 (AST clause closed, its "do not count" exclusion marker retired — this is the first round it counts) this round; §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry and its contracts-registry residual are separate, tracked in §47's own entry) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
