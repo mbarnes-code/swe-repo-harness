@@ -298,7 +298,7 @@ from fleet.workers.prwriter import (
 )
 from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
 from fleet.workers.relocate import RelocateInput, RelocateOutput, relocated_path
-from fleet.workers.rewrite import RewriteInput, RewriteOutput
+from fleet.workers.rewrite import RewriteInput, RewriteOutput, task_id_for_ids
 from fleet.workers.symbolindex import SymbolIndexInput, SymbolIndexOutput
 
 __all__ = [
@@ -12006,6 +12006,7 @@ async def _reset_stale_running(path: Path, run_id: str, horizons: tuple[str, str
 #: SQL is not a complete rendering of the step's candidate set and must not be read as one.
 _ARBITRATED_TASKS_SQL: Final = (
     "SELECT t.task_id, t.repo_id, t.phase, t.pre_commit_sha, "  # noqa: S608 - a Final constant
+    "       t.kind, t.target_paths, "
     "       p.base_ref, p.pre_commit_sha, "
     "       ((t.repo_id, t.phase) IN (SELECT repo_id, phase FROM phases "
     "                                  WHERE run_id = ?" + _LIVE_SANDBOX_PREDICATE + ")) "
@@ -12078,6 +12079,7 @@ async def _reconcile_tasks_with_git(
         "spared_live": [],
         "landed": [],
         "discarded": [],
+        "partially_landed": [],
         "anchors_recreated": [],
         "provenance_missing": [],
         "unresolved": [],
@@ -12086,7 +12088,7 @@ async def _reconcile_tasks_with_git(
     candidates = []
     for row in rows:
         target = {"task_id": str(row[0]), "repo_id": str(row[1]), "phase": int(row[2])}
-        if int(row[6]):
+        if int(row[8]):
             cast(list[object], report["spared_live"]).append(dict(target))
         else:
             candidates.append(row)
@@ -12097,8 +12099,19 @@ async def _reconcile_tasks_with_git(
     work_root = (settings.root / settings.config.run.work_dir).resolve()
     landed: list[tuple[str, str, int, str]] = []
     discarded: list[tuple[str, str, int]] = []
+    partial: list[tuple[str, str, int]] = []
 
-    for task_id, repo_id, phase, task_anchor, base_ref, phase_anchor, _live in candidates:
+    for (
+        task_id,
+        repo_id,
+        phase,
+        task_anchor,
+        kind_str,
+        target_paths_json,
+        base_ref,
+        phase_anchor,
+        _live,
+    ) in candidates:
         target = {"task_id": str(task_id), "repo_id": str(repo_id), "phase": int(phase)}
         worktree = work_root / str(repo_id)
         if not await asyncio.to_thread((worktree / ".git").exists):
@@ -12123,6 +12136,76 @@ async def _reconcile_tasks_with_git(
             if await git.resolve(branch) is None:
                 _unresolved(report, target, f"{branch} does not exist in {worktree}")
                 continue
+
+            if TaskKind(str(kind_str)) is TaskKind.REWRITE:
+                # D89 Phase 2 (ADR-0102 + this task): the row's OWN `task_id` was never written
+                # as any commit's `Fleet-Task-Id` trailer for this kind — only the per-unit
+                # synthetic ids `task_id_for`/`task_id_for_ids` derive were, one per landed
+                # commit (ADR-0024). Asking git about the coarse id here (the old single-shot
+                # path below) would always come back empty and fall into `discard_task`, which
+                # would `reset --hard` + `clean -fdx` away any per-unit commits that DID land
+                # during this dispatch. So REWRITE loops per unit and asks git about each unit's
+                # own trailer instead.
+                units = json.loads(target_paths_json) if target_paths_json else []
+                landed_units: list[tuple[str, str]] = []
+                missing_units: list[str] = []
+                for unit in units:
+                    synth_id = task_id_for_ids(run_id, str(repo_id), int(phase), unit)
+                    unit_sha = await find_task_commit(
+                        git, branch=branch, pre_commit_sha=anchor, task_id=synth_id
+                    )
+                    if unit_sha is not None:
+                        landed_units.append((unit, unit_sha))
+                    else:
+                        missing_units.append(unit)
+
+                if units and not missing_units:
+                    # every unit landed: identical to the non-REWRITE DONE path below, using the
+                    # LAST landed unit's sha as `attempts.commit_sha` — the same convention
+                    # `_TransformSink` uses for `output.commits[-1]` (cli.py `_TransformSink`).
+                    last_unit_sha = landed_units[-1][1]
+                    landed.append((str(task_id), str(repo_id), int(phase), last_unit_sha))
+                    cast(list[object], report["landed"]).append(
+                        {**target, "commit_sha": last_unit_sha}
+                    )
+                elif not landed_units:
+                    # nothing landed (including an empty/never-populated `target_paths`): the
+                    # existing discard path, unchanged — safe, there is nothing durable to lose.
+                    if task_anchor is None:
+                        _unresolved(
+                            report,
+                            target,
+                            "the task row carries no `pre_commit_sha` to reset to",
+                        )
+                        continue
+                    if not dry_run:
+                        await discard_task(
+                            git, task_pre_commit_sha=str(task_anchor), branch=branch
+                        )
+                    discarded.append((str(task_id), str(repo_id), int(phase)))
+                    cast(list[object], report["discarded"]).append(dict(target))
+                else:
+                    # NEW: partially landed. `discard_task` MUST NOT be called here — some of
+                    # these units are real, durable commits, and `reset --hard` + `clean -fdx`
+                    # would delete them. The row goes back to re-claimable PENDING (no git
+                    # mutation) so the next `fleet resume`/wave re-admits the dispatch; the
+                    # units that already landed are safely re-discovered by `apply_and_commit`'s
+                    # own idempotency guard and by `RewriteWorker.run`'s `find_task_commit`
+                    # no-op check (see this task's report for the full argument) — this branch's
+                    # only job is bookkeeping, never a git write.
+                    partial.append((str(task_id), str(repo_id), int(phase)))
+                    cast(list[object], report["partially_landed"]).append(
+                        {
+                            **target,
+                            "landed_units": [u for u, _sha in landed_units],
+                            "missing_units": missing_units,
+                        }
+                    )
+                continue
+
+            # Non-REWRITE kinds (HOIST/BUILDGEN/RDEP_VERIFY/PR_EMIT/REVALIDATE): the row's own
+            # `task_id` IS the commit identity (or the kind has no commit-producing path at all —
+            # §5 of this task's research plan). Unchanged from before this task.
             sha = await find_task_commit(
                 git, branch=branch, pre_commit_sha=anchor, task_id=str(task_id)
             )
@@ -12143,10 +12226,12 @@ async def _reconcile_tasks_with_git(
             # resume asks again.
             _unresolved(report, target, f"{type(exc).__name__}: {exc}")
 
-    if dry_run or not (landed or discarded):
+    if dry_run or not (landed or discarded or partial):
         return report
     report["applied"] = True
-    unwritten = await _persist_arbitration(path, run_id, landed=landed, discarded=discarded)
+    unwritten = await _persist_arbitration(
+        path, run_id, landed=landed, discarded=discarded, partial=partial
+    )
     for task_id, repo_id, phase, sha in unwritten:
         cast(list[object], report["provenance_missing"]).append(
             {"task_id": task_id, "repo_id": repo_id, "phase": phase, "commit_sha": sha}
@@ -12206,8 +12291,21 @@ async def _persist_arbitration(
     *,
     landed: Sequence[tuple[str, str, int, str]],
     discarded: Sequence[tuple[str, str, int]],
+    partial: Sequence[tuple[str, str, int]] = (),
 ) -> list[tuple[str, str, int, str]]:
     """Copy Git's answers down, for the whole run, in ONE `StateWriter` unit (§11.5).
+
+    **`partial` (D89 Phase 2, this task) shares its SQL effect with `discarded` and nothing
+    else.** A partially-landed REWRITE row wants the exact same reset — `status='PENDING',
+    claimed_by=NULL, lease_expires_at=NULL, fence_token=fence_token+1` — for the exact same
+    reason `discarded` does (the fence bump defends against the same "a killed worker somehow
+    still alive" hazard either way). It differs from `discarded` only in what the *caller*
+    reports about it (`_reconcile_tasks_with_git` writes the landed/missing unit split into
+    `report["partially_landed"]` before this function ever runs); no caller of `discarded`
+    distinguishes it from `partial` at the SQL layer, so the two are folded into one loop here
+    rather than duplicating the `UPDATE`. `partial` rows are NEVER passed through `discard_task`
+    — that is enforced one call site up, in `_reconcile_tasks_with_git`, not here; this function
+    only ever writes SQL, never touches git.
 
     One unit rather than one per task because the corrections are a single reconciliation: a
     partial commit would leave `tasks` reconciled against a `phases.post_commit_sha` that is not,
@@ -12296,11 +12394,12 @@ async def _persist_arbitration(
                     " WHERE run_id = ? AND repo_id = ? AND phase = ?",
                     (sha, stamp, run_id, repo_id, phase),
                 )
-            for task_id, _repo_id, _phase in discarded:
+            for task_id, _repo_id, _phase in (*discarded, *partial):
                 # The fence bump is the half that makes this safe, exactly as it is in step 3's
                 # `_RESET_RUNNING_TO_PENDING_SQL`: a killed worker that is somehow still alive
                 # carries the old `fence_token` on every write, and only the bump makes its next
-                # one match zero rows. `attempts` is not named here, in any table.
+                # one match zero rows. `attempts` is not named here, in any table. `partial`
+                # rows (D89 Phase 2) take the identical reset — see this function's docstring.
                 await db.execute(
                     "UPDATE tasks SET status = 'PENDING', claimed_by = NULL, "
                     "    lease_expires_at = NULL, fence_token = fence_token + 1 "

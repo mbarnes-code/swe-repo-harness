@@ -82,6 +82,7 @@ __all__ = [
     "WorkerRepairError",
     "land_patches",
     "task_id_for",
+    "task_id_for_ids",
     "units_owed",
     "write_patch_file",
 ]
@@ -104,9 +105,23 @@ derived from `(run_id, repo_id, phase, unit)` — the identity of the work, not 
 _SAFE_NAME: Final = re.compile(r"[^A-Za-z0-9_.-]")
 
 
+def task_id_for_ids(run_id: str | UUID, repo_id: str, phase: int, unit: str) -> UUID:
+    """The `Fleet-Task-Id` for one unit of work, ctx-free. Deterministic; see `TASK_NAMESPACE`.
+
+    Pure function over the raw identity components so callers with no `WorkerContext` (e.g.
+    `cli.py`'s reconciliation loop, re-deriving a landed unit's expected trailer at arbitration
+    time rather than at commit time) reuse the exact formula `land_patches` used to write the
+    trailer, instead of a second copy that could drift (CLAUDE.md "sweep for the class"). `run_id`
+    takes `str | UUID` because `WorkerContext.run_id` is a `UUID` (`workers/base.py`) while
+    `cli.py`'s reconciliation loop only ever has the plain `str` read back from SQL — `str()`
+    below is what the old f-string interpolation did implicitly for the `UUID` case.
+    """
+    return uuid5(TASK_NAMESPACE, f"{run_id}|{repo_id}|{int(phase)}|{unit}")
+
+
 def task_id_for(ctx: WorkerContext, phase: Phase, unit: str) -> UUID:
     """The `Fleet-Task-Id` for one unit of work. Deterministic; see `TASK_NAMESPACE`."""
-    return uuid5(TASK_NAMESPACE, f"{ctx.run_id}|{ctx.repo_id}|{int(phase)}|{unit}")
+    return task_id_for_ids(ctx.run_id, ctx.repo_id, int(phase), unit)
 
 
 def units_owed(all_units: Sequence[str], completed: Sequence[str]) -> list[str]:
