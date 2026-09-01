@@ -7536,3 +7536,53 @@ docstring claimed about how many routes reach it. The docstring itself has been 
 same fix wave; other `cli.py` writers noted as sharing the same "no fence bump" shape
 (approximately lines 2094, 2123, 4533) were not individually confirmed as concretely reachable as
 the quarantine path and are not claimed here.
+
+## D96 — OPEN. `fleet transform` has zero disk-headroom enforcement anywhere in its path — the phase most likely to consume disk at scale is the one phase left unguarded
+
+**Found by round AA task 2 (2026-09-01), during a TEST-ONLY task closing a different §12.22
+sub-clause — disclosed, not fixed, out of that task's scope.** Verified free before writing:
+highest allocated number was `D95`. Independently re-confirmed by the controller (not accepted on
+task review's word alone), against current `HEAD` — separately from task review's own trace,
+which itself went further than the implementer's original grep-only flag.
+
+**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13708`)
+is called at exactly 4 sites: `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
+`_continue_impl`/`fleet resume` (`:9464`). `transform`'s command body (`cli.py:3465-3538`) calls
+`_phase_preflight(ctx)` and then goes straight to `_transform_impl` — no `_require_disk_headroom`
+call anywhere in the function, confirmed by isolating the function body between `def transform(`
+and the next `@app.command` and grepping it directly. This breaks a pattern applied consistently
+everywhere else: `build` and `verify` each call `_phase_preflight` immediately followed by
+`_require_disk_headroom` under the identical `§11.3/§12.22` comment — `transform` alone omits the
+follow-up call, reading as a copy-paste gap rather than a deliberate exemption.
+
+**`sequence` is NOT part of this gap** — confirmed genuinely exempt: it is pure computation, no
+`project_once` call anywhere in `_sequence_impl`, no clone, no container. Its own docstring's
+"never touches the network" claim extends to disk at scale. Do not fold it into this defect's
+scope.
+
+**The per-repo fallback this project's own code claims should cover it does not exist for Phase
+2.** `_require_disk_headroom`'s own docstring (`cli.py:13709-13718`) states explicitly: "Per-repo
+enforcement is NOT here and must not be: the floor is re-checked before every clone and every
+container start by the workers themselves (§11.3)." Phase 1/3/4's workers back this claim up —
+`clone.py:113-116` and `buildverify.py:602-605` each carry a `min_free_bytes`-checked-before-
+operation field, wired via `min_free_bytes=` payload construction at `cli.py:1234`/`5827`/`6309`
+(`ScanPipelineWorker`/`BuildPipelineWorker`/`VerifyPipelineWorker`). **Phase 2's workers
+(`workers/relocate.py`, `workers/rewrite.py`, `workers/buildgen.py`) carry no such wiring at
+all** — confirmed by grep for `min_free_bytes`/`require_free`/`disk` across all three, returning
+nothing but one unrelated `scoped_tempdir` import in `buildgen.py`. Transform also spawns no
+`ContainerSandbox` (only `rdepverify.py`/`buildverify.py` — Phase 3/4 — do), so there is no
+per-container check standing in for the missing phase-level one either.
+
+**Net: `fleet transform` has zero disk-headroom enforcement anywhere in its path** — not at
+command entry, not per-repo, not per-container. This directly contradicts
+`_require_disk_headroom`'s own docstring and `docs/SPEC.md:7527` (§9 audit row 42: "re-checked
+before EVERY clone and EVERY container start — not once at startup"). Transform is plausibly the
+single most disk-hungry phase in the fleet (worktree checkouts, repo-scale rewrites, commits
+across every repo in a wave), and it is the one phase this project's own design intent says should
+be checked and isn't.
+
+**Not yet built:** the missing `_require_disk_headroom(settings)` call in `transform`'s command
+body (small, mechanical, identical to `build`/`verify`'s own pattern) closes the phase-entry half.
+The Phase 2 per-repo/per-worker wiring `_require_disk_headroom`'s docstring claims exists is a
+separate, larger piece — sizing it (a one-shot call-site addition, or something needing new
+plumbing through `relocate.py`/`rewrite.py`/`buildgen.py`'s worker payloads) is not done here.

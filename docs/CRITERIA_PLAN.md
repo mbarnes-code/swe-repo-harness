@@ -496,15 +496,33 @@ all in this fixture and risked a false-negative test. `docs/PROGRESS.md`'s `<n> 
 now count §12.21.
 
 ## 22. Memory + disk ceilings
-**OPEN — mostly missing — NEW-MECHANISM.** `resource_guard` defaults to a no-op
-(`lambda: None`) — RSS/cgroup sampling is not implemented at all, not just untested (audit row
-22). `budgets.max_host_rss_mb` is `KNOWN_INERT` (D50). Exit-9-on-disk-ceiling is covered; post-exit
-`migration_state.json` validity is not.
+**OPEN — mostly missing — NEW-MECHANISM, plus a real production gap disclosed round AA.**
+`resource_guard` defaults to a no-op (`lambda: None`) — RSS/cgroup sampling is not implemented at
+all, not just untested (audit row 22). `budgets.max_host_rss_mb` is `KNOWN_INERT` (D50).
 **Done bar:** the RSS-sampling sub-clause is blocked on implementing `resource_guard` for real —
 this is the one item in this file that's genuinely new infrastructure, not a wiring/test gap.
-Track it as its own round; do not fold it into a general "criterion 22" sweep that also claims the
-disk-ceiling sub-clause, which is smaller and already mostly done (needs only the post-exit state
-validity assertion).
+Track it as its own round.
+
+**Disk-ceiling sub-clause — closed, round AA task 2 (2026-09-01, `0df7075`).** Exit-9-on-disk-
+ceiling was already covered; post-exit `migration_state.json` validity is now proven too:
+`tests/test_cli.py::test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched` runs a
+real `fleet scan` to get a genuine baseline projection, lowers the floor, re-invokes `scan`, and
+asserts the projection is byte-identical pre/post the exit-9 refusal — not merely "still parses."
+Task review independently reproduced the Rule-12 mutation proof (skip-gate-if-projection-exists →
+exit 0 instead of 9, projection silently rewritten).
+
+**New, real production gap found during the same task's investigation, disclosed not fixed:
+`fleet transform` has NO disk-headroom enforcement anywhere in its path — tracked as D96
+(`docs/INTEGRATION_HONESTY.md`).** `_require_disk_headroom` is called by `scan`/`build`/`verify`/
+`fleet resume`, but not `transform`'s command body, and Phase 2's workers
+(`relocate.py`/`rewrite.py`/`buildgen.py`) carry none of the per-repo `min_free_bytes` wiring
+Phase 1/3/4's workers do — despite `_require_disk_headroom`'s own docstring claiming per-repo
+enforcement happens "before every clone and every container start by the workers themselves."
+`sequence` is confirmed genuinely exempt (pure computation, no `project_once` call) — do not fold
+it into D96's scope. This does not block §12.22's disk-ceiling sub-clause above, which is closed
+on the property it actually claims (exit-9 + post-exit validity for the phases that DO enforce
+the floor) — it is a separate, real gap in a phase this criterion's own text doesn't single out,
+tracked on its own number rather than silently reopening the sub-clause just closed.
 
 ## 23. Idempotency — re-scan, re-transform
 **OPEN — one sub-clause blocked on D23, otherwise DONE (round S, `4e1975d`).** Re-transform is
