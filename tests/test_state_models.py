@@ -45,6 +45,7 @@ from fleet.models.build import (
     BuildUnit,
     GazelleConfig,
     InternalDep,
+    Resolution,
     SupportFile,
     ToolchainRequirement,
     WorkspaceDep,
@@ -375,6 +376,13 @@ SAMPLES: dict[str, FleetModel] = {
     ),
     "InternalDep": InternalDep(
         label="//libs/com/acme/base:base", dest="libs/com/acme/base", published=COORD,
+    ),
+    "Resolution": Resolution(
+        lock_path="go.sum",
+        argv=["go", "mod", "download", "all"],
+        inputs=[SupportFile(path="go.mod", content="module acme.example/commons\n")],
+        env={"GOTOOLCHAIN": "go1.24.12"},
+        timeout_s=120.0,
     ),
     "BuildTarget": BuildTarget(
         package="libs/com/acme/commons", name="commons", rule="java_library",

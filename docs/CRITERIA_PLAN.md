@@ -869,7 +869,23 @@ wave: `tests/test_repository.py::test_the_reaper_never_reclaims_a_requires_human
 (Rule-12 mutation-proven — dropping the reaper SQL's `status = 'RUNNING'` guard reddens it) and
 `InternalDep` added to `fleet.models.__all__` + `SAMPLES["InternalDep"]` (the round-trip test now
 covers it automatically). The DONE marking stands, now for real.
-**Done bar:** met in full. Nothing remains open for §12.46.
+
+**Second correction, same day (2026-09-01), round Z fix-wave re-review:** the (b) fix above closed
+the *reported* site but not the *class* — an independent re-derivation (a runtime walk of
+`fleet.models`'s submodules plus a textual `grep '^class \w*(.*FleetModel'` sweep, both agreeing on
+36 `FleetModel` subclasses total) found one more model absent from `__all__`: `Resolution`
+(`src/fleet/models/build.py:189`). `Resolution` had a round-trip assertion
+(`tests/test_ecosystems.py:1187`) but only via object `==`, the exact form §12.46(i)'s literal text
+rules out ("compared via `model_fields`... NOT via object equality"). Closed identically to (b):
+`Resolution` added to `fleet.models.__all__` + a non-degenerate `SAMPLES["Resolution"]` (populated
+`inputs`/`env`, exercising the nested-model and dict/list fields) —
+`pytest tests/test_state_models.py -k Resolution` passes
+`test_every_exported_model_round_trips_through_its_own_json[Resolution]`; full `test_state_models.py`
++ `test_ecosystems.py` 213 passed, `ruff check` clean on both touched files. Both derivations that
+found this gap are recorded above so a future sweep can reproduce them rather than re-deriving the
+36-model count from scratch.
+**Done bar:** met in full, independently re-derived twice for the population clause specifically.
+Nothing remains open for §12.46.
 
 ## 47. Registries stateless, total, order-independent
 **OPEN (reverted 2026-09-01, controller ruling C1 on this round's own final review — the `**DONE`
