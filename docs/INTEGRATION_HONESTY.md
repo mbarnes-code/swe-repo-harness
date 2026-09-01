@@ -4145,10 +4145,10 @@ THIS attempt" is unambiguous once the field exists. This also closes the last co
 §12.43(i)'s literal fixture assertion (`attempts.llm_failovers = 1`) — a criterion this entry did
 not previously name, found by round Y task 4's own re-verification of D62 against current `main`.
 
-***`llm_backend` needed a ruling, not just wiring — recorded as ADR-0106.*** `accumulate` drops
+***`llm_backend` needed a ruling, not just wiring — recorded as ADR-0107.*** `accumulate` drops
 `backend` by explicit, reasoned design (a ladder rung can answer from more than one tier across
 several role-routed calls), so writing the column required saying which value wins when an
-attempt's usage spans more than one backend. ADR-0106 rules **last-non-empty-wins**,
+attempt's usage spans more than one backend. ADR-0107 rules **last-non-empty-wins**,
 order-preserving over the fold's call order — the same shape round G lane W4's ALL-HIT ruling
 took for `llm_cache_hit` before ADR-0094 could write it, smaller in scope (one field, no rejected
 alternative needing its own investigation).
@@ -7156,7 +7156,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2191-2241`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2202-2262`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (`cli.py:6611`) sets

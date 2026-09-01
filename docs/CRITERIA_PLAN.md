@@ -477,7 +477,7 @@ survives a second scan unchanged. Everything else in this criterion is already c
 the ledger-sum invariant, and the run-ceiling clause were already covered (rounds R and U — see
 below). The **only** remaining open item was local-profile row completeness, tracked as D62
 (`llm_backend` etc. were NULL — nothing wrote them). D62 closed in full: `f88e105` wires
-`llm_backend` (ADR-0106's last-non-empty-wins ruling in `accumulate`), `llm_failovers` (new
+`llm_backend` (ADR-0107's last-non-empty-wins ruling in `accumulate`), `llm_failovers` (new
 `TokenUsage` counter, stamped in `LadderModelClient.complete()`), and `input_tokens`/
 `output_tokens` (pure wiring) into `AttemptRow`/`record_attempt`/`iter_attempts`/`cli.py`'s
 writers. `193c319` adds
@@ -485,7 +485,7 @@ writers. `193c319` adds
 — a real `PhaseRunner.run_wave` dispatch under a free-priced target, sibling to the round R
 ledger-sum test and using the same harness, proving the criterion's own literal text: the run
 ends with `spent_usd == 0` and every `attempts` row carries a non-empty `llm_backend` and
-`llm_cache_hit == 0`. See `docs/INTEGRATION_HONESTY.md` D62 (now `FIXED, LANDED`) and ADR-0106
+`llm_cache_hit == 0`. See `docs/INTEGRATION_HONESTY.md` D62 (now `FIXED, LANDED`) and ADR-0107
 for the full design and rationale.
 **Done bar (met in full):** one e2e test asserting the ledger-sum invariant **(met, round R)**;
 one CLI-level test that organically breaches the run ceiling and asserts exit 3 **(met, round

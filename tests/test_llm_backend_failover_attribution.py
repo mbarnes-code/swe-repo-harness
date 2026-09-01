@@ -1,4 +1,4 @@
-"""SPEC §11.8 / §12.43(i) / D62 / ADR-0106 — `attempts.llm_backend`, `llm_failovers`,
+"""SPEC §11.8 / §12.43(i) / D62 / ADR-0107 — `attempts.llm_backend`, `llm_failovers`,
 `input_tokens`, `output_tokens`: the four D62 columns `llm_cache_hit` (ADR-0094) left open.
 
 Sibling to `tests/test_llm_cache_hit_attribution.py`, same shape and same reason for existing:
@@ -6,10 +6,10 @@ before this task `AttemptRow` had none of these four fields, `record_attempt`'s 
 not name any of them, and grepping the suite for `llm_backend`/`llm_failovers` (declaration sites
 aside) returned nothing — this half of D62 had zero fixture coverage anywhere.
 
-`llm_backend` is the one field here that needed a RULING, not just wiring (ADR-0106):
+`llm_backend` is the one field here that needed a RULING, not just wiring (ADR-0107):
 `workers/base.py::accumulate` drops `backend` by explicit, reasoned design (a ladder rung can
 answer from more than one tier), so "stop dropping it" has to say which value wins when an
-attempt's accumulated usage spans more than one backend. ADR-0106 rules LAST-NON-EMPTY-WINS,
+attempt's accumulated usage spans more than one backend. ADR-0107 rules LAST-NON-EMPTY-WINS,
 order-preserving over the fold's call order. `llm_failovers` needed a new counter field on
 `TokenUsage` (no semantics ambiguity — see `tasks.py`'s docstring) stamped by
 `LadderModelClient.complete()`'s target loop. `input_tokens`/`output_tokens` are pure wiring
@@ -68,12 +68,12 @@ def usage(
 
 
 # ---------------------------------------------------------------------------------------------
-# the derivation -- accumulate() (ADR-0106)
+# the derivation -- accumulate() (ADR-0107)
 # ---------------------------------------------------------------------------------------------
 
 
 def test_accumulate_takes_the_last_non_empty_backend_in_call_order() -> None:
-    """ADR-0106: two usages with different non-empty `backend` values fold to the LAST one, not
+    """ADR-0107: two usages with different non-empty `backend` values fold to the LAST one, not
     the first — `_stamp`'s own per-call semantics extended forward, and the reading that survives
     a mid-rung schema-repair failover: the LAST target is the one whose output the attempt
     actually shipped, not the one it discarded.
@@ -87,7 +87,7 @@ def test_accumulate_keeps_the_last_non_empty_backend_even_when_the_final_usage_i
 ):
     """Discriminates LAST-NON-EMPTY from plain LAST: if `accumulate` took the final argument's
     `backend` unconditionally, folding a trailing zero-seed `TokenUsage()` (`backend == ""`) after
-    a real answer would erase it. ADR-0106 rules "last NON-EMPTY", not "last" — this is the case
+    a real answer would erase it. ADR-0107 rules "last NON-EMPTY", not "last" — this is the case
     that tells the two apart.
     """
     attempt = accumulate(
@@ -97,7 +97,7 @@ def test_accumulate_keeps_the_last_non_empty_backend_even_when_the_final_usage_i
 
 
 def test_accumulate_sums_llm_failovers_across_the_fold() -> None:
-    """ADR-0106, §12.43(i): total hops across the whole attempt, summed exactly like the
+    """ADR-0107, §12.43(i): total hops across the whole attempt, summed exactly like the
     `llm_cache_lookups`/`llm_cache_hits` counters `accumulate` already sums — no identity element
     to poison, matching `schema.sql`'s `llm_failovers` comment ("backend hops spent inside THIS
     attempt") directly.
@@ -192,7 +192,10 @@ async def test_the_transform_sink_round_trips_all_four_new_fields(wired: _Wired)
         clock=lambda: NOW,
     )
     billed = TokenUsage(
-        backend="anthropic", model_id="cheap-a", input_tokens=1000, output_tokens=200,
+        backend="anthropic",
+        model_id="cheap-a",
+        input_tokens=1000,
+        output_tokens=200,
         llm_failovers=2,
     )
 
@@ -314,7 +317,10 @@ async def test_the_build_and_verify_sinks_forward_all_four_new_fields_they_were_
         writer=writer, repository=repo, read_conn=read_conn, run_id=RUN, clock=lambda: NOW
     )
     billed = TokenUsage(
-        backend="anthropic", model_id="heavy-a", input_tokens=2000, output_tokens=400,
+        backend="anthropic",
+        model_id="heavy-a",
+        input_tokens=2000,
+        output_tokens=400,
         llm_failovers=1,
     )
     step = StepRecord(unit="build", command=["bazel", "build", "//..."], exit_code=0, ok=True)

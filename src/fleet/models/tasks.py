@@ -73,7 +73,7 @@ class TokenUsage(FleetModel):
     # NOT `cache_read_tokens`' neighbourhood: that field is the PROVIDER's prompt cache. These
     # two count lookups against `llm_cache`, the harness's own store.
     llm_failovers: int = Field(default=0, ge=0)
-    # ADR-0106, §11.8, §12.43(i). Backend hops spent inside the call that produced THIS usage —
+    # ADR-0107, §11.8, §12.43(i). Backend hops spent inside the call that produced THIS usage —
     # `index` in `LadderModelClient.complete()`'s target loop at the point the call succeeded.
     # Summed by `accumulate`, exactly like the two counters above: `schema.sql`'s comment
     # ("backend hops spent inside THIS attempt") is a total across the whole attempt, not a

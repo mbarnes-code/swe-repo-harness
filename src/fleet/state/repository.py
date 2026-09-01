@@ -401,9 +401,9 @@ class AttemptRow:
                                   #   from `llm_cache`. Derived by
                                   #   `TokenUsage.all_served_from_llm_cache`, never from
                                   #   `cost_usd == 0` — a free local target costs 0 too.
-    llm_backend: str | None = None   # ADR-0023/ADR-0106; NULL for DETERMINISTIC rows
+    llm_backend: str | None = None   # ADR-0023/ADR-0107; NULL for DETERMINISTIC rows
                                       #   (schema.sql:732)
-    llm_failovers: int = 0            # ADR-0023/ADR-0106, §11.8; backend hops spent inside
+    llm_failovers: int = 0            # ADR-0023/ADR-0107, §11.8; backend hops spent inside
                                        #   THIS attempt
     input_tokens: int = 0
     output_tokens: int = 0

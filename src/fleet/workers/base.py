@@ -234,7 +234,7 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
     three of each. They are dropped rather than silently taking the last writer's value, which
     would attribute the whole run's spend to whichever tier happened to answer last.
 
-    `backend` is the one exception (ADR-0106): last-non-empty-wins, order-preserving over the
+    `backend` is the one exception (ADR-0107): last-non-empty-wins, order-preserving over the
     fold's argument order (every caller passes `accumulate(seed, *results_in_call_order)`, so
     "last" means "the target that answered most recently"). §12.24 needs a non-empty `backend`
     on the attempt row for the common single-call-per-rung case, and last-non-empty degrades
@@ -258,7 +258,7 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
         # `TokenUsage.all_served_from_llm_cache` derives the flag from the pair.
         llm_cache_lookups=sum(u.llm_cache_lookups for u in usages),
         llm_cache_hits=sum(u.llm_cache_hits for u in usages),
-        # ADR-0106. Total backend hops across the whole attempt, matching `schema.sql`'s
+        # ADR-0107. Total backend hops across the whole attempt, matching `schema.sql`'s
         # `llm_failovers` comment ("backend hops spent inside THIS attempt") directly — no
         # identity-element hazard, exactly like the two cache counters above.
         llm_failovers=sum(u.llm_failovers for u in usages),

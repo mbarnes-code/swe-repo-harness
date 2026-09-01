@@ -12400,7 +12400,7 @@ way, adding two redundant explicit-`false` keys would be pure churn to make code
 sentence that was imprecise, the wrong direction per this project's own stated rule ("building to
 match the criterion is the only legitimate closure direction — the reverse... is not").
 
-## ADR-0106 — `attempts.llm_backend` is LAST-NON-EMPTY-WINS in `accumulate`, order-preserving over call order
+## ADR-0107 — `attempts.llm_backend` is LAST-NON-EMPTY-WINS in `accumulate`, order-preserving over call order
 
 **Status:** ACCEPTED. Landed round Y task 4, alongside the code it decides.
 
@@ -12434,7 +12434,7 @@ def accumulate(*usages: TokenUsage) -> TokenUsage:
 ```
 
 `input_tokens`, `output_tokens`, `cache_read_tokens`, `cost_usd`, `llm_cache_lookups`,
-`llm_cache_hits` and `llm_failovers` (ADR-0106's own new field, §12.43(i)) continue to be summed,
+`llm_cache_hits` and `llm_failovers` (ADR-0107's own new field, §12.43(i)) continue to be summed,
 unchanged. `role`, `tier` and `model_id` continue to be dropped, unchanged — this decision touches
 `backend` alone.
 

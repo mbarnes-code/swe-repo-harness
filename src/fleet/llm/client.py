@@ -611,7 +611,7 @@ class LadderModelClient:
                 if index + 1 < len(targets):
                     self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
                 continue
-            # ADR-0106, §11.8: `index` at the point `_call_target` succeeded IS the failover-hop
+            # ADR-0107, §11.8: `index` at the point `_call_target` succeeded IS the failover-hop
             # count for this call — 0 for the first target, 1 for one hop, etc. Stamped only when
             # non-zero so the common (zero-hop) case allocates nothing extra.
             if index > 0:

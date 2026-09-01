@@ -270,7 +270,7 @@ def test_schema_violation_buys_one_repair_then_fails_the_target_over() -> None:
     assert failovers[0].trigger == "SCHEMA_UNSATISFIED"
     assert (failovers[0].from_model_id, failovers[0].to_model_id) == ("m1", "m2")
     assert response.usage.model_id == "m2"
-    # ADR-0106, §12.43(i): one hop was spent inside THIS call before it succeeded on m2.
+    # ADR-0107, §12.43(i): one hop was spent inside THIS call before it succeeded on m2.
     assert response.usage.llm_failovers == 1
 
 

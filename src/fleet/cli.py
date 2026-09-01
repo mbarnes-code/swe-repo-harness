@@ -6637,7 +6637,7 @@ class _AttemptWriter:
                     # carry the flag beside a `cost_usd` that is 0 only because the first row took
                     # it, which reads as a cache hit on a step that made no LLM call.
                     llm_cache_hit=llm_cache_hit if not written else False,
-                    # ADR-0106. Same "first row only" rule as `cost_usd`/`llm_cache_hit` above: a
+                    # ADR-0107. Same "first row only" rule as `cost_usd`/`llm_cache_hit` above: a
                     # later step row must not independently repeat the SAME backend/token counts
                     # as if it made its own separate call.
                     llm_backend=llm_backend if not written else None,
