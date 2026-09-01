@@ -688,15 +688,17 @@ stated text now passes — both the model-id/endpoint greps and the AST clause.*
 **Done bar:** met in full. Nothing remains open for §12.40.
 
 ## 41. Local-only profile runs the whole pipeline
-**OPEN — structural gap, no test at all — NEW-MECHANISM (test infra).** No test anywhere runs any
-pipeline phase under a non-`default` profile (9 of 11 sub-clauses unasserted). Separately, a
-genuine SPEC-vs-config drift: §12.41 says local CHEAP targets declare `supports_json_schema: false`
-and `supports_tools: false`; `config/models.yaml` declares neither, deliberately, per its own
-comment (audit row 41).
-**Done bar:** the drift is Rule-14 territory first — adjudicate whether `config/models.yaml` should
-gain those declarations or the SPEC sentence should drop them, with a dated marker either way.
-Then: run at least a Phase-1-through-Phase-3 slice of the fixture fleet under `--profile local`
-(or whatever the local-only profile is named) and assert every named sub-clause.
+**OPEN — structural gap, no test at all — NEW-MECHANISM (test infra); the SPEC-vs-config drift
+that used to block this is resolved (round W, ADR-0105).** No test anywhere runs any pipeline
+phase under a non-`default` profile (9 of 11 sub-clauses unasserted) — this is now the ONLY
+remaining blocker. The drift this entry used to name (§12.41 said local CHEAP targets "declare"
+both capability fields `false`; `config/models.yaml` omits them, deliberately) was traced and
+adjudicated as wording-precision, not a behavior gap — `merge_capabilities`'s dict-overlay makes
+an omitted key fall through to the backend's already-`false` declared floor, byte-identical
+either way. `docs/SPEC.md`'s sentence carries a dated marker; see ADR-0105.
+**Done bar:** run at least a Phase-1-through-Phase-3 slice of the fixture fleet under `--profile
+local` (or whatever the local-only profile is named) and assert every named sub-clause. This is
+genuine new test infrastructure (a runnable local-profile fixture fleet), not a one-shot task.
 
 ## 42. New backend costs one file + one registry line
 **OPEN — this done bar's own scope closed (round N, `cc12a2a`), criterion overall still 5 of 9.**
@@ -720,13 +722,21 @@ constructs a real `TierUnavailable` and asserts the message it actually produces
 hand-written string. Case (ii) itself stays blocked on D55/D58.
 
 ## 44. Cache not poisoned across backends
-**OPEN — this done bar's own scope closed (round O, `70a4398`), criterion overall still mixed.**
-Cache-key tamper detection is now real: `tests/test_llm_cache.py` recomputes `cache_key` from a
-persisted row's own SQL-read-back columns via the real `hashing.cache_key()` primitive and
-proves a direct-tamper mismatch — reviewed Approved, verified non-tautological. The rest of the
-original audit's "1 of 6 full, 4 partial, 1 absent" breakdown is untouched by this round (no stub
-OpenAI-compatible server, per this criterion's remaining sub-clauses). Do not count §12.44 toward
-the `<n> of 48` tally — the criterion as a whole is still open.
+**DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
+1 absent" breakdown now closed.** Sub-clause E (tamper detection) was already real, closed round O
+(`70a4398`): `tests/test_llm_cache.py` recomputes `cache_key` from a persisted row's own
+SQL-read-back columns via the real `hashing.cache_key()` primitive and proves a direct-tamper
+mismatch. Round W closed the remaining five without needing the stub OpenAI-compatible server this
+entry previously assumed was required — genuine two-profile scenarios (two single-target
+`LlmRouter`s sharing one cache store, differing only in `backend`) sufficed: **A** (two distinct
+`llm_cache` rows across profiles), **B** (the second profile's identical call reports a miss),
+**C** (neither response leaks into the other profile, checked by value not just call count), **D**
+(re-running either profile a second time hits with `cost_usd = 0`), and **F** (a real `local`
+profile call's `all_served_from_llm_cache = False`/`cost_usd = 0.0` are asserted together on the
+same object, so a free call is never miscounted as a cache hit — traced against `cli.py`'s real
+`attempts.llm_cache_hit` write site, the exact field pair that becomes the persisted column). Both
+new mutations independently reproduced by task review in the implementer's own worktree, not
+trusted from the report. TEST-ONLY, no production code touched. Commit `e526f07` (merge of `agent/roundw-task1`).
 
 ## 45. No code state persisted outside Git
 **OPEN — mostly missing — mixed, needs adjudication first.** SPEC-ADJUDICATION sub-part: the
@@ -855,11 +865,11 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 17 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 48 (re-derived 2026-09-01, round V, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §20 (PR-body placeholder clause closed) and §40 (AST clause closed, its "do not count" exclusion marker retired — this is the first round it counts) this round; §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry and its contracts-registry residual are separate, tracked in §47's own entry) |
+| DONE | 18 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round W, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §44 this round (all 6 sub-clauses closed, the last 5 without needing the stub OpenAI-compatible server the entry previously assumed was required); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
-| OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
+| OPEN — SPEC-ADJUDICATION needed before work starts | 2 | 17, 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37 (both NEW-MECHANISM, see above), plus all others not listed in a row above — see individual entries |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Note on §12.40's DONE marking: its dominant clause (no model string outside `config/`, structurally)
 is closed; the AST sub-clause (M1) is still open and small. This file counts criteria as DONE only
