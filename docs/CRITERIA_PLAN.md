@@ -757,19 +757,22 @@ part of this criterion's literal text.
 §12.28's entry.
 
 ## 48. Startup + version refusals before any cost
-**OPEN — 5 independent claims, mixed — TEST-ONLY.** `migrate-db` exception, the `BEGIN EXCLUSIVE`
-ladder, stale-checkpoint-invalidated, and truncation-retry-exactly-once are all covered. Missing:
-"every command" is asserted for exactly one verb (`status`) against 22 `@app.command`-decorated
-verbs and 12 `_check_schema_version` call sites — nothing enumerates the full set; the
-message-names-both-versions clause is unasserted; "before a clone or an LLM call" is unasserted and
-inexpressible in the current `status`-only fixture; the DDL AST test named by the criterion doesn't
-exist; the mirror-mutex refusal never asserts exit 2 (audit row 48).
-**Done bar:** parametrize the schema-version-refusal test over all 22 commands (or the subset that
-actually touches the DB, if some genuinely can't — state which and why); add the
-both-versions-in-message assertion; build the DDL AST test; add the exit-2 assertion to the
-mirror-mutex refusal test. "Before a clone or an LLM call" may need a different, non-`status`
-fixture — flag via Rule 14 if it turns out inexpressible as worded, rather than silently dropping
-it.
+**DONE (round T, 2026-09-01) — 5 independent claims, all closed — TEST-ONLY.** `migrate-db`
+exception, the `BEGIN EXCLUSIVE` ladder, stale-checkpoint-invalidated, and
+truncation-retry-exactly-once were already covered. Round T closed the remaining five, in
+`tests/test_cli.py`, `tests/test_ddl_ast.py` (new), `tests/test_resume_continue.py`: the
+schema-version-refusal test is now parametrized over all 18 of the 22 `@app.command`-family
+verbs that actually touch the DB (`_SCHEMA_CHECKED_COMMANDS`); the 4 excluded (`migrate-db` + 3
+`models` subcommands) are excluded with a stated reason — they call only `_load_settings`, never
+`_require_db` — not silently dropped; the refusal message's both-versions assertion is added;
+"before a clone or an LLM call" turned out expressible (no Rule 14 flag needed) via a
+call-recording spy asserting `calls == []` — the first exit-code-only design was a false
+discriminator (couldn't distinguish "refusal never fired, clone ran" from "refusal never fired,
+clone failed on its own"), caught and fixed by the implementer before reporting; a DDL AST test
+matching the criterion's literal text now exists (`tests/test_ddl_ast.py`); the mirror-mutex
+refusal now asserts exit code 2. All 5 assertions mutation-proven per Rule 12, independently
+reproduced by task review against the worktree at commit `9342732` (merge `81561b1`, merge of
+`agent/roundt-task3`).
 
 ---
 
@@ -777,7 +780,7 @@ it.
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 14 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 47 (re-derived 2026-09-01, round T, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 this round; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
+| DONE | 15 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 21, 26, 28, 32, 47, 48 (re-derived 2026-09-01, round T close-out, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §47 and §48 this round; §12.40 also carries a `**DONE` heading but is excluded from this tally per its own "do not count toward the `<n> of 48` tally" marker — its AST sub-clause is still open — see its entry) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 3 | 17, 41 (partial), 45 (partial) |
 | OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14, 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial), 39, 43 (partial), 46 (partial, D77/D80) |
