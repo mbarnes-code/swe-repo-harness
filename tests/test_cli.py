@@ -345,8 +345,9 @@ def test_context_policy_refuses_unknown_policy(workspace: Path) -> None:
 #: `_check_schema_version`) ever runs -- so a case here that omitted a required arg would still
 #: get exit 2 and the string "Missing argument", and the test below would falsely read that as
 #: this refusal firing. `command_paths()` (derived from the click group, `cli.py::command_paths`)
-#: is the source of truth for the full surface; `test_schema_checked_commands_cover_the_db_touching_surface`
-#: below cross-checks this tuple against it so a verb added later cannot go silently uncovered.
+#: is the source of truth for the full surface;
+#: `test_schema_checked_commands_cover_the_db_touching_surface` below cross-checks this tuple
+#: against it so a verb added later cannot go silently uncovered.
 _SCHEMA_CHECKED_COMMANDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
     (("status",), ()),
     (("scan",), ()),
@@ -447,12 +448,26 @@ def test_schema_version_refusal_precedes_clone_or_classify_side_effects(
     those side effects would look identical to one that fired before, from `status`. `scan`'s
     `_ScanDriver` dispatches `CloneWorker` (a `git clone --mirror` subprocess) as its first step
     and `ClassifyWorker` as "the ONE model-bearing step" (ADR-0008, `cli.py::scan`'s own
-    docstring) later in the same run. Both are patched to RAISE if invoked, rather than to a
-    silent no-op recorder: a no-op could report zero calls for an unrelated reason (e.g. the
-    command crashing before reaching either), which is exactly the failure mode CLAUDE.md's
-    Guardrail 6 warns a validated-instrument check must rule out. `cli.py::scan` calls
-    `_check_schema_version` immediately after `_require_db`, strictly before `_scan_impl` (and
-    therefore before either worker) is ever constructed or dispatched.
+    docstring) later in the same run.
+
+    **The primary assertion is `calls == []`, not the exit code.** A first version of this test
+    asserted only `exit_code == ExitCode.USAGE` with the spy RAISING and nothing else -- and it
+    turned out not to discriminate the intended defect: `orchestrator/runner.py` isolates a
+    per-repo worker exception into that repo's `REQUIRES_HUMAN_INTERVENTION` status rather than
+    letting it crash the process (by design -- one repo's failure must not halt the fleet), and
+    separately, the fixture's repos resolve to real (fictional) GitHub URLs, so a REAL git clone
+    against them ALSO fails and ALSO lands on `REQUIRES_HUMAN_INTERVENTION` regardless of
+    whether the schema check ran. Measured directly: deleting `_check_schema_version(path)` from
+    `cli.py::scan` reproduces `exit_code == 7` (`REQUIRES_HUMAN_INTERVENTION`) with or without
+    these monkeypatches in place, so an exit-code-only assertion could not tell "the refusal
+    never fired, and clone ran" apart from "the refusal never fired, and clone failed on its
+    own" -- both land on the same code. Recording every call into `calls` before raising, and
+    asserting `calls == []` regardless of what the final exit code turns out to be, is the
+    property SPEC §12 item 48 actually states ("before a clone or an LLM call") and the one that
+    is unaffected by how a downstream isolation layer happens to report a worker's exception.
+    The `raise` after recording is kept as a second, redundant signal (Rule 11: a worker
+    reached in error should still fail loud rather than silently succeed), not as the test's
+    proof.
     """
     write_config(tmp_path)
     db = fresh_db(tmp_path / "state" / "fleet.db")
@@ -462,15 +477,20 @@ def test_schema_version_refusal_precedes_clone_or_classify_side_effects(
     conn.close()
     monkeypatch.chdir(tmp_path)
 
-    def _boom(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError(
-            "a clone or classify worker ran before the schema-version refusal fired"
-        )
+    calls: list[str] = []
 
-    monkeypatch.setattr(CloneWorker, "run", _boom)
-    monkeypatch.setattr(ClassifyWorker, "run", _boom)
+    def _spy(name: str) -> Any:
+        def _record(*_args: object, **_kwargs: object) -> None:
+            calls.append(name)
+            raise AssertionError(f"{name} worker ran before the schema-version refusal fired")
+
+        return _record
+
+    monkeypatch.setattr(CloneWorker, "run", _spy("clone"))
+    monkeypatch.setattr(ClassifyWorker, "run", _spy("classify"))
 
     result = runner.invoke(app, [*base_args(tmp_path), "scan"])
+    assert calls == [], f"clone/classify worker(s) ran before the refusal: {calls}"
     assert result.exit_code == ExitCode.USAGE, result.output
     assert "migrate-db" in result.output
     assert str(stale) in result.output, result.output
