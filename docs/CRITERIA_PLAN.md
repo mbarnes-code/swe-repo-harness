@@ -238,10 +238,18 @@ actionable now.
 "assertion weaker than its name" failure mode this file exists to prevent.
 
 ## 14. Blast containment + escape hatch
-**OPEN — known D50, partial.** (a) and (b) — containment and `fleet resume` unblocking — are
-fully covered through real e2e paths. (c)/(d) are actively refused: `--stub-blocked` exits USAGE
-by design, tracked as D50 (audit row 14).
-**Done bar:** identical to D50's own closure — do not open a separate effort here.
+**OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
+and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
+refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3582-3587`/
+`5483-5489` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
+for a blocked dependency..." — this is the missing stub-creation worker gap (no worker in
+`src/fleet/workers/` writes a `stubs` row for it), the exact NEW-MECHANISM item §37's own entry
+already names, **not** D50's config-key-wiring thesis. D50 only mentions `--stub-blocked` in
+passing, grouping it rhetorically with two other refused flags that share the same refusal
+shape, not because D50 is the fix for all three.
+**Done bar:** identical to §37's `--stub-blocked` stub-creation worker (build it, wire it to
+actually create a `stubs` row instead of refusing exit 2) — not D50's scope. Do not open a
+separate effort for a "D50 closure" here; do not duplicate §37's own done bar.
 
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
@@ -882,8 +890,8 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | DONE | 18 | 1, 5, 6, 7, 10, 12, 15, 16, 18, 20, 21, 26, 28, 32, 33, 40, 44, 48 (re-derived 2026-09-01, round W, by scanning every `^**DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §44 this round (all 6 sub-clauses closed, the last 5 without needing the stub OpenAI-compatible server the entry previously assumed was required); §47 remains OPEN per round T's controller ruling C1, unaffected by this round (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 2 | 17, 45 (partial) |
-| OPEN — blocked on an existing D-number, don't duplicate | 7 | 13 (partial), 14 (D50 attribution corrected 2026-09-01 — real blocker is the same NEW-MECHANISM `--stub-blocked` gap §37 already names, not D50), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial), 46 (partial, D77 only — D80 leg closed, see §46's entry) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
+| OPEN — blocked on an existing D-number, don't duplicate | 8 | 13 (partial), 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — D80 leg now FIXED, LANDED, re-audit not re-dispatch, see §38's entry), 39, 43 (partial), 46 (partial, D77 only — D80 leg closed, see §46's entry) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 41 (all NEW-MECHANISM; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
