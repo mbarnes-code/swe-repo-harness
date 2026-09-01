@@ -5502,7 +5502,9 @@ arm real rather than dead.
 **Scope, checked before closing this out.** Only D78 (this entry) is closed here. D62
 (`attempts.llm_failovers`, `llm_backend`, `input_tokens`, `output_tokens`) is a separate task
 (round Y task, disjoint files: `src/fleet/models/tasks.py`, `src/fleet/llm/client.py`,
-`src/fleet/state/repository.py`, `src/fleet/cli.py`) and is untouched here, per this task's brief —
+`src/fleet/state/repository.py`, `src/fleet/cli.py`, `src/fleet/workers/base.py`'s `accumulate` —
+corrected 2026-09-01, this list omitted `workers/base.py` even though D62 touched it) and is
+untouched here, per this task's brief —
 the research report this task followed (§4) established D78 and D62's `llm_failovers` leg are
 independent fixes, not a dependency chain, despite sharing ADR-0094's "carry attribution on
 `TokenUsage`" precedent.
