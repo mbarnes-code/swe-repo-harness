@@ -124,6 +124,7 @@ from fleet.models.enums import (
     StubFidelity,
     StubState,
     SymbolKind,
+    TaskKind,
     TransformTier,
     transition,
 )
@@ -4018,6 +4019,65 @@ async def _wave_is_breached(
     return await scheduler.breached(wave_index)
 
 
+#: D89 Phase 1 (ADR-0101) — the coarse `Phase -> TaskKind` a dispatch-grain `tasks` row is minted
+#: under. SCAN has no entry: `_ScanSink` never calls `record_attempt`, so there is no `attempts`
+#: row to carry a `task_id` for in the first place (no worker exists for HOIST/REVALIDATE either,
+#: and PR_EMIT runs outside this dispatch loop entirely — none of the three belong here for three
+#: different reasons; see the ADR). This is an *Agent Recommendation* (CLAUDE.md Guardrail 1), not
+#: a spec-mandated mapping: the coarse grain bundles several per-unit kinds into one dispatch, and
+#: the pick below is the more general/defining member of each phase's bundle.
+_COARSE_TASK_KIND: Final[dict[Phase, TaskKind]] = {
+    Phase.TRANSFORM: TaskKind.REWRITE,
+    Phase.BUILD: TaskKind.BUILDGEN,
+    Phase.VERIFY: TaskKind.RDEP_VERIFY,
+}
+
+
+async def _repo_dest_path(read_conn: aiosqlite.Connection, repo_id: str) -> str | None:
+    rows = await _rows(read_conn, "SELECT dest_path FROM repos WHERE repo_id = ?", (repo_id,))
+    if not rows or rows[0][0] is None:
+        return None
+    return str(rows[0][0])
+
+
+async def _coarse_task_id(
+    repository: SqliteStateRepository,
+    read_conn: aiosqlite.Connection,
+    *,
+    run_id: str,
+    repo_id: str,
+    phase: Phase,
+    now: datetime,
+) -> str | None:
+    """One `tasks` row per `(run_id, repo_id, phase)`, reused across every retry rung of that
+    phase-dispatch (`ux_tasks_ident`'s uniqueness key, via `upsert_task`'s idempotent UPSERT).
+
+    Returns `None` for a phase with no coarse-kind mapping (today: only SCAN, which never reaches
+    this call site since it never writes an `AttemptRow` at all — see `_COARSE_TASK_KIND`).
+
+    D89 Phase 1 (ADR-0101): this calls `upsert_task` and NOTHING ELSE. `upsert_task` never writes
+    `status` (it stays at the schema default, `'PENDING'`, forever), and this helper never calls
+    `claim_next_task` or any other status-mutating path — that is what keeps a Phase-1 row
+    permanently invisible to `_ARBITRATED_TASKS_SQL`'s `status = 'RUNNING'` scan, closing the
+    misfire risk ADR-0101 records (generalized across BUILD/VERIFY/TRANSFORM, not just
+    REWRITE/RELOCATE). Populating `attempts.task_id` from a row that never leaves PENDING is
+    D89 Phase 1's entire scope; per-unit REWRITE/RELOCATE reconciliation is Phase 2, unbuilt.
+    """
+    kind = _COARSE_TASK_KIND.get(phase)
+    if kind is None:
+        return None
+    dest_path = await _repo_dest_path(read_conn, repo_id)
+    return await repository.upsert_task(
+        str(uuid4()),
+        run_id=run_id,
+        repo_id=repo_id,
+        phase=phase,
+        kind=kind,
+        dest_path=dest_path or "",
+        created_at=now,
+    )
+
+
 class _TransformSink:
     """Persists one dispatch's ADR-0024 pointers under the fence that produced it (§11.5).
 
@@ -4059,11 +4119,20 @@ class _TransformSink:
         error = result.error
         attempt = max(output.attempt, 1)
         command_json = json.dumps(["fleet", "transform", "--repo", repo_id])
+        # D89 Phase 1 (ADR-0101): mint/reuse this dispatch's coarse `tasks` row BEFORE the
+        # `attempts` row, so `attempts.task_id`'s FK (`ON DELETE SET NULL`) has something to
+        # point at. `_coarse_task_id` only ever calls `upsert_task`, which never leaves `status`
+        # at anything but the schema default `PENDING` — see that helper's docstring.
+        task_id = await _coarse_task_id(
+            self._repository, self._read, run_id=self._run_id, repo_id=repo_id,
+            phase=phase, now=self._clock(),
+        )
         await self._repository.record_attempt(
             AttemptRow(
                 attempt_id=str(uuid4()),
                 run_id=self._run_id,
                 repo_id=repo_id,
+                task_id=task_id,
                 phase=phase,
                 attempt=attempt,
                 # §6: `retry_ordinal` is in the row's uniqueness key precisely so a RE-EXECUTION
@@ -6416,6 +6485,14 @@ class _AttemptWriter:
     ) -> list[str]:
         stamp = _iso(self._clock())
         written: list[str] = []
+        # D89 Phase 1 (ADR-0101): one coarse `tasks` row per call to `record` (i.e. per dispatch —
+        # `record` is itself called once per `_BuildSink`/`_VerifySink` dispatch), minted before
+        # the loop so every step row of this dispatch shares the same `task_id`. See
+        # `_coarse_task_id`'s docstring for why this can never regress D87's arbitration sweep.
+        task_id = await _coarse_task_id(
+            self._repository, self._read, run_id=self._run_id, repo_id=repo_id,
+            phase=phase, now=self._clock(),
+        )
         for step in steps:
             command_json = json.dumps(list(step.command))
             attempt_id = str(uuid4())
@@ -6424,6 +6501,7 @@ class _AttemptWriter:
                     attempt_id=attempt_id,
                     run_id=self._run_id,
                     repo_id=repo_id,
+                    task_id=task_id,
                     phase=phase,
                     attempt=max(attempt, 1),
                     retry_ordinal=await self._next_ordinal(repo_id, phase, attempt, command_json),
