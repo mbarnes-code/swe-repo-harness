@@ -51,6 +51,11 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _read_bytes(path: Path) -> bytes:
+    """Sync file access, deliberately outside the async test bodies (ruff ASYNC240)."""
+    return path.read_bytes()
+
+
 def _names(directory: Path) -> list[str]:
     return sorted(p.name for p in directory.iterdir())
 
@@ -256,6 +261,34 @@ async def test_project_once_writes_the_file_atomically_and_leaves_no_temp(
     assert _names(out_path.parent) == ["migration_state.json"]
     for payload in (first, second):
         MigrationState.model_validate_json(payload)  # fully old or fully new, never a prefix
+
+
+async def test_two_projections_of_an_untouched_database_are_byte_identical(
+    db_path: Path, out_path: Path
+) -> None:
+    """SPEC §12.17's literal claim, restored (round Y task 1, ADR-0106).
+
+    `MigrationState.updated_at` carries `default_factory=utcnow`, which is correct for a
+    freshly-constructed model but was, until ADR-0106, also what `build_state` fell back to for
+    the top-level projection — so two regenerations of a database NOTHING had touched between
+    them produced different files, on wall-clock time alone, and the criterion's "byte-identical"
+    text was false by construction (`docs/SPEC.md` §12.17's round-K disclosure). `build_state`
+    now derives `updated_at` from the latest of the durable `phases`/`waves`/`contracts`/
+    `collisions` timestamps it already reads (`projection.py::_derive_updated_at`), which is a
+    deterministic function of `db_path`'s current content — unchanged content, unchanged result.
+
+    This asserts the whole-file bytes directly, not a field-scoped or model comparison: the
+    criterion's own wording is literal byte-identity, and that is what must hold.
+    """
+    await project_once(db_path, run_id=RUN_ID, path=out_path)
+    first = _read_bytes(out_path)
+    await project_once(db_path, run_id=RUN_ID, path=out_path)
+    second = _read_bytes(out_path)
+
+    assert first == second, (
+        "two projections of an untouched database produced different bytes; SPEC §12.17's "
+        "byte-identity claim does not hold"
+    )
 
 
 async def test_a_failed_rename_leaves_the_previous_projection_intact(

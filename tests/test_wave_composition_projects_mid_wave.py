@@ -15,10 +15,17 @@ weaker assertions are deliberately refused:
   handed down and **never started**, which is a projection just as dead as an absent one. The
   same shape passed throughout the period `RunContext.llm_cache` was dead one subsystem over
   (`tests/test_run_context_llm_cache.py`), so this project has been bitten by it twice.
-* `sha256` of `migration_state.json` — "the projector RAN", not "the state MOVED".
-  `MigrationState.updated_at` is `default_factory=utcnow`, so every rebuild yields different
-  bytes even from a database nothing has touched. A digest-keyed instrument passed three of its
-  four validation checks in round F and was caught only by the cosmetic control.
+* `sha256` of `migration_state.json` — "the projector RAN", not "the state MOVED", and a digest-
+  keyed instrument passed three of its four validation checks in round F and was caught only by
+  the cosmetic control. At the time this file was written, `MigrationState.updated_at` carried
+  `default_factory=utcnow`, so every rebuild yielded different bytes even from a database nothing
+  had touched — the round-F failure mode, reproduced below as the case that used to discriminate
+  it. **Corrected 2026-09-01 (round Y task 1, ADR-0106, SPEC §12.17):** `updated_at` is now
+  derived from the latest of the already-read `phases`/`waves`/`contracts`/`collisions`
+  timestamps, so a rebuild of a genuinely untouched database is byte-identical too — see
+  `test_projection.py::test_two_projections_of_an_untouched_database_are_byte_identical`. A
+  whole-file digest is still the wrong quantity for THIS file's purpose (it answers "did the
+  projector run", never "did the wave admit a new repo"), just no longer for the round-F reason.
 
 The quantity is therefore **the ordered sequence of distinct per-repo `status` vectors**
 `{repo_id: phases[<this phase>].status}` read out of `migration_state.json` while
@@ -27,9 +34,10 @@ vector appears — at least one repo already terminal while at least one is not.
 cannot leave that quantity unchanged: the vector is a pure function of the `phases` rows, the
 wave moves each repo `PENDING → RUNNING → SUCCEEDED` at distinct instants, and any rebuild
 between the first and last terminal write reports a vector equal to neither the pre-wave one nor
-the final one. It is equally the reason `updated_at` churn cannot move it: the vector reads
-`status` and nothing else, so a rebuild from an unchanged database yields a byte-different file
-and an identical vector.
+the final one. The vector reads `status` and nothing else, so it is indifferent to whether the
+file's bytes move for any other reason: a rebuild from an unchanged database now reports an
+identical vector AND (post-ADR-0106) identical bytes; either way the vector is the property
+this file needs.
 
 An intermediate vector is also the one thing the trailing `project_once(...)` every wave command
 already runs **cannot** manufacture: that call happens once, after the wave, from the final
@@ -591,26 +599,28 @@ async def test_a_wave_refreshes_the_projection_while_it_is_still_running(
 # ======================================================================================
 
 
-async def test_a_rebuild_from_an_unchanged_database_moves_the_bytes_and_not_the_vector(
+async def test_a_rebuild_from_an_unchanged_database_moves_neither_bytes_nor_vector(
     bed: _Bed,
 ) -> None:
-    """Why `_status_vector` and not `sha256(migration_state.json)` — executable, not asserted.
+    """Why `_status_vector`, not `sha256(migration_state.json)`, is still the right quantity here
+    — executable, not asserted. History, corrected 2026-09-01 (round Y task 1, ADR-0106):
 
-    Two `project_once` rebuilds with NOTHING happening in between: the file's bytes differ and
-    its status vector does not. A digest-keyed instrument would therefore read those two
-    rebuilds as two state changes, which is exactly how round F's first attempt at this
-    measurement passed three of its four validation checks under the wrong quantity — its
-    cosmetic control read 4 where it had to read 0.
+    This case used to assert `first != second` — two `project_once` rebuilds with NOTHING
+    happening in between produced DIFFERENT bytes (`MigrationState.updated_at` was
+    `default_factory=utcnow`, so it churned on wall-clock time alone) while the status vector
+    stayed equal, which is exactly how round F's first attempt at the mid-wave measurement above
+    passed three of its four validation checks under the wrong quantity: its cosmetic control
+    read 4 where it had to read 0. ADR-0106 fixed the root cause for SPEC §12.17 — `updated_at`
+    is now derived from already-read `phases`/`waves`/`contracts`/`collisions` timestamps, so the
+    two rebuilds below are now byte-identical too, and `first != second` would itself be the
+    wrong assertion to make.
 
-    UNIQUELY DISCRIMINATES against `MigrationState.updated_at` ceasing to churn (a fixed
-    `default=` in place of `default_factory=utcnow`): under that mutation the two rebuilds are
-    byte-identical, this case fails, and every wave case above still passes. Measured; the
-    reverse mutations — every one that kills the projector — leave this case green because it
-    never starts a wave.
-
-    What it does NOT catch, stated rather than implied: a future author rewriting
-    `_status_vector` into a digest breaks this case AND the wave cases together, so this is a
-    record of the reason, not a fence around the instrument.
+    What this case still proves: the mid-wave instrument's choice of quantity (`_status_vector`,
+    not a digest) was never dependent on the churn being present — the vector agreed with itself
+    whether or not the bytes did, and it still does now that ADR-0106 has made them agree too.
+    A digest-keyed instrument is STILL the wrong tool for the wave cases above (it answers "did
+    the projector run", never "did the wave admit a new repo"); it simply no longer produces a
+    false positive on an untouched database while being wrong for that separate reason.
     """
     await _seed_phase(bed, Phase.TRANSFORM)
     await project_once(bed.db_path, run_id=RUN_ID, path=bed.projection)
@@ -618,10 +628,10 @@ async def test_a_rebuild_from_an_unchanged_database_moves_the_bytes_and_not_the_
     await project_once(bed.db_path, run_id=RUN_ID, path=bed.projection)
     second = bed.projection.read_bytes()
 
-    assert first != second, (
-        "two rebuilds of an untouched database produced identical bytes; the premise that a "
-        "whole-file digest is a 'the projector ran' detector no longer holds and this file's "
-        "choice of quantity should be re-derived"
+    assert first == second, (
+        "two rebuilds of an untouched database produced different bytes; ADR-0106's "
+        "`_derive_updated_at` no longer holds SPEC §12.17's byte-identity, or something else in "
+        "the projection is newly non-deterministic"
     )
     assert _status_vector(first, Phase.TRANSFORM) == _status_vector(second, Phase.TRANSFORM), (
         "the status vector moved without the database moving — the instrument is reading "

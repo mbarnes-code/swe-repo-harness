@@ -182,6 +182,39 @@ def _json_obj(value: object) -> object:
     return json.loads(value) if isinstance(value, str) and value else {}
 
 
+def _derive_updated_at(
+    run: _Row,
+    phase_rows: list[_Row],
+    wave_rows: list[_Row],
+    contract_rows: list[_Row],
+    collision_rows: list[_Row],
+) -> str:
+    """`MigrationState.updated_at`, deterministically — the latest of the fixed-width UTC TEXT
+    timestamps this function already read off `phases.updated_at`, `waves.computed_at`,
+    `contracts.detected_at` and `collisions.detected_at`, falling back to `runs.started_at` for a
+    run with none of those rows yet.
+
+    Why not `default_factory=utcnow` at construction (the field's default, still correct for
+    every OTHER model that carries it, e.g. a freshly built `PhaseRecord`/`RepoState` in code
+    that isn't reading a persisted row): two projections of an untouched database must be
+    byte-identical (SPEC §12.17), and wall-clock-at-build-time can never satisfy that — it
+    differs on every call by construction, whether or not SQLite moved. These four columns are
+    §11.5's fixed-width `_iso()` rendering ("the reaper compares these instants as TEXT",
+    `state/repository.py::_iso`), so a lexicographic `max()` over them is a correct chronological
+    max without parsing. This does not scan every table that can move `MigrationState` (budget
+    ledger, events, stubs, attempts): it doesn't need to, because those fields' own values already
+    carry any difference they make to the JSON dump — `updated_at`'s only job is to stop being a
+    FALSE source of difference when nothing did, and a deterministic function of already-read rows
+    does that by construction (ADR-0106).
+    """
+    candidates = [str(run["started_at"])]
+    candidates.extend(str(row["updated_at"]) for row in phase_rows)
+    candidates.extend(str(row["computed_at"]) for row in wave_rows)
+    candidates.extend(str(row["detected_at"]) for row in contract_rows)
+    candidates.extend(str(row["detected_at"]) for row in collision_rows)
+    return max(candidates)
+
+
 async def build_state(conn: aiosqlite.Connection, run_id: UUID) -> MigrationState:
     """Read one consistent snapshot and fold it into a `MigrationState`.
 
@@ -214,6 +247,9 @@ async def build_state(conn: aiosqlite.Connection, run_id: UUID) -> MigrationStat
         {
             "run_id": rid,
             "started_at": run["started_at"],
+            "updated_at": _derive_updated_at(
+                run, phase_rows, wave_rows, contract_rows, collision_rows
+            ),
             "monorepo_branch": run["monorepo_branch"],
             "config_sha256": run["config_sha256"],
             "harness_version": run["harness_version"],
