@@ -1240,6 +1240,56 @@ class SqliteStateRepository:
 
         return await self._writer.submit(unit)
 
+    # -- D89 Phase 2 Task A: coarse-row claim lifecycle (ADR-0102) ---------------------
+
+    async def set_task_target_paths(self, task_id: str, target_paths: Sequence[str]) -> None:
+        """Populate ONE row's `target_paths` JSON column. Never widens to N rows (ADR-0102):
+        the coarse `tasks` row Phase 1 (ADR-0101) already mints is reused as-is, and this just
+        starts writing a column `upsert_task` has always left at its schema default `'[]'`.
+
+        Called from the TRANSFORM `PreDispatchHook`, before `claim_task_by_id`, so the row's
+        unit list is durable before the worker can produce a single commit against it.
+        """
+        sql = "UPDATE tasks SET target_paths = ? WHERE task_id = ?"
+        params = (json.dumps(list(target_paths)), task_id)
+
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(sql, params)
+
+        await self._writer.submit(unit)
+
+    async def claim_task_by_id(
+        self, task_id: str, *, worker: str, now: datetime, lease_ttl_s: int
+    ) -> bool:
+        """One CAS on a KNOWN task_id. Unlike `claim_next_task`'s queue-pop, this claims the
+        specific row the caller already minted (via `upsert_task`) — there is no candidate
+        SELECT, only the compare-and-swap.
+
+        Moves `status` PENDING -> **RUNNING** directly (not `claim_next_task`'s `'CLAIMED'`):
+        `_ARBITRATED_TASKS_SQL` (cli.py) scans for `status = 'RUNNING'`, and this is the one
+        write in the whole tree that is meant to make a REWRITE coarse row a real arbitration
+        candidate for the first time (D89 Phase 1 deliberately never did).
+
+        Returns whether the CAS won. Nothing else claims a TRANSFORM coarse row today, so this
+        should always be `True` here — but Rule 11 says report `False` rather than assert, since
+        an unmet expectation is a fact for the caller to act on, not a caller-side unreachable.
+        """
+        sql = (
+            "UPDATE tasks "
+            "   SET status = 'RUNNING', claimed_by = ?, lease_expires_at = ?, "
+            "       fence_token = fence_token + 1 "
+            " WHERE task_id = ? AND status = 'PENDING' "
+            "RETURNING task_id"
+        )
+        params = (worker, _shift(now, lease_ttl_s), task_id)
+
+        async def unit(conn: aiosqlite.Connection) -> bool:
+            async with conn.execute(sql, params) as cursor:
+                row = await cursor.fetchone()
+            return row is not None
+
+        return await self._writer.submit(unit)
+
     # -- primitive 1 -------------------------------------------------------------------
 
     async def claim_next_task(

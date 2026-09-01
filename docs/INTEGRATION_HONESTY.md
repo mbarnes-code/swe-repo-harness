@@ -6962,6 +6962,34 @@ on something a real write path does populate — that adjudication is not made h
 > per-unit rebuild, including the new "partially landed" third verdict state the round-S design
 > names.
 
+> **[Phase 2 Task A landed 2026-09-01, round U task 1A — ADR-0102. D89 remains OPEN/PARTLY
+> ADDRESSED; this is one of two Phase-2 sub-tasks, not a close.]** The TRANSFORM coarse `tasks`
+> row (Phase 1's `kind = 'REWRITE'` row) now gets a real `PENDING -> RUNNING -> {DONE, PENDING}`
+> claim lifecycle, scoped to one dispatch window: `orchestrator/runner.py`'s `PhaseRunner` gains an
+> optional `pre_dispatch: PreDispatchHook[I]` collaborator (mirrors the existing `sink=` shape),
+> called once in `_dispatch` on the final payload, before the worker executes; `cli.py`'s TRANSFORM
+> `PhaseRunner(...)` site (only) wires in `_TransformClaimHook`, which populates
+> `tasks.target_paths` and claims the row `RUNNING` via two new `state/repository.py` primitives
+> (`set_task_target_paths`, `claim_task_by_id`); `_TransformSink.__call__` resolves the row to
+> `DONE` on `status == "ok"` or back to re-claimable `PENDING` (fence bumped) otherwise. Identity
+> design: reuses Phase 1's single coarse row (populating the schema's pre-existing
+> `target_paths` JSON column) rather than minting N per-unit rows — full rationale in
+> `docs/DECISIONS.md` ADR-0102 §"Identity-key decision". BUILD/VERIFY/SCAN are unaffected by
+> construction (their `PhaseRunner(...)` sites pass no `pre_dispatch`) — verified both structurally
+> (an AST census of all four `PhaseRunner(...)` call sites) and functionally (a hookless coarse row
+> stays invisible to `_ARBITRATED_TASKS_SQL`, re-running Phase 1's own scenario-E pattern).
+>
+> **What is still OPEN — Task B, future, unbuilt.** `_reconcile_tasks_with_git`'s REWRITE/RELOCATE
+> branch is UNCHANGED (zero lines): it still treats a candidate row's own `task_id` as the git
+> trailer identity, which was never true for REWRITE/RELOCATE (`task_id_for`'s per-unit UUID5 is
+> the real trailer identity — see the round-S design note above). **This makes Task A alone a NEW
+> way to reach the pre-existing hazard**, not a fix for it: a TRANSFORM dispatch that crashes
+> mid-flight now leaves a genuinely `RUNNING` row that `_ARBITRATED_TASKS_SQL` WILL select on the
+> next `fleet resume`, `find_task_commit` will almost always find nothing (wrong identity), and
+> `discard_task` would `reset --hard`/`clean -fdx` real landed unit commits away. Task B (the
+> per-unit `task_id_for`-keyed reconciliation loop and the "partially landed" verdict) must land
+> before this path is safe for real crash recovery — see ADR-0102's "Cost if wrong".
+
 ## D90 — FIXED, LANDED (8e16653, merged 3c4d165). D88's redaction fix does not cover every `phases.last_error` write path — two raw `UPDATE phases` sites in `orchestrator/runner.py` bypass `complete_phase` entirely, one of them terminal; and the same SPEC sentence's `attempts.stdout_tail`/`stderr_tail` columns are still written unredacted by `repository.py` itself
 
 **Found by round Q's whole-branch review catch-up of round P (2026-08-31), verifying D88's fix
@@ -6975,7 +7003,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1216-1223`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1239-1246`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
@@ -6984,10 +7012,10 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2135-2185`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2185-2235`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:6519`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:6608`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 

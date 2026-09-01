@@ -11993,3 +11993,127 @@ hash and using only fields that are already pure functions of run content. Not f
 a disclosure, per CLAUDE.md's guardrail on documenting known limitations rather than silently
 carrying them forward, not a code change — this decision's own headline change does not touch
 `digest.py` or make the attempts section live.
+
+## ADR-0102 — D89 Phase 2 Task A: TRANSFORM coarse task claim lifecycle
+
+**Decision (2026-09-01, round U, task 1A).** ADR-0101 (D89 Phase 1) minted one coarse `tasks` row
+per `(run_id, repo_id, phase)` via `upsert_task` and deliberately never let it leave the schema
+default `status = 'PENDING'` — which kept D87's `_ARBITRATED_TASKS_SQL` (`status = 'RUNNING'`)
+permanently blind to it, closing the misfire hazard Phase 1 existed to close, but also leaving
+D87's git-arbitration mechanism inert for real traffic. Task A gives the TRANSFORM coarse row (the
+`kind = 'REWRITE'` row `_coarse_task_id` mints for `Phase.TRANSFORM`) a real
+`PENDING -> RUNNING -> {DONE, PENDING}` lifecycle, scoped to one dispatch window, WITHOUT touching
+`_reconcile_tasks_with_git`/`_ARBITRATED_TASKS_SQL`/`_persist_arbitration` — the verdict-rebuild
+that reads a `RUNNING` row (per-unit REWRITE/RELOCATE reconciliation, including the "partially
+landed" verdict) is Task B, a separate future task, explicitly out of scope here.
+
+**Identity-key decision: reuse Phase 1's one row; do not mint N per-unit rows.** ADR-0101's own
+forward-compat note framed the eventual fix as possibly needing to widen `ux_tasks_ident` to admit
+a per-unit discriminator and mint one row per REWRITE/RELOCATE unit. This task's research
+(`.superpowers/sdd/round-U-criteria-closure/research-1-d89-phase2-plan.md` §1) recommends against
+that, for three reasons that held up under implementation: (1) `state/schema.sql` already declares
+`tasks.target_paths TEXT NOT NULL DEFAULT '[]'` as ONE JSON-array column on ONE row — the schema
+authors' own "target_paths lives on one row" design, which Phase 1 simply never populated; (2)
+D89's ledger text itself says to "loop per-unit over `tasks.target_paths`" for reconciliation,
+which reads naturally as iterating a JSON column on one row, not reading N rows; (3) the "partially
+landed" verdict Task B will add only makes sense as a property of one row with multiple sub-units —
+under a per-row design it would have to be a derived, cross-row summary instead of a state any row
+is actually in. A per-unit-rows design would also have to answer *when* N individual rows would
+each reach `RUNNING`, given that REWRITE/RELOCATE units are processed sequentially inside ONE
+worker process with NO SQL write access (`WorkerContext.db` is `ReadOnlyRepository`,
+`vcs/commits.py`'s docstring: "Writes no SQL... the runner persists what these helpers return") —
+the only honest per-unit-rows answer is "claim all N rows RUNNING in one batch before dispatch",
+which is functionally identical to this decision's single-row claim, just N rows heavier for no
+benefit. No `ux_tasks_ident` migration is needed under this design: there is still only ever the
+one row Phase 1 already mints, so nothing new collides with it.
+
+**Where the claim happens: a new `PhaseRunner` collaborator, not inside the worker.**
+`apply_and_commit`/`land_patches` (inside `workers/rewrite.py`/`relocate.py`) cannot write SQL —
+this is architectural (§11.5's single-writer rule), not missing plumbing, so a per-unit-aware claim
+cannot live there under any design. The one place with (a) real SQL write access, (b) the full
+TRANSFORM unit list already computed (`TransformInput.sources`/`.targets`, built once before any
+dispatch from planning-phase data), and (c) a position strictly before the worker can produce a
+commit, is `orchestrator/runner.py`'s `PhaseRunner._dispatch`. `PhaseRunner` gains one new optional
+collaborator, `pre_dispatch: PreDispatchHook[I] | None = None`, mirroring the existing
+`sink: ResultSink[O] | None = None` injection shape — so `PhaseRunner` itself stays
+phase-and-kind-agnostic (the same design property ADR-0101 already relied on) for every phase that
+does not need it. `PreDispatchHook[I].__call__(self, *, repo_id, phase, payload) -> None` is called
+exactly once in `_dispatch`, on the FINAL payload — after a possible `ReEntry.REJECTED` rebuild,
+and never on the `ReEntry.COMPLETE` early return, since the worker is not about to run in that case
+and there is nothing to claim a dispatch for. `cli.py`'s TRANSFORM `PhaseRunner(...)` construction
+(`_run_transform_wave`) is the ONLY one of the four `PhaseRunner(...)` sites that passes
+`pre_dispatch=`; BUILD/VERIFY/SCAN pass nothing (the default), and this is load-bearing — see the
+safety property below.
+
+**The hook and the two new repository primitives.** `_TransformClaimHook` (`cli.py`) is
+constructed once per transform wave, closing over `repository`/`read_conn`/`run_id` and the same
+`ctx.lease_owner`/`ctx.clock`/`ctx.lease_ttl_s` `acquire_phase_lease` already uses for the phase
+lease. Its `__call__` reuses `_coarse_task_id` UNCHANGED (the same helper `_TransformSink.__call__`
+calls again after the worker returns — `upsert_task`'s idempotent UPSERT guarantees both calls
+resolve to the same row, so nothing new is minted, only populated and claimed), then calls two new
+`SqliteStateRepository` methods: `set_task_target_paths(task_id, target_paths)` (`UPDATE tasks SET
+target_paths = ?`, the payload's raw `[*sources, *targets]`, matching `task_id_for`'s own raw-unit
+input format for Task B's later lookup) and `claim_task_by_id(task_id, *, worker, now,
+lease_ttl_s)` — one CAS on a KNOWN task_id (`UPDATE tasks SET status = 'RUNNING', claimed_by = ?,
+lease_expires_at = ?, fence_token = fence_token + 1 WHERE task_id = ? AND status = 'PENDING'`).
+`claim_task_by_id` moves the row straight to `RUNNING`, deliberately NOT `claim_next_task`'s
+`'CLAIMED'` — `_ARBITRATED_TASKS_SQL` scans for `status = 'RUNNING'`, and making a TRANSFORM
+coarse row a real candidate for the first time is this task's whole point.
+`_TransformSink.__call__` gains the other half, after its existing `record_attempt` write: on the
+happy path (the sink ran, so the dispatch definitively finished — crash paths never reach here),
+`result.status == "ok"` resolves the row to `DONE` (`claimed_by`/`lease_expires_at` cleared);
+anything else (partial/failed/timeout/cancelled) resolves it back to re-claimable `PENDING` with
+`fence_token` bumped — the same CAS `claim_task_by_id` performs, in reverse. Both resolution
+UPDATEs are additionally gated on `WHERE ... AND status = 'RUNNING'`, matching this codebase's
+CAS-only discipline for `tasks.status` writes (`schema.sql`'s own comment: "never SELECT-then-
+UPDATE") and making the sink safe to call even for a row a hook never claimed (it then matches
+zero rows and is left exactly as Phase 1 always left it).
+
+**The safety property, and how it was verified.** BUILD/VERIFY/SCAN's `PhaseRunner(...)` sites
+must stay byte-identical: they pass no `pre_dispatch`, so their coarse rows (if any exist) must
+never leave `PENDING`, exactly as ADR-0101 guaranteed — reopening that hazard for BUILD/VERIFY/SCAN
+while closing it (correctly, deliberately) for TRANSFORM would be the same D87 misfire ADR-0101
+closed, reintroduced one call site over. Verified two ways:
+`tests/test_d89_phase2_claim_lifecycle.py::test_exactly_four_phaserunner_call_sites_and_only_one_
+passes_pre_dispatch` parses `cli.py` with `ast` (not text-grep, which rots) and asserts
+structurally that exactly one of the four `PhaseRunner(...)` calls passes a `pre_dispatch` keyword;
+`test_a_coarse_row_minted_before_a_hookless_dispatch_never_leaves_pending` re-runs ADR-0101's own
+scenario-E pattern (a coarse row minted via `upsert_task` alone, no claim) against the production
+`_ARBITRATED_TASKS_SQL` object and asserts zero candidates — BUILD/VERIFY/SCAN's exact shape today.
+
+**Proof, not argument (Rule 12).** `tests/test_runner.py` gains a `PreDispatchHook` ordering
+section proving, at the driver layer: the hook fires exactly once, strictly before
+`worker.execute`, carrying the FINAL payload (including after a `ReEntry.REJECTED` rebuild); the
+hook is NOT called when `ReEntry.COMPLETE` means the worker never runs; and a hookless dispatch
+(BUILD/VERIFY/SCAN's shape) is unaffected — all four proven against the real `PhaseRunner`, not a
+stand-in. `tests/test_d89_phase2_claim_lifecycle.py` proves the repository CAS semantics (a second
+claim on a non-`PENDING` row loses without disturbing the winning owner), the hook's row-population
+and row-reuse-with-the-sink behavior, and the sink's DONE/PENDING resolution. The DONE/PENDING
+resolution was additionally mutation-tested by hand (Rule 12): temporarily short-circuiting
+`_TransformSink.__call__`'s new resolution block to a no-op reddened exactly
+`test_sink_resolves_a_running_row_to_done_on_ok_status` and `test_sink_resolves_a_running_row_
+back_to_pending_with_fence_bump_on_non_ok` (2 of 66 across the three affected test files) — no
+other test in `tests/test_d89_phase2_claim_lifecycle.py`, `tests/test_d89_phase1_task_lifecycle.py`
+or `tests/test_runner.py` changed verdict, confirming the mutation perturbed exactly the resolution
+step and not the module's ability to load; reverting restored a byte-identical `cli.py`.
+
+**What this task explicitly does NOT do — Task B, future, unbuilt.** `_reconcile_tasks_with_git`
+still runs its pre-Task-A single-`find_task_commit` path against a TRANSFORM row's own `task_id` —
+which was never any commit's trailer identity — so a TRANSFORM row now genuinely reaching `RUNNING`
+with a dead lease is, as of this task alone, a NEW way to reach the pre-existing REWRITE/RELOCATE
+reconciliation gap D89's ledger names, not a fix for it. Task B (the per-unit
+`task_id_for`-keyed reconciliation loop, the "partially landed" verdict, and the `_persist_
+arbitration` reporting change) must land before `fleet resume` can safely arbitrate a crashed
+TRANSFORM dispatch — until then, an operator hitting that path should treat it the way D89's ledger
+already describes. D89 stays `PARTLY ADDRESSED` (`docs/INTEGRATION_HONESTY.md`); this ADR does not
+change that heading.
+
+**Cost if wrong.** If Task B is never landed but Task A ships alone, a crashed TRANSFORM dispatch
+now leaves a `RUNNING` row `_ARBITRATED_TASKS_SQL` WILL select, and the pre-Task-A single-
+`find_task_commit` path will almost always find nothing (the row's own `task_id` was never a
+commit trailer for REWRITE/RELOCATE) — `discard_task` would then `reset --hard`/`clean -fdx` the
+branch back to `tasks.pre_commit_sha`, discarding any units that DID land. This is the exact hazard
+ADR-0101's "Cost if wrong" already named for BUILD/VERIFY/SCAN, now reachable for TRANSFORM too
+until Task B lands. Landing Task A and Task B as one round (not two separate merges to `main`) is
+the intended sequencing; if that is not possible, Task A must not reach `main` alone without an
+explicit, disclosed acceptance of this window.

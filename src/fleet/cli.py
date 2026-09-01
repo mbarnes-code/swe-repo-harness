@@ -171,6 +171,7 @@ from fleet.orchestrator.runner import (
     WAVE_WALLCLOCK_EXIT_CODE,
     PayloadFactory,
     PhaseRunner,
+    PreDispatchHook,
     RunHalted,
     WaveReport,
 )
@@ -4078,6 +4079,56 @@ async def _coarse_task_id(
     )
 
 
+class _TransformClaimHook:
+    """D89 Phase 2 Task A (ADR-0102): `PreDispatchHook[TransformInput]` wired ONLY into the
+    TRANSFORM `PhaseRunner` (`_run_transform_wave`, below) — BUILD/VERIFY/SCAN pass no
+    `pre_dispatch` and are untouched by this class.
+
+    Gives the D89 Phase 1 coarse `tasks` row (ADR-0101) a real claim: PENDING -> RUNNING, with
+    `target_paths` populated, BEFORE `TransformPipelineWorker.execute` can produce a single
+    commit. This is what makes the row a genuine `_ARBITRATED_TASKS_SQL` candidate for the
+    first time — Phase 1 deliberately kept it invisible to that scan (permanently `PENDING`).
+
+    Reuses `_coarse_task_id` UNCHANGED (same helper `_TransformSink` calls again after the
+    worker returns) — `upsert_task`'s idempotent UPSERT guarantees both calls resolve to the
+    SAME row, so there is nothing new to mint here, only to populate and claim.
+    """
+
+    def __init__(
+        self,
+        *,
+        repository: SqliteStateRepository,
+        read_conn: aiosqlite.Connection,
+        run_id: str,
+        owner: str,
+        clock: Callable[[], datetime],
+        lease_ttl_s: int,
+    ) -> None:
+        self._repository = repository
+        self._read = read_conn
+        self._run_id = run_id
+        self._owner = owner
+        self._clock = clock
+        self._lease_ttl_s = lease_ttl_s
+
+    async def __call__(
+        self, *, repo_id: str, phase: Phase, payload: TransformInput
+    ) -> None:
+        if phase is not Phase.TRANSFORM:  # pragma: no cover - only wired for TRANSFORM below
+            return
+        task_id = await _coarse_task_id(
+            self._repository, self._read, run_id=self._run_id, repo_id=repo_id,
+            phase=phase, now=self._clock(),
+        )
+        if task_id is None:  # pragma: no cover - TRANSFORM always has a coarse kind mapping
+            return
+        target_paths = [*payload.sources, *payload.targets]
+        await self._repository.set_task_target_paths(task_id, target_paths)
+        await self._repository.claim_task_by_id(
+            task_id, worker=self._owner, now=self._clock(), lease_ttl_s=self._lease_ttl_s
+        )
+
+
 class _TransformSink:
     """Persists one dispatch's ADR-0024 pointers under the fence that produced it (§11.5).
 
@@ -4170,6 +4221,33 @@ class _TransformSink:
                 already_applied=bool(output.skipped),
             )
         )
+        # D89 Phase 2 Task A (ADR-0102): resolve the coarse row's claim on the HAPPY path — the
+        # sink ran, so this dispatch definitely finished (crash paths never reach here and leave
+        # the row `RUNNING` for D89 Phase 1's own reconciliation sweep, Task B, unbuilt, to find).
+        # `status == "ok"` is definitive success; anything else (partial/failed/timeout/cancelled)
+        # goes back to PENDING re-claimable, fence bumped, mirroring `claim_task_by_id`'s own CAS
+        # in reverse. Gated on `task_id is not None` for the same reason `_coarse_task_id` itself
+        # is optional (today: only SCAN, which this sink is never used for) — never asserted.
+        if task_id is not None:
+            done = result.status == "ok"
+
+            async def resolve_task(conn: aiosqlite.Connection) -> None:
+                if done:
+                    await conn.execute(
+                        "UPDATE tasks SET status = 'DONE', claimed_by = NULL, "
+                        "       lease_expires_at = NULL "
+                        " WHERE task_id = ? AND status = 'RUNNING'",
+                        (task_id,),
+                    )
+                else:
+                    await conn.execute(
+                        "UPDATE tasks SET status = 'PENDING', claimed_by = NULL, "
+                        "       lease_expires_at = NULL, fence_token = fence_token + 1 "
+                        " WHERE task_id = ? AND status = 'RUNNING'",
+                        (task_id,),
+                    )
+
+            await self._writer.submit(resolve_task)
         if commit is None:
             return
         params = (commit, stamp, self._run_id, repo_id, int(phase), fence)
@@ -4675,6 +4753,19 @@ async def _run_transform_wave(
             await _ordering_pairs(read_conn, settings, run_id)
         ),
     )
+    # D89 Phase 2 Task A (ADR-0102): wired ONLY into TRANSFORM's PhaseRunner, below.
+    # BUILD/VERIFY/SCAN's `PhaseRunner(...)` sites pass no `pre_dispatch` and stay
+    # byte-identical — their coarse rows, if any, must never leave `PENDING`, exactly as D89
+    # Phase 1 (ADR-0101) guaranteed. The annotation is a static, mypy-checked assertion that
+    # `_TransformClaimHook` actually satisfies `PreDispatchHook[TransformInput]`.
+    claim_hook: PreDispatchHook[TransformInput] = _TransformClaimHook(
+        repository=repository,
+        read_conn=read_conn,
+        run_id=run_id,
+        owner=ctx.lease_owner,
+        clock=ctx.clock,
+        lease_ttl_s=ctx.lease_ttl_s,
+    )
     runner = PhaseRunner(
         ctx,
         TransformPipelineWorker(),
@@ -4687,6 +4778,7 @@ async def _run_transform_wave(
             run_id=run_id,
             evidence=evidence,
         ),
+        pre_dispatch=claim_hook,
     )
     try:
         await projector.start()

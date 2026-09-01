@@ -98,6 +98,7 @@ __all__ = [
     "PayloadFactory",
     "PhaseCheckpoint",
     "PhaseRunner",
+    "PreDispatchHook",
     "ReEntry",
     "RepoOutcome",
     "ResultSink",
@@ -204,6 +205,21 @@ class PayloadFactory[I: WorkerInput](Protocol):
         attempt: int,
         remaining_units: Sequence[str] | None,
     ) -> I: ...
+
+
+class PreDispatchHook[I: WorkerInput](Protocol):
+    """Runs once per dispatch, after the payload is final and before the worker executes.
+
+    D89 Phase 2 Task A (ADR-0102): the one optional collaborator that lets a phase give its
+    coarse `tasks` row (D89 Phase 1 / ADR-0101) a real claim lifecycle, without `PhaseRunner`
+    itself becoming aware of `tasks`, `kind`, or any other phase-specific concept — mirroring
+    `ResultSink`'s injection shape so every phase that does not need this stays untouched.
+    `PhaseRunner` still does not persist run state itself (§11.5): a hook implementation is
+    handed `self.ctx.repository`/`self._writer` at ITS OWN construction site (`cli.py`'s
+    composition root), never through this call, so the single-writer boundary is unchanged.
+    """
+
+    async def __call__(self, *, repo_id: str, phase: Phase, payload: I) -> None: ...
 
 
 class ResultSink[O: WorkerOutput](Protocol):
@@ -359,6 +375,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         resource_guard: Callable[[], HaltReason | None] = lambda: None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         sink: ResultSink[O] | None = None,
+        pre_dispatch: PreDispatchHook[I] | None = None,
     ) -> None:
         self.ctx = ctx
         self.worker = worker
@@ -366,6 +383,7 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         self.phase = worker.phase
         self._payloads = payloads
         self._sink = sink
+        self._pre_dispatch = pre_dispatch
         self._policy = policy or RetryPolicy()
         self._estimate = estimate
         #: §11.3's RSS and disk ceilings are host facts, not repo facts, so they are polled
@@ -795,6 +813,11 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                     payload = await self._payloads(
                         repo_id=repo_id, phase=self.phase, attempt=attempt, remaining_units=None
                     )
+                # D89 Phase 2 Task A (ADR-0102): fired on the FINAL payload — after a possible
+                # REJECTED rebuild above, never on the COMPLETE early-return, since the worker
+                # is not about to run in that case and there is nothing to claim a dispatch for.
+                if self._pre_dispatch is not None:
+                    await self._pre_dispatch(repo_id=repo_id, phase=self.phase, payload=payload)
                 try:
                     execution = await self.worker.execute(worker_ctx, payload, max_attempts=1)
                 except asyncio.CancelledError:
