@@ -346,6 +346,15 @@ class _AuthorizedSessionTransport:
         return cast(Mapping[str, object], decoded)
 
 
+#: The transport a default-constructed (registered) backend uses. Built ONCE at module scope
+#: rather than per-instance (SPEC §12 item 47 — `register_backend`'s `cls()` must leave
+#: `vars(inst) == {}`), which also preserves the ADC session/project caching this class already
+#: documents: there is exactly one `VertexBackend` singleton per process either way, so moving the
+#: cache from an instance attribute to a module-level one changes where it lives, not its lifetime
+#: or its "resolved once" behaviour.
+_DEFAULT_TRANSPORT: Final[RawPredictTransport] = _AuthorizedSessionTransport()
+
+
 def _from_status(region: str, status: int, detail: str) -> LlmError:
     """A non-200 → either a §11.8 failover trigger or a loud task failure.
 
@@ -376,12 +385,14 @@ class VertexBackend:
     version: ClassVar[int] = 1
 
     def __init__(self, transport: RawPredictTransport | None = None) -> None:
-        """`register_backend` constructs this with no arguments (`cls()`), so the collaborator
-        defaults — but it is injectable, which is how a test drives the adapter with no socket and
-        no credentials (CLAUDE.md guardrail 3)."""
-        self._transport: RawPredictTransport = (
-            _AuthorizedSessionTransport() if transport is None else transport
-        )
+        """`register_backend` constructs this with no arguments (`cls()`), so the collaborator is
+        not stored on `self` in the registered case — `vars(inst) == {}` (SPEC §12 item 47) — and
+        `invoke` resolves the shared default (`_DEFAULT_TRANSPORT`) lazily instead. Still
+        injectable, which is how a test drives the adapter with no socket and no credentials
+        (CLAUDE.md guardrail 3): passing a value stores it on `self`, but that instance was built
+        for exactly one test and is never the registry's singleton."""
+        if transport is not None:
+            self._transport = transport
 
     def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
         """Declared, never probed. Validates the target's own fields FIRST (§13 row 36), so a
@@ -404,7 +415,8 @@ class VertexBackend:
         schema failure, no decision taken from `finish_reason`."""
         region = _require_region(target)
         body = build_body(target, messages, schema, mode, max_output_tokens)
-        raw = await self._transport(
+        transport = getattr(self, "_transport", _DEFAULT_TRANSPORT)
+        raw = await transport(
             region=region,
             model_id=target.model_id,
             body=body,

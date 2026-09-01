@@ -5,13 +5,19 @@ ADR-0020/0023), the three sub-clauses that had no coverage at all:
    other §7.2 registry (manifests, ecosystems) does, either baked into `discover()` itself or
    exercised per-file by individual worker tests, but nothing walks the REAL registry and checks
    every entry.
-2. The `backends` registry (`fleet.llm.client`) registers INSTANCES, not classes, and several of
-   those instances legitimately hold a constructor-injected collaborator (`_transport`, `_env` —
-   CLAUDE.md guardrail 3's dependency inversion). A bare `vars(inst) == {}` check — the shape that
-   works for `ManifestAdapter`/`EcosystemAdapter` — would misfire on those, so this file checks
-   the property that actually matters for an instance-registering registry: the registered
-   object is a genuine singleton (re-discovery returns the SAME object) and no per-call attribute
-   is added or replaced as a side effect of answering for two different targets.
+2. The `backends` registry (`fleet.llm.client`) registers INSTANCES, not classes. Round T
+   substituted a weaker property (singleton identity + no new/replaced attribute across two
+   `declared_capabilities()` calls) for the criterion's literal `vars(inst) == {}`, because at the
+   time `OpenAICompatibleBackend`/`BedrockBackend`/`VertexBackend` legitimately stored a
+   constructor-injected `_transport`/`_env` on `self` even in the default (registered) case. That
+   was reverted (see `docs/CRITERIA_PLAN.md` §47) and fixed in production: `register_backend`'s
+   `cls()` — zero arguments — now leaves every backend's `__dict__` empty; the collaborators
+   still exist for test injection, but are only stored on `self` when a test explicitly passes
+   one, and such an instance is never the registry's singleton. This file now checks the literal
+   `vars(inst) == {}`, exactly as `test_manifests.py`/`test_every_registered_worker_is_stateless`
+   do for their own registries, plus the stronger cross-call form the round-T test already
+   proved worth keeping: two `declared_capabilities()` calls for two different targets must not
+   leave the registered singleton's `__dict__` non-empty either.
 3. `preconditions_hold` being `abstract` on `BaseWorker` was asserted only via "every worker
    shipped today happens to override it" (`tests/test_workers_base.py`), which cannot fail if the
    `@abstractmethod` decorator itself were deleted and the base defaulted to `return True` — no
@@ -81,41 +87,47 @@ def _target_for(backend_name: str, *, suffix: str) -> BackendTarget:
     return BackendTarget(**fields)
 
 
-def _assert_backend_instance_is_stateless_across_calls(name: str, instance: Any) -> None:
-    """What "stateless" means for a registry that holds INSTANCES rather than classes.
-
-    `vars(inst) == {}` — the check that works for `ManifestAdapter`/`EcosystemAdapter` — is the
-    wrong shape here: `OpenAICompatibleBackend`/`VertexBackend`/`BedrockBackend` legitimately
-    carry a constructor-injected `_transport`/`_env` (dependency inversion, CLAUDE.md guardrail
-    3), fixed once at construction and never touched again. What must NOT happen is a call
-    picking up a NEW attribute, or replacing an EXISTING one, as a side effect of being asked
-    about two different targets — the same cross-repo-leak concern §7.2 states for adapters,
-    applied here to two different calls sharing one singleton instead of two different repos.
+def _assert_backend_call_leaves_no_state(name: str, instance: Any) -> None:
+    """The literal SPEC §12 item 47 check, applied twice: once at construction (the registered
+    singleton's `__dict__` must already be empty) and once after two `declared_capabilities()`
+    calls for two DIFFERENT targets (it must STAY empty) — the same cross-repo-leak concern §7.2
+    states for adapters, applied here to two calls sharing one singleton instead of two different
+    repos. `assert_stateless` (`fleet.workers.base`) is the same helper `workers`/`manifests`/
+    `ecosystems` are checked with; this is deliberately not a "no new attribute relative to a
+    non-empty before" diff — the registered instance starts empty, so the stronger, literal
+    `vars(inst) == {}` applies without qualification at both points.
     """
-    before = dict(vars(instance))
+    assert_stateless(instance)
     instance.declared_capabilities(_target_for(name, suffix="one"))
     instance.declared_capabilities(_target_for(name, suffix="two"))
-    after = dict(vars(instance))
-    leaked = set(after) - set(before)
-    replaced = {k for k in before if after.get(k) is not before[k]}
-    if leaked or replaced:
-        raise TypeError(
-            f"{type(instance).__qualname__} ({name!r}) leaked call state: "
-            f"new attributes {sorted(leaked)}, replaced attributes {sorted(replaced)}"
-        )
+    try:
+        assert_stateless(instance)
+    except TypeError as exc:
+        raise AssertionError(
+            f"{type(instance).__qualname__} ({name!r}) picked up instance state across calls: {exc}"
+        ) from exc
 
 
-def test_every_registered_backend_is_stateless_across_calls() -> None:
-    """Registration is a ONE-TIME construction (`register_backend`'s `cls()`, run once at import
-    time) — re-discovery must return the SAME object, and no per-call attribute may appear or
-    change identity across two calls answering about two different targets.
+def test_every_registered_backend_is_stateless() -> None:
+    """`vars(inst) == {}` for every registered backend instance (SPEC §12 item 47) — checked
+    against the REAL registered singleton via `discover()`, not a fresh `cls()`: unlike workers, a
+    backend constructor takes optional test-only collaborator overrides, and only the instance
+    `register_backend` actually built with zero arguments is bound by this criterion.
     """
+    backends = client_module.discover()
+    assert backends, "the backends registry discovered nothing on this host"
+    for name, instance in backends.items():
+        _assert_backend_call_leaves_no_state(name, instance)
+
+
+def test_backends_registry_is_a_stable_singleton() -> None:
+    """Registration is a ONE-TIME construction (`register_backend`'s `cls()`, run once at import
+    time) — re-discovery must return the SAME object, not a fresh instance each call."""
     first = client_module.discover()
     second = client_module.discover()
     assert first, "the backends registry discovered nothing on this host"
     for name, instance in first.items():
         assert second[name] is instance, f"{name}: discover() re-constructed a registered backend"
-        _assert_backend_instance_is_stateless_across_calls(name, instance)
 
 
 def test_backend_statelessness_check_rejects_a_leaking_backend() -> None:
@@ -136,8 +148,8 @@ def test_backend_statelessness_check_rejects_a_leaking_backend() -> None:
             raise NotImplementedError
 
     leaky = _LeakyBackend()
-    with pytest.raises(TypeError, match="leaked call state"):
-        _assert_backend_instance_is_stateless_across_calls(_LeakyBackend.name, leaky)
+    with pytest.raises(AssertionError, match="picked up instance state across calls"):
+        _assert_backend_call_leaves_no_state(_LeakyBackend.name, leaky)
 
 
 # =======================================================================================
