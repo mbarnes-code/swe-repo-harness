@@ -1272,6 +1272,52 @@ class SqliteStateRepository:
 
         return await self._writer.submit(unit)
 
+    async def insert_revalidation_task(
+        self,
+        task_id: str,
+        *,
+        run_id: str,
+        repo_id: str,
+        revalidation_key: str,
+        dest_path: str,
+        created_at: datetime,
+        max_attempts: int = 3,
+    ) -> str:
+        """The `kind='REVALIDATE'` path `upsert_task` itself refuses (§6 CHECK
+        `(kind = 'REVALIDATE') = (revalidation_key IS NOT NULL)`). D101 Half B / D102
+        (`docs/INTEGRATION_HONESTY.md`): T1 (`orchestrator.stubs.supersede`) plans one of these per
+        `RevalidationPlan` (`orchestrator/stubs.py::plan_revalidation`) — `revalidation_key` is
+        `plan.key`, `repo_id` is `plan.consumer_repo_id`. `phase` is always `Phase.VERIFY`: that is
+        the phase RDEP_VERIFY/verification runs under (`_COARSE_TASK_KIND[Phase.VERIFY] =
+        TaskKind.RDEP_VERIFY`), and a REVALIDATE task re-runs exactly that check against the
+        provider's now-real label.
+
+        Idempotent the same way `upsert_task` is: `ux_tasks_ident` includes
+        `IFNULL(revalidation_key, '')`, so a re-fired trigger for the same
+        round+provider-set (`revalidation_key` is content-derived, §3.5.1 step 4) UPSERTs the
+        SAME row rather than minting a duplicate — `DO UPDATE`, not `DO NOTHING`, mirroring
+        `upsert_task`'s own choice so a re-plan can still refresh `dest_path`/`max_attempts`
+        (e.g. after a `repos.dest_path` correction) without resetting `status`/`claimed_by`,
+        neither of which this statement's `SET` list touches.
+
+        Callers with an OPEN write transaction of their own (T1's production trigger inside
+        `cli._pr_sync_impl`, which must not open a second `StateWriter` — §11.5's
+        `SingleWriterViolationError`) should call `insert_revalidation_task_row(conn, ...)`
+        directly on their own connection instead of this method, which always submits its own.
+        """
+        return await self._writer.submit(
+            lambda conn: insert_revalidation_task_row(
+                conn,
+                task_id,
+                run_id=run_id,
+                repo_id=repo_id,
+                revalidation_key=revalidation_key,
+                dest_path=dest_path,
+                created_at=created_at,
+                max_attempts=max_attempts,
+            )
+        )
+
     # -- D89 Phase 2 Task A: coarse-row claim lifecycle (ADR-0102) ---------------------
 
     async def set_task_target_paths(self, task_id: str, target_paths: Sequence[str]) -> None:
@@ -2462,3 +2508,52 @@ def _stolen(run_id: str, repo_id: str, phase: Phase, fence: int, op: str) -> str
 _DEFAULT_LADDERS: Final[dict[int, str]] = {
     n: "[" + ",".join(["null", *['"EVIDENCE_ONLY"'] * (n - 1)]) + "]" for n in range(1, 9)
 }
+
+
+async def insert_revalidation_task_row(
+    conn: aiosqlite.Connection,
+    task_id: str,
+    *,
+    run_id: str,
+    repo_id: str,
+    revalidation_key: str,
+    dest_path: str,
+    created_at: datetime,
+    max_attempts: int = 3,
+) -> str:
+    """The write body of `SqliteStateRepository.insert_revalidation_task` — factored out to a
+    bare-connection function, mirroring `cli._upsert_pr_record`'s factoring of `_write_pr_record`,
+    so a caller that already holds an open write transaction (T1's production trigger inside
+    `cli._pr_sync_impl`) can fold this INSERT into its OWN transaction instead of opening a second
+    `StateWriter` — which would trip `SingleWriterViolationError` (§11.5 single-writer rule: one
+    writable connection per process). See `insert_revalidation_task`'s docstring for the shape of
+    the row and the idempotency argument; this function is that method's entire body plus the one
+    it exists to share.
+    """
+    ladder = _DEFAULT_LADDERS[max_attempts]
+    sql = (
+        "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, revalidation_key, dest_path, "
+        "                   max_attempts, ladder, created_at) "
+        "VALUES (?, ?, ?, ?, 'REVALIDATE', ?, ?, ?, ?, ?) "
+        "ON CONFLICT (run_id, repo_id, phase, kind, IFNULL(contract_id, ''), "
+        "             IFNULL(revalidation_key, '')) DO UPDATE SET "
+        "    dest_path = excluded.dest_path, max_attempts = excluded.max_attempts, "
+        "    ladder = excluded.ladder "
+        "RETURNING task_id"
+    )
+    params = (
+        task_id,
+        run_id,
+        repo_id,
+        int(Phase.VERIFY),
+        revalidation_key,
+        dest_path,
+        max_attempts,
+        ladder,
+        _iso(created_at),
+    )
+    async with conn.execute(sql, params) as cursor:
+        row = await cursor.fetchone()
+    if row is None:  # pragma: no cover - RETURNING on a successful UPSERT always yields one
+        raise RepositoryError("insert_revalidation_task RETURNING produced no row")
+    return str(row[0])
