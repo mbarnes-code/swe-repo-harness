@@ -1009,6 +1009,85 @@ def test_the_repair_prompt_omits_every_line_of_a_rejected_diff_and_the_prior_fai
     assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
 
 
+def test_the_repair_prompt_shows_every_line_of_a_prior_rejected_diff_under_evidence_plus_priors(
+    tmp_path: Path,
+) -> None:
+    """§12.35 positive control — SPEC.md:7461's own proof shape, inverted (round GG task 4).
+
+    The test above proves a raw prior diff is ABSENT from the repair prompt under
+    `EVIDENCE_ONLY`/`EVIDENCE_PLUS_REJECTED_APPROACHES`. This proves the literal inverse: once the
+    policy is `EVIDENCE_PLUS_PRIORS`, every non-blank line of a genuinely prior rejected diff DOES
+    appear — carried via `RewriteInput.prior_rejected_diffs`, never via `RejectedApproach` (which
+    still has no field able to hold one; `RejectedApproach.model_fields` is untouched by this
+    design — 5 fields, none diff-shaped) and never persisted to SQLite or git.
+    """
+    one, two, clean = f"{DEST}/one.py", f"{DEST}/two.py", f"{DEST}/clean.py"
+    committed = "L1\nL2\nL3\nL4\n"
+    dirty = "L1 DIRTY\nL2\nL3\nL4\n"
+    after = (
+        "REJECTED_LINE_1_UNIQUE\nREJECTED_LINE_2_UNIQUE\n"
+        "REJECTED_LINE_3_UNIQUE\nREJECTED_LINE_4_UNIQUE\n"
+    )
+    repo, anchor = make_repo(tmp_path, {one: committed, two: committed, clean: "keep\n"})
+
+    # The same real, multi-line diff the negative-control test above captures — built with the
+    # SAME helper (`make_unified_diff`) production code uses for a genuinely rejected patch.
+    rejected_diff = make_unified_diff(one, dirty, after)
+    assert rejected_diff, "fixture sanity: the rule actually changes the file"
+    rejected_lines = [line for line in rejected_diff.splitlines() if line.strip()]
+    assert len(rejected_lines) >= 8, "fixture sanity: a genuine multi-line diff, not one line"
+
+    engine = FakeRewriter({"r1": lambda _source: after})
+    worker = worker_with(engine)
+
+    # Attempt 2: a dirty worktree makes `git apply --index` refuse, verbatim — the same trick the
+    # negative-control test uses to actually produce a rejected `FilePatch`-shaped diff.
+    (repo / one).write_text(dirty, encoding="utf-8")
+    attempt_two = asyncio.run(
+        worker.run(make_ctx(repo, attempt=2), rewrite_payload(anchor, [one]))
+    )
+    assert attempt_two.status == "failed" and attempt_two.error is not None
+
+    # Attempt 3: force a repair rung on a DIFFERENT unit (two.py, same dirty-worktree trick),
+    # under EVIDENCE_PLUS_PRIORS, with attempt 2's captured diff threaded via
+    # `prior_rejected_diffs` — this is the in-process carrier the ladder driver (a test today,
+    # `PhaseRunner._drive()` later) is responsible for threading; the worker itself is stateless.
+    (repo / two).write_text(dirty, encoding="utf-8")
+    client = FakeModelClient(_proposal(clean, "keep\n", "kept\n", marker="repair"))
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_REPAIR,
+        context_policy=ContextPolicy.EVIDENCE_PLUS_PRIORS,
+        llm=client,
+    )
+    payload = rewrite_payload(
+        anchor,
+        [two],
+        prior_rejected_diffs=[
+            FilePatch(
+                path=one,
+                diff=rejected_diff,
+                tier=TransformTier.DETERMINISTIC,
+                parse_probe_ok=False,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.TRANSFORM_REPAIR)], "attempt 3 is the WORKHORSE rung"
+    prompt = client.prompts[0]
+
+    # The positive control: EVERY non-blank line of the prior rejected diff appears in the
+    # attempt-3 prompt — the literal inverse of the negative-control test's assertion above.
+    for line in rejected_lines:
+        assert line in prompt, f"a prior rejected diff line failed to appear: {line!r}"
+
+    assert result.status == "ok", "the repair patch still landed"
+    assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
+
+
 def test_a_multi_file_repair_records_every_landed_path_not_just_the_unit(
     tmp_path: Path,
 ) -> None:

@@ -24,7 +24,10 @@ The division of labour is the design, and every clause of it was a defect first:
 * **The repair prompt gets THIS failure's verbatim stderr and nothing else** (CLAUDE.md
   guardrail 5, §3.2 step 5). Evidence is rebuilt from scratch on every invocation from the
   failure in front of it — the worker is stateless, so it has no transcript to leak — and the
-  rejected *diff* is never rendered: `RejectedApproach` has no field able to hold one.
+  rejected *diff* is never rendered under `EVIDENCE_ONLY`/`EVIDENCE_PLUS_REJECTED_APPROACHES`:
+  `RejectedApproach` has no field able to hold one. `EVIDENCE_PLUS_PRIORS` is the one opt-in,
+  never-default exception — it renders `RewriteInput.prior_rejected_diffs`, a payload-only field
+  that still never touches `RejectedApproach` (§12.35, ADR-0108).
 
 `ctx.attempt` is the ladder position and `ctx.tier` is its consequence, both set by
 `BaseWorker.execute()` from the persisted `phases.attempts`. Nothing here counts attempts.
@@ -240,6 +243,16 @@ class RewriteInput(WorkerInput):
         default_factory=list,
         description="ADR-0021 memory, rendered ONLY under EVIDENCE_PLUS_REJECTED_APPROACHES. It "
         "carries no diff text, so a raw prior patch cannot travel inside it.",
+    )
+    prior_rejected_diffs: list[FilePatch] = Field(
+        default_factory=list,
+        description="ADR-0021/ADR-0108: already-rejected FilePatches for this task's ladder, "
+        "rendered ONLY under EVIDENCE_PLUS_PRIORS (opt-in, never default; see ContextPolicy's own "
+        "comment). Lives on this PAYLOAD, never on RejectedApproach or the rejected_approaches "
+        "table — §12.35's structural guarantee (docs/SPEC.md:7461) is scoped to those two "
+        "surfaces only — and is never persisted to SQLite or git (ADR-0016/ADR-0024: no column "
+        "anywhere may hold a diff, and a rejected patch never reaches `git apply`). Threaded "
+        "in-process, attempt to attempt, by whatever drives the ladder.",
     )
     min_free_bytes: int = Field(
         default=0,
@@ -568,9 +581,12 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
 
         Evidence is always carried; the rejected-approach summaries are carried only from
         `EVIDENCE_PLUS_REJECTED_APPROACHES` up; the previous proposal's **diff** is carried by no
-        policy this worker implements, because re-showing a model its own rejected patch biases it
-        toward tweaking an approach that is wrong at the approach level. `stderr` is the verbatim
-        text of the failure being repaired right now — this worker holds no transcript to append.
+        policy other than `EVIDENCE_PLUS_PRIORS` — opt-in, never default, because re-showing a
+        model its own rejected patch biases it toward tweaking an approach that is wrong at the
+        approach level. Even there, `RejectedApproach` itself still has no field able to hold one
+        — a raw diff travels only via `payload.prior_rejected_diffs` (§12.35, ADR-0108). `stderr`
+        is the verbatim text of the failure being repaired right now — this worker holds no
+        transcript to append.
         """
         rendered: dict[str, JsonValue] = {
             "repo_id": ctx.repo_id,
@@ -597,6 +613,11 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                 }
                 summaries.append(summary)
             rendered["rejected_approaches"] = summaries
+        if ctx.context_policy is ContextPolicy.EVIDENCE_PLUS_PRIORS:
+            rendered["prior_diffs"] = [
+                {"path": prior.path, "diff": prior.diff}
+                for prior in payload.prior_rejected_diffs
+            ]
         return rendered
 
     # ------------------------------------------------------------------ result shaping
