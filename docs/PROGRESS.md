@@ -8476,6 +8476,21 @@ by different agents), `mypy` clean on 115 files, `test_integration_honesty_citat
 unaffected). A future round should complete a genuinely clean full-suite run rather than assume
 this checkpoint's disclosed gap means something is actually broken.
 
+**Update (2026-09-02, later the same day) — the full-suite question is resolved, and it exonerates
+the round.** The round's own final review completed a clean full-suite run after its earlier
+concurrent-session mistake: **2178 passed, 5 failed, 1023.95s**. All 5 failures are in
+`tests/test_build_e2e.py` and share one root cause, measured directly from the failure log (not
+inferred): the HOST'S ROOT FILESYSTEM WAS 100% FULL (`591G total, 565G used, 860K free`) —
+`bazel`'s toolchain extraction hit `IOException: No space left on device` (12 occurrences in the
+log) partway through. Confirmed not attributable to round IV: `git diff --stat 4de887c..HEAD --
+src/` is empty, `test_build_e2e.py` itself is untouched, and the failure signature is an I/O error
+during external-toolchain extraction, not a behavioral assertion. This same host-wide disk
+exhaustion then blocked round V's own dispatch shortly after (see round V's own ledger) — a
+genuine environment incident spanning both rounds' close/open boundary, not a round III or IV
+defect. `bazel disk` line itself was clean throughout (peak 3.66 GiB, well under the 6 GiB
+ceiling, 0 bytes residual output bases) — the exhaustion was host-wide, not this project's own
+`BAZEL_ROOT` misbehaving.
+
 **§12 count independently re-derived at least three times across this round's close** — 26/48
 every time, "first bold status marker per section," matching the Rollup exactly.
 
