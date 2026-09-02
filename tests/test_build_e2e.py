@@ -91,6 +91,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Final
 from urllib.parse import urlsplit
+from uuid import uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -2889,6 +2890,182 @@ def test_an_unknown_ecosystem_still_falls_back_visibly(
         build_worktree(fleet, "acme-ui-ts") / dests["acme-ui-ts"] / "BUILD.bazel"
     ).read_text(encoding="utf-8")
     assert "ts_project(" in sibling and "filegroup(" not in sibling, sibling
+
+
+# ---------------------------------------------------------------------------------------
+# §37 Blocker C — an ACTIVE stub redirects the consumer's generated dependency edge
+# ---------------------------------------------------------------------------------------
+#
+# (Deliberately unnumbered: the "N." sections below this point are §7's real-binaries sequence,
+# numbered 7-10, and this addition sits between sections 6 and 7 without renumbering either.)
+#
+# `_unit_deps` (cli.py) used to resolve every consumer -> provider graph edge to the provider's
+# OWN internal Bazel label unconditionally — even when the provider is REQUIRES_HUMAN_INTERVENTION
+# and a stub exists for it, which is precisely the case where that label was never merged onto the
+# branch. These two tests seed a `stubs` row directly via SQL (no worker in this tree emits one
+# yet — `--stub-blocked` is refused by `fleet build`, the same reason `tests/test_pr_e2e.py`'s
+# `degrade()` does the same) and prove BOTH halves of the fix on the ONE real internal edge that
+# survives Phase 3 (`acme-app-py` -> `acme-lib-py`, see `DEPENDENCY_REPO`/`DEPENDENT_REPO` below):
+# an `ACTIVE` stub redirects the edge, and a `SUPERSEDED` one — the state T1 moves a stub to only
+# once the provider's PR is `MERGED` (`orchestrator/stubs.py`'s `supersede`, ADR-0011 stacking) —
+# does not, because by then the provider's real label IS live on the integration branch.
+
+_STUB_PROVIDER: Final = "acme-lib-py"
+_STUB_CONSUMER: Final = "acme-app-py"
+#: The REAL `Coordinate.key` `acme-lib-py` publishes (`tests/test_scan_e2e.py`:
+#: `published["pypi::acme-lib-py"] == "acme-lib-py"`) — `_unit_deps`'s stub lookup is keyed on
+#: `edges.dst_coord_key`, so this has to be the genuine key, not a placeholder.
+_STUB_COORD_KEY: Final = "pypi::acme-lib-py"
+#: `bazel.layout.stub_dest("pypi::acme-lib-py")` fed through `cli._internal_label` — the same
+#: recipe the (separately tracked, not-yet-built) stub-creation worker will use, so this is a
+#: realistic `bazel_label`, not an arbitrary string.
+_STUB_LABEL: Final = "//third_party/stubs/pypi__acme-lib-py:pypi__acme-lib-py"
+#: The provider's own real label absent a stub — `cli._internal_label(DESTINATIONS["acme-lib-py"])`.
+_PROVIDER_LABEL: Final = "//py/acme_lib_py:acme_lib_py"
+
+
+def _insert_stub_row(
+    root: Path,
+    *,
+    run_id: str,
+    state: str,
+    pinned_version: str | None = "2.0.1",
+) -> None:
+    """One `stubs` row for the `_STUB_CONSUMER` -> `_STUB_PROVIDER` edge, written straight to
+    SQLite — the same reason (and shape) as `tests/test_pr_e2e.py`'s `degrade()`."""
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, resolved_at, state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'PUBLISHED_ARTIFACT', ?, ?, ?)",
+            (
+                str(uuid4()),
+                run_id,
+                _STUB_CONSUMER,
+                _STUB_COORD_KEY,
+                _STUB_CONSUMER,
+                _STUB_PROVIDER,
+                pinned_version,
+                _STUB_LABEL,
+                state,
+                # `schema.sql`'s CHECK requires `resolved_at` set on entry to any non-ACTIVE state.
+                None if state == "ACTIVE" else "2026-08-09T00:00:00+00:00",
+                "2026-08-09T00:00:00+00:00",
+                "2026-08-09T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stubs_label(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: FakeResolver,
+) -> None:
+    """`acme-lib-py` ends `REQUIRES_HUMAN_INTERVENTION`; an `ACTIVE` stub names it as the provider
+    of `acme-app-py`'s real `acme-lib-py>=2.0` dependency. `acme-app-py`'s generated `py_library`
+    must carry the STUB's label in `deps` — never `acme-lib-py`'s own, which was never merged.
+
+    This is the fixture §37 Blocker C names: without the redirect, `_unit_deps` would still emit
+    `//py/acme_lib_py:acme_lib_py` into `acme-app-py`'s `BUILD.bazel`, a label pointing at a
+    package that Phase 3 never published (a failed repo's package never lands — see
+    `test_a_build_failure_is_structured_and_does_not_take_its_siblings_down` above).
+
+    **Why two `build()` calls.** §3.5's `blocked_by` propagation (`orchestrator/runner.py`'s
+    `_contain`, unconditional — it does not consult `stubs`) marks `acme-app-py` `BLOCKED` the
+    moment `acme-lib-py` reaches `REQUIRES_HUMAN_INTERVENTION`, in the SAME invocation, before its
+    own wave ever opens: a `BLOCKED` member is never admitted (`scheduler.Admission`), so its
+    `BUILD.bazel` is never written. The worker that would create a stub AND un-block its consumer
+    is `--stub-blocked`, which every call site in this tree still REFUSES as not-implemented
+    (§37 Blocker A/B landed only the plumbing `clear_blocked_by` needs, not the worker that drives
+    it) — so this test stands in for that not-yet-built worker's END STATE with the same raw-SQL
+    approach `tests/test_pr_e2e.py`'s `degrade()` already uses for the same reason: a direct
+    `BLOCKED -> PENDING` write with `blocked_by` cleared, matching `clear_blocked_by`'s effect
+    without exercising its floor/staleness machinery (`orchestrator/reentry.py`), which is a
+    landed, separately-tested surface this task does not touch. The second `build()` call then
+    admits `acme-app-py` through the ordinary, unmodified scheduler.
+    """
+    fake = FakeBazel(
+        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS[_STUB_PROVIDER]): 34}
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake)
+    filter_repo = FakeFilterRepo()
+    monkeypatch.setattr(cli, "FILTER_REPO_RUNNER", filter_repo)
+
+    transformed(fleet)
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    _insert_stub_row(fleet, run_id=run_id, state="ACTIVE")
+
+    first = build(fleet, "--no-sandbox")
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+    statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert statuses[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    assert statuses[_STUB_CONSUMER] == "BLOCKED", statuses
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db")
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'PENDING', blocked_by = '[]' "
+            " WHERE run_id = ? AND repo_id = ? AND phase = 3",
+            (run_id, _STUB_CONSUMER),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    result = build(fleet, "--no-sandbox")
+    # Still REQUIRES_HUMAN_INTERVENTION overall: `acme-lib-py`'s own terminal failure is
+    # re-reported every invocation (it never resolves), which is unrelated to whether THIS
+    # invocation's own wave — `acme-app-py`'s — succeeded. That is checked below, directly.
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert statuses[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    assert statuses[_STUB_CONSUMER] == "SUCCEEDED", statuses
+
+    dests = relocations(filter_repo)
+    body = (
+        build_worktree(fleet, _STUB_CONSUMER) / dests[_STUB_CONSUMER] / "BUILD.bazel"
+    ).read_text(encoding="utf-8")
+    assert f'"{_STUB_LABEL}"' in body, body
+    assert f'"{_PROVIDER_LABEL}"' not in body, body
+
+
+def test_a_superseded_stub_leaves_the_consumers_generated_dependency_on_the_real_label(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+    resolver: FakeResolver,
+) -> None:
+    """The direct proof of the state predicate: a `SUPERSEDED` row for the SAME edge must NOT
+    redirect it — `acme-app-py`'s generated `deps` must carry `acme-lib-py`'s own real label.
+
+    `SUPERSEDED` means T1 already fired (`orchestrator/stubs.supersede`), which only happens once
+    the provider's PR is `MERGED` (ADR-0011 stacking) — so the provider's real label is already
+    live on the integration branch and `_unit_deps`'s ordinary, unmodified resolution is already
+    correct here. Both repos build cleanly (the default `bazel` fixture), unlike the `ACTIVE`
+    companion test above: this case is about the STATE column, not about a build failure.
+    """
+    _ = bazel
+    transformed(fleet)
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    _insert_stub_row(fleet, run_id=run_id, state="SUPERSEDED")
+
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dests = relocations(filter_repo)
+    body = (
+        build_worktree(fleet, _STUB_CONSUMER) / dests[_STUB_CONSUMER] / "BUILD.bazel"
+    ).read_text(encoding="utf-8")
+    assert f'"{_PROVIDER_LABEL}"' in body, body
+    assert f'"{_STUB_LABEL}"' not in body, body
 
 
 def _second_fleet_workspace(
