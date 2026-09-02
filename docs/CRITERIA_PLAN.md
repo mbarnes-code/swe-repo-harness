@@ -709,20 +709,8 @@ fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` a
 four.
 
 ## 35. No raw prior diff reaches a prompt
-**OPEN — worker level covered at the `EVIDENCE_ONLY` rung; one proxy assertion and one
-structurally-blocked sub-clause remain.**
-**Corrected, final review, round AA (2026-09-01): the closure below is real but this entry
-originally overclaimed "fully covered."** A measured sweep of `tests/test_workers_transform.py`
-for diff-absence assertions using a header/marker proxy (rather than a genuine per-line sweep)
-found **3 sites before this round, 2 remaining after**: `:1106` and `:1213` (both
-`assert "diff --git" not in prompt`) are untouched — and they sit on tests whose context is
-`ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES` (`:1083`, `:1190`), the policy that actually
-carries prior-approach data and is therefore the more plausible leak path, not the
-`EVIDENCE_ONLY` rung the round's new test covers. **Mitigating, not a reason to skip fixing the
-claim:** `RejectedApproach` (`models/tasks.py:213`) has no field capable of holding diff text and
-`reason` is `max_length=280`, so leg B's leak is structurally constrained by schema — a stronger
-guard than any test, which is why this residual is left as a proxy rather than dispatched as a
-new task, but the entry must say so rather than claim the class is closed.
+**OPEN — worker level now covered at both rungs; only the CLI-level proof remains, blocked on
+D50.**
 
 **Closed, round AA task 3 (2026-09-01, `7e982d6`), at the `EVIDENCE_ONLY` rung.**
 `tests/test_workers_transform.py::
@@ -731,18 +719,28 @@ both gaps this rung had in one test: the prior `FailureClass` token (`str(Failur
 BUDGET_EXHAUSTED)`, chosen distinct from the current attempt's own legitimate `PATCH_REJECTED` to
 avoid a false-positive collision) is asserted absent, and diff-absence is now a real per-line
 sweep over a genuine multi-line diff built via the same `make_unified_diff` helper production
-code uses (`rewrite/pipeline.py:397` — **corrected, final review**: originally miscited as
-`workers/rewrite.py`, which does not define or call it directly; `workers/rewrite.py` imports
-`RewritePipeline` from `fleet.rewrite.pipeline`, which is what calls the helper) — not the single
-marker/header-string proxy this entry previously described for this rung. Task review
-independently reproduced two separate mutations (leaking `failure_class` in `_evidence()`;
-leaking rejected-patch content via `_apply_stderr`'s `GitCommandError` branch) and confirmed each
-reddens only its own assertion — two genuine, independent discriminators, not one riding on the
-other's mutation.
-**Remains OPEN**: the `EVIDENCE_PLUS_REJECTED_APPROACHES` rung's proxy assertions above, and the
-CLI-level proof, still blocked on D50's `--context-policy` work (`cli.py` refuses
-`--context-policy` for any value at all, audit row 35) — do not attempt the CLI-level half before
-D50 lands.
+code uses (`rewrite/pipeline.py:397`) — not the single marker/header-string proxy this entry
+previously described for this rung. Task review independently reproduced two separate mutations
+(leaking `failure_class` in `_evidence()`; leaking rejected-patch content via `_apply_stderr`'s
+`GitCommandError` branch) and confirmed each reddens only its own assertion.
+
+**Closed, round CC task 2 (2026-09-02, `2ba4cef`), at the `EVIDENCE_PLUS_REJECTED_APPROACHES`
+rung — the two proxy sites round AA's final review flagged.** `:1106` and `:1213` (both
+`assert "diff --git" not in prompt`) are replaced with the same real per-line sweep the
+`EVIDENCE_ONLY` rung already has. **A genuine discovery along the way, independently confirmed by
+task review two ways**: the OLD `"diff --git" not in prompt` proxy was not merely weaker than a
+per-line sweep — it was **structurally blind**. `make_unified_diff`
+(`src/fleet/rewrite/apply.py:119`) is a thin wrapper over `difflib.unified_diff`, which emits only
+`---`/`+++`/`@@` and content lines; the literal string `"diff --git a/... b/..."` is git's own
+preamble, layered on by `git diff` itself, and never appears in this helper's output at all. So
+the old proxy could never have caught a real leak through this path, regardless of how much
+content leaked. Task review reproduced this directly: a targeted single-line leak into
+`_evidence()`'s rendered summary made the reconstructed OLD assertion PASS while the NEW per-line
+sweep correctly reddened.
+
+**Remains OPEN**: the CLI-level proof only, still blocked on D50's `--context-policy` work
+(`cli.py` refuses `--context-policy` for any value at all, audit row 35) — do not attempt it
+before D50 lands. Both worker-level rungs are now genuinely closed.
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
