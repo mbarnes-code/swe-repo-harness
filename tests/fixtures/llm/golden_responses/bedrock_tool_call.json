@@ -1,0 +1,31 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch.",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_ZjIwYjk4NTAtZGM3",
+            "name": "emit_response",
+            "input": {
+              "ecosystem": "npm",
+              "is_library": false,
+              "confidence": 0.88,
+              "rationale": "package.json has no \"main\"/\"exports\" field, ships a bin/ entrypoint, and nothing else in the workspace imports it"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 480,
+    "outputTokens": 58,
+    "totalTokens": 538
+  },
+  "metrics": {
+    "latencyMs": 734
+  }
+}
