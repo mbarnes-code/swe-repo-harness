@@ -1199,6 +1199,45 @@ scenario in SPEC.md item 37 becomes testable for the first time.
 **Out of scope for the remaining work:** D80's landed reconciliation logic does not need to
 change — it's correct and tested; the remaining gap is purely on the creation side.
 
+**Update, round VI (2026-09-02) — the creation gap is deeper than "one NEW-MECHANISM worker task";
+three structural blockers found, one load-bearing, likely needing its own ADR.** A dispatched task
+(`agent/roundvi-task4`, `0b31b54`, not merged — report only, zero code changed) investigated
+building the minimal single-consumer stub-creation path and correctly reported BLOCKED rather than
+forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
+
+- **Blocker A (load-bearing).** There is no admission path for a `BLOCKED` repo, anywhere.
+  `WaveScheduler.admit()` unconditionally excludes every `RepoStatus.BLOCKED` member;
+  `ALLOWED_TRANSITIONS[RepoStatus.BLOCKED]` (`models/enums.py:41`) permits only `{PENDING,
+  SKIPPED}` — no edge to `RUNNING`/`DEGRADED` exists. The one existing re-admission mechanism
+  (`fleet resume` step 6's synthetic-wave append) triggers only when a repo's `blocked_by`
+  recomputes to *empty* — which never happens for a stub-eligible consumer, since the abandoned
+  provider stays `REQUIRES_HUMAN_INTERVENTION` forever. Reusing that mechanism means teaching it a
+  genuinely new second trigger condition, not wiring an existing one. `tests/test_scheduler.py::
+  test_a_blocked_repo_is_not_admitted` locks the current behavior down as an invariant — any fix
+  here changes tested behavior (correctly extending it is the real work, not a side effect).
+- **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
+  no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
+  (`cli.py:6956-6988`) always constructs `published: Coordinate` with `version_spec=None`. This is
+  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
+  re-derivation from an existing carrier as previously assumed.
+- **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7062-7113`) resolves every
+  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
+  branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
+  materialized: a build break, not the stub SPEC promises.
+
+**Done bar (revised):** three sequential prerequisites before the previously-scoped "bounded"
+piece (trigger detection + `StubRecord` construction + `workspace_deps()` render + the `stubs`
+INSERT + `EMPTY_FAILING` rendering — genuinely small, but has no real caller shape until the three
+blockers below resolve) can be built without risking a narrower overclaim requiring a rewrite:
+(1) admission design for a stub-eligible `BLOCKED` repo (likely its own ADR, given it changes a
+tested invariant — the state-machine-adjudication shape ADR-0112 set a precedent for); (2) a
+version-sourcing schema/design decision; (3) `_unit_deps`'s stub-aware reclassification branch.
+Each is independently dispatchable and each is sized comparably to an ordinary round task, not a
+one-shot bundle. **Still not ready for a single-task dispatch; ready for the FIRST of three
+follow-on tasks (Blocker A, since it's the prerequisite for the other two being end-to-end
+testable).**
+
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
 and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round
