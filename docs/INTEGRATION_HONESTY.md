@@ -7430,7 +7430,7 @@ that one column without making the criterion's stated text false. This defect's 
 adjudicated this sentence, so a reader arriving here directly sees the same context a reader
 arriving via `docs/CRITERIA_PLAN.md` sees.
 
-## D92 — OPEN. `PrState.HELD` is declared and documented but never written anywhere in `src/fleet/`
+## D92 — FIXED, LANDED (`7cd6647`, round GG task 1). `PrState.HELD` is declared and documented but never written anywhere in `src/fleet/`
 
 **Found by round Z task 2 (2026-09-01), while re-auditing §12.38/§12.46's `stub_reconcile` test
 coverage against D80's landed fix — a disclosed-but-out-of-scope finding, not this task's own
@@ -7457,6 +7457,26 @@ under real traffic.
 a sibling function in `orchestrator/stubs.py`, transitioning a PR's state to `HELD` when its
 stub_reconcile pass finds the stub still unresolved (mirroring how `ACTIVE`/`SUPERSEDED` are
 presumably set — not traced here). That design choice is not made here.
+
+**Fixed, 2026-09-02 (round GG task 1, `7cd6647`), reviewed Approved (spec/brief compliance) with
+one small controller fix (`d9cc964`) for two stale test comments the task review found.**
+`_apply_stub_reconcile` now takes `reconcile()`'s `held_for_merge`, dedupes by
+`provider_repo_id` (a provider can legitimately repeat across consumers or stub rows), loads each
+held provider's existing `PullRequestDraft` via `_pr_records`, and re-persists it with
+`state=PrState.HELD` in the same write transaction — an `_upsert_pr_record` helper extracted from
+`_write_pr_record` so both share the SQL without a second `BEGIN IMMEDIATE`. Proven a genuine
+discriminator (old-fails/new-passes): reverting only the `cli.py` portion leaves the pre-existing
+`test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr` assertions passing
+while a new read of the held provider's PR record fails `DRAFTED != HELD`; restored, it passes —
+reproduced independently by task review in a fresh worktree. **Consequence of this bullet's own
+paragraph above being wrong in one respect, corrected here rather than rewritten:** the claim
+"`_apply_stub_reconcile` touches only the `stubs` and `findings` tables" no longer holds — the
+held-provider path now also updates the provider's own `phases.pr_url`/`updated_at`
+(`Phase.VERIFY`), a pre-existing side effect of the reused `_write_pr_record` SQL the task review
+surfaced; it never touches the CONSUMER's `phases.status`, so §12.38's "consumers stay DEGRADED"
+guarantee is unaffected. Does not flip §12.38 alone — D94 (no PR-promotion mechanism) remains
+OPEN and still blocks it, confirmed genuinely NEW-MECHANISM sized with no smaller slice
+(round GG's own research, re-checked directly against current `HEAD`).
 
 ## D93 — FIXED, LANDED (`b774c8f`, round EE task 2; component commit `f0936c2`). No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
 

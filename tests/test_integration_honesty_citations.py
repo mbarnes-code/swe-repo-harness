@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 46 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 47 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -542,6 +542,18 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "_ruff()",
         "tests/test_lint_gate.py:63",
     ),  # L6378 defined at [(69, 110), (69, 110)], cited 63-63
+    # D96's own "as measured" paragraph names `_require_disk_headroom`'s definition line as of
+    # round AA task 2 (2026-09-01), the round that found the gap -- the same kind of past-tree
+    # claim `record_attempt` above is pinned for. Unrelated growth in `cli.py` since then (most
+    # recently round GG task 1's D92 fix) moved the real definition to [(13813, 13828)]; the
+    # citation is not repointable to "the current definition" without destroying what the
+    # paragraph measured. Found by the citation gate itself, round GG (2026-09-02) -- pre-existing
+    # drift surfaced as a side effect of an unrelated merge shifting `cli.py`'s line numbers, not
+    # introduced by this pin's own commit.
+    (
+        "_require_disk_headroom",
+        "cli.py:13782",
+    ),  # L7636 defined at [(13813, 13828), (13813, 13828)], cited 13782-13782
 )
 
 
