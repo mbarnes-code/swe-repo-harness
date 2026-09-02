@@ -6,7 +6,18 @@ add `BUILD_DIAGNOSIS`, `DEP_DISAMBIGUATE`, `CYCLE_BREAK_PROPOSAL`, and `CONFLICT
 (7 of 12); round V task 2 adds `API_INCOMPAT_REWRITE` and `ESCALATION` (9 of 12 counting this
 task's own rows alone — a sibling task 1 this round adds `TRANSFORM_REPAIR`/`MANIFEST_EXTRACT`
 independently, bringing the total to 11 of 12 if both land; 3 remain after this task's own half,
-tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
+tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here). Round V task 5 adds `BUILD_AUTHORING`
+— the 12th and last of the 12 roles, closing §12.4 in full. `BuildFileProposal` (its declared
+schema) is a TWO-LEVEL nested-object tuple: `targets` is a `tuple[BuildTargetProposal, ...]`, and
+each `BuildTargetProposal` itself carries three sibling `tuple[str, ...]` fields (`srcs`/`deps`/
+`visibility`) — structurally heavier than `TRANSFORM_REPAIR`/`API_INCOMPAT_REWRITE`/`ESCALATION`'s
+`ProposedFileEdit` (2 scalar fields) or `MANIFEST_EXTRACT`'s `ExtractedDependency` (3 scalar
+fields, no nested arrays). The anthropic fixture below carries 2 target entries with non-empty
+`srcs`/`deps`/`visibility` on the first, so the round-trip exercises both the outer `targets` tuple
+and every one of the inner object's own tuple fields at once; the mutation pair below deletes a
+required field one level inside a tuple ENTRY's own tuple entry (`targets[0].name`) rather than at
+the outer level, following `TRANSFORM_REPAIR`'s own precedent (round V task 1 mutated inside
+`ProposedFileEdit`, not just `LlmPatchProposal` itself).
 
 ADR-0013's contract layer declares the intent this closes: "every LLM prompt's declared response
 schema validates against a stored golden sample." `tests/test_llm_roles.py`'s
@@ -102,6 +113,8 @@ from fleet.llm.roles import Role
 from fleet.llm.schemas import (
     RESPONSE_SCHEMAS,
     ApiRewriteProposal,
+    BuildFileProposal,
+    BuildTargetProposal,
     CycleBreakProposal,
     DependencyDisambiguation,
     ExtractedDependency,
@@ -141,6 +154,7 @@ assert RESPONSE_SCHEMAS[Role.API_INCOMPAT_REWRITE] is ApiRewriteProposal
 assert RESPONSE_SCHEMAS[Role.ESCALATION] is LlmEscalationProposal
 assert RESPONSE_SCHEMAS[Role.TRANSFORM_REPAIR] is LlmPatchProposal
 assert RESPONSE_SCHEMAS[Role.MANIFEST_EXTRACT] is ManifestExtraction
+assert RESPONSE_SCHEMAS[Role.BUILD_AUTHORING] is BuildFileProposal
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -866,6 +880,96 @@ GOLDEN_CASES: tuple[GoldenCase, ...] = (
             "guessed list would be unrefutable",
         },
     ),
+    # --- BUILD_AUTHORING (round V task 5, new) — TWO-LEVEL nested-object tuple: `targets` is a
+    # tuple of `BuildTargetProposal`, each carrying three sibling tuple[str, ...] fields of its
+    # own (`srcs`/`deps`/`visibility`). Structurally the heaviest of the 12 roles. ---
+    GoldenCase(
+        role=Role.BUILD_AUTHORING,
+        schema=BuildFileProposal,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_authoring_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "package_path": "java/acme/legacy-shim",
+            "targets": (
+                BuildTargetProposal(
+                    name="legacy-shim",
+                    rule="java_library",
+                    srcs=("StringHelper.java", "LegacyUtil.java"),
+                    deps=("//java/acme/common:acme-base",),
+                    visibility=("//java/acme:__subpackages__",),
+                ),
+                BuildTargetProposal(
+                    name="legacy-shim_test",
+                    rule="java_test",
+                    srcs=("LegacyShimTest.java",),
+                    deps=(":legacy-shim", "//third_party/junit"),
+                    visibility=("//visibility:private",),
+                ),
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_AUTHORING,
+        schema=BuildFileProposal,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_authoring_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "package_path": "js/vendor/widgets-bundle",
+            "targets": (
+                BuildTargetProposal(
+                    name="widgets-bundle",
+                    rule="js_library",
+                    srcs=("widgets.min.js",),
+                    deps=(),
+                    visibility=("//js:__subpackages__",),
+                ),
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_AUTHORING,
+        schema=BuildFileProposal,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_authoring_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "package_path": "gradle/tools/codegen-legacy",
+            "targets": (
+                BuildTargetProposal(
+                    name="codegen-legacy",
+                    rule="java_library",
+                    srcs=("Codegen.java", "Templates.java"),
+                    deps=("//gradle/tools/common:codegen-support",),
+                    visibility=("//visibility:public",),
+                ),
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_AUTHORING,
+        schema=BuildFileProposal,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="build_authoring_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "package_path": "python/tools/legacy_scripts",
+            "targets": (
+                BuildTargetProposal(
+                    name="legacy_scripts",
+                    rule="py_library",
+                    srcs=("report.py", "cleanup.py"),
+                    deps=(),
+                    visibility=("//python/tools:__subpackages__",),
+                ),
+            ),
+        },
+    ),
 )
 
 
@@ -1050,3 +1154,35 @@ def test_the_unmutated_transform_repair_fixture_still_validates_after_the_mutati
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, LlmPatchProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_a_build_authoring_reply_missing_a_nested_target_field_fails_schema_validation() -> None:
+    """Mutation of the bedrock `BUILD_AUTHORING` fixture: delete `targets[0].name`, one of the two
+    `BuildTargetProposal` fields with no default (`name`/`rule` both lack a `default=`;
+    `srcs`/`deps`/`visibility` all default to `()` and would NOT discriminate — deleting any of
+    them leaves a still-valid payload). `BuildFileProposal.targets` is a TWO-LEVEL nested-object
+    tuple — `targets` is `tuple[BuildTargetProposal, ...]`, and this mutation reaches one field
+    inside one tuple ENTRY, not the outer `targets` tuple itself (deleting the whole `targets` list
+    or emptying it would only prove the OUTER `min_length=1` constraint, already exercised by every
+    other role's outer-tuple mutation). If `_validate`'s Pydantic call only checked the outer
+    `BuildFileProposal` shape (e.g. "is `targets` a non-empty tuple") without descending into each
+    entry's own required fields, this would pass instead of raising — following
+    `TRANSFORM_REPAIR`'s own precedent (round V task 1 mutated inside `ProposedFileEdit`, not just
+    `LlmPatchProposal` itself)."""
+    raw = _load("build_authoring_bedrock_tool_call.json")
+    del raw["output"]["message"]["content"][0]["toolUse"]["input"]["targets"][0]["name"]
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="name"):
+        client_module._validate(reply, BuildFileProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_build_authoring_fixture_still_validates_after_the_mutation() -> None:
+    """Control half of the `BUILD_AUTHORING` mutation pair: the identical fixture, unmutated (the
+    single `targets` entry's `name` intact), must still validate — proving the failure above is
+    caused by the deleted nested `name` field, not by an unrelated defect in the fixture, the
+    parse path, or `_validate` itself."""
+    raw = _load("build_authoring_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, BuildFileProposal, StructuredOutputMode.TOOL_CALL)
