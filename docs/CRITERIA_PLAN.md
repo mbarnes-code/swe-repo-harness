@@ -137,14 +137,24 @@ SPEC's own item numbering, so it is out of this entry's scope, not a residual of
 **Out of scope:** does not require reorganizing the rest of `tests/` into the `unit/` layout.
 
 ## 4. Model round-trip + per-backend golden response
-**OPEN — mechanism partly exists — NEW-MECHANISM (small, per backend).** Round-trip is fully
-covered. No golden-response artifact exists for any backend at any rung, including the required
-`PROMPTED` rung (audit row 4); ADR-0013 declares the intent, nothing ships it.
-**Done bar:** one recorded golden response per shipped backend (anthropic/bedrock/openai_compatible
-/vertex) validating against its declared schema, plus one recorded at the `PROMPTED` rung, each
-checked into a fixture and asserted by a real (non-network) test.
-**Out of scope:** does not require a live-network golden-capture pipeline — a checked-in fixture
-satisfies the criterion as written.
+**DONE (round II task 3, 2026-09-02, `251c774`, reviewed Approved in full).** Round-trip was
+already fully covered. `tests/test_llm_golden_responses.py` + `tests/fixtures/llm/golden_responses/
+*.json` add one recorded raw response per shipped backend
+(`anthropic`/`bedrock`/`vertex` at the `TOOL_CALL` rung, `openai_compatible` at the required
+`PROMPTED` rung — the only shipped backend whose declared capabilities make `PROMPTED` its floor
+rather than a fallback, confirmed by reading each backend's `declared_capabilities` directly), each
+parsed through that backend's real response-parsing code and validated against its declared
+schema. Task review independently re-verified every fixture field-for-field against real adapter
+code and existing hand-built test helpers, reproduced the Anthropic SDK's own
+`Message.model_validate()` succeeding on the anthropic fixture directly, confirmed the round-trip/
+golden-response distinction is real (the round-trip test never calls a backend's parse function),
+and independently reproduced 2 Rule-12 mutations (required-field removal → genuine
+`pydantic.ValidationError`, not a crash). No `DONE_WITH_CONCERNS` on any backend — all 4 plus the
+PROMPTED rung genuinely closed. **Done bar met in full, as originally stated:** one recorded golden
+response per shipped backend (anthropic/bedrock/openai_compatible/vertex) validating against its
+declared schema, plus one recorded at the `PROMPTED` rung, each checked into a fixture and asserted
+by a real (non-network) test. **Out of scope, honored:** no live-network golden-capture pipeline
+was built — a checked-in fixture satisfies the criterion as written.
 
 ## 5. No `pickle` / `ThreadPoolExecutor` / `subprocess.run` in `src/fleet/`
 **DONE (landed round N task 1, `51f7e31`, reviewed Approved).**
@@ -1427,7 +1437,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 26 | 1, 3, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round GG, form-agnostic `awk` re-scan after merging all four of this round's tasks: §35 closed — `EVIDENCE_PLUS_PRIORS` diff-rendering built and mutation-proven both directions, ADR-0110's disclosed-residual closure, see §35's own entry; §3 closed — coverage gate armed at `fail_under=85`, `tests/unit` populated, ADR-0111 (renumbered from a worktree collision with ADR-0110, see that entry), see §3's own entry. Round EE's history, when §35 was marked DONE and reverted the same day for the reason round GG has now actually built, is kept below rather than deleted) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 27 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round II, form-agnostic `awk` re-scan: §4 closed — golden-response fixtures for all 4 shipped backends + the required PROMPTED rung, task review Approved in full, see §4's own entry. Round GG's history — §35/§3 closed that round via ADR-0110/ADR-0111 — is kept below rather than deleted) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only, D92/D93 landed since; corrected round II, see §38's own entry — D80 is fully landed and no longer the blocker either), 43 (partial) |
