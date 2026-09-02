@@ -225,7 +225,8 @@ sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven
 No further work; do not touch.
 
 ## 13. Retry semantics — ladder, ceiling, atomicity, transient budget
-**OPEN — mixed — TEST-ONLY, not actually blocked on D50.** Ladder-length validation,
+**DONE (round CC task 1, 2026-09-02, `c77fc71`) — all sub-clauses closed, including atomicity.**
+Ladder-length validation,
 transient-vs-attempt counting, and 3-rung tier escalation to RHI are all covered. **Corrected
 2026-09-01 (round Z research): the "5-rung variant blocked on D50" framing is stale and was
 re-verified false, not merely re-stated.** `LadderState` (`orchestrator/retry.py:79-93`) DOES take
@@ -277,8 +278,26 @@ fixed here:** a REAL (non-`--deterministic-only`) 5-rung run would still repeat 
 rungs 4-5, since `TIER_LADDER`/`DEFAULT_LADDER` are hardcoded 3-tuples reading no config —
 flagged for a possible future sub-clause or D-number, orthogonal to the row-count property this
 task closed (confirmed independent by both the implementer and task review).
-**§13 stays OPEN**: only the atomicity sub-clause (a real interruption test) remains — its own
-Done bar text above is unchanged and still accurate.
+**Closed, round CC task 1 (2026-09-02, `c77fc71`) — the atomicity sub-clause, the last one open.**
+`tests/test_repository.py::
+test_complete_phase_is_one_write_unit_so_a_failure_leaves_no_half_completed_phase` is a genuine
+mid-transaction interruption test, not another end-state-only check: `complete_phase`'s unit has
+only one write statement (unlike the landed precedent's two,
+`test_the_demotion_is_one_write_unit_so_a_failure_leaves_no_half_demoted_repo`), so the
+injection point was adapted — the real `UPDATE` runs unmodified inside the open `BEGIN IMMEDIATE`,
+then a monkeypatched `aiosqlite.Connection.execute` raises on it, standing in for a crash after
+the write lands but before the unit returns and the writer commits. Same two-assertion discipline
+as the precedent: a `writer.submit` call-count proof (one transaction, not several) plus a
+post-rollback read-back through a genuinely separate connection, confirming nothing landed.
+Rule-12 proven three ways, independently reproduced by task review: a rollback→commit defect in
+`_run_in_immediate` (`state/db.py`) reddens the read-back assertion (and no pre-existing test in
+the suite would have caught it — every prior test only exercised the success path or a pre-write
+failure, never a fault after a real write inside this specific unit); a split-into-two-submits
+defect reddens the submit-count assertion; a cosmetic comment reflow stays green as a control.
+Task review's own independent judgment (not just the mutation mechanics): this proves the SPEC
+claim that "nothing is ever interrupted mid-write" for real, closing the exact gap this entry
+named — not a weaker "an exception can happen somewhere" substitute.
+**Done bar:** met in full. Nothing remains open for §12.13.
 
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
@@ -1111,11 +1130,11 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 22 | 1, 5, 6, 7, 10, 12, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 44, 45, 46, 48 (re-derived 2026-09-02, round BB close, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §45 this round: all 5 remaining sub-clauses closed across two parallel tasks, see §45's own entry; a `tasks.pre_commit_sha` gap surfaced during the work is pre-existing D91, not a new blocker); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 23 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 44, 45, 46, 48 (re-derived 2026-09-02, round CC, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §13 this round: its last remaining sub-clause, atomicity, closed via a real mid-transaction interruption test, see §13's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
-| OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — §45 (this round's only prior occupant of this row, and already stale before that) moved to DONE 2026-09-02; row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 5 | 22 (partial, D50 for one sub-clause only), 35 (partial), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 13 (not actually blocked on D50 — corrected 2026-09-01, round Z research, see §13's own entry; only its atomicity sub-clause remains as of round AA), 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 13/39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
+| OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
+| OPEN — blocked on an existing D-number, don't duplicate | 5 | 22 (partial, D50 for one sub-clause only), 35 (its worker level is now FULLY closed as of round CC — only the CLI-level proof remains, blocked on D50), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
