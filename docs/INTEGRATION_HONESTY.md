@@ -6656,8 +6656,10 @@ verbatim on re-entry), but it is work done and state changed on behalf of an adm
 already impossible before the loop began.
 
 **Class result — the same ordering exists in VERIFY, which R2 marked `[UNVERIFIED]`.** `_verify_impl`
-calls `_prepare_verify` for every member (`cli.py:8430-8449`) before `_run_verify_wave`
-(`cli.py:8451`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
+calls `_prepare_verify` for every member (`cli.py:9186-9193` — **corrected 2026-09-02, round EE
+final review: the citations here had rotted to the point of naming the wrong function entirely**,
+`8430-8449` now falls inside `_run_verify_wave`'s own definition, a different function) before
+`_run_verify_wave` (`cli.py:9206`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
 mutex it takes a fresh snapshot ref, then per member runs `worktree remove --force`, a `shutil.rmtree`
 fallback, `worktree prune`, and `worktree add --detach --force`. So **2 of the 3 wave-driving phase
 impls** put per-member git mutation ahead of admission. `_build_impl` is **not** in this class as
@@ -7284,7 +7286,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1255-1262`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1284-1286`)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
@@ -7297,7 +7299,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2269-2337`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:6611`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:6672`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7593,7 +7595,7 @@ highest allocated number was `D95`. Independently re-confirmed by the controller
 task review's word alone), against current `HEAD` — separately from task review's own trace,
 which itself went further than the implementer's original grep-only flag.
 
-**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13725`)
+**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13748`)
 was called at exactly 4 sites as of when this defect was found (a 5th, `transform` itself, exists
 now — see the fix note below): `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
 `_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3538` as of

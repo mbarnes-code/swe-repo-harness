@@ -1,9 +1,13 @@
 """Every §9 config key an operator can set must be read by some code.
 
-`src/fleet/cli.py` already refuses `--context-policy` at the flag layer, and says why: the value
-"would be parsed and then ignored by every rung", because `workers/base.context_policy_for_attempt`
-"reads no config". `--stub-blocked` and `--no-anchoring-guard` are refused in the same block for
-the same reason — *a flag that parses and is then dropped is read by the operator as honoured.*
+**Corrected 2026-09-02 (round EE): `--context-policy` is no longer refused.** This module's
+opening two paragraphs originally used `cli.py`'s then-blanket refusal of `--context-policy` as
+the motivating example for the whole file's design — round EE wired `transform.ladder.
+context_policy` through to the worker for real (`orchestrator/runner.py:523`), closing §12.35's
+CLI-level proof, and the refusal was removed. `--stub-blocked` and `--no-anchoring-guard` are
+still refused in the same block, for the same reason — *a flag that parses and is then dropped is
+read by the operator as honoured* — so the file's motivating pattern still holds for those two;
+only the `--context-policy` half of the original example is now historical.
 
 That refusal covers the flag layer only. The identical defect one layer down — a **config key**
 behind the same missing code — is still accepted silently: `config/fleet.yaml` validates, the
@@ -44,19 +48,35 @@ consequences remain worth knowing before trusting a pass:
    with real, unrelated fields of `llm/client.py`'s `CallPolicy` — injected precisely so a run does
    not have to load config, per its own docstring — and, for `enabled`, with the genuinely-wired
    `scan.contracts.enabled`). The collisions are all still there, so all five still need the
-   qualified check; their **verdicts** now differ. Two (`transform.ladder.role`,
-   `.context_policy`) remain inert and stay in `KNOWN_INERT`. The three `llm.` ones are
-   **read** as of 2026-08-22: `orchestrator/context.py::call_policy_for` maps them onto the
-   `CallPolicy` that `RunContext.__post_init__` now injects, so the qualified pair occurs for
-   real and the `KNOWN_INERT` lines were deleted. They stay in `QUALIFIED_MATCH_KEYS`
-   deliberately: the bare-name collision with `CallPolicy` is what would let a *revert* of
-   that wiring pass `test_every_config_key_is_read` unnoticed.
+   qualified check; their **verdicts** now differ. Only `transform.ladder.role` remains inert and
+   stays in `KNOWN_INERT`. The three `llm.` ones are **read** as of 2026-08-22:
+   `orchestrator/context.py::call_policy_for` maps them onto the `CallPolicy` that
+   `RunContext.__post_init__` now injects. `transform.ladder.context_policy` is **read** as of
+   2026-09-02 (round EE): `orchestrator/runner.py:523`'s `_drive` sources
+   `ladder=tuple(rung.context_policy for rung in self.ctx.config.transform.ladder)` — so for all
+   four, the qualified pair occurs for real and the `KNOWN_INERT` lines were deleted. They stay in
+   `QUALIFIED_MATCH_KEYS` deliberately: the bare-name collision is what would let a *revert* of
+   that wiring pass `test_every_config_key_is_read` unnoticed. `transform.ladder.context_policy`
+   needed one more piece to make that protection real: its genuine reader spells the qualifying
+   variable `rung`, not the `ladder` `_parent_field` derives from the dotted config path, a gap
+   round EE's own final review found — closed via `_PARENT_FIELD_OVERRIDES` (see
+   `_parent_field`'s definition), which maps this one key's parent explicitly rather than leaving
+   it structurally unverifiable.
 2. `UNVERIFIABLE` is what is left when even the qualified match cannot decide it:
-   `transform.ladder.tier` stays undecidable because `orchestrator/runner.py:655` calls
+   `transform.ladder.tier` stays undecidable because `orchestrator/runner.py:802` calls
    `ladder.tier(attempt)` where `ladder` is `orchestrator/retry.py`'s `LadderState` — a *different*
-   object with its own `tier` **method**, built from `workers/base.TIER_LADDER`, not
-   `config.transform.ladder`. `LadderState(...)` at `runner.py:512` takes no `ladder=`, so the
-   configured ladder never reaches a rung, but the text `ladder.tier` is genuinely there, naming
+   object with its own `tier` **method**. **Corrected 2026-09-02 (round EE): the reasoning below
+   this point used to be that `LadderState.tier` was built from the hardcoded
+   `workers.base.TIER_LADDER` rather than config, and that `LadderState(...)` took no `ladder=`
+   argument — both now false.** `LadderState.tier` (`orchestrator/retry.py:100`) now delegates to
+   the parameterized `workers.base.tier_for_attempt(attempt, self.ladder)`, and `runner.py:512`'s
+   `LadderState(...)` construction DOES pass `ladder=` — the configured ladder genuinely reaches
+   `.tier()` now, same as `.context_policy()` already did. **The verdict is unchanged regardless**:
+   `config.transform.ladder[i].tier` (the declared field on `LadderRung`) is still never read by
+   anything — `.tier()`'s value is *derived* from `.context_policy` via `workers.base.
+   _TIER_FOR_RUNG`, not read from the config object's own `.tier` field, so that field stays
+   undecidable by a name scan for the same structural reason as before, just not the reason
+   originally written down here. The text `ladder.tier` is genuinely there, naming
    genuinely unrelated code — no textual scan, qualified or not, tells "attribute of a config
    model" from "method of an unrelated same-named object" apart.
    `test_unverifiable_keys_still_defeat_the_scan` holds each member to *staying* undecided: the day
@@ -227,11 +247,20 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:scan.contracts.marker_scan_bytes",      # settings.py:337
         #
         # --- generic-word / same-name-different-object collisions, decided via qualified match --
-        # `transform.ladder[i].role` and `.context_policy`: `.tier` is their sibling and stays
-        # genuinely undecidable (see `UNVERIFIABLE`); these two ARE decidable — `ladder.role` and
-        # `ladder.context_policy` occur nowhere for real once qualified.
+        # `transform.ladder[i].role`: `.tier` is its sibling and stays genuinely undecidable (see
+        # `UNVERIFIABLE`); `.role` IS decidable — `ladder.role` occurs nowhere for real once
+        # qualified.
         "fleet.yaml:transform.ladder.role",                 # settings.py:419
-        "fleet.yaml:transform.ladder.context_policy",       # settings.py:420
+        # (`transform.ladder.context_policy` used to sit here, with the same "occurs nowhere for
+        # real once qualified" mechanism — round EE (2026-09-02) wired it for real:
+        # `orchestrator/runner.py:523`'s `_drive` now sources `ladder=tuple(rung.context_policy
+        # for rung in self.ctx.config.transform.ladder)`, closing §12.35's CLI-level proof. It
+        # keeps its `QUALIFIED_MATCH_KEYS` membership below. The qualified scan's own
+        # syntactically-derived parent name (`ladder`, from the dotted config path) does NOT match
+        # the genuine reader's actual variable name (`rung`) — round EE's own final review found
+        # this gap, which would have let the wiring land invisibly to this ratchet. Closed, not
+        # just disclosed: `_PARENT_FIELD_OVERRIDES` (below `_parent_field`'s definition) maps this
+        # one key to `rung` explicitly, so the qualified scan finds the real reader.)
         # (`llm.max_schema_repairs`, `llm.failover.enabled` and `llm.failover.max_targets_per_call`
         # used to sit here, with the mechanism spelled out: `RunContext.llm_policy` was declared
         # and consumed but never assigned, so `CallPolicy()` was always all-defaults and the bare
@@ -280,10 +309,15 @@ QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
         # `llm.max_schema_repairs`). Membership says only *which scan decides the key*, never
         # what the verdict is: for most of these the qualified pair occurs nowhere and the
         # verdict is inert, while the three `llm.` ones are genuinely READ through it since
-        # 2026-08-22 (`orchestrator/context.py::call_policy_for`) and are no longer in
-        # `KNOWN_INERT`. They stay here because the bare-name collision that made the plain
-        # scan useless for them is unchanged, and it is what would let a revert of that wiring
-        # go unnoticed. See the `KNOWN_INERT` comments above for each specific collision.
+        # 2026-08-22 (`orchestrator/context.py::call_policy_for`), and `transform.ladder.
+        # context_policy` is genuinely READ since 2026-09-02 (round EE,
+        # `orchestrator/runner.py:523`) — all four are no longer in `KNOWN_INERT`. They stay here
+        # because the bare-name collision that made the plain scan useless for them is unchanged,
+        # and it is what would let a revert of that wiring go unnoticed. `transform.ladder.
+        # context_policy`'s own qualified pair (`ladder.context_policy`) still would not catch a
+        # revert either, since the real read is spelled `rung.context_policy` — see the
+        # `KNOWN_INERT` comment above for the full disclosure. See the `KNOWN_INERT` comments
+        # above for each specific collision.
         "fleet.yaml:transform.ladder.role",
         "fleet.yaml:transform.ladder.context_policy",
         "fleet.yaml:llm.max_schema_repairs",
@@ -301,15 +335,21 @@ QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
 UNVERIFIABLE: frozenset[str] = frozenset(
     {
         # Not prose (stripped) and not a generic word resolved by qualification: the text
-        # `ladder.tier` genuinely occurs in real, non-comment code at `orchestrator/runner.py:655`
+        # `ladder.tier` genuinely occurs in real, non-comment code at `orchestrator/runner.py:802`
         # — `ladder.tier(attempt)` — but `ladder` there is `orchestrator/retry.py`'s `LadderState`
-        # (`retry.py:79`), whose OWN `tier` is a method (`retry.py:95`) derived from
-        # `workers/base.TIER_LADDER`, not from `config.transform.ladder`. `LadderState(...)` at
-        # `runner.py:512` takes no `ladder=` kwarg, so the configured ladder never reaches a rung
-        # — but "attribute of a Pydantic model" vs. "method of an unrelated same-named object" is
-        # not a distinction a text scan, qualified or bare, can draw. Its siblings `.role` and
-        # `.context_policy` ARE decided (see `QUALIFIED_MATCH_KEYS`) — this is the genuine
-        # remainder.
+        # (`retry.py:83`), whose OWN `tier` is a method (`retry.py:100`). **Corrected 2026-09-02
+        # (round EE): `LadderState.tier` used to be derived purely from the hardcoded
+        # `workers/base.TIER_LADDER`, and `LadderState(...)` at `runner.py:512` used to take no
+        # `ladder=` kwarg — both now false.** `.tier()` now delegates to the parameterized
+        # `workers.base.tier_for_attempt(attempt, self.ladder)`, and `runner.py:512` DOES pass
+        # `ladder=` — the configured ladder genuinely reaches `.tier()`. The verdict is unchanged
+        # regardless: `.tier()`'s value is *derived* from `.context_policy` (via
+        # `workers.base._TIER_FOR_RUNG`), never read from `config.transform.ladder[i].tier` — that
+        # declared field is still never read by anything, for the same structural reason as
+        # before, just not the reason originally written down here. "Attribute of a Pydantic
+        # model" vs. "method of an unrelated same-named object" is still not a distinction a text
+        # scan, qualified or bare, can draw. Its siblings `.role` and `.context_policy` ARE
+        # decided (see `QUALIFIED_MATCH_KEYS`) — this is the genuine remainder.
         "fleet.yaml:transform.ladder.tier",                 # settings.py:418
     }
 )
@@ -504,8 +544,29 @@ def _qualified_readers(parent: str, field_name: str) -> list[str]:
     ]
 
 
+#: Round EE (2026-09-02): `transform.ladder.context_policy`'s genuine reader
+#: (`orchestrator/runner.py:523`) spells the qualifying variable `rung`, not `ladder` — a real,
+#: intentional Python identifier choice (one element of the ladder, not the ladder itself), not a
+#: naming accident. `_parent_field`'s syntactic derivation from the DOTTED CONFIG PATH cannot see
+#: this: `transform.ladder.context_policy`'s path segment is `ladder` regardless of what the
+#: reading code calls its own local variable. Overriding here — rather than renaming the config
+#: path (which would be a real, disruptive `fleet.yaml` schema change for a test-scan
+#: convenience) or leaving this key structurally unverifiable forever — is what gives this key's
+#: `QUALIFIED_MATCH_KEYS` membership real teeth again, matching every other member's actual
+#: contract: "a non-empty reader list, not a hand-maintained claim."
+_PARENT_FIELD_OVERRIDES: dict[str, str] = {
+    "fleet.yaml:transform.ladder.context_policy": "rung",
+}
+
+
 def _parent_field(qualified: str) -> str:
-    """`fleet.yaml:llm.failover.enabled` -> `failover` — the immediate parent field name."""
+    """`fleet.yaml:llm.failover.enabled` -> `failover` — the immediate parent field name.
+
+    Consults `_PARENT_FIELD_OVERRIDES` first for the rare key whose genuine reader qualifies
+    against a Python identifier that differs from the config path's own segment name.
+    """
+    if qualified in _PARENT_FIELD_OVERRIDES:
+        return _PARENT_FIELD_OVERRIDES[qualified]
     dotted = qualified.split(":", 1)[1]
     segments = dotted.split(".")
     assert len(segments) >= 2, f"{qualified!r} has no parent to qualify against"

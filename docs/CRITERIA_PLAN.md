@@ -229,15 +229,21 @@ No further work; do not touch.
 Ladder-length validation,
 transient-vs-attempt counting, and 3-rung tier escalation to RHI are all covered. **Corrected
 2026-09-01 (round Z research): the "5-rung variant blocked on D50" framing is stale and was
-re-verified false, not merely re-stated.** `LadderState` (`orchestrator/retry.py:79-93`) DOES take
+re-verified false, not merely re-stated.** `LadderState` (`orchestrator/retry.py:83-90`) DOES take
 a `ladder=` kwarg — the "`LadderState` lacks a `ladder=` parameter" framing was false, and made
 elsewhere/orally, not sourced from `tests/test_config_keys_are_read.py:58,308`'s comment
 (**correction, round Z final review + fix wave, 2026-09-01**: an earlier version of this sentence
-misattributed it there). That comment makes a different, narrower, and still-TRUE claim: that
+misattributed it there). That comment makes a different, narrower claim: that
 `LadderState(...)` AT THAT SPECIFIC CALL SITE (`orchestrator/runner.py`, now line 512, was ~428)
 is invoked with no `ladder=` argument passed — not that the `LadderState` *class* lacks such a
 parameter. Conflating "this call site doesn't pass it" with "the class can't take it" is the
-error; the call-site claim needed no correction, only the class-level one. More substantively, the row-count/
+error; the call-site claim needed no correction THEN, only the class-level one.
+**Correction, round EE final review (2026-09-02): the call-site claim is now false too, made
+true by this project's own subsequent work, not by a measurement error.** Round EE's task 1
+wired `runner.py:512`'s `LadderState(...)` construction to genuinely pass `ladder=
+tuple(rung.context_policy for rung in self.ctx.config.transform.ladder)`, closing §12.35's
+CLI-level proof — see §35's own entry. The sentence above is left in place as the historical
+record of what was true through round Z; it is no longer true of the current tree. More substantively, the row-count/
 stop-at-5 half of this sub-clause (5-rung config → 5 attempts rows → stop, and a
 declared-length-mismatch → `ValidationError` at construction) does not depend on
 `context_policy_for_attempt`'s `KNOWN_INERT` wiring gap at all: `TransformSection.
@@ -269,7 +275,7 @@ length-mismatch and the rung-0-shape refusal, plus the positive case, via real c
 (not the config loader). The row-count test could not be built as a `fleet transform` CLI e2e
 test as this Done bar originally suggested: investigation found `--deterministic-only`
 structurally caps a run at exactly 1 attempt regardless of configured ladder length
-(`cli.py:3485-3489`,`:3592`), so a real 5-attempt run cannot be driven through the CLI without a
+(`cli.py:3485-3489`,`:3590`), so a real 5-attempt run cannot be driven through the CLI without a
 live LLM backend. Built instead at the `PhaseRunner`+`RetryPolicy` level
 (`tests/test_runner.py`), matching the existing 3-rung escalation tests' own architecture —
 Rule-12 mutation-proven (`LadderState.exhausted`'s `>=`→`>`, task review independently
@@ -323,7 +329,7 @@ named — not a weaker "an exception can happen somewhere" substitute.
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
 and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
 refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3586-3591`/
-`5493-5498` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
+`5528-5533` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
 for a blocked dependency..." — this is the missing stub-creation worker gap (no worker in
 `src/fleet/workers/` writes a `stubs` row for it), the exact NEW-MECHANISM item §37's own entry
 already names, **not** D50's config-key-wiring thesis. D50 only mentions `--stub-blocked` in
@@ -748,8 +754,34 @@ fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` a
 four.
 
 ## 35. No raw prior diff reaches a prompt
-**OPEN — worker level now covered at both rungs; only the CLI-level proof remains, blocked on
-D50.**
+**DONE (round EE, 2026-09-02) — worker level covered at both rungs; the CLI-level blocker (D50)
+is closed too.**
+
+**Closed, round EE task 1 (2026-09-02, `1fb6be5`), the CLI-level proof.** `--context-policy`'s
+blanket refusal (`cli.py`'s old `_validate_transform_flags`) is gone — `_apply_context_policy_
+overrides` now builds a per-run `FleetSettings` copy with only the overridden rungs' `context_
+policy` replaced, threaded through `RunContext.config` → `PhaseRunner._drive` →
+`LadderState(ladder=...)` → `BaseWorker.execute(..., ladder=...)` → `tier_for_attempt`/
+`context_policy_for_attempt` (both newly parameterized, no longer reading the hardcoded
+`DEFAULT_LADDER` constant on any live path). Final review independently traced every hop of that
+chain and found no gap, and independently reproduced a narrower, more discriminating mutation
+than the task's own proof (deleting only the `ladder=` sourcing at the runner, not reverting the
+whole diff) — confirming the configured policy, not the hardcoded default, is what a worker
+actually receives.
+
+**What this closes, stated precisely — a scope question the final review raised and the
+controller is settling here, not leaving implicit.** The new CLI-level test
+(`tests/test_transform_e2e.py::test_context_policy_reaches_the_worker_not_the_hardcoded_default`)
+proves the WIRING enabler: a configured `--context-policy` override reaches the worker (verified
+via the actual role/tier the worker resolves to and the actual prompt content it builds), not the
+hardcoded default. It does NOT itself re-assert diff-absence — that property was already closed,
+independently, at BOTH context-policy rungs by rounds AA and CC (see above), against real
+multi-line diffs via genuine per-line sweeps. Re-asserting diff-absence a third time at the
+CLI level would be substantially vacuous on this test's own fixture (rung 1 is a deterministic
+`RULE_MISS` that produces no prior patch to leak) and was correctly not attempted. §12.35's full
+text is satisfied by composition: the worker-level tests prove no diff leaks when a policy runs;
+this test proves a configured (not hardcoded) policy is what runs. Neither alone is the whole
+criterion; together they are.
 
 **Closed, round AA task 3 (2026-09-01, `7e982d6`), at the `EVIDENCE_ONLY` rung.**
 `tests/test_workers_transform.py::
@@ -790,11 +822,10 @@ diff text through this rung while the schema stands as it is. The test file's ow
 already says as much ("this represents what *would* leak if that boundary were ever crossed") —
 this entry should say so too, not claim more than the evidence supports.
 
-**Remains OPEN**: the CLI-level proof only, still blocked on D50's `--context-policy` work
-(`cli.py` refuses `--context-policy` for any value at all, audit row 35) — do not attempt it
-before D50 lands. Both worker-level rungs now have a real per-line sweep in place; the
+**Done bar:** met in full. Both worker-level rungs have a real per-line sweep in place (the
 `EVIDENCE_PLUS_REJECTED_APPROACHES` rung's is currently a tripwire rather than a live guard, per
-the schema constraint above.
+the schema constraint above — a disclosed, not-blocking residual), and the CLI-level proof is
+closed. Nothing remains open for §12.35.
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
@@ -1199,10 +1230,10 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 24 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round DD, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §42 this round: the fixture-backend proof closed the last of its 6 SPEC-named sub-requirements, confirmed against SPEC's literal text by the round's final review, see §42's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 25 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round EE, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §35 this round: the CLI-level `--context-policy` proof closed D50's block for real, see §35's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 5 | 22 (partial, D50 for one sub-clause only), 35 (its worker level is now FULLY closed as of round CC — only the CLI-level proof remains, blocked on D50), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):

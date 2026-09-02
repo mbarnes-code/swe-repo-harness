@@ -5701,13 +5701,13 @@ maintained. §5's cost sentence describes a mechanism that is not there.
 
 **The real risk is silent, not loud — four fallback sites in three files:**
 
-1. `src/fleet/workers/base.py:130-141` — `NON_RETRYABLE: frozenset[FailureClass]`, consumed by
-   `is_retryable()` (`:148-152`). Membership is a set literal; an omitted member does not error, it
+1. `src/fleet/workers/base.py:141-152` — `NON_RETRYABLE: frozenset[FailureClass]`, consumed by
+   `is_retryable()` (`:159-163`). Membership is a set literal; an omitted member does not error, it
    **silently defaults to retryable**.
-2. `src/fleet/orchestrator/retry.py:148-244` — `RetryPolicy.decide()` branches explicitly only for
-   `DISK_EXHAUSTED` (`:170`), `BACKEND_UNAVAILABLE` (`:187`), and `TRANSIENT_INFRA` (`:200`);
+2. `src/fleet/orchestrator/retry.py:156-252` — `RetryPolicy.decide()` branches explicitly only for
+   `DISK_EXHAUSTED` (`:178`), `BACKEND_UNAVAILABLE` (`:195`), and `TRANSIENT_INFRA` (`:209`);
    everything else — `CONTEXT_OVERFLOW` included, once added — falls to the generic charge-an-
-   attempt tail (`:221-244`). **This is exactly where §5's "retryable only via a context-reducing
+   attempt tail (`:229-252`). **This is exactly where §5's "retryable only via a context-reducing
    rung change, never a same-rung repeat" needs its own branch, and nothing in `decide()` forces one
    to exist.**
 3. `src/fleet/workers/base.py:500-519` — `classify_exception()`, an if/elif chain ending
