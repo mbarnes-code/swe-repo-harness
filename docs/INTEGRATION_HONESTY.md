@@ -7319,7 +7319,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2269-2337`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2315-2383`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (`cli.py:6752`) sets
@@ -7419,7 +7419,11 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12313-12392`), not the pre-Task-B code the paragraph above was describing.** The
+(`cli.py:12493-12730`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-02, round VI: task 6's `cli.py` additions drifted this citation and the bare sub-citations
+inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/`:12360-12376` below are NOT
+re-verified here, only the one anchored citation the automated gate flagged; a future pass should
+sweep the rest of this paragraph.)* The
 `if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12347` (REWRITE's
 `elif not landed_units:` nothing-landed branch) and `:12389` (the non-REWRITE discard branch) —
 both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
@@ -7807,12 +7811,12 @@ standalone reproduction script (not a reuse of the implementer's own test code) 
 `fleet scan` → `fleet sequence` through a genuine hoist and querying the persisted `edges` table
 directly by SQL.
 
-**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2368`)
-has exactly ONE production call site anywhere in `src/`: `cli.py:2208`, inside
-`_persist_scan_edges` (`cli.py:2179`), itself reachable only from the scan path (`cli.py:1852`).
+**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2414`)
+has exactly ONE production call site anywhere in `src/`: `cli.py:2217`, inside
+`_persist_scan_edges` (`cli.py:2188`), itself reachable only from the scan path (`cli.py:1861`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
-(`cli.py:2198`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3031-3194`)
+(`cli.py:2207`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3038-3206`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -7878,8 +7882,8 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:9532-9643`) returns early at `if not servable: return result`
-(`:9587-9588`) with `halted: None`, and `_raise_for_continuation` (`:9646-9656`) is a no-op when
+`_continue_impl` (`src/fleet/cli.py:9539-9652`) returns early at `if not servable: return result`
+(`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
 `cli.py:1889`, `:5183`, `:9113`, `:9333`) lives exclusively inside `_scan_impl`/`_transform_impl`/
