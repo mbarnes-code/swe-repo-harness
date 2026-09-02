@@ -47,10 +47,11 @@ import pytest
 from typer.testing import CliRunner
 
 from fleet.cli import ExitCode, app
-from fleet.models.enums import BreakStrategy, ContractStatus
+from fleet.graph.infer import EDGE_BASE_CONFIDENCE
+from fleet.models.enums import BreakStrategy, ContractStatus, EdgeKind
 from tests.test_cli import MODELS_YAML
 from tests.test_scan_e2e import _fresh_db, _make_repo
-from tests.test_workers_contracts import CYCLE_FLEET, PROTO_ID
+from tests.test_workers_contracts import CYCLE_FLEET, IDENTITY_BINDING, IDENTITY_SOURCE, PROTO_ID
 
 runner = CliRunner()
 
@@ -186,6 +187,69 @@ def test_a_contract_cycle_is_dissolved_by_scan_then_sequence(cycle_fleet: Path) 
             f"{consumer} consumes {PROTO_ID} and must migrate after it, not with it"
         )
     assert contract_wave < waves[("REPO", OWNER)], "the owner implements the contract"
+
+
+# =======================================================================================
+# §12.8 residual — CONTRACT_IMPL/CONTRACT_CONSUME never reach the `edges` table
+# =======================================================================================
+
+
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "SPEC §12.8 residual, documented in "
+        ".superpowers/sdd/round-HH-criteria-closure/task-2-report.md: "
+        "graph/cycles.py::_materialize (called from break_cycles' 6c-H hoist) computes real "
+        "CONTRACT_IMPL/CONTRACT_CONSUME DependencyEdge objects in memory for wave assignment, "
+        "but cli.py::_sequence_impl never calls repository.insert_edges (or any other write) "
+        "with them. insert_edges' ONLY production call site in the whole tree is "
+        "cli.py::_persist_scan_edges, which runs at SCAN time — before any hoist exists — and "
+        "builds its InferenceInput with no `contracts=` argument, so infer_contract_edges never "
+        "fires there either. The two kinds are therefore never written to the persisted `edges` "
+        "table by any real `fleet scan`/`fleet sequence` invocation today, even though the "
+        "contract genuinely reaches status=HOISTED (proved by the test just above). This test "
+        "pins the TARGET state; flip it to a real assertion (drop the xfail) once persistence "
+        "is wired, and see the report for the recommended fix shape."
+    ),
+)
+def test_the_hoisted_contract_produces_real_contract_impl_and_consume_edges_in_the_table(
+    cycle_fleet: Path,
+) -> None:
+    """§12.8's residual, payoff half. `test_a_contract_cycle_is_dissolved_by_scan_then_sequence`
+    above already proves the contract really reaches `status='HOISTED'` and orders the waves
+    correctly. What it does NOT check — because the real pipeline cannot yet produce it — is
+    whether the `edges` table itself ever gains a `CONTRACT_IMPL` row for the owner and a
+    `CONTRACT_CONSUME` row per real consumer, at `EDGE_BASE_CONFIDENCE`, evidenced by the real
+    carrier paths. `graph/infer.py::infer_contract_edges` and its confidence/DAG-membership are
+    already proven at the hand-built-`InferenceInput` unit level
+    (`tests/test_graph_build.py:296-305,396-411`); this is the fixture-fleet, real-`edges`-table
+    proof CLAUDE.md's measurement discipline requires before treating that unit proof as evidence
+    of what a real run persists.
+    """
+    payload = _scan_then_sequence(cycle_fleet)
+    assert payload["hoisted"] == [PROTO_ID], "the hoist itself must still succeed (unchanged)"
+
+    contract_edges = {
+        (str(kind), str(src_id)): (str(dst_id), str(evidence_path), float(confidence))
+        for kind, src_id, dst_id, evidence_path, confidence in _query(
+            cycle_fleet,
+            "SELECT kind, src_id, dst_id, evidence_path, confidence FROM edges "
+            "WHERE kind IN ('CONTRACT_IMPL', 'CONTRACT_CONSUME')",
+        )
+    }
+
+    assert contract_edges[("CONTRACT_IMPL", OWNER)] == (
+        PROTO_ID,
+        IDENTITY_SOURCE,
+        EDGE_BASE_CONFIDENCE[EdgeKind.CONTRACT_IMPL],
+    ), "the owner's real proto source path must carry the 1.0-confidence CONTRACT_IMPL row"
+
+    for consumer in CONSUMERS:
+        assert contract_edges[("CONTRACT_CONSUME", consumer)] == (
+            PROTO_ID,
+            IDENTITY_BINDING,
+            EDGE_BASE_CONFIDENCE[EdgeKind.CONTRACT_CONSUME],
+        ), f"{consumer}'s real generated binding must carry the 0.85-confidence CONSUME row"
 
 
 # =======================================================================================
