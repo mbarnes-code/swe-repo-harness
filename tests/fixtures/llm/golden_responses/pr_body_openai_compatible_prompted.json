@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` — the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) — this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (a `PrBody`-schema object) differs.",
+  "id": "chatcmpl-PrBody8f3b2c1a9d7e4f6b",
+  "object": "chat.completion",
+  "created": 1735689800,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"body\": \"Vendors the flask-utils pypi package into the monorepo. No existing consumer is affected.\", \"highlights\": [\"no existing consumer affected\"]}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 280,
+    "completion_tokens": 24,
+    "total_tokens": 304
+  }
+}

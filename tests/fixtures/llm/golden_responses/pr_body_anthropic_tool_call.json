@@ -1,0 +1,26 @@
+{
+  "_provenance": "Hand-constructed to match the Anthropic Messages API wire response documented at https://docs.anthropic.com/en/api/messages, and validated at test time through the real `anthropic` SDK's own `anthropic.types.Message.model_validate()` (installed SDK version 0.121.0) before being handed to `AnthropicBackend`'s real `_reply_from`. Rung: TOOL_CALL — a mandatory `emit_response` tool call, matching `_rung()`'s TOOL_CALL branch in src/fleet/llm/backends/anthropic.py. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`anthropic_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/anthropic.py:110) is a role-agnostic constant, and `_reply_from` never introspects `input`'s internal shape, so only the `input` payload below (a `PrBody`-schema object) differs.",
+  "id": "msg_01PrBodyAAABBBCCCDDDEEEF",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01PrBodyAAABBBCCCDDDEEE",
+      "name": "emit_response",
+      "input": {
+        "body": "Moves the acme-commons Maven module into the monorepo unchanged. No API surface or build output changes.",
+        "highlights": ["no behaviour change", "coordinates unchanged"]
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 355,
+    "output_tokens": 34,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}
