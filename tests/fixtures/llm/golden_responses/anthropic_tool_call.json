@@ -1,0 +1,28 @@
+{
+  "_provenance": "Hand-constructed to match the Anthropic Messages API wire response documented at https://docs.anthropic.com/en/api/messages, and validated at test time through the real `anthropic` SDK's own `anthropic.types.Message.model_validate()` (installed SDK version 0.121.0) before being handed to `AnthropicBackend`'s real `_reply_from`. Rung: TOOL_CALL — a mandatory `emit_response` tool call, matching `_rung()`'s TOOL_CALL branch in src/fleet/llm/backends/anthropic.py.",
+  "id": "msg_01XFDUDYJgAACzvnptvVoYEL",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01A09q90qw90lq917835lq9",
+      "name": "emit_response",
+      "input": {
+        "ecosystem": "maven",
+        "is_library": true,
+        "confidence": 0.92,
+        "rationale": "pom.xml declares <groupId>com.acme</groupId> and this coordinate is imported by two other repos in the workspace"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 512,
+    "output_tokens": 64,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}
