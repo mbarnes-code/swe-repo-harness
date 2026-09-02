@@ -181,9 +181,17 @@ from fleet.orchestrator.scheduler import (
     WaveScheduler,
     ordering_descendants,
 )
-from fleet.orchestrator.stubs import HeldStub, ProviderFacts, StubDecision
+from fleet.orchestrator.stubs import (
+    HeldStub,
+    ProviderFacts,
+    RevalidationPlan,
+    RevalidationPolicy,
+    StubDecision,
+)
 from fleet.orchestrator.stubs import apply as apply_stub_decision
+from fleet.orchestrator.stubs import plan_revalidation as plan_stub_revalidation
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
+from fleet.orchestrator.stubs import supersede as supersede_stub
 from fleet.rewrite.rules import (
     EngineRegistry,
     EngineUnavailableError,
@@ -232,6 +240,7 @@ from fleet.state.repository import (
     FloorSnapshotStaleError,
     SqliteStateRepository,
     SymbolRow,
+    insert_revalidation_task_row,
 )
 from fleet.util.fs import atomic_write, scoped_tempdir
 from fleet.util.fs import free_bytes as disk_free_bytes
@@ -10136,6 +10145,81 @@ async def _pr_sync_impl(
                             "signal, so this run fails rather than reporting a merge whose "
                             "durable record it failed to write (§3.4 step 5, CLAUDE.md Rule 11)."
                         )
+                    # D101 Half B / D102 (docs/INTEGRATION_HONESTY.md): fire T1
+                    # (`orchestrator.stubs.supersede`) for every consumer stubbed against this
+                    # now-MERGED provider. The comment block above is still true on its own narrow
+                    # claim — nothing reads the `events` table row to trigger this — because this
+                    # fires from the SAME code path that just wrote it, not from a reader of it.
+                    # `supersede()` requires SUCCEEDED + MERGED (ADR-0011 stacking); `updated`
+                    # above is this provider's own just-written PR record, already `MERGED`.
+                    policy = RevalidationPolicy(settings.config.stubs.revalidation)
+                    t1_records, t1_grouped = await _stub_supersede_inputs(
+                        read_conn, run_id, repo_id
+                    )
+                    if t1_grouped:  # the common case: no ACTIVE stub names this provider at all
+                        provider_phase_rows = await _rows(
+                            read_conn,
+                            "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? "
+                            " ORDER BY phase DESC LIMIT 1",
+                            (run_id, repo_id),
+                        )
+                        provider_facts = ProviderFacts(
+                            repo_id=repo_id,
+                            status=(
+                                RepoStatus(str(provider_phase_rows[0][0]))
+                                if provider_phase_rows
+                                else RepoStatus.PENDING
+                            ),
+                            pr_state=updated.state,
+                            pr_created_at=updated.created_at,
+                        )
+                        t1_decisions: list[StubDecision] = []
+                        for stub in t1_grouped.values():
+                            t1_decisions.extend(supersede_stub(stub, provider_facts, policy=policy))
+                        if t1_decisions:
+                            by_consumer: dict[str, list[StubDecision]] = {}
+                            for decision in t1_decisions:
+                                by_consumer.setdefault(decision.consumer_repo_id, []).append(
+                                    decision
+                                )
+                            plans: list[RevalidationPlan] = []
+                            for consumer_id in sorted(by_consumer):
+                                plans.extend(
+                                    plan_stub_revalidation(
+                                        consumer_id, by_consumer[consumer_id], policy=policy
+                                    )
+                                )
+
+                            async def t1_unit(
+                                conn: aiosqlite.Connection,
+                                _records: Mapping[tuple[str, str], StubRecord] = t1_records,
+                                _decisions: Sequence[StubDecision] = tuple(t1_decisions),
+                                _plans: Sequence[RevalidationPlan] = tuple(plans),
+                            ) -> None:
+                                # One transaction for the whole of T1's effect (stub
+                                # ACTIVE->SUPERSEDED, plus the REVALIDATE task(s) its
+                                # `RevalidationPlan`s mint) — never split across two
+                                # `writer.submit` calls, so a crash cannot supersede a stub
+                                # without also enqueueing its revalidation. Bound as defaults,
+                                # not read from the enclosing loop, so a later `repo_id` in this
+                                # same `for` cannot rebind what an already-queued unit sees
+                                # (B023).
+                                await _apply_stub_decisions(
+                                    conn, run_id, _records, _decisions, now=stamp
+                                )
+                                for plan in _plans:
+                                    dest_path = await _repo_dest_path(conn, plan.consumer_repo_id)
+                                    await insert_revalidation_task_row(
+                                        conn,
+                                        str(uuid4()),
+                                        run_id=run_id,
+                                        repo_id=plan.consumer_repo_id,
+                                        revalidation_key=plan.key,
+                                        dest_path=dest_path or "",
+                                        created_at=stamp,
+                                    )
+
+                            await writer.submit(t1_unit)
                 elif status.state is PrState.CLOSED:
                     closed.append(repo_id)
         finally:
@@ -12046,6 +12130,163 @@ async def _stub_reconcile_inputs(
     return records, providers
 
 
+async def _stub_supersede_inputs(
+    conn: aiosqlite.Connection, run_id: str, provider_repo_id: str
+) -> tuple[dict[tuple[str, str], StubRecord], dict[str, StubRecord]]:
+    """Every `ACTIVE` `stubs` row naming `provider_repo_id`, in the TWO shapes T1 needs — adapted
+    from `_stub_reconcile_inputs`'s query/construction, scoped to one provider instead of every
+    provider in the run.
+
+    `records`: one `StubRecord` per (consumer, coord_key) row, exactly as `_stub_reconcile_inputs`
+    builds it — this is the shape `_apply_stub_decisions` indexes by
+    `(decision.consumer_repo_id, decision.coord_key)`.
+
+    `grouped`: the SAME rows re-aggregated one `StubRecord` per `stub_id`, with every consumer
+    folded into that record's `consumer_repo_ids` — the shape `orchestrator.stubs.supersede`
+    takes (its own docstring: "One `StubRecord` is the aggregate of one `stubs` row per consumer
+    sharing a `stub_id`... taking only the first would supersede one row and leave the other two
+    ACTIVE"). Grouping by `stub_id` rather than `(coord_key, provider_repo_id)` follows
+    `schema.sql`'s own words for what `stub_id` means: "SHARED by every consumer row of one stub".
+
+    Scoped to `state = 'ACTIVE'` only, unlike `_stub_reconcile_inputs`'s `ACTIVE`/`SUPERSEDED`:
+    T1 is `ACTIVE -> SUPERSEDED`, and `supersede()` itself no-ops an already-`SUPERSEDED` row and
+    raises on a terminal one, so querying only `ACTIVE` never hands it either. Every row this
+    query can return therefore has `revalidation_round = 0` (schema: "0 while ACTIVE"), so folding
+    several consumers into one `grouped` record never has to reconcile a `rounds_spent` mismatch.
+    """
+    stub_rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, provider_repo_id, stub_id, stub_coord_key, state, "
+        "       stub_fidelity, pinned_version, revalidation_round, max_revalidation_rounds, "
+        "       created_at, state_changed_at "
+        "  FROM stubs WHERE run_id = ? AND provider_repo_id = ? AND state = 'ACTIVE' "
+        " ORDER BY consumer_repo_id, stub_coord_key",
+        (run_id, provider_repo_id),
+    )
+    records: dict[tuple[str, str], StubRecord] = {}
+    grouped: dict[str, StubRecord] = {}
+    for row in stub_rows:
+        consumer = str(row[0])
+        coord_key = str(row[3])
+        stub_id = str(row[2])
+        record = StubRecord(
+            stub_id=UUID(stub_id),
+            run_id=UUID(run_id),
+            coord_key=coord_key,
+            provider_repo_id=str(row[1]),
+            consumer_repo_ids=[consumer],
+            fidelity=StubFidelity(str(row[5])),
+            pinned_version=None if row[6] is None else str(row[6]),
+            state=StubState(str(row[4])),
+            max_revalidation_rounds=int(row[8]),
+            rounds_spent=int(row[7]),
+            created_at=datetime.fromisoformat(str(row[9])),
+            state_changed_at=datetime.fromisoformat(str(row[10])),
+        )
+        records[(consumer, coord_key)] = record
+        existing = grouped.get(stub_id)
+        grouped[stub_id] = (
+            record
+            if existing is None
+            else existing.model_copy(
+                update={"consumer_repo_ids": [*existing.consumer_repo_ids, consumer]},
+                deep=True,
+            )
+        )
+    return records, grouped
+
+
+async def _apply_stub_decisions(
+    conn: aiosqlite.Connection,
+    run_id: str,
+    records: Mapping[tuple[str, str], StubRecord],
+    decisions: Sequence[StubDecision],
+    *,
+    now: datetime,
+) -> list[str]:
+    """The write body shared by every `StubDecision` writer: one `stubs` UPDATE and, where the
+    decision carries one, one `findings` INSERT, per decision. `apply()` computes each row's new
+    state — never re-derived here, per the module's own "the single writer persists" contract —
+    and the finding is upserted so a replayed sweep (a second `fleet resume`, or `--sync`
+    re-observing the same merge) cannot double-write it (§11.7's idempotency key,
+    `ux_findings_ident`).
+
+    Factored out of `_apply_stub_reconcile` (T4/T3-via-reconcile) so T1's production trigger
+    (`_pr_sync_impl`'s `pr_merged` branch) can fold the SAME writes into ITS OWN open write
+    transaction, rather than opening a second `StateWriter` — which would trip
+    `SingleWriterViolationError` (§11.5 single-writer rule) — mirroring `_upsert_pr_record`'s
+    factoring of `_write_pr_record`. The SQL is transition-agnostic: every column it writes comes
+    off `decision.transition`/`.from_state`/`.to_state`/`.finding`/`.abandon_reason`, none of
+    which are reconcile-specific, so a T1 (`ACTIVE` -> `SUPERSEDED`, no `abandon_reason`, no
+    `finding`) fits this statement shape unmodified.
+
+    Returns the touched `consumer_repo_id`s, in first-seen order. Deliberately does NOT also mark
+    those consumers' PRs `PrState.HELD` — that write is `_apply_stub_reconcile`'s OWN, END-OF-RUN-
+    RECONCILE-SPECIFIC step (D99/D100: "every decision reaching THAT function is an end-of-run
+    abandonment"), and a T1 decision is not an abandonment — the consumer stays `DEGRADED`,
+    awaiting the `REVALIDATE` round T1's caller enqueues, and its PR is untouched.
+    """
+    stamp = _iso(now)
+    consumer_ids: list[str] = []
+    for decision in decisions:
+        original = records[(decision.consumer_repo_id, decision.coord_key)]
+        updated = apply_stub_decision(original, decision, now=now)
+        await conn.execute(
+            "UPDATE stubs SET state = ?, revalidation_round = ?, state_changed_at = ?, "
+            "       abandon_reason = ?, resolved_at = COALESCE(resolved_at, ?) "
+            " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ? "
+            "   AND revalidation_round = ? AND state = ?",
+            (
+                updated.state.value,
+                updated.rounds_spent,
+                stamp,
+                decision.abandon_reason.value if decision.abandon_reason else None,
+                stamp,
+                run_id,
+                decision.consumer_repo_id,
+                decision.coord_key,
+                original.rounds_spent,
+                decision.from_state.value,
+            ),
+        )
+        if decision.finding is not None:
+            await conn.execute(
+                "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
+                "                      payload, created_at) "
+                "VALUES (?, ?, ?, 'warn', ?, ?, ?) "
+                "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+                "DO UPDATE SET payload = excluded.payload, "
+                "              created_at = excluded.created_at",
+                (
+                    run_id,
+                    decision.consumer_repo_id,
+                    decision.finding.value,
+                    _fingerprint(run_id, decision.consumer_repo_id, decision.coord_key),
+                    redact_text(
+                        json.dumps(
+                            {
+                                "consumer": decision.consumer_repo_id,
+                                "coord_key": decision.coord_key,
+                                "provider": decision.provider_repo_id,
+                                "transition": decision.transition.value,
+                                "abandon_reason": (
+                                    decision.abandon_reason.value
+                                    if decision.abandon_reason
+                                    else None
+                                ),
+                                "detail": decision.detail,
+                            },
+                            sort_keys=True,
+                        )
+                    ),
+                    stamp,
+                ),
+            )
+        if decision.consumer_repo_id not in consumer_ids:
+            consumer_ids.append(decision.consumer_repo_id)
+    return consumer_ids
+
+
 async def _apply_stub_reconcile(
     path: Path,
     run_id: str,
@@ -12055,11 +12296,9 @@ async def _apply_stub_reconcile(
     *,
     now: datetime,
 ) -> None:
-    """Persist `reconcile()`'s decisions in one transaction: `apply()` computes each row's new
-    state — never re-derived here, per the module's own "the single writer persists" contract —
-    and one `UnresolvedStub` finding is upserted per decision, keyed so a replayed sweep (a second
-    `fleet resume` before the operator acts) cannot double-write it (§11.7's idempotency key,
-    `ux_findings_ident`).
+    """Persist `reconcile()`'s decisions in one transaction — the per-decision `stubs`/`findings`
+    write is `_apply_stub_decisions`, shared with T1's production trigger; see that function's
+    docstring for what it writes and why it takes a bare `conn`.
 
     D99/D100: every decision reaching this function is an end-of-run abandonment (T4, or T3-via-
     reconcile) with a `consumer_repo_id` — SPEC names the CONSUMER's own PR as `PrState.HELD`'s
@@ -12090,63 +12329,7 @@ async def _apply_stub_reconcile(
     async with StateWriter(path, owner="fleet-resume") as writer:
 
         async def unit(db: aiosqlite.Connection) -> None:
-            consumer_ids: list[str] = []
-            for decision in decisions:
-                original = records[(decision.consumer_repo_id, decision.coord_key)]
-                updated = apply_stub_decision(original, decision, now=now)
-                await db.execute(
-                    "UPDATE stubs SET state = ?, revalidation_round = ?, state_changed_at = ?, "
-                    "       abandon_reason = ?, resolved_at = COALESCE(resolved_at, ?) "
-                    " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ? "
-                    "   AND revalidation_round = ? AND state = ?",
-                    (
-                        updated.state.value,
-                        updated.rounds_spent,
-                        stamp,
-                        decision.abandon_reason.value if decision.abandon_reason else None,
-                        stamp,
-                        run_id,
-                        decision.consumer_repo_id,
-                        decision.coord_key,
-                        original.rounds_spent,
-                        decision.from_state.value,
-                    ),
-                )
-                if decision.finding is not None:
-                    await db.execute(
-                        "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
-                        "                      payload, created_at) "
-                        "VALUES (?, ?, ?, 'warn', ?, ?, ?) "
-                        "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
-                        "DO UPDATE SET payload = excluded.payload, "
-                        "              created_at = excluded.created_at",
-                        (
-                            run_id,
-                            decision.consumer_repo_id,
-                            decision.finding.value,
-                            _fingerprint(run_id, decision.consumer_repo_id, decision.coord_key),
-                            redact_text(
-                                json.dumps(
-                                    {
-                                        "consumer": decision.consumer_repo_id,
-                                        "coord_key": decision.coord_key,
-                                        "provider": decision.provider_repo_id,
-                                        "transition": decision.transition.value,
-                                        "abandon_reason": (
-                                            decision.abandon_reason.value
-                                            if decision.abandon_reason
-                                            else None
-                                        ),
-                                        "detail": decision.detail,
-                                    },
-                                    sort_keys=True,
-                                )
-                            ),
-                            stamp,
-                        ),
-                    )
-                if decision.consumer_repo_id not in consumer_ids:
-                    consumer_ids.append(decision.consumer_repo_id)
+            consumer_ids = await _apply_stub_decisions(db, run_id, records, decisions, now=now)
 
             # D101 Half A / ADR-0112: §13 row 45's carve-out, made operator-visible. No
             # `stubs`/`phases` write here — the row is already untouched (still ACTIVE/SUPERSEDED)

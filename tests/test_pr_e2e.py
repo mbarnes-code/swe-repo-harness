@@ -38,7 +38,7 @@ import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from typer.testing import CliRunner
@@ -48,6 +48,7 @@ from fleet.cli import ExitCode, app
 from fleet.llm import client as client_module
 from fleet.llm.client import StructuredOutputMode, TransportError
 from fleet.models.enums import BreakStrategy, PrState
+from fleet.orchestrator.stubs import revalidation_key
 from fleet.state.db import connect_ro
 from fleet.state.projection import build_state
 from fleet.util.proc import ProcResult
@@ -250,7 +251,9 @@ def body_of(root: Path, repo_id: str) -> str:
     return path.read_text(encoding="utf-8")
 
 
-def degrade(root: Path, repo_id: str, *, state: str = "ACTIVE") -> None:
+def degrade(
+    root: Path, repo_id: str, *, state: str = "ACTIVE", provider_repo_id: str = "acme-empty"
+) -> None:
     """Put one repo in the §3.5 escape hatch: DEGRADED, with a live `ACTIVE`/`SUPERSEDED` stub row.
 
     Written straight to SQLite because `--stub-blocked` is refused by `fleet build` (no worker
@@ -260,6 +263,12 @@ def degrade(root: Path, repo_id: str, *, state: str = "ACTIVE") -> None:
     `state` defaults to `ACTIVE` (the original fixture shape) and also accepts `SUPERSEDED` — the
     OTHER member of `_HELD_STATES`/§12.38's refusal set, so a caller can prove the guard holds on
     both open states, not only the one every prior test exercised.
+
+    `provider_repo_id` defaults to `'acme-empty'`, a name that is deliberately NOT one of this
+    fixture fleet's four real repos — every original caller of this helper wants a stub whose
+    provider never appears in `fleet pr --sync`'s ingested state, so a real merge can never
+    resolve it. A T1 test needs the opposite: a provider that IS one of the fixture's real repos,
+    so a real `forge.merge()` + `--sync` really drives `orchestrator.stubs.supersede`.
     """
     run_id = run_id_of(root)
     conn = sqlite3.connect(root / "state" / "fleet.db")
@@ -273,14 +282,19 @@ def degrade(root: Path, repo_id: str, *, state: str = "ACTIVE") -> None:
             "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
             "                   provider_repo_id, pinned_version, bazel_label, state, "
             "                   stub_fidelity, resolved_at, state_changed_at, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'acme-empty', '1.2.3', ?, ?, 'PUBLISHED_ARTIFACT', "
+            "VALUES (?, ?, ?, ?, ?, ?, '1.2.3', ?, ?, 'PUBLISHED_ARTIFACT', "
             "        ?, ?, ?)",
             (
-                "stub-gone",
+                # A real UUID hex, not the readable placeholder this literal used to be: nothing
+                # ever asserts this value by name, and `StubRecord.stub_id: UUID` (production, not
+                # test-only) rejects anything else — `_stub_supersede_inputs` (T1's production
+                # trigger) is the first code path this fixture exercises that actually parses it.
+                str(uuid4()),
                 run_id,
                 repo_id,
                 STUB_COORD,
                 repo_id,
+                provider_repo_id,
                 f"//third_party/stubs/{STUB_COORD}",
                 state,
                 # `schema.sql`'s CHECK requires `resolved_at` on any non-ACTIVE row (it is set "on
@@ -448,6 +462,57 @@ def test_pr_sync_ingests_merge_state_and_a_gate_blocked_on_merged_becomes_satisf
     # The stacked PR names the dependency it waited for, in the state it was observed in.
     assert "- `acme-lib-py` — " in body_of(fleet, "acme-app-py")
     assert "(`MERGED`)" in body_of(fleet, "acme-app-py")
+
+
+def test_pr_sync_fires_t1_and_enqueues_a_revalidate_task_for_a_merged_providers_stub(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """D101 Half B / D102: `fleet pr --sync` observing a provider's PR go `MERGED` must itself
+    fire T1 (`orchestrator.stubs.supersede`) for every stub naming that provider — the trigger had
+    ZERO production call sites anywhere in `src/` before this wiring (D102). Proven here rather
+    than in `tests/test_stubs.py` because T1's precondition is `RepoStatus.SUCCEEDED` **and**
+    `PullRequestDraft.state == 'MERGED'` (ADR-0011 stacking), and only a real `fleet pr --sync`
+    against a real forge answer can produce that second half honestly.
+
+    `acme-app-py` is `DEGRADED` with an `ACTIVE` stub whose `provider_repo_id` is `acme-lib-py` —
+    unlike every other `degrade()` caller in this file, a REAL fixture repo, not the placeholder
+    `'acme-empty'`, so a real `forge.merge()` really supersedes it. `acme-lib-ts` merges in the
+    SAME `--sync` invocation with no stub naming it anywhere — the control the brief asks for: a
+    merge with no `ACTIVE` stub must leave `stubs`/`tasks` untouched, in the same run that proves
+    the positive case, not a separately-argued claim.
+    """
+    verified(fleet)
+    degrade(fleet, "acme-app-py", provider_repo_id="acme-lib-py")
+    assert run_pr(fleet).exit_code == ExitCode.SUCCESS
+
+    forge.merge("acme-lib-py", "acme-lib-ts")
+    synced = run_pr(fleet, "--sync")
+    assert synced.exit_code == ExitCode.SUCCESS, synced.output
+    ingested = payload(synced)
+    assert sorted(ingested["merged"]) == ["acme-lib-py", "acme-lib-ts"], ingested
+
+    stub_rows = query(
+        fleet,
+        "SELECT state FROM stubs WHERE consumer_repo_id = 'acme-app-py' AND stub_coord_key = ?",
+        (STUB_COORD,),
+    )
+    assert [row[0] for row in stub_rows] == ["SUPERSEDED"], stub_rows
+
+    task_rows = query(
+        fleet,
+        "SELECT repo_id, revalidation_key, phase, status FROM tasks WHERE kind = 'REVALIDATE'",
+    )
+    assert len(task_rows) == 1, (
+        f"exactly one REVALIDATE task: acme-app-py's supersede, and NOTHING for acme-lib-ts's "
+        f"merge (no stub names it) — got {task_rows}"
+    )
+    repo_id, key, task_phase, task_status = task_rows[0]
+    assert str(repo_id) == "acme-app-py", task_rows
+    assert str(key) == revalidation_key(1, ("acme-lib-py",)), task_rows
+    assert int(task_phase) == 4, task_rows  # Phase.VERIFY
+    # D102's own scope boundary: nothing executes a REVALIDATE task yet (no worker exists), so
+    # the row is expected to sit PENDING forever — that is disclosed, not asserted as a defect.
+    assert str(task_status) == "PENDING", task_rows
 
 
 # ---------------------------------------------------------------------------------------
