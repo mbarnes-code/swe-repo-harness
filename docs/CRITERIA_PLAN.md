@@ -275,7 +275,7 @@ length-mismatch and the rung-0-shape refusal, plus the positive case, via real c
 (not the config loader). The row-count test could not be built as a `fleet transform` CLI e2e
 test as this Done bar originally suggested: investigation found `--deterministic-only`
 structurally caps a run at exactly 1 attempt regardless of configured ladder length
-(`cli.py:3485-3489`,`:3590`), so a real 5-attempt run cannot be driven through the CLI without a
+(`cli.py:3507-3511`,`:3612`), so a real 5-attempt run cannot be driven through the CLI without a
 live LLM backend. Built instead at the `PhaseRunner`+`RetryPolicy` level
 (`tests/test_runner.py`), matching the existing 3-rung escalation tests' own architecture —
 Rule-12 mutation-proven (`LadderState.exhausted`'s `>=`→`>`, task review independently
@@ -328,8 +328,8 @@ named — not a weaker "an exception can happen somewhere" substitute.
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
 and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
-refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3586-3591`/
-`5528-5533` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
+refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3606-3611`/
+`5554-5559` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
 for a blocked dependency..." — this is the missing stub-creation worker gap (no worker in
 `src/fleet/workers/` writes a `stubs` row for it), the exact NEW-MECHANISM item §37's own entry
 already names, **not** D50's config-key-wiring thesis. D50 only mentions `--stub-blocked` in

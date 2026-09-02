@@ -468,13 +468,14 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     ),  # L6242 defined at [(3873, 3978), (3873, 3978)], cited 3858-3858
     (
         "_run_verify_wave",
-        "cli.py:9206",
-    ),  # round-EE re-pin: a usage-site citation (the call inside `_verify_impl`, corrected from
-    #    the stale `:8451`, which this round's own line-shift accidentally made "resolve" into
-    #    a DIFFERENT function's body — `_run_verify_wave`'s own definition, not the call site the
-    #    prose describes) -- re-pinned rather than left to coincidentally resolve, matching D84's
+        "cli.py:9236",
+    ),  # round-EE re-pin, corrected a second time (2026-09-02, final review): the prior re-pin's
+    #    own `cli.py:9206` was itself wrong -- re-measured directly against source rather than
+    #    trusted from the gate (which only checks containment in `_run_verify_wave`'s own span
+    #    and cannot tell a wrong-but-outside-the-span citation from a right one). The real call
+    #    site inside `_verify_impl` is `cli.py:9236`; `_run_verify_wave`'s own definition starts
+    #    at `cli.py:8401`. Re-pinned rather than left to coincidentally resolve, matching D84's
     #    own standing "usage sites are reported, not repointed to resolve" convention above.
-    #    defined at [(8373, 8455), (8373, 8455)], cited 9206-9206
     (
         "_wave_snapshot",
         "cli.py:8237-8239",
