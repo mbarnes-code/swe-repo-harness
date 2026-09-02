@@ -39,6 +39,7 @@ from fleet.orchestrator.reentry import (
     Unblocking,
     plan_unblocking,
     still_blocking,
+    stub_permits_removal,
 )
 
 _ROWS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -356,3 +357,91 @@ def test_unblocking_is_frozen_so_a_caller_cannot_edit_the_plan_it_was_handed() -
     entry = _plan()["orphan-dep"]
     with pytest.raises(AttributeError):
         entry.removed = ("contract:acme.protos:1.4",)  # type: ignore[misc]
+
+
+# ---------------------------------------------------------------------------------------
+# ADR-0113 (§37 Blocker A) — `stub_permits_removal`, a SEPARATE predicate from `still_blocking`,
+# combined at the `plan_unblocking` call site via OR-logic. `still_blocking` above is untouched by
+# every line below (ADR-0113 condition 1) -- these tests exercise ONLY the new predicate and its
+# threading through `plan_unblocking`, never a rewritten `still_blocking` case.
+# ---------------------------------------------------------------------------------------
+
+# A blocker abandoned at ONE phase (here, phase 2) with another phase landed -- the ANY-match
+# shape `stub_permits_removal` requires (never `all`, unlike `still_blocking`): RHI at any single
+# row is already the permanent dead end, so waiting for every row to read RHI would miss this case.
+_RHI_BLOCKER: dict[str, BlockerState] = {
+    "acme-broken": BlockerState(
+        phase_statuses=frozenset({RepoStatus.SUCCEEDED, RepoStatus.REQUIRES_HUMAN_INTERVENTION})
+    )
+}
+
+
+def test_stub_permits_removal_is_off_by_default_even_for_an_rhi_blocker() -> None:
+    """`stub_blocked=False` (the default) is a hard `False` for every input -- the caller's
+    explicit policy switch, never derived from the blocker's own statuses. A stub-eligible
+    blocker stays retained absent the flag: no surprise removals (ADR-0113, the brief's own
+    "default-off, no surprise removals" requirement).
+    """
+    assert stub_permits_removal("acme-broken", _RHI_BLOCKER, stub_blocked=False) is False
+
+
+def test_stub_permits_removal_frees_a_blocker_carrying_any_rhi_row_when_enabled() -> None:
+    """The positive case: `stub_blocked=True` and the blocker has (at least) one RHI row."""
+    assert stub_permits_removal("acme-broken", _RHI_BLOCKER, stub_blocked=True) is True
+
+
+@pytest.mark.parametrize(
+    "status", [RepoStatus.RUNNING, RepoStatus.PENDING, RepoStatus.DEGRADED, RepoStatus.SUCCEEDED]
+)
+def test_stub_permits_removal_never_frees_a_blocker_that_is_not_rhi(status: RepoStatus) -> None:
+    """A stub only substitutes for a repo that will NEVER produce real work -- never one still in
+    flight (RUNNING/PENDING/DEGRADED) or one that landed cleanly (SUCCEEDED, `still_blocking`'s
+    own job). `stub_blocked=True` alone must not free any of these.
+    """
+    states = {"acme-live": BlockerState(phase_statuses=frozenset({status}))}
+    assert stub_permits_removal("acme-live", states, stub_blocked=True) is False
+
+
+def test_stub_permits_removal_is_false_for_a_name_it_cannot_resolve() -> None:
+    """An unresolvable name has no RHI row to find -- `still_blocking`'s fail-closed retention is
+    the only vote that applies, and this predicate must not fail OPEN on the same input.
+    """
+    assert stub_permits_removal("nobody", {}, stub_blocked=True) is False
+
+
+def test_stub_permits_removal_is_false_for_a_blocker_resolved_to_zero_rows() -> None:
+    states = {"acme-norows": BlockerState(phase_statuses=frozenset())}
+    assert stub_permits_removal("acme-norows", states, stub_blocked=True) is False
+
+
+def test_plan_unblocking_ors_the_two_predicates_at_the_call_site() -> None:
+    """The wiring item, not the predicate: `plan_unblocking(stub_blocked=True)` frees an
+    RHI-only blocker `still_blocking` alone retains, while a repo blocked by BOTH an RHI blocker
+    and a live one (`still_blocking` retains both, `stub_permits_removal` only the RHI one) stays
+    blocked -- the OR is per-NAME, not "stub_blocked frees the whole repo".
+    """
+    live = {"acme-live": BlockerState(phase_statuses=frozenset({RepoStatus.RUNNING}))}
+    statuses = {**_RHI_BLOCKER, **live}
+    rows = (
+        ("rhi-only-dep", ("acme-broken",)),
+        ("mixed-dep", ("acme-broken", "acme-live")),
+    )
+    plan = {
+        entry.repo_id: entry
+        for entry in plan_unblocking(
+            blocked_by_rows=rows, blocker_statuses=statuses, floors={}, stub_blocked=True
+        )
+    }
+    assert plan["rhi-only-dep"].removed == ("acme-broken",)
+    assert plan["rhi-only-dep"].remaining == ()
+    assert plan["mixed-dep"].removed == ("acme-broken",)
+    assert plan["mixed-dep"].remaining == ("acme-live",)
+
+    # And `stub_blocked=False` (the default `plan_unblocking` call, unchanged) retains the same
+    # RHI-only blocker byte-for-byte -- the default-off guarantee, driven through the planner.
+    off = {
+        entry.repo_id: entry
+        for entry in plan_unblocking(blocked_by_rows=rows, blocker_statuses=statuses, floors={})
+    }
+    assert off["rhi-only-dep"].removed == ()
+    assert off["rhi-only-dep"].remaining == ("acme-broken",)

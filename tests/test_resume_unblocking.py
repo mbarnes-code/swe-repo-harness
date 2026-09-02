@@ -871,3 +871,50 @@ def test_the_floor_step_6_reports_comes_from_step_5_even_when_step_5_demoted_not
         "floor read out of step 5's `demoted` list is `None` here"
     )
     assert set(entries.values()) == {"SCAN"}
+
+
+# --------------------------------------------------------------------------------------
+# ADR-0113 (§37 Blocker A) — `--stub-blocked` on `fleet resume`. The plumbing
+# (`orchestrator.reentry.stub_permits_removal`, threaded through `plan_unblocking` /
+# `_unblock_dependents` / `_apply_unblocking` / `clear_blocked_by`) is exercised directly, at the
+# pure-function level, in `tests/test_reentry_unblocking.py`. The two tests below are what this
+# file's own CLI-level machinery can prove: (1) the flag is REFUSED, not functional, per ADR-0113
+# condition 2, and (2) with the flag absent (the only state the CLI can reach this round) an
+# RHI-blocked repo stays blocked — `plan_unblocking`'s new parameter genuinely defaults to off.
+# --------------------------------------------------------------------------------------
+
+
+def test_stub_blocked_is_refused_on_resume_rather_than_silently_ignored(fleet: Path) -> None:
+    """ADR-0113 condition 2: the CLI surface must not be reachable until the TRANSFORM-worker
+    stub-creation logic exists. `RETAINED_RHI` is blocked solely by `CONTAINED`, an RHI provider
+    — exactly the repo `--stub-blocked` would free if it worked — and this test proves it does
+    NOT: the flag raises before step 6 (or any other step) runs, so nothing is written.
+
+    A flag that parsed and was then dropped would be read by an operator as honoured (§10); this
+    is the same refusal shape `_validate_build_flags`/`_validate_transform_flags` already use for
+    their own (different) `--stub-blocked` sites.
+    """
+    db = fleet / "state" / "fleet.db"
+    before = _rows(db)
+    result = runner.invoke(app, [*base_args(fleet), "resume", "--stub-blocked"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "--stub-blocked" in result.output, result.output
+    assert "not implemented" in result.output, result.output
+    assert _rows(db) == before, "the refusal did not fire before a write landed"
+
+
+def test_an_rhi_blocked_repo_stays_blocked_when_the_flag_is_absent(fleet: Path) -> None:
+    """The negative case (brief item, `test_a_blocked_repo_is_not_admitted`-style discipline):
+    prove the OLD behaviour survives unchanged, not just that new code exists.
+
+    `plan_unblocking`'s new `stub_blocked` parameter defaults to `False`, and every CLI path this
+    round reaches it with no other value available (the flag above is refused before `_resume_
+    impl` ever runs) — so a plain `fleet resume`, with `--stub-blocked` entirely absent, must
+    leave `RETAINED_RHI` blocked by `CONTAINED` exactly as it always has.
+    """
+    code, payload = _resume(fleet)
+    assert code == ExitCode.SUCCESS, payload
+    assert _blocked_by(fleet / "state" / "fleet.db", RETAINED_RHI) == [CONTAINED], (
+        "an RHI-only blocker was removed with `--stub-blocked` absent: the new parameter's "
+        "default is no longer off"
+    )

@@ -556,6 +556,7 @@ class StateRepository(ReadOnlyRepository, Protocol):
         floors: Mapping[str, Phase],
         resolve: BlockerResolver,
         now: datetime,
+        stub_blocked: bool = False,
     ) -> tuple[Phase, ...]: ...
 
     # -- primitive 4: the ledger CAS ---------------------------------------------------
@@ -1823,6 +1824,7 @@ class SqliteStateRepository:
         floors: Mapping[str, Phase],
         resolve: BlockerResolver,
         now: datetime,
+        stub_blocked: bool = False,
     ) -> tuple[Phase, ...]:
         """§11.5 step 6's write for ONE repo: remove the planned names, in ONE transaction.
 
@@ -1850,6 +1852,13 @@ class SqliteStateRepository:
         **A row is only touched if a planned name is actually on it.** A repo's blockers are
         written into every non-`SUCCEEDED` phase, so the plan is per repo while the write is per
         row; a row carrying none of `observed.removed` is left byte-for-byte alone.
+
+        **`stub_blocked` (ADR-0113 §37 Blocker A) is threaded exactly like `floors`: passed in
+        from the caller's preview, never re-derived here.** It MUST be the identical value the
+        `mode=ro` preview used to produce `observed` — this method's own staleness re-derivation
+        calls `plan_unblocking` again with it below, and a mismatched value would make `fresh`
+        disagree with `observed` on every stub-eligible removal, raising
+        `BlockedBySnapshotStaleError` spuriously rather than for an actual snapshot race.
 
         Returns the phases it wrote, in row order — so the caller reports a write that happened
         rather than one that was planned.
@@ -1880,6 +1889,7 @@ class SqliteStateRepository:
                 blocked_by_rows=live,
                 blocker_statuses=await resolve(conn, named),
                 floors=floors,
+                stub_blocked=stub_blocked,
             )
             if fresh != (observed,):
                 raise BlockedBySnapshotStaleError(
