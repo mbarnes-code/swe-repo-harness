@@ -1192,6 +1192,27 @@ This criterion's own 20-sub-clause re-audit against the CORRECTED D92/D98/D99/D1
 re-derived here — a future round should re-run round II task 1's re-audit against current `HEAD`
 rather than trust this entry's pre-round-III account of what's covered.
 
+**Round IV task 1's re-audit (2026-09-02), reviewed Approved — the re-run this correction asked
+for.** Independently re-derived a 20-sub-clause enumeration (none previously existed in the tree)
+against current `HEAD`, matched against SPEC §12 item 38's own literal text directly. Clauses
+touching D92/D98/D99/D100 (refusal, end-of-run ABANDONED/HELD/exit-7, the held-for-merge
+carve-out) are already covered — by tests landed inside the fix commits themselves
+(`600360d`/`448ceae`/`7cd6647`), not newly buildable now; task review independently confirmed each
+named test genuinely covers what's claimed by reading them directly. Clauses on "resolution
+mechanics for an already-open PR" remain D94-blocked, re-confirmed against current `_pr_impl`.
+
+**New, disclosed finding — a distinct, already-self-disclosed gap, deliberately not
+D-numbered.** Two complementary-case sub-clauses (a `BLOCKED` consumer + `UnmergedDependency`
+finding, and its clearing via `--sync`) are genuinely unimplemented —
+`grep -rn "UnmergedDependency" src/ tests/` finds it only in comments/docstrings, never a write
+site or test. Task review independently confirmed this is not a new gap this session's fixes
+created: `src/fleet/models/state.py:146-148` and `src/fleet/orchestrator/reentry.py:711-714`
+already name "a `pr.merge_wait_timeout_s` breach (§3.4)" as one of three `blocked_by` triggers
+with "0 producers today" — the code's own comments already disclose this as unbuilt. Not given a
+D-number here (a D-number in this ledger has so far marked a defect DISCOVERED by investigation,
+not one the code already names as its own known gap) — flagged for a future round's judgment on
+whether that distinction should hold or whether this deserves its own tracked number regardless.
+
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
 (batched=1/eager=3 cost comparison) is well covered. Cases (i)/(ii) only test what's handed in as
