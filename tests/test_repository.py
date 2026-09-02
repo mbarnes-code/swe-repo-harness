@@ -28,6 +28,7 @@ from pathlib import Path
 
 import aiosqlite
 import pytest
+from aiosqlite.context import contextmanager as aiosqlite_contextmanager
 from pydantic import BaseModel
 
 from fleet.models.enums import PHASE_DEMOTED_KIND, EdgeKind, Phase, RepoStatus, TaskKind
@@ -415,6 +416,99 @@ async def test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_state
     assert row.attempts == 2
     assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
     assert row.last_error == "bazel test //...: 3 failures"
+
+
+async def test_complete_phase_is_one_write_unit_so_a_failure_leaves_no_half_completed_phase(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+    read_conn: aiosqlite.Connection,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12.13's atomicity sub-clause, proved against a REAL interruption rather than end-state
+    only — the demotion test above proves it for `demote_to_floor`'s two-separate-writes shape;
+    this is the same two-assertion discipline against `complete_phase`'s different shape.
+
+    `complete_phase`'s unit does a SELECT, then exactly ONE `UPDATE ... SET attempts =
+    attempts + 1, status = ?, ...` — `attempts` and `status` are set by the SAME SQL statement, so
+    there is no gap *between* them for a crash to land in; SQLite already makes that pair atomic
+    by construction. What is NOT free of a gap is the code immediately after that UPDATE runs and
+    before `unit()` returns: `complete_phase`'s own docstring calls the rowcount check there
+    "defense-in-depth... this should be structurally impossible", but "structurally impossible in
+    correct code" is not "there is no window" — a crash in that window is exactly what
+    `BEGIN IMMEDIATE` exists to make safe, and nothing had ever driven a real failure through it.
+
+    So: (1) count `writer.submit` calls across one full `complete_phase` call — proves the SELECT
+    and the UPDATE run as one unit, one `BEGIN IMMEDIATE`, not two. (2) monkeypatch
+    `aiosqlite.Connection.execute` to let the real UPDATE execute unchanged — the write genuinely
+    lands on disk inside the open transaction — and only THEN raise, from the same call, standing
+    in for "something goes wrong after the UPDATE but before the unit returns". A separate
+    connection reading the row afterwards must see the PRE-transaction state (status/attempts/
+    lease untouched), proving the whole unit rolled back rather than the UPDATE's write surviving
+    a failure that happened after it. The submit-count half alone is a proxy — it counts units,
+    not transactions; the rollback half alone would pass even if `complete_phase` split its work
+    into two `submit` calls and only the second one failed. Together they pin one unit, therefore
+    one `BEGIN IMMEDIATE`, therefore all-or-nothing, for a shape where the interesting write is a
+    single SQL statement rather than several.
+    """
+    store, writer = demotion_bed
+    await store.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+    fence = await store.acquire_phase_lease(
+        RUN, REPO, Phase.TRANSFORM, owner=WORKER, now=NOW, lease_ttl_s=60
+    )
+    assert fence is not None
+
+    submits = 0
+    original_submit = writer.submit
+
+    async def counting_submit(unit: object) -> object:
+        nonlocal submits
+        submits += 1
+        return await original_submit(unit)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(writer, "submit", counting_submit)
+
+    result = await store.complete_phase(
+        RUN, REPO, Phase.TRANSFORM, fence=fence, status=RepoStatus.SUCCEEDED, now=NOW
+    )
+    assert result is RepoStatus.SUCCEEDED
+    assert submits == 1, "the SELECT and the UPDATE are one unit, not two"
+
+    # Now interrupt a second completion — for a DIFFERENT repo/phase — after its UPDATE has
+    # genuinely executed inside the transaction.
+    await store.upsert_phase(RUN, OTHER, Phase.TRANSFORM, now=NOW)
+    other_fence = await store.acquire_phase_lease(
+        RUN, OTHER, Phase.TRANSFORM, owner=WORKER, now=NOW, lease_ttl_s=60
+    )
+    assert other_fence is not None
+
+    boom = RuntimeError("injected mid-unit failure")
+    real_execute = aiosqlite.Connection.execute
+
+    async def raw_after_real_update(
+        conn: aiosqlite.Connection, sql: str, parameters: object = None
+    ) -> aiosqlite.Cursor:
+        cursor = await real_execute(conn, sql, parameters)
+        if "SET attempts = attempts + 1" in sql:
+            raise boom
+        return cursor
+
+    monkeypatch.setattr(
+        aiosqlite.Connection, "execute", aiosqlite_contextmanager(raw_after_real_update)
+    )
+
+    with pytest.raises(RuntimeError, match="injected mid-unit failure"):
+        await store.complete_phase(
+            RUN, OTHER, Phase.TRANSFORM, fence=other_fence, status=RepoStatus.SUCCEEDED, now=NOW
+        )
+
+    row = await _phase_state(read_conn, OTHER)
+    assert row == {
+        int(Phase.TRANSFORM): ("RUNNING", 0)
+    }, "the UPDATE ran before the raise; it must not have survived it"
+
+    after = await store.get_phase(RUN, OTHER, Phase.TRANSFORM)
+    assert after is not None
+    assert after.lease_fence == other_fence, "a rolled-back unit must not have spent the fence"
+    assert after.lease_owner == WORKER, "the lease survives — the caller can legitimately retry"
 
 
 async def test_complete_phase_refuses_an_illegal_transition_instead_of_writing_it(
