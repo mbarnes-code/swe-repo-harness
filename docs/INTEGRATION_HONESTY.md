@@ -8227,3 +8227,40 @@ re-deriving it.
 **Not yet built, either gap:** neither is designed in detail here — this entry establishes both
 gaps exist and are now tracked, following D102's own precedent of disclosing a real gap without
 prescribing its exact implementation.
+
+---
+
+## D104 — OPEN. `TaskKind.REVALIDATE` has no execution/dispatch path anywhere, and `settle_revalidation`
+(T2/T3) has zero production call sites — the same "defined, unit-tested, zero callers" shape D102
+found and fixed for T1, one layer downstream
+
+**Found by research-3 (2026-09-02), while sizing §37's stub-creation worker and confirming, per
+that research's own brief, whether closing creation alone would make §12.37 satisfiable end-to-end
+— it does not, and this is why.** Verified free before allocating: form-agnostic sweep of `docs/
+INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md`/`docs/SPEC.md` for `\bD[0-9]+\b`
+found `D103` as the highest allocated number.
+
+**The gap, as measured by research-3, re-verified by the controller before allocating:**
+`grep -rn "TaskKind.REVALIDATE" src/fleet/orchestrator/*.py src/fleet/workers/*.py` returns nothing
+outside `orchestrator/stubs.py`'s own docstrings, which only describe the *plan* a `RevalidationPlan`
+represents, never consume it — `cli.py`'s `_COARSE_TASK_KIND` dispatch-grain table has no mapping
+for `REVALIDATE` (confirmed at D102's own landing, unchanged since). `grep -rn
+"settle_revalidation(" src/fleet/` returns only `orchestrator/stubs.py`'s own definition — the
+function that turns a `VerificationReport` into a T2 (`RESOLVED`)/T3 (another failed round)
+`StubDecision` has zero production callers; `tests/test_stubs.py` is its only caller anywhere.
+
+**Consequence.** D102 (T1's production trigger) now correctly mints `REVALIDATE` `tasks` rows —
+but nothing ever claims, executes, or resolves one. Every `REVALIDATE` row sits `PENDING` forever
+by construction, exactly as D102's own entry disclosed as expected scope at the time. SPEC §12
+item 37's own criterion text requires the row eventually reach `RESOLVED` via T2 and the consumer
+`SUCCEEDED` — none of that is reachable today, independent of whether a stub was ever created
+(§37's own stub-creation gap is upstream of this one; both must close for §12.37 to be satisfiable
+end-to-end, and they are independent gaps, not the same one restated).
+
+**Not yet built:** a dispatch-grain mapping for `REVALIDATE` (`_COARSE_TASK_KIND` or an equivalent
+routing decision), a worker/handler that turns a claimed `REVALIDATE` task into a real
+`VerificationReport` (likely reusing `BuildverifyWorker`'s existing build/test-check engine, per
+this project's own established pattern of reusing an existing worker rather than building a new
+one — not confirmed here), and the call site that feeds that report to `settle_revalidation` and
+applies the resulting `StubDecision`. That design choice is not made here — this entry only
+establishes the gap exists and is now tracked, following D102's own precedent.
