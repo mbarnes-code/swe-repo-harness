@@ -7628,3 +7628,104 @@ candidates also scoped, neither closing its own criterion alone: §12.35's remai
 pattern) and D96's `transform` phase-entry disk-headroom fix (a small production fix + regression
 test, verified low-risk — this would be the first round-level task dispatched as production code
 rather than TEST-ONLY since the D77/D95 shape, not since a plain criteria-closure task).
+
+### Checkpoint — 2026-09-02 (round CC controller, close-out)
+
+**§12 criteria met: 23 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived by the final whole-branch reviewer via a
+SECOND, structurally different predicate — the first `**`-bold status line of each `## N.`
+section, immune to a mid-body `**DONE` miscounting the naive scan would catch — and matching
+exactly, member-for-member: up from 22 at round BB's close. **§12.13 flipped OPEN→DONE this
+round** — retry-ladder atomicity, its last remaining sub-clause, closed via a real mid-transaction
+interruption test on `complete_phase`. This round also landed the session's first production-code
+fix since D77/D95's shape: D96's phase-entry half (`fleet transform` now carries the same
+disk-headroom check every other phase has), verified regression-free by its own task review
+building separate before/after worktrees and finding byte-identical failure sets in
+`tests/test_build_e2e.py` across both. A third task strengthened (without flipping) §12.35,
+closing its last worker-level proxy gap and finding along the way that the proxy it replaced was
+not merely weaker but **structurally incapable** of ever catching a real leak.
+
+**A design that deviated from its own precedent, verified by an independent judgment call rather
+than mutation mechanics alone.** §12.13's atomicity sub-clause was closed against a landed
+precedent (`demote_to_floor`'s own interruption test) that assumed a two-write shape;
+investigation found `complete_phase` has only one write statement, so the injection point was
+adapted to monkeypatch `aiosqlite.Connection.execute` itself — letting the real `UPDATE` execute
+inside the open transaction, then raising afterward. Both this round's task review and the final
+whole-branch review were explicitly instructed to form their OWN judgment on whether this
+genuinely proves SPEC's atomicity claim rather than a weaker "an exception can happen somewhere"
+substitute, not just reproduce the mutations mechanically — both independently concluded it does,
+with the final review adding its own from-scratch reproduction of the load-bearing mutation before
+agreeing.
+
+**A production fix's own disclosed test failures were verified by direct before/after comparison,
+not accepted on the implementer's word.** Task 3's own report disclosed 11 failures in
+`tests/test_build_e2e.py`, attributed entirely to environment gaps (a missing `uv` binary, a
+gitignored toolchain directory not carrying into a fresh `git worktree add`) rather than the fix.
+Per this project's standing discipline that "an implementer's 'this defect is pre-existing' is the
+same claim in disguise," task review built its OWN separate worktrees at the base and fixed
+commits and ran the suite in both — the failure sets came back byte-identical, direct symmetric
+proof of zero regression, independent of trusting the implementer's causal account (which also
+checked out on inspection of the actual tracebacks).
+
+**The final whole-branch review found a real regression of the exact class this project's own
+Guardrail 7 names, inside a fix that had just closed the defect the guardrail describes.** Task
+3's 4-line production change shifted every subsequent line number in `src/fleet/cli.py`; the
+controller's own citation sweep before committing the D96 ledger update caught and fixed four
+rotted citations — but scoped that sweep to `docs/INTEGRATION_HONESTY.md` only. The final review
+found the same shift had rotted **six more citations** in `docs/CRITERIA_PLAN.md`, a file this
+same round edited in three of its own commits, entirely unswept: "a remedy that scopes itself to
+the reported site regenerates the class," reproducing verbatim inside the very round that landed
+the fix. Alongside it: a supporting sentence in §13's own closure text ("no pre-existing test
+would have caught it") that had never been measured and was false — four pre-existing tests do
+catch the cited mutation, and the actually-unique discriminator was a different one; a live
+disclosure from a PRIOR round's final review, silently deleted rather than annotated around, when
+this round's own edit rewrote the same entry; and a test that asserted a structurally-implied
+generalization of SPEC's literal sentence rather than the sentence itself, fixable — and fixed —
+for the cost of two keyword arguments. All six findings were fixed directly by the controller
+(one commit strengthening the test itself, one commit correcting five doc-only claims) rather than
+dispatching a fresh implementer, since the review supplied exact target values for the mechanical
+findings — but the controller independently re-verified those values against source before
+applying them rather than transcribing them, and caught the review's own citation math as
+measurably wrong in two of six places before landing the fix. A scoped re-review then
+independently re-derived all six citations from scratch a second time and confirmed every one
+correct, including the two the controller's own commit message flagged as uncertain.
+
+**Rulings made this round:**
+1. `complete_phase`'s single-write shape required deviating from the `demote_to_floor` precedent's
+   exact injection point; the deviation was reviewed with an explicit instruction to form an
+   independent judgment on whether it still proves the SPEC claim, not merely whether the
+   mutations pass — twice, by two different reviewers, both agreeing.
+2. D96's phase-entry fix was dispatched as production code (not TEST-ONLY) with an explicit
+   risk-check requirement in its brief to run the full e2e suite before committing; its disclosed
+   test failures were verified by direct before/after worktree comparison rather than accepted on
+   the implementer's causal account.
+3. The final review's six findings (one blocking) were fixed directly by the controller rather
+   than dispatched to a fresh implementer, judged appropriate given the review supplied exact
+   target values for five of six — but every value was independently re-verified against source
+   before landing, and two were found and corrected to be wrong as given.
+4. A scoped re-review was dispatched after the controller's own fix, rather than declaring the
+   round closed unilaterally, given the scale of the fix wave (six findings, one blocking, one
+   test-code change) — matching this project's standing discipline that a fix is itself a new
+   artefact needing its own measurement, not a lower bar because the fixer is the controller.
+
+**Full suite, post-close: verified clean on all touched surfaces across the round's full arc** —
+each task's own self-gate independently reproduced by its task review (54, 23, and 165+14+7-failed
+tests respectively, the last with a byte-identical before/after comparison); the final
+whole-branch review's own run (ruff clean, citation gate 54/54, 54+23+165+14 passed across all
+four touched-or-regression-checked files, plus its own from-scratch reproduction of the atomicity
+mutation and the structurally-blind claim); the controller's closing fix wave (54 passed,
+citation gate 54/54, ruff clean); the scoped re-review's own independent reproduction of every
+fix, including re-running the rollback→commit mutation a second time against the updated fixture.
+No step in this chain trusted a claim — mutation result, citation value, or regression-absence —
+it could instead re-derive.
+
+**Round DD, opening next.** Lead candidate pre-scoped by round CC's own research (concrete design
+already written): **§12.42's fixture-backend proof** — the entry's stale "5 of 9" count corrected
+to 6-of-7-distinct-requirements-already-covered, with the one genuine remaining gap (a
+`tests/fixtures/llm/echo_backend.py` "one file, zero `src/fleet/` changes" proof) scoped with
+exact file/test/pattern detail. D96's Phase-2 per-repo-worker wiring half also scoped concretely
+(not NEW-MECHANISM as previously assumed — mechanical replication of the existing
+`require_free_space` pattern across `RelocateInput`/`RewriteInput`/`BuildgenInput`+
+`TransformInput`, exact file/line citations for every touch point) — a bounded dedicated task,
+though it does not itself flip any §12 criterion. All 5 D-number-blocked criteria (§22/35/36/38/43)
+re-verified this round with no stale attributions found, for the first time this session.
