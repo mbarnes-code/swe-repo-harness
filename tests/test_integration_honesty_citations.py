@@ -595,10 +595,13 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     # review (CLAUDE.md: "the reason is the unmeasured sentence"). The citation is still not
     # repointable to "the current definition" without destroying what the D96 paragraph measured
     # at round AA -- that disposition (pin, not repoint) is unaffected by the provenance error.
+    # Further drift since (round III final review, 2026-09-02): the real def line has moved again,
+    # to 13904 -- the "13815" arithmetic above is a round-GG-time snapshot, not a live claim; the
+    # `defined at` trailer below is what's kept current on each re-verification, not this prose.
     (
         "_require_disk_headroom",
         "cli.py:13782",
-    ),  # L7636 defined at [(13813, 13828), (13813, 13828)], cited 13782-13782
+    ),  # L7703 defined at [(13904, 13917), (13904, 13917)], cited 13782-13782
     # Same class as `_require_disk_headroom` above, found the same way (round GG task 4's own
     # `rewrite.py` edits shifted lines below them): D49's own correction history cites `_record`'s
     # location as of `c5ab3b1`/`82654e8` -- both past commits, both confirmed matching `_record`'s

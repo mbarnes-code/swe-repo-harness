@@ -216,8 +216,11 @@ single fixture per (role, backend) pair likely suffices without needing all 4 ru
 (investigate before assuming the full cross-product is needed literally per-rung; SPEC's own
 "including one recorded at the PROMPTED rung" reads as one additional requirement layered on the
 per-role-per-backend base, not a multiplier). Round II's landed `REPO_CLASSIFY` coverage across 4
-backends + PROMPTED is genuine partial progress, not reverted — 1 of 12 roles is done; 11 remain.
-§12 count reverts from 27 to **26 of 48**.
+backends + PROMPTED is genuine partial progress, not reverted. §12 count reverts from 27 to
+**26 of 48**. (Role count updated below by round III task 3 — see that entry, not restated here,
+per round III final review's own finding that this line had gone stale by staying at "1 of 12"
+after round III landed 2 more roles; read the entry's own running count, not this line, for the
+current figure.)
 
 ## 5. No `pickle` / `ThreadPoolExecutor` / `subprocess.run` in `src/fleet/`
 **DONE (landed round N task 1, `51f7e31`, reviewed Approved).**
@@ -1168,6 +1171,26 @@ path (`_continue_impl` returns early with `halted: None` when nothing is servabl
 determination is a no-op on that path). A resume whose only event this cycle is a stub abandonment
 silently exits 0. Task review additionally flagged, without confirming to the same rigor, a
 possible SECOND gap in SPEC's own literal text — see D98's own entry for the open question.
+
+**Correction, round III final review (2026-09-02) — D92, D98, and the held-for-merge test's own
+credited behavior all changed under round III, and none of this entry's text above was updated.**
+Round III fixed all three defects this entry names — D92's own write was found mistargeted and
+replaced (D99/D100, `448ceae`), D98's exit-code gap was fixed (`600360d`) — and D98's own "open
+question" was answered (also `448ceae`), not left open. Specifically:
+- The bullet above reading *"D92 — FIXED, LANDED... now wired (round GG task 1)"* names a write
+  site that no longer exists — D92's original write targeted the wrong entity and was replaced,
+  not merely re-confirmed; see D92/D99/D100's own entries for the corrected account.
+- `test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr`, credited above as
+  covering *"the held-for-merge `PrState.HELD` case,"* now asserts the OPPOSITE — that no
+  `PrState.HELD` write targets the provider. The underlying held-for-merge carve-out (the `stubs`
+  row staying `ACTIVE`) is still covered by this test; the specific `PrState.HELD` behavior
+  originally credited to it is not, because that behavior was a defect (D100) and has been removed.
+- D98 is `FIXED, LANDED`, not an open "significant new finding" — see D98's own entry, which
+  itself now also carries a forward reference resolving its own disclosed open question.
+
+This criterion's own 20-sub-clause re-audit against the CORRECTED D92/D98/D99/D100 state is not
+re-derived here — a future round should re-run round II task 1's re-audit against current `HEAD`
+rather than trust this entry's pre-round-III account of what's covered.
 
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
