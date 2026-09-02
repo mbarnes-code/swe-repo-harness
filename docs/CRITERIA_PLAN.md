@@ -212,6 +212,25 @@ two tasks' diffs conflicted in the same table (both add rows) — combined by th
 merge, additive on both sides, no logic conflict. **5 of 12 roles remain** (`api_incompat_rewrite`,
 `build_authoring`, `escalation`, `transform_repair`, `manifest_extract`).
 
+**Round V tasks 1 and 2 (2026-09-02, `271f507`/`be48e94`, both reviewed Approved) — 4 more roles
+landed, 11 of 12 now covered.** Task 1 added `TRANSFORM_REPAIR`/`MANIFEST_EXTRACT`; task 2 added
+`API_INCOMPAT_REWRITE`/`ESCALATION` — both via the same `GoldenCase` table pattern, both this
+round's own investigation confirming the nested-object-tuple fields (`LlmPatchProposal.files`,
+`ManifestExtraction.dependencies`) are genuinely exercised with multi-entry realistic payloads, not
+single-entry placeholders. Both task reviews independently reproduced their Rule-12 mutation
+proofs live (task 1's reviewer went further, adding a second discriminating mutation on the nested
+`diff` field beyond the implementer's own proof). Task 2's worktree survived a mid-round host disk-
+exhaustion interruption; 3 of its 8 fixtures were pre-existing drafts from before the interruption,
+independently re-verified field-by-field against the schema rather than trusted on sight (task
+review confirmed this directly). The two tasks' diffs conflicted in the same table (both add rows,
+same shape as round IV's own precedent) — hand-resolved by the controller at merge by diffing each
+task's commit against its own stated base to extract its exact additions and splicing them into
+the other's already-merged state; verified via exact count reconstruction (36 baseline + 10 + 10 =
+56 passed, matching precisely). **Only `build_authoring` remains** — per round V's own research,
+confirmed the largest/most structurally complex of the 12 (a two-level nested-object tuple where
+each entry itself carries three sibling array fields), but still sized as a single-task one-shot
+following the same proven recipe, not needing a further split.
+
 **Not closed by composition.** `tests/test_llm_roles.py`'s existing round-trip test IS
 parametrized over all 12 roles, but its input is a hand-shaped Pydantic-model literal
 (`_sample(model_cls)`), never a stored wire response, and not per backend — it proves a different
