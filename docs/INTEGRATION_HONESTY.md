@@ -7534,8 +7534,14 @@ but see D99/D100 for the scope this entry's own original investigation missed.**
 CONSUMER's PR as `PrState.HELD`'s target at the T4/ABANDONED event (`docs/SPEC.md:1859`,
 `:7520`), not the provider's PR at the `held_for_merge` carve-out this fix actually writes to —
 and the provider-side write this fix landed has a further, self-defeating interaction with the
-same carve-out on a subsequent resume (D100). Read D99 and D100 in full before treating D92 as
-having closed the `PrState.HELD` gap its own original investigation described.
+same carve-out on a subsequent resume (D100).
+
+**Second correction, round III task 2 (2026-09-02, `448ceae`) — D99 and D100 are now FIXED,
+LANDED.** The mistargeted provider-side write this entry describes is removed; a correctly-targeted
+consumer-side write replaces it. Read D99/D100's own entries for the full account. D92's own
+status stays `FIXED, LANDED` for the historical record of what it built and why that was wrong —
+the ledger now reflects the corrected mechanism at D99/D100, not by rewriting this entry's own
+account of what happened.
 
 ## D93 — FIXED, LANDED (`b774c8f`, round EE task 2; component commit `f0936c2`). No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
 
@@ -7913,7 +7919,7 @@ and only to the provider's own record, not the consumer `C`'s). Read SPEC's own 
 directly before treating this as a confirmed gap — it was not independently re-derived to the same
 confidence as the exit-code finding above.
 
-## D99 — OPEN. `PrState.HELD` is written to the wrong PR: SPEC names the consumer's, D92's fix writes the provider's
+## D99 — FIXED, LANDED (`448ceae`, round III task 2). `PrState.HELD` is written to the wrong PR: SPEC names the consumer's, D92's fix writes the provider's
 
 **Found by round II final review (2026-09-02), re-verifying task review's own disclosed residual
 finding for D98 — this one confirmed to the reviewer's own higher confidence, not just flagged.**
@@ -7959,7 +7965,18 @@ loop (`cli.py`, the branch handling `decision.transition` for an abandon, not th
 fix already built for the provider case, applied to the correct entity. Whether the provider-side
 write should be removed, kept for a different purpose, or renamed is not decided here — see D100.
 
-## D100 — OPEN. The provider-side `PrState.HELD` write (D92's landed fix) is self-defeating: it can cause the exact premature abandonment SPEC's carve-out exists to prevent
+**Fixed, 2026-09-02 (round III task 2, `448ceae`), reviewed Approved.** The provider-side
+`held_providers` write is deleted entirely (closes D100 too — see that entry). A consumer-side
+write added inside `_apply_stub_reconcile`'s existing `decisions` loop: unique `consumer_repo_id`s
+collected from `decisions`, `pr_records` fetched once, each present consumer's draft upserted with
+`state=PrState.HELD`, mirroring D92's own `model_copy`/`_upsert_pr_record` shape verbatim, just
+keyed correctly. Task review independently re-read SPEC and found further corroboration beyond
+this entry's own citations — §12.38 and §12.39(ii) (`docs/SPEC.md`) and the `stubs:` config block
+comment both also name the consumer, and confirmed via `git grep` that no sentence anywhere in
+`docs/SPEC.md` describes a provider's PR being marked `HELD`. Proven old-fails/new-passes,
+reproduced independently by task review in a fresh worktree, zero drift confirmed both ways.
+
+## D100 — FIXED, LANDED (`448ceae`, round III task 2). The provider-side `PrState.HELD` write (D92's landed fix) is self-defeating: it can cause the exact premature abandonment SPEC's carve-out exists to prevent
 
 **Found by round II final review (2026-09-02), via a runtime probe against the shipped
 `reconcile()` function — reproduced directly, not inferred.** Verified free before writing:
@@ -8004,3 +8021,14 @@ as a side effect if the provider-side write is removed entirely — or D100 may 
 `held_for_merge` write simply not happening at all) if the provider-side write turns out to serve
 a real purpose SPEC names elsewhere. Not designed here — a future round should read both entries
 together before dispatching either.
+
+**Fixed, 2026-09-02 (round III task 2, `448ceae`), reviewed Approved — resolved exactly as D99's
+own entry predicted, by removing the provider-side write entirely.** No SPEC text anywhere
+names a legitimate purpose for it — task review re-read §13 row 45 and §3.5.1 in full and
+confirmed no sentence describes a provider's PR being marked `HELD`. Discriminator: the exact
+second-resume repro this entry documents (a provider PR still `DRAFTED`/`OPEN` inside the timeout
+window) was extended into a genuine test — after the fix, a second `resume` call leaves the stub
+row `ACTIVE`, not abandoned, and the provider's PR record stays unchanged (`DRAFTED`) rather than
+ever reading `HELD`. Task review reproduced this old-fails/new-passes independently, including
+running the exact repro shape against unfixed code in a scratch copy to directly observe the raw
+abandonment before the fix's own test assertion would have short-circuited the observation.
