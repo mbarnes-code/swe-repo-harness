@@ -7396,16 +7396,16 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12183-12262`), not the pre-Task-B code the paragraph above was describing.** The
-`if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12217` (REWRITE's
-`elif not landed_units:` nothing-landed branch) and `:12259` (the non-REWRITE discard branch) —
+(`cli.py:12280-12359`), not the pre-Task-B code the paragraph above was describing.** The
+`if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12314` (REWRITE's
+`elif not landed_units:` nothing-landed branch) and `:12356` (the non-REWRITE discard branch) —
 both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
 never reach the `DONE`/discard/partially-landed verdicts" is false for two of those three verdicts.
-Task B's `if units and not missing_units:` DONE branch (`:12205-12213`) and its `else:`
-partially-landed branch (`:12230-12246`) never read `task_anchor` at all — neither is gated by
+Task B's `if units and not missing_units:` DONE branch (`:12302-12310`) and its `else:`
+partially-landed branch (`:12327-12343`) never read `task_anchor` at all — neither is gated by
 this guard, and both are production-reachable: `phases.pre_commit_sha` (a *different* column,
 read into `anchor`/`phase_anchor` above, not `task_anchor`) DOES have a real production writer
-(`cli.py:4474`, `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
+(`cli.py:4537`, `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
 `find_task_commit` can genuinely locate a landed unit's commit and route into DONE or
 partially-landed with `task_anchor` still `NULL` throughout. The heading's claim stays true as far
 as it goes — the discard path (what §12.15(i)/§12.45(i) actually need guarded, since discarding
@@ -7413,6 +7413,19 @@ without a real anchor is the destructive case) is correctly blocked at both its 
 generalization to "any of the DONE/discard/partially-landed verdicts" was wrong the moment Task B
 landed the DONE and partially-landed branches, because it was never re-measured against them in
 the same commit that made them reachable.
+
+> ***Citation corrections made in place (2026-09-02, round GG task 2) — pointers, not records; no
+> claim changed.*** Unrelated growth in `src/fleet/cli.py` above `_reconcile_tasks_with_git`
+> between `cd0b76b` (when this correction's citations were written) and the current tree shifted
+> every line citation in the paragraph above by exactly `+97` (the function's own body is
+> byte-for-byte identical between the two trees — `diff` of the full definition returns nothing —
+> so the shift is pure unrelated insertion, not a rewritten function), and the `_TransformSink`
+> citation two paragraphs below by `+63`. Re-derived from content, each confirmed against the
+> current tree by exact-line-content match, not carried forward from the gate: `:12183-12262` ->
+> `:12280-12359` (`_reconcile_tasks_with_git`), `:12217` -> `:12314` and `:12259` -> `:12356` (the
+> two `discard_task` guard sites), `:12205-12213` -> `:12302-12310` (the DONE branch), `:12230-12246`
+> -> `:12327-12343` (the partially-landed branch), `:4474` -> `:4537` (`_TransformSink`'s `UPDATE
+> phases` statement).
 
 **Not yet built:** a production write path for `tasks.pre_commit_sha` — most naturally, having
 `_TransformClaimHook` (or an equivalent `pre_dispatch` hook for whichever kinds need it) persist
