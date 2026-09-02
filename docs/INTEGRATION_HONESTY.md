@@ -7527,6 +7527,16 @@ guarantee is unaffected. Does not flip §12.38 alone — D94 (no PR-promotion me
 OPEN and still blocks it, confirmed genuinely NEW-MECHANISM sized with no smaller slice
 (round GG's own research, re-checked directly against current `HEAD`).
 
+**Correction, round II final review (2026-09-02) — this fix is FIXED, LANDED for what it actually
+built (a real write, genuinely mutation-proven), but that write targets the wrong entity relative
+to SPEC's own text; not reverting this status, since the write itself is real and does something,
+but see D99/D100 for the scope this entry's own original investigation missed.** SPEC names the
+CONSUMER's PR as `PrState.HELD`'s target at the T4/ABANDONED event (`docs/SPEC.md:1859`,
+`:7520`), not the provider's PR at the `held_for_merge` carve-out this fix actually writes to —
+and the provider-side write this fix landed has a further, self-defeating interaction with the
+same carve-out on a subsequent resume (D100). Read D99 and D100 in full before treating D92 as
+having closed the `PrState.HELD` gap its own original investigation described.
+
 ## D93 — FIXED, LANDED (`b774c8f`, round EE task 2; component commit `f0936c2`). No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
 
 **Found by round Z task 2 (2026-09-01), same investigation as D92 — disclosed, not fixed, out of
@@ -7888,3 +7898,95 @@ a second, currently-unimplemented behavior (`_apply_stub_reconcile`'s ABANDONED 
 and only to the provider's own record, not the consumer `C`'s). Read SPEC's own compound sentence
 directly before treating this as a confirmed gap — it was not independently re-derived to the same
 confidence as the exit-code finding above.
+
+## D99 — OPEN. `PrState.HELD` is written to the wrong PR: SPEC names the consumer's, D92's fix writes the provider's
+
+**Found by round II final review (2026-09-02), re-verifying task review's own disclosed residual
+finding for D98 — this one confirmed to the reviewer's own higher confidence, not just flagged.**
+Verified free before writing: form-agnostic sweep of this file's `D<n>` headings found no `D99`;
+highest allocated number was `D98`.
+
+**The gap, as measured against SPEC directly.** Three independent citations name the CONSUMER's PR
+as `PrState.HELD`'s real target, at the point a stub is finally `ABANDONED` (end-of-run, T4):
+`docs/SPEC.md:1859` (§3.5.1 point 3): *"Their PRs are held"* — "their" = the consumers named in
+point 2 immediately above. `docs/SPEC.md:7520` (§13 row 35): *"consumers **stay** `DEGRADED`...;
+their PRs **go** `PrState.HELD`"* — a transition verb, tied to the same abandon event.
+`src/fleet/models/enums.py:409-411`'s own `PrState.HELD` docstring: *"still a draft on the forge,
+and the harness has finished without resolving **its** stubs... Entered ONLY from `DRAFTED`, by
+`stub_reconcile`"* — "its stubs" names the PR's own repo's unresolved dependencies, i.e. the
+consumer, not a provider it depends on.
+
+D92's landed fix (`7cd6647`, round GG task 1) writes `PrState.HELD` to a different entity
+entirely: `_apply_stub_reconcile`'s `held_providers` loop (`cli.py:12097-12106`) marks the
+**provider's** own PR record `HELD` when `reconcile()`'s `held_for_merge` carve-out (§13 row 45 —
+a DIFFERENT SPEC location, about NOT abandoning a stub row prematurely while its provider's PR is
+still under human review) fires. No code path anywhere in `src/` marks a CONSUMER's PR `HELD` at
+the T4/ABANDONED event SPEC actually describes — the sole `PrState.HELD` write site is this one,
+targeting the provider.
+
+**Root cause, as best understood:** D92's original finding (round Z, this file, search
+`## D92 —`) quoted `enums.py`'s docstring ("the state a PR sits in while its stub is still
+unresolved") without checking which SPEC location defines the target entity, and the round GG
+implementation inferred the target from `held_for_merge`'s own carve-out framing (which is about a
+STUB row's state, not a PR's) rather than from §3.5.1 point 3 / §13 row 35's own explicit "their
+PRs"/"consumers... their PRs" language.
+
+**Consequence.** No consumer's PR is ever marked `HELD` when its stub is genuinely abandoned at
+end-of-run — the exact scenario SPEC's sentence describes ("the run ends with the provider still
+abandoned... their PRs go `PrState.HELD` and `fleet pr --ready` refuses them, exit 2") is
+unimplemented. `fleet pr --ready` may refuse a stub-limited consumer's PR for other reasons (a
+`stubbed_deps` check, not traced here), but not via the `PrState.HELD` mechanism SPEC names
+specifically. See D100 for a second, compounding defect in the provider-side write this gap left
+in place.
+
+**Not yet built:** a write, inside the T4/ABANDONED branch of `_apply_stub_reconcile`'s decisions
+loop (`cli.py`, the branch handling `decision.transition` for an abandon, not the
+`held_providers` loop), marking the CONSUMER's own PR record `HELD` — mirroring the shape D92's
+fix already built for the provider case, applied to the correct entity. Whether the provider-side
+write should be removed, kept for a different purpose, or renamed is not decided here — see D100.
+
+## D100 — OPEN. The provider-side `PrState.HELD` write (D92's landed fix) is self-defeating: it can cause the exact premature abandonment SPEC's carve-out exists to prevent
+
+**Found by round II final review (2026-09-02), via a runtime probe against the shipped
+`reconcile()` function — reproduced directly, not inferred.** Verified free before writing:
+highest allocated number was `D99` (immediately above).
+
+**The gap, as measured.** `pr_open` (`src/fleet/orchestrator/stubs.py:202`), the property §13 row
+45's carve-out reads to decide whether a stub row should stay `ACTIVE` instead of being abandoned,
+returns `True` only for `PrState.DRAFTED`/`PrState.OPEN` — `PrState.HELD` is deliberately excluded
+(`stubs.py:191-199`'s own comment explains why: a `HELD` PR is "the fleet's own verdict", not a
+pending human action). But D92's fix (D99, above) writes `PrState.HELD` to a provider's PR record
+the FIRST time `held_for_merge` fires for it — and that write happens inside the very
+`_apply_stub_reconcile` pass that computed `held_for_merge` from `pr_open` being `True` a moment
+earlier. On the NEXT `stub_reconcile` pass (a subsequent `fleet resume`), that provider's PR now
+reads `HELD`, `pr_open` returns `False`, and the row that was legitimately protected by the
+carve-out is abandoned — even though the provider's real forge PR may still be genuinely open and
+under human review, since resume's forge re-poll is opt-in (`--repoll-prs`,
+`cli.py:11444-11455`) and the locally-cached `PrState` is what `pr_open` actually reads.
+
+Reproduced directly against the shipped `reconcile()` (one `ACTIVE` stub, provider PR 10s old,
+`pr.merge_wait_timeout_s` 3600s — well inside the carve-out's own window):
+```
+resume #1: pr_state=DRAFTED  -> held=['consumer'], decisions=[]            (correctly held)
+resume #2: pr_state=OPEN     -> held=['consumer'], decisions=[]            (correctly held)
+resume #3: pr_state=HELD     -> held=[],            decisions=[('T4', 'END_OF_RUN')]  (abandoned)
+```
+Resume #3 abandons a stub row whose provider PR is still open and inside the timeout window —
+exactly what `docs/SPEC.md`'s carve-out text (§13 row 45, cited in D92's own investigation) says
+must NOT happen: *"with `P`'s PR still open and unmerged inside `pr.merge_wait_timeout_s`,
+reconciliation does not abandon the row."* `tests/test_cli.py::test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr`
+(D92's own test) invokes `resume` exactly once, so this second-resume interaction is untested.
+
+**Consequence.** A stub genuinely being held for a human's in-progress review can be abandoned by
+the SECOND `fleet resume` a run happens to make, purely because the first resume's own
+carve-out-preserving write flips a state flag (`pr_open`) that the SAME mechanism reads on its
+next pass — a self-defeating interaction, not a race with external state.
+
+**Relationship to D99.** These are two sides of one root cause: D92 wrote `PrState.HELD` to the
+wrong entity (D99) using a mechanism (`held_for_merge`) whose own state feeds back into the
+carve-out that produced it (D100). Fixing D99 (writing the CONSUMER's PR instead) may resolve D100
+as a side effect if the provider-side write is removed entirely — or D100 may need its own fix
+(e.g., `pr_open` reading the forge's live state rather than the cached `PrState`, or the
+`held_for_merge` write simply not happening at all) if the provider-side write turns out to serve
+a real purpose SPEC names elsewhere. Not designed here — a future round should read both entries
+together before dispatching either.
