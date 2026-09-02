@@ -46,6 +46,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fleet.cli import ExitCode, app
+from fleet.llm.client import LlmError
 from tests.test_cli import MODELS_YAML
 from tests.test_scan_e2e import FIXTURE_REPOS, _fresh_db, _make_repo
 
@@ -806,23 +807,101 @@ def test_an_indeterminate_probe_blocks_the_run_unlike_a_genuinely_missing_engine
 
 
 def test_transform_refuses_the_flags_it_cannot_honour(fleet: Path) -> None:
-    """`--stub-blocked`, `--no-anchoring-guard` and `--context-policy` exit 2 rather than parsing
-    and doing nothing.
+    """`--stub-blocked` and `--no-anchoring-guard` exit 2 rather than parsing and doing nothing.
 
     Why a test and not a docstring: an accepted-and-ignored flag is indistinguishable from an
     honoured one at the exit code, which is all CI reads. An operator who disabled the anchoring
     guard and got no change has been told by exit 0 that the harness agreed with them.
+
+    `--context-policy` USED to be a third flag here — closed (§12.35): it now genuinely reaches
+    the worker (`cli._apply_context_policy_overrides` → `FleetSettings.config.transform.ladder`
+    → `orchestrator/runner.py::_drive`'s `LadderState` → `BaseWorker.execute`), so
+    `test_context_policy_reaches_the_worker_not_the_hardcoded_default` below is its discriminating
+    proof instead of a refusal.
     """
     scanned(fleet)
     for flag in (
         ["--stub-blocked"],
         ["--no-anchoring-guard"],
-        ["--context-policy", "2=EVIDENCE_ONLY"],
         ["--max-attempts", "9"],
     ):
         refused = transform(fleet, *flag)
         assert refused.exit_code == ExitCode.USAGE, f"{flag} was silently accepted"
     assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(0,)]
+
+
+def test_context_policy_reaches_the_worker_not_the_hardcoded_default(fleet: Path) -> None:
+    """§12.35's CLI-level proof: `--context-policy 2=EVIDENCE_PLUS_PRIORS` must change what a
+    REAL worker receives at rung 2, not merely parse and then be dropped.
+
+    The discriminator (Rule 12) is sharper than the flag's own value, because tier is DERIVED
+    from context policy (`workers/base._TIER_FOR_RUNG`) and never declared twice: rung 2's
+    hardcoded default is `EVIDENCE_ONLY`, tier `LLM_REPAIR`, role `transform_repair` — but
+    `EVIDENCE_PLUS_PRIORS` maps to tier `LLM_ESCALATION`, role `escalation`. If the pre-fix
+    hardcoded ladder were still in effect (the old refusal's own claim: the override "would be
+    parsed and then ignored by every rung"), this run would call `transform_repair` with
+    `EVIDENCE_ONLY` and no `rejected_approaches` key, exactly as the untouched default would.
+    Seeing `escalation` called instead, with the overridden policy and the `rejected_approaches`
+    key that only that policy adds, is proof the CONFIGURED value reached
+    `BaseWorker.execute` — a mis-wiring could not coincidentally produce this exact shape.
+
+    `acme-app-py`'s deterministic rung 1 is a designed `RULE_MISS` (`PY_MISSING_RULE`), so it
+    escalates past rung 1 and is the only repo that calls the model at all — the other three
+    repos' rules match cleanly at rung 1 and never reach this code path. `--max-attempts 2` caps
+    the ladder so the run terminates right after that one call.
+    """
+    write_rules(fleet, TS_IMPORT_RULE, PY_MISSING_RULE)
+    scanned(fleet)
+
+    calls: list[tuple[str, str]] = []
+
+    async def fake_complete(
+        self: object, role: str, messages: object, response_model: object, **kwargs: object
+    ) -> object:
+        content = "\n".join(m.content for m in messages)  # type: ignore[attr-defined]
+        calls.append((role, content))
+        # No real backend in this e2e test: the point is to observe what WOULD have been sent,
+        # not to simulate a repair. `_repair()` catches `LlmError` and turns it into a typed,
+        # isolated repo failure (`WorkerRepairError` → `FailureClass.UNKNOWN`), never a crash.
+        raise LlmError("simulated: no real backend in this e2e test")
+
+    monkeypatched = pytest.MonkeyPatch()
+    try:
+        monkeypatched.setattr("fleet.llm.client.LadderModelClient.complete", fake_complete)
+        result = runner.invoke(
+            app,
+            [
+                *base_args(fleet),
+                "--json",
+                "transform",
+                "--max-attempts",
+                "2",
+                "--context-policy",
+                "2=EVIDENCE_PLUS_PRIORS",
+            ],
+            catch_exceptions=False,
+        )
+    finally:
+        monkeypatched.undo()
+
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+    assert len(calls) == 1, f"expected exactly one LLM call (acme-app-py's rung 2), got {calls}"
+    role, content = calls[0]
+    assert role == "escalation", (
+        f"expected role 'escalation' (tier LLM_ESCALATION, derived from the configured "
+        f"EVIDENCE_PLUS_PRIORS override) — got {role!r}, which is what rung 2's HARDCODED "
+        f"default (EVIDENCE_ONLY -> LLM_REPAIR -> 'transform_repair') would have produced"
+    )
+    assert '"context_policy": "EVIDENCE_PLUS_PRIORS"' in content, content
+    assert '"rejected_approaches"' in content, (
+        "the rendered evidence has no rejected_approaches key — rung 2 ran under the HARDCODED "
+        f"default EVIDENCE_ONLY, not the configured EVIDENCE_PLUS_PRIORS override: {content}"
+    )
+
+    statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert statuses["acme-app-py"] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    for survivor in ("acme-lib-ts", "acme-lib-py", "acme-app-ts"):
+        assert statuses[survivor] == "SUCCEEDED", statuses
 
 
 def test_dry_run_emits_the_plan_and_writes_nothing(fleet: Path) -> None:

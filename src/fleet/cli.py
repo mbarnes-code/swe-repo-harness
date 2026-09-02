@@ -3492,7 +3492,7 @@ def transform(
         # start at all if the volume is still under `preflight.min_free_bytes` (exit 9). A phase
         # that consumes gigabytes does not get to discover ENOSPC inside a write transaction.
         _require_disk_headroom(settings)
-        ladder = _validate_transform_flags(
+        ladder, policy_overrides = _validate_transform_flags(
             settings,
             max_attempts=max_attempts,
             deterministic_only=deterministic_only,
@@ -3500,6 +3500,8 @@ def transform(
             context_policy=context_policy or (),
             no_anchoring_guard=no_anchoring_guard,
         )
+        if policy_overrides:
+            settings = _apply_context_policy_overrides(settings, policy_overrides)
         _check_wave_budget(opts, settings, run_id, wave)
         result = _run(
             _transform_impl(
@@ -3550,12 +3552,17 @@ def _validate_transform_flags(
     stub_blocked: bool,
     context_policy: Sequence[str],
     no_anchoring_guard: bool,
-) -> int:
+) -> tuple[int, dict[int, ContextPolicy]]:
     """Every transform flag either does what it says or is refused here (§10).
 
     Same rule as `_validate_scan_flags`, for the same reason: a flag that parses and is then
-    dropped is read by the operator as honoured. The three refusals below each name the module
-    that would have to exist for the flag to mean anything.
+    dropped is read by the operator as honoured. The two refusals below each name the module
+    that would have to exist for the flag to mean anything. `--context-policy` USED to be a
+    third refusal (the ADR-0021 rung policies were derived from the hardcoded
+    `models.tasks.DEFAULT_LADDER` by `workers/base.context_policy_for_attempt`, which read no
+    config) — closed by threading `FleetSettings.config.transform.ladder` down to
+    `orchestrator/runner.py::_drive`'s `LadderState` and from there into `BaseWorker.execute`, so
+    the parsed overrides below are now returned to the caller to apply (§9), not discarded.
     """
     declared = settings.config.transform.max_attempts
     if max_attempts < 1:
@@ -3566,16 +3573,7 @@ def _validate_transform_flags(
             f"and a rung that does not exist has no tier and no context policy. Lower the flag, "
             f"or add rungs to transform.ladder."
         )
-    # Parsed BEFORE it is refused: `--context-policy 1=…` and an unknown policy name are their
-    # own documented exit-2 refusals, and they must keep their messages.
-    _parse_context_policies(context_policy, max_attempts)
-    if context_policy:
-        raise UsageError(
-            "--context-policy is not implemented: the ADR-0021 rung policies are derived from "
-            "`models.tasks.DEFAULT_LADDER` by `workers/base.context_policy_for_attempt`, which "
-            "reads no config, so a per-run override would be parsed and then ignored by every "
-            "rung. Edit `transform.ladder` (§9) once that value reaches the worker."
-        )
+    policies = _parse_context_policies(context_policy, max_attempts)
     if no_anchoring_guard:
         raise UsageError(
             "--no-anchoring-guard names a guard that does not exist: §3.2 step 5's "
@@ -3589,7 +3587,32 @@ def _validate_transform_flags(
             "dependency (§3.5.1) has no worker in src/fleet/workers/ and would write no `stubs` "
             "row, so the flag would silently transform the repo WITHOUT the stub it promised."
         )
-    return 1 if deterministic_only else max_attempts
+    return (1 if deterministic_only else max_attempts), policies
+
+
+def _apply_context_policy_overrides(
+    settings: FleetSettings, overrides: Mapping[int, ContextPolicy]
+) -> FleetSettings:
+    """`--context-policy N=POLICY` (§10, ADR-0021): a per-run edit of `transform.ladder`'s
+    CONTEXT at the overridden rungs only — never `LadderRung.tier`/`.role`, which the flag says
+    nothing about.
+
+    Returns a settings copy so the CLI flag reaches the worker through the exact path the
+    configured ladder already reaches it (`RunContext.config` → `_drive`'s `LadderState(ladder=
+    ...)` → `BaseWorker.execute`), with no new parameter threaded anywhere. The override is
+    confined to this command's in-process copy: nothing is written to `config/fleet.yaml`, and
+    `settings.section_digests` (§6/§10's `fleet resume` drift check, written by `_open_run` at
+    plan time from the ON-DISK config) is computed upstream of this call and is unaffected.
+    """
+    rungs = tuple(
+        rung.model_copy(update={"context_policy": overrides[index]})
+        if index in overrides
+        else rung
+        for index, rung in enumerate(settings.config.transform.ladder, start=1)
+    )
+    transform = settings.config.transform.model_copy(update={"ladder": rungs})
+    config = settings.config.model_copy(update={"transform": transform})
+    return replace(settings, config=config)
 
 
 # --------------------------------------------------------------------------------------

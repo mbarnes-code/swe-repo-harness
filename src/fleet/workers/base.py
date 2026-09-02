@@ -101,28 +101,38 @@ TIER_LADDER: tuple[TransformTier, ...] = tuple(_TIER_FOR_RUNG[p] for p in DEFAUL
 a consequence of which rung is running, so it is derived here rather than declared twice."""
 
 
-def context_policy_for_attempt(attempt: int) -> ContextPolicy | None:
+def context_policy_for_attempt(
+    attempt: int, ladder: Sequence[ContextPolicy | None] = DEFAULT_LADDER
+) -> ContextPolicy | None:
     """The ADR-0021 rung for a 1-based attempt number. Rung 1 is `None`: deterministic, no prompt.
+
+    `ladder` defaults to the hardcoded `DEFAULT_LADDER` but is the CALLER's to override — the one
+    real caller, `execute()`, passes the CONFIGURED `transform.ladder` (§9), so a per-run
+    `--context-policy` override (§10) that already landed in `FleetSettings.config.transform.ladder`
+    genuinely changes which policy a rung gets, rather than being silently ignored.
 
     Past the declared ladder the last rung repeats rather than raising — a ladder shorter than a
     task's `max_attempts` is configuration (§9), not a crash. Clamped at the bottom too, because
     an attempt number below 1 is a caller bug that must not silently index from the end.
     """
-    if not DEFAULT_LADDER:
+    if not ladder:
         return None
-    return DEFAULT_LADDER[min(max(attempt, 1), len(DEFAULT_LADDER)) - 1]
+    return ladder[min(max(attempt, 1), len(ladder)) - 1]
 
 
-def tier_for_attempt(attempt: int) -> TransformTier:
-    """The tier that rung runs at, derived from `TIER_LADDER` and never declared beside it.
+def tier_for_attempt(
+    attempt: int, ladder: Sequence[ContextPolicy | None] = DEFAULT_LADDER
+) -> TransformTier:
+    """The tier that rung runs at, derived from `ladder` via `_TIER_FOR_RUNG` — never declared
+    twice, and never independently configurable: the tier is a CONSEQUENCE of which context
+    policy is running, so `LadderRung.tier` in config is descriptive, not a second input here.
 
     Deliberately the same clamp as `context_policy_for_attempt` and as
-    `orchestrator.retry.LadderState.tier`: the tier a worker OBSERVES and the tier the policy
-    REPORTS are the same function of the same attempt number, so they cannot drift.
+    `orchestrator.retry.LadderState.tier` (which now delegates to this function): the tier a
+    worker OBSERVES and the tier the policy REPORTS are the same function of the same attempt
+    number and the same ladder, so they cannot drift.
     """
-    if not TIER_LADDER:
-        return TransformTier.DETERMINISTIC
-    return TIER_LADDER[min(max(attempt, 1), len(TIER_LADDER)) - 1]
+    return _TIER_FOR_RUNG[context_policy_for_attempt(attempt, ladder)]
 
 
 WorkerStatus = Literal["ok", "partial", "failed", "timeout", "cancelled"]
@@ -688,7 +698,12 @@ class BaseWorker[I: WorkerInput, O: WorkerOutput](ABC):
     # ------------------------------------------------------------------ the ADR-0014 ladder
 
     async def execute(
-        self, ctx: WorkerContext, payload: I, *, max_attempts: int | None = None
+        self,
+        ctx: WorkerContext,
+        payload: I,
+        *,
+        max_attempts: int | None = None,
+        ladder: Sequence[ContextPolicy | None] = DEFAULT_LADDER,
     ) -> WorkerExecution[O]:
         """Run `run()` from rung `ctx.attempt` onward. Never raises for worker failure.
 
@@ -697,6 +712,13 @@ class BaseWorker[I: WorkerInput, O: WorkerOutput](ABC):
         rung this invocation runs is numbered from it. Nothing here counts attempts to decide
         which rung to run; the local counter below only says how many rungs THIS invocation has
         spent, which is what the ceiling and `WorkerExecution.attempts` are about.
+
+        `ladder` is the ADR-0021 CONTEXT ladder (`tier_for_attempt`/`context_policy_for_attempt`
+        are indexed by it, not by a module constant) — the runner's one call site
+        (`orchestrator/runner.py::_dispatch`) passes `LadderState.ladder`, itself sourced from
+        `FleetSettings.config.transform.ladder` (§9), so a per-run `--context-policy` override
+        (§10) reaches the rung actually dispatched. Defaults to `DEFAULT_LADDER` for every other
+        caller (tests, mainly), which is byte-identical to the settings default (§9).
 
         Why that distinction is the whole point: the runner dispatches one rung per invocation
         (`max_attempts=1`) so each rung's outcome is in SQLite before the next begins (§11.5).
@@ -741,12 +763,12 @@ class BaseWorker[I: WorkerInput, O: WorkerOutput](ABC):
             # THE line the defect lived on. The rung is a function of the ladder position the
             # caller handed in, not of how many times this coroutine has been round its own loop.
             attempt = start_attempt + attempts
-            tier = tier_for_attempt(attempt)
+            tier = tier_for_attempt(attempt, ladder)
             attempt_ctx = replace(
                 ctx,
                 attempt=attempt,
                 tier=tier,
-                context_policy=context_policy_for_attempt(attempt),
+                context_policy=context_policy_for_attempt(attempt, ladder),
             )
             result = await self._run_one(attempt_ctx, payload)
 

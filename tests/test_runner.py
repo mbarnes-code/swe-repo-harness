@@ -62,7 +62,7 @@ from fleet.models.enums import (
 )
 from fleet.models.graph import MigrationWave
 from fleet.models.state import SCHEMA_VERSION
-from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
+from fleet.models.tasks import DEFAULT_LADDER, BackendTarget, ModelCapabilities, Price, TokenUsage
 from fleet.orchestrator.budgets import (
     Ceilings,
     CostEstimate,
@@ -195,6 +195,7 @@ class ExplodingExecuteWorker(ScriptedWorker):
         payload: ScriptedInput,
         *,
         max_attempts: int | None = None,
+        ladder: Sequence[ContextPolicy | None] = DEFAULT_LADDER,
     ) -> WorkerExecution[ScriptedOutput]:
         raise RuntimeError(f"execute() itself exploded for {ctx.repo_id}")
 
