@@ -2666,6 +2666,29 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
     )
 
 
+def test_resume_exits_7_when_nothing_is_servable_but_a_repo_is_degraded(
+    workspace: Path,
+) -> None:
+    """D98: `_continue_impl` returns early with `halted: None` when nothing is servable this
+    cycle (here: the only event is `stub_reconcile` abandoning a stub, and the consumer's own
+    floor is `None` — a hard stop, per `_put_consumer_at_verify_degraded`'s own docstring — so
+    step 8 has nothing to drive). `_raise_for_continuation` is a no-op on `halted is None`, so
+    without this fix `resume()` exits 0 even though the consumer ends the run `DEGRADED` — SPEC
+    §3.5.1 point 5 requires exit 7 whenever any repo ends `DEGRADED`/`REQUIRES_HUMAN_INTERVENTION`,
+    same as the four phase-command sites `_needs_human_attention` already guards (D93).
+
+    Same fixtures as `test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll`,
+    but invoked WITHOUT `--no-continue` — that is the only difference, and it is what exercises
+    step 8's own exit path rather than `_raise_for_continuation`'s early-return.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db)
+    _put_stub(db)
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "resume"])
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+
 def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
     """Like `_seed_pr_record`, but `created_at` is real "now" rather than that helper's fixed
     2026-08-08 stamp. `_awaiting_merge` bounds the §13 row 45 carve-out by
