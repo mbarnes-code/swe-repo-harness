@@ -8218,3 +8218,97 @@ own independent reading of both stale entries):
    computed edges in memory at the point `_materialize` returns; the write path may be a small,
    surgical addition rather than a large one — not sized here, flagged for round II's research if
    §12.38 doesn't fill the round on its own).
+
+---
+
+## Round II close-out (2026-09-02)
+
+**§12 count: 26 of 48 — net unchanged, but real movement happened in both directions.** §12.8
+deepened from 5/8 to 7/8 `EdgeKind`s proven (D97 fixed). §12.4 was flipped DONE mid-round and
+**reverted the same day** by the round's own final review — the second such same-day
+overclaim-then-catch this session has produced (after §12.35 in round EE), and this time the
+overclaim was in controller-authored text, not a worker's self-flip. Two new production defects
+(D99, D100) were found and disclosed, cross-referencing a defect (D92) this session marked FIXED
+three rounds ago whose fix turns out to target the wrong entity.
+
+**This round started deliberately smaller than the standing 3-worker cadence** (1 worker + 1
+research), disclosing genuine backlog scarcity at this project's depth rather than forcing
+lower-quality tasks to hit a headcount — then expanded to the full cadence mid-round once research
+produced two more well-scoped candidates (D97's fix, §12.4's golden-response fixtures).
+
+**Task 1 — §12.38 re-audit.** Zero commits, a legitimate pure-investigation outcome its own brief
+anticipated. Found 2 sub-clauses D92/D93 unblock were already covered by existing tests, just
+uncredited. Found a significant NEW defect: `fleet resume`'s own exit path never reaches exit 7 in
+the "pure stub-abandon end-of-run" case — D93's fix lives only in four phase-command sites, never
+in `resume()`'s own exit determination. Task review independently reproduced this with its own
+fresh probe (a third reproduction, after the implementer's and the review's, when the round's own
+final review reproduced it again). Allocated **D98**.
+
+**Task 2 — D97 fix.** `_sequence_impl` now persists `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges via a
+new helper inside its existing `StateWriter` block. Task review's own fresh standalone SQL-query
+script (not reusing the implementer's test) found the new call site inherits D23's pre-existing
+defect at a real, live repro site — genuinely out of scope, cross-referenced at both entries. D97
+flipped FIXED, LANDED; §12.8 moved to 7/8, `API_CONTRACT` the sole remaining gap (confirmed
+separately NEW-MECHANISM by this round's own research, not a smaller slice).
+
+**Task 3 — §12.4 golden-response fixtures.** Genuinely well-built work: fixtures for all 4 shipped
+backends plus the required PROMPTED rung, every field independently verified against real adapter
+code, the Anthropic SDK's own validation reproduced directly, 2 Rule-12 mutations reproduced
+independently. Task review Approved in full — and was still not enough: **the round's own final
+review caught that the DONE flip itself was wrong**, because SPEC.md:7430's literal sentence names
+"every LLM role" (12, `config/models.yaml`) × per-backend, not "one recorded golden response per
+backend" (this criterion's own prior Done-bar paraphrase, which the controller flipped DONE
+against without re-checking SPEC's actual sentence). The fixtures cover exactly 1 of 12 roles
+(`REPO_CLASSIFY`). **Reverted to OPEN the same day**, with the real remaining scope (11 more
+roles × 4 backends) now stated as the Done bar. The task's own work is not reverted — it is
+genuine, verified partial progress, credited as such.
+
+**The round's own final whole-branch review found a second, larger, and more consequential
+finding while independently verifying the task review's own disclosed residual question about
+SPEC's `PrState.HELD` text.** Re-reading `docs/SPEC.md`'s actual sentences (§3.5.1 point 3, §13
+row 35) and `enums.py`'s own docstring, the reviewer found — and a direct runtime probe against
+the shipped `reconcile()` confirmed — that D92's landed fix (round GG, three rounds ago, marked
+FIXED, LANDED and never revisited since) writes `PrState.HELD` to a **provider's** PR record via
+the `held_for_merge` carve-out, when SPEC's own text names the **consumer's** PR as the real
+target at the end-of-run ABANDONED event — a different SPEC location than the one the original
+D92 investigation and its fix were built against. Worse, the provider-side write **self-defeats**:
+because `pr_open` deliberately excludes `HELD`, a provider marked `HELD` on one `fleet resume` has
+its stub abandoned on the very next resume even if the real forge PR is still genuinely open —
+exactly the premature abandonment SPEC's own carve-out exists to prevent. Reproduced directly
+against shipped code: three successive resumes move a provider's `PrState` `DRAFTED → OPEN →
+HELD`, and the third abandons a row the carve-out should still be protecting. Allocated **D99**
+(wrong target entity) and **D100** (the self-defeating interaction), cross-referenced at each
+other and at D92's own entry via a dated correction (D92's status is not reverted — the write it
+built is real and mutation-proven, just aimed at the wrong entity).
+
+**What this round demonstrates:** the controller's own authored text is not exempt from the
+overclaim discipline this project applies to workers — a DONE flip I wrote myself, reading a
+criterion's own Done-bar paraphrase instead of re-checking SPEC's literal sentence, was caught and
+reverted the same day by the process this project runs specifically to catch this. And a defect
+this session closed and stopped examining three rounds ago (D92) was still wrong in a way three
+separate reviews (implementer self-review, task review, and — in round GG — a second task review)
+never caught, because none of them checked the fix's target entity against SPEC's own text; only
+re-deriving from SPEC directly, prompted by an unrelated task's disclosed residual, surfaced it.
+
+**Full suite, post-close**: `tests/test_integration_honesty_citations.py` 72/72 (verified at every
+commit through the round's close, including after the F1 revert and the D99/D100 additions).
+`ruff check .` clean on the whole tree. §12 count independently re-derived multiple times across
+the round's close — 26/48 every time, using "first bold status marker per section" (not a naive
+`grep -c '^\*\*DONE'`, which over-counts by 1 due to §35's own legally-doubled heading — this
+project's third round in a row to note this exact trap in a checkpoint).
+
+**Round III, opening next.** No fully-scoped one-shot survives this round's own findings without
+requiring design work first:
+1. **D99/D100 together** — read both entries before dispatching either; fixing D99 (write the
+   consumer's PR instead) may resolve D100 as a side effect if the provider-side write is removed,
+   or D100 may need its own fix if that write serves a purpose not yet identified. Needs a design
+   read before a worker brief can be written, not a direct one-shot dispatch.
+2. **D98** (`fleet resume` never exits 7 in pure stub-abandon case) — smaller, more clearly scoped
+   than D99/D100: a real read of overall phase statuses inside `_continue_impl`'s own exit
+   determination for the nothing-re-driven case. Worth sizing properly before round III's dispatch
+   rather than assumed small.
+3. **§12.4's real remaining scope** (11 of 12 LLM roles × 4 backends, following `REPO_CLASSIFY`'s
+   now-landed pattern as the template) — large in aggregate but mechanically repetitive per role;
+   worth investigating whether it batches into fewer, larger tasks rather than 11 separate ones.
+4. Round HH's own still-open leads (`API_CONTRACT`'s extraction gap, confirmed NEW-MECHANISM by
+   two rounds' research now) remain available if the above don't fill round III.
