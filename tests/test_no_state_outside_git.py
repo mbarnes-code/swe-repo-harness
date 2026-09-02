@@ -36,20 +36,24 @@ delete in real output at this phase — and states so plainly rather than implyi
 resume does not need `artifacts/` to reproduce its result) does not depend on which phase
 populated it.
 
-**A second, genuinely unplanned finding, disclosed rather than fixed (this file is TEST-ONLY).**
-Investigating clause (i)'s format check surfaced that `tasks.pre_commit_sha` is NEVER written by
-any code path in `src/fleet` — `record_task_anchor()` (`src/fleet/vcs/commits.py`) computes the
-value and `workers/rewrite.py:182` uses it only locally, to seed a same-task rollback anchor on a
-failed `apply_and_commit`; no `UPDATE tasks ... SET pre_commit_sha = ...` exists anywhere in
-`src/fleet/state/repository.py` or `src/fleet/cli.py` (both `claim_task_by_id` and
-`claim_next_task` move the row to `RUNNING`/`CLAIMED` without touching this column). This
-contradicts `src/fleet/workers/rewrite.py:164`'s and `src/fleet/cli.py:12026`'s own comments,
-which describe it as "written in the same transaction that moves the task row to RUNNING" (§3.2
-step 6.5). Against a real, successful fixture run the column is NULL on every row, so the 40-hex
-format check is *vacuously* true for it — the test below says so at the assertion site rather than
-silently reporting a pass that covers nothing, and does not require the column to be non-empty the
-way the other four are required to be (see `_NEEDS_NONEMPTY` below). This is a production gap, not
-a test gap, and out of this TEST-ONLY task's scope to fix; it is reported as a concern.
+**A finding this file's implementation surfaced independently, and — corrected before merge by
+task review — is already tracked as `docs/INTEGRATION_HONESTY.md`'s D91, not a new gap.**
+Investigating clause (i)'s format check found `tasks.pre_commit_sha` is NEVER written by any code
+path in `src/fleet` — `record_task_anchor()` (`src/fleet/vcs/commits.py`) computes the value and
+`workers/rewrite.py:182` uses it only locally, to seed a same-task rollback anchor on a failed
+`apply_and_commit`; no `UPDATE tasks ... SET pre_commit_sha = ...` exists anywhere in
+`src/fleet/state/repository.py` or `src/fleet/cli.py`. This contradicts
+`src/fleet/workers/rewrite.py:164`'s and `src/fleet/cli.py:12026`'s own comments, which describe it
+as "written in the same transaction that moves the task row to RUNNING" (§3.2 step 6.5). **This
+gap was already OPEN as D91 at this task's own base commit** — task review traced the same code
+independently and found D91 both pre-existing and more precise (it names the exact two
+`if task_anchor is None:` consumer sites, `cli.py:12244`/`:12283`, and narrows the consequence to
+"the discard path hangs `RUNNING` forever," not the broader claim this file's own earlier draft
+made). No new D-number is warranted; cite D91 for the underlying defect. Against a real, successful
+fixture run the column is NULL on every row, so the 40-hex format check is *vacuously* true for
+it — the test below says so at the assertion site rather than silently reporting a pass that
+covers nothing, and does not require the column to be non-empty the way the other four are
+required to be (see `_NEEDS_NONEMPTY` below).
 
 **Correction to the round-BB brief's citation for `run_digest`.** The brief pointed at
 `cli.py:10481-10545` and called it `fleet resume --digest`. Reading that function (and `fleet
