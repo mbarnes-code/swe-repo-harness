@@ -8732,3 +8732,37 @@ next follows the same Blocker A/B pattern (a short research pass, then either di
 an ADR if it turns out to touch a guarded invariant). D94 remains the standing NEW-MECHANISM
 candidate for a dedicated round. D106 (plausible, unconfirmed) needs its own investigation before
 a fix is designed.
+
+### Checkpoint — round VI, sixth wave (2026-09-02, same day): all three §37 structural blockers closed
+
+**§12 count: 27 of 48, unchanged — this wave closed the last of §37's three structural blockers,
+a milestone worth marking even though it doesn't itself flip a §12 criterion.** Blocker C landed
+(`7bbc0c3`+`f75493c`/`f98bdc9`, task-scoped review Approved): `_unit_deps` redirects an
+`ACTIVE`-stubbed edge to the stub's own label; `SUPERSEDED`/`RESOLVED` correctly fall through
+unchanged, since T1's own invariant guarantees the real label is live on the branch by then — the
+state predicate is `ACTIVE`-only, not "any open state," a genuine finding research-6 surfaced and
+the review independently re-derived from source rather than trusting. No ADR needed. This task
+survived **two consecutive infrastructure failures** (an API connection error, then a 600s stream
+stall) before landing on its third attempt, and hit the session's now-familiar dormancy pattern
+once more mid-way through that third attempt — resumed each time rather than losing real work,
+per the feedback memory this session saved after the pattern's fourth occurrence.
+
+**Round VI, taken as a whole, closed:** D101 in full (Half A/B(i)/B(ii)), D102 (T1's trigger,
+qualified), D103 (crash-window + `revalidation_task_id`), D105 (the `--repoll-prs` interaction),
+and all three of §37's structural admission/version/label-resolution blockers (ADR-0113 for the
+first, direct dispatch for the other two) — while correctly disclosing two things it did NOT close
+along the way: D106 (a plausible, unconfirmed cross-call analogue of D105) and the fact that none
+of §37's landed work makes §12.37 itself satisfiable, since nothing in production yet creates a
+`stubs` row.
+
+**§37 state: exactly one remaining piece of work** — the TRANSFORM-worker stub-creation logic
+itself (trigger detection, `StubRecord` construction, the ecosystem `workspace_deps()` render, the
+`stubs` INSERT, `EMPTY_FAILING` rendering, the `RUNNING → DEGRADED` transition). Confirmed
+genuinely NEW-MECHANISM by two independent research passes this round (research-3, research-4);
+not a one-shot. Sizing it into dispatchable sub-tasks is the natural next unit of work.
+
+**What's next.** The stub-creation logic (research-3's own "a/c/e/g bundle" sizing, from earlier
+this round, is the starting point — re-verify it's still current before dispatching, since three
+rounds of blocker-landing work may have changed what's reusable). D106 needs its own investigation.
+D94 remains the standing NEW-MECHANISM candidate for a dedicated round if nothing smaller surfaces
+first.
