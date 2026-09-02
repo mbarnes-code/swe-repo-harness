@@ -7729,3 +7729,107 @@ exact file/test/pattern detail. D96's Phase-2 per-repo-worker wiring half also s
 `TransformInput`, exact file/line citations for every touch point) — a bounded dedicated task,
 though it does not itself flip any §12 criterion. All 5 D-number-blocked criteria (§22/35/36/38/43)
 re-verified this round with no stale attributions found, for the first time this session.
+
+### Checkpoint — 2026-09-02 (round DD controller, close-out)
+
+**§12 criteria met: 24 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived by the controller after the final review
+rather than trusted from the review's own tally — up from 23 at round CC's close). **§12.42
+flipped OPEN→DONE this round**, closing this session's third criterion in three consecutive
+rounds. The round's own final review supplied the flip's central judgment call explicitly, at the
+controller's deliberate request: after task 1 closed the criterion's one remaining test gap (a
+fixture LLM backend proving "one file, zero `src/fleet/` changes"), the controller independently
+grepped the tree and found real tests for the criterion's other five SPEC-named requirements —
+but declined to flip the criterion itself, since none of the five had been re-read closely enough
+to confirm they satisfy SPEC's specific "at `RunContext` construction, not wave 7" timing clause.
+The final review traced each to its actual raise site and settled the question with a finding
+neither round's own research anticipated: three of the five fire at `FleetSettings.load()` —
+strictly BEFORE a `RunContext` can exist at all — and the fourth fires genuinely inline in
+`RunContext(`'s own argument list, since every `cli.py` call site constructs its `LlmRouter`
+in-place as that call's `llm=` argument. Refusing earlier than construction is a stricter
+guarantee than SPEC's stated floor, not a gap in it.
+
+**This round also fully closed a defect (D96) whose two halves were split across two consecutive
+rounds — a real production-code fix, and its own review caught the exact regression class the
+sibling round's identical fix hit one round earlier, this time before merge instead of after.**
+Round CC's D96 phase-entry fix (a missing disk-headroom call in `fleet transform`'s own command
+body) had its own citation-drift casualty caught only after merge, requiring a follow-up fix wave.
+This round's D96 Phase-2 half (mechanical replication of the same disk-headroom pattern across
+three worker files) produced an identical class of casualty — five citations in
+`docs/INTEGRATION_HONESTY.md` rotted by the same 34-line/13-line insertions — but this time the
+task's OWN reviewer caught it during task-scoped review, before the controller ever merged the
+fix. The reviewer's report additionally disclosed a genuine self-correction the implementer had
+made mid-task: a first-draft regression test passed even with the new disk check fully removed,
+because a sibling worker's own check masked the gap, caught and fixed by the implementer before
+ever reaching review — Rule 12 discipline working at the authorship layer, not only the review
+layer.
+
+**The final review found the citation-rot class recurring a THIRD consecutive time, through a
+different door than either prior instance, and sharpened this project's own standing
+recommendation in response.** Round CC's final review had recommended adding
+`docs/CRITERIA_PLAN.md` to the citation gate's watched-file list after finding rot there. This
+round's task-2 fix correctly avoided that exact file (its own `cli.py` citations sat below the
+insertion point, escaping "by luck" in the final review's own words) — but the SAME insertions
+rotted two citations in `docs/DECISIONS.md`, a file neither prior incident had touched and the
+gate has never watched. The final review verified both citations were clean at this round's base
+commit and wrong at its tip, ruling out pre-existing drift, and revised the standing
+recommendation: watch `docs/DECISIONS.md` AND `docs/CRITERIA_PLAN.md` both, not the one file two
+incidents in a row each happened to name. The controller fixed both verified casualties directly,
+plus one adjacent pre-existing stale citation (`buildverify.py`, unrelated to this round) found
+while correcting the same sentence, and left a third, more ambiguous citation (a two-span
+reference into `rewrite.py`'s evidence-construction code whose exact original sub-ranges could not
+be confidently reconstructed) explicitly for round EE's citation-gate-scope-expansion task rather
+than guess at a number this project's own discipline says must never be unmeasured.
+
+**A status-field discipline lapse, caught by the final review as a blocking finding rather than
+logged as debt — this project's own D63 incident, reproduced in the opposite direction.** The
+controller's own D96 status-flip (after merging task 2) correctly updated the ledger heading to
+`FIXED, LANDED` but left the entry's closing paragraph reading "Still OPEN: the Phase 2
+per-repo/per-worker wiring half" — now false, and the last thing a reader of the entry would see.
+CLAUDE.md's own guardrail on this exact failure mode (a status heading correctly updated while the
+body still asserts the pre-fix state) was written after finding this same shape once before, in
+the other direction (D63 sat OPEN while its body declared the defect fixed); this round is the
+first time the mirrored form was caught, by the round's own final review rather than a later one.
+Fixed by appending a dated closing note in the file's existing convention, naming both component
+commits, rather than editing the stale paragraph in place.
+
+**Rulings made this round:**
+1. §12.42's flip-to-DONE decision was deliberately deferred by the controller to the round's final
+   review rather than claimed on the controller's own grep — the review's explicit mandate was to
+   answer a specific yes/no question, not merely to audit a claim already made.
+2. The final review's blocking finding (D96's body) was fixed directly by the controller,
+   following this round's own established pattern for small, well-specified corrections; the
+   citation-rot debt items were triaged into "fix now, high confidence" (2 of 3 sites) versus
+   "defer to a dedicated round-EE task" (the 1 ambiguous site) rather than guessing at an unmeasured
+   number to close the round faster.
+3. The citation-gate-scope recommendation was widened from round CC's single-file suggestion to a
+   two-file one, based on this round's own new evidence rather than assumed to still be complete.
+
+**Full suite, post-close: verified clean on all touched surfaces across the round's full arc** —
+task 1's self-gate (1 passed) independently reproduced by its task review including a from-scratch
+mutation proof; task 2's self-gate (353 passed across 5 files) independently reproduced by its
+task review including a from-scratch regression comparison across separate before/after
+worktrees (byte-identical results, matching round CC's own precedent for this exact class of
+claim) and a from-scratch reproduction of the implementer's self-caught mutation-masking story;
+the final whole-branch review's own run (ruff clean, citation gate 54/54, 165+23+85+15+1 passed
+across all six touched-or-regression-checked files, plus four covering-set files the brief didn't
+name but the review derived anyway — `test_d89_phase2_claim_lifecycle.py`,
+`test_wave_composition_projects_mid_wave.py`, `test_workers_contracts.py`,
+`test_config_keys_are_read.py` — since adding Pydantic fields can break schema-shape tests
+elsewhere); the controller's own closing fix (citation gate 54/54, ruff clean, DONE count
+independently re-derived rather than trusted from the review's own tally). No step in this chain
+trusted a pass-count, mutation result, or regression-absence claim it could instead re-derive.
+
+**Round EE, opening next.** Lead candidates pre-scoped by round DD's own research: wiring
+`context_policy_for_attempt`/`tier_for_attempt` off `config.transform.ladder` to close §12.35's
+LAST remaining piece (the CLI-level proof) — this round's research found D50 itself, corrected for
+staleness four times this session, has finally stopped drifting (`KNOWN_INERT=38/11/1/6`,
+unchanged a fifth time), so this wiring slice is confirmed ready to dispatch. Second, independent
+candidate: D93's exit-7/DEGRADED fix (`cli.py`, 4 named sites — the run-exits-7-on-any-DEGRADED-
+repo contract SPEC §3.5.1 and a docstring both claim and neither delivers). A genuinely large
+multiplier was found and explicitly deferred, not dispatched: building `llm/failover.py`'s circuit
+breaker would close §12.43 and progress D55/D58/D50's Group 1 simultaneously — the strongest
+leverage this session has found, but LARGE, flagged as a future dedicated round's target. The
+final review's own citation-gate-scope recommendation (watch `docs/DECISIONS.md` AND
+`docs/CRITERIA_PLAN.md`, not just one) is also owed a dedicated task, expected to surface
+pre-existing rot on its first run and needing a ratchet rather than a one-shot fix.
