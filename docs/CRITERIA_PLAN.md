@@ -190,9 +190,13 @@ structure) and added `PR_TITLE`/`PR_BODY`, each across all 4 backends, wire shap
 real adapter code (confirmed: all 4 backends' response-parsing is role-agnostic — a literal
 `_TOOL_NAME = "emit_response"` constant and zero payload-field branching before schema
 validation — so reusing `REPO_CLASSIFY`'s proven envelopes with only the payload swapped is sound,
-not merely convenient). The schema pin moved to `tests/test_llm_golden_responses.py:113-115`
-(3 assertions, one per landed role) — the citation above is a record of round II's own state, not
-repointed.
+not merely convenient). The schema pin moved to `tests/test_llm_golden_responses.py:113-115` at
+round III's own commit (3 assertions, one per landed role at the time) — the citation above
+(round II's `:77`) is a record of round II's own state, not repointed. **Correction, round IV
+final review (2026-09-02):** round IV's own additions moved the pin again, to
+`tests/test_llm_golden_responses.py:124-130` (now 7 assertions, one per landed role) — this
+`:113-115` citation is likewise kept as round III's own record, not repointed; see round IV's own
+paragraph below for the current location.
 
 **Round IV tasks 2 and 3 (2026-09-02, `bac8b91`/`f937190`, both reviewed Approved) — 4 more roles
 landed, 7 of 12 now covered.** Task 2 added `BUILD_DIAGNOSIS`/`DEP_DISAMBIGUATE`; task 3 added
@@ -1133,10 +1137,12 @@ scenario in SPEC.md item 37 becomes testable for the first time.
 change — it's correct and tested; the remaining gap is purely on the creation side.
 
 ## 38. No ready-for-review while a stub is unresolved
-**OPEN — mixed, 20 sub-clauses — correction, round II: only D94 still blocks; D92 and D93 are
-both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`) — this entry stayed
-stale after both landed. Which sub-clauses that unblocks is not re-derived here; see round II's
-own dispatched re-audit.** The headline
+**OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
+and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round
+IV task 1's own re-audit found a second, independent blocker (D101 — the `UnmergedDependency`
+finding + `--sync` clearing sub-clauses) that this "only D94" framing predates and does not
+name — see the correction and D101 reference further down this entry for the full account. The
+headline
 refusal (exit 2 + PrState unchanged) is well covered by two independent tests. **Round Z task 2
 re-audited the sweep sub-clauses against D80's landed `stub_reconcile`** (search
 `tests/test_cli.py:2535-2701`) and closed the genuinely missing pieces: the `SUPERSEDED` arm of
@@ -1220,10 +1226,13 @@ finding, and its clearing via `--sync`) are genuinely unimplemented —
 site or test. Task review independently confirmed this is not a new gap this session's fixes
 created: `src/fleet/models/state.py:146-148` and `src/fleet/orchestrator/reentry.py:711-714`
 already name "a `pr.merge_wait_timeout_s` breach (§3.4)" as one of three `blocked_by` triggers
-with "0 producers today" — the code's own comments already disclose this as unbuilt. Not given a
-D-number here (a D-number in this ledger has so far marked a defect DISCOVERED by investigation,
-not one the code already names as its own known gap) — flagged for a future round's judgment on
-whether that distinction should hold or whether this deserves its own tracked number regardless.
+with "0 producers today" — the code's own comments already disclose this as unbuilt.
+
+**Correction, round IV final review (2026-09-02) — the "no D-number" reasoning above was checked
+and found false, not just unverified.** D78 (`docs/INTEGRATION_HONESTY.md`) is a real counter-
+example: a code-disclosed gap that WAS given a D-number, explicitly ruled in by its own body,
+naming D56/D57 as the same class. **Allocated D101** instead of leaving this un-numbered — see
+that entry for the full account.
 
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
@@ -1580,7 +1589,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | DONE | 26 | 1, 3, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round II final review: §4 was marked DONE earlier this same round and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured; see §4's own entry for the full correction. Net count unchanged from round GG's 26, despite this round landing real, verified progress: D97 fixed and `REPO_CLASSIFY`'s golden fixtures genuinely closed, neither of which flips a criterion by itself) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only, D92/D93 landed since; corrected round II, see §38's own entry — D80 is fully landed and no longer the blocker either), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 and D101, D92/D93 landed since; corrected round IV, see §38's own entry — D80 is fully landed and no longer a blocker), 43 (partial) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries (round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):

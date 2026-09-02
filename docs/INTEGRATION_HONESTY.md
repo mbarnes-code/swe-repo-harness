@@ -8048,3 +8048,39 @@ row `ACTIVE`, not abandoned, and the provider's PR record stays unchanged (`DRAF
 ever reading `HELD`. Task review reproduced this old-fails/new-passes independently, including
 running the exact repro shape against unfixed code in a scratch copy to directly observe the raw
 abandonment before the fix's own test assertion would have short-circuited the observation.
+
+## D101 — OPEN. `BLOCKED` consumers never get an `UnmergedDependency` finding, and `--sync` has nothing to clear — self-disclosed in the code's own comments before this ledger entry existed
+
+**Found by round IV task 1 (2026-09-02), while re-auditing §12 item 38's sub-clauses against the
+now-fully-corrected D92/D98/D99/D100 state — a disclosed finding, not this TEST-ONLY task's own
+job to fix.** Verified free before writing: form-agnostic sweep of this file's `D<n>` headings
+found no `D101`; highest allocated number was `D100`.
+
+**Correction, round IV final review (2026-09-02) — this was originally left un-numbered on a
+reasoning that does not hold; numbered here instead.** The task's own report and this ledger's
+first version of this finding declined to allocate a number, reasoning that a D-number here has
+"so far" marked a defect discovered by investigation rather than one the code already names as its
+own known gap. That premise is false: **D78** (`search `## D78 —` above) is exactly a code-
+disclosed gap — the commit that filed it postdates, by two days, a commit that already wrote *"NOT
+REACHED IN PRODUCTION TODAY... every row this harness ships today is `scope: "run"`..."` into
+`src/fleet/orchestrator/findings.py` itself — and D78's own body explicitly rules it into the
+ledger anyway, naming D56/D57 as the same already-adjudicated class. The decision not to number
+this finding was right to reconsider, wrong in its stated reason; allocating D101 now, following
+D78's own precedent rather than inventing a new rule.
+
+**The gap, as measured.** `grep -rn "UnmergedDependency" src/ tests/` finds it only in comments and
+docstrings — never a write site, never a test. `src/fleet/models/state.py:146-148` and
+`src/fleet/orchestrator/reentry.py:711-714` both already name "a `pr.merge_wait_timeout_s` breach
+(§3.4)" as one of three `blocked_by` triggers with "0 producers today" — the code's own comments
+disclose this as unbuilt, which is why round IV task 1's own investigation found it rather than
+inventing it. SPEC §12 item 38's own text describes two complementary sub-clauses this gap leaves
+untested: a `BLOCKED` consumer getting an `UnmergedDependency` finding, and that finding clearing
+once `--sync` resolves the dependency.
+
+**Consequence.** `docs/CRITERIA_PLAN.md` §38's own status line and Rollup row both currently read
+"only D94 still blocks" — false as of this entry; D101 is a second, independent blocker on two of
+§38's 20 sub-clauses, unrelated to D94's PR-promotion gap.
+
+**Not yet built:** the write site for `UnmergedDependency` (most naturally wherever `blocked_by`
+propagation already runs, per `reentry.py:711-714`'s own comment) and the `--sync`-triggered
+clearing path. That design choice is not made here.
