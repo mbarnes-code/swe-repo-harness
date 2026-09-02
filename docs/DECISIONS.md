@@ -12848,3 +12848,56 @@ the test runner clearing every `api_key_env`" mechanism, mutation-verified). Thi
 against a base of 24/48 in this task's own isolated worktree; merged alongside this same round's
 §12.35 closure (ADR-0110 above, which independently moved the count 24 → 25), the combined count
 is re-derived, not summed, in the Rollup table below.
+
+## ADR-0112 — D101's "`C` is `BLOCKED`" is not the literal `RepoStatus.BLOCKED` enum member; a
+consumer held on an unmerged provider PR stays `DEGRADED` and gains an `UnmergedDependency` finding
+
+**Context.** Round V's research task, sizing D101 (`docs/INTEGRATION_HONESTY.md`, search `## D101
+—`) for implementation, found a fork that must be resolved before D101's write site can be built:
+SPEC §12 item 38's scenario describes a `DEGRADED` consumer `C`, waiting on a provider's unmerged
+PR, as "`C` is `BLOCKED`." Read literally as `RepoStatus.BLOCKED` — the same status the
+RHI/quarantine `blocked_by`-propagation mechanism already writes — this transition is illegal
+today: `src/fleet/models/enums.py:42-46`, `ALLOWED_TRANSITIONS[RepoStatus.DEGRADED] ==
+frozenset({RUNNING, SUCCEEDED, REQUIRES_HUMAN_INTERVENTION})`; `BLOCKED` is not a member (verified
+directly by this ADR's own read of the current file, not carried forward from research's read).
+Separately, `ALLOWED_TRANSITIONS[RepoStatus.BLOCKED]` only permits `→ {PENDING, SKIPPED}` — no path
+back to `DEGRADED` exists either, so a literal-`BLOCKED` implementation would need a second gate
+change beyond the one-directional transition itself.
+
+**The two options research surfaced, neither designed:**
+(a) Widen `ALLOWED_TRANSITIONS[DEGRADED]` to include `BLOCKED` (and give `BLOCKED` a path back to
+`DEGRADED`) — a real state-machine change to a guarded invariant this project's D95 (this same
+investigation area, `state/repository.py::complete_phase`) *just finished hardening* to refuse
+illegal transitions rather than write them silently.
+(b) Adjudicate that SPEC's "`C` is `BLOCKED`" is descriptive prose, not a literal `RepoStatus.
+BLOCKED` enum-member requirement — the consumer stays `DEGRADED`, gains an `UnmergedDependency`
+finding, and is refused by `fleet pr --ready` on the finding alone, the same mechanism §12.38's
+first half already uses to refuse an `ACTIVE`/`SUPERSEDED`-stub consumer without a status change.
+
+**Decision: (b).** Widening `ALLOWED_TRANSITIONS[DEGRADED]` for this one narrow case is precisely
+the kind of change that tends to reopen the race D95 just closed — a second entry point into
+`BLOCKED` for a status whose whole guarded-invariant point was "only these named states reach
+`BLOCKED`, and only for these named reasons." Nothing in §12.38's own literal text (SPEC.md, the
+sentence this whole area is measured against) requires a status write — it requires a finding
+that blocks `fleet pr --ready` and clears once the dependency resolves, both of which (b) delivers
+without touching the state machine at all. `RepoStatus` already has a real precedent for "blocked
+in effect, not in enum value" — `DEGRADED` itself is exactly that: a repo that is not fully
+succeeded and not running, held by something outside its own control, without a dedicated status
+per external cause. Treating stub-provider-unmerged as another `DEGRADED`-shaped hold, disclosed
+via a finding rather than a fourth status value, is consistent with that existing pattern rather
+than inventing a new one.
+
+**What this settles and what it doesn't.** This settles the write-site *design* for D101 Half A
+(per Rule 14, updating what "done" means for this corner of §12.38): insert an `UnmergedDependency`
+finding for the consumer, no status transition. It does not implement anything — that is D101 Half
+A's own task, dispatched separately. It does not touch D101 Half B (the `--sync`-triggered clearing
+and T1-wiring gap), which is independent of this fork and tracked as its own allocation below.
+
+**Consequence for `docs/CRITERIA_PLAN.md`**: §38's entry should note this adjudication alongside
+its existing D101 citation once D101 Half A actually lands — not before, per this project's own
+"building to match the criterion is not legitimate closure" rule (CLAUDE.md §4, Rule 14). No
+`docs/CRITERIA_PLAN.md` edit is made in this commit.
+
+**D102, tracking a related but independent gap this same sizing pass found (T1's zero production
+call sites), is allocated in `docs/INTEGRATION_HONESTY.md`, not here — this ADR adjudicates the
+DEGRADED→BLOCKED fork only.**

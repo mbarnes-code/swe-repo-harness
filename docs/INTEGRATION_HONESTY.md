@@ -8084,3 +8084,53 @@ once `--sync` resolves the dependency.
 **Not yet built:** the write site for `UnmergedDependency` (most naturally wherever `blocked_by`
 propagation already runs, per `reentry.py:711-714`'s own comment) and the `--sync`-triggered
 clearing path. That design choice is not made here.
+
+**Update, round V research + controller (2026-09-02) — this gap does not have a single write site;
+it splits into two halves of different size, and a fork blocks Half A's design.** Full sizing in
+that round's research report is not reproduced here (see `docs/PROGRESS.md`'s round V checkpoint);
+in summary: **Half A** (the `UnmergedDependency` finding write, `_apply_stub_reconcile`'s
+`held_for_merge` branch, `cli.py:12149-12178`, currently reads `held_for_merge` and writes nothing
+for it) is a small, TEST-ONLY-adjacent one-shot *once* a fork over what "`C` is `BLOCKED`" means is
+resolved — resolved by **ADR-0112** (`docs/DECISIONS.md`): no `RepoStatus` transition, finding only.
+**Half B** (the `--sync`-triggered clearing of that finding, plus firing T1) is NOT a one-shot — see
+**D102** below, which the same sizing pass split out as its own independent gap: T1
+(`orchestrator.stubs.supersede`) has zero production call sites anywhere in `src/`, so "firing T1"
+in Half B means building the trigger, not calling an existing one.
+
+---
+
+## D102 — OPEN. `orchestrator.stubs.supersede` (T1) and `plan_revalidation` have zero production
+call sites anywhere in `src/` — the automatic re-entry trigger §12.37's own criterion text depends
+on is unwired
+
+**Found by round V's research task (2026-09-02), while sizing D101 Half B (above) — disclosed as a
+distinct, independently-trackable gap from D101's own stated scope, per that research's own
+recommendation.** Verified free before allocating: form-agnostic sweep of `docs/
+INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md`/`docs/SPEC.md` for `\bD[0-9]+\b`
+found `D101` as the highest allocated number.
+
+**The gap, re-measured directly by the controller (2026-09-02), not carried forward from research's
+own hand-traced claim** (research flagged this exact claim as needing a real `grep` re-check, since
+its own trace was done by hand during a Bash-tool outage): `grep -rn "supersede(" src/` and `grep
+-rn "plan_revalidation(" src/` each return exactly one hit — the function's own definition in
+`src/fleet/orchestrator/stubs.py` (lines 300 and 365 respectively) — zero call sites anywhere else
+in `src/`. `grep -rln` for importers of `orchestrator.stubs` across `src/` returns exactly one file,
+`src/fleet/cli.py`, whose own import block (`cli.py:184-186`) imports only `ProviderFacts`,
+`StubDecision`, `apply` (aliased `apply_stub_decision`), and `reconcile` (aliased `stub_reconcile`)
+— `supersede` and `plan_revalidation` are not among them. This confirms research's hand-traced
+finding exactly; no correction needed.
+
+**Consequence.** T1 (`orchestrator.stubs.supersede`) is unit-tested as a pure function
+(`tests/test_stubs.py` exercises it directly and extensively) but has no live invocation path. SPEC
+§12 item 37's own criterion text ("re-running P to SUCCEEDED with its PR MERGED moves that row to
+SUPERSEDED") describes an automatic trigger that does not fire in production today — `cli.py`'s
+`_pr_sync_impl` (`:10018-10149`), the function SPEC's own docstring names as where T1 should fire
+(`:10112`), already discloses in its own inline comment (`:10114-10124`) that the `pr_merged` event
+it emits has no reader anywhere. This matters specifically for D101 Half B: `fleet pr --sync`
+"firing T1" is not wiring a call into an existing trigger — the trigger itself does not exist in any
+live code path and must be built.
+
+**Not yet built:** the call site inside `_pr_sync_impl`'s `pr_merged` branch that constructs
+`ProviderFacts` for the merged provider and invokes `supersede()`/`plan_revalidation()`. That design
+choice, and how it composes with D101 Half B's own clearing logic, is not made here — this entry
+only establishes the gap exists and is now tracked independently of D101.
