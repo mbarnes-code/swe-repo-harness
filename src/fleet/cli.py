@@ -3113,6 +3113,9 @@ async def _sequence_impl(
                 max_usd_per_repo=settings.config.budgets.wave_max_cost_usd_per_repo,
             )
             await _persist_cycle_findings(writer, run_id, wave_plan.cycle_findings, now=_now())
+            await _persist_contract_edges(
+                report.edges, writer=writer, read_conn=conn_ro, run_id=run_id
+            )
             collisions = audit_collisions(
                 CollisionInput(
                     coordinates=coordinate_claims,
@@ -3257,6 +3260,57 @@ async def _persist_cycle_findings(
             )
 
     await writer.submit(unit)
+
+
+_CONTRACT_EDGE_KINDS: Final = (EdgeKind.CONTRACT_IMPL, EdgeKind.CONTRACT_CONSUME)
+
+
+async def _persist_contract_edges(
+    edges: Sequence[DependencyEdge],
+    *,
+    writer: StateWriter,
+    read_conn: aiosqlite.Connection,
+    run_id: str,
+) -> int:
+    """Persist step 6c-H's `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges (D97, §12.8 residual).
+
+    `break_cycles` (`:3070`) computes these `DependencyEdge` objects in memory via
+    `graph/cycles.py::_materialize` — for pre-committed hoists as well as ones this run just
+    decided — but `insert_edges`'s only other production call site, `_persist_scan_edges`, runs
+    at scan time before any hoist exists and can never see them. Mirrors that call site's
+    `EdgeRow` construction shape exactly, field for field, so the two writers stay reconcilable.
+
+    `insert_edges` upserts on `(run_id, edge_key)` (§6), so re-running `fleet sequence` for the
+    same run re-materializes and re-persists the identical rows rather than duplicating them.
+    """
+    contract_edges = [edge for edge in edges if edge.kind in _CONTRACT_EDGE_KINDS]
+    if not contract_edges:
+        return 0
+    repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+    return await repository.insert_edges(
+        [
+            EdgeRow(
+                edge_key=edge.edge_key,
+                run_id=run_id,
+                src_kind=edge.src_kind.value,
+                src_id=edge.src_id,
+                dst_kind=edge.dst_kind.value,
+                dst_id=edge.dst_id,
+                dst_coord_key=(
+                    str(edge.dst_id) if edge.dst_coordinate is None else edge.dst_coordinate.key
+                ),
+                kind=edge.kind.value,
+                base_confidence=edge.base_confidence,
+                confidence=edge.confidence,
+                evidence_path=edge.evidence_path,
+                evidence_line=-1 if edge.evidence_line is None else edge.evidence_line,
+                detected_at=_iso(edge.detected_at),
+                ambiguous=edge.ambiguous,
+                ordering_suppressed=edge.ordering_suppressed,
+            )
+            for edge in contract_edges
+        ]
+    )
 
 
 def _edge_kinds(spec: str | None, settings: FleetSettings) -> tuple[EdgeKind, ...]:

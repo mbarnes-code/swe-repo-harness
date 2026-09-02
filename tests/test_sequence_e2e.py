@@ -194,23 +194,6 @@ def test_a_contract_cycle_is_dissolved_by_scan_then_sequence(cycle_fleet: Path) 
 # =======================================================================================
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "SPEC §12.8 residual, documented as D97 in docs/INTEGRATION_HONESTY.md: "
-        "graph/cycles.py::_materialize (called from break_cycles' 6c-H hoist) computes real "
-        "CONTRACT_IMPL/CONTRACT_CONSUME DependencyEdge objects in memory for wave assignment, "
-        "but cli.py::_sequence_impl never calls repository.insert_edges (or any other write) "
-        "with them. insert_edges' ONLY production call site in the whole tree is "
-        "cli.py::_persist_scan_edges, which runs at SCAN time — before any hoist exists — and "
-        "builds its InferenceInput with no `contracts=` argument, so infer_contract_edges never "
-        "fires there either. The two kinds are therefore never written to the persisted `edges` "
-        "table by any real `fleet scan`/`fleet sequence` invocation today, even though the "
-        "contract genuinely reaches status=HOISTED (proved by the test just above). This test "
-        "pins the TARGET state; flip it to a real assertion (drop the xfail) once persistence "
-        "is wired, and see the report for the recommended fix shape."
-    ),
-)
 def test_the_hoisted_contract_produces_real_contract_impl_and_consume_edges_in_the_table(
     cycle_fleet: Path,
 ) -> None:
