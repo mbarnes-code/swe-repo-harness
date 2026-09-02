@@ -512,6 +512,15 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
         ladder = LadderState(
             attempts=0 if row is None else row.attempts,
             max_attempts=MAX_ATTEMPTS if row is None else row.max_attempts,
+            # §9/§10, D-closing: the CONFIGURED ladder (`FleetSettings.config.transform.ladder`,
+            # already carrying any per-run `--context-policy` override `cli.py` applied) rather
+            # than `LadderState`'s hardcoded `DEFAULT_LADDER` default. One `ContextPolicy | None`
+            # per rung — `LadderRung.tier`/`.role` are not read here; tier is DERIVED from the
+            # policy (`workers.base.tier_for_attempt`), never declared twice. Applied uniformly
+            # across phases, same as the constant it replaces: BUILD/VERIFY/SCAN workers do not
+            # consume `WorkerContext.tier`/`.context_policy` for real, so this is inert for them,
+            # exactly as `DEFAULT_LADDER`/`TIER_LADDER` were.
+            ladder=tuple(rung.context_policy for rung in self.ctx.config.transform.ladder),
         )
         outcome = RepoOutcome(
             repo_id=repo_id,
@@ -753,9 +762,11 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
 
         `attempt` is `phases.attempts + 1` — the position read off disk — and it is what tells
         the worker WHICH rung to run: `BaseWorker.execute` derives the tier and the ADR-0021
-        `ContextPolicy` from `ctx.attempt`. `tier=` below is the same value by the same function
-        (`TIER_LADDER[attempt - 1]`), passed so the context is coherent before `execute` refines
-        it per rung; it is not an independent judgement and cannot disagree.
+        `ContextPolicy` from `ctx.attempt` and the `ladder=` it is now also passed below (§9/§10:
+        `LadderState.ladder`, sourced in `_drive` from `FleetSettings.config.transform.ladder`).
+        `tier=` below is the same value by the same function (`ladder.tier(attempt)`), passed so
+        the context is coherent before `execute` refines it per rung; it is not an independent
+        judgement and cannot disagree.
 
         **`preconditions_hold` is consulted HERE**, between the payload and `execute` — the only
         point where both the typed payload and the `WorkerContext` the worker would receive
@@ -835,7 +846,9 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                             execution=self._unknown(repo_id, exc), re_entry=re_entry
                         )
                 try:
-                    execution = await self.worker.execute(worker_ctx, payload, max_attempts=1)
+                    execution = await self.worker.execute(
+                        worker_ctx, payload, max_attempts=1, ladder=ladder.ladder
+                    )
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:

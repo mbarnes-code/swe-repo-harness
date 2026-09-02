@@ -47,7 +47,11 @@ from typing import Final
 from fleet.llm.client import FinishReason
 from fleet.models.enums import ContextPolicy, FailureClass, RepoStatus, TransformTier
 from fleet.models.tasks import DEFAULT_LADDER, MAX_ATTEMPTS
-from fleet.workers.base import TIER_LADDER, WorkerError
+from fleet.workers.base import (
+    WorkerError,
+    context_policy_for_attempt,
+    tier_for_attempt,
+)
 
 __all__ = [
     "DEFAULT_BACKOFF_BASE_S",
@@ -87,17 +91,21 @@ class LadderState:
 
     def context_policy(self, attempt: int) -> ContextPolicy | None:
         """ADR-0021: rung index == attempt number, 1-based. Past the declared ladder the last
-        rung repeats rather than raising — a shortened ladder is config, not a crash."""
-        if not self.ladder:
-            return None
-        return self.ladder[min(max(attempt, 1), len(self.ladder)) - 1]
+        rung repeats rather than raising — a shortened ladder is config, not a crash.
+
+        Delegates to `workers.base.context_policy_for_attempt` so this and `execute()`'s own
+        ladder walk are the same function of `(attempt, self.ladder)` and cannot drift."""
+        return context_policy_for_attempt(attempt, self.ladder)
 
     def tier(self, attempt: int) -> TransformTier:
-        """The tier that rung runs at. Derived from the ladder (`workers.base.TIER_LADDER`), never
-        declared twice: the tier is a consequence of which rung is running."""
-        if not TIER_LADDER:
-            return TransformTier.DETERMINISTIC
-        return TIER_LADDER[min(max(attempt, 1), len(TIER_LADDER)) - 1]
+        """The tier that rung runs at, derived from `self.ladder` — never declared twice: the
+        tier is a consequence of which rung is running.
+
+        Delegates to `workers.base.tier_for_attempt` for the same reason as `context_policy`
+        above: `self.ladder` is `runner.py::_drive`'s `LadderState(ladder=...)`, sourced from
+        `FleetSettings.config.transform.ladder` (§9), so this reads the CONFIGURED ladder rather
+        than the hardcoded `workers.base.TIER_LADDER` default it used to be pinned to."""
+        return tier_for_attempt(attempt, self.ladder)
 
     @property
     def exhausted(self) -> bool:
