@@ -1081,6 +1081,265 @@ def test_declaring_the_same_import_turns_it_into_a_declared_dep_not_an_internal_
     assert kinds == {"DECLARED_DEP"}, kinds
 
 
+# ---------------------------------------------------------------------------------------
+# SHARED_RESOURCE, end to end (§12 item 8 / §12.8's fixture-fleet done bar, ADR-0109)
+# ---------------------------------------------------------------------------------------
+#
+# `test_graph_build.py`'s `full_input()` proves SHARED_RESOURCE at the unit level: two hand-built
+# `DB_TABLE` `SymbolRef`s sharing one fqn ("users") produce one advisory edge per ordered pair.
+# Nothing proved the real regex extractor (`workers/symbolindex.py::_pattern_symbols`, the
+# `db_table` pattern in `DEFAULT_RESOURCE_PATTERNS`) and the real `edges` table agree with that
+# rule. Kept as its own two-repo fleet, same reason as INTERNAL_IMPORT above: folding a
+# `CREATE TABLE` literal into `FIXTURE_REPOS` would perturb every wave-ordering and table-count
+# assertion elsewhere in this file.
+#
+# Two repos with NO manifest relation: each ships one Python file whose text literally contains
+# `CREATE TABLE <name> (...)`, matched by the `db_table` pattern (case-insensitive; no `.sql`
+# extension needed — the pattern scans every indexed file's raw text regardless of language).
+# `same_table` toggles whether the second repo's DDL names the SAME table — the Rule 12
+# discriminator: identical shape, different table name, no edge.
+
+
+def _make_shared_resource_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, same_table: bool
+) -> Path:
+    other_table = "orders" if same_table else "invoices"
+    sources = {
+        "acme-orders-svc": _make_repo(
+            tmp_path / "sources",
+            "acme-orders-svc",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-orders-svc"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_orders_svc/schema.py": (
+                    'TABLE_DDL = "CREATE TABLE orders (id INTEGER PRIMARY KEY)"\n'
+                ),
+            },
+        ),
+        "acme-orders-report": _make_repo(
+            tmp_path / "sources",
+            "acme-orders-report",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-orders-report"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_orders_report/schema.py": (
+                    f'TABLE_DDL = "CREATE TABLE {other_table} (id INTEGER PRIMARY KEY)"\n'
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+@pytest.fixture
+def shared_resource_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Both repos' DDL name the same table (`orders`)."""
+    return _make_shared_resource_fleet(tmp_path, monkeypatch, same_table=True)
+
+
+@pytest.fixture
+def shared_resource_fleet_distinct(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The same two repos, but the second repo's DDL names a DIFFERENT table."""
+    return _make_shared_resource_fleet(tmp_path, monkeypatch, same_table=False)
+
+
+def test_two_repos_naming_the_same_table_produce_a_real_shared_resource_edge(
+    shared_resource_fleet: Path,
+) -> None:
+    """§12 item 8: SHARED_RESOURCE ("one table/topic/queue named by two repos") proven against a
+    real `fleet scan`, not only the hand-built `InferenceInput` in `test_graph_build.py`.
+
+    Both `acme-orders-svc/acme_orders_svc/schema.py` and
+    `acme-orders-report/acme_orders_report/schema.py` line 1 name `orders` via the real
+    `db_table` regex — no `.sql` extension, no manifest declaration on either side. The relation
+    is symmetric and written as one row per ordered pair (`infer.py`'s own docstring), so both
+    directions must land, each with `confidence == EDGE_BASE_CONFIDENCE[SHARED_RESOURCE] == 0.5`
+    (no vendor/generated modifier applies to either path).
+    """
+    result = scan(shared_resource_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = sorted(
+        query(
+            shared_resource_fleet,
+            "SELECT src_id, dst_id, kind, evidence_path, evidence_line, confidence "
+            "FROM edges WHERE kind = 'SHARED_RESOURCE'",
+        )
+    )
+    assert edges == [
+        (
+            "acme-orders-report", "acme-orders-svc", "SHARED_RESOURCE",
+            "acme_orders_report/schema.py", 1, 0.5,
+        ),
+        (
+            "acme-orders-svc", "acme-orders-report", "SHARED_RESOURCE",
+            "acme_orders_svc/schema.py", 1, 0.5,
+        ),
+    ], edges
+
+
+def test_naming_a_different_table_produces_no_shared_resource_edge(
+    shared_resource_fleet_distinct: Path,
+) -> None:
+    """Rule 12: the fixture-fleet proof above is a genuine discriminator, not a vacuous one.
+
+    Same two repos, same shape of DDL literal — but the second repo's table is `invoices`, not
+    `orders`. `_shared_resource_edges`'s `len(repos) < 2` check, keyed per fqn, must then see
+    only one repo per table name and emit nothing.
+    """
+    result = scan(shared_resource_fleet_distinct)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        shared_resource_fleet_distinct, "SELECT kind FROM edges WHERE kind = 'SHARED_RESOURCE'"
+    )
+    assert edges == [], edges
+
+
+# ---------------------------------------------------------------------------------------
+# DYNAMIC_REF, end to end (§12 item 8 / §12.8's fixture-fleet done bar, ADR-0109)
+# ---------------------------------------------------------------------------------------
+#
+# `test_graph_build.py`'s `full_input()` proves DYNAMIC_REF at the unit level with a hand-built
+# `SymbolRef(kind=SymbolKind.DYNAMIC_REF, ...)`. Nothing proved the real `py_importlib` regex
+# (`workers/symbolindex.py::DEFAULT_DYNAMIC_PATTERNS`) actually produces one, nor that
+# `_dynamic_ref_edges`'s FALLBACK path — resolving via `defined` (a real symbol definition)
+# rather than via `OwnerIndex.match_import` (a published coordinate, the path INTERNAL_IMPORT
+# and API_CONTRACT both use) — fires for real. The FQN below is deliberately chosen so NO
+# published coordinate's token prefix matches it (`match_import` returns `None`), which forces
+# the fallback branch: this is the case the docstring calls "a reference the compiler cannot
+# see", not a second INTERNAL_IMPORT wearing a different `EdgeKind`.
+#
+# Two repos: `acme-dynref-lib` defines a real Python function under `internal/registry.py`
+# (`ast`-derived fqn `internal.registry.build_widget`, unrelated to its own coordinate's tokens
+# `acme`/`dynref`/`lib`); `acme-dynref-app` never `import`s it — only via
+# `importlib.import_module("internal.registry.build_widget")`, a string literal an `ast.Import`
+# walk cannot see, which is exactly why this fires as DYNAMIC_REF and not INTERNAL_IMPORT.
+
+
+def _make_dynamic_ref_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, target: str
+) -> Path:
+    sources = {
+        "acme-dynref-lib": _make_repo(
+            tmp_path / "sources",
+            "acme-dynref-lib",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-dynref-lib"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "internal/registry.py": (
+                    "def build_widget(name: str) -> str:\n"
+                    "    return name\n"
+                ),
+            },
+        ),
+        "acme-dynref-app": _make_repo(
+            tmp_path / "sources",
+            "acme-dynref-app",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-dynref-app"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_dynref_app/loader.py": (
+                    "import importlib\n"
+                    "\n"
+                    "\n"
+                    "def load() -> object:\n"
+                    f'    return importlib.import_module("{target}")\n'
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+@pytest.fixture
+def dynamic_ref_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`acme-dynref-app` dynamically imports the exact FQN `acme-dynref-lib` defines."""
+    return _make_dynamic_ref_fleet(tmp_path, monkeypatch, target="internal.registry.build_widget")
+
+
+@pytest.fixture
+def dynamic_ref_fleet_unresolvable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The same two repos, but the dynamic string names a function nobody defines."""
+    return _make_dynamic_ref_fleet(
+        tmp_path, monkeypatch, target="internal.registry.missing_widget"
+    )
+
+
+def test_a_string_built_import_of_a_real_symbol_produces_a_real_dynamic_ref_edge(
+    dynamic_ref_fleet: Path,
+) -> None:
+    """§12 item 8: DYNAMIC_REF ("a reference the compiler cannot see") proven against a real
+    `fleet scan`, not only the hand-built `InferenceInput` in `test_graph_build.py`.
+
+    `acme-dynref-app/acme_dynref_app/loader.py` line 5 names
+    `internal.registry.build_widget` inside `importlib.import_module(...)` — no `ast.Import`
+    node, no published coordinate whose token prefix matches it, so `_dynamic_ref_edges` must
+    take the `defined`-symbol fallback — and `acme-dynref-lib/internal/registry.py` line 1 is
+    the real `ast`-derived definition it resolves to, with
+    `confidence == EDGE_BASE_CONFIDENCE[DYNAMIC_REF] == 0.3`.
+    """
+    result = scan(dynamic_ref_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        dynamic_ref_fleet,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line, confidence FROM edges "
+        "WHERE kind = 'DYNAMIC_REF'",
+    )
+    assert edges == [
+        (
+            "acme-dynref-app", "acme-dynref-lib", "DYNAMIC_REF",
+            "acme_dynref_app/loader.py", 5, 0.3,
+        )
+    ], edges
+
+
+def test_a_dynamic_reference_to_nothing_defined_produces_no_dynamic_ref_edge(
+    dynamic_ref_fleet_unresolvable: Path,
+) -> None:
+    """Rule 12: the fixture-fleet proof above is a genuine discriminator, not a vacuous one.
+
+    Same two repos, same `importlib.import_module(...)` shape — but the string now names
+    `internal.registry.missing_widget`, which nothing defines and no coordinate's prefix
+    matches. `_dynamic_ref_edges`'s `defined.get(sym.fqn, ())` must come back empty and emit
+    nothing.
+    """
+    result = scan(dynamic_ref_fleet_unresolvable)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        dynamic_ref_fleet_unresolvable, "SELECT kind FROM edges WHERE kind = 'DYNAMIC_REF'"
+    )
+    assert edges == [], edges
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
