@@ -7585,7 +7585,7 @@ same fix wave; other `cli.py` writers noted as sharing the same "no fence bump" 
 (approximately lines 2094, 2123, 4533) were not individually confirmed as concretely reachable as
 the quarantine path and are not claimed here.
 
-## D96 — OPEN. `fleet transform` has zero disk-headroom enforcement anywhere in its path — the phase most likely to consume disk at scale is the one phase left unguarded
+## D96 — PARTLY ADDRESSED (phase-entry half FIXED, LANDED `71c3cd9`, round CC task 3; Phase-2 per-repo-worker half still OPEN). `fleet transform` has zero disk-headroom enforcement anywhere in its path — the phase most likely to consume disk at scale is the one phase left unguarded
 
 **Found by round AA task 2 (2026-09-01), during a TEST-ONLY task closing a different §12.22
 sub-clause — disclosed, not fixed, out of that task's scope.** Verified free before writing:
@@ -7593,9 +7593,9 @@ highest allocated number was `D95`. Independently re-confirmed by the controller
 task review's word alone), against current `HEAD` — separately from task review's own trace,
 which itself went further than the implementer's original grep-only flag.
 
-**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13708`)
+**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13712`)
 is called at exactly 4 sites: `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
-`_continue_impl`/`fleet resume` (`:9464`). `transform`'s command body (`cli.py:3465-3538`) calls
+`_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3542`, as of when this defect was found — see the fix note below) calls
 `_phase_preflight(ctx)` and then goes straight to `_transform_impl` — no `_require_disk_headroom`
 call anywhere in the function, confirmed by isolating the function body between `def transform(`
 and the next `@app.command` and grepping it directly. This breaks a pattern applied consistently
@@ -7609,7 +7609,7 @@ follow-up call, reading as a copy-paste gap rather than a deliberate exemption.
 scope.
 
 **The per-repo fallback this project's own code claims should cover it does not exist for Phase
-2.** `_require_disk_headroom`'s own docstring (`cli.py:13709-13718`) states explicitly: "Per-repo
+2.** `_require_disk_headroom`'s own docstring (`cli.py:13713-13724`) states explicitly: "Per-repo
 enforcement is NOT here and must not be: the floor is re-checked before every clone and every
 container start by the workers themselves (§11.3)." Phase 1/3/4's workers back this claim up —
 `clone.py:113-116` and `buildverify.py:602-605` each carry a `min_free_bytes`-checked-before-
@@ -7644,3 +7644,26 @@ imported at `relocate.py:36` and `rewrite.py:53` (two sites, not one), and is NO
 `buildgen.py` at all — the reverse of what this entry originally said. Neither correction changes
 the finding: no Phase 2 worker carries any disk-floor check, confirmed independently by the
 round's own final review.
+
+**Phase-entry half FIXED, LANDED (2026-09-02, round CC task 3, merge `71c3cd9`, component commit
+`ce4cbef`).** `transform`'s command body now calls `_require_disk_headroom(settings)`
+immediately after `_phase_preflight(ctx)`, identical in placement and comment wording to
+`build`/`verify`'s own sites — closing exactly the copy-paste gap this entry's "Net" paragraph
+named. New regression test: `tests/test_cli.py::
+test_transform_refuses_to_start_below_the_disk_floor_with_exit_9`. Rule-12 mutation-proven (revert
+the fix, confirm exit 0 instead of 9; restore, confirm exit 9), independently reproduced by task
+review in a separate worktree with byte-identical results. Task review additionally ran
+`tests/test_build_e2e.py` in matched before/after worktrees (base `96243a4` vs. fixed `ce4cbef`)
+and found the failure SET byte-identical between them (same test names, same counts) — direct
+symmetric evidence this fix introduces zero regressions in that suite; the failures themselves
+are unrelated pre-existing environment gaps (`uv` not installed on this host; a gitignored
+`tools/go/` toolchain directory not carrying into a fresh `git worktree add`), independently
+confirmed by reading the actual failure tracebacks rather than trusting the implementer's
+categorization.
+
+**Still OPEN: the Phase 2 per-repo/per-worker wiring half.** `_require_disk_headroom`'s own
+docstring claim that per-repo enforcement happens "before every clone and every container start
+by the workers themselves" remains false for Phase 2 — `relocate.py`/`rewrite.py`/`buildgen.py`
+still carry no such wiring, unchanged by this fix (which only closes the phase-ENTRY gate, not
+the per-repo one). This is explicitly out of scope for the phase-entry fix and is the entry's one
+remaining open surface.
