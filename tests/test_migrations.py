@@ -79,6 +79,14 @@ _V6_TABLES: dict[str, str] = {
             largest_blob_bytes INTEGER NOT NULL DEFAULT 0, preflight_ok INTEGER,
             blast_radius INTEGER NOT NULL DEFAULT 0, updated_at TEXT NOT NULL)
     """,
+    "coordinates": """
+        CREATE TABLE coordinates (
+            coord_key TEXT PRIMARY KEY, ecosystem TEXT NOT NULL,
+            grp TEXT NOT NULL DEFAULT '', name TEXT NOT NULL,
+            owner_repo_id TEXT REFERENCES repos(repo_id) ON DELETE SET NULL,
+            -- pre-9: no `version` column — §37 Blocker B, added at 8 -> 9
+            first_seen_at TEXT NOT NULL)
+    """,
     "edges": """
         CREATE TABLE edges (
             edge_id INTEGER PRIMARY KEY,
@@ -381,14 +389,14 @@ def _table_shape(path: Path, table: str) -> list[tuple[object, ...]]:
 def test_registry_is_strictly_ordered_contiguous_and_ends_at_the_baseline():
     """A glob-discovered ladder can silently reorder; a gap or a duplicate corrupts data.
 
-    §6 fixes the ladder as `1 → 2 … 7 → 8`, so the registry must be exactly that: strictly
+    §6 fixes the ladder as `1 → 2 … 8 → 9`, so the registry must be exactly that: strictly
     ascending, no duplicate VERSION, no gap, and ending on the version `schema.sql` installs.
     """
     versions = [step.version for step in STEPS]
     assert versions == sorted(versions), "steps are not in ascending order"
     assert len(set(versions)) == len(versions), "duplicate VERSION in the registry"
     assert versions == list(range(EARLIEST_MIGRATABLE_VERSION + 1, LATEST_VERSION + 1))
-    assert versions == [2, 3, 4, 5, 6, 7, 8]
+    assert versions == [2, 3, 4, 5, 6, 7, 8, 9]
     assert len({step.module for step in STEPS}) == len(STEPS), "two steps share a module"
 
 
@@ -762,7 +770,10 @@ def test_every_recorded_spend_survives_the_seven_to_eight_step(tmp_path):
     )
     assert before_run == [(12.5, 7.5, 500.0)], "the fixture must actually hold money"
 
-    assert migrate(db) == (7, 8)
+    # This rung only, same reasoning as the 6 -> 7 test above: a bare `migrate(db)` would run
+    # past 8 to LATEST_VERSION once a later rung exists, and stop naming which step this test is
+    # actually about.
+    assert migrate(db, steps=_STEPS_THROUGH(8)) == (7, 8)
     assert current_version(db) == 8
 
     assert _query(db, "SELECT spent_usd, reserved_usd, max_usd FROM budget_ledger") == before_run

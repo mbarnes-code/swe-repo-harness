@@ -1,4 +1,4 @@
--- fleet state schema — the v8 BASELINE for a FRESH database (SPEC §6).
+-- fleet state schema — the v9 BASELINE for a FRESH database (SPEC §6).
 --
 -- This file is DATA, not a startup side effect. It is applied by `fleet migrate-db` (§10) and by
 -- nothing else. §6 "Migration policy" is normative: `CREATE TABLE IF NOT EXISTS` creates a
@@ -7,14 +7,14 @@
 -- `PRAGMA user_version` at startup and REFUSE TO START if it differs from the compiled-in
 -- version; they never run this file.
 --
--- A brand-new database gets this file and lands directly at user_version = 8. The ordered
--- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 7→8) exists only for databases that already
+-- A brand-new database gets this file and lands directly at user_version = 9. The ordered
+-- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 8→9) exists only for databases that already
 -- hold data; it is never replayed against a fresh one.
 --
 -- ---------------------------------------------------------------------------------------------
 -- PRAGMAs. Only the PERSISTENT ones live here, because this file runs once:
 --   * journal_mode = WAL   — stored in the database header, survives close (§6, ADR-0004)
---   * user_version = 8     — stored in the database header (§5 SCHEMA_VERSION)
+--   * user_version = 9     — stored in the database header (§5 SCHEMA_VERSION)
 --
 -- The rest are PER-CONNECTION and reset to their defaults on every new handle. `state/db.py`
 -- MUST issue these on EVERY connection it opens (read and write alike); setting them here would
@@ -115,6 +115,13 @@ CREATE TABLE IF NOT EXISTS coordinates (
     grp          TEXT NOT NULL DEFAULT '',
     name         TEXT NOT NULL,
     owner_repo_id TEXT REFERENCES repos(repo_id) ON DELETE SET NULL,  -- NULL => external
+    version      TEXT,                            -- the OWNING repo's own published version
+                                                   --   (§37 Blocker B). NULL until that repo is
+                                                   --   scanned, or forever for Go (module
+                                                   --   versions are VCS tags, not in-repo
+                                                   --   content). NEVER a dependent's declared
+                                                   --   range — only an owned=True write may set
+                                                   --   this (`src/fleet/cli.py` `_scan_rows`).
     first_seen_at TEXT NOT NULL
 );
 
@@ -881,6 +888,6 @@ CREATE INDEX IF NOT EXISTS ix_stubs_provider  ON stubs (run_id, provider_repo_id
 CREATE INDEX IF NOT EXISTS ix_stubs_open      ON stubs (run_id, state)
     WHERE state IN ('ACTIVE','SUPERSEDED');   -- the end-of-run reconciliation sweep
 
--- The baseline lands directly at 8 (§5 SCHEMA_VERSION). Workers refuse to start against any
+-- The baseline lands directly at 9 (§5 SCHEMA_VERSION). Workers refuse to start against any
 -- other value; the vNNN ladder is for databases that already hold data, never for this file.
-PRAGMA user_version = 8;
+PRAGMA user_version = 9;

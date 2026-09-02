@@ -1644,7 +1644,10 @@ def _scan_rows(
                 [_manifest_row(ref) for ref in manifests],
             )
         coordinates = [
-            (coord, output.repo_id if owned else None)
+            # `version` is the OWNING repo's own published version (§37 Blocker B) — a dependent's
+            # declared range (e.g. `^1.2`) is a different kind of value entirely and must never
+            # reach this column, so only an `owned=True` write may ever supply a non-NULL version.
+            (coord, output.repo_id if owned else None, coord.version_spec if owned else None)
             for coord, owned in [
                 *((coord, True) for coord in published),
                 *((dep.coordinate, False) for dep in dependencies),
@@ -1653,12 +1656,16 @@ def _scan_rows(
         if coordinates:
             await conn.executemany(
                 "INSERT INTO coordinates (coord_key, ecosystem, grp, name, owner_repo_id, "
-                "    first_seen_at) VALUES (?, ?, ?, ?, ?, ?) "
+                "    version, first_seen_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
                 # COALESCE, never assignment: a dependency row is written owner-less because the
                 # repo that publishes it may not be scanned yet, and it must never DEMOTE an
                 # internal coordinate to external — that deletes an ordering edge (§3.1 step 3).
+                # `version` gets the identical COALESCE shape for the identical reason: a
+                # dependency-only write, or a later scan whose manifest happens to omit the
+                # version, must never erase previously-known-good data.
                 "ON CONFLICT (coord_key) DO UPDATE SET owner_repo_id = "
-                "    COALESCE(excluded.owner_repo_id, coordinates.owner_repo_id)",
+                "    COALESCE(excluded.owner_repo_id, coordinates.owner_repo_id), "
+                "    version = COALESCE(excluded.version, coordinates.version)",
                 [
                     (
                         coord.key,
@@ -1666,9 +1673,10 @@ def _scan_rows(
                         coord.group,
                         coord.name,
                         owner,
+                        version,
                         stamp,
                     )
-                    for coord, owner in coordinates
+                    for coord, owner, version in coordinates
                 ],
             )
         if output.findings:
@@ -6964,7 +6972,7 @@ async def _repo_facts(conn: aiosqlite.Connection) -> dict[str, _RepoFacts]:
     """
     rows = await _rows(
         conn,
-        "SELECT r.repo_id, r.dest_path, r.ecosystems, c.ecosystem, c.grp, c.name, "
+        "SELECT r.repo_id, r.dest_path, r.ecosystems, c.ecosystem, c.grp, c.name, c.version, "
         "       r.baseline_test_count "
         "  FROM repos AS r LEFT JOIN coordinates AS c ON c.coord_key = r.primary_coord_key",
     )
@@ -6980,13 +6988,16 @@ async def _repo_facts(conn: aiosqlite.Connection) -> dict[str, _RepoFacts]:
         if row[3] is not None:
             with suppress(ValueError):
                 published = Coordinate(
-                    ecosystem=Ecosystem(str(row[3])), group=str(row[4] or ""), name=str(row[5])
+                    ecosystem=Ecosystem(str(row[3])),
+                    group=str(row[4] or ""),
+                    name=str(row[5]),
+                    version_spec=str(row[6]) if row[6] is not None else None,
                 )
         facts[str(row[0])] = _RepoFacts(
             dest_path=None if row[1] is None else str(row[1]),
             ecosystem=ecosystem,
             published=published,
-            baseline_test_count=int(row[6] or 0),
+            baseline_test_count=int(row[7] or 0),
         )
     return facts
 
