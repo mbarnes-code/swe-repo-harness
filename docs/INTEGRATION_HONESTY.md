@@ -7319,7 +7319,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2315-2383`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2325-2393`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (`cli.py:6752`) sets
@@ -7419,7 +7419,7 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12596-12833`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+(`cli.py:12631-12868`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
 2026-09-02, round VI, FOUR separate times as this round's own successive `cli.py` additions kept
 shifting it. Correction to this paragraph's own prior self: the "at `<sha>`" suffix a previous
 repointing added here was NOT a functional exemption — `test_no_unpinned_anchored_citation_
@@ -7817,7 +7817,7 @@ standalone reproduction script (not a reuse of the implementer's own test code) 
 `fleet scan` → `fleet sequence` through a genuine hoist and querying the persisted `edges` table
 directly by SQL.
 
-**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2414`)
+**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2423`)
 has exactly ONE production call site anywhere in `src/`: `cli.py:2217`, inside
 `_persist_scan_edges` (`cli.py:2188`), itself reachable only from the scan path (`cli.py:1861`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
