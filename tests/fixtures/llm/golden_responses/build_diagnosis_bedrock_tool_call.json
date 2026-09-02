@@ -1,0 +1,32 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (an `LlmBuildDiagnosis`-schema object) differs. This fixture is also the Rule-12 mutation base for `test_a_build_diagnosis_reply_missing_its_required_root_cause_field_fails_schema_validation` in `tests/test_llm_golden_responses.py` (deletes `root_cause`, one of the three `LlmBuildDiagnosis` fields with no default — `failure_class`, `root_cause`, `suggested_action`, `confidence` all have no default; `suspect_paths` alone defaults to `()` and would not discriminate).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_BuildDiag01ZjIwYjk4NTA",
+            "name": "emit_response",
+            "input": {
+              "failure_class": "TEST_FAILURE",
+              "root_cause": "left-pad's padding character defaults to '0' in this fork, but the test suite expects a space",
+              "suspect_paths": ["index.js", "tests/index.test.js"],
+              "suggested_action": "change the default pad character parameter from '0' to ' ' in index.js",
+              "confidence": 0.75
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 300,
+    "outputTokens": 38,
+    "totalTokens": 338
+  },
+  "metrics": {
+    "latencyMs": 480
+  }
+}

@@ -1,0 +1,31 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (a `DependencyDisambiguation`-schema object) differs. `chosen_coordinate` uses the `ecosystem:group:name` key format `Coordinate.key` computes (src/fleet/models/repo.py:34, ADR-0017); npm has no group here, so the group segment is empty (`npm::left-pad`).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_DepDis01ZjIwYjk4NTA",
+            "name": "emit_response",
+            "input": {
+              "chosen_coordinate": "npm::left-pad",
+              "candidates_considered": ["npm::left-pad", "npm::left-pad-cjs"],
+              "confidence": 0.93,
+              "rationale": "left-pad is the canonical package; left-pad-cjs is a rarely-downloaded fork exposing the same API"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 275,
+    "outputTokens": 33,
+    "totalTokens": 308
+  },
+  "metrics": {
+    "latencyMs": 465
+  }
+}

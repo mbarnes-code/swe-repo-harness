@@ -1,8 +1,9 @@
 """SPEC §12 item 4 — checked-in golden-response fixtures, one per shipped backend + PROMPTED rung,
 per LLM role. `docs/CRITERIA_PLAN.md` §4's revised Done bar requires this per **role** (12,
 `config/models.yaml`), not just per backend — round II's task 3 landed `REPO_CLASSIFY` alone (1 of
-12); this file's round III task 3 adds `PR_TITLE` and `PR_BODY` (3 of 12; 9 remain, tracked in
-`docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
+12); round III task 3 added `PR_TITLE` and `PR_BODY` (3 of 12); this file's round IV task 2 adds
+`BUILD_DIAGNOSIS` and `DEP_DISAMBIGUATE` (5 of 12; 7 remain, tracked in `docs/CRITERIA_PLAN.md`
+§4, not flipped DONE here).
 
 ADR-0013's contract layer declares the intent this closes: "every LLM prompt's declared response
 schema validates against a stored golden sample." `tests/test_llm_roles.py`'s
@@ -95,8 +96,16 @@ from fleet.llm.backends import anthropic as anthropic_backend
 from fleet.llm.backends import openai_compatible as oc_backend
 from fleet.llm.client import BackendReply
 from fleet.llm.roles import Role
-from fleet.llm.schemas import RESPONSE_SCHEMAS, FleetModel, PrBody, PrTitle, RepoClassification
-from fleet.models.enums import Ecosystem, StructuredOutputMode
+from fleet.llm.schemas import (
+    RESPONSE_SCHEMAS,
+    DependencyDisambiguation,
+    FleetModel,
+    LlmBuildDiagnosis,
+    PrBody,
+    PrTitle,
+    RepoClassification,
+)
+from fleet.models.enums import Ecosystem, FailureClass, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, Price
 from tests.test_llm_backend_bedrock import parse_reply as bedrock_parse_reply
 from tests.test_llm_backend_bedrock import target as bedrock_target
@@ -113,6 +122,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "llm" / "golden_re
 assert RESPONSE_SCHEMAS[Role.REPO_CLASSIFY] is RepoClassification
 assert RESPONSE_SCHEMAS[Role.PR_TITLE] is PrTitle
 assert RESPONSE_SCHEMAS[Role.PR_BODY] is PrBody
+assert RESPONSE_SCHEMAS[Role.BUILD_DIAGNOSIS] is LlmBuildDiagnosis
+assert RESPONSE_SCHEMAS[Role.DEP_DISAMBIGUATE] is DependencyDisambiguation
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -316,6 +327,115 @@ GOLDEN_CASES: tuple[GoldenCase, ...] = (
             "highlights": ("no existing consumer affected",),
         },
     ),
+    # --- BUILD_DIAGNOSIS (round IV task 2, new) ---
+    GoldenCase(
+        role=Role.BUILD_DIAGNOSIS,
+        schema=LlmBuildDiagnosis,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_diagnosis_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "failure_class": FailureClass.BUILD_ERROR,
+            "root_cause": "pom.xml is missing a dependency declaration for commons-lang3, which "
+            "src/main/java/com/acme/Util.java imports",
+            "suspect_paths": ("pom.xml", "src/main/java/com/acme/Util.java"),
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_DIAGNOSIS,
+        schema=LlmBuildDiagnosis,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_diagnosis_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "failure_class": FailureClass.TEST_FAILURE,
+            "suggested_action": "change the default pad character parameter from '0' to ' ' in "
+            "index.js",
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_DIAGNOSIS,
+        schema=LlmBuildDiagnosis,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="build_diagnosis_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "failure_class": FailureClass.DEP_CONFLICT,
+            "suspect_paths": ("widget-core/build.gradle", "gradle/libs.versions.toml"),
+        },
+    ),
+    GoldenCase(
+        role=Role.BUILD_DIAGNOSIS,
+        schema=LlmBuildDiagnosis,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="build_diagnosis_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "failure_class": FailureClass.PARSE_ERROR,
+            "confidence": 0.91,
+        },
+    ),
+    # --- DEP_DISAMBIGUATE (round IV task 2, new) ---
+    GoldenCase(
+        role=Role.DEP_DISAMBIGUATE,
+        schema=DependencyDisambiguation,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="dep_disambiguate_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "chosen_coordinate": "maven:org.apache.commons:commons-lang3",
+            "candidates_considered": (
+                "maven:org.apache.commons:commons-lang3",
+                "maven:commons-lang:commons-lang",
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.DEP_DISAMBIGUATE,
+        schema=DependencyDisambiguation,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="dep_disambiguate_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "chosen_coordinate": "npm::left-pad",
+            "confidence": 0.93,
+        },
+    ),
+    GoldenCase(
+        role=Role.DEP_DISAMBIGUATE,
+        schema=DependencyDisambiguation,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="dep_disambiguate_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "chosen_coordinate": "gradle:com.acme.widget:widget-core",
+            "candidates_considered": (
+                "gradle:com.acme.widget:widget-core",
+                "gradle:com.acme.widget:widget-core-legacy",
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.DEP_DISAMBIGUATE,
+        schema=DependencyDisambiguation,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="dep_disambiguate_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            # Deliberately exercises the nullable `chosen_coordinate` branch — "I cannot tell" is
+            # a legitimate answer per the schema's own docstring (src/fleet/llm/schemas.py:99).
+            "chosen_coordinate": None,
+            "candidates_considered": ("pypi::flask-utils", "pypi::flask_utils2"),
+        },
+    ),
 )
 
 
@@ -391,3 +511,28 @@ def test_the_unmutated_pr_body_fixture_still_validates_so_the_mutation_above_is_
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, PrBody, StructuredOutputMode.TOOL_CALL)
+
+
+def test_a_build_diagnosis_reply_missing_root_cause_fails_schema_validation() -> None:
+    """Mutation of the bedrock `BUILD_DIAGNOSIS` fixture: delete `root_cause`, one of the three
+    `LlmBuildDiagnosis` fields with no default (`failure_class`, `root_cause`,
+    `suggested_action`, `confidence` all lack a `default=`; `suspect_paths` alone defaults to `()`
+    and would NOT discriminate — deleting it leaves a still-valid payload). Same discriminator
+    shape as the `REPO_CLASSIFY`/`PR_BODY` mutations above, applied to one of the two roles this
+    task adds (round IV task 2)."""
+    raw = _load("build_diagnosis_bedrock_tool_call.json")
+    del raw["output"]["message"]["content"][0]["toolUse"]["input"]["root_cause"]
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="root_cause"):
+        client_module._validate(reply, LlmBuildDiagnosis, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_build_diagnosis_fixture_still_validates_so_the_mutation_broke_it() -> None:
+    """Control half of the `BUILD_DIAGNOSIS` mutation pair: the identical fixture, unmutated,
+    must still validate — proving the failure above is caused by the deleted `root_cause` field,
+    not by an unrelated defect in the fixture, the parse path, or `_validate` itself."""
+    raw = _load("build_diagnosis_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, LlmBuildDiagnosis, StructuredOutputMode.TOOL_CALL)
