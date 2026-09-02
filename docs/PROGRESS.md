@@ -7539,3 +7539,92 @@ docs-only, non-criterion-moving filler if picked up alongside §45. §14 confirm
 (identical to §37's done bar). No multiplier found for §45/D50; a real one exists for
 §37→§14+§39 but §37 stays NEW-MECHANISM-sized, a future dedicated round's target, not round BB
 material.
+
+### Checkpoint — 2026-09-02 (round BB controller, close-out)
+
+**§12 criteria met: 22 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count, independently re-derived by the final whole-branch reviewer and
+matching the committed table exactly — up from 21 at round AA's close). **§12.45 flipped OPEN→DONE
+this round** — the round's disclosed criterion-flipping target from dispatch, all 5 remaining
+sub-clauses closed across two parallel tasks (a real `PRAGMA table_list`/`table_info` schema
+sweep plus a hunk-header content scan in `tests/test_migrations.py`; 40-hex format,
+delete-artifacts-then-resume, and the SPEC-literal six-`Fleet-*`-trailer check in the new
+`tests/test_no_state_outside_git.py`) plus one final-review fix wave strengthening one of them
+from a hand-seeded stand-in to a real completed-pipeline fixture. This round also applied a
+docs-only controller fix before dispatch: D50's fourth correction (`docs/INTEGRATION_HONESTY.md`),
+its `KNOWN_INERT` count and "Group 1" narrative both stale a second time since its third
+correction — independently re-verified via `ast`-parsing the frozenset literals rather than
+transcribed from prior research.
+
+**A real finding was mistaken for new, and task review's own trace caught the duplication before
+it reached the committed record — worth naming as the pattern working correctly, not as a
+mistake.** Task 2's implementation surfaced that `tasks.pre_commit_sha` is never written by any
+production code path, disclosed it as "a genuinely unplanned finding" and recommended a new
+D-number. Task review traced the same code independently and found this was already `docs/
+INTEGRATION_HONESTY.md`'s D91 — allocated a full round earlier, present at this round's own base
+commit, and more precise about the actual consequence than the task's first-draft account. No new
+number was allocated; the controller corrected the test module's docstring to cite D91 directly
+before merging, so a future reader greps to one record instead of two independently-drifting
+descriptions of the same gap.
+
+**The final whole-branch review confirmed the round's central closure claim sound on independent
+re-derivation — its own words: "This is the one part of the round I expected to break and it
+doesn't"** — while still finding four real gaps in the closure's supporting evidence and
+documentation, three of them in `docs/CRITERIA_PLAN.md`'s §45 entry specifically, the same file
+this project's two immediately preceding rounds (Z and AA) also found overclaiming in. The
+reviewer independently re-read SPEC's literal text for §12.45(i) rather than accepting the
+closing commit's reading, and reached the same conclusion by its own reasoning: the clause
+requires non-NULL SHA-column values to be correct, not every column to be populated, so D91's
+pre-existing "cannot be exercised against a real production-populated value" caveat does not
+falsify the criterion's stated text. Four findings followed: (F1, Medium-High) a content-scan test
+for clause (ii) ran against a hand-seeded 5-row/5-table fixture rather than this same round's own
+real completed-pipeline output, covering roughly 10% of what a real run produces and missing
+exactly the payload-carrying tables (`edges`, `findings`, `manifests`, `symbols`, `coordinates`,
+`waves`, `wave_members`, `reservations`, `budget_ledger`, `repo_ledger`) where a smuggled diff
+would actually hide; (F2) an artifacts-deletion test's manufactured-stand-in limitation was
+disclosed in the test itself but not in the tracking document a reader would actually consult;
+(F3) a "2 already-covered sub-clauses" accounting was traced to a misreading of the original
+audit's "2 partials" language and had silently left one real SPEC clause — the snapshot-restore/
+no-duplicate-commits half of clause (iii) — with no test citation anywhere in the entry, though
+the property was genuinely covered elsewhere in the tree; (F4) a pre-existing defect entry (D91)
+that this round's own closure argument now depends on had no marker recording that dependency. One
+fix wave closed all four — F1 as a genuine strengthening (the coverage gap is closed, not merely
+caveated: re-verified independently at 71 rows/15 tables/487 values, matching the review's own
+measurement exactly, all ten previously-missed tables now scanned) — and one scoped re-review
+independently confirmed every fix, including re-deriving F1's coverage numbers from scratch rather
+than accepting the fix wave's restated figures, and verifying both of F3's new test citations by
+exact line-number grep plus reading the cited functions' bodies rather than trusting them blindly.
+
+**Rulings made this round:**
+1. D91 cited directly rather than a new D-number allocated, on task review's independent trace
+   finding the "new" gap was a pre-existing, more-precisely-described entry.
+2. §12.45(i)'s literal-text reading (non-NULL values must be correct; population is not required)
+   adopted as the closure argument, independently re-derived and agreed with by the final review
+   before the round was allowed to stand.
+3. The final review's four findings routed through exactly one fix wave (per this project's
+   "no second fix wave" rule) plus one scoped re-review, with F1 treated as a real fix rather than
+   a documented caveat since the coverage gap was cheaply closable using the round's own already-
+   built fixture.
+4. D91's marker added by append only, per `docs/INTEGRATION_HONESTY.md`'s own "annotate never
+   rewrite" convention — independently confirmed a byte-clean pure addition (the diff hunk carries
+   zero deleted lines).
+
+**Full suite, post-close: verified clean on all touched surfaces across the round's full arc** —
+task 1's self-gate (23 passed) independently reproduced by its task review including 3 separate
+Rule-12 mutations; task 2's self-gate (3 passed) independently reproduced including 2 separate
+Rule-12 mutations; the final whole-branch review's own run (ruff clean, citation gate 54/54,
+23+3=26 passed across both touched files, plus 2 of the review's own independently-run mutations
+on top); the fix wave's self-gate (27 passed: 23+4) independently reproduced by the scoped
+re-review, which additionally re-derived F1's real-fixture coverage numbers from first principles
+rather than accepting any prior party's restated figures. No step in this chain trusted a
+pass-count or coverage claim it could instead re-run.
+
+**Round CC, opening next.** Lead candidate pre-scoped by round BB's own research (concrete design
+already written): **§12.13's atomicity interruption test** (`tests/test_repository.py`, reusing
+the existing mid-unit-raise pattern at line ~1810, applied to `complete_phase`'s SELECT+UPDATE) —
+this closes §13 FULLY, its only remaining sub-clause after round AA's 5-rung closure. Two smaller
+candidates also scoped, neither closing its own criterion alone: §12.35's remaining
+`EVIDENCE_PLUS_REJECTED_APPROACHES` proxy-gap fix (reuses round AA's own landed per-line-sweep
+pattern) and D96's `transform` phase-entry disk-headroom fix (a small production fix + regression
+test, verified low-risk — this would be the first round-level task dispatched as production code
+rather than TEST-ONLY since the D77/D95 shape, not since a plain criteria-closure task).
