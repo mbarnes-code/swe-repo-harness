@@ -1311,6 +1311,34 @@ TRANSFORM-worker stub-creation logic. §37 does not move toward DONE from this l
 planned reader); this makes Blocker C's own eventual work end-to-end testable, per the same
 "removes a prerequisite, doesn't close the criterion" pattern Blocker A's landing established.**
 
+**Update, round VI task 13 (2026-09-02, `7bbc0c3`+`f75493c`, merged `f98bdc9`, task-scoped review
+Approved) — Blocker C lands. All three of §37's original structural blockers (A, B, C) are now
+closed.** `_unit_deps` now looks up an `ACTIVE` `stubs` row keyed on `(consumer_repo_id,
+dst_coord_key)` before falling back to the provider's own internal label; `SUPERSEDED`/`RESOLVED`
+correctly fall through to the existing (unmodified) behavior, since T1's own invariant guarantees
+the real label is live on the branch by then — a genuine finding, not a restatement: the predicate
+is `state = 'ACTIVE'` only, narrower than "any OPEN state," and generalizing by analogy with
+`_stub_reconcile_inputs`'s own broader filter would have been wrong. No ADR needed (pure read-only
+label-resolution logic, no tested-invariant lockdown, inert until a `stubs` row exists in
+production). Review independently re-derived the state-predicate reasoning from
+`orchestrator/stubs.py`'s own source (not the report's summary), reproduced the Rule-12 mutation
+proof in a fresh worktree (genuine discrimination — mutating the state filter reddens only the
+`SUPERSEDED` case), and verified a disclosed test-setup workaround (a raw-SQL `BLOCKED → PENDING`
+write between two `build()` calls, needed because `propagate_blocked` has zero `stubs` awareness
+and unconditionally blocks the consumer otherwise) genuinely reaches the code under test rather
+than bypassing it.
+
+**§37 state after all three blockers: what remains is exactly what research-6 named — the
+still-unbuilt TRANSFORM-worker stub-creation logic itself (trigger detection, `StubRecord`
+construction, the ecosystem `workspace_deps()` render, the `stubs` INSERT, `EMPTY_FAILING` target
+rendering, the `RUNNING → DEGRADED` transition — genuinely NEW-MECHANISM, not a one-shot), the
+`_eligible_build_units` domain-widening item, and ADR-0113's condition-2 CLI gate (stays refused
+until the stub-creation logic exists). Landing all three structural blockers does NOT close §37 or
+§12.37 — nothing in production writes a `stubs` row yet, so every branch this round's three tasks
+added is currently inert. §37 stays OPEN — PARTLY ADDRESSED, now blocked on exactly one remaining
+piece of work (the stub-creation logic) rather than three separate structural prerequisites plus
+that logic.**
+
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
 and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round
