@@ -15,7 +15,10 @@ def test_config_models_yaml_names_at_least_one_credential_variable(
     provider_credential_env_names: frozenset[str],
 ) -> None:
     """A non-empty set is what makes the autouse fixture non-vacuous. Today's
-    `config/models.yaml` names `ANTHROPIC_API_KEY` and `LOCAL_LLM_API_KEY` at minimum."""
+    `config/models.yaml` names `ANTHROPIC_API_KEY` — `LOCAL_LLM_API_KEY` appears only inside a
+    comment describing what an operator could add for the `local` profile, which itself declares
+    no `api_key_env` on any of its three targets (round GG task 3 review, re-verified directly
+    against the file's real YAML content, not its comments)."""
     assert provider_credential_env_names
     assert "ANTHROPIC_API_KEY" in provider_credential_env_names
 
