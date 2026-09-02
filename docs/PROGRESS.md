@@ -7945,3 +7945,96 @@ takes this on: the current containment-only predicate is provably blind to intra
 so pair it with a second, non-sharing derivation before declaring the expanded gate trustworthy.
 Second candidate, independently scoped and unaffected by this round's citation churn: D93's
 sibling gaps in `docs/INTEGRATION_HONESTY.md` (D92, D94) remain OPEN and still block §12.38.
+
+---
+
+## Round FF close-out (2026-09-02)
+
+**§12 count: 24 of 48 — unchanged from round EE.** Real, verified progress landed (D-count
+unaffected; no D-number allocated this round — none was needed), but the round's headline attempt
+to flip a criterion (§12.8) was caught overclaiming and corrected to a qualified OPEN, so the net
+count did not move. This is the round's central story, told in full below.
+
+**Task 1 — citation gate scope expansion.** Added `docs/CRITERIA_PLAN.md` as a second watched
+citation profile (39 pathed / 6 anchored / 0 missing / 1 pinned) and, closing the blind spot round
+EE's final review found, a second, non-sharing resolution derivation — literal source-text
+presence at the cited line, not just AST containment. Design was investigated, not assumed: the
+implementer proved finer AST sub-spans wouldn't have helped (`_symbol_table`'s walk never recurses
+into `If`/`For`/`While`/`Try`/`With` bodies), and its own task review — dispatched with elevated
+scrutiny given this changes shared infrastructure — independently re-ran that exact investigation
+and found it *understated*: 25 of 25 currently-resolving anchored citations across both profiles
+have no strictly-smaller indexed sub-span at all, so a stricter-containment design would have been
+a total no-op on the current population. The review reproduced the reported mutation proof and
+added two of its own on different citations, both caught; found one genuine false positive
+(`RejectedApproach`, a citation to supporting prose rather than a symbol's own name) correctly
+pinned rather than papered over. Three doc-accuracy findings (a stale "one profile" scope
+sentence, a `git log -S` claim that undercounted by one commit, an unmeasured "large/known"
+adjective where a number was available) were fixed directly post-merge. 62 tests pass (was 54).
+
+**Task 2 — §12.8's `INTERNAL_IMPORT` fixture gap, and the overclaim it surfaced.** Added a real
+`fleet scan`-driven fixture-fleet test proving a genuine `INTERNAL_IMPORT` edge (two-repo fixture,
+asserted against the real `edges` table) plus a Rule 12 discriminator proving the same import
+becomes `DECLARED_DEP` once declared — both independently reproduced by task review, including the
+mutation proof (18/19 red, exact blast radius claimed). The implementer then flipped §12.8 DONE
+itself, per its brief's explicit (if unusual) authorization. **The task review caught this as an
+overclaim relative to SPEC's own literal text.** SPEC.md:7434 requires "every known cross-repo
+edge is discovered," not only `INTERNAL_IMPORT` — `EdgeKind` has 8 members, and this task closed
+proof for 1 of the remaining 7 (`DECLARED_DEP` was already proven). The review traced the
+narrower "Done bar" framing to an inherited scoping in a 2026-08-27 audit
+(`docs/superpowers/plans/spec12-success-criteria-audit.md:135`) that every round since had copied
+verbatim without re-deriving it from SPEC's actual sentence — the same failure shape as CLAUDE.md's
+"a ruling in a brief is a fallback" guardrail, one level removed from a dispatcher ruling to an
+inherited document scoping. Controller correction: §8 reverted DONE → `OPEN — PARTLY,
+scope-disclosed`, adjudicated in ADR-0109 (same "build to match SPEC's text, never redefine it
+to match what shipped" direction as ADR-0108). Count re-verified 24/48 in place, immediately.
+
+**The round's own final whole-branch review then found the correction itself wrong on two
+numbers.** ADR-0109 claimed 2 of 8 `EdgeKind`s fixture-proven / 6 unproven and cited a nonexistent
+`src/fleet/models/edges.py`. The review measured `PUBLISHED_ARTIFACT` already has a real
+fixture-fleet proof — `tests/test_cli.py:1902-1907`, a pre-existing §12.21 digest test's
+precondition guard, never previously credited toward §12.8 because nobody had checked all 8 kinds
+against it. Corrected to 3 of 8 proven / 5 unproven, `EdgeKind`'s real location fixed
+(`src/fleet/models/enums.py:255`), and — the review's most structurally interesting find — the
+round's own newly-added citation to the audit file was line-wrapped in both `docs/DECISIONS.md`
+and `docs/CRITERIA_PLAN.md`, which defeated the *very citation gate this same round built*
+(normalization collapses a line-wrap to a space, and the path regex cannot span it) — a genuine
+cross-task interaction no task-scoped review could have seen, since task 1 built the gate before
+task 2's edits to the watched file existed. Unwrapped in both files; gate re-run clean (62/62)
+after the fix, DONE count re-verified 24/48 a second time.
+
+**What this round demonstrates, net of the numbers not moving:** three independent verification
+layers — task review, controller re-derivation, final whole-branch review — each caught a real
+error the layer before it missed, on the exact overclaim-and-citation-drift defect class this
+project's CLAUDE.md was written to guard against, and none of the three false claims survived to
+the round's close. The citation gate itself gained a genuinely stronger, measurably-verified
+second derivation. `docs/DECISIONS.md` is still not a watched profile (35 of 368 citations fail
+hard existence checks, 56 anchored unresolved — its own dedicated round, not attempted here) —
+worth noting since this round's own new citations there needed a human/review catch, not a
+mechanical one, precisely because that file isn't gated yet.
+
+**Full suite, post-close:** `tests/test_integration_honesty_citations.py` 62/62 (verified three
+separate times post-correction, most recently after the final commit). `ruff check .` clean on the
+whole tree. `.venv/bin/python -m mypy` with no path args, manifest scope, 115 source files, no
+issues. Round is DOC + TEST-ONLY end to end — `git diff --stat 97c3bd9..HEAD` touches only
+`docs/CRITERIA_PLAN.md`, `docs/DECISIONS.md`, `tests/test_integration_honesty_citations.py`,
+`tests/test_scan_e2e.py`; no `src/` production path was touched this round.
+
+**Round GG, opening next.** Three leads, all pre-scoped by round FF's own research and its task
+reviews' own findings, none requiring further sizing work before dispatch:
+1. **§12.35's `EVIDENCE_PLUS_PRIORS` diff-rendering** (ADR-0108's mandated capability, highest
+   direct-criterion-flip impact) — new field + policy-scoped render branch in
+   `workers/rewrite.py::_evidence` + positive/negative-control tests; research already confirmed
+   `RejectedApproach` has test-precedent hand-construction despite zero production constructors.
+2. **D92's `PrState.HELD` wiring** — the write helper (`_write_pr_record`) and needed data
+   (`pr_records`) already exist one call-frame from `_apply_stub_reconcile`; disclosed in advance
+   this alone will not flip §12.38 (D94 still blocks it, confirmed genuinely NEW-MECHANISM-sized).
+3. **The 4 drifted citations in `docs/INTEGRATION_HONESTY.md`** the citation gate's new
+   text-presence check already found but does not yet block on (opt-in scoping, deliberate):
+   `phase_floor:4641`, `_detail():7289`, `_AttemptWriter.record:7302`,
+   `_reconcile_tasks_with_git:7398` — each needs its drift-vs-supporting-prose disposition
+   adjudicated per site (repoint the genuine drift, pin the genuine supporting-prose citation).
+   Disclosed as hardening, no criterion movement expected.
+4th slot (research): size §12.8's remaining 5 `EdgeKind` fixture proofs precisely per-kind
+(`API_CONTRACT`/`CONTRACT_IMPL`/`CONTRACT_CONSUME` need a real scan through a hoisted contract,
+which no current e2e test drives; `SHARED_RESOURCE`/`DYNAMIC_REF` need their own fixture shapes
+investigated fresh) — for round HH, not this one.
