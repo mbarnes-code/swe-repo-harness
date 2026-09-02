@@ -60,7 +60,13 @@ from typer.core import TyperGroup
 
 from fleet import ecosystems
 from fleet.bazel.generators import render_gazelle_build, render_root_package
-from fleet.bazel.layout import LayoutNode, ReservedDestError, layout, normalize_dest
+from fleet.bazel.layout import (
+    LayoutNode,
+    ReservedDestError,
+    layout,
+    normalize_dest,
+    stub_dest,
+)
 from fleet.bazel.lockfile import MODULE_LOCK_PATH, check_lock_registry
 from fleet.bazel.query import DEFAULT_RDEPS_LIMIT, DEFAULT_SAMPLE_N
 from fleet.ecosystems.base import EcosystemAdapter, path_segment
@@ -7095,6 +7101,14 @@ async def _unit_deps(
     `monorepo_dir` — including an override — with no second copy of the layout rule. A repo whose
     own destination `layout()` refuses contributes no label rather than a broken one; its own
     `_ingest_build_source` is where that refusal is reported.
+
+    An edge whose destination has an `ACTIVE` `stubs` row (§3.5) is redirected to point at the
+    stub's own Bazel label instead of the provider's — the provider's real label is never on the
+    integration branch while its stub is `ACTIVE` (T1 fires only once the provider's PR is
+    `MERGED`, the ADR-0011 stacking rule), so leaving it unredirected would emit a dependency edge
+    to a package that was never merged. `SUPERSEDED`/`RESOLVED` stubs fall through to the ordinary
+    resolution below unchanged: by the same T1 invariant, the provider's real label IS live by
+    then.
     """
     resolved: dict[str, InternalDep] = {}
     for repo_id, fact in facts.items():
@@ -7114,17 +7128,43 @@ async def _unit_deps(
         conn,
         # `placeholders` is a run of `?`, one per configured edge kind — no value is
         # interpolated, so this is parameterised in the only sense that matters.
-        "SELECT src_id, dst_id FROM edges "  # noqa: S608
+        "SELECT src_id, dst_id, dst_coord_key FROM edges "  # noqa: S608
         " WHERE run_id = ? AND src_kind = 'REPO' AND dst_kind = 'REPO' AND dst_id IS NOT NULL "
         "   AND ordering_suppressed = 0 AND confidence >= ? "
         f"   AND kind IN ({placeholders}) ORDER BY edge_key",
         (run_id, settings.config.graph.min_confidence, *kinds),
     )
+    # `(consumer_repo_id, stub_coord_key) -> (bazel_label, pinned_version)`, `ACTIVE` only — see
+    # the docstring above for why `SUPERSEDED`/`RESOLVED` are deliberately excluded (unlike
+    # `_stub_reconcile_inputs`'s `ACTIVE`/`SUPERSEDED` filter, which answers a different question:
+    # which rows a reconciliation pass must still examine).
+    stub_rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, stub_coord_key, bazel_label, pinned_version FROM stubs "
+        " WHERE run_id = ? AND state = 'ACTIVE'",
+        (run_id,),
+    )
+    active_stubs: dict[tuple[str, str], tuple[str, str | None]] = {
+        (str(row[0]), str(row[1])): (str(row[2]), None if row[3] is None else str(row[3]))
+        for row in stub_rows
+    }
     internal: dict[str, dict[str, InternalDep]] = {}
     for row in rows:
-        dep = resolved.get(str(row[1]))
+        src_id, dst_id, dst_coord_key = str(row[0]), str(row[1]), str(row[2])
+        stub = active_stubs.get((src_id, dst_coord_key))
+        if stub is not None:
+            bazel_label, pinned_version = stub
+            provider = resolved.get(dst_id)
+            published = provider.published if provider is not None else None
+            if published is not None:
+                published = published.model_copy(update={"version_spec": pinned_version})
+            dep: InternalDep | None = InternalDep(
+                label=bazel_label, dest=stub_dest(dst_coord_key), published=published
+            )
+        else:
+            dep = resolved.get(dst_id)
         if dep is not None:
-            internal.setdefault(str(row[0]), {})[dep.label] = dep
+            internal.setdefault(src_id, {})[dep.label] = dep
     return {
         repo_id: tuple(deps[label] for label in sorted(deps))
         for repo_id, deps in ((key, internal.get(key, {})) for key in facts)
