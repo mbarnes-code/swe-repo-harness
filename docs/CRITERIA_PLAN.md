@@ -164,19 +164,43 @@ never populated. The property already held and needed no code/test change — th
 SPEC sentence alone.
 
 ## 8. Graph correctness incl. `hypothesis` property tests
-**DONE (round FF task 2, 2026-09-02, `2fa9039`).** Confidence reconstruction is exact and covered.
-The `hypothesis` property-test gap this row originally found was already **stale** before this
-round — `tests/test_graph_properties.py` landed at `83e1493` (2026-08-28, per the audit's own late
-correction) and covers ADR-0013's wave-ordering claim. The one remaining gap — cross-repo
-`INTERNAL_IMPORT` proven only on a hand-built `InferenceInput`, never the fixture fleet (audit row
-8) — is closed by `tests/test_scan_e2e.py::test_an_undeclared_cross_repo_import_produces_a_real_
-internal_import_edge` (a real `fleet scan` over a two-repo fixture fleet, asserted against the real
-`edges` table) plus a Rule 12 discriminator test
+**OPEN — PARTLY, scope-disclosed (round FF task 2 review, 2026-09-02, ADR-0109).** Confidence
+reconstruction is exact and covered. The `hypothesis` property-test gap this row originally found
+was already **stale** before this round — `tests/test_graph_properties.py` landed at `83e1493`
+(2026-08-28, per the audit's own late correction) and covers ADR-0013's wave-ordering claim. The
+gap this row's "Done bar" named — cross-repo `INTERNAL_IMPORT` proven only on a hand-built
+`InferenceInput`, never the fixture fleet — is closed by
+`tests/test_scan_e2e.py::test_an_undeclared_cross_repo_import_produces_a_real_internal_import_edge`
+(a real `fleet scan` over a two-repo fixture fleet, asserted against the real `edges` table) plus a
+Rule 12 discriminator test
 (`test_declaring_the_same_import_turns_it_into_a_declared_dep_not_an_internal_import`) proving the
 same import produces `DECLARED_DEP` instead once declared — confirmed genuine by a reverted
 mutation of `infer.py`'s manifest-entry check that reddened only the discriminator test. The
 hand-built unit test in `test_graph_build.py` is untouched and still covers the unit-level
-property. §12 item 8's literal wording is unchanged; no SPEC.md edit needed.
+property.
+
+**Round FF task 2's own task review found this row's "Done bar" is narrower than §12 item 8's
+literal text.** The task review traced that narrowing to `docs/superpowers/plans/
+spec12-success-criteria-audit.md:135` (`12be741`, 2026-08-27), which scoped "graph correctness" to
+exactly the two gaps closed above, without addressing SPEC's broader clause: "**every known
+cross-repo edge is discovered** including at least one `INTERNAL_IMPORT`…". `EdgeKind` has 8
+members. A fixture-fleet, real-`fleet-scan`-driven proof against the `edges` table now exists for
+2 of them (`DECLARED_DEP`, `INTERNAL_IMPORT`). The other 6 —
+`PUBLISHED_ARTIFACT` (no fixture manifest uses a pinned version spec, so none is ever produced),
+`API_CONTRACT`, `CONTRACT_IMPL`, `CONTRACT_CONSUME` (no e2e test drives a real scan through a
+hoisted contract to the resulting graph edges — `vendored_contract_fleet` only asserts against
+`contracts`/`collisions`), `SHARED_RESOURCE`, `DYNAMIC_REF` — remain proven only by the hand-built
+`InferenceInput` tests in `test_graph_build.py`, never the fixture fleet.
+
+**Adjudication (ADR-0109):** this is a genuine scope gap, not a SPEC-wording error — the six
+unproven kinds are real, already-implemented detectors (`src/fleet/graph/infer.py`) with no
+fixture-level proof, not aspirational text. §12 item 8's literal wording is unchanged; no SPEC.md
+edit needed. **Done bar (revised):** one real-`fleet-scan`-driven test per remaining `EdgeKind`
+(or one test covering several via a shared fixture fleet, implementer's choice) asserting against
+the real `edges` table, following this round's `INTERNAL_IMPORT` test as the template. Small,
+additive, TEST-ONLY per kind; `PUBLISHED_ARTIFACT` additionally needs one fixture manifest entry
+changed to a pinned version spec (a one-line fixture edit, confirmed not to break any existing
+fixture consumer before landing).
 
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
