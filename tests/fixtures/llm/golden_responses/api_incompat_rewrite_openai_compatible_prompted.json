@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` — the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) — this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (an `ApiRewriteProposal`-schema object: `LlmPatchProposal`'s base `files`/`approach_summary`/`rationale` plus the subclass's own `coord_key`/`breaking_changes`, src/fleet/llm/schemas.py:214-223) differs.",
+  "id": "chatcmpl-ApiRewrite8f3b2c1a9d7e4f6b",
+  "object": "chat.completion",
+  "created": 1735689950,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"files\": [{\"path\": \"app/utils.py\", \"diff\": \"--- a/app/utils.py\\n+++ b/app/utils.py\\n@@ -5,7 +5,7 @@\\n-    return flask_utils.escape(text)\\n+    return flask_utils.markup_escape(text)\\n\"}], \"approach_summary\": \"rename escape() call sites to the renamed markup_escape() function\", \"rationale\": \"flask-utils 0.9 renamed escape() to markup_escape() and dropped the old alias\", \"coord_key\": \"pypi:flask-utils\", \"breaking_changes\": [\"escape() renamed to markup_escape() with no backward-compatible alias\"]}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 300,
+    "completion_tokens": 46,
+    "total_tokens": 346
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "_provenance": "Hand-constructed to match the Anthropic Messages API wire response documented at https://docs.anthropic.com/en/api/messages, and validated at test time through the real `anthropic` SDK's own `anthropic.types.Message.model_validate()` (installed SDK version 0.121.0) before being handed to `AnthropicBackend`'s real `_reply_from`. Rung: TOOL_CALL — a mandatory `emit_response` tool call, matching `_rung()`'s TOOL_CALL branch in src/fleet/llm/backends/anthropic.py. Envelope shape is identical to the REPO_CLASSIFY/PR_BODY fixtures in this same directory by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/anthropic.py:110) is a role-agnostic constant, and `_reply_from` never introspects `input`'s internal shape, so only the `input` payload below (an `ApiRewriteProposal`-schema object: `LlmPatchProposal`'s base `files`/`approach_summary`/`rationale` plus the subclass's own `coord_key`/`breaking_changes`, src/fleet/llm/schemas.py:214-223) differs.",
+  "id": "msg_01ApiRewriteAAABBBCCCDDD",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01ApiRewriteAAABBBCCCDD",
+      "name": "emit_response",
+      "input": {
+        "files": [
+          {
+            "path": "src/main/java/com/acme/FileSync.java",
+            "diff": "--- a/src/main/java/com/acme/FileSync.java\n+++ b/src/main/java/com/acme/FileSync.java\n@@ -10,7 +10,7 @@\n-        IOUtils.copy(in, out);\n+        IOUtils.copy(in, out, StandardCharsets.UTF_8);\n"
+          }
+        ],
+        "approach_summary": "adopt commons-io 2.11's charset-aware IOUtils.copy overload",
+        "rationale": "commons-io 2.11 removed the deprecated raw-stream copy(InputStream, OutputStream) overload; callers must now pass an explicit charset",
+        "coord_key": "maven:org.apache.commons:commons-io",
+        "breaking_changes": [
+          "IOUtils.copy(InputStream, OutputStream) removed in 2.11"
+        ]
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 410,
+    "output_tokens": 62,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

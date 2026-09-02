@@ -1,0 +1,34 @@
+{
+  "_provenance": "Hand-constructed to match the Anthropic Messages API wire response documented at https://docs.anthropic.com/en/api/messages, and validated at test time through the real `anthropic` SDK's own `anthropic.types.Message.model_validate()` (installed SDK version 0.121.0) before being handed to `AnthropicBackend`'s real `_reply_from`. Rung: TOOL_CALL — a mandatory `emit_response` tool call, matching `_rung()`'s TOOL_CALL branch in src/fleet/llm/backends/anthropic.py. Envelope shape is identical to the REPO_CLASSIFY/PR_BODY fixtures in this same directory by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/anthropic.py:110) is a role-agnostic constant, and `_reply_from` never introspects `input`'s internal shape, so only the `input` payload below (an `LlmEscalationProposal`-schema object: `LlmPatchProposal`'s base `files`/`approach_summary`/`rationale` plus the subclass's own `abandon_recommended`/`human_intervention_reason`, src/fleet/llm/schemas.py:226-236) differs. `files` is still required (`min_length=1`, inherited unconditionally from `LlmPatchProposal`) even though this reply recommends abandoning: attempt 3 must still emit its best-effort patch alongside the escalation flag, per the schema's own field definitions.",
+  "id": "msg_01EscalationAAABBBCCCDDD",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01EscalationAAABBBCCCDD",
+      "name": "emit_response",
+      "input": {
+        "files": [
+          {
+            "path": "src/main/java/com/acme/FileSync.java",
+            "diff": "--- a/src/main/java/com/acme/FileSync.java\n+++ b/src/main/java/com/acme/FileSync.java\n@@ -10,7 +10,7 @@\n-        IOUtils.copy(in, out);\n+        IOUtils.copy(in, out, StandardCharsets.UTF_8);\n"
+          }
+        ],
+        "approach_summary": "best-effort escalation patch: assume UTF-8 is the correct charset for every caller",
+        "rationale": "two prior automated attempts against this same commons-io signature change were both refuted by the build; this is attempt 3, the last automated rung",
+        "abandon_recommended": true,
+        "human_intervention_reason": "the correct charset cannot be determined from the repository alone; a human must confirm whether UTF-8 is safe for every caller of FileSync.java before this patch is trusted"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 520,
+    "output_tokens": 78,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}

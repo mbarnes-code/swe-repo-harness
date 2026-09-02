@@ -1,0 +1,32 @@
+{
+  "_provenance": "Hand-constructed to match Claude-on-Vertex-AI's `:rawPredict` response, documented at https://docs.anthropic.com/en/api/claude-on-vertex-ai as the Anthropic Messages API body (Vertex adds only an `anthropic_version` discriminator to the REQUEST; the response is the native Messages shape), fed as-is (minus this key) to `vertex.parse_reply()` in src/fleet/llm/backends/vertex.py, whose `_content_blocks`/`_usage`/`_finish_reason` read exactly these snake_case top-level keys (`content`, `stop_reason`, `usage.input_tokens`/`usage.output_tokens`) — the same shape that module's own `raw_predict_body()` test helper builds. Rung: TOOL_CALL, matching `build_body()`'s tool branch. Envelope shape is identical to the REPO_CLASSIFY/PR_BODY fixtures in this same directory by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/vertex.py:92) is a role-agnostic constant and `parse_reply` never introspects `content[0].input`'s internal shape, so only the `input` payload below (an `LlmEscalationProposal`-schema object) differs.",
+  "id": "msg_vrtx_01EscalationMn23Op45Qr",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5@20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_vrtx_01EscalationMn23Op45",
+      "name": "emit_response",
+      "input": {
+        "files": [
+          {
+            "path": "widget-core/src/main/java/com/acme/widget/Widget.java",
+            "diff": "--- a/widget-core/src/main/java/com/acme/widget/Widget.java\n+++ b/widget-core/src/main/java/com/acme/widget/Widget.java\n@@ -12,7 +12,7 @@\n-        return WidgetFactory.create(name);\n+        return WidgetFactory.builder().name(name).build();\n"
+          }
+        ],
+        "approach_summary": "call the builder API with only the required name field, dropping the description that the old factory defaulted",
+        "rationale": "two prior attempts each guessed a different default for the removed factory's implicit description argument and both were refuted; the builder's own required-field set is the only fact this attempt relies on",
+        "abandon_recommended": true,
+        "human_intervention_reason": "cannot confirm whether any caller outside this repo relied on the factory's old default description value without a human checking downstream consumers"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 505,
+    "output_tokens": 74
+  }
+}
