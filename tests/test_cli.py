@@ -2752,6 +2752,12 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     a SECOND time to prove that never happens: under the old (pre-fix) code, the first call wrote
     the provider `HELD` and the second call abandoned the row — the exact D100 repro. Under the
     fix, nothing ever writes the provider's `PrState`, so the second call still holds the row.
+
+    D101 Half A / ADR-0112: this held row must ALSO gain a real `UnmergedDependency` finding for
+    the CONSUMER, naming the provider and coord_key it is waiting on — the write ADR-0112 settled
+    a design fork over. The consumer's own `phases.status` stays `DEGRADED`: ADR-0112's whole
+    point is no `RepoStatus` transition, so asserting `DEGRADED` (not a literal `BLOCKED`) here is
+    what proves the adjudication was followed, not just SPEC's §12.38 prose satisfied.
     """
     db = workspace / "state" / "fleet.db"
     _put_consumer_at_verify_degraded(db)
@@ -2783,6 +2789,16 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
             "  AND kind = 'PullRequest'",
             (RUN_ID,),
         ).fetchone()[0]
+        unmerged_dep = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+        consumer_phase_status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()[0]
     finally:
         conn.close()
     assert state == "ACTIVE", "held, not abandoned — the provider's PR is still open"
@@ -2790,6 +2806,22 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     assert json.loads(pr_payload)["state"] == "DRAFTED", (
         "D99/D100: the provider's own PR record must be UNCHANGED — no PrState.HELD write "
         "targets the provider; SPEC names the consumer as the target instead"
+    )
+
+    # D101 Half A / ADR-0112: a held-for-merge consumer gains an `UnmergedDependency` finding
+    # naming its provider and coord_key, and its `phases.status` is UNTOUCHED — ADR-0112's whole
+    # point is no `RepoStatus` transition, so `DEGRADED` here (not a literal `BLOCKED`) is what
+    # proves the adjudication was actually followed, not just SPEC's prose satisfied.
+    assert unmerged_dep is not None, (
+        "D101 Half A: a held-for-merge consumer must gain a real UnmergedDependency finding row"
+    )
+    unmerged_payload = json.loads(unmerged_dep[0])
+    assert unmerged_payload["consumer"] == "acme-commons"
+    assert unmerged_payload["provider"] == "acme-billing"
+    assert unmerged_payload["coord_key"] == "acme-billing@1.0.0"
+    assert consumer_phase_status == "DEGRADED", (
+        "ADR-0112: no RepoStatus transition for a held-for-merge consumer — it stays DEGRADED, "
+        "never BLOCKED"
     )
 
     # D100's own discriminator: a SECOND resume must not abandon the row. Under the old

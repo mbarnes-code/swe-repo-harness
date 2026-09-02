@@ -181,7 +181,7 @@ from fleet.orchestrator.scheduler import (
     WaveScheduler,
     ordering_descendants,
 )
-from fleet.orchestrator.stubs import ProviderFacts, StubDecision
+from fleet.orchestrator.stubs import HeldStub, ProviderFacts, StubDecision
 from fleet.orchestrator.stubs import apply as apply_stub_decision
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
 from fleet.rewrite.rules import (
@@ -12051,6 +12051,7 @@ async def _apply_stub_reconcile(
     run_id: str,
     records: Mapping[tuple[str, str], StubRecord],
     decisions: Sequence[StubDecision],
+    held: Sequence[HeldStub] = (),
     *,
     now: datetime,
 ) -> None:
@@ -12073,7 +12074,18 @@ async def _apply_stub_reconcile(
     removed: no SPEC text anywhere names a `PrState` write for the §13 row 45 carve-out — that row
     is only about not abandoning the STUB ROW — and the provider-side write was self-defeating,
     flipping `pr_open` False on the very next `stub_reconcile` pass and abandoning a row the
-    carve-out was protecting (D100).)"""
+    carve-out was protecting (D100).)
+
+    D101 Half A / ADR-0112: `held` (`ReconcileOutcome.held_for_merge`) is the §13 row 45 carve-out
+    itself — a row NOT abandoned because its provider's PR is still open. ADR-0112 settles the
+    design fork over what "the consumer is `BLOCKED`" means for this case: no `RepoStatus`
+    transition (the consumer stays `DEGRADED`; `phases.status` is never written here, same as the
+    abandoned branch above), only an `UnmergedDependency` finding per held consumer, naming the
+    provider and the coord_key it is waiting on. `fleet pr --ready`'s refusal
+    (`_refuse_unresolved_stubs`) already blocks these consumers independently of this finding — a
+    held row's `stubs.state` is left untouched at `ACTIVE`/`SUPERSEDED`, exactly the state set
+    that gate already queries — so this finding is the SPEC-required operator-visible record, not
+    what makes the refusal fire."""
     stamp = _iso(now)
     async with StateWriter(path, owner="fleet-resume") as writer:
 
@@ -12136,6 +12148,35 @@ async def _apply_stub_reconcile(
                 if decision.consumer_repo_id not in consumer_ids:
                     consumer_ids.append(decision.consumer_repo_id)
 
+            # D101 Half A / ADR-0112: §13 row 45's carve-out, made operator-visible. No
+            # `stubs`/`phases` write here — the row is already untouched (still ACTIVE/SUPERSEDED)
+            # and the consumer's `RepoStatus` never changes; only the finding is new.
+            for held_item in held:
+                await db.execute(
+                    "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
+                    "                      payload, created_at) "
+                    "VALUES (?, ?, 'UnmergedDependency', 'warn', ?, ?, ?) "
+                    "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+                    "DO UPDATE SET payload = excluded.payload, "
+                    "              created_at = excluded.created_at",
+                    (
+                        run_id,
+                        held_item.consumer_repo_id,
+                        _fingerprint(run_id, held_item.consumer_repo_id, held_item.coord_key),
+                        redact_text(
+                            json.dumps(
+                                {
+                                    "consumer": held_item.consumer_repo_id,
+                                    "coord_key": held_item.coord_key,
+                                    "provider": held_item.provider_repo_id,
+                                },
+                                sort_keys=True,
+                            )
+                        ),
+                        stamp,
+                    ),
+                )
+
             if consumer_ids:
                 pr_records = await _pr_records(db, run_id)
                 for consumer_repo_id in consumer_ids:
@@ -12169,8 +12210,10 @@ async def _stub_reconcile_impl(
         now=now,
         open_pr_max_age_s=float(settings.config.pr.merge_wait_timeout_s),
     )
-    if not dry_run and outcome.decisions:
-        await _apply_stub_reconcile(path, run_id, records, outcome.decisions, now=now)
+    if not dry_run and (outcome.decisions or outcome.held_for_merge):
+        await _apply_stub_reconcile(
+            path, run_id, records, outcome.decisions, outcome.held_for_merge, now=now
+        )
     return {
         "abandoned": sorted(f"{d.consumer_repo_id}→{d.coord_key}" for d in outcome.decisions),
         "held_for_merge": sorted(
