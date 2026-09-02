@@ -181,7 +181,7 @@ from fleet.orchestrator.scheduler import (
     WaveScheduler,
     ordering_descendants,
 )
-from fleet.orchestrator.stubs import HeldStub, ProviderFacts, StubDecision
+from fleet.orchestrator.stubs import ProviderFacts, StubDecision
 from fleet.orchestrator.stubs import apply as apply_stub_decision
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
 from fleet.rewrite.rules import (
@@ -9924,9 +9924,10 @@ async def _upsert_pr_record(
     conn: aiosqlite.Connection, run_id: str, draft: PullRequestDraft, *, now: datetime
 ) -> None:
     """The write body of one upserted `PullRequest` row — factored out of `_write_pr_record` so a
-    caller that already holds an open write transaction (`_apply_stub_reconcile`, marking a
-    provider's PR `HELD`) can fold this write into its OWN transaction rather than opening a
-    second one via `writer.submit`, per this module's single-writer-per-transaction contract."""
+    caller that already holds an open write transaction (`_apply_stub_reconcile`, marking an
+    abandoned decision's consumer PR `HELD`) can fold this write into its OWN transaction rather
+    than opening a second one via `writer.submit`, per this module's single-writer-per-transaction
+    contract."""
     row = (
         run_id,
         draft.repo_id,
@@ -12047,7 +12048,6 @@ async def _apply_stub_reconcile(
     run_id: str,
     records: Mapping[tuple[str, str], StubRecord],
     decisions: Sequence[StubDecision],
-    held_for_merge: Sequence[HeldStub] = (),
     *,
     now: datetime,
 ) -> None:
@@ -12057,18 +12057,25 @@ async def _apply_stub_reconcile(
     `fleet resume` before the operator acts) cannot double-write it (§11.7's idempotency key,
     `ux_findings_ident`).
 
-    `held_for_merge` (D92): each held row's provider PR is still `DRAFTED`/`OPEN` (`pr_open`) —
-    the fleet's own verdict that THIS run finished without resolving the stub and will never
-    promote it (`enums.py`'s `PrState.HELD` docstring). Deduped by `provider_repo_id` first — the
-    same provider can appear more than once (multiple consumers holding on one provider, or more
-    than one stub row naming the same provider), and re-upserting the same `HELD` payload twice in
-    one transaction would be harmless but wasteful. A provider absent from the run's PR records
-    (no draft ever written) has nothing to mark and is silently skipped — `HELD` is a state of an
-    existing draft, not a new one."""
+    D99/D100: every decision reaching this function is an end-of-run abandonment (T4, or T3-via-
+    reconcile) with a `consumer_repo_id` — SPEC names the CONSUMER's own PR as `PrState.HELD`'s
+    target at exactly this event (§3.5.1 point 3: "Their PRs are held"; §13 row 35: "consumers
+    stay DEGRADED...; their PRs go PrState.HELD"), not a provider's. After the per-decision
+    `stubs`/`findings` writes below, each abandoned decision's consumer PR record (if one exists)
+    is re-persisted with `state=PrState.HELD` — the fleet's own verdict that this run finished
+    without resolving the consumer's stubs and will never promote its PR
+    (`enums.py`'s `PrState.HELD` docstring). A consumer absent from the run's PR records (no draft
+    ever written) has nothing to mark and is silently skipped — `HELD` is a state of an existing
+    draft, not a new one. (D92's original provider-side write, keyed on `held_for_merge`, is
+    removed: no SPEC text anywhere names a `PrState` write for the §13 row 45 carve-out — that row
+    is only about not abandoning the STUB ROW — and the provider-side write was self-defeating,
+    flipping `pr_open` False on the very next `stub_reconcile` pass and abandoning a row the
+    carve-out was protecting (D100).)"""
     stamp = _iso(now)
     async with StateWriter(path, owner="fleet-resume") as writer:
 
         async def unit(db: aiosqlite.Connection) -> None:
+            consumer_ids: list[str] = []
             for decision in decisions:
                 original = records[(decision.consumer_repo_id, decision.coord_key)]
                 updated = apply_stub_decision(original, decision, now=now)
@@ -12123,14 +12130,15 @@ async def _apply_stub_reconcile(
                             stamp,
                         ),
                     )
+                if decision.consumer_repo_id not in consumer_ids:
+                    consumer_ids.append(decision.consumer_repo_id)
 
-            held_providers = list(dict.fromkeys(h.provider_repo_id for h in held_for_merge))
-            if held_providers:
+            if consumer_ids:
                 pr_records = await _pr_records(db, run_id)
-                for provider_repo_id in held_providers:
-                    draft = pr_records.get(provider_repo_id)
+                for consumer_repo_id in consumer_ids:
+                    draft = pr_records.get(consumer_repo_id)
                     if draft is None:
-                        continue  # no PR record for this provider — nothing to mark HELD
+                        continue  # no PR record for this consumer — nothing to mark HELD
                     await _upsert_pr_record(
                         db, run_id, draft.model_copy(update={"state": PrState.HELD}), now=now
                     )
@@ -12158,10 +12166,8 @@ async def _stub_reconcile_impl(
         now=now,
         open_pr_max_age_s=float(settings.config.pr.merge_wait_timeout_s),
     )
-    if not dry_run and (outcome.decisions or outcome.held_for_merge):
-        await _apply_stub_reconcile(
-            path, run_id, records, outcome.decisions, outcome.held_for_merge, now=now
-        )
+    if not dry_run and outcome.decisions:
+        await _apply_stub_reconcile(path, run_id, records, outcome.decisions, now=now)
     return {
         "abandoned": sorted(f"{d.consumer_repo_id}→{d.coord_key}" for d in outcome.decisions),
         "held_for_merge": sorted(

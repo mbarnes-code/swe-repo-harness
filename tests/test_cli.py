@@ -2610,6 +2610,10 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
     db = workspace / "state" / "fleet.db"
     _put_consumer_at_verify_degraded(db)
     _put_stub(db)
+    _seed_fresh_pr_record(
+        db, "acme-commons", state="DRAFTED",
+        url="https://example.invalid/acme-commons",
+    )
 
     result = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
     assert result.exit_code == ExitCode.SUCCESS, result.output
@@ -2631,18 +2635,27 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
             " WHERE run_id = ? AND repo_id = 'acme-commons' AND kind = 'UnresolvedStub'",
             (RUN_ID,),
         ).fetchone()
+        pr_payload = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'PullRequest'",
+            (RUN_ID,),
+        ).fetchone()[0]
     finally:
         conn.close()
     assert (state, abandon_reason) == ("ABANDONED", "END_OF_RUN")
     assert resolved_at is not None, "schema.sql CHECKs a non-ACTIVE row carries one"
     assert finding == ("UnresolvedStub", "warn")
+    assert json.loads(pr_payload)["state"] == "HELD", (
+        "D99: the CONSUMER's own PR record must be re-persisted as PrState.HELD when its stub "
+        "is abandoned at end-of-run — SPEC names the consumer, not the provider, as the target"
+    )
 
     # §3.5.1 point 2 / §12.38: "their consumers stay DEGRADED — never promoted, never quietly
     # re-labelled SUCCEEDED." `_apply_stub_reconcile` writes `stubs` and `findings` directly, and
-    # (round GG, D92) a held provider's OWN `phases.pr_url`/`updated_at` via `_upsert_pr_record` —
-    # never the CONSUMER's `phases.status`, which is what this assertion checks — so this is true
-    # by construction, asserted explicitly here because nothing in this test block checked it
-    # before.
+    # (D99/D100) the abandoned consumer's OWN `phases.pr_url`/`updated_at` via
+    # `_upsert_pr_record` — but never `phases.status`, which is what this assertion checks — so
+    # this is true by construction, asserted explicitly here because nothing in this test block
+    # checked it before.
     conn = sqlite3.connect(db)
     try:
         phase_status = conn.execute(
@@ -2731,10 +2744,14 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     mid-review, not a giveup, so the row is left open and reported under `held_for_merge` instead
     of abandoned — and no `UnresolvedStub` finding is written for it.
 
-    D92: the held provider's OWN `PullRequestDraft` must come back `PrState.HELD` after the sweep
-    — `enums.py` documents `HELD` as entered ONLY by `stub_reconcile`, and before this test's fix
-    nothing wrote it (the record stayed `DRAFTED` forever, even though the fleet had already
-    decided it would never promote it this run).
+    D99/D100: the held provider's OWN `PullRequestDraft` must stay UNCHANGED (`DRAFTED`) — SPEC
+    names the CONSUMER's PR, not the provider's, as `PrState.HELD`'s target (§3.5.1 point 3 /
+    §13 row 35), and D92's original provider-side write was self-defeating: `pr_open` excludes
+    `HELD`, so a provider marked `HELD` here would have its stub abandoned on the very next
+    `stub_reconcile` pass even though its real forge PR is still open. This test invokes `resume`
+    a SECOND time to prove that never happens: under the old (pre-fix) code, the first call wrote
+    the provider `HELD` and the second call abandoned the row — the exact D100 repro. Under the
+    fix, nothing ever writes the provider's `PrState`, so the second call still holds the row.
     """
     db = workspace / "state" / "fleet.db"
     _put_consumer_at_verify_degraded(db)
@@ -2770,9 +2787,36 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
         conn.close()
     assert state == "ACTIVE", "held, not abandoned — the provider's PR is still open"
     assert finding == 0
-    assert json.loads(pr_payload)["state"] == "HELD", (
-        "D92: the held provider's own PR record must be re-persisted as PrState.HELD, the "
-        "fleet's own verdict that this run will never promote it"
+    assert json.loads(pr_payload)["state"] == "DRAFTED", (
+        "D99/D100: the provider's own PR record must be UNCHANGED — no PrState.HELD write "
+        "targets the provider; SPEC names the consumer as the target instead"
+    )
+
+    # D100's own discriminator: a SECOND resume must not abandon the row. Under the old
+    # provider-side write, the first call above would have flipped the provider's PrState to
+    # HELD, which makes pr_open() False on this second pass and abandons the row — the exact
+    # premature-abandonment D100 reproduced against the shipped reconcile(). Under the fix,
+    # nothing ever writes the provider's PrState, so pr_open() still reads True here and the row
+    # stays held.
+    result2 = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert result2.exit_code == ExitCode.SUCCESS, result2.output
+    payload2 = json.loads(result2.stdout)
+    assert payload2["stub_reconcile"]["abandoned"] == [], (
+        "D100: a second resume must not abandon a stub whose provider PR is still open"
+    )
+    assert payload2["stub_reconcile"]["held_for_merge"] == ["acme-commons→acme-billing@1.0.0"]
+
+    conn = sqlite3.connect(db)
+    try:
+        state_after_second = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "  AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert state_after_second == "ACTIVE", (
+        "D100: the stub row must still be ACTIVE (not abandoned) after a second resume"
     )
 
 
@@ -2811,10 +2855,11 @@ def test_resume_stub_reconcile_never_moves_a_repo_out_of_requires_human_interven
     its own SQL filters on `stubs.state`, never on the consumer's `phases.status` — and abandons
     the row exactly as the plain-DEGRADED case does (T4, `END_OF_RUN`). What it must NOT do is
     touch the consumer's phase 4 row: `_apply_stub_reconcile` writes `stubs` and `findings`
-    directly, and (round GG, D92) a held provider's OWN `phases.pr_url`/`updated_at`, but never
-    the CONSUMER's `phases.status` row — this fixture has no held provider, so
-    `REQUIRES_HUMAN_INTERVENTION` survives the sweep unconditionally rather than by any check
-    that reads it.
+    directly, and (D99/D100) an abandoned decision's own consumer PR record's
+    `phases.pr_url`/`updated_at`, but never the consumer's `phases.status` row — this fixture
+    seeds no PR record for `acme-commons`, so that write is skipped entirely (`HELD` is a state
+    of an existing draft, not a new one), and `REQUIRES_HUMAN_INTERVENTION` survives the sweep
+    unconditionally rather than by any check that reads it.
     """
     db = workspace / "state" / "fleet.db"
     _put_consumer_at_rhi(db)
