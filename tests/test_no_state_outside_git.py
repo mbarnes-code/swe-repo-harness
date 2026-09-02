@@ -61,6 +61,14 @@ resume`'s own option list, `cli.py:11029` onward) shows `--digest` is a `fleet s
 (`cli.py:10481`, `_status_once`) — `fleet resume` has no `--digest` flag at all. This file uses
 `fleet status --digest` (`--json` for a parseable payload), which is the function the brief's line
 range actually names.
+
+**Fix-wave-1 addition (F1, round BB final-review response).** Clause (ii)'s content scan was
+already covered — by `tests/test_migrations.py`'s hand-seeded, 5-row fixture, touching only 5 of
+22 tables. This file adds a fourth test that reuses the same column-enumeration helper and
+self-validation shape against `_primed`'s REAL completed pipeline run instead, closing the
+coverage gap the hand-seeded fixture left. It does not close a new sub-clause — clause (ii) was
+already counted as covered before this addition — it strengthens an existing one from a
+hand-seeded stand-in to real production output.
 """
 
 from __future__ import annotations
@@ -68,6 +76,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sqlite3
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -75,6 +84,7 @@ from typing import Any
 from typer.testing import CliRunner
 
 from fleet.cli import app
+from tests.test_migrations import _HUNK_HEADER_LIKE, _all_text_blob_columns
 from tests.test_transform_e2e import (  # noqa: F401  (`fleet` is a fixture, used by injection)
     DESTINATIONS,
     anchor_of,
@@ -298,3 +308,62 @@ def test_every_fixture_commit_carries_all_six_fleet_trailers_via_interpret_trail
             checked += 1
 
     assert checked > 0, "no commit was checked — the fixture run produced nothing to assert on"
+
+
+# ---------------------------------------------------------------------------------------
+# §12 item 45(ii) — real-fixture strengthening of the hunk-header content scan (F1, round BB
+# final-review fix wave)
+# ---------------------------------------------------------------------------------------
+
+
+def test_no_persisted_value_in_a_real_completed_run_contains_a_diff_hunk_header(
+    fleet: Path,  # noqa: F811
+) -> None:
+    """§12 item 45(ii)'s content scan, driven over a REAL completed `scan`→`sequence`→`transform`
+    run rather than `tests/test_migrations.py`'s hand-seeded 5-row fixture (5 of 22 tables, 47
+    non-NULL TEXT/BLOB values — roughly 10% of what a real run produces: 71 rows across 15 tables,
+    487 non-NULL TEXT/BLOB values across 105 distinct columns, as measured by round BB's final
+    review). Does not remove or weaken the hand-seeded scan — that one stays as a cheap, fast,
+    self-contained check; this closes the real-fixture coverage gap alongside it, so
+    `edges`/`findings`/`manifests`/`symbols`/`coordinates`/`waves`/`wave_members`/`reservations`/
+    `budget_ledger`/`repo_ledger` — the payload-carrying tables the hand-seeded fixture never
+    touches — are actually swept.
+    """
+    _primed(fleet)
+    db = fleet / "state" / "fleet.db"
+
+    columns = _all_text_blob_columns(db)
+    assert columns, "the column walk returned nothing — that is broken, not clean"
+    touched_tables = {table for table, _ in columns}
+    assert len(touched_tables) >= 15, (
+        f"only {len(touched_tables)} tables carry TEXT/BLOB columns in a real completed run — "
+        "expected at least 15 (the real-fixture coverage this test exists to prove)"
+    )
+
+    # Rule 12: prove the scan is a real discriminator BEFORE trusting a zero count on real data —
+    # same shape as tests/test_migrations.py's hand-seeded version of this scan.
+    poisoned = db.parent / "poisoned.db"
+    shutil.copyfile(db, poisoned)
+    conn = sqlite3.connect(poisoned, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET last_error = ?",
+            ("@@ -1,4 +1,4 @@\n unrelated context\n",),
+        )
+        poisoned_count = conn.execute(
+            'SELECT COUNT(*) FROM "phases" WHERE "last_error" LIKE ?', (_HUNK_HEADER_LIKE,)
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert poisoned_count > 0, "the scan failed to catch a synthetic hunk header planted in it"
+
+    conn = sqlite3.connect(db)
+    try:
+        for table, column in columns:
+            count = conn.execute(
+                f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" LIKE ?',  # noqa: S608
+                (_HUNK_HEADER_LIKE,),
+            ).fetchone()[0]
+            assert count == 0, f"{table}.{column} contains a diff hunk header"
+    finally:
+        conn.close()
