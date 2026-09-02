@@ -8312,3 +8312,103 @@ requiring design work first:
    worth investigating whether it batches into fewer, larger tasks rather than 11 separate ones.
 4. Round HH's own still-open leads (`API_CONTRACT`'s extraction gap, confirmed NEW-MECHANISM by
    two rounds' research now) remain available if the above don't fill round III.
+
+---
+
+## Round III close-out (2026-09-02)
+
+**§12 count: 26 of 48 — unchanged, but four production defects fixed and one criterion's real
+scope deepened.** D97, D98, D99, and D100 are all now `FIXED, LANDED`. §12.4 moved from 1 to 3 of
+12 required LLM roles. None of this flips a §12 criterion by itself (§12.8 and §12.38 stay OPEN,
+correctly; §12.4 stays OPEN, correctly, at 3/12) — this round's own final review specifically
+checked that the DONE-flip discipline held after round II's overclaim, and confirmed it did.
+
+**Task 1 — D98 fix.** `fleet resume` now exits 7 even when nothing was re-driven this cycle but a
+repo remained `DEGRADED`/`REQUIRES_HUMAN_INTERVENTION`. This round's own research fully designed
+the fix in advance (reusing `build_state`, the same helper `fleet status` already uses — a new
+call site, not new plumbing); the implementer disclosed one faithful deviation from the design's
+literal sketch (`resume()` is a sync `typer` command, so the design's inline `await` couldn't
+compile — implemented via the module's own established `_run(...)` sync/async bridge instead).
+Task review independently reproduced the fix's discriminator for a third time (after the
+implementer's and, earlier, round II task 1's own finding).
+
+**Task 2 — D99+D100 fix, the round's highest-stakes work.** Corrects **D92**, a defect this
+session marked `FIXED, LANDED` three rounds ago (round GG) and never revisited — its landed write
+targeted the wrong PR (a held-for-merge provider's, when SPEC names the consumer's at the
+end-of-run ABANDONED event) and, worse, self-defeated by causing the exact premature abandonment
+its own carve-out exists to prevent. This round's research re-read SPEC's full §13 row 45 text and
+found it names no `PrState` write at all, making the fix unambiguous: remove the provider-side
+write entirely, add a correctly-targeted consumer-side write. Task review independently re-derived
+the SPEC basis from scratch and found MORE corroborating citations than either the original
+finding or the fix itself had cited (§12.38, §12.39(ii), a config comment) — and, for D100, went
+beyond the implementer's own test by directly observing the raw pre-fix abandonment behavior in a
+scratch copy rather than trusting the discriminator's own framing.
+
+**Task 3 — §12.4, 2 more roles + a structural refactor.** Following this round's own research
+confirming the remaining 11-role scope batches mechanically (backend response-parsing is
+role-agnostic; every role's valid payload already existed in `tests/test_llm_roles.py::_sample()`),
+refactored the golden-response tests into a parametrized table (an Agent Recommendation from
+research, adopted) and landed `PR_TITLE`/`PR_BODY`. Task review's single most important check —
+whether the refactor genuinely preserves every property the original `REPO_CLASSIFY` tests
+checked, not just "still passes" — held: every field-level assertion, and the mutation/control
+pair, survive unweakened in the new structure.
+
+**The round's own final whole-branch review found `main` was RED** — task 3's landed test used a
+backslash-continued function signature `ruff format` rewrites, taking the pinned dirty-file
+baseline from 123 to 124, and nothing in this round's own targeted gates (all scoped to specific
+test files) ever ran the whole-tree `ruff format --check` gate that would have caught it. Fixed
+immediately (one file reformatted, not a baseline bump — the failing test's own message forbids
+that). This is the same root cause CLAUDE.md's `94a2653` incident already documents: a covering
+set derived from topic ("this touches golden responses, so run the golden-response tests") rather
+than from what actually executes the changed property (a formatting gate that has nothing
+topically to do with the change). The review's own full-suite run (the first since round HH,
+several rounds ago) is what caught it — no round in between had run the whole suite.
+
+**The review also found five further documentation-accuracy issues, all in controller-authored
+text — the same class round II's own final review caught in the immediately-preceding round**:
+D92's own correction paragraph was accidentally left self-falsifying when a later correction was
+appended (a deleted sentence its own neighbor still promised was there); `docs/CRITERIA_PLAN.md`
+§4's Done-bar paragraph kept a trailing role count that went stale the moment task 3 landed 2 more
+roles, even though the entry's own headline count was correct; §38 — untouched by any of this
+round's own diffs — credited D92's original write and D98's "open question" as still-live and
+its own cited test's behavior as still-current, all three falsified by this round's actual fixes;
+D98's own disclosed-open-question paragraph was answered by a sibling task's fix with no forward
+reference connecting them; and three `cli.py` citations rotted from this round's own edits, the
+exact recurring pattern (an edit to `cli.py`/`rewrite.py` rotting an unrelated citation elsewhere)
+that has now shown up in every round since GG — one was a live citation and needed repointing, one
+named code this round's own fix deleted and needed historical framing instead. All fixed in one
+commit, along with two pre-existing minor citation staleness issues found in the same sweep.
+
+**What this round demonstrates:** the controller's own doc-writing discipline is holding up under
+sustained adversarial review — round II caught a real overclaim in controller text, and this round
+demonstrates that lesson generalizes (the final review explicitly re-applied the same skepticism
+to this round's controller text and found five more issues, all fixed) rather than being a
+one-time correction that stopped mattering once made. And a defect (D92) that survived two
+independent reviews across two rounds before this round's own research re-derived it from SPEC
+directly is now closed with MORE independent verification than the original finding had — the
+discipline compounds rather than resetting each time a defect is marked fixed.
+
+**Full suite, post-close**: the round's own final review ran the FULL suite once (the first since
+round HH) — 1 failed (the `ruff format` drift, fixed immediately after) / 2162 passed pre-fix;
+re-run post-fix not yet repeated at full scale in this checkpoint, but every targeted gate
+(`test_integration_honesty_citations.py` 72/72, `test_cli.py` 166/166, `test_llm_golden_
+responses.py` 16/16, `ruff check .` clean, `ruff format --check` clean, `mypy` clean on 115 files)
+passes post-fix. §12 count independently re-derived four times across this round's close — 26/48
+every time, using "first bold status marker per section" (this project's fourth consecutive round
+to explicitly guard against the naive `grep -c '^\*\*DONE'` over-count; this round's own review
+found the "over-counts by 1" framing in round HH's checkpoint had itself drifted to "by 2" as of
+round II's own revert — re-measure fresh each time, never carry a delta forward).
+
+**Round IV, opening next.** No fully-scoped one-shot survives this round's own findings without
+further sizing:
+1. **§12.4's remaining 9 roles** — the batching pattern is now proven twice (`REPO_CLASSIFY`,
+   then `PR_TITLE`/`PR_BODY` through the refactored table); continuing role-by-role (or 2-per-task)
+   is the most mechanically certain path, following the research's own suggested simple-to-complex
+   ordering (`LlmBuildDiagnosis`, `DependencyDisambiguation`, `CycleBreakProposal` next).
+2. **§38's 20-sub-clause re-audit against the now-fully-corrected D92/D98/D99/D100 state** — this
+   round's own final review found the entry's account of what's covered is now stale in three
+   places; round II task 1's own re-audit needs re-running against current `HEAD`, not assumed
+   still accurate.
+3. Round HH's still-open lead (`API_CONTRACT`'s extraction gap, confirmed NEW-MECHANISM by two
+   rounds' research) and D94 (PR-promotion mechanism, confirmed NEW-MECHANISM three times now)
+   remain available if the above don't fill round IV.
