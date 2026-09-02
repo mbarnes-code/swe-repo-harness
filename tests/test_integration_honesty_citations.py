@@ -108,6 +108,40 @@ The prose census below is the **module's**, about the one profile named in
 ``_CENSUS_PROSE_PROFILE``; a second profile's census would not be stated here and so would
 not be checked. That is a disclosed limit of this file's prose, not a mechanism.
 
+A second profile, and a second derivation
+------------------------------------------
+Round FF adds ``docs/CRITERIA_PLAN.md`` as a second profile -- a file this project edits every
+round and that, until now, this module never watched at all. It carries no census-prose sentence
+of its own (``_CENSUS_PROSE_PROFILE`` stays ``INTEGRATION_HONESTY``-only; that constant is
+*singular by design*, not a list this module happened not to grow yet -- see its own docstring),
+and it declares ``commit_bound`` ``not_applicable``: measured 0 matches of ``_COMMIT_BOUND`` at
+round FF, the same falsifiable-not-a-waiver shape ``INTEGRATION_HONESTY`` uses for the categories
+it lacks.
+
+Round EE's final review found containment alone -- *is the cited range anywhere inside the
+anchor's own AST span* -- provably blind to a citation repointed to the WRONG statement inside
+that same span: three of that round's own repoints stayed green under it. A wider span offers
+more room for that to happen unnoticed, and this module's own containment predicate has no
+notion of "how wide is too wide" that would not be the kind of magic numeric slack CLAUDE.md's
+Rule 12 forbids. So the fix is not a stricter threshold on the same quantity; it is a SECOND
+quantity that does not share containment's blind spot:
+``test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line`` reads the literal
+source text AT the cited line(s) -- never the anchor's AST span -- and asks whether the anchor's
+own bare identifier is written there. Containment is blind to *which* line inside a wide span is
+cited; this check is blind to a citation naming *supporting prose* about a symbol rather than the
+symbol's own name (measured, not hypothetical: building this check against
+``docs/CRITERIA_PLAN.md`` found exactly one such case, ``RejectedApproach``
+(`src/fleet/models/tasks.py:213`), and its pin comment records why it is a correct citation
+rather than a defect). That is the disclosed blind spot; it is closed by a pin
+(``text_mismatch_pins``), ratcheted in both directions exactly like ``pins`` above, not by
+weakening the assertion for every citation.
+
+Scoped, deliberately, to profiles that opt in via ``cross_check_anchors=True`` -- today, only
+``CRITERIA_PLAN``. Folding it into ``INTEGRATION_HONESTY`` would run it over that file's large
+pre-existing anchored-citation population, which this task was told not to sweep; doing so would
+either surface unmeasured rot as new failures or require pinning an unmeasured set sight unseen,
+neither of which this task does. See ``DocProfile.cross_check_anchors``'s own docstring.
+
 The pinned set is not an exemption list
 ---------------------------------------
 ``_PINNED_UNRESOLVED`` records every anchored citation that does **not** resolve at the
@@ -251,6 +285,20 @@ class DocProfile:
     search_dirs: tuple[str, ...]
     pins: tuple[tuple[str, str], ...]
     dispositions: tuple[tuple[str, Disposition], ...]
+    # Opt-in to the SECOND, non-sharing derivation (see
+    # `test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line`). Default False and
+    # deliberately outside `_CATEGORIES`/`_check_population`: folding it into that governed
+    # vocabulary would force every profile to declare a disposition for it, and
+    # `INTEGRATION_HONESTY`'s pre-existing anchored citations are known (by the same reasoning
+    # that keeps `docs/DECISIONS.md` out of this module entirely) to contain unmeasured instances
+    # of the class this check would flag -- opting it in there would be exactly the "make it
+    # blocking retroactively" scope creep this task was told not to do.
+    cross_check_anchors: bool = False
+    # Citations where containment resolves but the cited line does not literally name the
+    # anchor -- a deliberate, measured exception (a citation to *supporting prose*, not the
+    # definition), pinned the same way `pins` pins a non-resolving citation: both directions
+    # checked, never a silent waiver. See `test_a_pinned_text_mismatch_still_mismatches`.
+    text_mismatch_pins: tuple[tuple[str, str], ...] = ()
 
 
 def _disposition(profile: DocProfile, key: str) -> Disposition:
@@ -507,7 +555,62 @@ _INTEGRATION_HONESTY = DocProfile(
     ),
 )
 
-_PROFILES: tuple[DocProfile, ...] = (_INTEGRATION_HONESTY,)
+# CRITERIA_PLAN's one anchored-unresolved citation, same both-directions ratchet as
+# `_PINNED_UNRESOLVED` above. Re-measured fresh at round FF, not inherited from a prior round's
+# sizing research: `record_attempt` (`repository.py:2124-2174`) is genuine drift, verified
+# against history exactly like the `settings.py` cluster in `_PINNED_UNRESOLVED` above -- the
+# citation was added in `8e16653` (the commit that fixed D90, `git log -S` on the literal
+# citation string against `docs/CRITERIA_PLAN.md` names no other commit), and at that commit
+# `record_attempt`'s real (non-stub) definition began at line 2124 (`git show
+# 8e16653:src/fleet/state/repository.py | grep -n 'def record_attempt'` -> `2124:`), matching
+# the citation exactly. Unrelated growth in `repository.py` since then moved the definition to
+# 2269-2337 (survey span), so the citation is not repointable to "the current definition" without
+# destroying what it was measured against -- it names the tree as it stood when D90 was
+# investigated, the same kind of past-tree claim `INTEGRATION_HONESTY.md` marks
+# `Measured at <sha>:` for. `docs/CRITERIA_PLAN.md`'s own prose calls this same paragraph a
+# "Dated annotation, 2026-08-31 (round Q whole-branch review)" -- this file's own convention for
+# exactly that kind of record.
+_PINNED_UNRESOLVED_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
+    (
+        "record_attempt",
+        "repository.py:2124-2174",
+    ),  # L454 defined at [(611, 613), (2269, 2337)], cited 2124-2174
+)
+
+# Discovered *while building* this profile, not hypothetical: containment alone (the primary
+# predicate) calls this citation resolved, because 213 falls inside `RejectedApproach`'s own
+# 208-226 span -- but line 213 is the class's own docstring, not the `class RejectedApproach`
+# line, so the second derivation below (which requires the anchor's own token at the cited line)
+# flags it. Read against source it is a deliberate, correct citation: the doc's claim is "this
+# class has no field that can hold diff text", and line 213 is the docstring sentence stating
+# exactly that -- a citation to *supporting prose*, the same category `INTEGRATION_HONESTY.md`'s
+# `response.usage` pin documents. Pinned rather than repointed, because there is no more-precise
+# line to point it at: the claim is about the class as a whole, not one field.
+_TEXT_MISMATCH_PINS_CRITERIA_PLAN: tuple[tuple[str, str], ...] = (
+    ("RejectedApproach", "src/fleet/models/tasks.py:213"),
+)
+
+_CRITERIA_PLAN = DocProfile(
+    name="CRITERIA_PLAN",
+    doc_rel="docs/CRITERIA_PLAN.md",
+    search_dirs=_SEARCH_DIRS,
+    pins=_PINNED_UNRESOLVED_CRITERIA_PLAN,
+    # `commit_bound` measured 0 at round FF (`_COMMIT_BOUND` over the file returns no matches) --
+    # this file has never yet needed the drift-resistant `(`:N` at `sha`)` form. `not_applicable`
+    # is a falsifiable claim, not a waiver: the moment one appears, `_check_population` fails and
+    # names this reason as outlived (see the module docstring's "not merely list a category"
+    # paragraph).
+    dispositions=(
+        ("pathed_citations", _asserted()),
+        ("anchored", _asserted()),
+        ("commit_bound", _not_applicable("measured 0 commit-bound citations at round FF")),
+        ("pins", _asserted()),
+    ),
+    cross_check_anchors=True,
+    text_mismatch_pins=_TEXT_MISMATCH_PINS_CRITERIA_PLAN,
+)
+
+_PROFILES: tuple[DocProfile, ...] = (_INTEGRATION_HONESTY, _CRITERIA_PLAN)
 
 # The prose census in this module's docstring is about exactly one profile. Named here so
 # that adding a second profile cannot silently re-point what the census check asserts.
@@ -682,6 +785,26 @@ def _symbol_table(path: Path) -> dict[str, list[tuple[int, int]]]:
     return table
 
 
+def _anchor_token(anchor: str) -> str:
+    """The bare identifier a definition-citation names.
+
+    Same normalisation `build_survey` applies before the symbol-table lookup (strip a trailing
+    call-parens marker, a leading attribute dot, then take the last dotted component) -- so this
+    check and the containment check start from the same notion of "what the anchor names",
+    which is what makes it a genuine cross-check rather than a test of a different anchor.
+    """
+    key = anchor.rstrip("()").lstrip(".")
+    return key.split(".")[-1]
+
+
+def _cited_source_text(root: Path, resolved: str, lo: int, hi: int) -> str:
+    """The exact source lines a citation names, 1-indexed and inclusive -- not the symbol's
+    (possibly much wider) enclosing span. This is the quantity the containment check never
+    reads: containment asks only whether ``lo, hi`` sit inside the anchor's own AST span."""
+    lines = (Path(root) / resolved).read_text(encoding="utf-8").split("\n")
+    return "\n".join(lines[lo - 1 : hi])
+
+
 def build_survey(root: Path, profile: DocProfile) -> Survey:
     """Read one profiled document and resolve every citation in it. All I/O is here.
 
@@ -849,6 +972,109 @@ def test_each_pinned_citation_is_still_unresolved(
     assert not found.resolves, (
         f"{found.citation.site}: `{pin[0]}` (`{pin[1]}`) now resolves ({found.detail}). "
         f"Delete this entry from {profile.name}'s pins."
+    )
+
+
+_CROSS_CHECK_PROFILES = tuple(p for p in _PROFILES if p.cross_check_anchors)
+
+
+@pytest.mark.parametrize("profile", _CROSS_CHECK_PROFILES, ids=lambda p: p.name)
+def test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line(
+    profile: DocProfile, surveys: dict[str, Survey]
+) -> None:
+    """The SECOND, non-sharing derivation (see the module docstring for why one is needed).
+
+    What quantity this reads, and why containment cannot leave it unchanged: containment asks
+    whether ``lo, hi`` fall anywhere inside the anchor's own (possibly multi-hundred-line) AST
+    span -- so a citation repointed to the WRONG statement inside that same span stays green,
+    which is exactly the failure round EE's final review found in three of that round's own
+    repoints. This check instead reads the literal source text AT the cited line(s) and asks
+    whether the anchor's own bare identifier appears there. A citation drifted to an unrelated
+    statement inside the same enclosing symbol will, in general, not have that symbol's own name
+    written on the line it drifted to; a citation still on the definition line, the signature, or
+    a usage/call site will. The two checks share no code path: this one never consults
+    `_symbol_table` or `_logical_span`.
+
+    Disclosed blind spot, found while building this check rather than asserted in the abstract:
+    a citation naming a class/function can legitimately point at a SUPPORTING line inside that
+    symbol's own body that does not repeat the symbol's name -- `RejectedApproach`
+    (`src/fleet/models/tasks.py:213`) cites the class's own docstring sentence stating the claim
+    the doc makes, not the `class RejectedApproach` line itself, and correctly does not contain
+    the token `RejectedApproach`. That is not a defect in the citation; it is a defect in
+    assuming "names its anchor" is the only way a citation can be right. Such cases are pinned
+    exactly like an unresolved anchor is pinned -- `profile.text_mismatch_pins`, both directions
+    ratcheted (see `test_a_pinned_text_mismatch_still_mismatches`) -- rather than silently
+    exempted or used to weaken this assertion for every citation.
+
+    Scope: only citations that already resolve under containment (an unresolved one is already
+    reported by `test_no_unpinned_anchored_citation_fails_to_resolve`, and re-reporting it here
+    would tell the next author nothing new). Only profiles that opt in via
+    `cross_check_anchors=True` -- deliberately not `INTEGRATION_HONESTY`, whose large pre-existing
+    anchored-citation population this task does not sweep; see the field's docstring on
+    `DocProfile`.
+    """
+    survey = surveys[profile.name]
+    pinned = set(profile.text_mismatch_pins)
+    bad = []
+    for a in survey.anchored:
+        if not a.resolves or a.key in pinned:
+            continue
+        token = _anchor_token(a.anchor)
+        lo, hi = a.citation.span
+        text = _cited_source_text(survey.root, a.citation.resolved, lo, hi)  # type: ignore[arg-type]
+        if re.search(rf"\b{re.escape(token)}\b", text):
+            continue
+        bad.append(
+            f"{a.citation.site}: `{a.anchor}` (`{a.citation.text}`) -> containment resolves "
+            f"but the cited line(s) do not mention `{token}`; repoint it to the line that "
+            f"actually states the claim, or add ('{a.anchor}', {a.citation.text!r}) to "
+            f"{profile.name}'s text_mismatch_pins with a measurement of why the cited line is "
+            "right despite not naming the anchor"
+        )
+    assert not bad, "anchored citations whose cited line does not name their anchor:\n" + "\n".join(
+        bad
+    )
+
+
+_TEXT_PIN_CASES: tuple[tuple[DocProfile, tuple[str, str]], ...] = tuple(
+    (p, pin) for p in _PROFILES for pin in p.text_mismatch_pins
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    _TEXT_PIN_CASES,
+    ids=lambda case: f"{case[0].name}|{case[1][0]}|{case[1][1]}",
+)
+def test_a_pinned_text_mismatch_still_mismatches(
+    case: tuple[DocProfile, tuple[str, str]], surveys: dict[str, Survey]
+) -> None:
+    """The other direction of the text-mismatch ratchet, one case per `text_mismatch_pins` entry.
+
+    Mirrors `test_each_pinned_citation_is_still_unresolved`: a pin recorded because the cited
+    line does not name its anchor must keep not naming it, or the pin has gone stale and should
+    be deleted (the citation may have been repointed, in which case the primary check now covers
+    it without this exemption).
+    """
+    profile, pin = case
+    survey = surveys[profile.name]
+    found = survey.anchored_by_key(pin)
+    assert found is not None, (
+        f"pinned text-mismatch citation `{pin[0]}` (`{pin[1]}`) is no longer in {profile.doc_rel} "
+        f"in that form. If it was repointed, delete this entry from {profile.name}'s "
+        "text_mismatch_pins."
+    )
+    assert found.resolves, (
+        f"{found.citation.site}: `{pin[0]}` (`{pin[1]}`) is pinned as a text mismatch but no "
+        "longer resolves under containment either -- it belongs in `pins`, not "
+        "`text_mismatch_pins`; move it."
+    )
+    token = _anchor_token(pin[0])
+    lo, hi = found.citation.span
+    text = _cited_source_text(survey.root, found.citation.resolved, lo, hi)  # type: ignore[arg-type]
+    assert not re.search(rf"\b{re.escape(token)}\b", text), (
+        f"{found.citation.site}: `{pin[0]}` (`{pin[1]}`) now mentions `{token}` at the cited "
+        f"line. Delete this entry from {profile.name}'s text_mismatch_pins."
     )
 
 
