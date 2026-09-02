@@ -1339,6 +1339,38 @@ added is currently inert. §37 stays OPEN — PARTLY ADDRESSED, now blocked on e
 piece of work (the stub-creation logic) rather than three separate structural prerequisites plus
 that logic.**
 
+**Update, round VI research-7 + research-8 (2026-09-02) — the stub-creation-logic bundle was
+re-scoped now that all three structural blockers are landed, and a genuinely new, deeper open
+question was found — not yet a worker-ready task.** Two research passes (full detail:
+`.superpowers/sdd/round-V-criteria-closure/research-7-report.md`,
+`.../research-8-report.md`) found:
+- Research-3's original sizing (pre-dating the three blockers) had two real errors, both load-
+  bearing: item `b` (version-sourcing) is now fully retired by Blocker B (free, via `_repo_facts`);
+  item `d` (locate the `BuildInput` assembler) traced to the WRONG PHASE — the real creation
+  decision site is `_transform_payloads`'s `build()` closure (TRANSFORM phase, `cli.py:4814-4860`),
+  not BUILD-phase `buildgen.py` — matching ADR-0113's own repeated "TRANSFORM-worker" phrasing
+  that no prior research had explained.
+- Two items absent from research-3's table entirely: a `RUNNING → DEGRADED` write site (nothing
+  currently writes this status the first time, in production, for a stub-limited repo), and a
+  THIRD `--stub-blocked` refusal site (`_validate_resume_flags`, new since Blocker A — its own
+  docstring already names removing it as this bundle's job, per ADR-0113 condition 2).
+- **A genuinely deeper, newly-found open question, NOT specific to stubs**: research-8 traced
+  whether TRANSFORM's existing rewrite mechanism could redirect an import toward a stub's label
+  and found **no orchestrator code anywhere in `src/` dynamically constructs a `RewriteRule` for
+  ANY cross-repo relocation, stub-eligible or not** — the only live rule-construction path is
+  static, operator-authored YAML (`config/rules/*.yml`, currently empty in this tree). Determining
+  "the OLD import text a consumer currently writes for a repo being relocated" is an unresolved
+  question for the whole rewrite system, and a stub-redirect rule needs exactly that same
+  unresolved piece to know what to match against. This is NOT a stub-specific gap surfaced by
+  §37's investigation — it is a pre-existing gap in ordinary cross-repo relocation that §37's own
+  bundle happens to depend on.
+- Net aggregate size of the stub-creation-logic bundle is comparable to research-3's original
+  estimate (real shrinkage offset by real growth), not ADR-shaped (no tested invariant or
+  state-machine edge is touched), but **not yet dispatchable as a worker-ready task** — the
+  OLD-import-text question needs its own resolution first, and that resolution is scoped wider
+  than §37 alone. Deferred pending a future round's investigation of the underlying rewrite-rule
+  construction gap; not attempted further this round.
+
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
 and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round
