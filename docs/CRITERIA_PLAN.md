@@ -180,27 +180,30 @@ hand-built unit test in `test_graph_build.py` is untouched and still covers the 
 property.
 
 **Round FF task 2's own task review found this row's "Done bar" is narrower than §12 item 8's
-literal text.** The task review traced that narrowing to `docs/superpowers/plans/
-spec12-success-criteria-audit.md:135` (`12be741`, 2026-08-27), which scoped "graph correctness" to
+literal text.** The task review traced that narrowing to `docs/superpowers/plans/spec12-success-criteria-audit.md:135`
+(`12be741`, 2026-08-27), which scoped "graph correctness" to
 exactly the two gaps closed above, without addressing SPEC's broader clause: "**every known
 cross-repo edge is discovered** including at least one `INTERNAL_IMPORT`…". `EdgeKind` has 8
-members. A fixture-fleet, real-`fleet-scan`-driven proof against the `edges` table now exists for
-2 of them (`DECLARED_DEP`, `INTERNAL_IMPORT`). The other 6 —
-`PUBLISHED_ARTIFACT` (no fixture manifest uses a pinned version spec, so none is ever produced),
-`API_CONTRACT`, `CONTRACT_IMPL`, `CONTRACT_CONSUME` (no e2e test drives a real scan through a
-hoisted contract to the resulting graph edges — `vendored_contract_fleet` only asserts against
-`contracts`/`collisions`), `SHARED_RESOURCE`, `DYNAMIC_REF` — remain proven only by the hand-built
-`InferenceInput` tests in `test_graph_build.py`, never the fixture fleet.
+members (`src/fleet/models/enums.py:255`). A fixture-fleet, real-`fleet-scan`-driven proof against
+the `edges` table now exists for 3 of them: `DECLARED_DEP`, `INTERNAL_IMPORT`, and
+`PUBLISHED_ARTIFACT` (**correction, 2026-09-02, round FF's own final whole-branch review**: this
+row originally said 2 of 8 and listed `PUBLISHED_ARTIFACT` among the unproven — that was wrong by
+direct measurement; `PUBLISHED_ARTIFACT` already has a real fixture-fleet proof at
+`tests/test_cli.py:1902-1907`, a §12.21 digest test's precondition guard over an inline-built
+two-repo fleet, reproduced `1 passed`). The other 5 — `API_CONTRACT`, `CONTRACT_IMPL`,
+`CONTRACT_CONSUME` (no e2e test drives a real scan through a hoisted contract to the resulting
+graph edges — `vendored_contract_fleet` only asserts against `contracts`/`collisions`),
+`SHARED_RESOURCE`, `DYNAMIC_REF` — remain proven only by hand-built-edge tests
+(`test_graph_build.py`, `test_graph_sequence.py:863`, `test_graph_cycles.py`) or direct SQL seeding
+(`test_projection.py:107-111`), never a real scan against `edges`.
 
-**Adjudication (ADR-0109):** this is a genuine scope gap, not a SPEC-wording error — the six
+**Adjudication (ADR-0109):** this is a genuine scope gap, not a SPEC-wording error — the five
 unproven kinds are real, already-implemented detectors (`src/fleet/graph/infer.py`) with no
 fixture-level proof, not aspirational text. §12 item 8's literal wording is unchanged; no SPEC.md
 edit needed. **Done bar (revised):** one real-`fleet-scan`-driven test per remaining `EdgeKind`
 (or one test covering several via a shared fixture fleet, implementer's choice) asserting against
-the real `edges` table, following this round's `INTERNAL_IMPORT` test as the template. Small,
-additive, TEST-ONLY per kind; `PUBLISHED_ARTIFACT` additionally needs one fixture manifest entry
-changed to a pinned version spec (a one-line fixture edit, confirmed not to break any existing
-fixture consumer before landing).
+the real `edges` table, following this round's `INTERNAL_IMPORT`/`PUBLISHED_ARTIFACT` tests as the
+template. Small, additive, TEST-ONLY per kind.
 
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**

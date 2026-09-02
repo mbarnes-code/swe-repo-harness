@@ -12626,20 +12626,32 @@ bias-avoidance design tension noted above needs its own resolution before the br
 
 ## ADR-0109 — §12.8's "every known cross-repo edge is discovered" clause: a real residual scope gap, not a SPEC-wording error
 
+**Correction, 2026-09-02 (round FF's own final whole-branch review, same day).** This entry
+originally read "2 of 8" proven / "the other 6" and cited `src/fleet/models/edges.py`. The final
+review found both wrong by direct measurement and they are corrected in place below, per this
+file's own practice of fixing a same-day, same-round factual error before it propagates rather
+than leaving a known-false count standing: it is **3 of 8** (`PUBLISHED_ARTIFACT` already has a
+real fixture-fleet proof, at `tests/test_cli.py:1902-1907`, a §12.21 digest test's precondition
+guard over an inline-built two-repo fleet — reproduced, `1 passed`), **5** remain unproven, and
+`EdgeKind` lives at `src/fleet/models/enums.py:255`, not a file named `edges.py`.
+
 **Context.** Round FF task 2 closed the specific gap `docs/CRITERIA_PLAN.md`'s §8 "Done bar" named
 (cross-repo `INTERNAL_IMPORT` proven only on a hand-built `InferenceInput`, never the fixture
 fleet) with a genuine, mutation-verified fixture test. Its task review then checked that Done bar
 against SPEC.md:7434's actual literal text — "on the fixture fleet: **every known cross-repo edge
 is discovered** including at least one `INTERNAL_IMPORT` with no corresponding manifest entry" —
 and found the Done bar itself is narrower than the sentence it exists to close. `EdgeKind` has 8
-members (`src/fleet/models/edges.py` — `DECLARED_DEP`, `PUBLISHED_ARTIFACT`, `INTERNAL_IMPORT`,
+members (`src/fleet/models/enums.py:255` — `DECLARED_DEP`, `PUBLISHED_ARTIFACT`, `INTERNAL_IMPORT`,
 `API_CONTRACT`, `CONTRACT_IMPL`, `CONTRACT_CONSUME`, `SHARED_RESOURCE`, `DYNAMIC_REF`). After this
-round, 2 of 8 have a real-`fleet-scan`-driven, fixture-fleet proof against the `edges` table
-(`DECLARED_DEP`, `INTERNAL_IMPORT`); the other 6 remain proven only by hand-built `InferenceInput`
-unit tests in `tests/test_graph_build.py`.
+round, 3 of 8 have a real-`fleet-scan`-driven, fixture-fleet proof against the `edges` table
+(`DECLARED_DEP`, `INTERNAL_IMPORT`, `PUBLISHED_ARTIFACT`); the other 5
+(`API_CONTRACT`/`CONTRACT_IMPL`/`CONTRACT_CONSUME`/`SHARED_RESOURCE`/`DYNAMIC_REF`) remain proven
+only by hand-built-edge tests (`tests/test_graph_build.py`, `tests/test_graph_sequence.py:863`,
+`tests/test_graph_cycles.py`) or direct SQL seeding (`tests/test_projection.py:107-111`) — never a
+real scan against `edges`.
 
-The task review traced the narrowing to its origin: `docs/superpowers/plans/
-spec12-success-criteria-audit.md:135` (`12be741`, 2026-08-27, "CONTROLLER-VERIFIED") scoped
+The task review traced the narrowing to its origin: `docs/superpowers/plans/spec12-success-criteria-audit.md:135`
+(`12be741`, 2026-08-27, "CONTROLLER-VERIFIED") scoped
 "graph correctness" to exactly two named gaps (the `INTERNAL_IMPORT` fixture-proof gap and the
 `hypothesis` wave-ordering gap) and never addressed the sentence's broader "every known cross-repo
 edge" wording. That audit was correct about the two gaps it named; it simply didn't ask the wider
@@ -12653,18 +12665,17 @@ aspirational beyond what a graph-inference engine can reasonably fixture-prove, 
 item 8's text to name `DECLARED_DEP`/`INTERNAL_IMPORT` specifically (Rule 14 adjudication); or (b)
 treat it as a real, already-implemented-but-unproven residual and leave SPEC's text standing.
 **Ruling: (b).** All 8 `EdgeKind` detectors are real, shipped code in `src/fleet/graph/infer.py` —
-this is not an unbuilt capability the way §12.35's diff-rendering branch was (ADR-0108); it is an
-proof-coverage gap against code that already exists. `PUBLISHED_ARTIFACT`'s non-appearance is a
-fixture-manifest artifact (no fixture repo's manifest uses a pinned version spec), not a detector
-limitation. Narrowing SPEC's text to match today's proof coverage would be closing the gap by
-redefining "done," which CLAUDE.md's own guardrail names as the wrong direction.
+this is not an unbuilt capability the way §12.35's diff-rendering branch was (ADR-0108); it is a
+proof-coverage gap against code that already exists. Narrowing SPEC's text to match today's proof
+coverage would be closing the gap by redefining "done," which CLAUDE.md's own guardrail names as
+the wrong direction.
 
 **Consequence.** `docs/CRITERIA_PLAN.md` §8 is corrected from an unqualified DONE to `OPEN —
 PARTLY, scope-disclosed` (see its own entry) — round FF task 2's `INTERNAL_IMPORT` fixture test and
 Rule-12 discriminator are real, independently-reproduced progress and are not reverted by this
-ruling; they close 2 of the clause's 8 sub-parts. §12 count stays at 24/48, not 25 — this criterion
-does not flip until the remaining 6 kinds get fixture-fleet proof or a future round adjudicates a
-narrower reading with its own disclosed ADR. **Not yet built:** one real-`fleet-scan`-driven test
-per remaining `EdgeKind` against the real `edges` table (small, additive, TEST-ONLY per kind,
-following this round's `INTERNAL_IMPORT` test as the template); `PUBLISHED_ARTIFACT` additionally
-needs one fixture manifest entry changed to a pinned version spec.
+ruling; they close 3 of the clause's 8 sub-parts (including `PUBLISHED_ARTIFACT`, already proven —
+see the 2026-09-02 correction above). §12 count stays at 24/48, not 25 — this criterion does not
+flip until the remaining 5 kinds get fixture-fleet proof or a future round adjudicates a narrower
+reading with its own disclosed ADR. **Not yet built:** one real-`fleet-scan`-driven test per
+remaining `EdgeKind` against the real `edges` table (small, additive, TEST-ONLY per kind, following
+this round's `INTERNAL_IMPORT`/`PUBLISHED_ARTIFACT` tests as the template).
