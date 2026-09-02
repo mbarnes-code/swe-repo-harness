@@ -882,8 +882,8 @@ local` (or whatever the local-only profile is named) and assert every named sub-
 genuine new test infrastructure (a runnable local-profile fixture fleet), not a one-shot task.
 
 ## 42. New backend costs one file + one registry line
-**OPEN — "5 of 9" was stale, likely fully closed, NOT yet flipped DONE pending final-review
-confirmation.** `register_backend`'s duplicate-name `RuntimeError` has a real test
+**DONE (round DD, 2026-09-02) — confirmed by the round's final whole-branch review; the "5 of 9"
+framing was stale and is retired.** `register_backend`'s duplicate-name `RuntimeError` has a real test
 (`tests/test_llm_client.py::test_register_backend_refuses_a_duplicate_name`, round N,
 `cc12a2a`). SPEC's literal text (`docs/SPEC.md`, "A new backend costs one file and one registry
 line") names, distinctly: (1) the fixture-backend proof — **closed round DD task 1
@@ -899,14 +899,29 @@ test_a_role_whose_tier_has_no_target_fails_loudly_at_startup` and
 an `openai_compatible` target has no `base_url` — `tests/test_settings.py::
 test_openai_compatible_target_without_base_url_is_refused`; (6) refusal when a role's tier is not
 a `ModelTier` member — `tests/test_settings.py::
-test_a_role_routed_to_a_tier_that_is_not_a_modeltier_member_is_a_startup_error`. **All six
-independently confirmed present via direct grep (controller, 2026-09-02), not carried forward from
-the stale "9" framing** — but not re-read line-by-line for whether each genuinely proves
-construction-time (not deferred-to-runtime) refusal, which the round's final review should
-confirm before this entry is marked DONE and counted toward the `<n> of 48` tally. The old "9"
-denominator and "four remain open" framing appear to predate work that has since landed and are
-not trusted here — do not cite them.
-**Done bar, if confirmed:** flip to DONE, add §42 to the Rollup, recount.
+test_a_role_routed_to_a_tier_that_is_not_a_modeltier_member_is_a_startup_error`.
+
+**The final review independently traced each of the six to its actual raise site rather than
+trusting the controller's grep, and specifically settled the "construction, not wave 7" timing
+question.** None of the four condition-refusals (3-6) fire inside `RunContext.__post_init__`
+itself — three fire at `FleetSettings.load()` (strictly BEFORE a `RunContext` can be built at
+all) and one (empty target list) at `LlmRouter.__init__`, which every `cli.py` call site
+constructs inline as a `RunContext(` argument (`llm=llm_router(settings)`, five sites) — so
+`TierNotConfigured` genuinely raises during evaluation of `RunContext(`'s own argument list.
+Refusing at settings-load time is strictly stronger than SPEC's "not in wave 7" bar, not a gap in
+it. The old "9" denominator and "four remain open" framing predate work that has since landed and
+are retired — do not cite them.
+
+**One disclosed narrowing in the fixture-backend proof (1), not treated as a gap.** SPEC's phrase
+is "serves every role in a full fixture run"; the landed test drives 12 direct
+`client.complete()` calls through a directly-constructed `LlmRouter`, not a real
+`scan`/`transform`/`build` pipeline (a real fixture run cannot reach all 12 roles — most fixture
+repos exercise only a handful). The final review judged this a STRONGER proof of the criterion's
+headline claim ("one file, zero `src/fleet/` changes"), not a weaker one, and independently
+reproduced its own mutation proof (truncating the role loop reddens naming the 11 missing roles;
+a synthetic `src/fleet/` dirty-tree fault reddens the zero-changes assertion; a cosmetic control
+stays green).
+**Done bar:** met in full. Nothing remains open for §12.42.
 
 ## 43. Failover layered, bounded, fail-closed
 **OPEN — case (ii) is the sole remaining blocker, everything else in this entry closed.** Case
@@ -1184,7 +1199,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 23 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 44, 45, 46, 48 (re-derived 2026-09-02, round CC, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §13 this round: its last remaining sub-clause, atomicity, closed via a real mid-transaction interruption test, see §13's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 24 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round DD, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §42 this round: the fixture-backend proof closed the last of its 6 SPEC-named sub-requirements, confirmed against SPEC's literal text by the round's final review, see §42's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 5 | 22 (partial, D50 for one sub-clause only), 35 (its worker level is now FULLY closed as of round CC — only the CLI-level proof remains, blocked on D50), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |

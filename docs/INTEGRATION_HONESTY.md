@@ -7669,3 +7669,22 @@ by the workers themselves" remains false for Phase 2 — `relocate.py`/`rewrite.
 still carry no such wiring, unchanged by this fix (which only closes the phase-ENTRY gate, not
 the per-repo one). This is explicitly out of scope for the phase-entry fix and is the entry's one
 remaining open surface.
+
+**Closed, 2026-09-02 (round DD task 2, component commit `6711229`, merged `ebb83d3`) — the
+paragraph immediately above is superseded, not deleted, per this file's annotate-never-rewrite
+convention.** `RelocateInput`/`RewriteInput`/`BuildgenInput` each now carry a `min_free_bytes`
+field matching `CloneInput`'s own shape (`default=0, ge=0`), and each worker's `run()` calls
+`require_free_space(...)` immediately before its real disk-consuming write — `relocate.py`'s
+before `scoped_tempdir`/`land_patches`, `rewrite.py`'s in the identical position, `buildgen.py`'s
+immediately before writing the generated `BUILD.bazel`. `cli.py`'s Phase-2 payload construction
+wires `min_free_bytes=` from `preflight.min_free_bytes` the same way `ScanPipelineWorker`'s
+already did. Both halves of this defect are now closed — see the heading's status field, updated
+in the same commit as this note. **One disclosed residual, not closed by this fix and not itself
+a new defect**: `buildgen.py`'s `_ingest` step (a real `git fetch`+`merge`) runs before its new
+disk check, unprotected — currently a dead path in production (`cli.py`'s only `BuildgenInput`
+construction site always passes `ingest=None`), noted in a one-line code comment rather than left
+silent. **A second disclosed residual, from this round's own final review, not yet closed**:
+three of the four new per-worker checks (`RewriteWorker`'s, `BuildgenWorker`'s, and the
+`_buildgen_input` wiring) ship with zero dedicated test coverage — only `RelocateWorker`'s got a
+regression test this round. Deleting any of the other three today would leave the suite green;
+flagged for a future round, not fixed here.

@@ -5107,7 +5107,7 @@ the D47 entry, not folded silently into an unrelated ADR. See D47 for the full c
 **Decision 2 — `CacheMiss` (`llm/cache.py:92`) no longer subclasses `LlmError`.** Independent of
 (1): research-36 Q3(b) found `CacheMiss` raised on a `--llm-cache read-only` miss
 (`cache.py:469-470`) is caught by the bare `except LlmError:` degrade-and-continue pattern at
-every advice-call site that uses it — `buildverify.py:1148`, `buildgen.py:454`, `buildgen.py:566`,
+every advice-call site that uses it — `buildverify.py:1243`, `buildgen.py:491`, `buildgen.py:603`,
 `prwriter.py:414`, `prwriter.py:422` (all re-verified by direct read, not just cited from
 research-36) — each of which exists to keep a genuine model-side hiccup (a malformed reply, a
 transport failure) from turning a recorded repo failure into an unrecorded worker crash. A replay
