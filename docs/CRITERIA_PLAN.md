@@ -655,13 +655,14 @@ asserts the projection is byte-identical pre/post the exit-9 refusal — not mer
 Task review independently reproduced the Rule-12 mutation proof (skip-gate-if-projection-exists →
 exit 0 instead of 9, projection silently rewritten).
 
-**New, real production gap found during the same task's investigation, disclosed not fixed:
-`fleet transform` has NO disk-headroom enforcement anywhere in its path — tracked as D96
-(`docs/INTEGRATION_HONESTY.md`).** `_require_disk_headroom` is called by `scan`/`build`/`verify`/
-`fleet resume`, but not `transform`'s command body, and Phase 2's workers
-(`relocate.py`/`rewrite.py`/`buildgen.py`) carry none of the per-repo `min_free_bytes` wiring
-Phase 1/3/4's workers do — despite `_require_disk_headroom`'s own docstring claiming per-repo
-enforcement happens "before every clone and every container start by the workers themselves."
+**New, real production gap found during the same task's investigation — tracked as D96
+(`docs/INTEGRATION_HONESTY.md`), now `FIXED, LANDED` (phase-entry half `71c3cd9` round CC task 3,
+Phase-2 per-repo-worker half `ebb83d3` round DD task 2 — correction, round II, this entry still
+read "disclosed not fixed" after both halves had landed).** Originally found: `_require_disk_
+headroom` is called by `scan`/`build`/`verify`/`fleet resume`, but not `transform`'s command body,
+and Phase 2's workers (`relocate.py`/`rewrite.py`/`buildgen.py`) carried none of the per-repo
+`min_free_bytes` wiring Phase 1/3/4's workers do — see D96's own entry for what the landed fix
+actually wired (both halves, phase-entry and per-repo-worker) rather than re-describing it here.
 `sequence` is confirmed genuinely exempt (pure computation, no `project_once` call) — do not fold
 it into D96's scope. This does not block §12.22's disk-ceiling sub-clause above, which is closed
 on the property it actually claims (exit-9 + post-exit validity for the phases that DO enforce
@@ -1033,7 +1034,10 @@ scenario in SPEC.md item 37 becomes testable for the first time.
 change — it's correct and tested; the remaining gap is purely on the creation side.
 
 ## 38. No ready-for-review while a stub is unresolved
-**OPEN — mixed, 20 sub-clauses — now blocked on D92/D93/D94, not TEST-ONLY.** The headline
+**OPEN — mixed, 20 sub-clauses — correction, round II: only D94 still blocks; D92 and D93 are
+both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`) — this entry stayed
+stale after both landed. Which sub-clauses that unblocks is not re-derived here; see round II's
+own dispatched re-audit.** The headline
 refusal (exit 2 + PrState unchanged) is well covered by two independent tests. **Round Z task 2
 re-audited the sweep sub-clauses against D80's landed `stub_reconcile`** (search
 `tests/test_cli.py:2535-2701`) and closed the genuinely missing pieces: the `SUPERSEDED` arm of
@@ -1042,21 +1046,23 @@ the refusal guard (was untested — only `ACTIVE` ever seeded), and the positive
 mutation-proven, independently reproduced by task review. The T4 abandon path and the
 held-for-merge carve-out were already covered pre-round, confirmed by the same re-audit.
 
-**The remaining sub-clauses are now blocked on three real production gaps this same
-investigation found and disclosed, not left as untested-but-buildable TEST-ONLY work:**
-- **D92** — `PrState.HELD` is declared and documented as `stub_reconcile`'s exclusive write
-  target but has zero production writers anywhere in `src/`.
-- **D93** — no exit-code path reads `RepoStatus.DEGRADED` for the exit-7 contract SPEC §3.5.1
-  point 5 (and `HumanInterventionError`'s own docstring) claims — a real SPEC/docstring-vs-code
-  mismatch on an operator-facing exit code.
-- **D94** — this criterion's own "resolution" sub-clause (an already-open PR getting promoted to
-  ready once its stub resolves — rebase/force-push/body regeneration) has no implementation at
-  all; `_pr_impl` skips any repo with an existing PR record unconditionally. This is why the
-  resolution sub-clause specifically cannot be tested, not merely untested.
+**The remaining sub-clauses were blocked on three real production gaps this same investigation
+found and disclosed; two are now closed:**
+- **D92 — FIXED, LANDED.** `PrState.HELD` was declared and documented as `stub_reconcile`'s
+  exclusive write target but had zero production writers; now wired (round GG task 1).
+- **D93 — FIXED, LANDED.** No exit-code path read `RepoStatus.DEGRADED` for the exit-7 contract
+  SPEC §3.5.1 point 5 claims; now wired (round EE task 2).
+- **D94 — still OPEN, still the sole remaining blocker.** This criterion's own "resolution"
+  sub-clause (an already-open PR getting promoted to ready once its stub resolves —
+  rebase/force-push/body regeneration) has no implementation at all; `_pr_impl` skips any repo
+  with an existing PR record unconditionally. This is why the resolution sub-clause specifically
+  cannot be tested, not merely untested. Confirmed genuinely NEW-MECHANISM sized, no smaller slice
+  found, twice independently (round FF's and round GG's own research).
 
-**Done bar:** D92/D93/D94 need their own dedicated work (D94 in particular is NEW-MECHANISM
-sized, not a one-shot) before the remaining sub-clauses of this criterion become buildable. Do
-not attempt to test-write around them.
+**Done bar:** with D92/D93 landed, re-audit which of the 20 sub-clauses are now buildable against
+current `HEAD` (not re-derived here — this is round II's own dispatched task) rather than assuming
+all remain blocked; D94 alone blocks the resolution sub-clause specifically, not the whole
+criterion.
 
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
@@ -1413,7 +1419,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | DONE | 26 | 1, 3, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round GG, form-agnostic `awk` re-scan after merging all four of this round's tasks: §35 closed — `EVIDENCE_PLUS_PRIORS` diff-rendering built and mutation-proven both directions, ADR-0110's disclosed-residual closure, see §35's own entry; §3 closed — coverage gate armed at `fail_under=85`, `tests/unit` populated, ADR-0111 (renumbered from a worktree collision with ADR-0110, see that entry), see §3's own entry. Round EE's history, when §35 was marked DONE and reverted the same day for the reason round GG has now actually built, is kept below rather than deleted) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only, D92/D93 landed since; corrected round II, see §38's own entry — D80 is fully landed and no longer the blocker either), 43 (partial) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries (round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
