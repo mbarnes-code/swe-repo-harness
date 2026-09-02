@@ -1,0 +1,26 @@
+{
+  "_provenance": "Hand-constructed to match Claude-on-Vertex-AI's `:rawPredict` response, documented at https://docs.anthropic.com/en/api/claude-on-vertex-ai as the Anthropic Messages API body (Vertex adds only an `anthropic_version` discriminator to the REQUEST; the response is the native Messages shape), fed as-is (minus this key) to `vertex.parse_reply()` in src/fleet/llm/backends/vertex.py, whose `_content_blocks`/`_usage`/`_finish_reason` read exactly these snake_case top-level keys (`content`, `stop_reason`, `usage.input_tokens`/`usage.output_tokens`) — the same shape that module's own `raw_predict_body()` test helper builds. Rung: TOOL_CALL, matching `build_body()`'s tool branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`vertex_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/vertex.py:92) is a role-agnostic constant and `parse_reply` never introspects `content[0].input`'s internal shape, so only the `input` payload below (a `DependencyDisambiguation`-schema object) differs. `chosen_coordinate` uses the `ecosystem:group:name` key format `Coordinate.key` computes (src/fleet/models/repo.py:34, ADR-0017); `gradle` is `Ecosystem.GRADLE`, a distinct member from `Ecosystem.MAVEN` (src/fleet/models/enums.py:218).",
+  "id": "msg_vrtx_01DepDisMn23Op45Qr67",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5@20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_vrtx_01DepDisMn23Op45Qr",
+      "name": "emit_response",
+      "input": {
+        "chosen_coordinate": "gradle:com.acme.widget:widget-core",
+        "candidates_considered": ["gradle:com.acme.widget:widget-core", "gradle:com.acme.widget:widget-core-legacy"],
+        "confidence": 0.79,
+        "rationale": "widget-core is imported directly by the module under migration; widget-core-legacy is a deprecated artifact kept only for downstream compatibility"
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 305,
+    "output_tokens": 37
+  }
+}
