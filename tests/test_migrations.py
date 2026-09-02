@@ -18,7 +18,10 @@ must.
 
 from __future__ import annotations
 
+import re
+import shutil
 import sqlite3
+import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -862,3 +865,237 @@ def test_the_first_rung_renames_columns_without_touching_rows(tmp_path):
                       "FROM edges") == [("repo-a", "repo-b", "REPO", "REPO", None)]
     assert _query(db, "SELECT node_id, node_kind FROM wave_members") == [("repo-a", "REPO")]
     assert _query(db, "SELECT task_id, contract_id FROM tasks") == [("task-1", None)]
+
+
+# --------------------------------------------------------------------------------------
+# SPEC §12 item 45 — "no code state is persisted outside Git" (ADR-0024)
+#
+# Two of the criterion's mechanical checks: (i) schema — no `mutations` table, no column whose
+# name matches the forbidden-pattern regex, and the five git-SHA-shaped columns that DO exist
+# each resolve to a real commit; (ii) content — no persisted TEXT/BLOB value anywhere contains a
+# unified-diff hunk header. The forbidden-name regex below is quoted VERBATIM from `docs/SPEC.md`
+# §12 item 45's dated correction — this file makes that hand-validation mechanical, it does not
+# re-derive the pattern.
+# --------------------------------------------------------------------------------------
+
+_FORBIDDEN_COLUMN_RE: Final = re.compile(
+    r"(pre|post)_tree_sha|tree_sha|patch_sha256|patch_path|patch_blob|diff_blob|(^|_)diff(_|$)|"
+    r"rollback_log"
+)
+
+#: The five columns SPEC's dated correction names as the git-SHA-shaped ones that legitimately
+#: exist — pointers INTO git (ADR-0024), never a copy of its content.
+_SHA_COLUMNS: Final[tuple[tuple[str, str], ...]] = (
+    ("repos", "head_sha"),
+    ("phases", "pre_commit_sha"),
+    ("phases", "post_commit_sha"),
+    ("tasks", "pre_commit_sha"),
+    ("attempts", "commit_sha"),
+)
+
+_HUNK_HEADER_LIKE: Final = "%@@ -%+%@@%"
+
+
+def _all_columns(path: Path) -> list[tuple[str, str, str]]:
+    """Every (table, column, declared_type) SQLite tracks, across every table `PRAGMA table_list`
+    reports — SQLite's own internal tables (`sqlite_schema` et al.) excluded. The one mechanical
+    walk both the forbidden-name sweep and the TEXT/BLOB content scan are built from, so the
+    schema is never enumerated twice."""
+    triples: list[tuple[str, str, str]] = []
+    for row in _query(path, "PRAGMA table_list"):
+        schema, table = row[0], row[1]
+        if schema != "main" or table.startswith("sqlite_"):
+            continue
+        for col in _query(path, f"PRAGMA table_info('{table}')"):
+            triples.append((table, col[1], col[2]))
+    return triples
+
+
+def _all_text_blob_columns(path: Path) -> list[tuple[str, str]]:
+    """(table, column) pairs whose declared type is TEXT or BLOB — what §12.45(ii)'s content scan
+    walks. Derived from `_all_columns` rather than a second `PRAGMA` walk."""
+    return [(table, column) for table, column, decl in _all_columns(path)
+            if decl.upper() in ("TEXT", "BLOB")]
+
+
+def test_schema_has_no_mutations_table_and_no_forbidden_column_name(tmp_path):
+    """§12.45(i), first half: `PRAGMA table_list` contains no `mutations` table, and across every
+    table `PRAGMA table_info` yields no column whose name matches the forbidden-pattern regex —
+    the mechanical version of the check SPEC's 2026-08-27 correction validated by hand."""
+    db = _fresh_baseline(tmp_path / "fleet.db")
+
+    tables = {row[1] for row in _query(db, "PRAGMA table_list")
+              if row[0] == "main" and not row[1].startswith("sqlite_")}
+    assert "mutations" not in tables
+
+    for table, column, _decl_type in _all_columns(db):
+        assert not _FORBIDDEN_COLUMN_RE.search(column), (
+            f"{table}.{column} matches the forbidden shadow-VCS column pattern"
+        )
+
+
+def test_the_forbidden_column_regex_is_validated_both_directions():
+    """Rule 12: applying a regex without self-validating it proves nothing. This is the
+    mechanical form of the double-direction check SPEC's dated correction already did by hand —
+    the retired draft regex's bare `blob`/`diff` alternatives false-matched
+    `repos.largest_blob_bytes` and `collisions.blob_shas`, and the replacement must not repeat
+    that while still catching every one of the four synthetic names the correction names."""
+    for near_miss in ("largest_blob_bytes", "blob_shas"):
+        assert not _FORBIDDEN_COLUMN_RE.search(near_miss), near_miss
+
+    for forbidden in ("pre_tree_sha", "patch_path", "rollback_log", "diff_blob"):
+        assert _FORBIDDEN_COLUMN_RE.search(forbidden), forbidden
+
+
+def test_the_near_miss_columns_are_real_schema_columns(tmp_path):
+    """Confirms the previous test's near-misses are not straw men: `repos.largest_blob_bytes` and
+    `collisions.blob_shas` are real, currently-shipped columns (SPEC names them explicitly as the
+    ones that must never be renamed or dropped to satisfy the retired regex)."""
+    db = _fresh_baseline(tmp_path / "fleet.db")
+    real_columns = {(table, column) for table, column, _decl in _all_columns(db)}
+    assert ("repos", "largest_blob_bytes") in real_columns
+    assert ("collisions", "blob_shas") in real_columns
+
+
+def _git(cwd: Path, *args: str) -> str:
+    """A real `git`, with every ambient config source cut off, so a developer's `~/.gitconfig`
+    cannot change what these assertions mean (mirrors `tests/test_reentry_evidence.py`'s `_git`;
+    duplicated rather than imported — this codebase does not import fixtures across test files)."""
+    result = subprocess.run(  # noqa: S603
+        ["git", *args],  # noqa: S607
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+        env={
+            "GIT_AUTHOR_NAME": "Fleet Fixture",
+            "GIT_AUTHOR_EMAIL": "fixture@example.invalid",
+            "GIT_COMMITTER_NAME": "Fleet Fixture",
+            "GIT_COMMITTER_EMAIL": "fixture@example.invalid",
+            "GIT_CONFIG_GLOBAL": "/dev/null",
+            "GIT_CONFIG_SYSTEM": "/dev/null",
+            "HOME": str(cwd),
+            "PATH": "/usr/bin:/bin:/usr/local/bin",
+        },
+    )
+    return result.stdout.strip()
+
+
+def _throwaway_git_repo(path: Path) -> list[str]:
+    """A real repo with three commits on its default branch. Returns their SHAs, oldest first."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git(path, "init", "--initial-branch=main", ".")
+    shas = []
+    for i in range(3):
+        (path / f"file{i}.txt").write_text(f"content {i}\n")
+        _git(path, "add", "--all")
+        _git(path, "commit", "-m", f"commit {i}")
+        shas.append(_git(path, "rev-parse", "HEAD"))
+    return shas
+
+
+def _sha_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    """A fresh `state/fleet.db` whose five §12.45(i) SHA columns are seeded with real commits from
+    a throwaway git repo. Not a genuine pipeline run — §12.45(i)'s SHA-resolves-to-a-commit
+    property doesn't need one, and sub-clauses 2-5 (the sibling task) cover that separately.
+    Returns (db_path, repo_path)."""
+    repo = tmp_path / "throwaway-repo"
+    shas = _throwaway_git_repo(repo)
+    db = _fresh_baseline(tmp_path / "fleet.db")
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, harness_version) "
+            "VALUES (?,?,?,?)",
+            (RUN, NOW, "cfg", "1.4.2"),
+        )
+        conn.execute(
+            "INSERT INTO repos (repo_id, name, url, head_sha, updated_at) VALUES (?,?,?,?,?)",
+            ("repo-a", "acme/widget", "https://example.invalid/widget.git", shas[0], NOW),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, pre_commit_sha, post_commit_sha, "
+            "updated_at) VALUES (?,?,?,?,?,?)",
+            (RUN, "repo-a", 2, shas[0], shas[1], NOW),
+        )
+        conn.execute(
+            "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, dest_path, "
+            "pre_commit_sha, created_at) VALUES (?,?,?,?,?,?,?,?)",
+            ("task-a", RUN, "repo-a", 2, "MIGRATE", "java/acme/widget", shas[1], NOW),
+        )
+        conn.execute(
+            "INSERT INTO attempts (attempt_id, run_id, repo_id, task_id, phase, attempt, "
+            "command, exit_code, commit_sha, started_at, finished_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            ("attempt-a", RUN, "repo-a", "task-a", 2, 1, '["true"]', 0, shas[2], NOW, NOW),
+        )
+    finally:
+        conn.close()
+    return db, repo
+
+
+def test_the_five_named_sha_columns_all_resolve_to_real_commits(tmp_path):
+    """§12.45(i), second half: `repos.head_sha`, `phases.pre_commit_sha`/`post_commit_sha`,
+    `tasks.pre_commit_sha` and `attempts.commit_sha` are pointers INTO git (ADR-0024), never a
+    copy of its content — so every non-NULL value must resolve to a real commit on the repo's
+    branch, asserted with `git cat-file -e <sha>^{commit}`."""
+    db, repo = _sha_fixture(tmp_path)
+
+    verified: set[tuple[str, str]] = set()
+    for table, column in _SHA_COLUMNS:
+        values = {
+            row[0]
+            for row in _query(
+                db,
+                f'SELECT DISTINCT "{column}" FROM "{table}" '  # noqa: S608
+                f'WHERE "{column}" IS NOT NULL',
+            )
+        }
+        assert values, f"{table}.{column} has no non-NULL value in the fixture"
+        for sha in values:
+            result = subprocess.run(  # noqa: S603
+                ["git", "cat-file", "-e", f"{sha}^{{commit}}"],  # noqa: S607
+                cwd=repo,
+                check=False,
+                capture_output=True,
+            )
+            assert result.returncode == 0, f"{table}.{column} = {sha} is not a real commit"
+        verified.add((table, column))
+
+    assert verified == set(_SHA_COLUMNS), "not every named column was actually exercised"
+
+
+def test_no_persisted_text_or_blob_value_contains_a_diff_hunk_header(tmp_path):
+    """§12.45(ii): after a fixture run, no persisted value anywhere in `state/fleet.db` contains a
+    unified-diff hunk header — a diff smuggled into a payload, checkpoint, or error field would be
+    exactly the shadow-VCS anti-pattern ADR-0024 forbids, just relocated to a TEXT column instead
+    of a dedicated `mutations` table."""
+    db, _repo = _sha_fixture(tmp_path)
+    columns = _all_text_blob_columns(db)
+    assert columns, "the column walk returned nothing — that is broken, not clean"
+
+    # Rule 12: prove the scan is a real discriminator BEFORE trusting a zero count on real data.
+    poisoned = tmp_path / "poisoned.db"
+    shutil.copyfile(db, poisoned)
+    conn = sqlite3.connect(poisoned, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET last_error = ? WHERE run_id = ? AND repo_id = ? AND phase = ?",
+            ("@@ -1,4 +1,4 @@\n unrelated context\n", RUN, "repo-a", 2),
+        )
+    finally:
+        conn.close()
+    poisoned_count = _query(
+        poisoned,
+        'SELECT COUNT(*) FROM "phases" WHERE "last_error" LIKE ?',
+        (_HUNK_HEADER_LIKE,),
+    )[0][0]
+    assert poisoned_count > 0, "the scan failed to catch a synthetic hunk header planted in it"
+
+    for table, column in columns:
+        count = _query(
+            db,
+            f'SELECT COUNT(*) FROM "{table}" WHERE "{column}" LIKE ?',  # noqa: S608
+            (_HUNK_HEADER_LIKE,),
+        )[0][0]
+        assert count == 0, f"{table}.{column} contains a diff hunk header"
