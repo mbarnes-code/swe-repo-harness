@@ -261,8 +261,11 @@ before any hoist, and never passes `InferenceInput.contracts`. Unlike `API_CONTR
 join) or the five already-closed kinds (a fixture-proof gap against working code), these two have
 **no round-trip production code path at all** — a landed `xfail(strict=True)` test in
 `tests/test_sequence_e2e.py` documents the target state and will fail loudly (forcing the marker's
-removal) once persistence is wired. See D23 in `docs/INTEGRATION_HONESTY.md` for whether this is
-the same defect from a different angle or a distinct one — pending task review.
+removal) once persistence is wired. **Allocated D97** (`docs/INTEGRATION_HONESTY.md`) — task
+review confirmed this is genuinely distinct from D23, not a duplicate: D23's diagnosis (a missing
+`retargeted_from_repo_id` column) presumes rows are written today with the wrong shape, but
+`insert_edges` has exactly one call site anywhere in `src/` (scan-time only), so no contract-kind
+row is ever written at all — fixing D23's column alone would not close this gap.
 
 **§12.8 state after round HH: 5 of 8 proven, 3 of 8 open on two distinct, now well-understood
 production gaps** (`API_CONTRACT`'s starved extraction, `CONTRACT_IMPL`/`CONTRACT_CONSUME`'s

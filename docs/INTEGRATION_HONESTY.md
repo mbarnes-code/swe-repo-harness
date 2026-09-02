@@ -7754,3 +7754,52 @@ three of the four new per-worker checks (`RewriteWorker`'s, `BuildgenWorker`'s, 
 `_buildgen_input` wiring) ship with zero dedicated test coverage — only `RelocateWorker`'s got a
 regression test this round. Deleting any of the other three today would leave the suite green;
 flagged for a future round, not fixed here.
+
+## D97 — OPEN. `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges are computed in memory but never persisted — no production call site writes them, at any point
+
+**Found by round HH task 2 (2026-09-02), while attempting SPEC §12.8's residual fixture-fleet
+proof for these two `EdgeKind` members — a disclosed BLOCKED finding, not this task's own job to
+fix (TEST-ONLY scope). Verified free before writing**: form-agnostic sweep of this file's `D<n>`
+headings found no `D97`; highest allocated number was `D96`. Independently re-verified by task
+review, not accepted on the implementer's word alone — including a fresh, independently-written
+standalone reproduction script (not a reuse of the implementer's own test code) driving a real
+`fleet scan` → `fleet sequence` through a genuine hoist and querying the persisted `edges` table
+directly by SQL.
+
+**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2368`)
+has exactly ONE production call site anywhere in `src/`: `cli.py:2205`, inside
+`_persist_scan_edges` (`cli.py:2176`), itself reachable only from the scan path (`cli.py:1850`).
+`_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
+(`cli.py:2196`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3028-3186`)
+does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
+computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
+assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
+other write path (grepped in full by task review). A real run through `cycle_fleet`'s fixture
+(contract genuinely reaches `contracts.status = 'HOISTED'`, confirmed) leaves the `edges` table
+holding only the pre-existing `DECLARED_DEP`/`INTERNAL_IMPORT` rows from scan time — zero
+contract-kind rows, always, independent of fixture shape.
+
+**Not a duplicate of D23 — distinct and broader, cross-referenced here.** D23 (search `## D23 —`
+above) diagnoses a 15-column `insert_edges` schema missing a `retargeted_from_repo_id` column,
+implying retargeted-edge rows ARE written today, just with the wrong shape. That premise does not
+hold for the mechanism this entry describes: since `insert_edges` has exactly one call site
+(scan-time only, per above), no row `_materialize` produces — retargeted or freshly-inferred,
+contract-kind or otherwise — is ever written, missing column or not. D23 also never mentions
+`CONTRACT_IMPL` (a source-side edge, not a retarget) at all. **Fixing D23's missing column alone
+would not close this gap** — `_sequence_impl` would still need a real write path added. Read both
+entries together; this one is not covered by D23's proposed remedy.
+
+**Consequence.** SPEC §12 item 8's "every known cross-repo edge is discovered" clause
+(`docs/CRITERIA_PLAN.md` §8, ADR-0109) cannot close for these two `EdgeKind` members via a
+fixture-proof alone, unlike the five already-proven kinds (`DECLARED_DEP`, `INTERNAL_IMPORT`,
+`PUBLISHED_ARTIFACT`, `SHARED_RESOURCE`, `DYNAMIC_REF`) — there is no round-trip production code
+path to prove against. A landed `xfail(strict=True)` test
+(`tests/test_sequence_e2e.py::test_the_hoisted_contract_produces_real_contract_impl_and_consume_edges_in_the_table`)
+pins the target state and will hard-fail the suite once persistence is wired, forcing the marker's
+removal rather than silently staying green forever.
+
+**Not yet built:** a real write path — most naturally, `_sequence_impl` (or wherever
+`_materialize`'s output is available post-hoist) calling `insert_edges` with the contract-kind
+edges it already computes in memory, mirroring how `_persist_scan_edges` does it for scan-time
+edges. That design choice is not made here.
