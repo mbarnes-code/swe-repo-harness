@@ -1,0 +1,39 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (an `LlmPatchProposal`-schema object) differs. `files` carries TWO entries (a source fix and its matching test-expectation fix) to exercise the same multi-entry nested-object-tuple shape as the anthropic fixture, with realistic unified diffs rather than placeholders. This fixture is also the Rule-12 mutation base for `test_a_transform_repair_reply_missing_a_nested_diff_field_fails_schema_validation` in `tests/test_llm_golden_responses.py` (deletes `files[0].diff`, the one `ProposedFileEdit` field with no default).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_XformRepair01ZjIwYjk4",
+            "name": "emit_response",
+            "input": {
+              "files": [
+                {
+                  "path": "index.js",
+                  "diff": "--- a/index.js\n+++ b/index.js\n@@ -1,7 +1,7 @@\n function leftPad(str, len, ch) {\n-  ch = ch || '0';\n+  ch = ch || ' ';\n   str = String(str);\n   if (str.length >= len) return str;\n   return Array(len - str.length + 1).join(ch) + str;\n }\n"
+                },
+                {
+                  "path": "test/index.test.js",
+                  "diff": "--- a/test/index.test.js\n+++ b/test/index.test.js\n@@ -3,6 +3,6 @@\n describe('leftPad', () => {\n   it('pads with the default character', () => {\n-    assert.equal(leftPad('1', 3), '001');\n+    assert.equal(leftPad('1', 3), '  1');\n   });\n });\n"
+                }
+              ],
+              "approach_summary": "Change the default pad character from '0' to ' ' and update the matching test expectation",
+              "rationale": "the failing test expects a space-padded result but index.js's default pad character was '0'; the test itself was correct per the package's documented default, so index.js is the side that must change"
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 360,
+    "outputTokens": 88,
+    "totalTokens": 448
+  },
+  "metrics": {
+    "latencyMs": 610
+  }
+}

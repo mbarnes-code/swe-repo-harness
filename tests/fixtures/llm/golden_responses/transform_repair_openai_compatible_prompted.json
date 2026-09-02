@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` — the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) — this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (an `LlmPatchProposal`-schema object) differs. The encoded `files` array carries TWO entries, exercising the same nested-object-tuple shape as the TOOL_CALL fixtures but through PROMPTED's bare-JSON-text path rather than a structured tool-call argument.",
+  "id": "chatcmpl-XformRepair8f3b2c1a9d7e",
+  "object": "chat.completion",
+  "created": 1735690050,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"files\": [{\"path\": \"setup.py\", \"diff\": \"--- a/setup.py\\n+++ b/setup.py\\n@@ -1,6 +1,6 @@\\n from setuptools import setup\\n \\n-setup(name=\\\"flask-utils\\\", version=VERSION_UNRESOLVED)\\n+setup(name=\\\"flask-utils\\\", version=\\\"0.9.2\\\")\\n\"}, {\"path\": \"flask_utils/__init__.py\", \"diff\": \"--- a/flask_utils/__init__.py\\n+++ b/flask_utils/__init__.py\\n@@ -1,4 +1,4 @@\\n-from .compat import *  # noqa: F401,F403\\n+from .utils import *  # noqa: F401,F403\\n \\n __version__ = \\\"0.9.2\\\"\\n\"}], \"approach_summary\": \"Pin setup.py's version literal and repoint the package's star-import at the renamed utils module\", \"rationale\": \"setup.py referenced an undefined VERSION_UNRESOLVED name and __init__.py star-imported a compat module that was renamed to utils; both breakages stem from the same incomplete rename\"}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 300,
+    "completion_tokens": 92,
+    "total_tokens": 392
+  }
+}
