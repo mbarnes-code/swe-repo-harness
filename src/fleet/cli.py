@@ -10037,7 +10037,7 @@ async def _fire_t1_for_provider(
     *,
     policy: RevalidationPolicy,
     now: datetime,
-) -> bool:
+) -> frozenset[tuple[str, str]]:
     """T1 (`orchestrator.stubs.supersede`) for every `ACTIVE` stub naming `repo_id` as provider,
     given `provider_pr` is that provider's own durably-persisted `PullRequestDraft`.
 
@@ -10048,16 +10048,24 @@ async def _fire_t1_for_provider(
     record) and the D103 gap-1 sweep below over PR records that were ALREADY durably `MERGED`
     before this invocation (`provider_pr` is that prior record, re-read unchanged). Both need
     `_stub_supersede_inputs`'s `state = 'ACTIVE'` scoping to make a replay a no-op: a provider
-    with no `ACTIVE` stub, or one already `SUPERSEDED` by an earlier firing, returns `False`
+    with no `ACTIVE` stub, or one already `SUPERSEDED` by an earlier firing, returns `frozenset()`
     having written nothing — see `supersede()`'s own docstring for why a `SUPERSEDED` row is a
     no-op rather than a second transition.
 
-    Returns whether anything was written. The sweep uses this only for its own accounting; a
-    `False` return is the common case (no `ACTIVE` stub names this provider) and is not a failure.
+    Returns the `(consumer_repo_id, coord_key)` pairs T1 just superseded — the empty set is the
+    common case (no `ACTIVE` stub names this provider) and is not a failure. D105
+    (`docs/INTEGRATION_HONESTY.md`): `fleet resume --repoll-prs` calls `_stub_reconcile_impl` in
+    the SAME invocation immediately after `_pr_sync_impl`, and `reconcile()`'s own sweep would
+    otherwise immediately re-abandon a row this function just superseded (its provider's PR is now
+    `MERGED`, so `_awaiting_merge` reads it as no-longer-open). The caller threads this return
+    value all the way to `_stub_reconcile_impl` so it can exclude exactly these rows from that
+    same-call sweep — a row T1 did NOT touch this invocation (already `SUPERSEDED` from an earlier
+    command, or genuinely still `ACTIVE` against an unmerged provider) is unaffected and reaches
+    `reconcile()` exactly as before.
     """
     t1_records, t1_grouped = await _stub_supersede_inputs(read_conn, run_id, repo_id)
     if not t1_grouped:  # the common case: no ACTIVE stub names this provider at all
-        return False
+        return frozenset()
     provider_phase_rows = await _rows(
         read_conn,
         "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? ORDER BY phase DESC LIMIT 1",
@@ -10077,7 +10085,10 @@ async def _fire_t1_for_provider(
     for stub in t1_grouped.values():
         t1_decisions.extend(supersede_stub(stub, provider_facts, policy=policy))
     if not t1_decisions:
-        return False
+        return frozenset()
+    superseded_this_call = frozenset(
+        (decision.consumer_repo_id, decision.coord_key) for decision in t1_decisions
+    )
     by_consumer: dict[str, list[StubDecision]] = {}
     for decision in t1_decisions:
         by_consumer.setdefault(decision.consumer_repo_id, []).append(decision)
@@ -10134,7 +10145,7 @@ async def _fire_t1_for_provider(
                 )
 
     await writer.submit(t1_unit)
-    return True
+    return superseded_this_call
 
 
 async def _pr_sync_impl(
@@ -10184,6 +10195,13 @@ async def _pr_sync_impl(
     merged: list[str] = []
     closed: list[str] = []
     unchanged: list[str] = []
+    # D105 (`docs/INTEGRATION_HONESTY.md`): every `(consumer_repo_id, coord_key)` T1 supersedes in
+    # THIS invocation, across both the newly-observed loop below and the D103 gap-1 sweep. `fleet
+    # resume --repoll-prs` calls `_stub_reconcile_impl` immediately after this function returns, in
+    # the SAME command — `reconcile()`'s own sweep would otherwise re-abandon a row this function
+    # just superseded (its provider is now `MERGED`, so `_awaiting_merge` no longer holds it).
+    # Returned so the caller can exclude exactly these rows from that same-call sweep.
+    t1_superseded: set[tuple[str, str]] = set()
     stamp = _now()
     # Read once, up front: both the per-repo loop's newly-observed merges and the D103 gap-1
     # sweep over already-durable ones fire T1 under the SAME policy.
@@ -10265,8 +10283,10 @@ async def _pr_sync_impl(
                     # fires from the SAME code path that just wrote it, not from a reader of it.
                     # `supersede()` requires SUCCEEDED + MERGED (ADR-0011 stacking); `updated`
                     # above is this provider's own just-written PR record, already `MERGED`.
-                    await _fire_t1_for_provider(
-                        read_conn, writer, run_id, repo_id, updated, policy=policy, now=stamp
+                    t1_superseded.update(
+                        await _fire_t1_for_provider(
+                            read_conn, writer, run_id, repo_id, updated, policy=policy, now=stamp
+                        )
                     )
                 elif status.state is PrState.CLOSED:
                     closed.append(repo_id)
@@ -10287,8 +10307,10 @@ async def _pr_sync_impl(
             for repo_id, draft in sorted(records.items()):
                 if draft.state is not PrState.MERGED:
                     continue
-                await _fire_t1_for_provider(
-                    read_conn, writer, run_id, repo_id, draft, policy=policy, now=stamp
+                t1_superseded.update(
+                    await _fire_t1_for_provider(
+                        read_conn, writer, run_id, repo_id, draft, policy=policy, now=stamp
+                    )
                 )
         finally:
             await read_conn.close()
@@ -10300,6 +10322,13 @@ async def _pr_sync_impl(
         "closed": sorted(closed),
         "unchanged": sorted(unchanged),
         "terminal": sorted(set(records) - set(pollable)),
+        # D105: every `stubs` row T1 superseded THIS invocation, as `[consumer_repo_id, coord_key]`
+        # pairs (JSON-safe: a `frozenset` of tuples serializes as an array of 2-element arrays).
+        # `_resume_impl` reads this straight back into a set of tuples and passes it to
+        # `_stub_reconcile_impl` so its same-call sweep excludes exactly these rows — the fix for
+        # the same-call reconcile-undoes-T1 defect. Carried in the JSON-facing result too, for an
+        # operator to see which rows were held back from reconciliation and why.
+        "t1_superseded_this_call": sorted(list(pair) for pair in t1_superseded),
         "exit_code": int(ExitCode.SUCCESS),
     }
 
@@ -11681,7 +11710,23 @@ async def _resume_impl(
     # per-row `heartbeat_ttl_seconds` half. Both are required — see `_STALE_HEARTBEAT_PREDICATE`,
     # and `stub_reconcile` above shares it for the same reason `_now()` is called once per resume.
     now = _now()
-    stub_reconciled = await _stub_reconcile_impl(path, settings, run_id, now=now, dry_run=dry_run)
+    # D105 (`docs/INTEGRATION_HONESTY.md`): when `--repoll-prs` just ran `_pr_sync_impl` in THIS
+    # same call, exclude every row it superseded via T1 from this sweep — see
+    # `_stub_reconcile_impl`'s `exclude_this_call` docstring for why. `pr_sync` is `None` on a
+    # plain `fleet resume` (not requested), under `--dry-run` (skipped), and on a forge failure —
+    # all three pass nothing, exactly matching prior behaviour.
+    t1_superseded_this_call: frozenset[tuple[str, str]] = frozenset()
+    if pr_sync is not None:
+        pairs = cast(Sequence[Sequence[str]], pr_sync.get("t1_superseded_this_call", ()))
+        t1_superseded_this_call = frozenset((str(pair[0]), str(pair[1])) for pair in pairs)
+    stub_reconciled = await _stub_reconcile_impl(
+        path,
+        settings,
+        run_id,
+        now=now,
+        dry_run=dry_run,
+        exclude_this_call=t1_superseded_this_call,
+    )
     horizons = (_iso(now - timedelta(seconds=settings.config.run.stale_after_s)), _iso(now))
 
     if dry_run:
@@ -12512,7 +12557,13 @@ async def _apply_stub_reconcile(
 
 
 async def _stub_reconcile_impl(
-    path: Path, settings: FleetSettings, run_id: str, *, now: datetime, dry_run: bool
+    path: Path,
+    settings: FleetSettings,
+    run_id: str,
+    *,
+    now: datetime,
+    dry_run: bool,
+    exclude_this_call: frozenset[tuple[str, str]] = frozenset(),
 ) -> dict[str, object]:
     """`stub_reconcile`: the sweep §13 row 35 requires before the final checkpoint and again in
     `fleet resume` (§10, §3.5.1). Every `stubs` row still `ACTIVE`/`SUPERSEDED` goes `ABANDONED`
@@ -12523,8 +12574,23 @@ async def _stub_reconcile_impl(
     `--dry-run` computes and returns the identical outcome without writing: `reconcile()` is a
     pure function over rows already read, so the preview and the real run share one read path and
     diverge only in whether `_apply_stub_reconcile` runs (§11.5's dry-run promise: no SQL write).
+
+    `exclude_this_call` — D105 (`docs/INTEGRATION_HONESTY.md`): `(consumer_repo_id, coord_key)`
+    pairs `_fire_t1_for_provider` just superseded in THIS SAME `fleet resume --repoll-prs`
+    invocation, via `_pr_sync_impl`'s `t1_superseded_this_call`. Those rows are read back here as
+    freshly `SUPERSEDED` with their provider now `MERGED` — `_awaiting_merge` would read the PR as
+    no-longer-open and `reconcile()` would immediately re-sweep them to `ABANDONED` via T3,
+    overwriting T1's outcome and the finding it just cleared within one command. Filtering them out
+    BEFORE `reconcile()` runs is the fix: a row T1 did not touch this call (already `SUPERSEDED`
+    from an earlier command, or genuinely `ACTIVE` against a still-unmerged provider) is absent
+    from this set and reaches `reconcile()` exactly as before — this is a strict narrowing of the
+    sweep's input, never a change to `reconcile()` itself or to its `OPEN_STATES`/carve-out logic.
+    Default `frozenset()` — a plain `fleet resume` with no `--repoll-prs` call this way and pass
+    nothing, matching prior behaviour exactly.
     """
     records, providers = await _with_ro(path, lambda conn: _stub_reconcile_inputs(conn, run_id))
+    if exclude_this_call:
+        records = {key: record for key, record in records.items() if key not in exclude_this_call}
     outcome = stub_reconcile(
         records.values(),
         providers,
@@ -12541,6 +12607,9 @@ async def _stub_reconcile_impl(
             f"{h.consumer_repo_id}→{h.coord_key}" for h in outcome.held_for_merge
         ),
         "degraded_consumers": sorted(outcome.degraded_consumers),
+        # D105 disclosure: rows this same call's `_stub_reconcile_impl` deliberately did NOT sweep
+        # because `_pr_sync_impl` (`--repoll-prs`) had just superseded them via T1.
+        "excluded_superseded_this_call": sorted(f"{c}→{k}" for c, k in exclude_this_call),
     }
 
 
