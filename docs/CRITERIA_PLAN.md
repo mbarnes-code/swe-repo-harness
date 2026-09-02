@@ -192,9 +192,21 @@ real adapter code (confirmed: all 4 backends' response-parsing is role-agnostic 
 validation — so reusing `REPO_CLASSIFY`'s proven envelopes with only the payload swapped is sound,
 not merely convenient). The schema pin moved to `tests/test_llm_golden_responses.py:113-115`
 (3 assertions, one per landed role) — the citation above is a record of round II's own state, not
-repointed. **9 of 12 roles remain** (`conflict_resolution`, `api_incompat_rewrite`,
-`build_authoring`, `cycle_break_proposal`, `escalation`, `transform_repair`, `build_diagnosis`,
-`manifest_extract`, `dep_disambiguate`).
+repointed.
+
+**Round IV tasks 2 and 3 (2026-09-02, `bac8b91`/`f937190`, both reviewed Approved) — 4 more roles
+landed, 7 of 12 now covered.** Task 2 added `BUILD_DIAGNOSIS`/`DEP_DISAMBIGUATE`; task 3 added
+`CYCLE_BREAK_PROPOSAL`/`CONFLICT_RESOLUTION` — both via the same `GoldenCase` table pattern, both
+independently investigated the specific complications their roles introduced (task 2: the
+nullable `chosen_coordinate` field, confirmed a genuine null-branch exercise, not a mislabeled
+valid case; task 3: `mechanism`'s `pattern=r"^(bazel_dep|single_version_override)$"` constraint,
+confirmed the mutation test fires specifically on the pattern, not a missing-field error). Both
+task reviews independently re-derived the whole-tree `ruff format --check .` claim (123 dirty
+files, the pre-existing pinned baseline — not introduced by either task) rather than trusting it,
+given round III's own close-out found `main` red from exactly this kind of unverified claim. The
+two tasks' diffs conflicted in the same table (both add rows) — combined by the controller at
+merge, additive on both sides, no logic conflict. **5 of 12 roles remain** (`api_incompat_rewrite`,
+`build_authoring`, `escalation`, `transform_repair`, `manifest_extract`).
 
 **Not closed by composition.** `tests/test_llm_roles.py`'s existing round-trip test IS
 parametrized over all 12 roles, but its input is a hand-shaped Pydantic-model literal
