@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 50 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 57 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -108,6 +108,32 @@ get the existence/in-range checks and nothing more.
 The prose census below is the **module's**, about the one profile named in
 ``_CENSUS_PROSE_PROFILE``; a second profile's census would not be stated here and so would
 not be checked. That is a disclosed limit of this file's prose, not a mechanism.
+
+The anchor may now come before OR after its citation
+------------------------------------------------------
+Round GG's own final review found this module's anchor recognition blind on one side: an
+anchor immediately BEFORE a parenthesised citation (``_ANCHORED``) was the only shape
+checked, and the ledger also uses the reverse -- the citation first, its anchor immediately
+after, e.g. ```` `retry.py:203-217`'s `RETRY_TRANSIENT` branch ````. Round GG hit this blind
+spot three times in one round, none caught by the gate, all found only by a human re-reading.
+``_ANCHORED_REVERSE`` (round HH task 3) closes it, sharing ``_resolve_anchor``'s resolution
+and containment logic with the forward form so the two cannot silently diverge on what counts
+as an anchor.
+
+Measured at ``ac75bb3`` (this task's base), before landing anything: the previously-invisible
+citation-first population is 8 in ``INTEGRATION_HONESTY.md`` (66 -> 74 anchored citations) and
+0 in ``CRITERIA_PLAN.md`` (unchanged at 6) -- sized with a throwaway script per this task's own
+brief before any regex was written, exactly like round FF's own citation-gate task sized its
+starting population first. A looser, free-form "any backtick token within ~40 characters"
+candidate window was measured too and rejected: it found 143/5 candidates before requiring
+resolution and would have produced the false pair documented at ``_ANCHORED_REVERSE``'s own
+definition (`` `cli.py:7427`; `_VerifyPlan` ``, which is not what that citation names). The
+landed regex is tight-adjacency only, and of its 8 real matches, 7 are pre-existing rot this
+task did not cause and does not silently make blocking -- absorbed into ``_PINNED_UNRESOLVED``
+individually, each measured, exactly as this file's own convention requires (see the dated
+block there). The 8th, ``_sweep_containers`` (`workers/buildverify.py:1088`), already resolves
+and needed no pin. ``CRITERIA_PLAN``'s one candidate match names a bare filename rather than a
+symbol, so it was never added to the survey and there was nothing to pin.
 
 A second profile, and a second derivation
 ------------------------------------------
@@ -232,6 +258,22 @@ _COMMIT_BOUND = re.compile(r"\(`:\d+(?:-\d+)?`\s+at\s+`[0-9a-f]{7,40}`\)")
 _ANCHORED = re.compile(
     r"`(?P<anchor>[^`\n]{3,120})`[,;]?\s*\((?:[^()`]{0,40}\s)?"
     r"`(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + _EXT_ALT + r"))(?P<lines>(?::\d+(?:-\d+)?)+)`"
+)
+# The reverse/citation-first shape (round HH task 3): the citation appears FIRST, immediately
+# followed by its anchor, e.g. `` `retry.py:203-217`'s `RETRY_TRANSIENT` branch `` or
+# `` `state/repository.py:1259` `set_task_target_paths` ``. Tight adjacency ONLY -- a possessive
+# `'s`, a comma, or nothing but a single space -- deliberately NOT a free-form nearby-token
+# window: a looser window (checked while sizing this population, never landed) matched
+# `` `cli.py:7427`; `_VerifyPlan` `` as if `_VerifyPlan` anchored that citation, when the
+# semicolon in fact introduced an unrelated corrective clause and the citation's real anchor
+# (`cli._prepare_verify`) precedes it instead, already outside this regex's reach because
+# markdown bold (`**...**`) sits between that anchor and its own parenthesised citation. That
+# false pair is exactly the failure mode CLAUDE.md's Rule 12 warns a loose shape regex invites;
+# excluding `;` and any free-text gap here is what keeps it out, at the cost of not recognising
+# that specific markdown-interrupted case (a disclosed, separate blind spot, not a new one).
+_ANCHORED_REVERSE = re.compile(
+    r"`(?P<path>[A-Za-z0-9_][A-Za-z0-9_./-]*\.(?:" + _EXT_ALT + r"))(?P<lines>(?::\d+(?:-\d+)?)+)`"
+    r"(?:'s|,)?\s?`(?P<anchor>[^`\n]{2,120})`"
 )
 _IDENT_PATH = re.compile(r"^\.?[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*(?:\(\))?$")
 
@@ -574,6 +616,62 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "_record",
         "workers/rewrite.py:614-634",
     ),  # L2765 defined at [(642, 662), (642, 662)], cited 614-634
+    # Round HH task 3 (2026-09-02): the citation-first form (`_ANCHORED_REVERSE`) is newly
+    # recognised this round and, per this task's brief, this newly-visible population is
+    # pre-existing rot this task did not cause, not something to silently make blocking --
+    # absorbed here via the same pins ratchet the forward form already uses, each measured
+    # individually below rather than pinned sight unseen. Measured at `ac75bb3` (this task's
+    # base): 8 total newly-recognised citation-first anchors in INTEGRATION_HONESTY, of which
+    # 7 are pinned here (the 8th, `_sweep_containers` (`workers/buildverify.py:1088`), already
+    # resolves correctly and needs no pin); 0 in CRITERIA_PLAN (its own one candidate match,
+    # `test_graph_sequence.py:863`'s `test_graph_cycles.py`, names a bare filename, not a
+    # symbol this module's resolver can look up, so it was never added to the survey at all).
+    (
+        "gazelle_binary",
+        "settings.py:563",
+    ),  # L787 defined at [(570, 571)], cited 563-563 -- genuine drift: the field's own
+    #    definition is unchanged in content, but unrelated growth in the ruleset-table
+    #    docstring immediately above it (lines ~505-568) shifted it down; line 563 today sits
+    #    inside that unrelated docstring, not `gazelle_binary`'s own.
+    (
+        "test_publish_is_not_blocked_by_worktree_droppings_outside_the_pathspec",
+        "tests/test_cli.py:3168",
+    ),  # L1469 defined at [(5687, 5746), (5687, 5746)], cited 3168-3168 -- genuine drift:
+    #    `tests/test_cli.py` has grown substantially since this citation was written; the test
+    #    itself is unmoved in content, only its line number.
+    (
+        "test_publish_module_lock_survives_a_crash_between_materialize_and_commit",
+        "tests/test_cli.py:3229",
+    ),  # L1502 defined at [(5747, 5803), (5747, 5803)], cited 3229-3229 -- same class as the
+    #    entry immediately above, same file, same cause.
+    (
+        "RETRY_TRANSIENT",
+        "retry.py:203-217",
+    ),  # L2291 defined at [(76, 77)], cited 203-217 -- a deliberate USAGE-site citation, not
+    #    the enum member's own definition: the cited range is `RetryPolicy.decide`'s branch
+    #    that returns `RetryAction.RETRY_TRANSIENT`, which the ledger's own prose names
+    #    ("`retry.py:203-217`'s `RETRY_TRANSIENT` branch replays..."). Same category
+    #    `response.usage` above is pinned for.
+    (
+        "task_id_for",
+        "workers/rewrite.py:107",
+    ),  # L7145 defined at [(128, 132), (128, 132)], cited 107-107 -- genuine drift: line 107
+    #    today falls inside the tail of a different function (`task_id_for_ids`) defined
+    #    earlier in the same module; `task_id_for`'s own `def` is at 128.
+    (
+        "set_task_target_paths",
+        "state/repository.py:1259",
+    ),  # L7371 defined at [(490, 491), (1274, 1291)], cited 1259-1259 -- genuine drift: two
+    #    defs exist (an abstract Protocol stub at 490-491, the real `SqliteStateRepository`
+    #    implementation at 1274-1291); the citation falls between both, nearest the real impl.
+    (
+        "_TransformSink",
+        "cli.py:4537",
+    ),  # L7408 defined at [(4195, 4347), (4195, 4347)], cited 4537-4537 -- a deliberate
+    #    USAGE-site citation: the ledger's own prose names it as "`cli.py:4537`,
+    #    `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`" -- the
+    #    SQL statement `_TransformSink` triggers, well past the class's own AST span, not the
+    #    class definition itself. Same category as the `RETRY_TRANSIENT` entry above.
 )
 
 
@@ -846,6 +944,45 @@ def _cited_source_text(root: Path, resolved: str, lo: int, hi: int) -> str:
     return "\n".join(lines[lo - 1 : hi])
 
 
+def _resolve_anchor(
+    root: Path,
+    tables: dict[str, dict[str, list[tuple[int, int]]]],
+    cite: Citation,
+    anchor: str,
+) -> Anchored | None:
+    """Look ``anchor`` up in ``cite.resolved``'s own symbol table and build the verdict.
+
+    Shared by both anchor shapes -- adjacent-before (``_ANCHORED``) and adjacent-after
+    (``_ANCHORED_REVERSE``) -- so what counts as "our class" (a bare identifier that is
+    actually defined in the cited file) cannot silently diverge between the two. Returns
+    ``None`` when the citation isn't a resolved ``.py`` file, the anchor isn't a bare
+    identifier, or the identifier names nothing that file defines -- none of those are errors,
+    they just mean this pair isn't a checkable definition-citation.
+    """
+    if cite.resolved is None or not cite.resolved.endswith(".py"):
+        return None
+    if not _IDENT_PATH.match(anchor):
+        return None  # not an identifier -- prose or a quoted expression, not our class
+    key = anchor.rstrip("()").lstrip(".")
+    try:
+        if cite.resolved not in tables:
+            tables[cite.resolved] = _symbol_table(root / cite.resolved)
+        table = tables[cite.resolved]
+    except (OSError, SyntaxError, ValueError) as exc:
+        return Anchored(cite, anchor, False, "", error=f"{type(exc).__name__}: {exc}")
+    parts = key.split(".")
+    spans: list[tuple[int, int]] | None = None
+    for i in range(len(parts)):
+        spans = table.get(".".join(parts[i:]))
+        if spans:
+            break
+    if not spans:
+        return None  # the anchor names nothing this file defines -- not our class
+    lo, hi = cite.span
+    contained = any(s <= lo and hi <= e for s, e in spans)
+    return Anchored(cite, anchor, contained, f"defined at {spans[:3]}, cited {lo}-{hi}")
+
+
 def build_survey(root: Path, profile: DocProfile) -> Survey:
     """Read one profiled document and resolve every citation in it. All I/O is here.
 
@@ -881,36 +1018,28 @@ def build_survey(root: Path, profile: DocProfile) -> Survey:
         survey.citations.append(cite_of(m))
 
     tables: dict[str, dict[str, list[tuple[int, int]]]] = {}
+    forward_citation_starts: set[int] = set()
     for m in _ANCHORED.finditer(norm):
+        forward_citation_starts.add(m.start("path"))
         anchor = m.group("anchor").strip()
         cite = cite_of(m)
-        if cite.resolved is None or not cite.resolved.endswith(".py"):
+        resolved = _resolve_anchor(root, tables, cite, anchor)
+        if resolved is not None:
+            survey.anchored.append(resolved)
+
+    # Round HH task 3: the reverse/citation-first shape -- see `_ANCHORED_REVERSE`'s own
+    # docstring comment for the shape and why it is this tight. Skips any citation the forward
+    # form above already consumed (by citation-match start position, not by key, so a genuine
+    # duplicate anchor pair cannot silently double-count) -- in this corpus no citation has ever
+    # been observed to match both shapes, but nothing here assumes that stays true.
+    for m in _ANCHORED_REVERSE.finditer(norm):
+        if m.start("path") in forward_citation_starts:
             continue
-        if not _IDENT_PATH.match(anchor):
-            continue  # not an identifier -- prose or a quoted expression, not our class
-        key = anchor.rstrip("()").lstrip(".")
-        try:
-            if cite.resolved not in tables:
-                tables[cite.resolved] = _symbol_table(root / cite.resolved)
-            table = tables[cite.resolved]
-        except (OSError, SyntaxError, ValueError) as exc:
-            survey.anchored.append(
-                Anchored(cite, anchor, False, "", error=f"{type(exc).__name__}: {exc}")
-            )
-            continue
-        parts = key.split(".")
-        spans: list[tuple[int, int]] | None = None
-        for i in range(len(parts)):
-            spans = table.get(".".join(parts[i:]))
-            if spans:
-                break
-        if not spans:
-            continue  # the anchor names nothing this file defines -- not our class
-        lo, hi = cite.span
-        contained = any(s <= lo and hi <= e for s, e in spans)
-        survey.anchored.append(
-            Anchored(cite, anchor, contained, f"defined at {spans[:3]}, cited {lo}-{hi}")
-        )
+        anchor = m.group("anchor").strip()
+        cite = cite_of(m)
+        resolved = _resolve_anchor(root, tables, cite, anchor)
+        if resolved is not None and survey.anchored_by_key(resolved.key) is None:
+            survey.anchored.append(resolved)
     return survey
 
 
