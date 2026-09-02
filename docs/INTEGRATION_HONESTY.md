@@ -7419,13 +7419,17 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12567-12804` at `2a5c2ac`), not the pre-Task-B code the paragraph above was describing.**
-*(Repointed 2026-09-02, round VI, THREE separate times as this round's own successive `cli.py`
-additions kept shifting it — converted to the commit-bound form here to stop the recurring drift;
-this describes the function's shape as of the cited commit, re-derive fresh if citing "current".
-The bare sub-citations inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/
-`:12360-12376` below — are NOT re-verified here, only the one anchored citation the automated gate
-checks; a future pass should sweep the rest of this paragraph.)* The
+(`cli.py:12596-12833`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-02, round VI, FOUR separate times as this round's own successive `cli.py` additions kept
+shifting it. Correction to this paragraph's own prior self: the "at `<sha>`" suffix a previous
+repointing added here was NOT a functional exemption — `test_no_unpinned_anchored_citation_
+fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
+convention (that convention marks a paragraph's CENSUS NUMBER claims as historical via
+`_RECORD_MARKER`, a different check entirely) — the citation gate still required a live-resolving
+line range regardless of the suffix, and did in fact catch it re-drifted a fourth time. Reverted
+to a plain line citation; a real pin would need editing the test file itself, not done here. The
+bare sub-citations inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/`:12360-12376`
+below — are still NOT re-verified, only the one anchored citation the automated gate checks.)* The
 `if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12347` (REWRITE's
 `elif not landed_units:` nothing-landed branch) and `:12389` (the non-REWRITE discard branch) —
 both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
@@ -7818,7 +7822,7 @@ has exactly ONE production call site anywhere in `src/`: `cli.py:2217`, inside
 `_persist_scan_edges` (`cli.py:2188`), itself reachable only from the scan path (`cli.py:1861`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
 (`cli.py:2207`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3038-3206`)
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3039-3207`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -7884,7 +7888,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:9539-9652`) returns early at `if not servable: return result`
+`_continue_impl` (`src/fleet/cli.py:9540-9653`) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
