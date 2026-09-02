@@ -50,7 +50,7 @@ from fleet.orchestrator.registry import register_worker
 from fleet.rewrite.apply import check_diff
 from fleet.rewrite.pipeline import DEFAULT_MAX_PASSES, RewriteOutcome, RewritePipeline
 from fleet.rewrite.rules import EngineRegistry, RewriteRule
-from fleet.util.fs import scoped_tempdir
+from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
 from fleet.vcs.commits import (
     CommitOutcome,
     FleetTrailers,
@@ -241,6 +241,15 @@ class RewriteInput(WorkerInput):
         description="ADR-0021 memory, rendered ONLY under EVIDENCE_PLUS_REJECTED_APPROACHES. It "
         "carries no diff text, so a raw prior patch cannot travel inside it.",
     )
+    min_free_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="`preflight.min_free_bytes`, re-checked before THIS repo's rewrites rather "
+        "than once at startup (§11.3): the fleet fills the volume as it runs, so a floor tested "
+        "at repo 1 says nothing about repo 180. `0` disables the gate and is the default only "
+        "because a payload built by hand in a test has no `config/fleet.yaml` behind it; `fleet "
+        "transform` always passes the configured value.",
+    )
 
 
 class RewriteOutput(WorkerOutput):
@@ -306,6 +315,29 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         output = RewriteOutput()
         usage = TokenUsage()
         root = Path(ctx.workdir)
+
+        # §11.3, before the first rewrite pass: the fleet fills the volume as it runs, so a floor
+        # tested at repo 1 says nothing about repo 180 (same reasoning as `clone.py`'s per-clone
+        # check).
+        try:
+            require_free_space(
+                root,
+                payload.min_free_bytes,
+                operation=f"rewrite {payload.dest_path}",
+            )
+        except DiskFloorBreached as breach:
+            return WorkerResult[RewriteOutput](
+                status="failed",
+                output=output,
+                remaining_units=owed,
+                usage=usage,
+                error=WorkerError(
+                    failure_class=FailureClass.DISK_EXHAUSTED,
+                    retryable=False,
+                    stderr_tail=str(breach),
+                    exception_type=f"{type(breach).__module__}.{type(breach).__qualname__}",
+                ),
+            )
 
         with scoped_tempdir(prefix="fleet-rewrite-") as patch_dir:
             for index, unit in enumerate(owed):
