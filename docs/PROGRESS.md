@@ -8691,3 +8691,20 @@ landed, two structural blockers (B, C) plus the `_eligible_build_units` item rem
 next candidate. Blockers B (version-sourcing) and C (`_unit_deps` reclassification) each need
 their own sizing/design pass before dispatch, similar to how Blocker A did. D94 remains the
 standing NEW-MECHANISM candidate for a dedicated round if nothing smaller surfaces.
+
+### Checkpoint — round VI, fourth wave (2026-09-02, same day)
+
+**§12 count: 27 of 48, unchanged — this wave closed D105 only, a defect-ledger fix within an
+already-open criterion.** D105 landed (`d8c1cd7`/`0243792`, task-scoped review Approved): the
+`fleet resume --repoll-prs` same-call interaction bug is fixed via an exclusion set threaded from
+T1's own effect through to `reconcile()`'s sweep input — `reconcile()` itself untouched, review
+independently confirmed the exclusion targeting is precise (matches `_stub_reconcile_inputs`' own
+dict key exactly) and reproduced the Rule-12 mutation proof in a fresh interpreter-isolated
+worktree. The review surfaced a plausible but unconfirmed follow-up — a stub superseded in one
+`fleet resume` call, surviving un-revalidated into a LATER separate call, has no protection from
+D105's call-scoped exclusion — allocated **D106**, disclosed as plausible, not independently
+investigated as a live bug. Citation drift recurred once more (same recurring interior-range
+citation), fixed same-day.
+
+Full-suite not re-run whole this wave; `mypy`/`ruff`/every touched test file reconfirmed green
+after each merge (`test_cli.py` 168/168, `test_stubs.py` 32/32, citation gate 72/72).
