@@ -1283,6 +1283,75 @@ def test_build_reaches_phase_three_and_lands_the_generated_files(
     assert "EcosystemAdapterUnavailable" not in kinds, kinds
 
 
+def test_a_degraded_repo_with_no_rhi_repo_exits_7(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, filter_repo: FakeFilterRepo  # noqa: F811
+) -> None:
+    """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
+    `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
+    proved in isolation from the already-covered RHI trigger (`test_phase_four_withholds_a_repo_
+    whose_phase_three_did_not_succeed` and others in this file cover RHI).
+
+    A real stub-consumer scenario is proven elsewhere; this test isolates `cli.py::build`'s
+    exit-code determination by writing the `phases` row directly, so the assertion is about what
+    the CLI does with a `DEGRADED` phase-3 row, not about how a repo comes to hold one.
+    """
+    transformed(fleet)
+    first = build(fleet, "--no-sandbox")
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    before = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert "REQUIRES_HUMAN_INTERVENTION" not in before.values(), before
+    victim = sorted(before)[0]
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'DEGRADED' WHERE repo_id = ? AND phase = 3",
+            (victim,),
+        )
+    finally:
+        conn.close()
+
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION == 7, result.output
+
+    after = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert after[victim] == "DEGRADED", after
+    assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after
+
+
+def test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7(
+    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+) -> None:
+    """D93 / SPEC §3.5.1 point 5, Phase 4: the same trigger, at `cli.py::verify`'s own exit-code
+    determination site — a genuinely separate call site from `build`'s (`_needs_human_attention`
+    is shared, but each phase reads its own `phases` rows), so this is not redundant with the
+    Phase 3 test above.
+    """
+    transformed(fleet)
+    assert build(fleet, "--no-sandbox").exit_code == ExitCode.SUCCESS
+    first = verify(fleet, "--rdeps-limit", "3")
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    before = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 4"))
+    assert "REQUIRES_HUMAN_INTERVENTION" not in before.values(), before
+    victim = sorted(before)[0]
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'DEGRADED' WHERE repo_id = ? AND phase = 4",
+            (victim,),
+        )
+    finally:
+        conn.close()
+
+    result = verify(fleet, "--rdeps-limit", "3")
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION == 7, result.output
+
+    after = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 4"))
+    assert after[victim] == "DEGRADED", after
+    assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after
+
+
 def test_the_build_runs_against_the_immutable_snapshot_and_nothing_else(
     fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:
