@@ -882,12 +882,31 @@ local` (or whatever the local-only profile is named) and assert every named sub-
 genuine new test infrastructure (a runnable local-profile fixture fleet), not a one-shot task.
 
 ## 42. New backend costs one file + one registry line
-**OPEN — this done bar's own scope closed (round N, `cc12a2a`), criterion overall still 5 of 9.**
-`register_backend`'s duplicate-name `RuntimeError` now has a real, reviewed-Approved test
-(`tests/test_llm_client.py::test_register_backend_refuses_a_duplicate_name`) — the specific gap
-this file's done bar named. Four of the other eight startup refusals were already covered before
-this round; four remain open (not this round's scope). Do not count §12.42 toward the `<n> of 48`
-tally — the criterion as a whole is still open.
+**OPEN — "5 of 9" was stale, likely fully closed, NOT yet flipped DONE pending final-review
+confirmation.** `register_backend`'s duplicate-name `RuntimeError` has a real test
+(`tests/test_llm_client.py::test_register_backend_refuses_a_duplicate_name`, round N,
+`cc12a2a`). SPEC's literal text (`docs/SPEC.md`, "A new backend costs one file and one registry
+line") names, distinctly: (1) the fixture-backend proof — **closed round DD task 1
+(2026-09-02)**, `tests/test_llm_backend_fixture_e2e.py` + `tests/fixtures/llm/echo_backend.py`,
+reviewed Approved, mutation-proven ("serves every role" genuinely discriminates — truncating the
+role loop reddens it); (2) the duplicate-name refusal — closed round N, above; (3) refusal at
+`RunContext` construction when the active profile names a backend that does not resolve —
+`tests/test_backend_registry_gate.py::
+test_a_shipped_name_the_live_registry_lacks_is_refused_at_startup`; (4) refusal when a tier has an
+empty target list — `tests/test_llm_roles.py::
+test_a_role_whose_tier_has_no_target_fails_loudly_at_startup` and
+`tests/test_settings.py::test_a_role_routed_to_an_empty_tier_is_a_startup_error`; (5) refusal when
+an `openai_compatible` target has no `base_url` — `tests/test_settings.py::
+test_openai_compatible_target_without_base_url_is_refused`; (6) refusal when a role's tier is not
+a `ModelTier` member — `tests/test_settings.py::
+test_a_role_routed_to_a_tier_that_is_not_a_modeltier_member_is_a_startup_error`. **All six
+independently confirmed present via direct grep (controller, 2026-09-02), not carried forward from
+the stale "9" framing** — but not re-read line-by-line for whether each genuinely proves
+construction-time (not deferred-to-runtime) refusal, which the round's final review should
+confirm before this entry is marked DONE and counted toward the `<n> of 48` tally. The old "9"
+denominator and "four remain open" framing appear to predate work that has since landed and are
+not trusted here — do not cite them.
+**Done bar, if confirmed:** flip to DONE, add §42 to the Rollup, recount.
 
 ## 43. Failover layered, bounded, fail-closed
 **OPEN — case (ii) is the sole remaining blocker, everything else in this entry closed.** Case
