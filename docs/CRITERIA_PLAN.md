@@ -1238,6 +1238,31 @@ one-shot bundle. **Still not ready for a single-task dispatch; ready for the FIR
 follow-on tasks (Blocker A, since it's the prerequisite for the other two being end-to-end
 testable).**
 
+**Update, round VI research-4 (2026-09-02) — Blocker A's framing corrected, adjudicated, ready to
+dispatch.** A follow-up research pass found the "state-machine-adjudication shape" comparison to
+ADR-0112 above was WRONG: every transition the stub scenario needs already exists in
+`ALLOWED_TRANSITIONS`, and `WaveScheduler.admit()`/`test_a_blocked_repo_is_not_admitted` need zero
+changes under any design considered. The real gap is narrower — `orchestrator/reentry.
+still_blocking`'s removal predicate only recognizes "blocker reached `SUCCEEDED`," never true for
+a terminal RHI provider. **Adjudicated via ADR-0113** (`docs/DECISIONS.md`): a new, separate
+predicate combined with `still_blocking` at the `plan_unblocking` call site (`still_blocking`
+itself never edited), with its CLI surface (`fleet resume --stub-blocked`) gated until the
+TRANSFORM-worker stub-creation logic (item 3, `_unit_deps`'s reclassification, plus the `stubs`
+INSERT and `EMPTY_FAILING` rendering — Blocker A does not include building these) also exists, to
+avoid dispatching real work against a dependency that objectively cannot succeed. **Blocker A is
+now ready for direct dispatch** — ADR-0113's own §7 gives a design precise enough to hand a worker
+without further investigation.
+
+**A fourth, previously-untraced item, found by the same research pass and distinct from all three
+blockers above**: `_eligible_build_units` (`cli.py:8581-8614`) filters on the literal string
+`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
+the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
+for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
+in production yet); does not need its own ADR (a mechanical domain-widening, not a guarded-
+invariant change) but must land no later than whichever task first makes a TRANSFORM phase reach
+`DEGRADED` in production, or it silently strands every such repo out of BUILD/VERIFY. Tracked here
+as §37's fourth done-bar item, not yet its own D-number.
+
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
 and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round

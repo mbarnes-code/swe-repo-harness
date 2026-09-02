@@ -12929,3 +12929,79 @@ its existing D101 citation once D101 Half A actually lands — not before, per t
 **D102, tracking a related but independent gap this same sizing pass found (T1's zero production
 call sites), is allocated in `docs/INTEGRATION_HONESTY.md`, not here — this ADR adjudicates the
 DEGRADED→BLOCKED fork only.**
+
+## ADR-0113 — §37 Blocker A: a stub-eligible `BLOCKED` repo re-enters via a new predicate beside
+`still_blocking`, not a state-machine edit, and its CLI surface is gated until stub-creation exists
+
+**Context.** `docs/CRITERIA_PLAN.md` §37's stub-creation gap was found (round VI task 9) to have
+three structural blockers, the load-bearing one ("Blocker A") being: no admission path exists for
+a `BLOCKED` repo whose sole blocker is a permanently-abandoned (`REQUIRES_HUMAN_INTERVENTION`)
+provider. Task 9's own framing assumed this needed a state-machine-topology change comparable to
+ADR-0112's DEGRADED→BLOCKED fork. A follow-up research pass (round VI, research-4) traced every
+edge the stub scenario needs directly against current `HEAD` and found this framing wrong: every
+transition (`BLOCKED→PENDING`, `PENDING→RUNNING`, `RUNNING→DEGRADED`) already exists in
+`ALLOWED_TRANSITIONS` (`models/enums.py:32-51`), and `WaveScheduler.admit()` needs zero changes —
+`test_a_blocked_repo_is_not_admitted` stays a true, unmodified statement of its own invariant under
+every design considered, because none of them ever route a `BLOCKED` status into `admit()`. The
+real gap is narrower: `orchestrator/reentry.still_blocking`, the one fail-closed predicate deciding
+whether a `blocked_by` entry may be dropped, recognizes only "the blocker reached `SUCCEEDED`" —
+never true for a terminal RHI provider.
+
+**Options considered** (full detail: research-4's report, `.superpowers/sdd/round-V-criteria-
+closure/research-4-report.md`):
+(a) A new, separate pure predicate (`stub_permits_removal`) combined with `still_blocking` at the
+`plan_unblocking` call site via OR-logic — `still_blocking` itself stays byte-for-byte untouched.
+(b) A dedicated stub-sweep bypass, independent of step 6 entirely — rejected: strictly more code
+than (a) for no isolation benefit, and introduces a genuine two-writer race on `phases.blocked_by`
+that (a) does not have (a repo blocked by both a since-succeeded provider and an RHI-abandoned one
+needs both predicates evaluated together against one snapshot to correctly report "fully freed";
+two independent writers would have to engineer that coordination deliberately).
+(c) An operator-triggered, out-of-band admin command — rejected: SPEC's own text binds
+`--stub-blocked` to the phase commands (`fleet transform|build --stub-blocked`) describing
+automatic in-run behavior, not a separate manual surface.
+
+**Decision: (a), with two conditions, both load-bearing enough to state in this ADR rather than
+leave to an implementer's judgment:**
+
+1. **`still_blocking` is never edited.** The new predicate is a separate, named function
+   (`stub_permits_removal` or equivalent), combined at the call site
+   (`plan_unblocking(...) `'s removal expression becomes `not still_blocking(...) or
+   stub_permits_removal(...)`). `still_blocking`'s own fail-closed, mutation-tested contract (an
+   unresolvable name retained, a zero-row name retained, any non-`SUCCEEDED` row retained) is about
+   whether a blocker *objectively landed* — conflating that with "policy permits proceeding without
+   landing" inside one predicate is exactly the shape CLAUDE.md's Guardrail 6 warns against (derive
+   from the body: two different reasons for one outcome belong in two named things).
+2. **The mechanism must not be reachable through a live, unguarded CLI surface until the
+   TRANSFORM-worker stub-creation logic (§37's own "not yet built" creation half, task 9's own
+   scope) also exists.** Landing Blocker A's `fleet resume --stub-blocked` flag alone, before a
+   TRANSFORM worker knows how to migrate against a stub, would let an operator un-block a repo into
+   an ordinary `PENDING` state and have it picked up by a **plain** `fleet transform` invocation
+   (no flag required) — dispatching real work, spending a real attempt and real LLM tokens, against
+   a dependency that objectively does not exist. That is, one layer up, exactly the harm
+   `scheduler.py`'s own docstring names as the reason `BLOCKED` is excluded from admission in the
+   first place, and exactly what `test_a_blocked_repo_is_not_admitted`'s own docstring calls out
+   ("at the transform phase, real tokens"). The existing `_validate_build_flags`/
+   `_validate_transform_flags` refusals do NOT protect against this — they gate a *different* flag
+   on a *different* command (`fleet transform|build --stub-blocked`, the flag that tells the
+   TRANSFORM worker to create a stub), not `fleet resume --stub-blocked` (this new flag). Land the
+   predicate and its unit tests with the CLI surface either withheld or refused with the same
+   "not implemented" shape the other two `--stub-blocked` sites already use, until the
+   TRANSFORM-worker half lands — whichever task lands second must remove the refusal.
+
+**Reasoning.** Option (a) requires zero `ALLOWED_TRANSITIONS` edits, zero `WaveScheduler` edits,
+leaves the one existing tested invariant untouched, reuses `SchedulerStore.append_unblocked_wave`
+and `clear_blocked_by`'s existing staleness guard verbatim, and adds exactly one new, independently
+unit-testable concept. Both conditions close hazards research-4 found and disclosed that were not
+previously named anywhere in §37's tracked history — recording them here rather than trusting a
+future implementer to re-derive the same reasoning.
+
+**What this does not decide.** Module ownership for the new predicate (`orchestrator/reentry.py`
+beside `still_blocking`, or `orchestrator/stubs.py`) is left to the implementing worker's judgment.
+This ADR does not design or authorize Blockers B (version-sourcing) or C (`_unit_deps` target-label
+reclassification) from the same task 9 investigation, or D104 (REVALIDATE execution) — each is
+independent and separately tracked.
+
+**Consequence for `docs/CRITERIA_PLAN.md`**: §37's entry should be updated to reflect this
+adjudication once a worker lands it — not before, per this project's own "building to match the
+criterion is not legitimate closure" rule (Rule 14). No `docs/CRITERIA_PLAN.md` edit is made in
+this commit.
