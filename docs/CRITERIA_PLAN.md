@@ -137,10 +137,13 @@ SPEC's own item numbering, so it is out of this entry's scope, not a residual of
 **Out of scope:** does not require reorganizing the rest of `tests/` into the `unit/` layout.
 
 ## 4. Model round-trip + per-backend golden response
-**OPEN — reverted from a same-day DONE marking (round II final review, 2026-09-02): SPEC's own
-literal sentence names a scope this criterion's own "Done bar" paraphrase silently narrowed, and
-the round only built the paraphrase's scope.** See the correction after the "Out of scope" line
-for what remains. History below kept, not deleted, per this file's ground rule 1.
+**DONE (round V task 5, 2026-09-02, `16277f8`/`71fc59b`, reviewed Approved with elevated scrutiny)
+— all 12 of 12 LLM roles now covered, closing the Done bar SPEC's literal sentence actually names.**
+This criterion was previously reverted from a same-day DONE marking (round II final review,
+2026-09-02): SPEC's own literal sentence names a scope this criterion's own "Done bar" paraphrase
+had silently narrowed, and that round only built the paraphrase's scope. History below kept, not
+deleted, per this file's ground rule 1 — see the corrections and round-by-round progress inline for
+the full account of how the count moved from 1 to 12 of 12.
 
 **DONE (round II task 3, 2026-09-02, `251c774`, reviewed Approved in full) — as it stood before
 this correction.** Round-trip was
@@ -230,6 +233,28 @@ the other's already-merged state; verified via exact count reconstruction (36 ba
 confirmed the largest/most structurally complex of the 12 (a two-level nested-object tuple where
 each entry itself carries three sibling array fields), but still sized as a single-task one-shot
 following the same proven recipe, not needing a further split.
+
+**Round V task 5 (2026-09-02, `16277f8`, merged `71fc59b`, reviewed Approved with elevated
+scrutiny given this criterion's own history) — `BUILD_AUTHORING` landed, 12 of 12 roles now
+covered. §12.4 flips DONE.** The task-scoped review independently re-derived SPEC's literal
+sentence (`docs/SPEC.md:7430`) fresh rather than trusting any prior round's quotation, independently
+re-derived the full 12-role set from `src/fleet/llm/roles.py::Role` / `config/models.yaml` /
+`schemas.py::RESPONSE_SCHEMAS` (not from any prior round's count), and programmatically extracted
+the full 12×4 role/backend-and-rung cross-product directly from `tests/test_llm_golden_responses.py`
+on the landed branch — confirming every one of the 12 roles has all 4 required entries
+(anthropic/bedrock/vertex at `TOOL_CALL`, openai_compatible at `PROMPTED`), no gaps. The reviewer
+explicitly stated its own independent verdict that §12.4 should flip DONE, separately from
+approving the diff. Rule-12 mutation reproduced live in a fresh worktree, including an extra
+manual check (deleting a defaulted inner field does NOT discriminate, confirming the landed
+mutation genuinely proves two-level descent rather than a shallower check). **One disclosed,
+non-blocking finding**: the 4 new fixtures' scenario narrative ("no `EcosystemAdapter` can derive
+targets") does not precisely match SPEC §3.3's literal trigger text ("a non-trivial `BUILD.bazel`
+target that no generator template covers") or the real `buildgen.py` trigger condition (a per-unit
+template miss within an already-recognized ecosystem, not "no adapter at all") — this drift
+originates in a pre-existing `schemas.py` docstring, is documentation flavor text no test asserts
+on, and does not touch this criterion's actual Done bar (schema validation of a recorded wire
+response against a real backend's parse path). Worth a future docs-accuracy pass, not a blocker
+here. **§12 count moves from 26 to 27 of 48.**
 
 **Not closed by composition.** `tests/test_llm_roles.py`'s existing round-trip test IS
 parametrized over all 12 roles, but its input is a hand-shaped Pydantic-model literal
@@ -1634,10 +1659,10 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 26 | 1, 3, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round II final review: §4 was marked DONE earlier this same round and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured; see §4's own entry for the full correction. Net count unchanged from round GG's 26, despite this round landing real, verified progress: D97 fixed and `REPO_CLASSIFY`'s golden fixtures genuinely closed, neither of which flips a criterion by itself) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 27 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 and D101, D92/D93 landed since; corrected round IV, see §38's own entry — D80 is fully landed and no longer a blocker), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 and D101-Half-B/D102 as of round V, not D94-and-D101-as-an-undifferentiated-pair; D101 Half A landed round V task 4, D92/D93 landed earlier; see §38's own entry — D80 is fully landed and no longer a blocker), 43 (partial) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries (round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
