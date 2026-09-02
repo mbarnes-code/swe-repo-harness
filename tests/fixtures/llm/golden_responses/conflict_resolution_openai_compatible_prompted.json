@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` — the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) — this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (a `VersionConflictResolution`-schema object) differs. `mechanism` is the field with `pattern=r\"^(bazel_dep|single_version_override)$\"` on `src/fleet/llm/schemas.py:281-285`; this fixture's value, `\"single_version_override\"`, genuinely matches that pattern even though it is encoded as escaped text here rather than a tool-call argument — the pattern check runs on the decoded value regardless of rung.",
+  "id": "chatcmpl-ConflictRes8f3b2c1a9d7e4f",
+  "object": "chat.completion",
+  "created": 1735689950,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"coord_key\": \"pypi:flask-utils\", \"proposed_version\": \"0.9.2\", \"mechanism\": \"single_version_override\", \"violated_specs\": [\"==0.8.*\"], \"rationale\": \"One consumer pins flask-utils to ==0.8.*; a newer consumer needs a fix only present in 0.9.2, so 0.9.2 is proposed and the older pin is disclosed as violated.\"}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 340,
+    "completion_tokens": 52,
+    "total_tokens": 392
+  }
+}

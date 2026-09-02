@@ -1,0 +1,31 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (a `CycleBreakProposal`-schema object) differs. `strategy` is a bare JSON string (`\"EDGE_BREAK\"`); `BreakStrategy` (a `StrEnum`) coerces it the same way `RepoClassification.ecosystem` already does in `bedrock_tool_call.json` — no enum-specific handling anywhere on this path. This fixture is also the Rule-12 mutation base for `test_a_cycle_break_proposal_reply_missing_its_required_rationale_field_fails_schema_validation` in `tests/test_llm_golden_responses.py` (deletes `rationale`, the one field on `CycleBreakProposal` with no default).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_CycleBreak01ZjIwYjk4NTA",
+            "name": "emit_response",
+            "input": {
+              "strategy": "EDGE_BREAK",
+              "broken_edge_ids": ["e42"],
+              "hoisted_contract_ids": [],
+              "rationale": "Edge e42 is a DYNAMIC_REF from widget-core into widget-ui with no compile-time cost; suppressing it breaks the cycle and both members migrate in sequence."
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 388,
+    "outputTokens": 40,
+    "totalTokens": 428
+  },
+  "metrics": {
+    "latencyMs": 601
+  }
+}

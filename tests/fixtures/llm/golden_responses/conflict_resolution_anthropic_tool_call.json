@@ -1,0 +1,29 @@
+{
+  "_provenance": "Hand-constructed to match the Anthropic Messages API wire response documented at https://docs.anthropic.com/en/api/messages, and validated at test time through the real `anthropic` SDK's own `anthropic.types.Message.model_validate()` (installed SDK version 0.121.0) before being handed to `AnthropicBackend`'s real `_reply_from`. Rung: TOOL_CALL — a mandatory `emit_response` tool call, matching `_rung()`'s TOOL_CALL branch in src/fleet/llm/backends/anthropic.py. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`anthropic_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/anthropic.py:110) is a role-agnostic constant, and `_reply_from` never introspects `input`'s internal shape, so only the `input` payload below (a `VersionConflictResolution`-schema object) differs. `mechanism` is the field with `pattern=r\"^(bazel_dep|single_version_override)$\"` on `src/fleet/llm/schemas.py:281-285` — this fixture's value, `\"bazel_dep\"`, genuinely matches that pattern (not merely schema-shape-valid), since a tool-call reply is free text on the wire and pydantic's pattern check runs after JSON decoding regardless of rung.",
+  "id": "msg_01ConflictResAAABBBCCC",
+  "type": "message",
+  "role": "assistant",
+  "model": "claude-sonnet-5-20250929",
+  "content": [
+    {
+      "type": "tool_use",
+      "id": "toolu_01ConflictResAAABBBCC",
+      "name": "emit_response",
+      "input": {
+        "coord_key": "maven:com.acme:commons-io",
+        "proposed_version": "2.11.0",
+        "mechanism": "bazel_dep",
+        "violated_specs": ["[1.0,2.0)"],
+        "rationale": "No version in [1.0,2.0) also satisfies the newer consumer's [2.5,3.0) requirement; 2.11.0 breaks the older, unmaintained consumer's upper bound."
+      }
+    }
+  ],
+  "stop_reason": "tool_use",
+  "stop_sequence": null,
+  "usage": {
+    "input_tokens": 395,
+    "output_tokens": 45,
+    "cache_creation_input_tokens": 0,
+    "cache_read_input_tokens": 0
+  }
+}
