@@ -7417,6 +7417,17 @@ the same commit that made them reachable.
 the git tip it reads at claim time, mirroring `_TransformSink`'s own `pre_dispatch`/`sink` pairing.
 That design choice is not made here.
 
+**Adjudication note (2026-09-02, round BB's §45 closure — appended, not a fix to this defect).**
+Round BB's `docs/CRITERIA_PLAN.md` §45 entry read this entry's heading sentence — that
+`tasks.pre_commit_sha` cannot currently be exercised against a real production-populated value —
+and did not treat it as blocking §12.45's closure. Reasoning: §12.45(i)'s literal text requires
+non-NULL values in the 5 named columns to be correct (resolvable, 40-hex), not every column to be
+populated; a column that is always NULL in production makes the real-fixture coverage vacuous for
+that one column without making the criterion's stated text false. This defect's status stays
+`OPEN` — nothing above is changed by this note, which records only that another entry read and
+adjudicated this sentence, so a reader arriving here directly sees the same context a reader
+arriving via `docs/CRITERIA_PLAN.md` sees.
+
 ## D92 — OPEN. `PrState.HELD` is declared and documented but never written anywhere in `src/fleet/`
 
 **Found by round Z task 2 (2026-09-01), while re-auditing §12.38/§12.46's `stub_reconcile` test
