@@ -732,6 +732,41 @@ def still_blocking(name: str, blocker_statuses: Mapping[str, BlockerState]) -> b
     return not all(status in LANDED_STATUSES for status in state.phase_statuses)
 
 
+def stub_permits_removal(
+    name: str, blocker_statuses: Mapping[str, BlockerState], *, stub_blocked: bool
+) -> bool:
+    """§37 Blocker A (ADR-0113): may `name` be dropped from `blocked_by` on the strength of a
+    STUB, rather than on the strength of landed work?
+
+    A SEPARATE, named predicate from `still_blocking` — never a change to it (ADR-0113 condition
+    1). `still_blocking` answers "did the blocker's work objectively land?"; this answers "does
+    policy permit proceeding without it having landed?" — two different reasons for one outcome,
+    which CLAUDE.md's Guardrail 6 ("derive from the body") says belong in two named things, not
+    folded into one predicate's polarity.
+
+    **`any`, not `all` — deliberately the opposite shape from `still_blocking`.** A blocker is
+    stub-eligible the moment ONE of its `phases` rows reads `REQUIRES_HUMAN_INTERVENTION`, because
+    RHI is mechanically terminal (`reentry.phase_floor`'s own frontier scan returns `None` the
+    instant it sees one, and nothing in `models.enums.ALLOWED_TRANSITIONS` routes a repo back out
+    of it): once any phase is abandoned there, the whole repo can never again produce landed work,
+    so waiting for `still_blocking`'s `all-landed` bar to clear can never happen for it. Requiring
+    every row to be RHI would miss a repo abandoned at phase 2 with an untouched phase 3 row still
+    `PENDING` — RHI at any one phase is already the permanent dead end.
+
+    `stub_blocked=False` (the default) is a hard `False` for every input, independent of
+    `blocker_statuses` — the caller-supplied policy switch, not a fact this function can derive.
+    An unresolvable name (absent from `blocker_statuses`) and a name resolved to zero rows both
+    read `False` here too: there is no RHI row to find, so there is nothing for a stub to
+    substitute for, and `still_blocking`'s own fail-closed retention is the only vote that applies.
+    """
+    if not stub_blocked:
+        return False
+    state = blocker_statuses.get(name)
+    if state is None:
+        return False
+    return RepoStatus.REQUIRES_HUMAN_INTERVENTION in state.phase_statuses
+
+
 @dataclass(frozen=True, slots=True)
 class Unblocking:
     """What §11.5 step 6 would do to one repo's `blocked_by`, computed once for both routes.
@@ -758,6 +793,7 @@ def plan_unblocking(
     blocked_by_rows: Iterable[tuple[str, Sequence[str]]],
     blocker_statuses: Mapping[str, BlockerState],
     floors: Mapping[str, Phase],
+    stub_blocked: bool = False,
 ) -> tuple[Unblocking, ...]:
     """The whole of §11.5 step 6's decision, as one pure function. No I/O, no clock, no connection.
 
@@ -772,6 +808,12 @@ def plan_unblocking(
     places with nothing binding them — D74 again, and the whole reason `demotable_phases` exists
     as one shared rule rather than as a preview beside a write.
 
+    **`stub_blocked` (ADR-0113 §37 Blocker A) is threaded exactly like `floors`: passed in, never
+    re-derived, defaulting to `False` so every existing caller and test is unaffected byte-for-
+    byte.** The removal rule per name is `not still_blocking(...) or stub_permits_removal(...,
+    stub_blocked=stub_blocked)` — an OR of two independently named predicates, never a change to
+    `still_blocking` itself (ADR-0113 condition 1).
+
     Deterministic by construction: names are sorted (matching what `append_blocked_by` persists,
     `json.dumps(sorted(names))`) and repos are emitted in sorted order, so the identical inputs
     yield the identical tuple on the `--dry-run` path and on the write path. That is one call
@@ -781,18 +823,20 @@ def plan_unblocking(
     nothing was removed — "this repo is still blocked, by these names" is a fact an operator needs
     and a count of removals cannot carry (D44).
     """
+
+    def _may_remove(name: str) -> bool:
+        return not still_blocking(name, blocker_statuses) or stub_permits_removal(
+            name, blocker_statuses, stub_blocked=stub_blocked
+        )
+
     unions: dict[str, set[str]] = {}
     for row_repo_id, row_names in blocked_by_rows:
         unions.setdefault(row_repo_id, set()).update(row_names)
     plans: list[Unblocking] = []
     for repo_id in sorted(unions):
         blockers = unions[repo_id]
-        removed = tuple(
-            sorted(name for name in blockers if not still_blocking(name, blocker_statuses))
-        )
-        remaining = tuple(
-            sorted(name for name in blockers if still_blocking(name, blocker_statuses))
-        )
+        removed = tuple(sorted(name for name in blockers if _may_remove(name)))
+        remaining = tuple(sorted(name for name in blockers if not _may_remove(name)))
         plans.append(
             Unblocking(
                 repo_id=repo_id,

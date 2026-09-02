@@ -11360,6 +11360,7 @@ def resume(
             help="Reconcile and stop at exit 0; do not run §11.5 step 8 (ADR-0080).",
         ),
     ] = False,
+    stub_blocked: Annotated[bool, typer.Option("--stub-blocked")] = False,
 ) -> None:
     """Reconcile after a crash and continue from each repo's re-entry floor (§11.5 step 5),
     never the earliest incomplete phase.
@@ -11411,6 +11412,15 @@ def resume(
     stores it. A demotion writes `SUCCEEDED → PENDING`, so a repo demoted out of a closed wave
     re-opens that wave. `docs/SPEC.md` §3.5's "closed waves are never re-opened" governs
     un-blocking, and §11.5 step 5 does not mention waves at all.
+
+    **`--stub-blocked` is REFUSED, not implemented (ADR-0113 §37 Blocker A condition 2).** Step 6
+    already carries the plumbing for a stub-eligible repo (one whose sole blocker is
+    `REQUIRES_HUMAN_INTERVENTION`) to re-enter — `orchestrator.reentry.stub_permits_removal` — but
+    the TRANSFORM-worker half that would create the stub does not exist yet. Accepting this flag
+    today would free the repo into ordinary `PENDING` for a PLAIN `fleet transform` (no flag
+    required) to dispatch real work — real tokens — against a dependency that objectively does not
+    exist, exactly the harm `scheduler.py` excludes `BLOCKED` from admission to prevent. The flag
+    is refused until the stub-creation half lands.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -11424,6 +11434,7 @@ def resume(
             revalidation=revalidation,
             raise_revalidation_rounds=raise_revalidation_rounds,
         )
+        _validate_resume_flags(stub_blocked=stub_blocked)
         result = _run(
             _resume_impl(
                 opts,
@@ -12119,6 +12130,30 @@ def _refuse_unbuilt_resume_flags(
             "the resume. Re-run without it to get the "
             "reconciliation that IS built (step 1's config digests, "
             "steps 2, 3, 4, 5, 6, 7 and 8, `--repoll-prs`, the budget raises)."
+        )
+
+
+def _validate_resume_flags(*, stub_blocked: bool) -> None:
+    """`fleet resume`'s own `--stub-blocked` refusal (§10, ADR-0113 §37 Blocker A condition 2).
+
+    Same shape as `_validate_build_flags`'s and `_validate_transform_flags`'s `--stub-blocked`
+    refusals (`grep -n "stub-blocked is not implemented" src/fleet/cli.py`), but a DIFFERENT
+    hazard from theirs: those two refuse a flag that would tell a worker to CREATE a stub, with no
+    such worker in `src/fleet/workers/`. This flag would instead ADMIT a repo blocked solely by a
+    `REQUIRES_HUMAN_INTERVENTION` provider back into `PENDING` — the pure predicate for that,
+    `orchestrator.reentry.stub_permits_removal`, is built and unit-tested, but ADR-0113 condition
+    2 requires the CLI surface stay refused until the TRANSFORM-worker half that would actually
+    create the stub also exists: a freed repo with no stub to build against would be picked up by
+    a plain `fleet transform` (no flag needed) and spend real tokens against a dependency that
+    objectively does not exist.
+    """
+    if stub_blocked:
+        raise UsageError(
+            "--stub-blocked is not implemented: admitting a repo whose sole blocker is "
+            "REQUIRES_HUMAN_INTERVENTION (ADR-0113 §37 Blocker A) back into PENDING has no "
+            "TRANSFORM-worker stub-creation logic in src/fleet/workers/ yet, so the freed repo "
+            "would be picked up by a plain `fleet transform` (no flag required) and dispatch "
+            "real work -- real tokens -- against a dependency that objectively does not exist."
         )
 
 
@@ -13395,6 +13430,7 @@ async def _unblock_dependents(
     floors: Mapping[str, Phase],
     dry_run: bool,
     now: datetime,
+    stub_blocked: bool = False,
 ) -> dict[str, object]:
     """§11.5 step 6: recompute `blocked_by`, and append the wave the freed repos move into.
 
@@ -13417,6 +13453,13 @@ async def _unblock_dependents(
     row down to the floor here would be a demotion outside step 5's audited `PhaseDemoted` path,
     which `models.enums.demote` refuses by construction. The only status write here is the
     `BLOCKED -> PENDING` the emptied list implies.
+
+    **`stub_blocked` (ADR-0113 §37 Blocker A) is threaded exactly like `floors`: a plain value
+    passed in, never re-derived inside the transaction below.** Defaulting to `False` means every
+    existing caller is unaffected byte-for-byte. `fleet resume`'s own `--stub-blocked` flag does
+    NOT reach this parameter yet — it is refused unconditionally at the CLI layer (ADR-0113
+    condition 2) until the TRANSFORM-worker stub-creation half exists; this parameter is the
+    plumbing that refusal will be removed in front of, not a live path today.
 
     **Four buckets, none of them a bare count (D44).** `unblocked` is a repo whose list is now
     empty — it re-enters the queue; `retained` is a repo still held, *by these names*, which is a
@@ -13457,13 +13500,24 @@ async def _unblock_dependents(
     _refuse_unresolved_blockers(run_id, known, blocker_statuses)
 
     plans = plan_unblocking(
-        blocked_by_rows=blocked_by_rows, blocker_statuses=blocker_statuses, floors=floors
+        blocked_by_rows=blocked_by_rows,
+        blocker_statuses=blocker_statuses,
+        floors=floors,
+        stub_blocked=stub_blocked,
     )
     report["candidates"] = len(plans)
     refused: Mapping[str, str] = {}
     if not dry_run and any(plan.removed for plan in plans):
-        refused = await _apply_unblocking(settings, path, run_id, plans, report, floors=floors,
-                                          now=now)
+        refused = await _apply_unblocking(
+            settings,
+            path,
+            run_id,
+            plans,
+            report,
+            floors=floors,
+            now=now,
+            stub_blocked=stub_blocked,
+        )
     for plan in plans:
         if plan.repo_id in refused:
             _unresolved(report, {"repo_id": plan.repo_id}, refused[plan.repo_id])
@@ -13482,6 +13536,7 @@ async def _apply_unblocking(
     *,
     floors: Mapping[str, Phase],
     now: datetime,
+    stub_blocked: bool = False,
 ) -> dict[str, str]:
     """One `StateWriter`, one `BEGIN IMMEDIATE` per repo, then ONE `append_unblocked_wave`.
 
@@ -13501,6 +13556,9 @@ async def _apply_unblocking(
     nothing re-appends the wave; an operator sees a repo at a floor in an early wave. The
     opposite order is worse: it appends a fresh synthetic wave on *every* resume until the
     `blocked_by` write lands.
+
+    `stub_blocked` (ADR-0113 §37 Blocker A) is passed straight through to `clear_blocked_by`,
+    exactly like `floors` — never re-derived here.
 
     Returns the repos whose write was refused, with the reason, so the caller can report them
     rather than count them.
@@ -13525,6 +13583,7 @@ async def _apply_unblocking(
                         floors=floors,
                         resolve=resolve,
                         now=now,
+                        stub_blocked=stub_blocked,
                     )
                 except BlockedBySnapshotStaleError as exc:
                     refused[plan.repo_id] = str(exc)
