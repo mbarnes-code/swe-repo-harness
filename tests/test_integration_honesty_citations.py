@@ -656,8 +656,10 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "task_id_for",
         "workers/rewrite.py:107",
     ),  # L7145 defined at [(128, 132), (128, 132)], cited 107-107 -- genuine drift: line 107
-    #    today falls inside the tail of a different function (`task_id_for_ids`) defined
-    #    earlier in the same module; `task_id_for`'s own `def` is at 128.
+    #    today falls inside `TASK_NAMESPACE`'s own docstring (a module-level constant at line
+    #    104, not a function), well before `task_id_for_ids` (defined at 116, AFTER this line,
+    #    not earlier) and `task_id_for`'s own `def` at 130 (round HH task 3 review, corrected
+    #    this comment's stated cause -- the disposition, pin not repoint, was already right).
     (
         "set_task_target_paths",
         "state/repository.py:1259",
