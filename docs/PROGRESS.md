@@ -8708,3 +8708,27 @@ citation), fixed same-day.
 
 Full-suite not re-run whole this wave; `mypy`/`ruff`/every touched test file reconfirmed green
 after each merge (`test_cli.py` 168/168, `test_stubs.py` 32/32, citation gate 72/72).
+
+### Checkpoint — round VI, fifth wave (2026-09-02, same day)
+
+**§12 count: 27 of 48, unchanged — this wave closed §37 Blocker B, another defect/sub-clause fix
+within an already-open criterion.** Blocker B landed (`6b07925`/`13242e2`, task-scoped review
+Approved with elevated scrutiny given a schema migration): a new `coordinates.version` column
+captures what 4 of 5 ecosystem adapters already computed every scan and previously discarded — no
+ADR needed, purely additive. The task hit this session's recurring "agent dormancy on its own
+background job" pattern (4th occurrence) — resumed directly via message rather than losing real,
+substantial uncommitted work; now saved as a feedback memory. Citation drift this time spanned
+BOTH doc profiles (7 citations, `INTEGRATION_HONESTY` and `CRITERIA_PLAN`) from the combined
+growth of `cli.py` and the new schema column — fixed same-day as always.
+
+**§37 state: one structural blocker remains (C — `_unit_deps`'s stub-aware target-label
+reclassification), plus the `_eligible_build_units` item and the still-unbuilt TRANSFORM-worker
+stub-creation logic. `coordinates.version` has no consumer yet** — its only planned reader is the
+still-unbuilt stub-creation logic, so this landing (like Blocker A's) removes a prerequisite
+without moving §37 itself toward DONE.
+
+**What's next.** Blocker C is the last of §37's three original structural blockers — sizing it
+next follows the same Blocker A/B pattern (a short research pass, then either direct dispatch or
+an ADR if it turns out to touch a guarded invariant). D94 remains the standing NEW-MECHANISM
+candidate for a dedicated round. D106 (plausible, unconfirmed) needs its own investigation before
+a fix is designed.
