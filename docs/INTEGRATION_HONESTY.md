@@ -8049,7 +8049,7 @@ ever reading `HELD`. Task review reproduced this old-fails/new-passes independen
 running the exact repro shape against unfixed code in a scratch copy to directly observe the raw
 abandonment before the fix's own test assertion would have short-circuited the observation.
 
-## D101 — OPEN. `BLOCKED` consumers never get an `UnmergedDependency` finding, and `--sync` has nothing to clear — self-disclosed in the code's own comments before this ledger entry existed
+## D101 — PARTLY ADDRESSED. `BLOCKED` consumers never get an `UnmergedDependency` finding, and `--sync` has nothing to clear — self-disclosed in the code's own comments before this ledger entry existed
 
 **Found by round IV task 1 (2026-09-02), while re-auditing §12 item 38's sub-clauses against the
 now-fully-corrected D92/D98/D99/D100 state — a disclosed finding, not this TEST-ONLY task's own
@@ -8096,6 +8096,16 @@ resolved — resolved by **ADR-0112** (`docs/DECISIONS.md`): no `RepoStatus` tra
 **D102** below, which the same sizing pass split out as its own independent gap: T1
 (`orchestrator.stubs.supersede`) has zero production call sites anywhere in `src/`, so "firing T1"
 in Half B means building the trigger, not calling an existing one.
+
+**Half A FIXED, LANDED (round V task 4, 2026-09-02, `6f9b777`, merged `609f57f`, task-scoped review
+Approved).** `_apply_stub_reconcile` now inserts one `UnmergedDependency` finding per held-for-merge
+stub consumer (`consumer_repo_id`/`provider_repo_id`/`coord_key` payload), in the same
+`StateWriter` transaction as the D99/D100 abandoned-decision branch — no `phases.status` write, no
+`transition()` call, per ADR-0112. Review independently confirmed zero calls to
+`transition()`/`append_blocked_by`/`UPDATE phases` anywhere in the touched function, and
+independently reproduced the Rule-12 mutation proof in a fresh worktree. **D101 as a whole stays
+PARTLY ADDRESSED — Half B (the `--sync`-triggered clearing and firing T1) remains fully open,
+tracked jointly here and at D102.**
 
 ---
 

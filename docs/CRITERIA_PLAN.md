@@ -1272,6 +1272,16 @@ example: a code-disclosed gap that WAS given a D-number, explicitly ruled in by 
 naming D56/D57 as the same class. **Allocated D101** instead of leaving this un-numbered — see
 that entry for the full account.
 
+**Update, round V (2026-09-02) — D101 splits in two; Half A landed, Half B remains open.** D101's
+own entry (`docs/INTEGRATION_HONESTY.md`) now records: Half A (the `BLOCKED`-consumer
+`UnmergedDependency` finding write) FIXED, LANDED (task 4, `6f9b777`/`609f57f`) per an adjudication
+in ADR-0112 (`docs/DECISIONS.md`) that the finding alone satisfies this sub-clause without a
+`RepoStatus` transition. Half B (the `--sync`-triggered clearing of that finding) remains fully
+open and is now known to be larger than originally scoped — it also requires building T1
+(`orchestrator.stubs.supersede`)'s production trigger from scratch, tracked at **D102**. §38 stays
+**partial**, now blocked on **D94 and D101-Half-B/D102**, not D94 and D101 as an undifferentiated
+pair.
+
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
 (batched=1/eager=3 cost comparison) is well covered. Cases (i)/(ii) only test what's handed in as
