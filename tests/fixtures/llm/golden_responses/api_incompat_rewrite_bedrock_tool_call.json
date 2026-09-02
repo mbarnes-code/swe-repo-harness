@@ -1,0 +1,39 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY/PR_BODY fixtures in this same directory by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (an `ApiRewriteProposal`-schema object) differs. This fixture is also the Rule-12 mutation base for `test_an_api_rewrite_reply_with_an_oversized_coord_key_fails_schema_validation` in `tests/test_llm_golden_responses.py` (mutates the subclass-specific `coord_key` field past its `max_length=512` bound).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_ApiRewrite01ZjIwYjk4NTA",
+            "name": "emit_response",
+            "input": {
+              "files": [
+                {
+                  "path": "index.js",
+                  "diff": "--- a/index.js\n+++ b/index.js\n@@ -3,7 +3,7 @@\n-module.exports = function leftPad(str, len) {\n-  return leftPad(str, len, ' ');\n+module.exports = function leftPad(str, len, ch) {\n+  return String(str).padStart(len, ch);\n"
+                }
+              ],
+              "approach_summary": "add the now-mandatory pad-character argument to every leftPad call site",
+              "rationale": "left-pad 2.0 dropped the implicit space default; every caller must pass ch explicitly or the call is a TypeError",
+              "coord_key": "npm:left-pad",
+              "breaking_changes": [
+                "leftPad(str, len) now requires an explicit third pad-character argument"
+              ]
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 360,
+    "outputTokens": 55,
+    "totalTokens": 415
+  },
+  "metrics": {
+    "latencyMs": 610
+  }
+}

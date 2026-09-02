@@ -1,0 +1,37 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY/PR_BODY fixtures in this same directory by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (an `LlmEscalationProposal`-schema object) differs. `abandon_recommended` is `false` here and `human_intervention_reason` is `null` (its `default=None`, `src/fleet/llm/schemas.py:236`) deliberately: attempt 3 believes its own patch is correct and is not asking for a human, exercising the opposite branch of both subclass-added fields from the anthropic fixture in this same directory.",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_Escalation01ZjIwYjk4NTA",
+            "name": "emit_response",
+            "input": {
+              "files": [
+                {
+                  "path": "index.js",
+                  "diff": "--- a/index.js\n+++ b/index.js\n@@ -3,7 +3,7 @@\n-module.exports = function leftPad(str, len) {\n-  return leftPad(str, len, '0');\n+module.exports = function leftPad(str, len, ch) {\n+  return String(str).padStart(len, ch === undefined ? ' ' : ch);\n"
+                }
+              ],
+              "approach_summary": "restore a default pad character of a single space, matching left-pad 1.x's implicit behaviour, instead of assuming '0'",
+              "rationale": "attempt 1 hard-coded '0' as the default pad character and the build's own test suite expects a space; this attempt corrects that assumption directly from the failing test's expected output",
+              "abandon_recommended": false,
+              "human_intervention_reason": null
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 470,
+    "outputTokens": 66,
+    "totalTokens": 536
+  },
+  "metrics": {
+    "latencyMs": 640
+  }
+}

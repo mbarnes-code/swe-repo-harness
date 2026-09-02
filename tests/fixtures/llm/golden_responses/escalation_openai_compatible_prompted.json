@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` — the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) — this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (an `LlmEscalationProposal`-schema object) differs. `abandon_recommended` is `false` and `human_intervention_reason` is `null` here, matching the bedrock escalation fixture's branch of both subclass-added fields rather than the anthropic/vertex ones.",
+  "id": "chatcmpl-Escalation8f3b2c1a9d7e4f6b",
+  "object": "chat.completion",
+  "created": 1735690000,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"files\": [{\"path\": \"app/utils.py\", \"diff\": \"--- a/app/utils.py\\n+++ b/app/utils.py\\n@@ -5,7 +5,7 @@\\n-    return flask_utils.escape(text)\\n+    return flask_utils.markup_escape(text, autoescape=True)\\n\"}], \"approach_summary\": \"pass the now-mandatory autoescape argument explicitly instead of relying on a removed default\", \"rationale\": \"attempt 1 assumed markup_escape() still defaulted autoescape to True; flask-utils 0.9's changelog confirms the default was dropped, not just the old escape() alias\", \"abandon_recommended\": false, \"human_intervention_reason\": null}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 320,
+    "completion_tokens": 52,
+    "total_tokens": 372
+  }
+}

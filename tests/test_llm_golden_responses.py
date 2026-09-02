@@ -3,7 +3,10 @@ per LLM role. `docs/CRITERIA_PLAN.md` §4's revised Done bar requires this per *
 `config/models.yaml`), not just per backend — round II's task 3 landed `REPO_CLASSIFY` alone (1 of
 12); round III task 3 added `PR_TITLE` and `PR_BODY` (3 of 12); round IV tasks 2 and 3 together
 add `BUILD_DIAGNOSIS`, `DEP_DISAMBIGUATE`, `CYCLE_BREAK_PROPOSAL`, and `CONFLICT_RESOLUTION`
-(7 of 12; 5 remain, tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
+(7 of 12); round V task 2 adds `API_INCOMPAT_REWRITE` and `ESCALATION` (9 of 12 counting this
+task's own rows alone — a sibling task 1 this round adds `TRANSFORM_REPAIR`/`MANIFEST_EXTRACT`
+independently, bringing the total to 11 of 12 if both land; 3 remain after this task's own half,
+tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
 
 ADR-0013's contract layer declares the intent this closes: "every LLM prompt's declared response
 schema validates against a stored golden sample." `tests/test_llm_roles.py`'s
@@ -98,10 +101,12 @@ from fleet.llm.client import BackendReply
 from fleet.llm.roles import Role
 from fleet.llm.schemas import (
     RESPONSE_SCHEMAS,
+    ApiRewriteProposal,
     CycleBreakProposal,
     DependencyDisambiguation,
     FleetModel,
     LlmBuildDiagnosis,
+    LlmEscalationProposal,
     PrBody,
     PrTitle,
     RepoClassification,
@@ -128,6 +133,8 @@ assert RESPONSE_SCHEMAS[Role.BUILD_DIAGNOSIS] is LlmBuildDiagnosis
 assert RESPONSE_SCHEMAS[Role.DEP_DISAMBIGUATE] is DependencyDisambiguation
 assert RESPONSE_SCHEMAS[Role.CYCLE_BREAK_PROPOSAL] is CycleBreakProposal
 assert RESPONSE_SCHEMAS[Role.CONFLICT_RESOLUTION] is VersionConflictResolution
+assert RESPONSE_SCHEMAS[Role.API_INCOMPAT_REWRITE] is ApiRewriteProposal
+assert RESPONSE_SCHEMAS[Role.ESCALATION] is LlmEscalationProposal
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -550,6 +557,112 @@ GOLDEN_CASES: tuple[GoldenCase, ...] = (
             "violated_specs": ("==0.8.*",),
         },
     ),
+    # --- API_INCOMPAT_REWRITE (round V task 2, new) ---
+    GoldenCase(
+        role=Role.API_INCOMPAT_REWRITE,
+        schema=ApiRewriteProposal,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="api_incompat_rewrite_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "maven:org.apache.commons:commons-io",
+            "breaking_changes": ("IOUtils.copy(InputStream, OutputStream) removed in 2.11",),
+        },
+    ),
+    GoldenCase(
+        role=Role.API_INCOMPAT_REWRITE,
+        schema=ApiRewriteProposal,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="api_incompat_rewrite_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "npm:left-pad",
+            "breaking_changes": (
+                "leftPad(str, len) now requires an explicit third pad-character argument",
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.API_INCOMPAT_REWRITE,
+        schema=ApiRewriteProposal,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="api_incompat_rewrite_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "gradle:com.acme.widget:widget-core",
+            "breaking_changes": ("WidgetFactory.create(String) static factory removed",),
+        },
+    ),
+    GoldenCase(
+        role=Role.API_INCOMPAT_REWRITE,
+        schema=ApiRewriteProposal,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="api_incompat_rewrite_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "coord_key": "pypi:flask-utils",
+            "breaking_changes": (
+                "escape() renamed to markup_escape() with no backward-compatible alias",
+            ),
+        },
+    ),
+    # --- ESCALATION (round V task 2, new) ---
+    GoldenCase(
+        role=Role.ESCALATION,
+        schema=LlmEscalationProposal,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="escalation_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "abandon_recommended": True,
+            "human_intervention_reason": "the correct charset cannot be determined from the "
+            "repository alone; a human must confirm whether UTF-8 is safe for every caller of "
+            "FileSync.java before this patch is trusted",
+        },
+    ),
+    GoldenCase(
+        role=Role.ESCALATION,
+        schema=LlmEscalationProposal,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="escalation_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "abandon_recommended": False,
+            "human_intervention_reason": None,
+        },
+    ),
+    GoldenCase(
+        role=Role.ESCALATION,
+        schema=LlmEscalationProposal,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="escalation_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "abandon_recommended": True,
+            "human_intervention_reason": "cannot confirm whether any caller outside this repo "
+            "relied on the factory's old default description value without a human checking "
+            "downstream consumers",
+        },
+    ),
+    GoldenCase(
+        role=Role.ESCALATION,
+        schema=LlmEscalationProposal,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="escalation_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "abandon_recommended": False,
+            "human_intervention_reason": None,
+        },
+    ),
 )
 
 
@@ -677,3 +790,32 @@ def test_the_unmutated_conflict_resolution_fixture_still_validates_after_the_mut
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, VersionConflictResolution, StructuredOutputMode.TOOL_CALL)
+
+
+def test_an_api_rewrite_reply_with_an_oversized_coord_key_fails_schema_validation() -> None:
+    """Mutation of the bedrock `API_INCOMPAT_REWRITE` fixture: `coord_key`
+    (`ApiRewriteProposal`, `src/fleet/llm/schemas.py:222`) carries `max_length=512` — a
+    SUBCLASS-specific constraint, not one inherited from `LlmPatchProposal`. This mutates it to a
+    600-character string, past the bound, while leaving every inherited base field
+    (`files`/`approach_summary`/`rationale`) untouched and valid. If schema validation only
+    checked `LlmPatchProposal`'s own base fields — e.g. a `_validate` call that resolved the base
+    class instead of the declared subclass — this mutation would pass instead of raising, proving
+    the subclass's own added constraints are genuinely checked and not just inherited ones."""
+    raw = _load("api_incompat_rewrite_bedrock_tool_call.json")
+    raw["output"]["message"]["content"][0]["toolUse"]["input"]["coord_key"] = "n" * 600
+
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="coord_key"):
+        client_module._validate(reply, ApiRewriteProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_api_rewrite_fixture_still_validates_after_the_mutation_above() -> None:
+    """Control half of the `API_INCOMPAT_REWRITE` mutation pair: the identical fixture,
+    unmutated, must still validate — proving the failure above is caused by the oversized
+    `coord_key`, not by an unrelated defect in the fixture, the parse path, or `_validate`
+    itself."""
+    raw = _load("api_incompat_rewrite_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, ApiRewriteProposal, StructuredOutputMode.TOOL_CALL)
