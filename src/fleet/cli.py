@@ -11164,6 +11164,20 @@ async def _abort_impl(
 # --------------------------------------------------------------------------------------
 
 
+async def _resume_needs_human_attention(path: Path, run_id: str) -> bool:
+    """D98: the run's OVERALL per-repo status, read fresh — the same computation `fleet status`'s
+    `_status_once` reads via `build_state` — so `resume()`'s own exit path can catch a repo left
+    REQUIRES_HUMAN_INTERVENTION/DEGRADED even when step 8 drove nothing this cycle and
+    `_raise_for_continuation` stayed silent (`halted is None`).
+    """
+    conn = await connect_ro(path)
+    try:
+        state = await build_state(conn, UUID(run_id))
+    finally:
+        await conn.close()
+    return _needs_human_attention({repo_id: r.status for repo_id, r in state.repos.items()})
+
+
 @app.command()
 def resume(
     ctx: typer.Context,
@@ -11328,6 +11342,21 @@ def resume(
             )
         if continuation is not None:
             _raise_for_continuation(continuation)
+            # D98: `_raise_for_continuation` is a no-op when `halted is None` — nothing servable
+            # this cycle (e.g. the only event was a stub abandonment), or everything servable
+            # succeeded. Neither case re-checks the run's OVERALL per-repo status, so a repo
+            # already REQUIRES_HUMAN_INTERVENTION/DEGRADED — from this cycle or an earlier resume
+            # — silently exits 0 instead of §3.5.1 point 5's required 7. This cannot double-fire
+            # against the raise above: if any driven phase went non-SUCCESS, `_continue_impl`
+            # already set `halted` and `_raise_for_continuation` raised first, so this line is
+            # only ever reached when it was silent. `build_state` is the same computation `fleet
+            # status`'s `_status_once` reads (imported already, new call site only).
+            if _run(_resume_needs_human_attention(path, str(result["run_id"]))):
+                raise HumanInterventionError(
+                    "§3.5.1 point 5 / §10: a repo ended REQUIRES_HUMAN_INTERVENTION or DEGRADED "
+                    "this run; fleet resume must exit 7 even when nothing was re-driven this "
+                    "cycle (D98)."
+                )
 
 
 def _floors_from(result: Mapping[str, object]) -> dict[str, Phase]:
