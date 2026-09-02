@@ -100,10 +100,11 @@ than from a hand list, and fails **by name** in both directions.
 
 Scope, stated so it is not mistaken for more
 --------------------------------------------
-One profile, ``docs/INTEGRATION_HONESTY.md``. Only citations that name a path; the ledger
-also holds 343 bare ``:N`` continuation citations whose file comes from surrounding prose,
-and none of those are covered. The anchored check runs on ``.py`` targets only (AST);
-``.md`` and ``.sql`` citations get the existence/in-range checks and nothing more.
+Two profiles (see the next section): ``docs/INTEGRATION_HONESTY.md`` and, as of round FF,
+``docs/CRITERIA_PLAN.md``. Only citations that name a path; the ledger also holds 343 bare
+``:N`` continuation citations whose file comes from surrounding prose, and none of those are
+covered. The anchored check runs on ``.py`` targets only (AST); ``.md`` and ``.sql`` citations
+get the existence/in-range checks and nothing more.
 The prose census below is the **module's**, about the one profile named in
 ``_CENSUS_PROSE_PROFILE``; a second profile's census would not be stated here and so would
 not be checked. That is a disclosed limit of this file's prose, not a mechanism.
@@ -137,10 +138,15 @@ rather than a defect). That is the disclosed blind spot; it is closed by a pin
 weakening the assertion for every citation.
 
 Scoped, deliberately, to profiles that opt in via ``cross_check_anchors=True`` -- today, only
-``CRITERIA_PLAN``. Folding it into ``INTEGRATION_HONESTY`` would run it over that file's large
-pre-existing anchored-citation population, which this task was told not to sweep; doing so would
-either surface unmeasured rot as new failures or require pinning an unmeasured set sight unseen,
-neither of which this task does. See ``DocProfile.cross_check_anchors``'s own docstring.
+``CRITERIA_PLAN``. Folding it into ``INTEGRATION_HONESTY`` would run it over that file's
+pre-existing anchored-citation population, which this task was told not to sweep; the task-review
+measured the cost of that at round FF -- 4 of 20 resolving anchored citations already fail this
+predicate (``phase_floor`` at ``docs/INTEGRATION_HONESTY.md:4641``, ``_detail()`` at ``:7289``,
+``_AttemptWriter.record`` at ``:7302``, ``_reconcile_tasks_with_git`` at ``:7398``) -- so opting in
+today would either surface those four as new failures or require pinning them sight unseen,
+neither of which this task does; closing them (drift-vs-supporting-prose needs adjudicating per
+site, per the disclosed blind spot above) is sized follow-up work, not a reason to leave the count
+unstated. See ``DocProfile.cross_check_anchors``'s own docstring.
 
 The pinned set is not an exemption list
 ---------------------------------------
@@ -289,10 +295,10 @@ class DocProfile:
     # `test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line`). Default False and
     # deliberately outside `_CATEGORIES`/`_check_population`: folding it into that governed
     # vocabulary would force every profile to declare a disposition for it, and
-    # `INTEGRATION_HONESTY`'s pre-existing anchored citations are known (by the same reasoning
-    # that keeps `docs/DECISIONS.md` out of this module entirely) to contain unmeasured instances
-    # of the class this check would flag -- opting it in there would be exactly the "make it
-    # blocking retroactively" scope creep this task was told not to do.
+    # `INTEGRATION_HONESTY`'s pre-existing anchored citations were measured, at round FF's task
+    # review, to contain 4 (of 20 resolving) instances of the class this check would flag --
+    # opting it in there would be exactly the "make it blocking retroactively" scope creep this
+    # task was told not to do; see the module docstring's Scope section for the four sites.
     cross_check_anchors: bool = False
     # Citations where containment resolves but the cited line does not literally name the
     # anchor -- a deliberate, measured exception (a citation to *supporting prose*, not the
@@ -559,8 +565,11 @@ _INTEGRATION_HONESTY = DocProfile(
 # `_PINNED_UNRESOLVED` above. Re-measured fresh at round FF, not inherited from a prior round's
 # sizing research: `record_attempt` (`repository.py:2124-2174`) is genuine drift, verified
 # against history exactly like the `settings.py` cluster in `_PINNED_UNRESOLVED` above -- the
-# citation was added in `8e16653` (the commit that fixed D90, `git log -S` on the literal
-# citation string against `docs/CRITERIA_PLAN.md` names no other commit), and at that commit
+# citation was added in `8e16653` (the commit that fixed D90; `git log -S` on the literal
+# citation string against `docs/CRITERIA_PLAN.md` names two commits, `8e16653` and the sibling
+# ADR/round-Q-plan commit `859ca5b` -- both introduce the same occurrence in unrelated lanes,
+# neither is an ancestor of the other, and `record_attempt`'s real definition begins at line
+# 2124 at `859ca5b` too), and at that commit
 # `record_attempt`'s real (non-stub) definition began at line 2124 (`git show
 # 8e16653:src/fleet/state/repository.py | grep -n 'def record_attempt'` -> `2124:`), matching
 # the citation exactly. Unrelated growth in `repository.py` since then moved the definition to
@@ -1009,9 +1018,9 @@ def test_a_resolving_anchored_citation_names_its_anchor_at_the_cited_line(
     Scope: only citations that already resolve under containment (an unresolved one is already
     reported by `test_no_unpinned_anchored_citation_fails_to_resolve`, and re-reporting it here
     would tell the next author nothing new). Only profiles that opt in via
-    `cross_check_anchors=True` -- deliberately not `INTEGRATION_HONESTY`, whose large pre-existing
-    anchored-citation population this task does not sweep; see the field's docstring on
-    `DocProfile`.
+    `cross_check_anchors=True` -- deliberately not `INTEGRATION_HONESTY`, where 4 of its 20
+    resolving anchored citations already fail this predicate (measured at round FF, not swept by
+    this task); see the field's docstring on `DocProfile`.
     """
     survey = surveys[profile.name]
     pinned = set(profile.text_mismatch_pins)
