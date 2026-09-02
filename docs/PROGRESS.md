@@ -8038,3 +8038,95 @@ reviews' own findings, none requiring further sizing work before dispatch:
 (`API_CONTRACT`/`CONTRACT_IMPL`/`CONTRACT_CONSUME` need a real scan through a hoisted contract,
 which no current e2e test drives; `SHARED_RESOURCE`/`DYNAMIC_REF` need their own fixture shapes
 investigated fresh) — for round HH, not this one.
+
+---
+
+## Round GG close-out (2026-09-02)
+
+**§12 count: 26 of 48 — up from 24.** Two criteria closed this round (§3, §35), both via
+real capability work plus honest, disclosed adjudications rather than by narrowing what "closed"
+means. Four tasks, all merged, all reviewed, all with real controller fixes landed for what each
+review found — no review came back clean, and every finding was small, mechanical, and fixed in
+the same round.
+
+**Task 1 — D92, `PrState.HELD` wiring.** Wired the fleet's own verdict for a stub row held open
+by an in-review provider PR — previously declared, documented, never written. Task review
+reproduced the Rule-12 discriminator independently and found a real gap in the report's own claim
+("table footprint unchanged" — the reused SQL also touches `phases.pr_url`); fixed by correcting
+two stale test comments rather than the underlying write, which was correct. Does not flip §12.38
+alone (D94, no PR-promotion mechanism, remains genuinely NEW-MECHANISM sized).
+
+**Task 2 — citation-drift adjudication.** Round FF's new text-presence check flagged 4 citations
+in `docs/INTEGRATION_HONESTY.md`; this task adjudicated each on its merits rather than blanket-
+repointing: 3 were correct citations to supporting prose (verified against the commits that
+deliberately placed them there), 1 was genuine drift (repointed along with 5 riding siblings, with
+a dated disclosure note). Task review approved in full, independently re-verifying every commit
+citation and every line-content match.
+
+**Task 4 — §12.35, `EVIDENCE_PLUS_PRIORS` diff rendering.** Built the capability ADR-0108 ruled
+must exist, without touching the same criterion's own structural no-diff-field guarantee
+(`RejectedApproach`/`rejected_approaches` confirmed byte-for-byte unchanged from base, four
+independent ways per task review). Task review found the first positive-control test moved two
+variables at once, leaving a real leak surface — a plausible one-token-class gate-widening
+mutation — undiscriminated; fixed with the missing negative arm, verified to redden under the
+exact mutation named. **The DONE flip itself required its own adjudication (ADR-0110)**: SPEC's
+positive-control sentence names a real production-wiring gap (`prior_rejected_diffs` is populated
+only by test fixtures, no production caller exists), and the round ruled — on textual, precedent,
+and criterion-scope grounds, following the task review's own explicit recommendation — that a
+fixture-driven proof satisfies SPEC's literal text, with the residual disclosed rather than
+composed away silently. Round GG's own final review re-verified the SPEC text supports this
+reading and checked it against ADR-0109's contrasting precedent (§12.8, kept OPEN for a real
+production-inference requirement) — found consistent, not contradictory: each ADR rests on its
+own SPEC sentence, not a general rule stretched to fit.
+
+**Task 3 — §12.3, coverage gate + `tests/unit`.** Investigated (not assumed) an inherited
+forkserver/multiprocessing caveat blocking `fail_under` since round L — found no ADR had ever
+adjudicated it, ran three independent whole-suite `--cov` measurements (631s/604s/733s, all clean
+at 91%), and root-caused the runs' failing tests entirely to fresh-worktree provisioning gaps, not
+a coverage interaction. Populated `tests/unit/` with a real fast/offline test plus a new
+credential-clearing fixture pair implementing SPEC's own literal mechanism, mutation-verified.
+Self-flipped DONE (brief-authorized). **Two process incidents, both caught and fixed:**
+(1) the implementing agent went dormant twice waiting on an untracked background job it launched
+itself — once for ~6.5 hours — resolved by instructing it to run synchronously; (2) its isolated
+worktree independently allocated `ADR-0110` for this decision, colliding with task 4's own
+already-landed `ADR-0110` — a live instance of the exact Central Number Allocation failure
+CLAUDE.md's own ADR-0075 precedent describes, caught at merge and renumbered to ADR-0111
+throughout. Task review then found a THIRD process defect in the same lineage: the controller's
+own Rollup-table fix for this collision had been edited after `git add -A` and never actually
+staged, so the committed merge undercounted by one despite the merge message's own claim — caught
+by the reviewer's own re-scan of the committed tree, not trusted from any report.
+
+**The round's final whole-branch review found the cross-task pattern the four task-scoped reviews
+structurally could not see**: three separate times this round, an edit to `cli.py`/`rewrite.py`
+rotted a DIFFERENT pre-existing citation elsewhere in `docs/INTEGRATION_HONESTY.md`, and each time
+the fix was reactive — exactly what the gate reported, nothing more. The final review swept
+form-agnostically (not relying on the gate, which structurally cannot see the citation-first form
+these six sites all used — a disclosed blind spot, not a new one) and found six more rotted sites,
+plus a Rollup-table self-contradiction (§35 listed in both the DONE and OPEN rows), a false
+provenance sentence in a pin's own comment, a stale ADR reference in an accidentally-tracked
+scratch file, and one overstated precedent in ADR-0110 itself. All five fixed in one commit,
+including a self-caught error while drafting one of the fixes (an unverified section-number
+citation, checked before committing rather than after — the discipline holding under direct
+exercise, not just as a rule the round reads and cites).
+
+**Full suite, post-close**: `tests/test_integration_honesty_citations.py` 65/65 (verified at every
+major commit through the round, not just at close). `ruff check .` clean on the whole tree.
+`.venv/bin/python -m mypy` with no path args, 115 source files, no issues. `tests/unit` 17/17 in
+~1.1s. Full-suite `--cov` run on the primary checkout at `HEAD` (the round itself only ever
+measured this inside a worktree — the final review ran it on the primary tree, closing that gap):
+2134 passed, 90.83% coverage, clean exit. §12 count independently re-derived three times across
+the round's close (task 3's review, the final review, and this checkpoint) — 26/48 every time.
+
+**Round HH, opening next.** Two leads, both pre-scoped and neither requiring further sizing:
+1. **§12.8's remaining 5 `EdgeKind` fixture proofs** (round FF's ADR-0109 residual — `API_CONTRACT`,
+   `CONTRACT_IMPL`, `CONTRACT_CONSUME` need a real scan through a hoisted contract, which no
+   current e2e test drives; `SHARED_RESOURCE`/`DYNAMIC_REF` need their own fixture shapes
+   investigated fresh). Highest direct-criterion-impact candidate not yet attempted.
+2. **A form-agnostic citation-gate widening**: the final review's root-cause finding — `_ANCHORED`
+   only recognizes the anchor-first form (`` `anchor` (`file:line`) ``), structurally blind to the
+   citation-first form (`` `file:line`'s `anchor` `` or bare `` `file:line` `` inside prose naming
+   a symbol) that caused three separate reactive citation-drift fixes this round alone. Widening
+   the regex (or adding a second, citation-first derivation) would close the actual recurring
+   defect class rather than the individual sites it kept producing. Process-hardening, explicitly
+   disclosed as such — no criterion movement expected, but this project's own CLAUDE.md now
+   documents FOUR separate rounds hitting variants of this exact class.
