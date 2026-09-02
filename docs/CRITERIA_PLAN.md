@@ -200,7 +200,7 @@ touched further — already correct.
 ## 10. Phase 2 exit condition — `_transform_criterion`
 **DONE (round R, `320bee9`).** All three violation branches (probe-returns-False, empty-diff,
 outside-`dest_path`) are now exercised by three discriminating tests —
-`tests/test_cli.py:4893`, `:4983`, `:5034` — each driving `_transform_criterion` to its specific
+`tests/test_cli.py:4923`, `:5013`, `:5064` — each driving `_transform_criterion` to its specific
 violation and asserting the correct rejection (the probe-returns-False test plants a fake
 `parse_probe` that returns `False`, closing the gap the prior wording described). SPEC §12 item
 10 names exactly these three branches and nothing else, so the done bar below is fully met.
@@ -269,7 +269,7 @@ length-mismatch and the rung-0-shape refusal, plus the positive case, via real c
 (not the config loader). The row-count test could not be built as a `fleet transform` CLI e2e
 test as this Done bar originally suggested: investigation found `--deterministic-only`
 structurally caps a run at exactly 1 attempt regardless of configured ladder length
-(`cli.py:3485-3489`,`:3588`), so a real 5-attempt run cannot be driven through the CLI without a
+(`cli.py:3485-3489`,`:3592`), so a real 5-attempt run cannot be driven through the CLI without a
 live LLM backend. Built instead at the `PhaseRunner`+`RetryPolicy` level
 (`tests/test_runner.py`), matching the existing 3-rung escalation tests' own architecture —
 Rule-12 mutation-proven (`LadderState.exhausted`'s `>=`→`>`, task review independently
@@ -290,10 +290,30 @@ the write lands but before the unit returns and the writer commits. Same two-ass
 as the precedent: a `writer.submit` call-count proof (one transaction, not several) plus a
 post-rollback read-back through a genuinely separate connection, confirming nothing landed.
 Rule-12 proven three ways, independently reproduced by task review: a rollback→commit defect in
-`_run_in_immediate` (`state/db.py`) reddens the read-back assertion (and no pre-existing test in
-the suite would have caught it — every prior test only exercised the success path or a pre-write
-failure, never a fault after a real write inside this specific unit); a split-into-two-submits
+`_run_in_immediate` (`state/db.py`) reddens the read-back assertion; a split-into-two-submits
 defect reddens the submit-count assertion; a cosmetic comment reflow stays green as a control.
+**Correction, final review, round CC (2026-09-02): the rollback→commit mutation's claimed
+uniqueness was false and unmeasured — the reason was the unmeasured sentence, CLAUDE.md's own
+named failure mode.** The original text said no pre-existing test would have caught the
+rollback→commit defect; measured, `tests/test_repository.py` alone goes 5 failed / 49 passed
+under it — **four** pre-existing tests also catch it
+(`test_the_demotion_is_one_write_unit_so_a_failure_leaves_no_half_demoted_repo` — the very
+precedent this closure names — plus `test_a_run_refusal_leaves_no_phantom_repo_reservation`,
+`test_a_halt_is_written_to_disk_and_refuses_every_later_reservation`,
+`test_concurrent_reserve_and_settle_never_exceed_either_ceiling`). The split-into-two-submits
+mutation is the genuinely unique discriminator (1 failed / 53 passed) — it is what actually earns
+this test its place, not the rollback→commit one.
+
+**Also strengthened, same review: the interrupted call's fixture now asserts SPEC's literal
+state, not a structural implication of it.** SPEC §12.13 names the property as "the increment
+that reaches the ceiling is the same statement that writes `status='REQUIRES_HUMAN_INTERVENTION'`".
+The test as first landed drove `status=SUCCEEDED` for the interrupted call, which never takes the
+escalation branch — the property held only by composition with the pre-existing
+`test_the_attempt_that_reaches_max_attempts_escalates_in_the_same_state_write`, undisclosed. Fixed
+directly (cheap, per the review's own suggestion): the interrupted call now seeds
+`max_attempts=1` and `status=PENDING`, so the write it interrupts genuinely IS the
+ceiling-escalation write SPEC names, asserted in one test rather than by composition across two.
+
 Task review's own independent judgment (not just the mutation mechanics): this proves the SPEC
 claim that "nothing is ever interrupted mid-write" for real, closing the exact gap this entry
 named — not a weaker "an exception can happen somewhere" substitute.
@@ -302,8 +322,8 @@ named — not a weaker "an exception can happen somewhere" substitute.
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
 and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
-refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3582-3587`/
-`5483-5489` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
+refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3586-3591`/
+`5493-5498` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
 for a blocked dependency..." — this is the missing stub-creation worker gap (no worker in
 `src/fleet/workers/` writes a `stubs` row for it), the exact NEW-MECHANISM item §37's own entry
 already names, **not** D50's config-key-wiring thesis. D50 only mentions `--stub-blocked` in
@@ -753,13 +773,28 @@ per-line sweep — it was **structurally blind**. `make_unified_diff`
 `---`/`+++`/`@@` and content lines; the literal string `"diff --git a/... b/..."` is git's own
 preamble, layered on by `git diff` itself, and never appears in this helper's output at all. So
 the old proxy could never have caught a real leak through this path, regardless of how much
-content leaked. Task review reproduced this directly: a targeted single-line leak into
-`_evidence()`'s rendered summary made the reconstructed OLD assertion PASS while the NEW per-line
-sweep correctly reddened.
+content leaked. **Correction, final review, round CC: the mutation reproducing this is a
+demonstration of assertion form, not of a reachable defect** — `_evidence()`'s
+`rejected_approaches` summary carries no field diff text could travel in (see the still-standing
+schema-constraint paragraph below), so any mutation that "leaks" diff text there must inject the
+marker literal directly; it shows what the old assertion could and couldn't catch, not a live path
+a worker bug could actually take.
+
+**Correction, final review, round CC (2026-09-02): a live disclosure from round AA's own final
+review was dropped by this round's rewrite, not annotated — restored here rather than left
+missing.** `RejectedApproach` (`src/fleet/models/tasks.py:213`) has no field capable of holding
+diff text and `reason` is `max_length=280` — still true, re-verified unchanged by this round. So
+on the `EVIDENCE_PLUS_REJECTED_APPROACHES` rung the new per-line sweep is a **tripwire against a
+future schema change**, not a guard against a currently-reachable leak: no worker defect can leak
+diff text through this rung while the schema stands as it is. The test file's own inline comment
+already says as much ("this represents what *would* leak if that boundary were ever crossed") —
+this entry should say so too, not claim more than the evidence supports.
 
 **Remains OPEN**: the CLI-level proof only, still blocked on D50's `--context-policy` work
 (`cli.py` refuses `--context-policy` for any value at all, audit row 35) — do not attempt it
-before D50 lands. Both worker-level rungs are now genuinely closed.
+before D50 lands. Both worker-level rungs now have a real per-line sweep in place; the
+`EVIDENCE_PLUS_REJECTED_APPROACHES` rung's is currently a tripwire rather than a live guard, per
+the schema constraint above.
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`

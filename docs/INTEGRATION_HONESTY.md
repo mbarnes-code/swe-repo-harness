@@ -7594,8 +7594,10 @@ task review's word alone), against current `HEAD` — separately from task revie
 which itself went further than the implementer's original grep-only flag.
 
 **The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13712`)
-is called at exactly 4 sites: `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
-`_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3542`, as of when this defect was found — see the fix note below) calls
+was called at exactly 4 sites as of when this defect was found (a 5th, `transform` itself, exists
+now — see the fix note below): `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
+`_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3538` as of
+when this defect was found, now `3465-3542` post-fix) calls
 `_phase_preflight(ctx)` and then goes straight to `_transform_impl` — no `_require_disk_headroom`
 call anywhere in the function, confirmed by isolating the function body between `def transform(`
 and the next `@app.command` and grepping it directly. This breaks a pattern applied consistently
