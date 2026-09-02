@@ -3265,6 +3265,240 @@ def test_resume_repoll_prs_does_not_undo_t1_in_the_same_call(
         "acme-widgets→acme-utils@1.0.0"
         not in (second_payload["stub_reconcile"]["excluded_superseded_this_call"])
     ), "T1 never touched the control this call, so it must not appear in the exclude disclosure"
+
+
+def test_resume_reconcile_does_not_abandon_a_superseded_stub_across_separate_calls(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D106 (`docs/INTEGRATION_HONESTY.md`): D105's `exclude_this_call` protects a stub T1
+    supersedes from `reconcile()`'s sweep only within the SAME `fleet resume` invocation — its
+    accumulator is scoped to one call and never persisted. This drives TWO genuinely SEPARATE
+    `fleet resume --repoll-prs` invocations (two distinct `runner.invoke` calls, each opening and
+    closing its own `StateWriter`/read connections independently, exactly as two distinct `fleet
+    resume` commands would run) and checks whether the SECOND call's `reconcile()` sweep
+    re-abandons the row the FIRST call's T1 superseded, with no revalidation having run in
+    between (D104: `REVALIDATE` execution has no dispatch path, so nothing currently could have).
+
+    Target (the gap): the stub is superseded by T1 in call 1 (protected by D105's same-call
+    exclusion, asserted). Nothing runs between the two calls. Per invariant 1
+    (`orchestrator/stubs.py`'s module docstring), a `SUPERSEDED` row means the real label is
+    already live, so call 2 must not treat it as if its provider never merged.
+
+    Control 1 (reconcile's genuine job, unrelated repo, seeded ONLY between the two calls so its
+    abandonment is provably driven by the SECOND call): an `ACTIVE` stub whose provider never
+    opened a PR at all must still be abandoned via ordinary T4 in call 2 — proves the fix does not
+    neuter `reconcile()`'s real end-of-run abandon logic.
+
+    Control 2 (the fix's own boundary, also seeded only between the two calls): a stub seeded
+    directly `SUPERSEDED` with NO `revalidation_task_id` — never produced by
+    `_fire_t1_for_provider`, which always stamps it in T1's own transaction (D103 gap 2) — against
+    a provider whose PR is genuinely, durably `MERGED`. It must STILL be abandoned by call 2's
+    ordinary T3 sweep: a fix that protects every `SUPERSEDED` row regardless of tracking would be
+    broader than D106 asks for and would silently defeat §13 row 35 for any row whose revalidation
+    bookkeeping is absent.
+    """
+    from fleet import cli
+    from fleet.cli import PR_RECORD_KIND, _fingerprint
+
+    db = workspace / "state" / "fleet.db"
+
+    # ---- target: acme-commons / acme-billing, seeded BEFORE call 1 so T1 fires this call ----
+    _put_consumer_at_verify_degraded(db, "acme-commons")
+    _put_stub(db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0")
+    billing_url = "https://github.invalid/acme/monorepo/pull/9"
+    _seed_fresh_pr_record(db, "acme-billing", state="DRAFTED", url=billing_url)
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for phase, status in (
+            (1, "SUCCEEDED"),
+            (2, "SUCCEEDED"),
+            (3, "SUCCEEDED"),
+            (4, "SUCCEEDED"),
+        ):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (RUN_ID, "acme-billing", phase, status, "2026-08-08T12:00:00.000000+00:00"),
+            )
+    finally:
+        conn.close()
+
+    # ---- call 1: --repoll-prs merges acme-billing's PR, firing T1 for the target ----
+    forge = _SelectiveMergedForge(merged_url=billing_url)
+    monkeypatch.setattr(cli, "GH_RUNNER", forge)
+    first = runner.invoke(
+        app, [*base_args(workspace), "--json", "resume", "--no-continue", "--repoll-prs"]
+    )
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    first_payload = json.loads(first.stdout)
+    assert (
+        "acme-commons→acme-billing@1.0.0"
+        in first_payload["stub_reconcile"]["excluded_superseded_this_call"]
+    ), "setup check: T1 must have fired and D105 must have protected it THIS call"
+    assert "acme-commons→acme-billing@1.0.0" not in first_payload["stub_reconcile"]["abandoned"]
+
+    conn = sqlite3.connect(db)
+    try:
+        target_after_call1 = conn.execute(
+            "SELECT state, revalidation_task_id FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-commons' AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert target_after_call1[0] == "SUPERSEDED", "T1 must have fired in call 1"
+    assert target_after_call1[1] is not None, (
+        "setup check: D103 gap 2 must have stamped a REVALIDATE task id onto the row T1 just "
+        "superseded — this fix's whole mechanism reads that column"
+    )
+
+    # ---- seed the two controls ONLY NOW, between the two calls ----
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for name in ("acme-frontend", "acme-legacy", "acme-widgets", "acme-utils"):
+            conn.execute(
+                "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+                (name, name, f"https://example.invalid/{name}", "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+
+    # Control 1: ACTIVE, provider never opened a PR at all.
+    _put_consumer_at_verify_degraded(db, "acme-frontend")
+    _put_stub(db, consumer="acme-frontend", provider="acme-legacy", coord_key="acme-legacy@1.0.0")
+
+    # Control 2: seeded directly SUPERSEDED, no revalidation_task_id, provider durably MERGED.
+    _put_consumer_at_verify_degraded(db, "acme-widgets")
+    stamp = "2026-08-08T12:00:00.000000+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, revalidation_round, max_revalidation_rounds, "
+            "                   state_changed_at, resolved_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SUPERSEDED', 'PUBLISHED_ARTIFACT', 0, 2, ?, ?, ?)",
+            (
+                "44444444-4444-4444-8444-444444444444",
+                RUN_ID,
+                "acme-widgets",
+                "acme-utils@1.0.0",
+                "acme-widgets",
+                "acme-utils",
+                "1.0.0",
+                "//third_party/stubs/acme-utils",
+                stamp,
+                stamp,
+                stamp,
+            ),
+        )
+    finally:
+        conn.close()
+    utils_url = "https://github.invalid/acme/monorepo/pull/10"
+    payload = json.dumps(
+        {
+            "run_id": RUN_ID,
+            "repo_id": "acme-utils",
+            "wave_index": 0,
+            "branch": "migrate/acme-utils",
+            "base": "integration",
+            "title": "migrate acme-utils",
+            "body": "body",
+            "source_url": "https://example.invalid/acme-utils",
+            "source_sha": "b" * 40,
+            "state": "MERGED",
+            "url": utils_url,
+            "created_at": stamp,
+        }
+    )
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
+            (
+                RUN_ID,
+                "acme-utils",
+                PR_RECORD_KIND,
+                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND),
+                payload,
+                stamp,
+            ),
+        )
+    finally:
+        conn.close()
+
+    # ---- call 2: a wholly separate `fleet resume --repoll-prs` invocation ----
+    second = runner.invoke(
+        app, [*base_args(workspace), "--json", "resume", "--no-continue", "--repoll-prs"]
+    )
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+    second_payload = json.loads(second.stdout)
+
+    conn = sqlite3.connect(db)
+    try:
+        target_state, target_abandon_reason = conn.execute(
+            "SELECT state, abandon_reason FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-commons' AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+        target_unresolved = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnresolvedStub'",
+            (RUN_ID,),
+        ).fetchone()
+        control1_state = conn.execute(
+            "SELECT state, abandon_reason FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-frontend' AND stub_coord_key = 'acme-legacy@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+        control2_state = conn.execute(
+            "SELECT state, abandon_reason FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-widgets' AND stub_coord_key = 'acme-utils@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # The positive assertion D106 exists for: the row T1 superseded in call 1 must survive
+    # call 2's sweep, with NO protection from D105's call-scoped exclusion (empty this call).
+    assert target_state == "SUPERSEDED", (
+        f"D106: a stub superseded in an EARLIER, separate `fleet resume` call must not be "
+        f"re-abandoned by a LATER call's ordinary reconcile sweep, got {target_state!r}"
+    )
+    assert target_abandon_reason is None
+    assert target_unresolved is None, (
+        "D106: reconcile() must not have written a fresh UnresolvedStub finding for a row still "
+        "awaiting revalidation from an earlier call"
+    )
+    assert "acme-commons→acme-billing@1.0.0" not in second_payload["stub_reconcile"]["abandoned"]
+    assert second_payload["stub_reconcile"]["excluded_superseded_this_call"] == [], (
+        "setup check: T1 must NOT have fired again this call (already SUPERSEDED) — whatever "
+        "protects the target this call must be a DIFFERENT, persisted mechanism"
+    )
+    assert (
+        "acme-commons→acme-billing@1.0.0"
+        in second_payload["stub_reconcile"]["excluded_awaiting_revalidation"]
+    ), "the fix's own disclosure must name exactly the row it excluded"
+
+    # Control 1: reconcile()'s genuine end-of-run job must still fire for an unrelated, genuinely
+    # abandoned stub.
+    assert control1_state == ("ABANDONED", "END_OF_RUN")
+    assert "acme-frontend→acme-legacy@1.0.0" in second_payload["stub_reconcile"]["abandoned"]
+
+    # Control 2: a SUPERSEDED row with no REVALIDATE task tracking it must still be swept —
+    # the fix protects rows an outstanding task names, not every SUPERSEDED row.
+    assert control2_state == ("ABANDONED", "END_OF_RUN"), (
+        f"a SUPERSEDED row with no revalidation_task_id must not be protected by the fix — got "
+        f"{control2_state!r}"
+    )
+    assert "acme-widgets→acme-utils@1.0.0" in second_payload["stub_reconcile"]["abandoned"]
+    assert (
+        "acme-widgets→acme-utils@1.0.0"
+        not in second_payload["stub_reconcile"]["excluded_awaiting_revalidation"]
+    )
+
+
 def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
     """Phases 1-3 `SUCCEEDED`, phase 4 `REQUIRES_HUMAN_INTERVENTION` — a repo an operator must
     already triage for a reason unrelated to any stub (§12.14: only `fleet retry`'s audited

@@ -12607,6 +12607,47 @@ async def _apply_stub_reconcile(
         await writer.submit(unit)
 
 
+async def _stub_awaiting_revalidation(
+    conn: aiosqlite.Connection, run_id: str
+) -> frozenset[tuple[str, str]]:
+    """D106 (`docs/INTEGRATION_HONESTY.md`): every `(consumer_repo_id, stub_coord_key)` pair whose
+    `stubs` row is `SUPERSEDED` with a REVALIDATE task (`stubs.revalidation_task_id`, D103 gap 2)
+    still outstanding — `tasks.status` not yet `DONE`/`FAILED`.
+
+    D105 fixed the SAME-call defect (`reconcile()` re-abandoning a row T1 just superseded, within
+    one `fleet resume --repoll-prs` invocation) with `exclude_this_call`, an in-memory accumulator
+    scoped to that one call. D106 is the cross-call analogue: a row that survives — un-revalidated
+    — into a LATER, separate `fleet resume` invocation has no protection from that accumulator (it
+    is empty every call except the one T1 fired in), so it is fully exposed to `reconcile()`'s
+    ordinary sweep, which (per its own unchanged logic) reads a `SUPERSEDED` row's provider as
+    `MERGED` and therefore no longer "open", and abandons it via T3 — exactly the state invariant 1
+    (`orchestrator/stubs.py`'s module docstring: "a `SUPERSEDED` row means the real label is
+    already live") says must not be treated as if the provider never merged. This query is the
+    persisted equivalent of `exclude_this_call`, good across calls because it reads real state
+    (`tasks.status`) rather than an accumulator that resets every invocation.
+
+    D104: `REVALIDATE` tasks have no dispatch path yet, so `tasks.status` stays `PENDING`
+    indefinitely in practice today — this correctly holds the row open for as long as that stays
+    true, rather than assuming revalidation completes promptly. It also means a row here does not
+    reach `held_for_merge`/`abandoned` in the returned payload at all this call: it is filtered out
+    of `reconcile()`'s input entirely, same as `exclude_this_call`, and disclosed separately below.
+
+    A row with NO `revalidation_task_id` is NOT protected here: `_fire_t1_for_provider` always
+    stamps that column in T1's OWN transaction (D103 gap 2), so its absence on a `SUPERSEDED` row
+    is not evidence revalidation is pending — it means no task was ever minted for this row (a
+    fixture seeded directly, or a pre-D103-gap-2 artifact), and such a row must still reach
+    `reconcile()`'s ordinary sweep exactly as it did before this fix.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT s.consumer_repo_id, s.stub_coord_key "
+        "  FROM stubs s JOIN tasks t ON t.task_id = s.revalidation_task_id "
+        " WHERE s.run_id = ? AND s.state = 'SUPERSEDED' AND t.status NOT IN ('DONE', 'FAILED')",
+        (run_id,),
+    )
+    return frozenset((str(row[0]), str(row[1])) for row in rows)
+
+
 async def _stub_reconcile_impl(
     path: Path,
     settings: FleetSettings,
@@ -12638,10 +12679,19 @@ async def _stub_reconcile_impl(
     sweep's input, never a change to `reconcile()` itself or to its `OPEN_STATES`/carve-out logic.
     Default `frozenset()` — a plain `fleet resume` with no `--repoll-prs` call this way and pass
     nothing, matching prior behaviour exactly.
+
+    D106: `_stub_awaiting_revalidation` (above) adds a SECOND, persisted exclusion — rows
+    `SUPERSEDED` by an EARLIER call whose REVALIDATE task has not yet resolved — filtered out of
+    `reconcile()`'s input the same way, so `reconcile()` itself stays byte-for-byte unchanged
+    exactly as D105's fix kept it.
     """
     records, providers = await _with_ro(path, lambda conn: _stub_reconcile_inputs(conn, run_id))
-    if exclude_this_call:
-        records = {key: record for key, record in records.items() if key not in exclude_this_call}
+    awaiting_revalidation = await _with_ro(
+        path, lambda conn: _stub_awaiting_revalidation(conn, run_id)
+    )
+    exclude = exclude_this_call | awaiting_revalidation
+    if exclude:
+        records = {key: record for key, record in records.items() if key not in exclude}
     outcome = stub_reconcile(
         records.values(),
         providers,
@@ -12661,6 +12711,9 @@ async def _stub_reconcile_impl(
         # D105 disclosure: rows this same call's `_stub_reconcile_impl` deliberately did NOT sweep
         # because `_pr_sync_impl` (`--repoll-prs`) had just superseded them via T1.
         "excluded_superseded_this_call": sorted(f"{c}→{k}" for c, k in exclude_this_call),
+        # D106 disclosure: rows superseded by an EARLIER, separate call, still awaiting a
+        # REVALIDATE task that has not resolved (`tasks.status` not `DONE`/`FAILED`).
+        "excluded_awaiting_revalidation": sorted(f"{c}→{k}" for c, k in awaiting_revalidation),
     }
 
 
