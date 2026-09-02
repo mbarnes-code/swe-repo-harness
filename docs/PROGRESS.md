@@ -8412,3 +8412,86 @@ further sizing:
 3. Round HH's still-open lead (`API_CONTRACT`'s extraction gap, confirmed NEW-MECHANISM by two
    rounds' research) and D94 (PR-promotion mechanism, confirmed NEW-MECHANISM three times now)
    remain available if the above don't fill round IV.
+
+---
+
+## Round IV close-out (2026-09-02)
+
+**§12 count: 26 of 48 — unchanged.** §38's re-audit found nothing newly buildable (a legitimate
+zero-movement, zero-commit outcome); §12.4 deepened from 3/12 to 7/12 LLM roles, correctly not
+flipped DONE (5 remain).
+
+**Task 1 — §38 re-audit, zero commits.** Independently re-derived §38's 20 sub-clauses against
+SPEC's literal text (no such enumeration previously existed in the tree) after D92/D98/D99/D100
+all landed in the prior two rounds. Everything touching those four defects is already covered by
+tests landed inside their own fix commits — nothing newly buildable. Clauses depending on D94
+remain confirmed blocked. Found one new, genuine gap: two complementary sub-clauses
+(`UnmergedDependency` finding + `--sync` clearing) are unimplemented, though the code's own
+comments already disclosed this before the investigation found it. Task review Approved,
+independently confirmed the "already covered" claims by reading the named tests directly.
+
+**Tasks 2 and 3 — §12.4, 4 more roles.** `BUILD_DIAGNOSIS`/`DEP_DISAMBIGUATE` and
+`CYCLE_BREAK_PROPOSAL`/`CONFLICT_RESOLUTION`, both via the established `GoldenCase`-table pattern.
+Each task investigated its roles' specific complications (a nullable-field branch; a
+`pattern=`-constrained field) rather than assuming the established pattern trivially extends.
+**The controller independently re-verified each task's own highest-risk claim — the whole-tree
+`ruff format --check .` result — BEFORE dispatching either task review**, given round III's own
+close-out found `main` red from exactly an unverified version of this claim; both task reviews then
+independently re-derived it a further time. Both tasks add rows to the same table, producing a
+real git merge conflict the controller resolved by hand — purely additive on both sides, no logic
+conflict, verified field-by-field by task 3's own review and, more thoroughly, by this round's own
+final review (which reconstructed all three trees — base, task 2, task 3 — and diffed line sets to
+prove the merge was an exact union, then re-ran both tasks' mutation proofs against the merged
+state directly, since neither task's own review had seen the post-merge file).
+
+**The round's own final whole-branch review found four issues, all fixed in one commit:**
+1. Task 1's own stated reason for NOT allocating a D-number to its new finding ("a D-number here
+   has so far marked a defect discovered by investigation, not one the code already names as its
+   own known gap") was checked against the actual ledger rather than accepted — and found false:
+   **D78** is exactly a code-disclosed gap that was given a number, its own body explicitly ruling
+   it in and naming two siblings (D56/D57) as the same class. Allocated **D101** for the finding,
+   following that precedent instead of a rule that didn't hold up to a direct check.
+2. §38's own status line and Rollup row both still read "only D94 still blocks" after the same
+   task's own finding established a second, independent blocker — corrected both.
+3. A schema-pin citation went stale a second time within the same entry (round III's own
+   `:113-115` correction, itself now stale after round IV's additions moved it to `:124-130`) —
+   kept as a historical record rather than silently rewritten, following the file's own convention.
+4. A workspace scratch report was accidentally force-committed by one task's own commit,
+   inconsistent with every prior round leaving the gitignored workspace untracked — untracked
+   before it could leave a tracked deletion when the workspace is removed at close.
+
+**Full suite status: genuinely indeterminate this round, disclosed rather than asserted either
+way.** The final review attempted a full-suite run and, by its own admission, violated this
+project's "never run two pytest sessions concurrently" rule mid-review (running a targeted test
+alongside the backgrounded full suite), reaping the full run's own `BAZEL_ROOT` and invalidating
+it. It re-ran the suite serially afterward but that clean run had not finished by the time review
+concluded. What IS established: round IV's diff touches zero files any of the observed partial
+failures' test modules read (`git diff --stat` against `src/`, `SPEC.md`, and every real-bazel
+e2e test file is empty), so those failures — if they hold on a clean run — predate this round.
+**No full-suite green claim is made here.** Every targeted gate this round's tasks and reviews
+actually completed cleanly: `ruff check .` clean, `ruff format --check .` matches the pinned
+123-file baseline exactly (verified independently at least four separate times across this round
+by different agents), `mypy` clean on 115 files, `test_integration_honesty_citations.py` 72/72,
+`test_llm_golden_responses.py` 36/36, `test_cli.py` 166/166 (untouched by this round, reconfirmed
+unaffected). A future round should complete a genuinely clean full-suite run rather than assume
+this checkpoint's disclosed gap means something is actually broken.
+
+**§12 count independently re-derived at least three times across this round's close** — 26/48
+every time, "first bold status marker per section," matching the Rollup exactly.
+
+**Round V, opening next.** Per this round's own research (not yet acted on):
+1. **§12.4's remaining 5 roles** (`api_incompat_rewrite`, `build_authoring`, `escalation`,
+   `transform_repair`, `manifest_extract`) — the batching pattern is now proven across three
+   rounds; research's own suggested split: (A) `transform_repair`+`manifest_extract`,
+   (B) `api_incompat_rewrite`+`escalation` (both extend `LlmPatchProposal`, per the schema's own
+   inheritance structure), (C) `build_authoring` standalone (largest, deepest nesting).
+2. **`API_CONTRACT`'s extraction gap** — research found a genuinely smaller first slice than
+   previously scoped: `_pattern_symbols` (an existing generic, config-driven, already-wired
+   cross-language extractor already used for `SHARED_RESOURCE`/`DYNAMIC_REF`) could plausibly
+   extend to detect gRPC's generated-code literal service-name strings, reusing existing plumbing
+   rather than a from-scratch extractor. Still real work — needs settings/payload/cli wiring plus
+   a disclosed design assumption about codegen conventions — but closing it retires the last open
+   `EdgeKind` and closes §12.8 in full. A real second candidate alongside §12.4's continuation.
+3. D94 (PR-promotion mechanism) re-confirmed NEW-MECHANISM a fourth time, not ready for dispatch.
+   D101 (this round's own new finding) not yet sized for dispatch either — a future round's
+   research should scope both before either is attempted.
