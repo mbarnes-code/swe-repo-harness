@@ -1217,11 +1217,14 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:6956-6988`) always constructs `published: Coordinate` with `version_spec=None`. This is
+  (`cli.py:6963-7002`) always constructs `published: Coordinate` with `version_spec=None`. This is
   a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
-  re-derivation from an existing carrier as previously assumed.
+  re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
+  investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
+  history kept as the record of what was true when this paragraph was written, not repointed to
+  the post-fix state.**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7062-7113`) resolves every
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7072-7131`) resolves every
   consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -1254,7 +1257,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:8581-8614`) filters on the literal string
+blockers above**: `_eligible_build_units` (`cli.py:8590-8625`) filters on the literal string
 `phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
@@ -1284,6 +1287,29 @@ logic itself, which this task deliberately does not build (its CLI surface stays
 that logic exists — see ADR-0113's condition 2). §37 does not move toward DONE from this landing
 alone; it removes the load-bearing prerequisite for B and C to become end-to-end testable, per
 research-4's own framing.**
+
+**Update, round VI task 12 (2026-09-02, `6b07925`, merged `13242e2`, task-scoped review Approved
+with elevated scrutiny given the schema migration) — Blocker B lands.** New `coordinates.version`
+column (migration `v009_coordinate_version`), captured at the existing `coordinates` write site:
+research-5 found the value was already computed transiently by 4 of 5 ecosystem adapters every
+scan (python/npm/maven/cargo — Go is a genuine, disclosed ecosystem limitation, module versions
+are VCS tags not in-repo content) and simply discarded before reaching durable storage — Blocker B
+was "the value is thrown away," not "the value cannot be derived." Only `owned=True` (the repo's
+own publish) may ever supply a non-NULL version; a dependency declaration (a range, e.g. `^1.2`)
+never does, guarded by an `ON CONFLICT ... DO UPDATE SET version = COALESCE(...)` clause mirroring
+the existing `owner_repo_id` pattern exactly. `_repo_facts` now reads the column into
+`Coordinate.version_spec`. No ADR was needed (purely additive, no state-machine/tested-invariant
+change). Review independently re-verified all 5 adapters, the write-site guard, reproduced the
+Rule-12 mutation proof against a real `fleet scan`, and — with elevated scrutiny given the schema
+bump broke and required fixing three pre-existing tests — confirmed each fix genuinely preserves
+its test's original intent rather than being mechanically patched to pass.
+
+**§37 state after Blocker B: one structural blocker remains (C — `_unit_deps`'s stub-aware
+target-label reclassification), plus the `_eligible_build_units` item and the still-unbuilt
+TRANSFORM-worker stub-creation logic. §37 does not move toward DONE from this landing alone —
+`coordinates.version` has no consumer yet (the still-unbuilt stub-creation logic is its only
+planned reader); this makes Blocker C's own eventual work end-to-end testable, per the same
+"removes a prerequisite, doesn't close the criterion" pattern Blocker A's landing established.**
 
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
