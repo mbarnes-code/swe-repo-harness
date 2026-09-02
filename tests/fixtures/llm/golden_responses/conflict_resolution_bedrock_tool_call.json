@@ -1,0 +1,32 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (a `VersionConflictResolution`-schema object) differs. `mechanism` is the field with `pattern=r\"^(bazel_dep|single_version_override)$\"` on `src/fleet/llm/schemas.py:281-285`; this fixture's value, `\"single_version_override\"`, genuinely matches that pattern. This fixture is also the Rule-12 mutation base for `test_a_conflict_resolution_reply_with_an_invalid_mechanism_fails_schema_validation` in `tests/test_llm_golden_responses.py` (mutates `mechanism` to `\"override_all\"`, a value that is schema-shape-valid — a non-empty string within the 1-char-minimum bound `VersionConflictResolution` otherwise imposes on no other field of this type — but fails the closed `pattern=` regex, a genuinely different failure mode than deleting a required field).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_ConflictRes01ZjIwYjk4",
+            "name": "emit_response",
+            "input": {
+              "coord_key": "npm:left-pad",
+              "proposed_version": "1.3.0",
+              "mechanism": "single_version_override",
+              "violated_specs": ["<1.2.0"],
+              "rationale": "No version satisfies every consumer: one pins <1.2.0 for a since-fixed padding bug, another requires >=1.3.0 for a security patch. single_version_override forces every dependent onto 1.3.0."
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 372,
+    "outputTokens": 48,
+    "totalTokens": 420
+  },
+  "metrics": {
+    "latencyMs": 588
+  }
+}

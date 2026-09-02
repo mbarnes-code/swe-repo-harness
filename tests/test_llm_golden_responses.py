@@ -1,8 +1,11 @@
 """SPEC §12 item 4 — checked-in golden-response fixtures, one per shipped backend + PROMPTED rung,
 per LLM role. `docs/CRITERIA_PLAN.md` §4's revised Done bar requires this per **role** (12,
 `config/models.yaml`), not just per backend — round II's task 3 landed `REPO_CLASSIFY` alone (1 of
-12); this file's round III task 3 adds `PR_TITLE` and `PR_BODY` (3 of 12; 9 remain, tracked in
-`docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
+12); round III's task 3 added `PR_TITLE` and `PR_BODY` (3 of 12); this file's round IV task 3 adds
+`CYCLE_BREAK_PROPOSAL` and `CONFLICT_RESOLUTION` (5 of 12 counting this task's own additions only —
+a sibling round IV task independently targets `BUILD_DIAGNOSIS`/`DEP_DISAMBIGUATE` but this file
+does not assume that lands; 7 remain uncovered even if it does, tracked in `docs/CRITERIA_PLAN.md`
+§4, not flipped DONE here).
 
 ADR-0013's contract layer declares the intent this closes: "every LLM prompt's declared response
 schema validates against a stored golden sample." `tests/test_llm_roles.py`'s
@@ -95,8 +98,16 @@ from fleet.llm.backends import anthropic as anthropic_backend
 from fleet.llm.backends import openai_compatible as oc_backend
 from fleet.llm.client import BackendReply
 from fleet.llm.roles import Role
-from fleet.llm.schemas import RESPONSE_SCHEMAS, FleetModel, PrBody, PrTitle, RepoClassification
-from fleet.models.enums import Ecosystem, StructuredOutputMode
+from fleet.llm.schemas import (
+    RESPONSE_SCHEMAS,
+    CycleBreakProposal,
+    FleetModel,
+    PrBody,
+    PrTitle,
+    RepoClassification,
+    VersionConflictResolution,
+)
+from fleet.models.enums import BreakStrategy, Ecosystem, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, Price
 from tests.test_llm_backend_bedrock import parse_reply as bedrock_parse_reply
 from tests.test_llm_backend_bedrock import target as bedrock_target
@@ -113,6 +124,8 @@ FIXTURES_DIR = Path(__file__).resolve().parent / "fixtures" / "llm" / "golden_re
 assert RESPONSE_SCHEMAS[Role.REPO_CLASSIFY] is RepoClassification
 assert RESPONSE_SCHEMAS[Role.PR_TITLE] is PrTitle
 assert RESPONSE_SCHEMAS[Role.PR_BODY] is PrBody
+assert RESPONSE_SCHEMAS[Role.CYCLE_BREAK_PROPOSAL] is CycleBreakProposal
+assert RESPONSE_SCHEMAS[Role.CONFLICT_RESOLUTION] is VersionConflictResolution
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -316,6 +329,116 @@ GOLDEN_CASES: tuple[GoldenCase, ...] = (
             "highlights": ("no existing consumer affected",),
         },
     ),
+    # --- CYCLE_BREAK_PROPOSAL (round IV task 3, new) ---
+    GoldenCase(
+        role=Role.CYCLE_BREAK_PROPOSAL,
+        schema=CycleBreakProposal,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="cycle_break_proposal_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "strategy": BreakStrategy.CONTRACT_HOIST,
+            "broken_edge_ids": (),
+            "hoisted_contract_ids": ("proto:acme.v1",),
+        },
+    ),
+    GoldenCase(
+        role=Role.CYCLE_BREAK_PROPOSAL,
+        schema=CycleBreakProposal,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="cycle_break_proposal_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "strategy": BreakStrategy.EDGE_BREAK,
+            "broken_edge_ids": ("e42",),
+            "hoisted_contract_ids": (),
+        },
+    ),
+    GoldenCase(
+        role=Role.CYCLE_BREAK_PROPOSAL,
+        schema=CycleBreakProposal,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="cycle_break_proposal_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "strategy": BreakStrategy.ATOMIC_WAVE,
+            "broken_edge_ids": (),
+            "hoisted_contract_ids": (),
+        },
+    ),
+    GoldenCase(
+        role=Role.CYCLE_BREAK_PROPOSAL,
+        schema=CycleBreakProposal,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="cycle_break_proposal_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "strategy": BreakStrategy.MANUAL,
+            "broken_edge_ids": (),
+            "hoisted_contract_ids": (),
+        },
+    ),
+    # --- CONFLICT_RESOLUTION (round IV task 3, new) ---
+    GoldenCase(
+        role=Role.CONFLICT_RESOLUTION,
+        schema=VersionConflictResolution,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="conflict_resolution_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "maven:com.acme:commons-io",
+            "proposed_version": "2.11.0",
+            "mechanism": "bazel_dep",
+            "violated_specs": ("[1.0,2.0)",),
+        },
+    ),
+    GoldenCase(
+        role=Role.CONFLICT_RESOLUTION,
+        schema=VersionConflictResolution,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="conflict_resolution_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "npm:left-pad",
+            "proposed_version": "1.3.0",
+            "mechanism": "single_version_override",
+            "violated_specs": ("<1.2.0",),
+        },
+    ),
+    GoldenCase(
+        role=Role.CONFLICT_RESOLUTION,
+        schema=VersionConflictResolution,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="conflict_resolution_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "coord_key": "gradle:com.widget:widget-core",
+            "proposed_version": "3.4.1",
+            "mechanism": "bazel_dep",
+            "violated_specs": ("[3.0,3.4)",),
+        },
+    ),
+    GoldenCase(
+        role=Role.CONFLICT_RESOLUTION,
+        schema=VersionConflictResolution,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="conflict_resolution_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "coord_key": "pypi:flask-utils",
+            "proposed_version": "0.9.2",
+            "mechanism": "single_version_override",
+            "violated_specs": ("==0.8.*",),
+        },
+    ),
 )
 
 
@@ -391,3 +514,30 @@ def test_the_unmutated_pr_body_fixture_still_validates_so_the_mutation_above_is_
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, PrBody, StructuredOutputMode.TOOL_CALL)
+
+
+def test_a_conflict_resolution_reply_with_an_invalid_mechanism_fails_schema_validation() -> None:
+    """Mutation of the bedrock `CONFLICT_RESOLUTION` fixture: `mechanism`
+    (`VersionConflictResolution`, `src/fleet/llm/schemas.py:281-285`) carries
+    `pattern=r"^(bazel_dep|single_version_override)$"` — a closed enumeration expressed as a
+    string field, not a missing-field constraint. This mutates it to `"override_all"`: a non-empty
+    string that satisfies every OTHER constraint on the field (it is a `str`, present, non-empty)
+    and would pass a schema-shape-only check, but fails the closed pattern. That is a genuinely
+    different failure mode than the missing-required-field mutations above — this is the one
+    Rule 12 exists to force onto a pattern-constrained field."""
+    raw = _load("conflict_resolution_bedrock_tool_call.json")
+    raw["output"]["message"]["content"][0]["toolUse"]["input"]["mechanism"] = "override_all"
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="mechanism"):
+        client_module._validate(reply, VersionConflictResolution, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_conflict_resolution_fixture_still_validates_after_the_mutation() -> None:
+    """Control half of the `CONFLICT_RESOLUTION` mutation pair: the identical fixture, unmutated,
+    must still validate — proving the failure above is caused by the invalid `mechanism` value,
+    not by an unrelated defect in the fixture, the parse path, or `_validate` itself."""
+    raw = _load("conflict_resolution_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, VersionConflictResolution, StructuredOutputMode.TOOL_CALL)
