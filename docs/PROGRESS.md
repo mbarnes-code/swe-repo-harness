@@ -8596,3 +8596,73 @@ crash-window fix-forward and `revalidation_task_id` write are both small, well-s
 dispatched. §12.37 itself remains unmoved by any of this round's stub-lifecycle work — its own
 blocker (`--stub-blocked`'s stub-creation worker, `workers/buildgen.py`, never built) is upstream
 of everything D101/D102/D103 touch.
+
+### Checkpoint — round VI, second wave (2026-09-02, same day)
+
+**§12 count: 27 of 48, unchanged.** This wave's work moved D-numbers and sub-clause state within
+already-open criteria (§38, §12.37) — none flipped a full §12 criterion. Not every round needs to;
+this one names why, per Rule 13.
+
+**D103 closed** (task 7, `6007423`/`2a5c2ac`, task-scoped review Approved): the crash-window sweep
+(re-fires T1 for any provider PR durably `MERGED` from before this run, not just newly-observed
+ones, on every `--sync`) and the `stubs.revalidation_task_id` write (SPEC §3.5.1 step 4), both
+Rule-12 mutation-proven, both independently reproduced by the review including a fresh-worktree
+re-run with proper import-isolation pinning. One process near-miss, self-reported and independently
+re-verified clean: the implementer briefly edited the primary checkout by mistake before catching
+it via `git status`/`git branch --show-current` and recovering — the controller confirmed the
+primary checkout's own history shows no residue before dispatching the review, and the review
+independently re-confirmed the same.
+
+**D101 closed in full** (task 8, `9077795`/`3b861f9`, task-scoped review Approved): the last piece,
+Half B(ii)'s `--sync`-triggered clearing of the `UnmergedDependency` finding, lands via a targeted
+`DELETE` in the shared `_apply_stub_decisions` helper, matching D101 Half A's own fingerprint
+exactly, proven end-to-end (`fleet resume` then `fleet pr --sync`, real `findings` table query).
+All three of D101's named pieces are now genuinely landed and individually tested. **Qualifier,
+found by the review's own investigation of a concern the implementer disclosed but didn't
+diagnose**: `fleet resume --repoll-prs` chains `_pr_sync_impl` and `stub_reconcile` in one call,
+and `reconcile()`'s pre-existing logic immediately re-abandons the just-superseded stub in that
+same call (ordinary success, no crash needed) — undoing T1's outcome and the just-cleared finding.
+**Allocated D105** for this, distinct from D101's own three (correctly) landed pieces.
+
+**§37's stub-creation gap investigated and correctly reported BLOCKED, not forced.** A dispatched
+task, explicitly authorized to report BLOCKED, investigated building the minimal single-consumer
+stub-creation path and found three structural blockers instead of the previously-hoped "bounded
+NEW-MECHANISM task": (A, load-bearing) no admission path exists for a `BLOCKED` repo anywhere —
+the wave scheduler unconditionally excludes it and the state machine has no
+`BLOCKED`→`RUNNING`/`DEGRADED` edge, likely needing its own ADR since it changes a tested
+invariant (`test_a_blocked_repo_is_not_admitted`); (B) the abandoned provider's last published
+version has no durable field to source from at all, a schema-or-design decision; (C, newly found)
+no code branch reclassifies a stubbed edge from internal to external in `_unit_deps`. Zero code
+was written — the report correctly judged that building the genuinely-small remaining pieces (the
+`stubs` INSERT, `EMPTY_FAILING` rendering) without these three settled would risk exactly the
+"narrower overclaim, will be rewritten" pattern this project's own guardrails warn against.
+`docs/CRITERIA_PLAN.md` §37 updated with the full re-sizing. **D104 allocated separately** for a
+second-order gap the same research pass found: `TaskKind.REVALIDATE` has no execution/dispatch
+path anywhere and `settle_revalidation` (T2/T3) has zero production callers — mirroring exactly
+the shape D102 found and fixed for T1, one layer downstream. Even a fully-landed stub-creation
+worker would not make §12.37 satisfiable end-to-end; both gaps must close.
+
+**Citation drift, same class, recurring cost made visible.** `cli.py`'s successive growth across
+this wave (task 6's ~130 lines, this checkpoint's own docstring fix, task 7's ~200 lines, task 8's
+~30 lines) re-drifted the citation gate FOUR separate times in this wave alone, three of them
+hitting the exact same interior sub-range citation (`_reconcile_tasks_with_git`). One attempted
+fix (converting it to a "commit-bound `at <sha>`" form, believing it would exempt the citation
+permanently) was itself wrong — that suffix is prose convention this file uses elsewhere, not a
+mechanism the citation gate's `pins` list recognizes — and was caught and corrected in place when
+the gate failed on the exact citation it was meant to fix, a fourth time. All repointed to plain
+line citations; the citation gate is 72/72 clean as of this checkpoint.
+
+**Full-suite state**: not re-run whole this wave (the ~15-minute cost, weighed against `mypy`/
+`ruff`/targeted-file confirmation after every merge and citation fix) — `mypy` clean (115 files),
+`ruff check`/`ruff format --check` clean against the pinned baseline, and every touched test file
+(`test_pr_e2e.py` 19/19, `test_cli.py` 167/167, `test_integration_honesty_citations.py` 72/72)
+reconfirmed green after each merge. A future checkpoint should complete one rather than assume
+this gap means something is broken.
+
+**What's next.** §37: dispatch Blocker A (admission design, likely its own ADR) as the
+prerequisite for B and C. §38: D94 is now the sole D-number blocker (still NEW-MECHANISM,
+unchanged across 5+ confirmations) — a genuine dedicated-round candidate if nothing smaller
+surfaces first. D105: a small, well-scoped fix once someone picks it up (skip-in-same-call or
+narrow the "open" window). D104: needs its own sizing pass before dispatch (likely NEW-MECHANISM,
+reusing `BuildverifyWorker`'s existing engine per this project's established reuse pattern —
+not confirmed).
