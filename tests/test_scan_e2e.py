@@ -1054,6 +1054,33 @@ def test_an_undeclared_cross_repo_import_produces_a_real_internal_import_edge(
     ], edges
 
 
+def test_the_owning_repos_published_version_lands_and_a_dependents_range_never_clobbers_it(
+    internal_import_fleet_declared: Path,
+) -> None:
+    """§37 Blocker B: the value `ManifestAdapter.publishes(path)` already computes every scan was
+    discarded before reaching `coordinates` — this proves it now lands, and proves the one
+    distinction that matters: only the OWNING repo's own publish may set it.
+
+    `acme-shared-py` publishes `pyproject.toml`'s `[project].version = "1.0.0"` — a real concrete
+    version. `acme-consumer-py` DECLARES a dependency on that same coordinate at `>=1.0` — a
+    RANGE, a different kind of value entirely. Scanned in TWO separate `--only` invocations, the
+    owning repo FIRST and the dependent SECOND, so the dependent's write is the one that lands
+    last against the `coordinates` row — the exact ordering that would expose a version write
+    with no `owned` guard. The stored `coordinates.version` must be the publisher's `1.0.0`,
+    never the dependent's range and never NULL.
+    """
+    first = scan(internal_import_fleet_declared, "--only", "acme-shared-py")
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    second = scan(internal_import_fleet_declared, "--only", "acme-consumer-py")
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+
+    rows = query(
+        internal_import_fleet_declared,
+        "SELECT version FROM coordinates WHERE coord_key = 'pypi::acme-shared-py'",
+    )
+    assert rows == [("1.0.0",)], rows
+
+
 def test_declaring_the_same_import_turns_it_into_a_declared_dep_not_an_internal_import(
     internal_import_fleet_declared: Path,
 ) -> None:
