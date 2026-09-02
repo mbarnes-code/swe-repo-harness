@@ -1,0 +1,38 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py -- the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (a `BuildFileProposal`-schema object) differs. This fixture's scenario is `js/vendor/widgets-bundle`, a pre-minified vendor JS drop with no package.json for any EcosystemAdapter to recognize -- a single BUILD_AUTHORING target, deliberately kept to ONE entry with an empty `deps` tuple, contrasting with the anthropic fixture's two-entry, non-empty-deps case. This fixture is also the Rule-12 mutation base for `test_a_build_authoring_reply_missing_a_nested_target_field_fails_schema_validation` in `tests/test_llm_golden_responses.py` (deletes `targets[0].name`, one of the two `BuildTargetProposal` fields with no default).",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_BuildAuthoring01ZjIwYjk4",
+            "name": "emit_response",
+            "input": {
+              "package_path": "js/vendor/widgets-bundle",
+              "targets": [
+                {
+                  "name": "widgets-bundle",
+                  "rule": "js_library",
+                  "srcs": ["widgets.min.js"],
+                  "deps": [],
+                  "visibility": ["//js:__subpackages__"]
+                }
+              ],
+              "rationale": "widgets.min.js is a pre-minified vendor drop with no package.json -- no EcosystemAdapter recognizes it -- so a single js_library target wrapping the bundled file is authored directly."
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 340,
+    "outputTokens": 72,
+    "totalTokens": 412
+  },
+  "metrics": {
+    "latencyMs": 545
+  }
+}

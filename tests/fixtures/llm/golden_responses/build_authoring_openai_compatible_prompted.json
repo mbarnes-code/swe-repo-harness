@@ -1,0 +1,22 @@
+{
+  "_provenance": "Hand-constructed to match the OpenAI-compatible chat-completions response shape (https://platform.openai.com/docs/api-reference/chat/object) that vLLM/llama.cpp/TGI/Ollama and the hosted OpenAI API all serve, fed as-is (minus this key) to `openai_compatible.parse_reply()` in src/fleet/llm/backends/openai_compatible.py, whose `_choice`/`_first_message`/`_finish_reason` read exactly `choices[0].message.content` and `choices[0].finish_reason` -- the same shape that module's own `body()` test helper builds. Rung: PROMPTED (the REQUIRED rung per SPEC's ADR-0013 contract layer) -- this backend's declared_capabilities().structured_output_modes is (PROMPTED,) ONLY, so `message.content` carries the schema answer as bare JSON text rather than a tool call. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`openai_compatible_prompted.json`) by design: `parse_reply` never introspects the JSON text's internal shape beyond `json.loads`, so only the encoded payload below (a `BuildFileProposal`-schema object) differs. This fixture's scenario is `python/tools/legacy_scripts`, a folder of ad hoc maintenance scripts with no setup.py or pyproject.toml -- one target, exercising the encoded two-level nested-object-tuple shape (`targets[0]` is a `BuildTargetProposal`) through PROMPTED's bare-JSON-text path rather than a structured tool-call argument.",
+  "id": "chatcmpl-BuildAuthoring8f3b2c1a9d",
+  "object": "chat.completion",
+  "created": 1735690120,
+  "model": "local-model",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": "{\"package_path\": \"python/tools/legacy_scripts\", \"targets\": [{\"name\": \"legacy_scripts\", \"rule\": \"py_library\", \"srcs\": [\"report.py\", \"cleanup.py\"], \"deps\": [], \"visibility\": [\"//python/tools:__subpackages__\"]}], \"rationale\": \"legacy_scripts has no setup.py or pyproject.toml -- it is a folder of ad hoc maintenance scripts predating the package's Python packaging -- so no EcosystemAdapter applies and a single py_library target is authored directly from the two source files.\"}"
+      },
+      "finish_reason": "stop"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 285,
+    "completion_tokens": 78,
+    "total_tokens": 363
+  }
+}
