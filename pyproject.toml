@@ -97,10 +97,22 @@ markers = [
 ]
 
 # --------------------------------------------------------------------------------------
-# coverage.py (SPEC.md §12.3: >=85% line coverage on src/fleet/). Configured, not armed:
-# no `fail_under` here, and `--cov` is deliberately NOT added to the pytest addopts above —
-# that would collect coverage on every targeted pytest invocation in this repo and interacts
-# with the suite's multiprocessing/forkserver use. Run explicitly with
+# coverage.py (SPEC.md §12.3: >=85% line coverage on src/fleet/). ARMED (round GG task 3):
+# `fail_under = 85` below. `--cov` is still deliberately NOT added to the pytest addopts
+# above — that would collect coverage on every targeted pytest invocation in this repo, and
+# `src/fleet/orchestrator/budgets.py`'s CPU pool uses a real `forkserver` mp_context. That
+# risk was investigated, not assumed: three independent whole-suite runs of
+# `.venv/bin/python -m pytest --cov=fleet --cov-report=term-missing` completed cleanly
+# (631s, 604s, 733s; no hang, no crash) and agreed on the total every time
+# (17946 stmts, ~1195-1211 miss, branch ~4510/673-679, 91%) — coverage.py's default
+# (non-multiprocessing) collector evidently sees everything that matters here, because the
+# pool's one live callable (`workers/symbolindex.py`'s `scan_file`, per
+# `docs/INTEGRATION_HONESTY.md`'s D86 analysis) is reached from tests that also exercise it
+# in-process elsewhere in the suite. Full account, including the unrelated worktree-
+# provisioning failures this investigation ran into and resolved: `docs/DECISIONS.md`
+# ADR-0110. `--cov` in `addopts` is still avoided on general principle (coverage
+# instrumentation slows every targeted single-test invocation for no benefit), not because of
+# a measured forkserver failure. THIS is the invocation §12.3 measures — run it explicitly:
 # `.venv/bin/python -m pytest --cov=fleet --cov-report=term-missing`.
 # --------------------------------------------------------------------------------------
 [tool.coverage.run]
@@ -108,6 +120,7 @@ source = ["src/fleet"]
 branch = true
 
 [tool.coverage.report]
+fail_under = 85
 exclude_lines = [
   "pragma: no cover",
   "if TYPE_CHECKING:",
