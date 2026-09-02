@@ -12874,6 +12874,19 @@ BLOCKED` enum-member requirement — the consumer stays `DEGRADED`, gains an `Un
 finding, and is refused by `fleet pr --ready` on the finding alone, the same mechanism §12.38's
 first half already uses to refuse an `ACTIVE`/`SUPERSEDED`-stub consumer without a status change.
 
+**Correction, round V final whole-branch review (2026-09-02) — "on the finding alone" is false;
+the mechanism this paragraph names is not what the landed code implements.**
+`_refuse_unresolved_stubs` (`src/fleet/cli.py:10589-10608`) reads only the `stubs` table (`SELECT
+... FROM stubs WHERE run_id = ? AND state IN ('ACTIVE','SUPERSEDED')`) — it never queries
+`findings`. The refusal fires because a held-for-merge stub's `stubs.state` never leaves
+`ACTIVE`/`SUPERSEDED` (confirmed independently by task 4's own review), not because of the
+`UnmergedDependency` finding this ADR authorizes. The landed code's own docstring
+(`cli.py:12084-12089`) already says so correctly: the finding is "the SPEC-required
+operator-visible record, not what makes the refusal fire." The **decision** (no `RepoStatus`
+transition) is unaffected and remains sound — only this paragraph's stated *mechanism* was wrong.
+Left in place per this file's own "annotate, do not rewrite" convention; do not edit the paragraph
+above.
+
 **Decision: (b).** Widening `ALLOWED_TRANSITIONS[DEGRADED]` for this one narrow case is precisely
 the kind of change that tends to reopen the race D95 just closed — a second entry point into
 `BLOCKED` for a status whose whole guarded-invariant point was "only these named states reach
@@ -12892,6 +12905,21 @@ than inventing a new one.
 finding for the consumer, no status transition. It does not implement anything — that is D101 Half
 A's own task, dispatched separately. It does not touch D101 Half B (the `--sync`-triggered clearing
 and T1-wiring gap), which is independent of this fork and tracked as its own allocation below.
+
+**Disclosed residual, round V final whole-branch review (2026-09-02) — this adjudication engages
+only §12.38's text; a second SPEC sentence describing the same scenario disagrees and was never
+reconciled.** `docs/SPEC.md` §13 row 45 places `UnmergedDependency` at a DIFFERENT trigger point
+than §12.38: **past** `pr.merge_wait_timeout_s` (not within it), described as "reversible by a
+later `pr_merged` event" — wording that reads more naturally as a status transition than a finding,
+and is the strongest textual case for reading "`C` is `BLOCKED`" literally. The landed code
+(D101 Half A) writes the finding for `outcome.held_for_merge`, which `_awaiting_merge`
+(`orchestrator/stubs.py:794-808`) defines as PR-open-and-within-window — §12.38's window, not row
+45's; past the timeout the row is abandoned instead (`UnresolvedStub`, not `UnmergedDependency`).
+This does not, on its own, overturn decision (b) above — `ALLOWED_TRANSITIONS` genuinely forbids
+`DEGRADED → BLOCKED` in both directions today, independent of which SPEC sentence is read — but
+the adjudication as written is incomplete, having quoted only §12.38. Reconciling §13 row 45
+against §12.38 (are they describing the same event, or two different consequences at two different
+times?) is unresolved and belongs to whoever picks up D101 Half B.
 
 **Consequence for `docs/CRITERIA_PLAN.md`**: §38's entry should note this adjudication alongside
 its existing D101 citation once D101 Half A actually lands — not before, per this project's own

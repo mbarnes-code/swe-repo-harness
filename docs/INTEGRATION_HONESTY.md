@@ -8134,8 +8134,8 @@ finding exactly; no correction needed.
 (`tests/test_stubs.py` exercises it directly and extensively) but has no live invocation path. SPEC
 §12 item 37's own criterion text ("re-running P to SUCCEEDED with its PR MERGED moves that row to
 SUPERSEDED") describes an automatic trigger that does not fire in production today — `cli.py`'s
-`_pr_sync_impl` (`:10018-10149`), the function SPEC's own docstring names as where T1 should fire
-(`:10112`), already discloses in its own inline comment (`:10114-10124`) that the `pr_merged` event
+`_pr_sync_impl` (`:10021-10152`), the function SPEC's own docstring names as where T1 should fire
+(`:10115`), already discloses in its own inline comment (`:10117-10127`) that the `pr_merged` event
 it emits has no reader anywhere. This matters specifically for D101 Half B: `fleet pr --sync`
 "firing T1" is not wiring a call into an existing trigger — the trigger itself does not exist in any
 live code path and must be built.

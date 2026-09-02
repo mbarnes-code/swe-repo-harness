@@ -3,10 +3,8 @@ per LLM role. `docs/CRITERIA_PLAN.md` §4's revised Done bar requires this per *
 `config/models.yaml`), not just per backend — round II's task 3 landed `REPO_CLASSIFY` alone (1 of
 12); round III task 3 added `PR_TITLE` and `PR_BODY` (3 of 12); round IV tasks 2 and 3 together
 add `BUILD_DIAGNOSIS`, `DEP_DISAMBIGUATE`, `CYCLE_BREAK_PROPOSAL`, and `CONFLICT_RESOLUTION`
-(7 of 12); round V task 2 adds `API_INCOMPAT_REWRITE` and `ESCALATION` (9 of 12 counting this
-task's own rows alone — a sibling task 1 this round adds `TRANSFORM_REPAIR`/`MANIFEST_EXTRACT`
-independently, bringing the total to 11 of 12 if both land; 3 remain after this task's own half,
-tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here). Round V task 5 adds `BUILD_AUTHORING`
+(7 of 12); round V tasks 1 and 2 together add `TRANSFORM_REPAIR`, `MANIFEST_EXTRACT`,
+`API_INCOMPAT_REWRITE`, and `ESCALATION` (11 of 12); round V task 5 adds `BUILD_AUTHORING`
 — the 12th and last of the 12 roles, closing §12.4 in full. `BuildFileProposal` (its declared
 schema) is a TWO-LEVEL nested-object tuple: `targets` is a `tuple[BuildTargetProposal, ...]`, and
 each `BuildTargetProposal` itself carries three sibling `tuple[str, ...]` fields (`srcs`/`deps`/

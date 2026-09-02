@@ -6319,6 +6319,8 @@ scan:
     py_importlib: "importlib\\.import_module\\(\\s*[\"']([\\w.]+)"
     js_dynamic: "(?:require|import)\\(\\s*[`\"']([^`\"']+)"
     spring_scan: "@ComponentScan\\([^)]*[\"']([\\w.]+)"
+  api_contract_patterns:      # API_CONTRACT edge inference (advisory, gRPC/proto reference side)
+    grpc_method_path: "[\"']/((?:[A-Za-z_]\\w*\\.)+[A-Za-z_]\\w*)/[A-Za-z_]\\w*[\"']"
   contracts:                  # §3.1 step 5b; contract-node discovery (ADR-0019)
     enabled: true             # false → every DAG node is a repo; pre-ADR-0019 behaviour exactly
     min_consumers: 2          # fewer ⇒ not shared ⇒ extractable = 0

@@ -612,9 +612,10 @@ def _pattern_symbols(
     *,
     kind: SymbolKind | None = None,
 ) -> list[SymbolRef]:
-    """`scan.resource_patterns` / `scan.dynamic_patterns` — the string literals a compiler cannot
-    see (§3.1 steps 4 and 5). Always references, never definitions: a topic name in a source file
-    is evidence that the repo TOUCHES it, never that it owns it."""
+    """`scan.resource_patterns` / `scan.dynamic_patterns` / `scan.api_contract_patterns` — the
+    string literals a compiler cannot see (§3.1 steps 4 and 5). Always references, never
+    definitions: a topic name in a source file is evidence that the repo TOUCHES it, never that it
+    owns it."""
     out: list[SymbolRef] = []
     for name, raw in sorted(patterns.items()):
         compiled = _compiled(raw)

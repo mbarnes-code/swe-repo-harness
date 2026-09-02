@@ -75,7 +75,7 @@ check` is covered. `mypy --strict` is now gated: `tests/test_lint_gate.py:384` s
 The third leg — `ruff format --check src/ tests/` exits 0 — is **not met**. The landed test
 (`test_ruff_format_check_dirty_count_matches_the_pinned_baseline`,
 `tests/test_lint_gate.py:297`) deliberately pins a baseline dirty count instead of requiring exit
-0 (its own docstring says so); `docs/SPEC.md:7417` item 2 requires exit 0 with no baseline
+0 (its own docstring says so); `docs/SPEC.md:7432` item 2 requires exit 0 with no baseline
 carve-out. Measured in the criterion's own scope, not the whole-repo scope the pinned test
 actually runs: `ruff format --check --no-cache src/ tests/` → **116 dirty / 72 clean = 188
 scanned** (re-measured 2026-08-31, round R final-fix, in an isolated worktree at `54b2c80`) —
@@ -167,7 +167,7 @@ was built — a checked-in fixture satisfies the criterion as written.
 
 **Correction, round II final review (2026-09-02): the DONE marking above overclaimed — SPEC's own
 sentence names a subject this criterion's own Done bar was never checked against.**
-`docs/SPEC.md:7430`, verbatim: *"every LLM role in `config/models.yaml` has a stored golden
+`docs/SPEC.md:7434`, verbatim: *"every LLM role in `config/models.yaml` has a stored golden
 response per shipped backend that validates against its declared schema — including one recorded
 at the `PROMPTED` rung."* The subject is **every LLM role**, not "one recorded golden response per
 backend" (this entry's own prior "Done bar" text, which the controller wrote when this criterion
@@ -237,7 +237,7 @@ following the same proven recipe, not needing a further split.
 **Round V task 5 (2026-09-02, `16277f8`, merged `71fc59b`, reviewed Approved with elevated
 scrutiny given this criterion's own history) — `BUILD_AUTHORING` landed, 12 of 12 roles now
 covered. §12.4 flips DONE.** The task-scoped review independently re-derived SPEC's literal
-sentence (`docs/SPEC.md:7430`) fresh rather than trusting any prior round's quotation, independently
+sentence (`docs/SPEC.md:7434`) fresh rather than trusting any prior round's quotation, independently
 re-derived the full 12-role set from `src/fleet/llm/roles.py::Role` / `config/models.yaml` /
 `schemas.py::RESPONSE_SCHEMAS` (not from any prior round's count), and programmatically extracted
 the full 12×4 role/backend-and-rung cross-product directly from `tests/test_llm_golden_responses.py`
@@ -300,7 +300,7 @@ extend" — both halves had already landed and this entry was never refreshed af
 round-Q final review finding I1.)* All five original `Ecosystem`-only line-scan tests still exist
 and pass. Round Q task 1 landed both halves this entry's old done bar described as future work:
 `src/fleet/workers/contracts.py:758`'s `if kind is ContractKind.OPENAPI:` was converted to the
-table-derived `KIND_MODIFIERS` form (`78e5667`, `docs/DECISIONS.md` ADR-0100, `docs/SPEC.md:7421`
+table-derived `KIND_MODIFIERS` form (`78e5667`, `docs/DECISIONS.md` ADR-0100, `docs/SPEC.md:7436`
 dated marker), and a new AST walk
 (`tests/test_ecosystems.py::test_no_bare_compare_or_subscript_names_a_kind_member_outside_the_adapter_packages`
 + `::test_no_match_case_names_a_kind_member_outside_the_adapter_packages`, `dbd91d6`) now covers
@@ -313,7 +313,7 @@ ContractKind.Y):` form the branch this gate forbids would actually take once a s
 kind-specific case exists. Accidentally reachable, not adversarial-only, per Rule 12's stop rule.
 Fixed by recursing `_kind_member_name` into container-literal comparators; gate re-run confirmed 0
 offenders on `src/fleet/`, both before and after.
-**Out of scope (disclosed, not required by SPEC.md:7421's literal wording):** an aliased import
+**Out of scope (disclosed, not required by SPEC.md:7436's literal wording):** an aliased import
 (`from … import ContractKind as CK`) or an attribute-chain form (`enums.ContractKind.X`) still
 escapes the AST walk even after the I4 fix (`tests/test_ecosystems.py` M4) — I4 closed the
 tuple/list/set-literal container form, not the aliasing/attribute-chain forms. The pre-existing
@@ -688,11 +688,11 @@ one `scc_id`) and `test_a_41_repo_cycle_completes_without_hanging` (timeout-boun
 property). What remains open, and the reason `OPEN` is still the correct status rather than
 `DONE`: the landed 12-node test asserts shared `scc_id` via a `CycleFinding`, not via a built
 `PullRequestDraft` — the round's own task report explicitly scopes `PullRequestDraft.scc_id` out
-("out of this file's scope"), matching `docs/SPEC.md:7434`'s literal wording ("one
+("out of this file's scope"), matching `docs/SPEC.md:7449`'s literal wording ("one
 `PullRequestDraft.scc_id`") rather than the looser "assert all 12 members share one `scc_id`"
 phrasing the round plan used to describe the task.
 **Done bar (narrowed to the one remaining leg):** a test asserting the shared `scc_id` specifically
-through a built `PullRequestDraft` for the 12-node cycle case, per `docs/SPEC.md:7434`'s literal
+through a built `PullRequestDraft` for the 12-node cycle case, per `docs/SPEC.md:7449`'s literal
 wording. The 41-node no-hang property is closed and does not need re-doing.
 
 ## 20. Secrets never leak
@@ -838,7 +838,7 @@ tracked on its own number rather than silently reopening the sub-clause just clo
 ## 23. Idempotency — re-scan, re-transform
 **OPEN — one sub-clause blocked on D23, otherwise DONE (round S, `4e1975d`).** Re-transform is
 fully covered. Re-scan now covers all 8 of the named tables (`edges, contracts, symbols,
-manifests, findings, collisions, waves, wave_members` per `docs/SPEC.md:7438`): 6 under re-scan
+manifests, findings, collisions, waves, wave_members` per `docs/SPEC.md:7453`): 6 under re-scan
 directly in `tests/test_scan_e2e.py` (`symbols, edges, manifests, findings` extended in-place,
 `waves, wave_members` newly added this round), and 2 under re-sequence (`contracts, collisions`,
 via a genuine 9-repo, real-git, real-CLI vendored-contract fixture newly added this round, plus
@@ -924,7 +924,7 @@ single one-shot task.
 
 ## 28. Single writer, pool children have no DB handle
 **DONE (round S, `0742a0f`; disclosure corrected 2026-08-31, see round S's final review, finding
-I3).** `docs/SPEC.md:7443` states three clauses: (a) an integration test that starts the runner
+I3).** `docs/SPEC.md:7458` states three clauses: (a) an integration test that starts the runner
 and shows a second writable `aiosqlite` connection in the same process raises; (b) pool children
 constructed with no DB handle, verified by inspecting the initializer arguments; (c) a 200-repo
 simulated run produces zero `SQLITE_BUSY` errors.
