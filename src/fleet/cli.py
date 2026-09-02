@@ -187,6 +187,7 @@ from fleet.orchestrator.stubs import (
     RevalidationPlan,
     RevalidationPolicy,
     StubDecision,
+    StubTransition,
 )
 from fleet.orchestrator.stubs import apply as apply_stub_decision
 from fleet.orchestrator.stubs import plan_revalidation as plan_stub_revalidation
@@ -12299,6 +12300,24 @@ async def _apply_stub_decisions(
     RECONCILE-SPECIFIC step (D99/D100: "every decision reaching THAT function is an end-of-run
     abandonment"), and a T1 decision is not an abandonment — the consumer stays `DEGRADED`,
     awaiting the `REVALIDATE` round T1's caller enqueues, and its PR is untouched.
+
+    D101 Half B(ii): a T1 decision (`ACTIVE` -> `SUPERSEDED`) also clears the `UnmergedDependency`
+    finding D101 Half A wrote for this exact `(consumer, coord_key)` pair, if one exists — §13
+    row 45's own text: "reversible by a later `pr_merged` event", and T1 IS that event's effect.
+    `findings` has no resolution/status column (`schema.sql`'s `CREATE TABLE findings`: no
+    `resolved_at`, no `state`), so "no longer applies" is a targeted `DELETE`, the same convention
+    this file already uses for cycle findings (`DELETE FROM findings WHERE run_id = ? AND kind =
+    ?`, the `CYCLE_FINDING_KIND` sweep) — narrowed here to `fingerprint` as well, since (unlike a
+    per-run cycle sweep) an `UnmergedDependency` finding is per-consumer and a blanket per-`kind`
+    delete would also clear OTHER consumers' still-valid findings for unrelated providers. Placed
+    here rather than only in `_pr_sync_impl`'s T1 branch because this function is the shared,
+    transition-agnostic writer (see the factoring note above): a T1 decision reaching this
+    function via EITHER caller clears the finding for free, with no per-caller duplication. In
+    practice only `_pr_sync_impl` ever constructs a T1 `StubDecision` — `_apply_stub_reconcile`'s
+    own decisions are always T4/T3 (its own docstring: "every decision reaching this function is
+    an end-of-run abandonment") — so this is not reachable today from the reconcile caller, but
+    the placement is still correct: it costs nothing extra and needs no revisiting if a future
+    caller ever does pass T1 through reconcile.
     """
     stamp = _iso(now)
     consumer_ids: list[str] = []
@@ -12354,6 +12373,16 @@ async def _apply_stub_decisions(
                         )
                     ),
                     stamp,
+                ),
+            )
+        if decision.transition is StubTransition.T1:
+            await conn.execute(
+                "DELETE FROM findings WHERE run_id = ? AND repo_id = ? "
+                "  AND kind = 'UnmergedDependency' AND fingerprint = ?",
+                (
+                    run_id,
+                    decision.consumer_repo_id,
+                    _fingerprint(run_id, decision.consumer_repo_id, decision.coord_key),
                 ),
             )
         if decision.consumer_repo_id not in consumer_ids:

@@ -2852,6 +2852,196 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     )
 
 
+class _SelectiveMergedForge:
+    """`gh pr view` answers `MERGED` for exactly one URL and `OPEN` for every other — unlike
+    `_MergedForge` above (which merges whatever it is asked about), this lets a test drive one
+    provider's PR to `MERGED` while a second, unrelated provider's PR stays open in the SAME
+    `--repoll-prs` invocation. `github.py`'s `argv(["pr", "view", url, ...])` puts the URL at
+    `call[3]`, which is what this class switches on."""
+
+    def __init__(self, merged_url: str) -> None:
+        self.merged_url = merged_url
+        self.calls: list[tuple[str, ...]] = []
+
+    async def __call__(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        _ = (cwd, env, deadline, timeout_s)
+        call = tuple(argv)
+        self.calls.append(call)
+        stdout = ""
+        if call[1:3] == ("auth", "status"):
+            stdout = "Logged in to github.invalid\n"
+        elif call[1:3] == ("pr", "view"):
+            if call[3] == self.merged_url:
+                stdout = json.dumps(
+                    {
+                        "state": "MERGED",
+                        "mergedAt": "2026-08-09T12:00:00Z",
+                        "mergeCommit": {"oid": "f" * 40},
+                    }
+                )
+            else:
+                stdout = json.dumps({"state": "OPEN", "mergedAt": None, "mergeCommit": None})
+        else:  # pragma: no cover - an unrecognised argv is a test bug, loudly
+            raise AssertionError(f"unexpected gh invocation: {call}")
+        return ProcResult(
+            argv=call,
+            exit_code=0,
+            stdout_tail=stdout,
+            stderr_tail="",
+            duration_ms=1,
+            timed_out=False,
+        )
+
+
+def test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D101 Half B(ii): once `fleet pr --sync` observes a held provider's PR go `MERGED`, firing
+    T1 (`ACTIVE` -> `SUPERSEDED`), the `UnmergedDependency` finding D101 Half A wrote for that
+    exact `(consumer, coord_key)` pair must be gone — §13 row 45's own text: "reversible by a
+    later `pr_merged` event". Reuses D101 Half A's own fixture
+    (`test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr`, above) as the
+    starting point for the positive case, and adds a SECOND, unrelated consumer/provider pair as
+    the control the brief requires: its `UnmergedDependency` finding must survive the same
+    `--sync` invocation untouched, proving the clearing `DELETE` is targeted by
+    `fingerprint`/`repo_id`, not a blanket per-`kind` sweep that would also clear other
+    consumers' still-valid findings.
+
+    First, a plain `fleet resume --no-continue` lets `stub_reconcile` write both
+    `UnmergedDependency` findings via Half A's real code (not a synthetic `INSERT`) — both
+    providers' PRs are freshly `DRAFTED`, so both stubs are `held_for_merge`. Then `fleet pr
+    --sync` (NOT `resume --repoll-prs`): `--sync` invokes ONLY `_pr_sync_impl`
+    (`cli.py`'s `pr()` command: `if sync: ... return`) with no `stub_reconcile` sweep chained
+    after it in the same call. `resume --repoll-prs` chains both in one invocation, and
+    reconcile's own (unrelated, pre-existing) sweep would immediately re-visit the
+    just-`SUPERSEDED` row — its provider's PR is now `MERGED`, not `DRAFTED`/`OPEN`, so the §13
+    row 45 held-for-merge carve-out no longer applies, and reconcile abandons the row (T3, its
+    own separate, correct logic) in the SAME call before this test could observe the
+    `SUPERSEDED` state T1 itself wrote. `--sync` isolates T1's own effect from that.
+    """
+    from fleet import cli
+
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db, "acme-commons")
+    _put_stub(db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0")
+    billing_url = "https://github.invalid/acme/monorepo/pull/2"
+    _seed_fresh_pr_record(db, "acme-billing", state="DRAFTED", url=billing_url)
+
+    # The control: a different consumer, waiting on a different provider that never merges.
+    # `workspace`'s own `seed_run` only seeds `repos` for "acme-commons"/"acme-billing" — a
+    # second pair needs its own `repos` rows first (the FK every other table here declares).
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for name in ("acme-widgets", "acme-utils"):
+            conn.execute(
+                "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+                (name, name, f"https://example.invalid/{name}", "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+    _put_consumer_at_verify_degraded(db, "acme-widgets")
+    _put_stub(db, consumer="acme-widgets", provider="acme-utils", coord_key="acme-utils@1.0.0")
+    utils_url = "https://github.invalid/acme/monorepo/pull/3"
+    _seed_fresh_pr_record(db, "acme-utils", state="DRAFTED", url=utils_url)
+
+    # T1's own precondition (ADR-0011 stacking): `ProviderFacts.merged` requires the PROVIDER's
+    # own `phases` row to read `RepoStatus.SUCCEEDED`, not just its PR state — `_pr_sync_impl`
+    # reads that off `phases` directly. Neither provider has a `phases` row otherwise (only the
+    # two CONSUMERS get one, from `_put_consumer_at_verify_degraded` above), which would leave
+    # `provider_facts.status` at the `PENDING` fallback and silently prevent T1 from ever firing.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for provider in ("acme-billing", "acme-utils"):
+            for phase, status in (
+                (1, "SUCCEEDED"),
+                (2, "SUCCEEDED"),
+                (3, "SUCCEEDED"),
+                (4, "SUCCEEDED"),
+            ):
+                conn.execute(
+                    "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (RUN_ID, provider, phase, status, "2026-08-08T12:00:00.000000+00:00"),
+                )
+    finally:
+        conn.close()
+
+    first = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    first_payload = json.loads(first.stdout)
+    assert sorted(first_payload["stub_reconcile"]["held_for_merge"]) == [
+        "acme-commons→acme-billing@1.0.0",
+        "acme-widgets→acme-utils@1.0.0",
+    ], first_payload
+
+    conn = sqlite3.connect(db)
+    try:
+        target_before = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+        control_before = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-widgets' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert target_before is not None, "Half A must have written the target's finding first"
+    assert control_before is not None, "Half A must have written the control's finding too"
+
+    forge = _SelectiveMergedForge(merged_url=billing_url)
+    monkeypatch.setattr(cli, "GH_RUNNER", forge)
+
+    second = runner.invoke(app, [*base_args(workspace), "--json", "pr", "--sync"])
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+
+    conn = sqlite3.connect(db)
+    try:
+        stub_state = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "  AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+        target_after = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+        control_after = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-widgets' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert stub_state == "SUPERSEDED", (
+        f"T1 must have fired for the merged provider's stub, got {stub_state!r}"
+    )
+    assert target_after is None, (
+        "D101 Half B(ii): the target's UnmergedDependency finding must be gone once T1 "
+        "supersedes its stub"
+    )
+    assert control_after is not None, (
+        "the control's UnmergedDependency finding (a different consumer, unrelated provider "
+        "that never merged) must survive untouched — a blanket per-kind DELETE would wrongly "
+        "clear it too"
+    )
+    assert json.loads(control_after[0]) == json.loads(control_before[0]), (
+        "the control's finding payload must be byte-identical, not merely still present"
+    )
+
+
 def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
     """Phases 1-3 `SUCCEEDED`, phase 4 `REQUIRES_HUMAN_INTERVENTION` — a repo an operator must
     already triage for a reason unrelated to any stub (§12.14: only `fleet retry`'s audited
