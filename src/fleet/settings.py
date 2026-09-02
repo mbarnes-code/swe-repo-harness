@@ -396,6 +396,15 @@ class ScanSection(Section):
             "spring_scan": r"@ComponentScan\([^)]*[\"']([\w.]+)",
         }
     )
+    api_contract_patterns: dict[str, str] = Field(
+        default_factory=lambda: {
+            "grpc_method_path": r"[\"']/((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*)/[A-Za-z_]\w*[\"']",
+        },
+        description="A gRPC stub's wire-level RPC path, `/package.Service/Method` — the one "
+        "string every generated client emits verbatim regardless of target language. Captures "
+        "`package.Service`, the same FQN `_proto_symbols` emits for `GRPC_SERVICE` definitions, "
+        "as an `is_definition=False` reference (§12.8, API_CONTRACT).",
+    )
     contracts: ContractsSection = ContractsSection()
 
 

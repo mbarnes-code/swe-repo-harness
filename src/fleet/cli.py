@@ -1134,6 +1134,7 @@ class ScanInput(WorkerInput):
     max_symbols_per_repo: int = Field(default=500_000, gt=0)
     resource_patterns: dict[str, str] = Field(default_factory=dict)
     dynamic_patterns: dict[str, str] = Field(default_factory=dict)
+    api_contract_patterns: dict[str, str] = Field(default_factory=dict)
     remaining_units: tuple[str, ...] | None = None
 
 
@@ -1320,6 +1321,7 @@ class ScanPipelineWorker(BaseWorker[ScanInput, ScanOutput]):
                     symbols_already_indexed=indexed,
                     resource_patterns=dict(payload.resource_patterns),
                     dynamic_patterns=dict(payload.dynamic_patterns),
+                    api_contract_patterns=dict(payload.api_contract_patterns),
                     remaining_units=remaining,
                     completed_units=completed,
                 ),
@@ -2041,6 +2043,7 @@ def _scan_payloads(
             max_symbols_per_repo=scan.max_symbols_per_repo,
             resource_patterns=dict(scan.resource_patterns),
             dynamic_patterns=dict(scan.dynamic_patterns),
+            api_contract_patterns=dict(scan.api_contract_patterns),
             remaining_units=None if remaining_units is None else tuple(remaining_units),
         )
 
