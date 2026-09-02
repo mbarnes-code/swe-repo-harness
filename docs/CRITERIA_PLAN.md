@@ -874,9 +874,30 @@ trusted from the report. TEST-ONLY, no production code touched. Commit `e526f07`
 
 ## 45. No code state persisted outside Git
 **DONE (round BB, 2026-09-01) — all 5 remaining sub-clauses covered, across two parallel tasks.**
-The 2 already-covered sub-clauses (adjudication and the `collisions.blob_shas` regex fix) plus
-the 5 closed this round give the criterion's full stated text a real, non-vacuous, mutation-proven
-test:
+The criterion's full stated text breaks down into 7 sub-clauses: 5 closed this round, 1 covered
+pre-existing (clause (iii)'s trailers-re-derivation half, cited below), and 1 resolved via
+SPEC-text adjudication (a wording fix, not a test) — 7 total, all accounted for, none silently
+folded into another category.
+
+**Correction (2026-09-02, round BB fix wave 1, response to final-review finding F3).** An earlier
+version of this entry said "the 2 already-covered sub-clauses (adjudication and the
+`collisions.blob_shas` regex fix) plus the 5 closed this round" — that accounting was wrong,
+traced against the actual source (`docs/superpowers/plans/spec12-success-criteria-audit.md:152`,
+audit row 45). The audit's 2 residual items there were partials, not "already-covered" items: an
+adjudication and a SPEC regex edit aren't assertable sub-clauses. The real 2 partials were (a)
+trailer coverage at 3-of-6, which this round's task 2 itself closed — already counted among the
+"5 closed this round" above, so it was double-counted in the old framing, not missing — and (b)
+clause (iii)'s second half, which had no citation anywhere in this entry until now (see the new
+bullet below).
+
+**Precision on what's tested against real production output vs. a construction (response to the
+"non-vacuous" overclaim finding).** Not a single blanket adjective for all 7 sub-clauses: after
+this fix wave's F1 (below), clauses (i) (resolvability + 40-hex format) and (ii) (content scan)
+are both tested against real production output, and so is clause (iii)'s six-trailer half. Clause
+(iii)'s artifacts-deletion half is tested against a construction that proves the property but is
+not organically-produced real data — a manufactured stand-in file, disclosed in F2 below — because
+this round's fixture only reaches Phase 2 and production writes nothing under `artifacts/` before
+Phase 3.
 - **Task 1** (`tests/test_migrations.py`): clause (i)'s schema sweep — `PRAGMA table_list`
   contains no `mutations` table, and `PRAGMA table_info` across every table matches no column name
   against the forbidden-pattern regex quoted verbatim from `docs/SPEC.md`'s own dated correction
@@ -886,7 +907,15 @@ test:
   real-git-backed fixture. Clause (ii)'s content scan (no persisted TEXT/BLOB value anywhere
   contains a unified-diff hunk header) reuses the same column-enumeration helper, mutation-proven
   by planting a synthetic hunk header and confirming the scan catches it before trusting a
-  zero-count real-fixture result.
+  zero-count result — originally against a hand-seeded, 5-row fixture (5 of 22 tables). **Fix
+  wave 1 (F1, 2026-09-02, response to final-review finding F1)** added a second scan, in
+  `tests/test_no_state_outside_git.py`, reusing the same column-enumeration helper and
+  self-validation shape against a REAL completed `scan`→`sequence`→`transform` run (71 rows / 15
+  tables / 487 non-NULL TEXT/BLOB values, per the review's own measurement) — closing the coverage
+  gap the hand-seeded fixture left (it never touched `edges`/`findings`/`manifests`/`symbols`/
+  `coordinates`/`waves`/`wave_members`/`reservations`/`budget_ledger`/`repo_ledger`, the
+  payload-carrying tables where a smuggled diff would live). The hand-seeded scan stays — cheap,
+  fast, self-contained — alongside the new real-fixture one, not replaced by it.
 - **Task 2** (new file `tests/test_no_state_outside_git.py`): the 40-hex format half of clause
   (i)'s enumeration, against a REAL `scan`→`sequence`→`transform` pipeline run (distinct from
   task 1's resolvability check — a resolvable ref need not be 40 lowercase hex, and vice versa);
@@ -896,7 +925,25 @@ test:
   trailer test used `git log --format=` instead) and to assert all six `Fleet-*` trailers on the
   same real commit. Both remaining sub-clause mutation proofs (digest-salting for the
   artifacts-deletion test; dropping `Fleet-Attempt` from the trailer mapping for the six-trailer
-  test) independently reproduced by task review.
+  test) independently reproduced by task review. **Disclosure (F2, 2026-09-02, response to
+  final-review finding F2):** the artifacts-deletion test's fixture only drives to Phase 2, and
+  production writes nothing under `artifacts/` before Phase 3 — so the test manufactures its own
+  stand-in (`artifacts/logs/stand-in.log`) before deleting it, rather than deleting real
+  Phase-3+ output. This was already disclosed in the test's own docstring and the module
+  docstring, but not here until now. The property proved — a resume does not need `artifacts/` to
+  reproduce its result — does not depend on which phase populated the directory, but the input to
+  the test is a construction, not organically-produced real data.
+- **Clause (iii)'s second half (F3, 2026-09-02, response to final-review finding F3) —
+  pre-existing coverage, uncited in this entry until now.** SPEC clause (iii)'s second half:
+  "restoring a database snapshot taken before a phase's commits while leaving the branches intact
+  makes `fleet resume` re-derive that phase's outcome from the `Fleet-Task-Id` trailers and add no
+  duplicate commits." Covered by `tests/test_transform_e2e.py:459`
+  (`test_re_running_transform_over_a_landed_branch_duplicates_nothing`, which uses a
+  `crash_the_phase` helper to roll a phase row back to `RUNNING` with branches intact and asserts
+  the `Fleet-Task-Id` guard stops re-application) and `tests/test_workers_transform.py:423`
+  (`test_forty_of_sixty_land_then_the_deadline_makes_it_partial_and_re_entry_replays_none`,
+  credited by the same audit row cited above). Both drive `transform` re-invocation directly, not
+  literally `fleet resume` — a distinction worth stating, not hiding.
 
 **A finding surfaced during task 2's work is a pre-existing, already-tracked defect (D91), not a
 new gap, and does not block this closure.** `tasks.pre_commit_sha` is never written by any
