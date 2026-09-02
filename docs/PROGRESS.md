@@ -8130,3 +8130,91 @@ the round's close (task 3's review, the final review, and this checkpoint) — 2
    defect class rather than the individual sites it kept producing. Process-hardening, explicitly
    disclosed as such — no criterion movement expected, but this project's own CLAUDE.md now
    documents FOUR separate rounds hitting variants of this exact class.
+
+---
+
+## Round HH close-out (2026-09-02)
+
+**§12 count: 26 of 48 — unchanged.** Explicitly disclosed in advance (round GG's own close-out
+named this round's citation-gate task as process-hardening with no criterion movement expected),
+and this round's two §12.8 tasks moved real, verified progress within an already-open criterion
+without flipping it — neither an overclaim nor a wasted round. Per Rule 13, this is the allowed
+shape (a round with no criterion flip, named as such), and per Rule 13's own guard against back-
+to-back hardening rounds: round GG closed two criteria immediately before this one, so this is not
+a second consecutive process-only round.
+
+**Task 1 — §12.8: `SHARED_RESOURCE`/`DYNAMIC_REF` fixture-fleet proof.** Both closed with real
+`fleet scan`-driven tests against the `edges` table, each with a Rule-12 negative control the task
+review reproduced independently by hand-mutating the fixtures itself (not just re-running the
+report's). Investigated `API_CONTRACT` as instructed and found — genuine, well-substantiated,
+independently re-traced by task review through every symbol producer in `symbolindex.py` — that no
+shipped extractor ever emits a non-definition API symbol, so the detector's join is structurally
+starved of real input. §12.8 moved from 3/8 to 5/8 `EdgeKind`s proven.
+
+**Task 2 — §12.8: `CONTRACT_IMPL`/`CONTRACT_CONSUME`, BLOCKED with a significant finding.**
+Investigated the brief's suggested fixture (`vendored_contract_fleet`) first and correctly found it
+non-reusable (no cross-repo cycle, hoisting structurally unreachable there); reused `cycle_fleet`
+instead. Traced the real persistence path and found these two `EdgeKind`s are computed correctly in
+memory during a real `fleet sequence` hoist but never written — the only production call site of
+`insert_edges` anywhere in `src/` runs at scan time, before any hoist exists. Task review
+independently re-derived this from scratch, including writing its own separate standalone
+reproduction script (not reusing the implementer's test) and querying the `edges` table directly by
+SQL. **Allocated D97** (`docs/INTEGRATION_HONESTY.md`), confirmed genuinely distinct from the
+pre-existing D23 (D23 presumes rows are written with a missing column; D97 is that no row is ever
+written at all) — cross-referenced in both directions after the final review caught the first
+cross-reference commit's claim of "both directions" being only one. A landed `xfail(strict=True)`
+test pins the target state and will hard-fail once persistence is wired.
+
+**Task 3 — citation gate: recognize the citation-first form.** Measured the real population before
+designing anything (a loose scan found 143/5 candidates, mostly false positives) and landed a
+conservative, individually-justified design (8 new anchors in `INTEGRATION_HONESTY`, 0 in
+`CRITERIA_PLAN`, each pinned with a measured reason, not a blanket ratchet). **Honestly reported
+that round GG's own six originally-targeted sites are still NOT all caught** — task review
+independently re-verified this exclusion was genuinely structurally necessary (three distinct
+reasons: different-file symbol definitions, non-identifier anchor phrases, an out-of-scope
+bare-citation form), not an avoidable design shortfall. One small defect found and fixed: a pin
+comment's stated cause was factually wrong (disposition was already correct).
+
+**The round's own final whole-branch review — the most thorough of this session's runs, ~120 tool
+calls, ran the full suite itself — found seven documentation-accuracy issues no task-scoped review
+could see, all fixed in one commit:**
+1. Round HH's `xfail(strict=True)` made `CLAUDE.md` §6's stated green criterion (`xfail: 0`)
+   permanently unsatisfiable by design, with nothing disclosing the change — amended §6 to name
+   the one disclosed exception explicitly, keeping an undisclosed xfail still an outage.
+2. A merge commit and this round's own ledger both claimed D23↔D97 were "cross-referenced in both
+   directions" — only one direction existed (a pure append at D97, nothing added at D23). Fixed,
+   and D23's own citation (rotted since before this round, newly load-bearing now that D97 points
+   readers at it) was corrected in the same pass.
+3. ADR-0109's forward-looking "TEST-ONLY per kind" instruction for the 5 remaining `EdgeKind`s no
+   longer held for 3 of them — annotated in place; the ADR's central ruling was unaffected and, if
+   anything, better supported by what this round found.
+4-7. A dangling pointer to the doomed scratch workspace, a line-wrapped citation defeating
+   line-oriented sweeps, a self-referential search instruction matching only itself, and two
+   citations a few lines short of their real AST span — all corrected.
+
+**Two carried-forward disclosures, not fixed this round (deliberately deferred, per round HH's own
+research), that must not be lost with the deleted workspace:** `docs/CRITERIA_PLAN.md` §22 still
+presents D96 as "disclosed not fixed" (D96 is `FIXED, LANDED`, has been since round DD); §38's
+entry and Rollup row still list D92/D93 as blockers (both are now `FIXED, LANDED` — only D94
+remains). Round II's own research recommended leading with a bounded §12.38 re-audit against these
+now-landed fixes, bundling both corrections.
+
+**Full suite, post-close**: 2145 passed, 1 xfailed (D97, disclosed), clean `bazel disk` line.
+`tests/test_integration_honesty_citations.py` 72/72. `ruff check .` clean on the whole tree.
+`.venv/bin/python -m mypy` with no path args, 115 source files, no issues. §12 count independently
+re-derived three times across the round's close (task reviews, the final review, this checkpoint)
+— 26/48 every time, deduped by section (a raw un-deduped grep reads 27, since §35's entry legally
+carries two `**DONE` markers — noted so a future re-derivation isn't surprised by it again).
+
+**Round II, opening next.** Lead per round HH's own research (re-confirmed by the final review's
+own independent reading of both stale entries):
+1. **§12.38 re-audit against D92/D93's now-landed fixes** — bounded, concrete: correct the two
+   stale-blocker mentions above, re-verify the entry's remaining 20 sub-clauses against current
+   `HEAD` (most were written against a tree where D92/D93 were still open), shrink what's left to
+   what D94 alone actually blocks.
+2. `API_CONTRACT`'s production extraction gap and D97's persistence gap are both now precisely
+   characterized but neither is scoped for dispatch yet — a future round's research should size
+   whether either has a smaller first slice (D97 in particular: `_sequence_impl` already has the
+   computed edges in memory at the point `_materialize` returns; the write path may be a small,
+   surgical addition rather than a large one — not sized here, flagged for round II's research if
+   §12.38 doesn't fill the round on its own).
