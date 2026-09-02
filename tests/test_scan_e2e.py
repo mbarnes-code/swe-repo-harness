@@ -1340,6 +1340,168 @@ def test_a_dynamic_reference_to_nothing_defined_produces_no_dynamic_ref_edge(
     assert edges == [], edges
 
 
+# ---------------------------------------------------------------------------------------
+# API_CONTRACT, end to end (§12 item 8's last EdgeKind, ADR-0111's own gRPC-consumer research)
+# ---------------------------------------------------------------------------------------
+#
+# `_api_contract_edges` (`graph/infer.py`) requires, for the same FQN, an `is_definition=True`
+# GRPC_SERVICE/PROTO_MESSAGE symbol in one repo and an `is_definition=False` symbol of the same
+# FQN in another. `_proto_symbols` (`workers/symbolindex.py`) only ever emits the DEFINITION
+# side — it parses `.proto` declarations, never a consumer's reference to an already-generated
+# stub — so nothing produced the reference side until `scan.api_contract_patterns` extended the
+# existing `_pattern_symbols` mechanism (the same one `SHARED_RESOURCE`/`DYNAMIC_REF` already
+# use, §12 item 8's DYNAMIC_REF section above) with a pattern over a gRPC stub's wire-level RPC
+# path, `/package.Service/Method` — the one string literal every generated gRPC client emits
+# verbatim regardless of target language, because it is the HTTP/2 path gRPC's OWN wire protocol
+# uses, not a per-language codegen convention.
+
+_GRPC_WIDGET_PROTO = """\
+syntax = "proto3";
+
+package acme.widgets.v1;
+
+service WidgetService {
+}
+"""
+
+
+@pytest.fixture
+def api_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`acme-grpc-provider` defines the `.proto` service; `acme-grpc-consumer` never sees the
+    `.proto` file at all — only a hand-written stand-in for a generated `_pb2_grpc.py` client,
+    carrying the wire path literal `/acme.widgets.v1.WidgetService/GetWidget` a real `protoc`
+    gRPC plugin emits into `channel.unary_unary(...)` calls."""
+    sources = {
+        "acme-grpc-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-grpc-provider",
+            {
+                "api/widgets.proto": _GRPC_WIDGET_PROTO,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-grpc-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-grpc-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-grpc-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-grpc-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_grpc_consumer/widgets_pb2_grpc.py": (
+                    "class WidgetServiceStub(object):\n"
+                    "    def __init__(self, channel):\n"
+                    "        self.GetWidget = channel.unary_unary(\n"
+                    "                '/acme.widgets.v1.WidgetService/GetWidget',\n"
+                    "                )\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def test_a_grpc_stub_wire_path_produces_a_real_api_contract_edge(
+    api_contract_fleet: Path,
+) -> None:
+    """§12 item 8: API_CONTRACT proven against a real `fleet scan`, not only the hand-built
+    `InferenceInput` in `test_graph_build.py`.
+
+    `acme-grpc-consumer/acme_grpc_consumer/widgets_pb2_grpc.py` line 4 names
+    `/acme.widgets.v1.WidgetService/GetWidget` inside a `channel.unary_unary(...)` call — the
+    `scan.api_contract_patterns` `grpc_method_path` regex captures `acme.widgets.v1.WidgetService`
+    as a `GRPC_SERVICE` reference (`is_definition=False`), and
+    `acme-grpc-provider/api/widgets.proto` line 3's `service WidgetService {}` under `package
+    acme.widgets.v1;` is the real `_proto_symbols`-derived definition (`is_definition=True`) it
+    resolves to.
+    """
+    result = scan(api_contract_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        api_contract_fleet,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line FROM edges "
+        "WHERE kind = 'API_CONTRACT'",
+    )
+    assert edges == [
+        (
+            "acme-grpc-consumer",
+            "acme-grpc-provider",
+            "API_CONTRACT",
+            "acme_grpc_consumer/widgets_pb2_grpc.py",
+            4,
+        )
+    ], edges
+
+
+def test_a_grpc_stub_naming_a_different_service_produces_no_api_contract_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 12: the fixture-fleet proof above is a genuine discriminator, not a vacuous one.
+
+    Same two repos, same wire-path shape — but the consumer's stub names `OtherService`, which
+    `acme-grpc-provider`'s `.proto` never defines. `_api_contract_edges`'s `definitions.get(sym.fqn,
+    [])` must come back empty for that FQN and emit nothing.
+    """
+    sources = {
+        "acme-grpc-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-grpc-provider",
+            {
+                "api/widgets.proto": _GRPC_WIDGET_PROTO,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-grpc-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-grpc-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-grpc-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-grpc-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_grpc_consumer/other_pb2_grpc.py": (
+                    "class OtherServiceStub(object):\n"
+                    "    def __init__(self, channel):\n"
+                    "        self.GetOther = channel.unary_unary(\n"
+                    "                '/acme.widgets.v1.OtherService/GetOther',\n"
+                    "                )\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(workspace, "SELECT kind FROM edges WHERE kind = 'API_CONTRACT'")
+    assert edges == [], edges
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
