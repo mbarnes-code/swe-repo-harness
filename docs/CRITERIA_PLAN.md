@@ -18,7 +18,7 @@
 >   `errors-<run_id>.jsonl` split as "separate later tasks" — **now a WIRING task, not
 >   NEW-MECHANISM**: the infrastructure exists, only the emission call and the error-sink split
 >   remain. Reclassified below.
-> - **§12.27** — COORDINATE detector now wired into real `fleet sequence` (`cli.py:2952`,
+> - **§12.27** — COORDINATE detector now wired into real `fleet sequence` (`cli.py:3085`,
 >   `3da6e79`) with 6 discriminating tests + 7 validated mutations. DEST_PATH and FILE_PATH remain
 >   unwired **deliberately, not by oversight**, per that commit's own disclosure: FILE_PATH needs a
 >   path/blob-SHA capture mechanism nothing upstream produces; DEST_PATH's `dest_rewrites` has no
@@ -642,7 +642,7 @@ task 3, correctly left out of scope).
 ## 27. Collisions caught before transformation
 **PARTIALLY CLOSED (2026-08-30, see file addendum) — COORDINATE done, DEST_PATH/FILE_PATH
 reclassified NEW-MECHANISM.** `3da6e79` wired COORDINATE through real `fleet sequence`
-(`cli.py:2952`), persisted to the `collisions` table, gated by a real post-write exit-6 refusal —
+(`cli.py:3085`), persisted to the `collisions` table, gated by a real post-write exit-6 refusal —
 6 discriminating tests + 7 validated mutations, `tests/test_collisions_wiring.py`. DEST_PATH and
 FILE_PATH remain unwired **by disclosed decision, not oversight**: FILE_PATH needs a path/blob-SHA
 listing nothing upstream captures; DEST_PATH's `dest_rewrites` has no consumer because Phase 3

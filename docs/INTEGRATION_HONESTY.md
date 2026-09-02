@@ -7458,7 +7458,7 @@ a sibling function in `orchestrator/stubs.py`, transitioning a PR's state to `HE
 stub_reconcile pass finds the stub still unresolved (mirroring how `ACTIVE`/`SUPERSEDED` are
 presumably set — not traced here). That design choice is not made here.
 
-## D93 — OPEN. No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
+## D93 — FIXED, LANDED (`b774c8f`, round EE task 2; component commit `f0936c2`). No exit-code path in `cli.py` reads `RepoStatus.DEGRADED`; SPEC §3.5.1 point 5 and `HumanInterventionError`'s own docstring both claim a DEGRADED-driven exit 7 that does not exist in code
 
 **Found by round Z task 2 (2026-09-01), same investigation as D92 — disclosed, not fixed, out of
 a test-writing task's scope.** Verified free before writing: highest allocated number was `D92`
@@ -7491,6 +7491,24 @@ cited lines are exact and unchanged since the original measurement — `1863`, `
 `9201` — each an `attention = sorted(... if status is RepoStatus.REQUIRES_HUMAN_INTERVENTION)`
 exit-code determination site, each reading `RepoStatus.REQUIRES_HUMAN_INTERVENTION` only, no
 `RepoStatus.DEGRADED` check at any of the four.
+
+**Fixed, 2026-09-02 (round EE task 2, component commit `f0936c2`, merged `b774c8f`).** All four
+sites (scan/transform/build/verify) now gate `exit_code` on a new shared
+`_needs_human_attention(statuses) -> bool` helper (RHI OR DEGRADED), rather than widening
+`attention` itself — `attention`'s own RHI-only meaning is read again downstream at each site for
+operator-facing messages, and DEGRADED is resolvable per §3.5.1 (not a terminal failure), so
+folding it into `attention` would have mislabeled it there. The design also sidestepped a real
+naming collision: the build site already has an unrelated local `degraded` set
+(`EcosystemAdapter`-unavailable repos, feeding an `"adapter_unavailable"` finding) that a naive
+per-site `degraded = sorted(...)` block would have shadowed. Task review independently
+mutation-proved 2 of the 4 sites (scan, build) and independently confirmed the verify site is
+genuinely fixed AND tested — not by a dedicated verify-e2e file, but by
+`tests/test_build_e2e.py::test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7`, which
+drives the real `verify` CLI subcommand end to end. Regression-checked via the same before/after
+separate-worktree comparison this project has now used three times for this exact claim shape
+(rounds CC/DD's own D96 fixes, this round's D93 fix): identical failing-test sets in both trees,
+confirming the 11 (implementer's run) / 7 (task review's own, slightly flaky, re-run)
+`test_build_e2e.py` failures are pre-existing environment gaps, not caused by this fix.
 
 ## D94 — OPEN. No mechanism exists to promote an already-open PR to ready (rebase, force-push, body regeneration) — §12.38's "resolution" sub-clause has no code to test
 
@@ -7595,7 +7613,7 @@ highest allocated number was `D95`. Independently re-confirmed by the controller
 task review's word alone), against current `HEAD` — separately from task review's own trace,
 which itself went further than the implementer's original grep-only flag.
 
-**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13748`)
+**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13780`)
 was called at exactly 4 sites as of when this defect was found (a 5th, `transform` itself, exists
 now — see the fix note below): `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
 `_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3538` as of
