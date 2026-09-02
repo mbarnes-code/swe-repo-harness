@@ -285,17 +285,21 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   all ('WeakEdge' and the four Contract/Hoist
                                                   --   kinds). The two annotated above each have a
                                                   --   live INSERT behind them, in
-                                                  --   orchestrator/findings.py. FOUR more are
+                                                  --   orchestrator/findings.py. THREE more are
                                                   --   built only as in-process dataclasses that
                                                   --   no writer ever sees, so nothing emits
-                                                  --   them: 'UnmergedDependency' (no literal
-                                                  --   in src/**/*.py outside the
-                                                  --   settings.py:704 docstring), 'VersionConflict'
+                                                  --   them: 'VersionConflict'
                                                   --   (bazel/generators.py:414), 'CoarseTarget'
                                                   --   (graph/cycles.py:923) and 'RuleOscillation'
                                                   --   (rewrite/pipeline.py:263) — GraphFinding
                                                   --   and RewriteFinding are imported by no
                                                   --   module that holds an INSERT INTO findings.
+                                                  --   'UnmergedDependency' left that group
+                                                  --   2026-09-02 (D101 Half A / ADR-0112): it now
+                                                  --   has a live INSERT in cli.py's
+                                                  --   _apply_stub_reconcile, one per §13 row 45
+                                                  --   held-for-merge consumer, repo_id the
+                                                  --   consumer's.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',
