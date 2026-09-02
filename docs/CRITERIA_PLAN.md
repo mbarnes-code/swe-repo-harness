@@ -232,6 +232,43 @@ edit needed. **Done bar (revised):** one real-`fleet-scan`-driven test per remai
 the real `edges` table, following this round's `INTERNAL_IMPORT`/`PUBLISHED_ARTIFACT` tests as the
 template. Small, additive, TEST-ONLY per kind.
 
+**Round HH task 1 (2026-09-02, `d776c0a`, reviewed Approved in full).** `SHARED_RESOURCE` and
+`DYNAMIC_REF` now closed the same way: `tests/test_scan_e2e.py` gained real fleet-scan-driven
+proofs against the `edges` table, each with an independently-reproduced Rule-12 negative control
+(hand-mutating the fixture's triggering shape and confirming the edge disappears — task review
+reproduced both mutations itself, not just re-ran the report's). **5 of 8 `EdgeKind`s now proven**
+(`DECLARED_DEP`, `INTERNAL_IMPORT`, `PUBLISHED_ARTIFACT`, `SHARED_RESOURCE`, `DYNAMIC_REF`).
+
+**`API_CONTRACT` — genuine finding, not attempted, not a fixture gap.** Traced exhaustively (task
+review independently re-traced every symbol producer, not just read the claim): no shipped
+extractor in `src/fleet/workers/symbolindex.py` ever emits a non-definition `API_SYMBOL_KINDS`
+symbol — `_proto_symbols` hard-codes `is_definition=True` on every `GRPC_SERVICE`/`PROTO_MESSAGE`
+it produces, and `HTTP_OPERATION` is never constructed anywhere in the file. `_api_contract_edges`
+(`infer.py:419-446`) requires exactly the symbol shape that never exists in real scan data — its
+join is structurally starved of input, independent of any fixture. `tests/test_workers_
+contracts.py:727-732`'s own docstring already documented this independently; task review confirmed
+the quote verbatim. **This is a production extraction-layer gap, not a fixture-design problem** —
+closing it needs a `symbolindex.py` change (real API-reference extraction, not just definitions),
+out of scope for a TEST-ONLY task. Not yet D-numbered; a future round should size it.
+
+**`CONTRACT_IMPL`/`CONTRACT_CONSUME` — a second, larger finding, sharpening this entry's own
+"already-implemented detectors, no fixture-level proof" framing.** Round HH task 2 traced the
+persistence path and found these two kinds are computed correctly in memory during a real
+`fleet sequence` run reaching a hoist (`_sequence_impl` → `break_cycles` → `_materialize` →
+`infer_contract_edges`) but are **never persisted** — the only production call site of
+`repository.insert_edges` anywhere in `src/` is `_persist_scan_edges`, which runs at scan time,
+before any hoist, and never passes `InferenceInput.contracts`. Unlike `API_CONTRACT` (a starved
+join) or the five already-closed kinds (a fixture-proof gap against working code), these two have
+**no round-trip production code path at all** — a landed `xfail(strict=True)` test in
+`tests/test_sequence_e2e.py` documents the target state and will fail loudly (forcing the marker's
+removal) once persistence is wired. See D23 in `docs/INTEGRATION_HONESTY.md` for whether this is
+the same defect from a different angle or a distinct one — pending task review.
+
+**§12.8 state after round HH: 5 of 8 proven, 3 of 8 open on two distinct, now well-understood
+production gaps** (`API_CONTRACT`'s starved extraction, `CONTRACT_IMPL`/`CONTRACT_CONSUME`'s
+missing persistence) rather than one undifferentiated "5 remaining" bucket. Both are real,
+traced-to-the-line findings — this round's own work, not fixture design failures.
+
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
 `check_criteria()` is now wired into `_sequence_impl` (`fleet sequence`) via a new
