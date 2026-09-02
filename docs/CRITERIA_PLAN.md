@@ -178,10 +178,23 @@ roles (`conflict_resolution`, `api_incompat_rewrite`, `build_authoring`, `cycle_
 `repo_classify`, `dep_disambiguate`, `pr_title`) — not interchangeable: `src/fleet/llm/schemas.py`
 maps each to its own response model, and `tests/test_llm_roles.py`'s own
 `test_schema_digests_are_stable_and_distinct_per_role` asserts all 12 schema digests are distinct.
-Round II task 3's fixtures cover **exactly one**: `tests/test_llm_golden_responses.py:77` pins
-`RESPONSE_SCHEMAS[Role.REPO_CLASSIFY] is RepoClassification`, and all four fixtures carry a
-`RepoClassification` payload. No other stored golden response exists anywhere in the tree
-(`find tests -ipath '*golden*'` returns only these four files).
+Round II task 3's fixtures covered **exactly one**: `tests/test_llm_golden_responses.py:77` (at
+round II's own commit) pinned `RESPONSE_SCHEMAS[Role.REPO_CLASSIFY] is RepoClassification`, and
+all four fixtures carried a `RepoClassification` payload. No other stored golden response existed
+anywhere in the tree at that point.
+
+**Round III task 3 (2026-09-02, `7e8072b`, reviewed Approved) — 2 more roles landed, 3 of 12
+now covered.** Refactored the test file into a `GoldenCase`-parametrized table (task review
+independently confirmed every original `REPO_CLASSIFY` assertion survives unweakened in the new
+structure) and added `PR_TITLE`/`PR_BODY`, each across all 4 backends, wire shapes derived from
+real adapter code (confirmed: all 4 backends' response-parsing is role-agnostic — a literal
+`_TOOL_NAME = "emit_response"` constant and zero payload-field branching before schema
+validation — so reusing `REPO_CLASSIFY`'s proven envelopes with only the payload swapped is sound,
+not merely convenient). The schema pin moved to `tests/test_llm_golden_responses.py:113-115`
+(3 assertions, one per landed role) — the citation above is a record of round II's own state, not
+repointed. **9 of 12 roles remain** (`conflict_resolution`, `api_incompat_rewrite`,
+`build_authoring`, `cycle_break_proposal`, `escalation`, `transform_repair`, `build_diagnosis`,
+`manifest_extract`, `dep_disambiguate`).
 
 **Not closed by composition.** `tests/test_llm_roles.py`'s existing round-trip test IS
 parametrized over all 12 roles, but its input is a hand-shaped Pydantic-model literal
