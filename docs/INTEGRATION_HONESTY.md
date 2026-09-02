@@ -8111,9 +8111,22 @@ independently reproduced the Rule-12 mutation proof in a fresh worktree. **D101 
 PARTLY ADDRESSED — Half B (the `--sync`-triggered clearing and firing T1) remains fully open,
 tracked jointly here and at D102.**
 
+**Update, round VI task 6 (2026-09-02) — Half B splits further; the "firing T1" sub-part is FIXED,
+the "clearing" sub-part is NOT.** Post-hoc task-scoped review (this task self-merged before
+review — a controller briefing gap, not implementer error, see the process note in its own review
+report) confirmed: Half B(i), firing T1, is genuinely landed — see D102's own updated entry.
+**Half B(ii), the `--sync`-triggered clearing of the `UnmergedDependency` finding D101 Half A
+writes, was never in this task's "What to build" scope** (its brief's Context section named it,
+but the concrete build instructions and Rule-12 requirement did not ask for it — the implementer
+correctly flagged this as a discrepancy rather than silently building or skipping it). No
+production code reads or clears an `UnmergedDependency` finding anywhere. **D101 stays PARTLY
+ADDRESSED — Half B(ii) is the sole remaining open piece, now precisely scoped rather than bundled
+with "firing T1."**
+
 ---
 
-## D102 — OPEN. `orchestrator.stubs.supersede` (T1) and `plan_revalidation` have zero production
+## D102 — FIXED, LANDED (round VI task 6, `3cc679d`/`ae0d961`), WITH A QUALIFIER — see below.
+`orchestrator.stubs.supersede` (T1) and `plan_revalidation` have zero production
 call sites anywhere in `src/` — the automatic re-entry trigger §12.37's own criterion text depends
 on is unwired
 
@@ -8148,3 +8161,69 @@ live code path and must be built.
 `ProviderFacts` for the merged provider and invokes `supersede()`/`plan_revalidation()`. That design
 choice, and how it composes with D101 Half B's own clearing logic, is not made here — this entry
 only establishes the gap exists and is now tracked independently of D101.
+
+**FIXED, LANDED (round VI task 6, 2026-09-02, `3cc679d`, merged `ae0d961`), with a qualifier this
+task's own report omitted, found by the post-hoc task-scoped review that verified this landing.**
+`_pr_sync_impl`'s `pr_merged` branch now builds `StubRecord`s for the merged provider's ACTIVE
+stubs (`_stub_supersede_inputs`), calls `supersede()`/`plan_revalidation()` (both pure, unit-tested,
+unchanged), and writes the `stubs` UPDATE plus a new `tasks` row (`kind='REVALIDATE'`, via the new
+`insert_revalidation_task_row`) in one transaction with the stub decision — proven end-to-end by a
+real `fleet pr --sync` fixture-fleet test (`tests/test_pr_e2e.py`), Rule-12 mutation-verified.
+T1's literal complaint (zero production call sites) is genuinely closed.
+
+**The qualifier: `grep -rn "INSERT INTO stubs" src/` returns nothing — no production code path
+creates a `stubs` row at all.** That is §12.37/D80's own stub-*creation* gap (`--stub-blocked`'s
+worker, `workers/buildgen.py`, was never built), unrelated to and unmoved by this fix. T1's newly-
+wired trigger can only fire against rows nothing in production creates today, so §12.37's own
+criterion is still not satisfiable end-to-end. This does not diminish what D102 closed (the trigger
+genuinely fires against any `stubs` row that DOES exist, e.g. one seeded by a test fixture or
+future stub-creation code) — it is a pre-existing, separately-tracked blocker one layer up, not a
+defect in this fix. See D103 below for the residual gaps this same landing surfaced.
+
+---
+
+## D103 — OPEN. Two residual gaps surfaced by D102's landing: a narrow crash-window ordering gap
+in `_pr_sync_impl`, and `stubs.revalidation_task_id` (SPEC §3.5.1 step 4) is never written
+
+**Found by round VI task 6's post-hoc task-scoped review (2026-09-02)** — both self-disclosed by
+the review as fix-forward items, not by the implementer's own report. Verified free before
+allocating: form-agnostic sweep of `docs/INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/
+CRITERIA_PLAN.md`/`docs/SPEC.md` for `\bD[0-9]+\b` found `D102` as the highest allocated number.
+
+**Gap 1 — the crash window.** Inside `_pr_sync_impl`'s per-repo loop, a merged PR causes THREE
+separate `writer.submit(...)` transactions: (1) `_write_pr_record` marks the PR record durably
+`MERGED`; (2) `emitter.emit("pr_merged", ...)`; (3) T1's own effect (the `stubs` `ACTIVE`→
+`SUPERSEDED` UPDATE and the `REVALIDATE` task INSERT, correctly atomic with EACH OTHER, per the
+brief). A crash between (1) and (3) leaves a durably-`MERGED` PR record whose stub was never
+superseded. **Reviewed and found NOT a correctness bug**: no double-supersede is possible (the
+UPDATE is guarded on `revalidation_round`/`state`; `supersede()` itself no-ops a `SUPERSEDED` row),
+no duplicate `REVALIDATE` task is possible (measured directly against `ux_tasks_ident`), and the
+crash outcome — `stub_reconcile`'s end-of-run sweep abandons the stub instead of superseding it —
+is exactly what happened to 100% of cases before this task existed. No new failure mode; a
+narrowing of an existing one.
+
+**Not yet built:** on every `fleet pr --sync` invocation, sweep PR records already durably `MERGED`
+(not just newly-observed-this-run) whose named stub is still `ACTIVE`, and re-fire T1 for them —
+closing the crash window by making the trigger retry-safe rather than single-shot. Estimated ~10
+lines, reusing `_stub_supersede_inputs`/`supersede`/`plan_revalidation` as-is (all three are already
+idempotent against a replay).
+
+**Gap 2 — `stubs.revalidation_task_id` is a real schema column
+(`src/fleet/state/schema.sql:386`, `revalidation_task_id TEXT REFERENCES tasks(task_id) ON DELETE
+SET NULL`) that SPEC §3.5.1 step 4 (`docs/SPEC.md:1774`) requires be set to the minted `REVALIDATE`
+task's id — verified by direct grep (`grep -rn "revalidation_task_id" src/fleet/`) to be written
+NOWHERE in production code**, only declared in `schema.sql` and the `v004_stub_lifecycle` migration
+that added the column. `RevalidationPlan.coord_keys` already carries the data a write site would
+need; `insert_revalidation_task_row` already returns the winning `task_id`. Not yet built: an
+UPDATE of the relevant `stubs` rows to the returned `task_id`, in the same transaction T1's own
+effect already runs in.
+
+**Relationship to D101 Half B(ii).** Writing `stubs.revalidation_task_id` is plumbing, not the
+`--sync`-triggered *clearing* of the `UnmergedDependency` finding D101 Half A writes — those remain
+two distinct gaps. Whoever picks up D101 Half B(ii) should read `revalidation_task_id` (once Gap 2
+here is closed) to find which `REVALIDATE` task a held consumer is waiting on, rather than
+re-deriving it.
+
+**Not yet built, either gap:** neither is designed in detail here — this entry establishes both
+gaps exist and are now tracked, following D102's own precedent of disclosing a real gap without
+prescribing its exact implementation.
