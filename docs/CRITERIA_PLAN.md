@@ -1263,6 +1263,28 @@ invariant change) but must land no later than whichever task first makes a TRANS
 `DEGRADED` in production, or it silently strands every such repo out of BUILD/VERIFY. Tracked here
 as §37's fourth done-bar item, not yet its own D-number.
 
+**Update, round VI task 10 (2026-09-02, `26db8a8`, merged `9a0a741`, task-scoped review Approved
+with elevated scrutiny on both ADR-0113 conditions) — Blocker A lands.** `stub_permits_removal`
+(`orchestrator/reentry.py`) is a new, separate predicate combined with `still_blocking` via
+OR-logic at the `plan_unblocking` call site; `still_blocking` itself is confirmed byte-for-byte
+unchanged (diffed in isolation, zero removed lines in its body — independently re-verified by the
+review, not just the implementer's own claim). `stub_blocked` threads through
+`_unblock_dependents`/`_apply_unblocking`/`clear_blocked_by` exactly as `floors` already does
+(confirmed by side-by-side comparison). A new `--stub-blocked` flag exists on `fleet resume` and
+is confirmed genuinely unreachable — `_validate_resume_flags` refuses it unconditionally with
+`UsageError` before `_resume_impl` is even constructed, and `_resume_impl` itself has no
+`stub_blocked` parameter at all, so no live path from the CLI to the new plumbing exists this
+round, per ADR-0113's condition 2. Both Rule-12 mutations reproduced independently by the review
+in a fresh interpreter-isolated worktree.
+
+**§37 state after Blocker A: two of three structural blockers remain (B — version-sourcing
+schema/design decision; C — `_unit_deps`'s stub-aware target-label reclassification), plus the
+fourth item above (`_eligible_build_units`) and the still-unbuilt TRANSFORM-worker stub-creation
+logic itself, which this task deliberately does not build (its CLI surface stays refused until
+that logic exists — see ADR-0113's condition 2). §37 does not move toward DONE from this landing
+alone; it removes the load-bearing prerequisite for B and C to become end-to-end testable, per
+research-4's own framing.**
+
 ## 38. No ready-for-review while a stub is unresolved
 **OPEN — mixed, 20 sub-clauses — correction, round IV: D94 AND D101 block, not D94 alone.** D92
 and D93 are both `FIXED, LANDED` (round GG task 1, `7cd6647`; round EE task 2, `b774c8f`); round
