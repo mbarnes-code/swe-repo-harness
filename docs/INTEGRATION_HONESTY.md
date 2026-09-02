@@ -7419,11 +7419,13 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12500-12737`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-02, round VI: task 6's `cli.py` additions drifted this citation and the bare sub-citations
-inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/`:12360-12376` below are NOT
-re-verified here, only the one anchored citation the automated gate flagged; a future pass should
-sweep the rest of this paragraph.)* The
+(`cli.py:12567-12804` at `2a5c2ac`), not the pre-Task-B code the paragraph above was describing.**
+*(Repointed 2026-09-02, round VI, THREE separate times as this round's own successive `cli.py`
+additions kept shifting it — converted to the commit-bound form here to stop the recurring drift;
+this describes the function's shape as of the cited commit, re-derive fresh if citing "current".
+The bare sub-citations inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/
+`:12360-12376` below — are NOT re-verified here, only the one anchored citation the automated gate
+checks; a future pass should sweep the rest of this paragraph.)* The
 `if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12347` (REWRITE's
 `elif not landed_units:` nothing-landed branch) and `:12389` (the non-REWRITE discard branch) —
 both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
