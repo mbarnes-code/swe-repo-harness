@@ -7845,3 +7845,46 @@ whoever picks up D23. Also noted, not fixed here: the existing fixture test's di
 assertion silently collapses the two `acme-billing` rows, so despite its docstring's wording it
 does not actually prove "exactly one `CONTRACT_CONSUME` row per consumer" — pre-existing test
 structure, untouched by this diff, flagged for a future pass.
+
+## D98 — OPEN. `fleet resume` never exits 7 in the pure stub-abandon end-of-run case — D93's exit-7 wiring lives only in the four phase-command sites, never in `resume()`'s own exit path
+
+**Found by round II task 1 (2026-09-02), while re-auditing SPEC §12 item 38's sub-clauses against
+D92/D93's now-landed fixes — a disclosed finding, not this TEST-ONLY task's own job to fix.**
+Verified free before writing: form-agnostic sweep of this file's `D<n>` headings found no `D98`;
+highest allocated number was `D97`. Independently reproduced by task review, not accepted on the
+implementer's word alone — including a fresh, independently-written throwaway probe test (reverted
+after use, confirmed clean via `git status`) rather than a reuse of the implementer's own probe.
+
+**The gap, as measured, twice.** A resume cycle where the ONLY event is `stub_reconcile` abandoning
+a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a real
+`fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
+phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
+`"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
+`_continue_impl` (`src/fleet/cli.py:9529-9640`) returns early at `if not servable: return result`
+(`:9584-9585`) with `halted: None`, and `_raise_for_continuation` (`:9643-9653`) is a no-op when
+`halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
+overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
+`cli.py:1889`, `:5183`, `:9113`, `:9333`) lives exclusively inside `_scan_impl`/`_transform_impl`/
+`_build_impl`/`_verify_impl` — genuinely distinct code from `_resume_impl`/`_continue_impl`/
+`resume()`'s own body, confirmed by task review reading both paths directly. `phase_floor`'s
+hard-stop logic (`orchestrator/reentry.py:48,54,116-117`) confirms `DEGRADED` at the frontier
+phase yields floor `None`, so nothing gets planned and no phase impl — and thus no
+`_needs_human_attention` call — ever runs on this path.
+
+**Consequence.** A `fleet resume` invocation whose only outcome this cycle is a stub abandonment —
+"a human is needed" per SPEC §3.5.1/§13's own intent — silently exits 0 instead of 7. An operator
+or CI pipeline gating on exit code sees success where the fleet's own state says otherwise.
+
+**Not yet built:** a real read of the run's overall phase statuses (or equivalent
+`_needs_human_attention`-style check) inside `resume()`'s/`_continue_impl`'s own exit-code
+determination, for the case where nothing was re-driven this cycle. That design choice is not made
+here.
+
+**Disclosed, not confirmed, open question for a future pass (task review's own residual finding,
+explicitly flagged as ambiguous, not asserted as a second defect here):** SPEC.md:7464's literal
+text — "`C` stays `DEGRADED` with `PrState.HELD`" for the end-of-run ABANDONED case — may describe
+a second, currently-unimplemented behavior (`_apply_stub_reconcile`'s ABANDONED decisions loop,
+`cli.py:12043-12096`, never writes any `PrState`; only the separate `held_for_merge` branch does,
+and only to the provider's own record, not the consumer `C`'s). Read SPEC's own compound sentence
+directly before treating this as a confirmed gap — it was not independently re-derived to the same
+confidence as the exit-code finding above.

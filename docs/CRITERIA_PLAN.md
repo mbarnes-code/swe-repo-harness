@@ -1085,6 +1085,27 @@ current `HEAD` (not re-derived here — this is round II's own dispatched task) 
 all remain blocked; D94 alone blocks the resolution sub-clause specifically, not the whole
 criterion.
 
+**Round II task 1's re-audit (2026-09-02), reviewed Approved — no new tests needed, a
+documentation-credit re-audit, plus one significant new finding.** Two sub-clauses D92/D93
+newly unblocked turn out to already be covered by existing tests, just uncredited: the
+held-for-merge `PrState.HELD` case (D92's own extended test,
+`tests/test_cli.py::test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr`)
+and the generic exit-7-on-DEGRADED sub-clause (D93's own four `_needs_human_attention` site tests,
+`test_scan_e2e.py`/`test_transform_e2e.py`/`test_build_e2e.py` — task review confirmed all four
+independently, including that the `test_build_e2e.py`-housed one actually drives the real
+`verify` subcommand despite living in the build test file). Several other sub-clauses were already
+covered pre-round, confirmed unrelated to D92/D93. The whole "resolution" sub-clause remains
+D94-blocked, re-confirmed.
+
+**Significant new finding, allocated D98 (`docs/INTEGRATION_HONESTY.md`) — independently
+reproduced by task review with its own fresh probe, not the implementer's.** `fleet resume`'s own
+exit code does NOT reach 7 in the "pure stub-abandon end-of-run" case — D93's fix lives only in
+the four phase-command sites (`scan`/`build`/`transform`/`verify`), never in `resume()`'s own exit
+path (`_continue_impl` returns early with `halted: None` when nothing is servable, and the exit
+determination is a no-op on that path). A resume whose only event this cycle is a stub abandonment
+silently exits 0. Task review additionally flagged, without confirming to the same rigor, a
+possible SECOND gap in SPEC's own literal text — see D98's own entry for the open question.
+
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
 (batched=1/eager=3 cost comparison) is well covered. Cases (i)/(ii) only test what's handed in as
