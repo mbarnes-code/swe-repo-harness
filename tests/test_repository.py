@@ -448,6 +448,13 @@ async def test_complete_phase_is_one_write_unit_so_a_failure_leaves_no_half_comp
     into two `submit` calls and only the second one failed. Together they pin one unit, therefore
     one `BEGIN IMMEDIATE`, therefore all-or-nothing, for a shape where the interesting write is a
     single SQL statement rather than several.
+
+    The interrupted call is seeded with `max_attempts=1` and `status=PENDING` — the retry
+    hand-back that escalates — not `SUCCEEDED`, so the write this interrupts is SPEC §12.13's own
+    literal sentence: "the increment that reaches the ceiling is the same statement that writes
+    `status='REQUIRES_HUMAN_INTERVENTION'`". Asserting atomicity against that exact write, not a
+    non-escalating one, is what makes this a direct proof of the sentence rather than a
+    structurally-implied generalization of it.
     """
     store, writer = demotion_bed
     await store.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
@@ -472,9 +479,13 @@ async def test_complete_phase_is_one_write_unit_so_a_failure_leaves_no_half_comp
     assert result is RepoStatus.SUCCEEDED
     assert submits == 1, "the SELECT and the UPDATE are one unit, not two"
 
-    # Now interrupt a second completion — for a DIFFERENT repo/phase — after its UPDATE has
-    # genuinely executed inside the transaction.
-    await store.upsert_phase(RUN, OTHER, Phase.TRANSFORM, now=NOW)
+    # Now interrupt a second completion — for a DIFFERENT repo/phase, with `max_attempts=1` and
+    # a retry-hand-back `status` — so the interrupted UPDATE is the exact SPEC §12.13 state: "the
+    # increment that reaches the ceiling is the same statement that writes
+    # `status='REQUIRES_HUMAN_INTERVENTION'`". Proving atomicity against THIS write, not a
+    # SUCCEEDED one, is what makes the interruption test assert the literal sentence rather than
+    # a structurally-implied generalization of it.
+    await store.upsert_phase(RUN, OTHER, Phase.TRANSFORM, now=NOW, max_attempts=1)
     other_fence = await store.acquire_phase_lease(
         RUN, OTHER, Phase.TRANSFORM, owner=WORKER, now=NOW, lease_ttl_s=60
     )
@@ -497,7 +508,7 @@ async def test_complete_phase_is_one_write_unit_so_a_failure_leaves_no_half_comp
 
     with pytest.raises(RuntimeError, match="injected mid-unit failure"):
         await store.complete_phase(
-            RUN, OTHER, Phase.TRANSFORM, fence=other_fence, status=RepoStatus.SUCCEEDED, now=NOW
+            RUN, OTHER, Phase.TRANSFORM, fence=other_fence, status=RepoStatus.PENDING, now=NOW
         )
 
     row = await _phase_state(read_conn, OTHER)
