@@ -7419,7 +7419,7 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12751-12988`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+(`cli.py:12804-13041`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
 2026-09-02, round VI, FOUR separate times as this round's own successive `cli.py` additions kept
 shifting it. Correction to this paragraph's own prior self: the "at `<sha>`" suffix a previous
 repointing added here was NOT a functional exemption — `test_no_unpinned_anchored_citation_
@@ -8343,7 +8343,7 @@ Not confirmed as a live bug — a plausible gap, not independently investigated 
 
 ---
 
-## D106 — OPEN. Possible cross-call analogue of D105: a `SUPERSEDED` stub surviving to a LATER
+## D106 — FIXED, LANDED (round VI task 14, `d503eb2`/`877155f`). Possible cross-call analogue of D105: a `SUPERSEDED` stub surviving to a LATER
 `fleet resume` invocation may still be abandoned by `reconcile()`, unprotected by D105's fix
 
 **Found by round VI task 11's task-scoped review (2026-09-02), flagged as plausible but not
@@ -8373,3 +8373,24 @@ second abandons it) and, if so, what the fix should be — likely something that
 `reconcile()`-side change to its own "open" definition (option (b) from D105's own entry, deferred
 there as "more fragile"). Neither is designed here — this entry only establishes the gap as
 plausible and disclosed, following D102/D104/D105's own precedent, not as a confirmed defect.
+
+**FIXED, LANDED (round VI task 14, 2026-09-02, `d503eb2`, merged `877155f`, task-scoped review
+Approved).** **Confirmed real, not refuted**, via a genuine two-separate-invocation test (not two
+calls in one process) before any fix was written — a stub superseded in one `fleet resume` call,
+surviving un-revalidated into a later separate call, was incorrectly re-abandoned by
+`reconcile()`'s ordinary sweep, since D105's own exclusion set is call-scoped and never persisted.
+Option (a) chosen: a new `_stub_awaiting_revalidation` query protects a `SUPERSEDED` row whose
+`revalidation_task_id` (D103) names a `tasks` row not yet `DONE`/`FAILED`, filtered into
+`_stub_reconcile_impl`'s exclusion set alongside D105's own `exclude_this_call` (a plain
+`frozenset` union, additive/independent — no override risk). `reconcile()` itself remains
+untouched (empty diff, matching D105's own precedent). A `SUPERSEDED` row with no revalidation-task
+tracking is deliberately left unprotected (proven by a control) — the fix's scope is not
+overbroad, targeted precisely by SQL semantics (an `INNER JOIN` on `revalidation_task_id`
+structurally excludes any NULL-tracked row).
+
+**Correctness given D104 stays open, independently confirmed by the review**: since nothing
+currently moves a `REVALIDATE` task off `PENDING` (D104), this exclusion's protection is
+effectively indefinite for as long as D104 stays open — the review grepped every `REVALIDATE`
+reference and confirmed no code path anywhere (dispatch loop, git-arbitration sweep) ever executes
+one. This is disclosed, not a silent accident: the CLI reports an `excluded_awaiting_revalidation`
+payload key on every `--repoll-prs` call naming exactly which rows are held back this way.
