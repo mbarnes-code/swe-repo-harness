@@ -493,26 +493,98 @@ def test_pr_sync_fires_t1_and_enqueues_a_revalidate_task_for_a_merged_providers_
 
     stub_rows = query(
         fleet,
-        "SELECT state FROM stubs WHERE consumer_repo_id = 'acme-app-py' AND stub_coord_key = ?",
+        "SELECT state, revalidation_task_id FROM stubs "
+        " WHERE consumer_repo_id = 'acme-app-py' AND stub_coord_key = ?",
         (STUB_COORD,),
     )
     assert [row[0] for row in stub_rows] == ["SUPERSEDED"], stub_rows
 
     task_rows = query(
         fleet,
-        "SELECT repo_id, revalidation_key, phase, status FROM tasks WHERE kind = 'REVALIDATE'",
+        "SELECT task_id, repo_id, revalidation_key, phase, status FROM tasks "
+        " WHERE kind = 'REVALIDATE'",
     )
     assert len(task_rows) == 1, (
         f"exactly one REVALIDATE task: acme-app-py's supersede, and NOTHING for acme-lib-ts's "
         f"merge (no stub names it) — got {task_rows}"
     )
-    repo_id, key, task_phase, task_status = task_rows[0]
+    task_id, repo_id, key, task_phase, task_status = task_rows[0]
     assert str(repo_id) == "acme-app-py", task_rows
     assert str(key) == revalidation_key(1, ("acme-lib-py",)), task_rows
     assert int(task_phase) == 4, task_rows  # Phase.VERIFY
     # D102's own scope boundary: nothing executes a REVALIDATE task yet (no worker exists), so
     # the row is expected to sit PENDING forever — that is disclosed, not asserted as a defect.
     assert str(task_status) == "PENDING", task_rows
+
+    # D103 gap 2: `stubs.revalidation_task_id` (SPEC §3.5.1 step 4) names the REVALIDATE task
+    # this SAME transaction just minted — a real schema column that was written NOWHERE in
+    # production before this task, so a future D101 Half B(ii) can read it instead of
+    # re-deriving which task a held consumer is waiting on.
+    assert stub_rows[0][1] == str(task_id), (stub_rows, task_id)
+
+
+def test_pr_sync_sweeps_a_pre_merged_providers_stub_left_active_by_a_prior_crash(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """D103 gap 1: the per-repo loop above fires T1 only for a PR OBSERVED going `MERGED` in the
+    SAME `--sync` invocation. `_pr_sync_impl`'s three per-repo transactions (PR record write,
+    `pr_merged` emit, T1's own effect) mean a crash between the first and third leaves a durably
+    `MERGED` PR record whose stub is still `ACTIVE`, with T1 never having fired for it — and every
+    later `--sync` used to leave it that way forever, because `acme-lib-py` is terminal and drops
+    out of `pollable` the moment it is first ingested.
+
+    Reproduced without an injected crash: `acme-lib-py` merges and is durably ingested BEFORE any
+    stub names it, so T1 correctly no-ops on that first `--sync` (real, not simulated — there is
+    genuinely nothing to supersede yet). The `ACTIVE` stub is planted only afterwards, so no
+    `--sync` invocation has ever observed "provider MERGED" and "stub ACTIVE" at the same time —
+    exactly the state a crash between the event-emit and T1 would leave, reached here by a
+    different, equally real route. A second `--sync`, with `acme-lib-py` already terminal and
+    nothing new on the forge, must still supersede the stub — that is the sweep, not the loop.
+    `acme-lib-ts` never merges and never gets a stub naming it: the control proving the sweep
+    fires only on an actually-MERGED, actually-ACTIVE pairing, not on every terminal PR.
+    """
+    verified(fleet)
+    assert run_pr(fleet).exit_code == ExitCode.SUCCESS
+
+    forge.merge("acme-lib-py")
+    first_sync = run_pr(fleet, "--sync")
+    assert first_sync.exit_code == ExitCode.SUCCESS, first_sync.output
+    assert payload(first_sync)["merged"] == ["acme-lib-py"], payload(first_sync)
+    # No ACTIVE stub named acme-lib-py yet: T1 genuinely had nothing to do.
+    assert query(fleet, "SELECT COUNT(*) FROM tasks WHERE kind = 'REVALIDATE'")[0][0] == 0
+
+    # The crash-window state: a durably-MERGED provider, and only now an ACTIVE stub against it.
+    degrade(fleet, "acme-app-py", provider_repo_id="acme-lib-py")
+
+    swept = run_pr(fleet, "--sync")
+    assert swept.exit_code == ExitCode.SUCCESS, swept.output
+    ingested = payload(swept)
+    # acme-lib-py is terminal (MERGED) and out of `pollable`; nothing is newly observed. The
+    # sweep, not the per-repo loop, is what has to fire T1 here.
+    assert ingested["merged"] == [], ingested
+    assert "acme-lib-py" in ingested["terminal"], ingested
+
+    stub_rows = query(
+        fleet,
+        "SELECT state, revalidation_task_id FROM stubs "
+        " WHERE consumer_repo_id = 'acme-app-py' AND stub_coord_key = ?",
+        (STUB_COORD,),
+    )
+    assert [row[0] for row in stub_rows] == ["SUPERSEDED"], stub_rows
+
+    task_rows = query(
+        fleet, "SELECT task_id, repo_id, revalidation_key FROM tasks WHERE kind = 'REVALIDATE'"
+    )
+    assert len(task_rows) == 1, task_rows
+    task_id, repo_id, key = task_rows[0]
+    assert str(repo_id) == "acme-app-py", task_rows
+    assert str(key) == revalidation_key(1, ("acme-lib-py",)), task_rows
+    assert stub_rows[0][1] == str(task_id), (stub_rows, task_id)
+
+    # The control: acme-lib-ts never merged, so its own terminal-ness is irrelevant here — it
+    # stays OPEN throughout and no stub anywhere names it.
+    assert pr_states(fleet)["acme-lib-ts"] == PrState.OPEN.value, pr_states(fleet)
+    assert query(fleet, "SELECT COUNT(*) FROM stubs")[0][0] == 1, "only acme-app-py's stub exists"
 
 
 # ---------------------------------------------------------------------------------------

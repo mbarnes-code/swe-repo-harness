@@ -10027,6 +10027,115 @@ async def _verifications(
     return out
 
 
+async def _fire_t1_for_provider(
+    read_conn: aiosqlite.Connection,
+    writer: StateWriter,
+    run_id: str,
+    repo_id: str,
+    provider_pr: PullRequestDraft,
+    *,
+    policy: RevalidationPolicy,
+    now: datetime,
+) -> bool:
+    """T1 (`orchestrator.stubs.supersede`) for every `ACTIVE` stub naming `repo_id` as provider,
+    given `provider_pr` is that provider's own durably-persisted `PullRequestDraft`.
+
+    Factored out of `_pr_sync_impl`'s `pr_merged` branch (D102) so the SAME effect — one
+    transaction folding `_apply_stub_decisions` (stub `ACTIVE`->`SUPERSEDED`) and
+    `insert_revalidation_task_row` (the `REVALIDATE` task(s) the decisions mint) — can be reached
+    from two callers: the newly-observed-this-run merge (`provider_pr` is the just-written
+    record) and the D103 gap-1 sweep below over PR records that were ALREADY durably `MERGED`
+    before this invocation (`provider_pr` is that prior record, re-read unchanged). Both need
+    `_stub_supersede_inputs`'s `state = 'ACTIVE'` scoping to make a replay a no-op: a provider
+    with no `ACTIVE` stub, or one already `SUPERSEDED` by an earlier firing, returns `False`
+    having written nothing — see `supersede()`'s own docstring for why a `SUPERSEDED` row is a
+    no-op rather than a second transition.
+
+    Returns whether anything was written. The sweep uses this only for its own accounting; a
+    `False` return is the common case (no `ACTIVE` stub names this provider) and is not a failure.
+    """
+    t1_records, t1_grouped = await _stub_supersede_inputs(read_conn, run_id, repo_id)
+    if not t1_grouped:  # the common case: no ACTIVE stub names this provider at all
+        return False
+    provider_phase_rows = await _rows(
+        read_conn,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? ORDER BY phase DESC LIMIT 1",
+        (run_id, repo_id),
+    )
+    provider_facts = ProviderFacts(
+        repo_id=repo_id,
+        status=(
+            RepoStatus(str(provider_phase_rows[0][0]))
+            if provider_phase_rows
+            else RepoStatus.PENDING
+        ),
+        pr_state=provider_pr.state,
+        pr_created_at=provider_pr.created_at,
+    )
+    t1_decisions: list[StubDecision] = []
+    for stub in t1_grouped.values():
+        t1_decisions.extend(supersede_stub(stub, provider_facts, policy=policy))
+    if not t1_decisions:
+        return False
+    by_consumer: dict[str, list[StubDecision]] = {}
+    for decision in t1_decisions:
+        by_consumer.setdefault(decision.consumer_repo_id, []).append(decision)
+    plans: list[RevalidationPlan] = []
+    for consumer_id in sorted(by_consumer):
+        plans.extend(plan_stub_revalidation(consumer_id, by_consumer[consumer_id], policy=policy))
+
+    async def t1_unit(
+        conn: aiosqlite.Connection,
+        _records: Mapping[tuple[str, str], StubRecord] = t1_records,
+        _decisions: Sequence[StubDecision] = tuple(t1_decisions),
+        _plans: Sequence[RevalidationPlan] = tuple(plans),
+    ) -> None:
+        # One transaction for the whole of T1's effect (stub ACTIVE->SUPERSEDED, plus the
+        # REVALIDATE task(s) its `RevalidationPlan`s mint, plus — D103 gap 2 — stamping the
+        # winning task id back onto the stub rows it was minted for) — never split across two
+        # `writer.submit` calls, so a crash cannot supersede a stub without also enqueueing its
+        # revalidation. Bound as defaults, not read from the enclosing scope, so a later caller
+        # cannot rebind what an already-queued unit sees (B023).
+        await _apply_stub_decisions(conn, run_id, _records, _decisions, now=now)
+        for plan in _plans:
+            dest_path = await _repo_dest_path(conn, plan.consumer_repo_id)
+            task_id = await insert_revalidation_task_row(
+                conn,
+                str(uuid4()),
+                run_id=run_id,
+                repo_id=plan.consumer_repo_id,
+                revalidation_key=plan.key,
+                dest_path=dest_path or "",
+                created_at=now,
+            )
+            # D103 gap 2: `stubs.revalidation_task_id` (`schema.sql:386`) is a real column SPEC
+            # §3.5.1 step 4 requires be set to the minted REVALIDATE task's id, so a future
+            # D101 Half B(ii) can read which task a held consumer is waiting on instead of
+            # re-deriving it. `_records` keys on (consumer, coord_key) and its `rounds_spent` is
+            # each row's own pre-UPDATE `revalidation_round` (T1 never bumps it — `apply()`'s own
+            # docstring) — the exact value `_apply_stub_decisions` just matched its UPDATE against,
+            # so this WHERE clause addresses precisely the rows that UPDATE just moved to
+            # SUPERSEDED, never an unrelated historical row sharing the same coord_key at a
+            # different round.
+            for coord_key in plan.coord_keys:
+                original = _records[(plan.consumer_repo_id, coord_key)]
+                await conn.execute(
+                    "UPDATE stubs SET revalidation_task_id = ? "
+                    " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ? "
+                    "   AND revalidation_round = ? AND state = 'SUPERSEDED'",
+                    (
+                        task_id,
+                        run_id,
+                        plan.consumer_repo_id,
+                        coord_key,
+                        original.rounds_spent,
+                    ),
+                )
+
+    await writer.submit(t1_unit)
+    return True
+
+
 async def _pr_sync_impl(
     opts: GlobalOptions, settings: FleetSettings, path: Path, *, run_id: str
 ) -> dict[str, object]:
@@ -10075,6 +10184,9 @@ async def _pr_sync_impl(
     closed: list[str] = []
     unchanged: list[str] = []
     stamp = _now()
+    # Read once, up front: both the per-repo loop's newly-observed merges and the D103 gap-1
+    # sweep over already-durable ones fire T1 under the SAME policy.
+    policy = RevalidationPolicy(settings.config.stubs.revalidation)
     async with StateWriter(path, owner="fleet-pr-sync") as writer:
         read_conn = await connect_ro(path)
         try:
@@ -10152,76 +10264,31 @@ async def _pr_sync_impl(
                     # fires from the SAME code path that just wrote it, not from a reader of it.
                     # `supersede()` requires SUCCEEDED + MERGED (ADR-0011 stacking); `updated`
                     # above is this provider's own just-written PR record, already `MERGED`.
-                    policy = RevalidationPolicy(settings.config.stubs.revalidation)
-                    t1_records, t1_grouped = await _stub_supersede_inputs(
-                        read_conn, run_id, repo_id
+                    await _fire_t1_for_provider(
+                        read_conn, writer, run_id, repo_id, updated, policy=policy, now=stamp
                     )
-                    if t1_grouped:  # the common case: no ACTIVE stub names this provider at all
-                        provider_phase_rows = await _rows(
-                            read_conn,
-                            "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? "
-                            " ORDER BY phase DESC LIMIT 1",
-                            (run_id, repo_id),
-                        )
-                        provider_facts = ProviderFacts(
-                            repo_id=repo_id,
-                            status=(
-                                RepoStatus(str(provider_phase_rows[0][0]))
-                                if provider_phase_rows
-                                else RepoStatus.PENDING
-                            ),
-                            pr_state=updated.state,
-                            pr_created_at=updated.created_at,
-                        )
-                        t1_decisions: list[StubDecision] = []
-                        for stub in t1_grouped.values():
-                            t1_decisions.extend(supersede_stub(stub, provider_facts, policy=policy))
-                        if t1_decisions:
-                            by_consumer: dict[str, list[StubDecision]] = {}
-                            for decision in t1_decisions:
-                                by_consumer.setdefault(decision.consumer_repo_id, []).append(
-                                    decision
-                                )
-                            plans: list[RevalidationPlan] = []
-                            for consumer_id in sorted(by_consumer):
-                                plans.extend(
-                                    plan_stub_revalidation(
-                                        consumer_id, by_consumer[consumer_id], policy=policy
-                                    )
-                                )
-
-                            async def t1_unit(
-                                conn: aiosqlite.Connection,
-                                _records: Mapping[tuple[str, str], StubRecord] = t1_records,
-                                _decisions: Sequence[StubDecision] = tuple(t1_decisions),
-                                _plans: Sequence[RevalidationPlan] = tuple(plans),
-                            ) -> None:
-                                # One transaction for the whole of T1's effect (stub
-                                # ACTIVE->SUPERSEDED, plus the REVALIDATE task(s) its
-                                # `RevalidationPlan`s mint) — never split across two
-                                # `writer.submit` calls, so a crash cannot supersede a stub
-                                # without also enqueueing its revalidation. Bound as defaults,
-                                # not read from the enclosing loop, so a later `repo_id` in this
-                                # same `for` cannot rebind what an already-queued unit sees
-                                # (B023).
-                                await _apply_stub_decisions(
-                                    conn, run_id, _records, _decisions, now=stamp
-                                )
-                                for plan in _plans:
-                                    dest_path = await _repo_dest_path(conn, plan.consumer_repo_id)
-                                    await insert_revalidation_task_row(
-                                        conn,
-                                        str(uuid4()),
-                                        run_id=run_id,
-                                        repo_id=plan.consumer_repo_id,
-                                        revalidation_key=plan.key,
-                                        dest_path=dest_path or "",
-                                        created_at=stamp,
-                                    )
-
-                            await writer.submit(t1_unit)
                 elif status.state is PrState.CLOSED:
                     closed.append(repo_id)
+
+            # D103 gap 1 — the crash-window sweep. The loop above fires T1 only for a PR
+            # OBSERVED going MERGED in THIS invocation. A crash between `_write_pr_record`
+            # marking a PR durably MERGED and T1's own effect three transactions later — or a
+            # stub minted (by a build worker) against a provider that had ALREADY merged in an
+            # earlier `--sync` — leaves a durably-MERGED PR record whose stub is still ACTIVE
+            # with no T1 ever having fired for it. `records` is the pre-poll snapshot read at the
+            # top of this function, before ANY write this invocation makes — so a repo this run
+            # just merged (via the loop above) still reads its OLD, non-MERGED state here and is
+            # naturally skipped without needing to consult `merged`; only a PR that was ALREADY
+            # durably `MERGED` before this invocation started reaches `_fire_t1_for_provider`
+            # below. That call is idempotent against a replay regardless
+            # (`_stub_supersede_inputs` scopes to `state = 'ACTIVE'`), which is what makes this
+            # sweep retry-safe on every invocation rather than single-shot.
+            for repo_id, draft in sorted(records.items()):
+                if draft.state is not PrState.MERGED:
+                    continue
+                await _fire_t1_for_provider(
+                    read_conn, writer, run_id, repo_id, draft, policy=policy, now=stamp
+                )
         finally:
             await read_conn.close()
 
