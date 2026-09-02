@@ -8666,3 +8666,28 @@ surfaces first. D105: a small, well-scoped fix once someone picks it up (skip-in
 narrow the "open" window). D104: needs its own sizing pass before dispatch (likely NEW-MECHANISM,
 reusing `BuildverifyWorker`'s existing engine per this project's established reuse pattern —
 not confirmed).
+
+### Checkpoint — round VI, third wave (2026-09-02, same day)
+
+**§12 count: 27 of 48, unchanged again — this wave closed Blocker A only, disclosed as such.**
+Research corrected the second wave's own framing: no `ALLOWED_TRANSITIONS` widening was needed at
+all for §37's admission blocker — every transition already existed, and `WaveScheduler.admit()`
+needed zero changes. The real gap was `still_blocking`'s fail-closed removal predicate. Adjudicated
+**ADR-0113**: a new, separate predicate, `still_blocking` never edited, the new CLI surface
+(`fleet resume --stub-blocked`) deliberately held non-functional (refused) until the still-unbuilt
+TRANSFORM-worker stub-creation logic exists — landing admission alone would let an operator
+dispatch real work against a dependency that objectively cannot succeed, the exact harm the
+existing `BLOCKED` exclusion prevents. Implemented and landed (`26db8a8`/`9a0a741`), task-scoped
+review with elevated scrutiny on both conditions: **APPROVED**, both independently re-verified (not
+trusted from the implementer's own claim) — `still_blocking`'s diff shows zero removed lines in its
+body, and the CLI path was traced by hand and confirmed genuinely unreachable this round.
+
+Citation drift recurred once more from this merge's growth (3 citations, same recurring class,
+`2bed040`) — routine at this point, fixed same-day as always. §37 updated to reflect Blocker A
+landed, two structural blockers (B, C) plus the `_eligible_build_units` item remaining
+(`ba65b89`).
+
+**What's next, updated.** D105 (the `--repoll-prs` interaction bug) is small and well-scoped —
+next candidate. Blockers B (version-sourcing) and C (`_unit_deps` reclassification) each need
+their own sizing/design pass before dispatch, similar to how Blocker A did. D94 remains the
+standing NEW-MECHANISM candidate for a dedicated round if nothing smaller surfaces.
