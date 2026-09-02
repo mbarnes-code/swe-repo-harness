@@ -2638,9 +2638,11 @@ def test_resume_reconciles_an_open_stub_unconditionally_even_without_repoll(
     assert finding == ("UnresolvedStub", "warn")
 
     # §3.5.1 point 2 / §12.38: "their consumers stay DEGRADED — never promoted, never quietly
-    # re-labelled SUCCEEDED." `_apply_stub_reconcile` writes only `stubs` and `findings` (see its
-    # docstring), never `phases`, so this is true by construction — asserted explicitly here
-    # because nothing in this test block checked it before.
+    # re-labelled SUCCEEDED." `_apply_stub_reconcile` writes `stubs` and `findings` directly, and
+    # (round GG, D92) a held provider's OWN `phases.pr_url`/`updated_at` via `_upsert_pr_record` —
+    # never the CONSUMER's `phases.status`, which is what this assertion checks — so this is true
+    # by construction, asserted explicitly here because nothing in this test block checked it
+    # before.
     conn = sqlite3.connect(db)
     try:
         phase_status = conn.execute(
@@ -2785,8 +2787,10 @@ def test_resume_stub_reconcile_never_moves_a_repo_out_of_requires_human_interven
     issue) AND carries an open `ACTIVE` stub row. `stub_reconcile` still walks `ix_stubs_open` —
     its own SQL filters on `stubs.state`, never on the consumer's `phases.status` — and abandons
     the row exactly as the plain-DEGRADED case does (T4, `END_OF_RUN`). What it must NOT do is
-    touch the consumer's phase 4 row: `_apply_stub_reconcile` writes only `stubs` and `findings`,
-    so `REQUIRES_HUMAN_INTERVENTION` survives the sweep unconditionally rather than by any check
+    touch the consumer's phase 4 row: `_apply_stub_reconcile` writes `stubs` and `findings`
+    directly, and (round GG, D92) a held provider's OWN `phases.pr_url`/`updated_at`, but never
+    the CONSUMER's `phases.status` row — this fixture has no held provider, so
+    `REQUIRES_HUMAN_INTERVENTION` survives the sweep unconditionally rather than by any check
     that reads it.
     """
     db = workspace / "state" / "fleet.db"
