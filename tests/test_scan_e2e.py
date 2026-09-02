@@ -944,6 +944,143 @@ def test_a_contract_vendored_into_nine_repos_stays_one_row_across_a_second_scan(
     assert collisions_after == collisions_before, "a re-scan changed the vendored collision row"
 
 
+# ---------------------------------------------------------------------------------------
+# INTERNAL_IMPORT, end to end (§12 item 8 / §12.8's fixture-fleet done bar)
+# ---------------------------------------------------------------------------------------
+#
+# `test_graph_build.py::test_an_undeclared_import_is_an_edge_but_a_declared_one_is_not_doubled`
+# proves the same distinction at the unit level, against a hand-built `InferenceInput` that never
+# touches a parser, a manifest adapter, or the `edges` table. Nothing in the suite proved that the
+# real pieces agree: that `_python_symbols`' `ast`-derived `IMPORT` fqn, `PythonAdapter.publishes`'
+# coordinate, and `OwnerIndex.match_import`'s token matching actually meet in the middle when
+# driven through a real `fleet scan`. Kept as its own two-repo fleet for the same reason the three
+# sections above are — folding it into `FIXTURE_REPOS` would perturb every wave-ordering and
+# table-count assertion elsewhere in this file.
+#
+# Two repos only: `acme-shared-py` publishes a coordinate (`pyproject.toml`'s `[project].name`),
+# `acme-consumer-py` imports it (`from acme_shared_py import helper`) via real Python source real
+# `ast.parse` walks. `declare_dependency` toggles whether `acme-consumer-py`'s own manifest also
+# lists it — the Rule 12 discriminator: the same import must produce `INTERNAL_IMPORT` when
+# undeclared and `DECLARED_DEP` (never both) when declared.
+
+
+def _make_internal_import_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, declare_dependency: bool
+) -> Path:
+    consumer_deps = '["acme-shared-py>=1.0"]' if declare_dependency else "[]"
+    sources = {
+        "acme-shared-py": _make_repo(
+            tmp_path / "sources",
+            "acme-shared-py",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-shared-py"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_shared_py/__init__.py": (
+                    "def helper(name: str) -> str:\n"
+                    "    return name.upper()\n"
+                ),
+            },
+        ),
+        "acme-consumer-py": _make_repo(
+            tmp_path / "sources",
+            "acme-consumer-py",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-consumer-py"\n'
+                    'version = "0.1.0"\n'
+                    f"dependencies = {consumer_deps}\n"
+                ),
+                # No corresponding manifest entry when `declare_dependency` is False: exactly
+                # the shape `_import_edges` (`graph/infer.py`) names — "an import whose module
+                # prefix resolves to a coordinate owned by ANOTHER repo, with NO corresponding
+                # manifest entry".
+                "acme_consumer_py/main.py": (
+                    "from acme_shared_py import helper\n"
+                    "\n"
+                    "\n"
+                    "def run(name: str) -> str:\n"
+                    "    return helper(name)\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+@pytest.fixture
+def internal_import_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`acme-consumer-py` imports `acme-shared-py` with NO declared dependency."""
+    return _make_internal_import_fleet(tmp_path, monkeypatch, declare_dependency=False)
+
+
+@pytest.fixture
+def internal_import_fleet_declared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """The same two repos, but `acme-consumer-py` DECLARES the dependency it imports."""
+    return _make_internal_import_fleet(tmp_path, monkeypatch, declare_dependency=True)
+
+
+def test_an_undeclared_cross_repo_import_produces_a_real_internal_import_edge(
+    internal_import_fleet: Path,
+) -> None:
+    """§12 item 8: "every known cross-repo edge is discovered including at least one
+    `INTERNAL_IMPORT` with no corresponding manifest entry" — proven against a real `fleet scan`,
+    not only the hand-built `InferenceInput` in `test_graph_build.py`.
+
+    `acme-consumer-py/acme_consumer_py/main.py` line 1 imports `acme_shared_py`, the coordinate
+    `acme-shared-py` publishes via its `pyproject.toml`, and `acme-consumer-py`'s own manifest
+    declares no dependency on it at all — real `ast`-derived symbols, a real manifest adapter, a
+    real `OwnerIndex` built from the real `coordinates` table, landing in the real `edges` table.
+    """
+    result = scan(internal_import_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        internal_import_fleet,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line FROM edges "
+        "WHERE kind = 'INTERNAL_IMPORT'",
+    )
+    assert edges == [
+        ("acme-consumer-py", "acme-shared-py", "INTERNAL_IMPORT", "acme_consumer_py/main.py", 1)
+    ], edges
+
+
+def test_declaring_the_same_import_turns_it_into_a_declared_dep_not_an_internal_import(
+    internal_import_fleet_declared: Path,
+) -> None:
+    """Rule 12: the fixture-fleet proof above is a genuine discriminator, not a vacuous one.
+
+    Same two repos, same import — but `acme-consumer-py`'s manifest now declares
+    `acme-shared-py>=1.0`. `_import_edges`'s manifest-entry check (`(sym.repo_id, coord.key) in
+    declared`) must suppress the `INTERNAL_IMPORT` edge in favor of the `DECLARED_DEP` edge
+    `_dependency_edges` emits for the same pair — never both, and never neither
+    (`test_an_undeclared_import_is_an_edge_but_a_declared_one_is_not_doubled` in
+    `test_graph_build.py` proves this transition at the unit level; this proves the real manifest
+    adapter and real symbol extraction agree with it).
+    """
+    result = scan(internal_import_fleet_declared)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    kinds = {
+        row[0]
+        for row in query(
+            internal_import_fleet_declared,
+            "SELECT kind FROM edges WHERE src_id = 'acme-consumer-py' "
+            "AND dst_id = 'acme-shared-py'",
+        )
+    }
+    assert kinds == {"DECLARED_DEP"}, kinds
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,

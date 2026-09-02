@@ -164,13 +164,19 @@ never populated. The property already held and needed no code/test change — th
 SPEC sentence alone.
 
 ## 8. Graph correctness incl. `hypothesis` property tests
-**OPEN — mixed — TEST-ONLY, mostly landed.** Confidence reconstruction is exact and covered.
-Cross-repo `INTERNAL_IMPORT` is proven only on a hand-built input, never the fixture fleet (audit
-row 8). The `hypothesis` property-test gap this row originally found is **stale** —
-`tests/test_graph_properties.py` landed at `83e1493` (2026-08-28, per the audit's own late
-correction) and now covers ADR-0013's wave-ordering claim.
-**Done bar:** one test asserting `INTERNAL_IMPORT` edges appear from a real `test_scan_e2e.py`-style
-fixture run, not only the hand-built `InferenceInput`.
+**DONE (round FF task 2, 2026-09-02, `2fa9039`).** Confidence reconstruction is exact and covered.
+The `hypothesis` property-test gap this row originally found was already **stale** before this
+round — `tests/test_graph_properties.py` landed at `83e1493` (2026-08-28, per the audit's own late
+correction) and covers ADR-0013's wave-ordering claim. The one remaining gap — cross-repo
+`INTERNAL_IMPORT` proven only on a hand-built `InferenceInput`, never the fixture fleet (audit row
+8) — is closed by `tests/test_scan_e2e.py::test_an_undeclared_cross_repo_import_produces_a_real_
+internal_import_edge` (a real `fleet scan` over a two-repo fixture fleet, asserted against the real
+`edges` table) plus a Rule 12 discriminator test
+(`test_declaring_the_same_import_turns_it_into_a_declared_dep_not_an_internal_import`) proving the
+same import produces `DECLARED_DEP` instead once declared — confirmed genuine by a reverted
+mutation of `infer.py`'s manifest-entry check that reddened only the discriminator test. The
+hand-built unit test in `test_graph_build.py` is untouched and still covers the unit-level
+property. §12 item 8's literal wording is unchanged; no SPEC.md edit needed.
 
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
