@@ -1356,6 +1356,17 @@ stays **partial, now blocked on D94 and D101-Half-B(ii)** specifically, not the 
 can only fire against `stubs` rows nothing in production creates today (§12.37/D80's own stub-
 creation gap), so this narrowing does not by itself move §38 or §12.37 closer to DONE.
 
+**Update, round VI task 8 (2026-09-02) — D101 Half B(ii) lands; D101 is now FIXED, LANDED in
+full (with a qualifier).** All three named pieces of D101 are genuinely implemented and tested.
+§38 stays **partial, now blocked on D94 only** as far as D101/D102 are concerned — the whole
+D101/D102 chain this row has tracked across three rounds is closed. **But this does not flip §38
+DONE**: D94 alone remains a real blocker (still NEW-MECHANISM, 5+ confirmations), and a NEW gap
+(**D105**) surfaced by this same landing means the clearing D101 Half B(ii) built is not reliable
+under `fleet resume --repoll-prs`'s specific invocation shape (a same-call interaction with
+`stub_reconcile` can immediately undo it) — §38's own criterion text should be re-checked against
+whether it requires reliability under that specific command, since D105 is a genuinely separate,
+disclosed gap from anything D94 blocks.
+
 ## 39. Bounded, priced rework; stub rot reaches a human
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
 (batched=1/eager=3 cost comparison) is well covered. Cases (i)/(ii) only test what's handed in as
@@ -1711,7 +1722,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 | DONE | 27 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 and D101-Half-B(ii) as of round VI, narrower than round V's D101-Half-B/D102 framing since D102 landed and Half B(i) closed; D101 Half A landed round V task 4, D92/D93 landed earlier; see §38's own entry — D80 is fully landed and no longer a blocker), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries (round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):

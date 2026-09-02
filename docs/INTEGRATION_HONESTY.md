@@ -8059,7 +8059,7 @@ ever reading `HELD`. Task review reproduced this old-fails/new-passes independen
 running the exact repro shape against unfixed code in a scratch copy to directly observe the raw
 abandonment before the fix's own test assertion would have short-circuited the observation.
 
-## D101 — PARTLY ADDRESSED. `BLOCKED` consumers never get an `UnmergedDependency` finding, and `--sync` has nothing to clear — self-disclosed in the code's own comments before this ledger entry existed
+## D101 — FIXED, LANDED, WITH A QUALIFIER — see below. `BLOCKED` consumers never get an `UnmergedDependency` finding, and `--sync` has nothing to clear — self-disclosed in the code's own comments before this ledger entry existed
 
 **Found by round IV task 1 (2026-09-02), while re-auditing §12 item 38's sub-clauses against the
 now-fully-corrected D92/D98/D99/D100 state — a disclosed finding, not this TEST-ONLY task's own
@@ -8128,6 +8128,23 @@ correctly flagged this as a discrepancy rather than silently building or skippin
 production code reads or clears an `UnmergedDependency` finding anywhere. **D101 stays PARTLY
 ADDRESSED — Half B(ii) is the sole remaining open piece, now precisely scoped rather than bundled
 with "firing T1."**
+
+**Update, round VI task 8 (2026-09-02, `9077795`, merged `3b861f9`, task-scoped review Approved) —
+Half B(ii) lands. All three named pieces of D101 (Half A, Half B(i), Half B(ii)) are now genuinely
+implemented and each proven by a real fixture-fleet test.** `_apply_stub_decisions` now deletes
+the `UnmergedDependency` finding for a `(consumer, coord_key)` pair whenever its decision is T1,
+targeted by the exact same fingerprint Half A's write site uses, in the same transaction as the
+`stubs` UPDATE. Review independently reproduced both Rule-12 mutations (disabling the DELETE;
+broadening it to prove targeting precision) and confirmed no scope overlap with sibling D103.
+
+**Qualifier, found by the same review — D101 is FIXED, LANDED but not unconditionally reliable
+under every invocation shape.** `fleet resume --repoll-prs` chains `_pr_sync_impl` (fires T1,
+clears the finding) and `stub_reconcile` in one call, and `reconcile()`'s own pre-existing logic
+immediately re-abandons the just-superseded row in that same call (its provider's PR is now
+`MERGED`, no longer "open" per `_awaiting_merge`) — overwriting T1's outcome and the just-cleared
+finding within one command. This is a distinct, newly-found gap, **allocated D105**, not a defect
+in D101's own three landed pieces — each is correct on its own, proven by its own test using
+`fleet resume` and `fleet pr --sync` as two SEPARATE commands, which does not reach D105's path.
 
 ---
 
@@ -8270,3 +8287,37 @@ this project's own established pattern of reusing an existing worker rather than
 one — not confirmed here), and the call site that feeds that report to `settle_revalidation` and
 applies the resulting `StubDecision`. That design choice is not made here — this entry only
 establishes the gap exists and is now tracked, following D102's own precedent.
+
+---
+
+## D105 — OPEN. `fleet resume --repoll-prs` can immediately abandon a stub T1 just superseded, in
+the same call, overwriting T1's outcome and D101 Half B(ii)'s newly-cleared finding
+
+**Found by round VI task 8's task-scoped review (2026-09-02), while independently investigating a
+concern the implementer disclosed but did not diagnose or fix.** Verified free before allocating:
+form-agnostic sweep of `docs/INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md`/
+`docs/SPEC.md` for `\bD[0-9]+\b` found `D104` as the highest allocated number.
+
+**The gap, as measured by the review, re-verify before acting on it — this account is the
+review's, not independently re-derived by the controller.** `fleet resume --repoll-prs` runs
+`_pr_sync_impl` (fires T1 on a newly-merged provider: `stubs` `ACTIVE`→`SUPERSEDED`, the
+`UnmergedDependency` finding cleared per D101 Half B(ii)) and then unconditionally runs
+`_stub_reconcile_impl` in the **same call**. `SUPERSEDED` is in `reconcile()`'s own `OPEN_STATES`,
+and the provider's PR is now `MERGED` (no longer "open"), so `_awaiting_merge` returns `False` —
+`reconcile()` immediately re-sweeps the just-superseded row to `ABANDONED` via T3, writing a fresh
+`UnresolvedStub` finding and overwriting T1's outcome (and this round's D101 Half B(ii) fix)
+within one command invocation. No crash, no race, no unusual timing — ordinary `--repoll-prs`
+success reaches this.
+
+**Consequence.** D101 Half B(ii) (the finding-clearing logic) is correctly implemented and proven
+by a real fixture-fleet test in isolation (`fleet resume` then `fleet pr --sync` as two separate
+commands) — this is a DIFFERENT code path (`--repoll-prs` chaining both in one call) that
+undoes it. D101 as a whole should be recorded as landed WITH this qualifier, not left implying
+the clearing is reliable under every invocation shape.
+
+**Not yet built:** either (a) `_stub_reconcile_impl`'s sweep needs to skip a row T1 just
+superseded in the SAME call (an ordering/exclusion fix), or (b) `_awaiting_merge`'s definition of
+"open" needs to account for a PR merged so recently that T1 already consumed the event this same
+invocation (a narrower fix, more surgical but more fragile). Neither is designed here — this entry
+only establishes the gap exists and is now tracked, following D102's own precedent of disclosing a
+real gap without prescribing its exact implementation.
