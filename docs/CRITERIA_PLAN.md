@@ -98,15 +98,42 @@ closing §2 for real needs either the ADR or driving the `ruff format` leg to ac
 and disruptive change — track it as its own item if wanted, not folded into closing §12.2.
 
 ## 3. Coverage gate + `tests/unit` isolation
-**OPEN — SPEC was aspirational — NEW-MECHANISM (small).** No `pytest-cov`/`coverage` dependency,
-no `[tool.coverage]` config anywhere; `tests/unit/` and `tests/contract/` hold only `__init__.py`
-so they pass vacuously (audit row 3, and the §12.3 gate-measurement section — 93% measured
-out-of-band, never wired in-tree).
-**Done bar:** declare `pytest-cov`/`coverage` in `pyproject.toml`, add `[tool.coverage] fail_under
-= 85`, wire `--cov` into the real `pytest` invocation this criterion names, and either populate
-`tests/unit/` with real fast/no-network/no-Docker/no-credential tests or retarget the criterion's
-`<30s>` clause at whatever subset genuinely is that (adjudication, not silent narrowing — flag via
-Rule 14 if the latter).
+**DONE (round GG task 3).** *(This entry itself was stale before this round — see the addendum at
+the top of this file — the "no `pytest-cov`/`coverage` dependency" sentence below was already
+false by `bcd08eb`; corrected in place, not rewritten, per ground rule 1.)*
+`pytest-cov`/`coverage` are declared in `pyproject.toml` (line 48, `[tool.coverage.run]`/
+`[report]`), and `[tool.coverage.report] fail_under = 85` is now armed. **Investigated, not
+assumed:** no ADR ever adjudicated the `pyproject.toml` comment's forkserver/multiprocessing
+caveat — it was an inherited engineering note (a commit body + a `docs/PROGRESS.md` checkpoint),
+not a decision record — so this round measured it directly rather than treating it as settled.
+Three independent whole-suite `.venv/bin/python -m pytest --cov=fleet --cov-report=term-missing`
+runs (631s, 604s, 733s) completed cleanly — no hang, no crash — and agreed on total coverage to
+within rounding (17946 stmts, 1211/1211/1195 miss, branch 4510/679~673, **91%** every time,
+comfortably above the 85% floor). The failing tests each run showed (24, 24, then 7 after fixing
+part of the gap below) were investigated and are unrelated to `--cov`/forkserver entirely: they
+reproduced identically with `--cov` removed, and root-caused entirely to worktree provisioning
+gaps — a fresh `git worktree add` does not copy untracked, gitignored local toolchain state:
+`tools/bin/ast-grep`, `tools/bin/bazel`, `tools/go/` (real vendored binaries/SDKs), and `.venv`
+itself (so `tests/conftest.py`'s own `VENV_BIN` PATH-prepend silently no-ops, hiding
+`.venv/bin/uv`). Symlinking/copying each from the primary checkout took the last batch (7 tests,
+all `'uv' is not installed`) to `7 passed`. None of this is a coverage/forkserver interaction —
+`--cov` is still deliberately not added to `addopts` (general principle: it would slow every
+targeted single-test invocation with no benefit), not because a forkserver failure was found — see
+`pyproject.toml`'s own comment and `docs/DECISIONS.md` ADR-0111 for the full account (renumbered
+from this task's own worktree draft of ADR-0110, a Central Number Allocation collision with §35's
+closure below caught at merge). **Note for
+the next fresh worktree on this criterion or any other:** copy/symlink `tools/bin/{ast-grep,bazel,
+gh}`, `tools/go/`, and `.venv` before trusting a "failure" as a real defect — this round burned
+real time on that exact confusion.
+`tests/unit/` now holds real tests (`tests/unit/test_retry.py`, moved from `tests/test_retry.py`
+— pure `RetryPolicy` logic, no I/O; `tests/unit/conftest.py` + `tests/unit/test_no_provider_credentials.py`,
+new — an autouse fixture that clears every `api_key_env` named by every profile in
+`config/models.yaml`, which is SPEC's own literal §12.3 mechanism, mutation-verified to actually
+clear a planted credential rather than passing vacuously). `pytest tests/unit -q`: 17 passed in
+under 1s wall (measured 0.16-0.71s across several runs), no network, no Docker, no credential.
+`tests/contract/` is unchanged (still `__init__.py` only) — SPEC's §12.3 text names `tests/unit`
+specifically, not `tests/contract`; the latter is a different criterion's (§12.4's) concern per
+SPEC's own item numbering, so it is out of this entry's scope, not a residual of it.
 **Out of scope:** does not require reorganizing the rest of `tests/` into the `unit/` layout.
 
 ## 4. Model round-trip + per-backend golden response

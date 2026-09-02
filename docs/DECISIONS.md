@@ -12740,3 +12740,87 @@ defect (nothing claims this wiring exists) but a disclosed scope boundary of wha
 here. If a future round finds this reading wrong — if SPEC's authors intended reading (a) — the
 fix is small: revert §35 to OPEN and dispatch exactly the `PhaseRunner._drive()` extension
 research's §1e already scoped.
+
+---
+
+## ADR-0111 — §12.3's coverage gate is armed (`fail_under = 85`) on a separate, explicit
+invocation; the forkserver caveat was investigated, not assumed, and did not hold
+
+*(Renumbered from ADR-0110, controller correction: the implementing task worked in an isolated
+worktree branched before ADR-0110 above was allocated on `main`, and independently picked the same
+number — Central Number Allocation collision per CLAUDE.md §3, caught and fixed at merge, before
+either ADR was cited anywhere else.)*
+
+**Context.** `pyproject.toml`'s `[tool.coverage]` section (declared `bcd08eb`, round L) carried a
+comment stating `--cov` was deliberately not added to `addopts` because it "interacts with the
+suite's multiprocessing/forkserver use." Searching `docs/DECISIONS.md` and `docs/PROGRESS.md`
+found no ADR ever adjudicated this — it exists only as a commit-body note and a `docs/PROGRESS.md`
+checkpoint line quoting that commit. Per this file's own Rule 1 discipline, an inherited
+engineering note is not an adjudicated constraint; it still deserves respect, but it deserves
+measurement before being either armed-around or armed-through.
+
+**Investigation.** `src/fleet/orchestrator/budgets.py`'s CPU pool is the only `ProcessPoolExecutor`
+in the tree and is unconditionally constructed with `mp_context=multiprocessing.get_context(
+"forkserver")` (`:948`). Per `docs/INTEGRATION_HONESTY.md`'s D86 analysis, exactly one callable is
+ever submitted to it: `workers/symbolindex.py`'s `scan_file`, via the tree's only
+`run_in_executor` call. That is the entire surface a forkserver/coverage interaction could touch.
+Three independent whole-suite runs of `.venv/bin/python -m pytest --cov=fleet
+--cov-report=term-missing` were executed (631.09s, 603.75s, and 733.07s — the third after fixing
+the tool-provisioning gap described below, which is why it ran longer: real bazel/gazelle/ast-grep
+work now executes instead of failing fast) — all three completed with an exit code reflecting the
+(unrelated, see below) test failures, **none hung, crashed, or produced a materially divergent
+coverage number**: 91% every time (17946 stmts; 1211/1211/1195 miss, branch 4510/679, 4510/679,
+4510/673 — the small third-run improvement is real code newly exercised by the now-passing
+bazel/ast-grep tests, not measurement noise). If forkserver children were silently dropping
+coverage collection, the `scan_file` codepath's lines would show as consistently missed and/or
+independently-scheduled subprocess timing would make the runs disagree — neither happened.
+
+Both runs did show the same 24 failing tests (`tests/test_build_e2e.py`,
+`tests/test_rewrite.py`). These were investigated by re-running the exact 24 node IDs **without**
+`--cov`: all 24 failed identically, proving the failures are not caused by `--cov`/forkserver at
+all. Root cause: the task's git worktree (created fresh via `git worktree add`) lacked
+`tools/bin/ast-grep`, `tools/bin/bazel`, and `tools/go/` — real, large, locally-provisioned
+binaries/SDKs that `.gitignore` deliberately excludes from version control (only the wrapper
+*scripts* `tools/bin/{cargo,gazelle,go,rustc}` are tracked; see `.gitignore:54-64` and its own
+comment). Copying these from the primary checkout (read-only vendored toolchain data, not source)
+took the 24 failures down to 3. A third full-suite `--cov` run (733.07s, after tool provisioning)
+found 7 such failures instead of 3 — the extra 4 are the same shape, surfaced only once the
+ast-grep/bazel gap stopped masking them earlier in the same test bodies — all
+`fleet.cli.DependencyResolutionError: 'uv' is not installed on this host`. **This claim was
+initially mismeasured as "uv absent from PATH on this host entirely"; re-measured, that is false.**
+`.venv/bin/uv` exists (it is `pip install`ed alongside `pytest-cov`), and `tests/conftest.py`
+already prepends it to `PATH` via `VENV_BIN = REPO_ROOT / ".venv" / "bin"` — but `REPO_ROOT`
+resolves from `conftest.py`'s own location, i.e. **the worktree root**, and `git worktree add`
+does not copy the untracked `.venv/` directory into a new worktree, so `VENV_BIN` pointed at a
+directory that did not exist in this worktree and `_prepend_path`'s `entry.is_dir()` guard
+silently skipped it. Symlinking `.venv` into the worktree from the primary checkout (`ln -s
+"<primary>/.venv" .venv` — the same fix pattern as the ast-grep/bazel/tools-go binaries, all
+untracked-but-required local provisioning) made all 7 pass: `7 passed in 276.42s`, with a clean
+`bazel disk` line (`peak 3.73 GiB · residual output bases 0 bytes`) and `0 tests skipped this
+session`. None of the (now fully explained and fully resolved) 24 original failures had anything
+to do with coverage collection or the forkserver pool — every one was a worktree provisioning gap:
+missing untracked toolchain binaries/SDKs, or a missing `.venv` symlink, both artifacts of a fresh
+`git worktree add` rather than of anything this round changed. A future round's worktree setup
+step should copy/symlink `tools/bin/{ast-grep,bazel,gh}`, `tools/go/`, and `.venv` up front — this
+round's own worktree now has them, but the task brief's setup instructions did not ask for them,
+so the next fresh worktree will hit the same three gaps unless that step is added.
+
+**Decision.** Arm `[tool.coverage.report] fail_under = 85`. Leave `--cov` out of `addopts` — not
+because the forkserver risk was confirmed (it wasn't), but on the simpler, still-valid ground the
+original comment also gave: adding it to `addopts` would instrument coverage on every targeted
+single-test `pytest` invocation in this repo for no benefit, slowing the fast local dev loop this
+project's own `<30s>` `tests/unit` clause and Rule 6 context-budget both care about. The armed gate
+is invoked explicitly: `.venv/bin/python -m pytest --cov=fleet --cov-report=term-missing`. This
+matches SPEC.md §12 item 3's literal text — "`pytest` exits 0 with ≥85% line coverage on
+`src/fleet/`" — which names a coverage property of a `pytest` run, not that `--cov` must live in
+the default `addopts` string; the brief's own reading (a separate, explicit invocation satisfies
+this) is correct on SPEC's own wording, not a workaround for the forkserver concern the measurement
+above already found not to apply.
+
+**Consequence.** `docs/CRITERIA_PLAN.md`'s §3 entry is corrected from OPEN to DONE (see its own
+entry for the `tests/unit` population half of this same round's work — a moved, pure, offline
+`tests/unit/test_retry.py` plus a new `tests/unit/conftest.py` implementing SPEC's own "asserted by
+the test runner clearing every `api_key_env`" mechanism, mutation-verified). This was measured
+against a base of 24/48 in this task's own isolated worktree; merged alongside this same round's
+§12.35 closure (ADR-0110 above, which independently moved the count 24 → 25), the combined count
+is re-derived, not summed, in the Rollup table below.
