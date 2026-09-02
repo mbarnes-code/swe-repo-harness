@@ -5,6 +5,25 @@ per LLM role. `docs/CRITERIA_PLAN.md` §4's revised Done bar requires this per *
 add `BUILD_DIAGNOSIS`, `DEP_DISAMBIGUATE`, `CYCLE_BREAK_PROPOSAL`, and `CONFLICT_RESOLUTION`
 (7 of 12; 5 remain, tracked in `docs/CRITERIA_PLAN.md` §4, not flipped DONE here).
 
+Round V task 1 adds `TRANSFORM_REPAIR` and `MANIFEST_EXTRACT` (9 of 12; 3 remain —
+`API_INCOMPAT_REWRITE`, `ESCALATION`, `BUILD_AUTHORING` — tracked in `docs/CRITERIA_PLAN.md` §4,
+not flipped DONE here; a sibling round V task runs on some of the remaining roles in parallel).
+Both roles landed here carry a genuinely more complex shape than any role landed so far: a
+nested-object tuple field (`LlmPatchProposal.files: tuple[ProposedFileEdit, ...]` and
+`ManifestExtraction.dependencies: tuple[ExtractedDependency, ...]`), not a flat scalar or a tuple
+of bare strings. Every fixture below carries a MULTI-entry tuple (never a single-entry edge case),
+and each `diff` value is a realistic unified diff, not a placeholder string. Confirmed directly
+against each backend's real parse code (`src/fleet/llm/backends/{anthropic,bedrock,vertex,
+openai_compatible}.py`): none of the four `parse_reply`/`_reply_from` functions introspects the
+tool-call `input` (or PROMPTED JSON text)'s internal shape beyond locating the `emit_response`
+tool call / decoding the JSON — the nested-object-tuple validation happens entirely inside
+`client_module._validate`'s Pydantic call, identically to every flat-field role already landed.
+`ManifestExtraction`'s nullable `unparsed_reason` decline branch (dependencies extraction refused
+rather than guessed) and `ExtractedDependency.version`'s nullable branch (a BOM-managed coordinate
+with no version stated at the call site) are each exercised once, on the `openai_compatible` and
+`vertex` fixtures respectively — following the established convention (round IV's `DEP_DISAMBIGUATE`
+openai_compatible fixture) of using the PROMPTED-rung fixture to exercise a role's "decline" branch.
+
 ADR-0013's contract layer declares the intent this closes: "every LLM prompt's declared response
 schema validates against a stored golden sample." `tests/test_llm_roles.py`'s
 `test_every_response_schema_round_trips_and_refuses_an_extra_field` already covers a DIFFERENT
@@ -100,9 +119,13 @@ from fleet.llm.schemas import (
     RESPONSE_SCHEMAS,
     CycleBreakProposal,
     DependencyDisambiguation,
+    ExtractedDependency,
     FleetModel,
     LlmBuildDiagnosis,
+    LlmPatchProposal,
+    ManifestExtraction,
     PrBody,
+    ProposedFileEdit,
     PrTitle,
     RepoClassification,
     VersionConflictResolution,
@@ -128,6 +151,8 @@ assert RESPONSE_SCHEMAS[Role.BUILD_DIAGNOSIS] is LlmBuildDiagnosis
 assert RESPONSE_SCHEMAS[Role.DEP_DISAMBIGUATE] is DependencyDisambiguation
 assert RESPONSE_SCHEMAS[Role.CYCLE_BREAK_PROPOSAL] is CycleBreakProposal
 assert RESPONSE_SCHEMAS[Role.CONFLICT_RESOLUTION] is VersionConflictResolution
+assert RESPONSE_SCHEMAS[Role.TRANSFORM_REPAIR] is LlmPatchProposal
+assert RESPONSE_SCHEMAS[Role.MANIFEST_EXTRACT] is ManifestExtraction
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -550,6 +575,203 @@ GOLDEN_CASES: tuple[GoldenCase, ...] = (
             "violated_specs": ("==0.8.*",),
         },
     ),
+    # --- TRANSFORM_REPAIR (round V task 1, new) — nested-object tuple field (`files`) ---
+    GoldenCase(
+        role=Role.TRANSFORM_REPAIR,
+        schema=LlmPatchProposal,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="transform_repair_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "files": (
+                ProposedFileEdit(
+                    path="pom.xml",
+                    diff="--- a/pom.xml\n+++ b/pom.xml\n@@ -10,6 +10,10 @@\n"
+                    "   <dependencies>\n+    <dependency>\n+      "
+                    "<groupId>org.apache.commons</groupId>\n+      "
+                    "<artifactId>commons-lang3</artifactId>\n+      "
+                    "<version>3.12.0</version>\n+    </dependency>\n   </dependencies>\n",
+                ),
+                ProposedFileEdit(
+                    path="src/main/java/com/acme/Util.java",
+                    diff="--- a/src/main/java/com/acme/Util.java\n"
+                    "+++ b/src/main/java/com/acme/Util.java\n@@ -1,6 +1,6 @@\n package com.acme;\n"
+                    " \n-import com.acme.util.StringHelper;\n"
+                    "+import org.apache.commons.lang3.StringUtils;\n \n public class Util {\n",
+                ),
+            ),
+            "approach_summary": "Declare the missing commons-lang3 Maven dependency and repoint "
+            "Util.java's import at it",
+        },
+    ),
+    GoldenCase(
+        role=Role.TRANSFORM_REPAIR,
+        schema=LlmPatchProposal,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="transform_repair_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "files": (
+                ProposedFileEdit(
+                    path="index.js",
+                    diff="--- a/index.js\n+++ b/index.js\n@@ -1,7 +1,7 @@\n"
+                    " function leftPad(str, len, ch) {\n-  ch = ch || '0';\n+  ch = ch || ' ';\n"
+                    "   str = String(str);\n   if (str.length >= len) return str;\n"
+                    "   return Array(len - str.length + 1).join(ch) + str;\n }\n",
+                ),
+                ProposedFileEdit(
+                    path="test/index.test.js",
+                    diff="--- a/test/index.test.js\n+++ b/test/index.test.js\n@@ -3,6 +3,6 @@\n"
+                    " describe('leftPad', () => {\n"
+                    "   it('pads with the default character', () => {\n"
+                    "-    assert.equal(leftPad('1', 3), '001');\n"
+                    "+    assert.equal(leftPad('1', 3), '  1');\n   });\n });\n",
+                ),
+            ),
+            "approach_summary": "Change the default pad character from '0' to ' ' and update the "
+            "matching test expectation",
+        },
+    ),
+    GoldenCase(
+        role=Role.TRANSFORM_REPAIR,
+        schema=LlmPatchProposal,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="transform_repair_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "files": (
+                ProposedFileEdit(
+                    path="widget-core/build.gradle",
+                    diff="--- a/widget-core/build.gradle\n+++ b/widget-core/build.gradle\n"
+                    "@@ -12,7 +12,7 @@\n dependencies {\n"
+                    "-    implementation 'com.acme.widget:widget-core-legacy:2.9.0'\n"
+                    "+    implementation 'com.acme.widget:widget-core:3.4.1'\n }\n",
+                ),
+                ProposedFileEdit(
+                    path="gradle/libs.versions.toml",
+                    diff="--- a/gradle/libs.versions.toml\n+++ b/gradle/libs.versions.toml\n"
+                    '@@ -4,7 +4,7 @@\n [versions]\n-widget-core = "2.9.0"\n'
+                    '+widget-core = "3.4.1"\n',
+                ),
+            ),
+            "approach_summary": "Repoint widget-core/build.gradle and the version catalog at the "
+            "current widget-core coordinate and version",
+        },
+    ),
+    GoldenCase(
+        role=Role.TRANSFORM_REPAIR,
+        schema=LlmPatchProposal,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="transform_repair_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "files": (
+                ProposedFileEdit(
+                    path="setup.py",
+                    diff="--- a/setup.py\n+++ b/setup.py\n@@ -1,6 +1,6 @@\n"
+                    " from setuptools import setup\n \n"
+                    '-setup(name="flask-utils", version=VERSION_UNRESOLVED)\n'
+                    '+setup(name="flask-utils", version="0.9.2")\n',
+                ),
+                ProposedFileEdit(
+                    path="flask_utils/__init__.py",
+                    diff="--- a/flask_utils/__init__.py\n+++ b/flask_utils/__init__.py\n"
+                    "@@ -1,4 +1,4 @@\n-from .compat import *  # noqa: F401,F403\n"
+                    "+from .utils import *  # noqa: F401,F403\n \n"
+                    ' __version__ = "0.9.2"\n',
+                ),
+            ),
+            "approach_summary": "Pin setup.py's version literal and repoint the package's "
+            "star-import at the renamed utils module",
+        },
+    ),
+    # --- MANIFEST_EXTRACT (round V task 1, new) — nested-object tuple field (`dependencies`) ---
+    GoldenCase(
+        role=Role.MANIFEST_EXTRACT,
+        schema=ManifestExtraction,
+        backend="anthropic",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="manifest_extract_anthropic_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "ecosystem": Ecosystem.MAVEN,
+            "dependencies": (
+                ExtractedDependency(
+                    coordinate="maven:org.apache.commons:commons-lang3",
+                    version="3.12.0",
+                    scope="compile",
+                ),
+                ExtractedDependency(coordinate="maven:junit:junit", version="4.13.2", scope="test"),
+            ),
+            "unparsed_reason": None,
+        },
+    ),
+    GoldenCase(
+        role=Role.MANIFEST_EXTRACT,
+        schema=ManifestExtraction,
+        backend="bedrock",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="manifest_extract_bedrock_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "ecosystem": Ecosystem.NPM,
+            "dependencies": (
+                ExtractedDependency(
+                    coordinate="npm::left-pad", version="1.3.0", scope="dependencies"
+                ),
+                ExtractedDependency(
+                    coordinate="npm::mocha", version="^9.0.0", scope="devDependencies"
+                ),
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.MANIFEST_EXTRACT,
+        schema=ManifestExtraction,
+        backend="vertex",
+        rung=StructuredOutputMode.TOOL_CALL,
+        fixture="manifest_extract_vertex_tool_call.json",
+        finish_reason="tool_call",
+        expected={
+            "ecosystem": Ecosystem.GRADLE,
+            "dependencies": (
+                ExtractedDependency(
+                    coordinate="gradle:com.acme.widget:widget-core",
+                    version="3.4.1",
+                    scope="implementation",
+                ),
+                # Deliberately exercises `ExtractedDependency.version`'s nullable branch — a
+                # BOM-managed coordinate whose version is inherited, not stated at this call site.
+                ExtractedDependency(
+                    coordinate="gradle:org.jetbrains.kotlin:kotlin-stdlib",
+                    version=None,
+                    scope="implementation",
+                ),
+            ),
+        },
+    ),
+    GoldenCase(
+        role=Role.MANIFEST_EXTRACT,
+        schema=ManifestExtraction,
+        backend="openai_compatible",
+        rung=StructuredOutputMode.PROMPTED,
+        fixture="manifest_extract_openai_compatible_prompted.json",
+        finish_reason="stop",
+        expected={
+            "ecosystem": Ecosystem.PYPI,
+            # Deliberately exercises the nullable `unparsed_reason` decline branch — an empty
+            # `dependencies` tuple plus a stated reason is a legitimate answer per the schema's
+            # own docstring (src/fleet/llm/schemas.py:139-144), not a degenerate one.
+            "dependencies": (),
+            "unparsed_reason": "setup.py computes the version and install_requires list via a "
+            "subprocess call to a build-time script; static extraction cannot evaluate it and a "
+            "guessed list would be unrefutable",
+        },
+    ),
 )
 
 
@@ -677,3 +899,31 @@ def test_the_unmutated_conflict_resolution_fixture_still_validates_after_the_mut
     reply = bedrock_parse_reply(raw, bedrock_target())
 
     client_module._validate(reply, VersionConflictResolution, StructuredOutputMode.TOOL_CALL)
+
+
+def test_a_transform_repair_reply_missing_a_nested_diff_field_fails_schema_validation() -> None:
+    """Mutation of the bedrock `TRANSFORM_REPAIR` fixture: delete `files[0].diff`, the one
+    `ProposedFileEdit` field with no default (`Field(min_length=1)`; `ProposedFileEdit.path` also
+    lacks a default and would discriminate too, but `diff` is targeted deliberately — it is the
+    field this task's nested-object-tuple investigation flagged as the genuinely more complex
+    shape (a required field one level INSIDE a tuple entry, not a top-level required field like
+    every mutation above). If `_validate`'s Pydantic call only checked the outer `LlmPatchProposal`
+    shape (e.g. "is `files` a non-empty tuple") without descending into each entry, this would pass
+    instead of raising."""
+    raw = _load("transform_repair_bedrock_tool_call.json")
+    del raw["output"]["message"]["content"][0]["toolUse"]["input"]["files"][0]["diff"]
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    with pytest.raises(ValidationError, match="diff"):
+        client_module._validate(reply, LlmPatchProposal, StructuredOutputMode.TOOL_CALL)
+
+
+def test_the_unmutated_transform_repair_fixture_still_validates_after_the_mutation() -> None:
+    """Control half of the `TRANSFORM_REPAIR` mutation pair: the identical fixture, unmutated
+    (both `files` entries intact), must still validate — proving the failure above is caused by
+    the deleted nested `diff` field, not by an unrelated defect in the fixture, the parse path, or
+    `_validate` itself."""
+    raw = _load("transform_repair_bedrock_tool_call.json")
+    reply = bedrock_parse_reply(raw, bedrock_target())
+
+    client_module._validate(reply, LlmPatchProposal, StructuredOutputMode.TOOL_CALL)

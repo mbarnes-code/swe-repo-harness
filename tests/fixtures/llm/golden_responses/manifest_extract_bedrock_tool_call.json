@@ -1,0 +1,41 @@
+{
+  "_provenance": "Hand-constructed to match the AWS Bedrock Runtime `Converse` API response shape documented at https://docs.aws.amazon.com/bedrock/latest/APIReference/API_runtime_Converse.html (`output.message.content[].toolUse`, `stopReason`, `usage.{inputTokens,outputTokens,totalTokens}`), fed as-is (minus this key) to `bedrock.parse_reply()` in src/fleet/llm/backends/bedrock.py — the same Mapping shape that module's own `converse_body()` test helper builds. Rung: TOOL_CALL, matching `build_request()`'s `toolConfig` branch. Envelope shape is identical to the REPO_CLASSIFY fixture in this same directory (`bedrock_tool_call.json`) by design: `_TOOL_NAME = \"emit_response\"` (src/fleet/llm/backends/bedrock.py:71) is a role-agnostic constant and `parse_reply` never introspects `toolUse.input`'s internal shape, so only the `input` payload below (a `ManifestExtraction`-schema object) differs. `dependencies` carries TWO entries (a runtime and a dev dependency) to exercise the same multi-entry nested-object-tuple shape as the anthropic fixture.",
+  "output": {
+    "message": {
+      "role": "assistant",
+      "content": [
+        {
+          "toolUse": {
+            "toolUseId": "tooluse_ManifestExt01ZjIwYjk4",
+            "name": "emit_response",
+            "input": {
+              "ecosystem": "npm",
+              "dependencies": [
+                {
+                  "coordinate": "npm::left-pad",
+                  "version": "1.3.0",
+                  "scope": "dependencies"
+                },
+                {
+                  "coordinate": "npm::mocha",
+                  "version": "^9.0.0",
+                  "scope": "devDependencies"
+                }
+              ],
+              "unparsed_reason": null
+            }
+          }
+        }
+      ]
+    }
+  },
+  "stopReason": "tool_use",
+  "usage": {
+    "inputTokens": 250,
+    "outputTokens": 40,
+    "totalTokens": 290
+  },
+  "metrics": {
+    "latencyMs": 480
+  }
+}
