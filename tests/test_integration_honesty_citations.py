@@ -544,12 +544,15 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     ),  # L6378 defined at [(69, 110), (69, 110)], cited 63-63
     # D96's own "as measured" paragraph names `_require_disk_headroom`'s definition line as of
     # round AA task 2 (2026-09-01), the round that found the gap -- the same kind of past-tree
-    # claim `record_attempt` above is pinned for. Unrelated growth in `cli.py` since then (most
-    # recently round GG task 1's D92 fix) moved the real definition to [(13813, 13828)]; the
-    # citation is not repointable to "the current definition" without destroying what the
-    # paragraph measured. Found by the citation gate itself, round GG (2026-09-02) -- pre-existing
-    # drift surfaced as a side effect of an unrelated merge shifting `cli.py`'s line numbers, not
-    # introduced by this pin's own commit.
+    # claim `record_attempt` above is pinned for. The citation was still exact at round GG's own
+    # base (`f48d303`) -- round GG's final review measured this directly and found round GG task
+    # 1's D92 edits are the SOLE cause of the drift (13782 + 33 = 13815, the current def line;
+    # `git show f48d303:src/fleet/cli.py | sed -n 13782p` matches the citation exactly). An
+    # earlier version of this comment said "pre-existing drift, most recently round GG task 1" and
+    # "not introduced by this pin's own commit" -- both wrong, corrected here per round GG's final
+    # review (CLAUDE.md: "the reason is the unmeasured sentence"). The citation is still not
+    # repointable to "the current definition" without destroying what the D96 paragraph measured
+    # at round AA -- that disposition (pin, not repoint) is unaffected by the provenance error.
     (
         "_require_disk_headroom",
         "cli.py:13782",

@@ -12704,9 +12704,20 @@ today, no diff appears: `cli.py::_rewrite_input` never populates `prior_rejected
 in `src/` does, anywhere. The field is threaded only by test fixtures, exactly as
 `RewriteInput.rejected_approaches` (the older, sibling field `EVIDENCE_PLUS_REJECTED_APPROACHES`
 reads) already is — round GG's own research confirmed `RejectedApproach` has ZERO production
-constructors anywhere in `src/fleet/`, and `docs/CRITERIA_PLAN.md` §36 (anchoring detection,
-which reads that same field) has been left OPEN, blocked on D50/`rewrite/approach.py` not existing,
-precisely because of this same unwired-in-production gap on the sibling mechanism.
+constructors anywhere in `src/fleet/`, and `docs/CRITERIA_PLAN.md` §36 (anchoring detection, which
+reads that same field) has been left OPEN, blocked on D50/`rewrite/approach.py` not existing.
+**Correction (round GG final review, 2026-09-02): "precisely because of this same gap" overstates
+it — §36's own entry names its blocker as the missing `rewrite/approach.py` module itself, not
+merely `RejectedApproach`'s payload going unpopulated.** A missing module is strictly larger than
+an unpopulated field; the two are related (both are pieces of the same never-built anchoring
+mechanism) but §36 is not open FOR the same narrow reason cited above. The precedent this
+paragraph actually needs is narrower, closer to home, and still holds: this same criterion's own
+entry (§35, round CC's correction) already accepted `rejected_approaches` sitting unwired in
+production as compatible with closing the `EVIDENCE_PLUS_REJECTED_APPROACHES` rung's diff-absence
+sub-clause — naming the resulting per-line sweep "a tripwire against a future schema change, not a
+guard against a currently-reachable leak" and closing it anyway. An equally unwired
+`prior_rejected_diffs` does not need production wiring to close the `EVIDENCE_PLUS_PRIORS`
+sub-clause by the same standard.
 
 **The decision (CLAUDE.md Rule 1).** Two readings of SPEC's sentence: (a) it requires a real,
 production-driven `fleet transform` invocation to render the diff — in which case this criterion

@@ -7374,7 +7374,7 @@ two `_TransformSink`/`_persist_arbitration` DONE/PENDING resolutions) and none n
 `pre_commit_sha`. A runtime probe against a real database corroborates: after a real
 `_TransformClaimHook` claim and a real `_TransformSink` dispatch, `tasks.pre_commit_sha` reads
 `NULL`. The one place a real per-unit anchor value is computed at all —
-`workers/rewrite.py:182`'s `record_task_anchor(git, branch)` call inside `land_patches` — is
+`workers/rewrite.py:190`'s `record_task_anchor(git, branch)` call inside `land_patches` — is
 used only in-process, passed directly to a same-call `discard_task` on a caught `PatchApplyError`;
 it is never written to SQL.
 
@@ -7396,13 +7396,13 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12280-12359`), not the pre-Task-B code the paragraph above was describing.** The
-`if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12314` (REWRITE's
-`elif not landed_units:` nothing-landed branch) and `:12356` (the non-REWRITE discard branch) —
+(`cli.py:12313-12392`), not the pre-Task-B code the paragraph above was describing.** The
+`if task_anchor is None:` guard is consulted at exactly two sites, `cli.py:12347` (REWRITE's
+`elif not landed_units:` nothing-landed branch) and `:12389` (the non-REWRITE discard branch) —
 both, and only, `discard_task` call sites, so the claim that a real crashed `RUNNING` row "can
 never reach the `DONE`/discard/partially-landed verdicts" is false for two of those three verdicts.
-Task B's `if units and not missing_units:` DONE branch (`:12302-12310`) and its `else:`
-partially-landed branch (`:12327-12343`) never read `task_anchor` at all — neither is gated by
+Task B's `if units and not missing_units:` DONE branch (`:12335-12343`) and its `else:`
+partially-landed branch (`:12360-12376`) never read `task_anchor` at all — neither is gated by
 this guard, and both are production-reachable: `phases.pre_commit_sha` (a *different* column,
 read into `anchor`/`phase_anchor` above, not `task_anchor`) DOES have a real production writer
 (`cli.py:4537`, `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
@@ -7426,6 +7426,19 @@ the same commit that made them reachable.
 > two `discard_task` guard sites), `:12205-12213` -> `:12302-12310` (the DONE branch), `:12230-12246`
 > -> `:12327-12343` (the partially-landed branch), `:4474` -> `:4537` (`_TransformSink`'s `UPDATE
 > phases` statement).
+
+> ***Second citation correction (2026-09-02, round GG final review) — same class, one round
+> later.*** Round GG task 1's own `cli.py` edits (D92, `_apply_stub_reconcile`) inserted `+33`
+> lines above this function — again confirmed pure insertion, `_reconcile_tasks_with_git`'s body
+> byte-for-byte identical between the previous correction's tree and current `HEAD`. The five
+> citations the correction above just repointed had already drifted again by the time this round's
+> own final review checked: `:12280-12359` -> `:12313-12392`, `:12314` -> `:12347` and `:12356` ->
+> `:12389` (the two `discard_task` guard sites), `:12302-12310` -> `:12335-12343` (the DONE
+> branch), `:12327-12343` -> `:12360-12376` (the partially-landed branch). The `_TransformSink`
+> citation below is unaffected (`cli.py:4537`, unchanged — the D92 edits land well after it).
+> Flagged by the same recurring pattern this file's own citation-gate work has now hit twice on
+> this exact paragraph: any edit to `cli.py` above this function rots these five citations, and
+> nothing currently watches for it between rounds.
 
 **Not yet built:** a production write path for `tasks.pre_commit_sha` — most naturally, having
 `_TransformClaimHook` (or an equivalent `pre_dispatch` hook for whichever kinds need it) persist
@@ -7695,7 +7708,7 @@ was misattributed above — the material claim reproduces exactly, the supportin
 not.** Re-running this entry's own stated predicate (`min_free_bytes|require_free|disk`) over the
 three Phase 2 workers returns exactly one hit, `buildgen.py:625` — a docstring reading "Put every
 file the generated text NAMES on disk," unrelated to a disk-floor check. `scoped_tempdir` is
-imported at `relocate.py:36` and `rewrite.py:53` (two sites, not one), and is NOT imported by
+imported at `relocate.py:36` and `rewrite.py:61` (two sites, not one), and is NOT imported by
 `buildgen.py` at all — the reverse of what this entry originally said. Neither correction changes
 the finding: no Phase 2 worker carries any disk-floor check, confirmed independently by the
 round's own final review.
