@@ -3488,6 +3488,10 @@ def transform(
     """
     with _mapped_errors():
         opts, settings, run_id = _phase_preflight(ctx)
+        # §11.3/§12.22: evict the Bazel disk cache to `budgets.max_disk_gb`, then refuse to
+        # start at all if the volume is still under `preflight.min_free_bytes` (exit 9). A phase
+        # that consumes gigabytes does not get to discover ENOSPC inside a write transaction.
+        _require_disk_headroom(settings)
         ladder = _validate_transform_flags(
             settings,
             max_attempts=max_attempts,

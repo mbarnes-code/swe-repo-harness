@@ -4605,6 +4605,36 @@ def test_a_phase_refuses_to_start_below_the_disk_floor_with_exit_9(
     assert str(shutil.disk_usage(tmp_path).free)[:3] in result.output, result.output
 
 
+def test_transform_refuses_to_start_below_the_disk_floor_with_exit_9(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D96 (phase-entry half): `transform` gets the same §12.22 disk-headroom gate `scan`,
+    `build`, `verify` and `fleet resume` already had — `transform`'s command body used to call
+    `_phase_preflight(ctx)` and go straight to `_validate_transform_flags`, with no
+    `_require_disk_headroom` call anywhere, even though it is plausibly the single most
+    disk-hungry phase in the fleet.
+
+    `transform`'s command body calls `_phase_preflight(ctx)` BEFORE `_require_disk_headroom`
+    (the same order `build`/`verify` use), and `_phase_preflight` itself calls `_resolve_run`,
+    which raises `UsageError` if the database holds no runs at all — so unlike `scan` (which
+    computes its own run_id later, after the disk check), a bare `fresh_db` is not sufficient
+    fixture state here: a run must already exist for `_phase_preflight` to succeed and reach
+    the disk-headroom call. `seed_run` provides exactly that one row and nothing
+    transform-specific (no scan/sequence output), which is enough: the refusal fires before
+    `_validate_transform_flags`/`_check_wave_budget`/`_transform_impl` touch anything else.
+    """
+    write_config(tmp_path, fleet=DISK_FLOOR_YAML)
+    fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(tmp_path / "state" / "fleet.db")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [*base_args(tmp_path), "transform"])
+
+    assert result.exit_code == ExitCode.DISK_EXHAUSTED == 9, result.output
+    assert str(IMPOSSIBLE_FLOOR) in result.output, result.output
+    assert "min_free_bytes" in result.output, result.output
+
+
 def test_the_floor_is_checked_even_when_there_is_no_cache_directory_to_evict(
     tmp_path: Path,
 ) -> None:
