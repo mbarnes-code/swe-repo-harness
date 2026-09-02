@@ -186,6 +186,7 @@ def _real_symbols(root: Path, repo_id: str, files: Mapping[str, str]) -> list[Sy
             2_097_152,
             {},
             {},
+            {},
             tuple(config.generated_markers),
         )
         out.extend(scan.symbols)
