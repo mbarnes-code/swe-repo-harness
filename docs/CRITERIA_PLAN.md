@@ -137,7 +137,13 @@ SPEC's own item numbering, so it is out of this entry's scope, not a residual of
 **Out of scope:** does not require reorganizing the rest of `tests/` into the `unit/` layout.
 
 ## 4. Model round-trip + per-backend golden response
-**DONE (round II task 3, 2026-09-02, `251c774`, reviewed Approved in full).** Round-trip was
+**OPEN — reverted from a same-day DONE marking (round II final review, 2026-09-02): SPEC's own
+literal sentence names a scope this criterion's own "Done bar" paraphrase silently narrowed, and
+the round only built the paraphrase's scope.** See the correction after the "Out of scope" line
+for what remains. History below kept, not deleted, per this file's ground rule 1.
+
+**DONE (round II task 3, 2026-09-02, `251c774`, reviewed Approved in full) — as it stood before
+this correction.** Round-trip was
 already fully covered. `tests/test_llm_golden_responses.py` + `tests/fixtures/llm/golden_responses/
 *.json` add one recorded raw response per shipped backend
 (`anthropic`/`bedrock`/`vertex` at the `TOOL_CALL` rung, `openai_compatible` at the required
@@ -155,6 +161,50 @@ response per shipped backend (anthropic/bedrock/openai_compatible/vertex) valida
 declared schema, plus one recorded at the `PROMPTED` rung, each checked into a fixture and asserted
 by a real (non-network) test. **Out of scope, honored:** no live-network golden-capture pipeline
 was built — a checked-in fixture satisfies the criterion as written.
+
+**Correction, round II final review (2026-09-02): the DONE marking above overclaimed — SPEC's own
+sentence names a subject this criterion's own Done bar was never checked against.**
+`docs/SPEC.md:7430`, verbatim: *"every LLM role in `config/models.yaml` has a stored golden
+response per shipped backend that validates against its declared schema — including one recorded
+at the `PROMPTED` rung."* The subject is **every LLM role**, not "one recorded golden response per
+backend" (this entry's own prior "Done bar" text, which the controller wrote when this criterion
+was first opened and never re-checked against SPEC's actual sentence before flipping DONE — the
+same class of error round FF's §12.8 and round EE's §12.35 both hit).
+
+**Verified directly against source, not inferred.** `config/models.yaml` (lines 14-25) declares
+**12**
+roles (`conflict_resolution`, `api_incompat_rewrite`, `build_authoring`, `cycle_break_proposal`,
+`escalation`, `transform_repair`, `build_diagnosis`, `manifest_extract`, `pr_body`,
+`repo_classify`, `dep_disambiguate`, `pr_title`) — not interchangeable: `src/fleet/llm/schemas.py`
+maps each to its own response model, and `tests/test_llm_roles.py`'s own
+`test_schema_digests_are_stable_and_distinct_per_role` asserts all 12 schema digests are distinct.
+Round II task 3's fixtures cover **exactly one**: `tests/test_llm_golden_responses.py:77` pins
+`RESPONSE_SCHEMAS[Role.REPO_CLASSIFY] is RepoClassification`, and all four fixtures carry a
+`RepoClassification` payload. No other stored golden response exists anywhere in the tree
+(`find tests -ipath '*golden*'` returns only these four files).
+
+**Not closed by composition.** `tests/test_llm_roles.py`'s existing round-trip test IS
+parametrized over all 12 roles, but its input is a hand-shaped Pydantic-model literal
+(`_sample(model_cls)`), never a stored wire response, and not per backend — it proves a different
+property than SPEC's sentence names. The union of "round-trip covers 12 roles with fake data" and
+"golden fixtures cover 1 role with real data" is not the 12-roles-×-4-backends cross-product
+SPEC's sentence requires.
+
+**Not a defect in round II task 3's own work.** The fixtures built are genuine, well-derived
+(task review independently verified every field against real adapter code and the real Anthropic
+SDK), and they correctly satisfy this entry's own prior "Done bar" paraphrase in full — the defect
+is in the controller's DONE flip reading that paraphrase as the criterion instead of re-checking
+SPEC's actual sentence, not in the implementation.
+
+**Done bar (revised, matching SPEC's literal text):** one recorded golden response per **LLM
+role** (12, `config/models.yaml`) per shipped backend (4), validating against that role's declared
+schema, plus one recorded at the `PROMPTED` rung — 48 combinations in the worst case, though a
+single fixture per (role, backend) pair likely suffices without needing all 4 rungs per pair
+(investigate before assuming the full cross-product is needed literally per-rung; SPEC's own
+"including one recorded at the PROMPTED rung" reads as one additional requirement layered on the
+per-role-per-backend base, not a multiplier). Round II's landed `REPO_CLASSIFY` coverage across 4
+backends + PROMPTED is genuine partial progress, not reverted — 1 of 12 roles is done; 11 remain.
+§12 count reverts from 27 to **26 of 48**.
 
 ## 5. No `pickle` / `ThreadPoolExecutor` / `subprocess.run` in `src/fleet/`
 **DONE (landed round N task 1, `51f7e31`, reviewed Approved).**
@@ -1458,7 +1508,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 27 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round II, form-agnostic `awk` re-scan: §4 closed — golden-response fixtures for all 4 shipped backends + the required PROMPTED rung, task review Approved in full, see §4's own entry. Round GG's history — §35/§3 closed that round via ADR-0110/ADR-0111 — is kept below rather than deleted) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 26 | 1, 3, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round II final review: §4 was marked DONE earlier this same round and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured; see §4's own entry for the full correction. Net count unchanged from round GG's 26, despite this round landing real, verified progress: D97 fixed and `REPO_CLASSIFY`'s golden fixtures genuinely closed, neither of which flips a criterion by itself) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only, D92/D93 landed since; corrected round II, see §38's own entry — D80 is fully landed and no longer the blocker either), 43 (partial) |
