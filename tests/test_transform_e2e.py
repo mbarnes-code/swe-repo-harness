@@ -577,6 +577,80 @@ def test_a_failing_repo_does_not_stop_its_siblings_or_the_wave(fleet: Path) -> N
 
 
 # ---------------------------------------------------------------------------------------
+# 3b. disk headroom that develops MID-WAVE (D96 phase-2 half, §11.3)
+# ---------------------------------------------------------------------------------------
+
+
+def test_relocate_refuses_a_repo_when_disk_pressure_develops_after_the_phase_entry_gate(
+    fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The phase-ENTRY gate (`_require_disk_headroom`, fixed round CC) is a single reading taken
+    once, before the wave starts. `RelocateWorker` must re-check per repo (D96's other half) —
+    otherwise a volume that had room at wave start and fills up by repo 40 sails every later repo
+    straight into `ENOSPC` inside a `BEGIN IMMEDIATE` (§13 row 42).
+
+    This is proven by making the two readings disagree, not by raising the configured floor
+    (which would ALSO trip the phase-entry gate and prove nothing about the per-repo check):
+    `scan`/`sequence` run first, against the real, unpatched `fleet.util.fs.free_bytes` — so
+    Phase 1 succeeds. THEN, and only then, `fleet.util.fs.free_bytes` is patched to report 0
+    bytes free everywhere. `transform`'s own phase-entry gate (`cli.py`'s `_gc_disk` calls
+    `free_bytes` through its own `from fleet.util.fs import free_bytes as disk_free_bytes`
+    binding, captured at import time — a SEPARATE name from the one this patch replaces) still
+    reads the real, plentiful disk and passes. `RelocateWorker.run` calls `require_free_space`,
+    which is defined in `fleet.util.fs` and resolves `free_bytes` through THAT module's own
+    globals at call time — so it sees the patched 0 — and refuses before `ctx.workdir` in the
+    worktree the relocation would have written to.
+
+    A `min_free_bytes` this low (`FLEET_YAML`'s `1048576`) would never refuse an unpatched real
+    disk, which is what makes the phase-entry pass, and never proves the per-repo check with a
+    genuinely full volume — the patch is standing in for the disk filling up between the two
+    readings, exactly as an operator's host would between wave start and repo 40.
+    """
+    scanned(fleet)
+
+    import fleet.util.fs as fs_module
+
+    monkeypatch.setattr(fs_module, "free_bytes", lambda _path: 0)
+
+    result = transform(fleet)
+
+    assert result.exit_code == ExitCode.DISK_EXHAUSTED == 9, result.output
+    assert "min_free_bytes" in result.output, result.output
+    assert "1048576" in result.output, result.output
+    # Pinned to RELOCATE specifically, not merely "some Phase 2 worker's disk check fired": if
+    # RelocateWorker's own check were the one silently missing, its writes would go through — a
+    # real 0-byte-free volume cannot actually receive them, but this test does not fill the real
+    # disk, it only makes `free_bytes` REPORT 0 — so `land_patches` would still succeed here, and
+    # the run would proceed to `RewriteWorker`, whose OWN check (unaffected by this test's
+    # mutation) would fire instead and still exit 9 with the SAME failure_class, silently
+    # certifying a defective relocate.py green. "relocate to" is `RelocateWorker`'s own operation
+    # string (`relocate.py`'s `require_free_space(..., operation=f"relocate to {dest_path}")`);
+    # `rewrite.py` and `buildgen.py` each use their own, disjoint operation strings.
+    assert "relocate to" in result.output, result.output
+    assert payload(result)["commits"] == 0, (
+        "a commit landed before the refusal — the check ran too late, or a DIFFERENT worker's "
+        "check (e.g. rewrite's) caught it instead of relocate's own"
+    )
+
+    failures = query(
+        fleet,
+        "SELECT repo_id, failure_class, last_error FROM phases "
+        "WHERE phase = 2 AND failure_class IS NOT NULL",
+    )
+    assert failures, "no phase-2 row recorded the disk-exhausted failure"
+    assert all(failure_class == "DISK_EXHAUSTED" for _, failure_class, _ in failures), failures
+    assert any("relocate to" in str(detail) for _, _, detail in failures), failures
+
+    # Nothing from Phase 2 reached git for the repo(s) the halt caught: the refusal fired BEFORE
+    # `scoped_tempdir`/`land_patches`, not after a partial move.
+    for repo_id in DESTINATIONS:
+        statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+        assert statuses.get(repo_id) != "SUCCEEDED", (
+            f"{repo_id}: reached SUCCEEDED after the volume was reported full"
+        )
+
+
+# ---------------------------------------------------------------------------------------
 # 4. the phase's success criterion (§3.2)
 # ---------------------------------------------------------------------------------------
 

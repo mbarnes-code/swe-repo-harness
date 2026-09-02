@@ -33,7 +33,7 @@ from pydantic import Field
 from fleet.models.enums import FailureClass, Phase, TransformTier
 from fleet.models.tasks import FilePatch, TokenUsage
 from fleet.orchestrator.registry import register_worker
-from fleet.util.fs import scoped_tempdir
+from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
 from fleet.vcs.commits import PatchApplyError
 from fleet.vcs.git import Git, GitCommandError
 from fleet.workers.base import (
@@ -113,6 +113,15 @@ class RelocateInput(WorkerInput):
     completed_units: list[str] = Field(
         default_factory=list, description="The `partial` checkpoint, replayed by the runner"
     )
+    min_free_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="`preflight.min_free_bytes`, re-checked before THIS repo's moves rather than "
+        "once at startup (§11.3): the fleet fills the volume as it runs, so a floor tested at "
+        "repo 1 says nothing about repo 180. `0` disables the gate and is the default only "
+        "because a payload built by hand in a test has no `config/fleet.yaml` behind it; `fleet "
+        "transform` always passes the configured value.",
+    )
 
 
 class RelocateOutput(WorkerOutput):
@@ -159,6 +168,27 @@ class RelocateWorker(BaseWorker[RelocateInput, RelocateOutput]):
         owed = units_owed(payload.sources, payload.completed_units)
         landed = list(payload.completed_units)
         output = RelocateOutput(dest_path=payload.dest_path)
+
+        # §11.3, before the first move: the fleet fills the volume as it runs, so a floor tested
+        # at repo 1 says nothing about repo 180 (same reasoning as `clone.py`'s per-clone check).
+        try:
+            require_free_space(
+                ctx.workdir,
+                payload.min_free_bytes,
+                operation=f"relocate to {payload.dest_path}",
+            )
+        except DiskFloorBreached as breach:
+            return WorkerResult[RelocateOutput](
+                status="failed",
+                output=output,
+                remaining_units=owed,
+                error=WorkerError(
+                    failure_class=FailureClass.DISK_EXHAUSTED,
+                    retryable=False,
+                    stderr_tail=str(breach),
+                    exception_type=f"{type(breach).__module__}.{type(breach).__qualname__}",
+                ),
+            )
 
         with scoped_tempdir(prefix="fleet-relocate-") as patch_dir:
             for index, unit in enumerate(owed):

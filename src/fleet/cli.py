@@ -3653,6 +3653,14 @@ class TransformInput(WorkerInput):
         "threads the configured value here so `_rewrite_input` can copy it onto "
         "`RewriteInput.max_patch_bytes` — see that field's docstring in `workers/rewrite.py`.",
     )
+    min_free_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="`preflight.min_free_bytes`; `_transform_payloads` threads the configured "
+        "value here so `_relocate_input`/`_rewrite_input` can copy it onto "
+        "`RelocateInput.min_free_bytes`/`RewriteInput.min_free_bytes` — re-checked before EACH "
+        "repo's Phase 2 work rather than once at startup (§11.3).",
+    )
     remaining_units: tuple[str, ...] | None = None
 
 
@@ -3797,6 +3805,7 @@ class TransformPipelineWorker(BaseWorker[TransformInput, TransformOutput]):
             phase_pre_commit_sha=payload.phase_pre_commit_sha,
             dest_path=payload.dest_path,
             sources=list(payload.sources),
+            min_free_bytes=payload.min_free_bytes,
             completed_units=[
                 source
                 for source in payload.sources
@@ -3815,6 +3824,7 @@ class TransformPipelineWorker(BaseWorker[TransformInput, TransformOutput]):
             params=dict(payload.params),
             max_passes=payload.max_passes,
             max_patch_bytes=payload.max_patch_bytes,
+            min_free_bytes=payload.min_free_bytes,
             completed_units=[
                 target
                 for target in payload.targets
@@ -4684,6 +4694,7 @@ def _transform_payloads(
     engines = dict(settings.config.transform.engines)
     max_passes = settings.config.transform.max_passes
     max_patch_bytes = settings.config.transform.max_patch_bytes
+    min_free_bytes = settings.config.preflight.min_free_bytes
 
     async def build(
         *, repo_id: str, phase: Phase, attempt: int, remaining_units: Sequence[str] | None
@@ -4716,6 +4727,7 @@ def _transform_payloads(
             },
             max_passes=max_passes,
             max_patch_bytes=max_patch_bytes,
+            min_free_bytes=min_free_bytes,
             remaining_units=None if remaining_units is None else tuple(remaining_units),
         )
 
@@ -5801,6 +5813,7 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
             write_module_bazel=True,
             ingest=None,
             log_dir=payload.log_dir,
+            min_free_bytes=payload.min_free_bytes,
         )
 
     def _buildverify_input(self, payload: BuildInput) -> BuildverifyInput:

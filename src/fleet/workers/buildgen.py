@@ -62,6 +62,7 @@ from fleet.models.build import (
 from fleet.models.enums import FailureClass, Phase
 from fleet.models.tasks import TokenUsage
 from fleet.orchestrator.registry import register_worker
+from fleet.util.fs import DiskFloorBreached, require_free_space
 from fleet.util.proc import CommandRunner
 from fleet.vcs.filter_repo import IngestError, IntegrationMutex, SourceProvenance, ingest
 from fleet.vcs.git import Git, GitError
@@ -194,6 +195,15 @@ class BuildgenInput(WorkerInput):
     write_module_bazel: bool = True
     ingest: IngestSpec | None = None
     log_dir: str = "artifacts/logs"
+    min_free_bytes: int = Field(
+        default=0,
+        ge=0,
+        description="`preflight.min_free_bytes`, re-checked before THIS unit's generated-file "
+        "write rather than once at startup (§11.3): the fleet fills the volume as it runs, so a "
+        "floor tested at repo 1 says nothing about repo 180. `0` disables the gate and is the "
+        "default only because a payload built by hand in a test has no `config/fleet.yaml` "
+        "behind it; `fleet build` always passes the configured value.",
+    )
 
 
 class BuildgenOutput(WorkerOutput):
@@ -349,6 +359,29 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
             else render_build_bazel(targets)
         )
         build_path = Path(ctx.workdir) / dest / "BUILD.bazel"
+        # §11.3, before the generated-file write: the fleet fills the volume as it runs, so a
+        # floor tested at repo 1 says nothing about repo 180 (same reasoning as `clone.py`'s
+        # per-clone check).
+        try:
+            require_free_space(
+                build_path.parent,
+                payload.min_free_bytes,
+                operation=f"write BUILD.bazel for {dest}",
+            )
+        except DiskFloorBreached as breach:
+            return WorkerResult[BuildgenOutput](
+                status="failed",
+                output=output,
+                completed_units=completed,
+                remaining_units=units,
+                usage=usage,
+                error=WorkerError(
+                    failure_class=FailureClass.DISK_EXHAUSTED,
+                    retryable=False,
+                    stderr_tail=str(breach),
+                    exception_type=f"{type(breach).__module__}.{type(breach).__qualname__}",
+                ),
+            )
         _write(build_path, text)
         output.build_bazel_path = str(build_path)
         # D10: the files the generated text NAMES, written in the same unit that writes the text.
