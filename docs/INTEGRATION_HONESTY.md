@@ -7419,7 +7419,7 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12631-12868`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+(`cli.py:12700-12937`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
 2026-09-02, round VI, FOUR separate times as this round's own successive `cli.py` additions kept
 shifting it. Correction to this paragraph's own prior self: the "at `<sha>`" suffix a previous
 repointing added here was NOT a functional exemption — `test_no_unpinned_anchored_citation_
@@ -8290,7 +8290,7 @@ establishes the gap exists and is now tracked, following D102's own precedent.
 
 ---
 
-## D105 — OPEN. `fleet resume --repoll-prs` can immediately abandon a stub T1 just superseded, in
+## D105 — FIXED, LANDED (round VI task 11, `d8c1cd7`/`0243792`). `fleet resume --repoll-prs` can immediately abandon a stub T1 just superseded, in
 the same call, overwriting T1's outcome and D101 Half B(ii)'s newly-cleared finding
 
 **Found by round VI task 8's task-scoped review (2026-09-02), while independently investigating a
@@ -8321,3 +8321,55 @@ superseded in the SAME call (an ordering/exclusion fix), or (b) `_awaiting_merge
 invocation (a narrower fix, more surgical but more fragile). Neither is designed here — this entry
 only establishes the gap exists and is now tracked, following D102's own precedent of disclosing a
 real gap without prescribing its exact implementation.
+
+**FIXED, LANDED (round VI task 11, 2026-09-02, `d8c1cd7`, merged `0243792`, task-scoped review
+Approved).** Option (a) chosen. `_fire_t1_for_provider` now returns the `(consumer_repo_id,
+coord_key)` pairs it superseded; `_pr_sync_impl` accumulates these across both its normal
+merge-observation loop and D103's own crash-window sweep into `t1_superseded_this_call`;
+`_resume_impl` threads that set into `_stub_reconcile_impl`'s new `exclude_this_call` parameter,
+filtering exactly those rows out of `reconcile()`'s sweep input before `reconcile()` runs.
+`reconcile()` itself is byte-for-byte unchanged (confirmed by the review: its own file's diff
+against base is empty). Review independently reproduced the Rule-12 mutation proof and confirmed
+the exclusion key matches `_stub_reconcile_inputs`' own dict key exactly — not a broader
+per-consumer or per-provider exclusion.
+
+**Disclosed follow-up, found by the review, not this fix's own scope: a plausible CROSS-call
+(not same-call) analogue.** `_stub_reconcile_impl` runs unconditionally on every `fleet resume`
+call — so a `SUPERSEDED` row that survives until a LATER, separate `fleet resume` invocation (not
+the same one T1 fired in) is exposed to the identical abandon mechanism this fix's exclusion set
+cannot see, if a REVALIDATE task for it hasn't been processed by then (see D104: `REVALIDATE`
+execution has no dispatch path yet, so this window can be arbitrarily long in practice today).
+Not confirmed as a live bug — a plausible gap, not independently investigated further. See D106.
+
+---
+
+## D106 — OPEN. Possible cross-call analogue of D105: a `SUPERSEDED` stub surviving to a LATER
+`fleet resume` invocation may still be abandoned by `reconcile()`, unprotected by D105's fix
+
+**Found by round VI task 11's task-scoped review (2026-09-02), flagged as plausible but not
+independently investigated as a live bug.** Verified free before allocating: form-agnostic sweep
+of `docs/INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md`/`docs/SPEC.md` for
+`\bD[0-9]+\b` found `D105` as the highest allocated number.
+
+**The gap, as reasoned by the review — NOT independently re-derived or measured by the
+controller; re-verify before acting on it.** D105's fix excludes, from `reconcile()`'s sweep, only
+the `(consumer_repo_id, coord_key)` pairs T1 superseded in the SAME `fleet resume` call
+(`t1_superseded_this_call`, scoped to one invocation's own accumulator, never persisted). Since
+`_stub_reconcile_impl` runs unconditionally on every `fleet resume` invocation, a stub that T1
+superseded in one call, then survives — un-revalidated — into a SUBSEQUENT, separate `fleet
+resume` call has no exclusion protecting it: that later call's own `t1_superseded_this_call` is
+empty (T1 didn't fire again this call), so the row is fully exposed to `reconcile()`'s ordinary
+sweep, which per its own existing logic (unchanged by D105's fix) would abandon a `SUPERSEDED` row
+whose provider's PR is `MERGED` and therefore not "open." Because D104 (`REVALIDATE` task
+execution has no dispatch path) means nothing currently advances a `SUPERSEDED` row toward
+`RESOLVED`, this window — a superseded-but-not-yet-revalidated stub sitting between resume calls —
+is not a narrow timing accident; it may be the ORDINARY case today, for as long as D104 stays
+open.
+
+**Not yet built or confirmed:** whether this is genuinely reachable (a real test needs to drive
+two SEPARATE `fleet resume` invocations, superseding a stub in the first and observing whether the
+second abandons it) and, if so, what the fix should be — likely something that persists
+"recently superseded, awaiting revalidation" as real state (not a call-scoped accumulator), or a
+`reconcile()`-side change to its own "open" definition (option (b) from D105's own entry, deferred
+there as "more fragile"). Neither is designed here — this entry only establishes the gap as
+plausible and disclosed, following D102/D104/D105's own precedent, not as a confirmed defect.
