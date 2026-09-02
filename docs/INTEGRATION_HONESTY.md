@@ -7856,7 +7856,7 @@ assertion silently collapses the two `acme-billing` rows, so despite its docstri
 does not actually prove "exactly one `CONTRACT_CONSUME` row per consumer" — pre-existing test
 structure, untouched by this diff, flagged for a future pass.
 
-## D98 — OPEN. `fleet resume` never exits 7 in the pure stub-abandon end-of-run case — D93's exit-7 wiring lives only in the four phase-command sites, never in `resume()`'s own exit path
+## D98 — FIXED, LANDED (`600360d`, round III task 1). `fleet resume` never exits 7 in the pure stub-abandon end-of-run case — D93's exit-7 wiring lives only in the four phase-command sites, never in `resume()`'s own exit path
 
 **Found by round II task 1 (2026-09-02), while re-auditing SPEC §12 item 38's sub-clauses against
 D92/D93's now-landed fixes — a disclosed finding, not this TEST-ONLY task's own job to fix.**
@@ -7889,6 +7889,20 @@ or CI pipeline gating on exit code sees success where the fleet's own state says
 `_needs_human_attention`-style check) inside `resume()`'s/`_continue_impl`'s own exit-code
 determination, for the case where nothing was re-driven this cycle. That design choice is not made
 here.
+
+**Fixed, 2026-09-02 (round III task 1, `600360d`), reviewed Approved.** A new async helper
+`_resume_needs_human_attention(path, run_id)` — `connect_ro` → `build_state` → `_needs_human_
+attention` over the repos' statuses, closed in a `finally` — is called from `resume()`'s own
+command body via the module's existing `_run(...)` sync/async bridge, immediately after
+`_raise_for_continuation(continuation)` inside the `if continuation is not None:` block. Design
+deviates from this round's own research sketch only in mechanics (`resume()` is a sync `typer`
+command, so the sketch's inline `await` couldn't compile) — task review independently confirmed
+the helper is semantically identical to the design and reaches the exact call-site location
+specified. Confirmed `_stub_reconcile_impl`'s `degraded_consumers` return value is genuinely
+insufficient (only covers this-pass abandonments, missing an already-DEGRADED repo from an earlier
+resume) by direct read of `orchestrator/stubs.py::reconcile()`. Proven old-fails/new-passes,
+reproduced independently by task review in a fresh worktree; `--no-continue`/`--dry-run`
+confirmed still exempt, unchanged.
 
 **Disclosed, not confirmed, open question for a future pass (task review's own residual finding,
 explicitly flagged as ambiguous, not asserted as a second defect here):** SPEC.md:7464's literal
