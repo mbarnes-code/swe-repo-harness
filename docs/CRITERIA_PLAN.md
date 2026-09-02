@@ -787,9 +787,11 @@ fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` a
 four.
 
 ## 35. No raw prior diff reaches a prompt
-**OPEN — reverted from a same-day DONE marking (round EE final review, 2026-09-02): SPEC's own
-positive-control sentence names a worker capability that does not exist, and cannot be closed by
-composing the work below.** See the correction after the "Done bar" paragraph for what remains.
+**DONE (round GG task 4, 2026-09-02, `2657ec4`/`a5253ab`, ADR-0110) — see the closure paragraph
+after the "Done bar" history below for the disclosed residual.** Reverted from an earlier same-day
+DONE marking (round EE final review, 2026-09-02) that overclaimed by composition; the capability
+that correction found missing is now built, mutation-proven both directions, and closed with an
+explicit disclosed scope boundary rather than by silently narrowing what "closed" means.
 
 **Closed, round EE task 1 (2026-09-02, `1fb6be5`), the CLI-level proof.** `--context-policy`'s
 blanket refusal (`cli.py`'s old `_validate_transform_flags`) is gone — `_apply_context_policy_
@@ -906,8 +908,38 @@ already on record for the sibling policy. The CLI-level wiring closed by round E
 (`--context-policy` genuinely reaching the worker) is real, correct, independently re-verified
 progress and is NOT reverted by this correction — it is a necessary but not sufficient piece of
 this criterion's closure.
-**Done bar (current):** the EVIDENCE_PLUS_PRIORS diff-rendering capability above, plus its
-positive-control test, both still to build.
+**Done bar (as it stood before this closure — kept as history, not deleted):** the
+EVIDENCE_PLUS_PRIORS diff-rendering capability above, plus its positive-control test, both still
+to build.
+
+**DONE (round GG task 4, 2026-09-02, `2657ec4`; controller fix `a5253ab`; adjudication ADR-0110).**
+The capability ADR-0108 ruled must exist is built: `RewriteInput.prior_rejected_diffs: list
+[FilePatch]`, never touching `RejectedApproach`/`rejected_approaches` (both confirmed byte-for-byte
+unchanged from base, independently, by task review), rendered by a new `_evidence()` branch gated
+on `ctx.context_policy is ContextPolicy.EVIDENCE_PLUS_PRIORS`. SPEC.md:7461's own proof shape
+passes both directions, each independently proven a genuine discriminator (old-fails/new-passes,
+mechanically stripped and restored with zero drift): the diff appears under `EVIDENCE_PLUS_PRIORS`
+(every non-blank line, not just a marker), and — task review's own finding, closed same-round by
+controller fix `a5253ab` — the identical payload stays leak-free under the DEFAULT_LADDER's own
+rung-3 policy (`EVIDENCE_PLUS_REJECTED_APPROACHES`), reddening under the exact one-token-class
+gate-widening mutation a plausible future refactor could make.
+
+**Disclosed residual, per ADR-0110 — not a blocker on this criterion, read the ADR before treating
+it as one.** No production caller populates `prior_rejected_diffs` today — `cli.py::_rewrite_input`
+never sets it, and nothing else in `src/` does either. A real `fleet transform
+--context-policy 3=EVIDENCE_PLUS_PRIORS` run therefore renders an empty `prior_diffs` list; only a
+fixture-driven test (this criterion's own proof shape, per SPEC's literal framing — "a fixture...
+is driven through the full ladder") exercises a populated one. This is symmetric with
+`RewriteInput.rejected_approaches` (`EVIDENCE_PLUS_REJECTED_APPROACHES`'s own field) being equally
+unpopulated by any production caller — round GG's own research confirmed zero production
+constructors of `RejectedApproach` anywhere — and §12.36 (anchoring detection) is the criterion
+that actually depends on that production data flow existing; it correctly stays OPEN, blocked on
+D50. ADR-0110 rules this criterion's own header — "no raw prior diff reaches a prompt under the
+default ladder" — is a claim about worker behavior given inputs, not about where production
+sources those inputs, so the gap belongs to §12.36/D50, not here. **Not yet built (tracked
+informally, no D-number — a disclosed scope boundary, not a defect):** wiring
+`PhaseRunner._drive()`/its `_payloads` Protocol to thread a real prior rung's rejected `FilePatch`
+into the next rung's payload (research's §1e, this round).
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
@@ -1312,7 +1344,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 24 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round EE final review: §35 was marked DONE earlier this same round and reverted the same day — SPEC's own positive-control sentence names a worker capability, `EVIDENCE_PLUS_PRIORS` diff-rendering, that does not exist and cannot be closed by composing already-landed work; see §35's own entry for the full correction. Net count unchanged from round DD's 24, despite this round landing real, verified progress: D93 fixed and the CLI-level `--context-policy` wiring genuinely closed, neither of which flips a criterion by itself) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 25 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round GG: §35 now genuinely closed — `EVIDENCE_PLUS_PRIORS` diff-rendering built and mutation-proven both directions, per ADR-0110's disclosed-residual closure; see §35's own entry. Round EE's history, when §35 was marked DONE and reverted the same day for the reason round GG has now actually built, is kept below rather than deleted) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |

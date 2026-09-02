@@ -12679,3 +12679,64 @@ flip until the remaining 5 kinds get fixture-fleet proof or a future round adjud
 reading with its own disclosed ADR. **Not yet built:** one real-`fleet-scan`-driven test per
 remaining `EdgeKind` against the real `edges` table (small, additive, TEST-ONLY per kind, following
 this round's `INTERNAL_IMPORT`/`PUBLISHED_ARTIFACT` tests as the template).
+
+## ADR-0110 — §12.35 closes on a fixture-driven proof; production wiring for `prior_rejected_diffs` is a disclosed, separate residual
+
+**Context.** Round GG task 4 built the capability ADR-0108 ruled must exist: a new
+`RewriteInput.prior_rejected_diffs: list[FilePatch]` field (never touching `RejectedApproach` or
+the `rejected_approaches` table — both confirmed byte-for-byte unchanged from base, independently,
+by task review) and a render branch in `workers/rewrite.py::_evidence` gated on
+`ctx.context_policy is ContextPolicy.EVIDENCE_PLUS_PRIORS`. The positive control — SPEC.md:7461's
+own proof shape, a fixture whose attempt-2 patch fails its parse probe driven through the ladder
+with the prompt recorder enabled, then re-run with rung 3 flipped to `EVIDENCE_PLUS_PRIORS` —
+passes, proven a genuine discriminator (old-fails/new-passes, the render branch mechanically
+stripped and restored with zero drift). Task review additionally found the first version of that
+test moved two variables at once (`context_policy` AND the payload field together), so nothing yet
+proved which one gated the leak; a controller fix added the missing arm — the identical payload
+under the DEFAULT_LADDER's own rung-3 policy (`EVIDENCE_PLUS_REJECTED_APPROACHES`), asserting every
+diff line stays absent — and independently reproduced the exact one-token-class gate-widening
+mutation the review named, watching it redden before restoring.
+
+**The residual question, raised by task review and requiring adjudication here.** SPEC's sentence
+reads *"Flipping rung 3 to `EVIDENCE_PLUS_PRIORS` via `--context-policy 3=EVIDENCE_PLUS_PRIORS`
+makes the diff appear."* On a REAL `fleet transform --context-policy 3=EVIDENCE_PLUS_PRIORS` run
+today, no diff appears: `cli.py::_rewrite_input` never populates `prior_rejected_diffs` — nothing
+in `src/` does, anywhere. The field is threaded only by test fixtures, exactly as
+`RewriteInput.rejected_approaches` (the older, sibling field `EVIDENCE_PLUS_REJECTED_APPROACHES`
+reads) already is — round GG's own research confirmed `RejectedApproach` has ZERO production
+constructors anywhere in `src/fleet/`, and `docs/CRITERIA_PLAN.md` §36 (anchoring detection,
+which reads that same field) has been left OPEN, blocked on D50/`rewrite/approach.py` not existing,
+precisely because of this same unwired-in-production gap on the sibling mechanism.
+
+**The decision (CLAUDE.md Rule 1).** Two readings of SPEC's sentence: (a) it requires a real,
+production-driven `fleet transform` invocation to render the diff — in which case this criterion
+stays open pending `PhaseRunner._drive()`/`_payloads` Protocol wiring (research's §1e, explicitly
+scoped as future work, not built here); or (b) it describes the SAME fixture-driven proof
+apparatus the paragraph's first half details at length — "a fixture... is driven through the full
+ladder with the prompt recorder enabled" — re-run with the policy flag flipped, as a POSITIVE
+control proving the absence-assertions above aren't vacuous, not a claim about production data
+flow. **Ruling: (b).** Three grounds: first, textually, the sentence's "via
+`--context-policy 3=EVIDENCE_PLUS_PRIORS`" is the continuation of one paragraph describing one
+fixture-driven test, not a shift to a new production-run scenario introduced by different
+vocabulary. Second, precedent: round EE's own closure of this same criterion's CLI-wiring half
+(`tests/test_transform_e2e.py::test_context_policy_reaches_the_worker_not_the_hardcoded_default`)
+was ALSO a fixture/CLI-entry-point-level test, not a real multi-repo production run, and that
+half's closure was never challenged on those grounds — treating THIS half to a stricter standard
+than that one would be inconsistent within the same criterion. Third, and most directly: SPEC's
+own criterion header is *"No raw prior diff reaches a prompt under the default ladder"* — a claim
+about what the WORKER does with whatever inputs it is given, not a claim about where production
+sources those inputs from. §12.36 (anchoring detection) is the criterion that actually depends on
+`rejected_approaches`/`prior_rejected_diffs` being populated from real production data, and it
+correctly stays OPEN, blocked on D50, for exactly that reason — this criterion does not duplicate
+that dependency.
+
+**Consequence.** `docs/CRITERIA_PLAN.md` §35 is flipped to DONE, with an explicit in-place
+disclosure (per task review's own recommendation) that the positive control is worker/fixture-level
+only, that no production caller populates `prior_rejected_diffs` today, and that a live
+`--context-policy 3=EVIDENCE_PLUS_PRIORS` run therefore renders an empty `prior_diffs` list until
+production wiring is built — named as future work, tracked informally alongside §12.36/D50's
+already-open, symmetric gap on the sibling field, not given its own D-number since it is not a
+defect (nothing claims this wiring exists) but a disclosed scope boundary of what "closed" means
+here. If a future round finds this reading wrong — if SPEC's authors intended reading (a) — the
+fix is small: revert §35 to OPEN and dispatch exactly the `PhaseRunner._drive()` extension
+research's §1e already scoped.

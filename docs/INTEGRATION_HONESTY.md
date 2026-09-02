@@ -1347,7 +1347,7 @@ invoke it does not exist**. Every one of these has tests that pass. None of thos
 evidence, because the thing they exercise is not the thing that ships.
 
 **D20 — OPEN. Commits are not probe-gated in production; the ast-grep parse probe is wired only in
-tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:276`) constructs its `RewritePipeline`
+tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:294`) constructs its `RewritePipeline`
 with `rules`, an `EngineRegistry`, `max_passes`, `params`, `tier` and `repo_id` — and **no
 `probe=`**. The only `probe=` in `src/` is `workers/rewrite.py:456`, an unrelated local in the
 repair-evidence renderer. Separately, `rewrite/apply.apply_patch` — the function whose docstring

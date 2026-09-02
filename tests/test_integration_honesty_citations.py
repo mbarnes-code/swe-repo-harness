@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 47 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 50 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -554,6 +554,23 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "_require_disk_headroom",
         "cli.py:13782",
     ),  # L7636 defined at [(13813, 13828), (13813, 13828)], cited 13782-13782
+    # Same class as `_require_disk_headroom` above, found the same way (round GG task 4's own
+    # `rewrite.py` edits shifted lines below them): D49's own correction history cites `_record`'s
+    # location as of `c5ab3b1`/`82654e8` -- both past commits, both confirmed matching `_record`'s
+    # real position at round GG's own base (`f48d303`, line 616) before this round's edits moved
+    # it to 642. Repointing would misrepresent what those corrections measured at the time.
+    (
+        "_record",
+        "workers/rewrite.py:616-622",
+    ),  # L2722/L2746 defined at [(642, 662), (642, 662)], cited 616-622
+    # Same class, the round-W dated note's own "re-verified against HEAD" citation -- current as
+    # of round W (2026-09-01), rotted by the same round GG shift. Left as the record of what round
+    # W verified rather than silently repointed to today's line; a future pass re-verifying D49
+    # against current HEAD can choose to update this note's own citation when it does.
+    (
+        "_record",
+        "workers/rewrite.py:614-634",
+    ),  # L2765 defined at [(642, 662), (642, 662)], cited 614-634
 )
 
 
