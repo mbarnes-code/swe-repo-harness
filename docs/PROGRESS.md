@@ -7833,3 +7833,115 @@ leverage this session has found, but LARGE, flagged as a future dedicated round'
 final review's own citation-gate-scope recommendation (watch `docs/DECISIONS.md` AND
 `docs/CRITERIA_PLAN.md`, not just one) is also owed a dedicated task, expected to surface
 pre-existing rot on its first run and needing a ratchet rather than a one-shot fix.
+
+### Checkpoint — 2026-09-02 (round EE controller, close-out)
+
+**§12 criteria met: 24 of 48** (re-measured directly against `docs/CRITERIA_PLAN.md`'s `**DONE`
+headings, form-agnostic count — unchanged from round DD's close). This round is the first this
+session to land two genuinely substantial pieces of verified progress — D93's real exit-code
+defect fixed, and §12.35's CLI-level `--context-policy` wiring genuinely closed — while its own
+net criterion count holds flat, because the round's initial closure claim for §12.35 was caught
+overclaiming by its own final review and honestly reverted the same day, rather than left to
+stand or to be caught by a later round.
+
+**Both of this round's two production-code tasks independently hit, and each task's own
+task-scoped review independently caught, the exact same citation-rot class this session has now
+seen four times — worth stating plainly as a pattern, not a coincidence.** Task 1 (the
+`--context-policy` wiring) and task 2 (D93's fix) each shifted enough line numbers in `cli.py`/
+`retry.py`/`runner.py`/`workers/base.py` to rot citations in `docs/INTEGRATION_HONESTY.md`,
+`docs/CRITERIA_PLAN.md`, and `docs/DECISIONS.md` — files this project's own citation gate
+(`tests/test_integration_honesty_citations.py`) only partially watches. The controller applied
+two separate fix-wave commits, one after each task merged, each independently re-verifying every
+repointed citation against current source rather than trusting the gate alone. **Merging the
+second task's fix on top of the first's re-broke a citation the first fix wave had just
+repaired** — a reverse-ratchet pin (`_run_verify_wave`, deliberately tracking a citation that must
+STAY unresolved) that is structurally sensitive to any shift in its region, needing re-pinning
+twice in the same round for two unrelated reasons.
+
+**The round's own final whole-branch review then found the citation-gate's blind spot is deeper
+than either task-scoped fix wave could see, and measured it precisely rather than asserting it.**
+The gate's resolution check is containment-only: does the cited line fall somewhere inside the
+named symbol's own AST span? That predicate cannot distinguish a citation that drifted to a
+DIFFERENT statement within the same long function from one still genuinely correct — and `cli.py`'s
+functions run hundreds of lines, so the blind spot is wide open there specifically. Measured
+directly against source (reading cited-line CONTENT against each claim, not re-running the gate):
+**3 of the round's own repointed citations were still wrong** despite the gate reporting them
+green, and **4 more citations rotted this round untouched by either task review or either fix
+wave.** The review named the root cause exactly, quoting this project's own guardrail: both fix
+waves re-ran the check *against the finding* rather than *against the artefact the fix produced* —
+CLAUDE.md's own "re-run the check against the artefact the fix produced, not against the finding"
+guardrail, recurring in a form its own author had not previously enumerated (intra-function
+drift, distinct from the cross-file and cross-round instances this session has already logged).
+The controller fixed all 7 (6 named by the final review, 1 more — a wrong citation introduced
+while drafting the correction to the wording of another finding, `enums.py:2358`→`356` — caught
+by the controller's own habit of re-verifying every citation against source before committing
+rather than trusting a draft).
+
+**§12.35's closure was reverted the same day it was claimed, via a genuine SPEC-vs-code
+adjudication rather than a citation fix — the first time this session a criterion flip has been
+reversed rather than merely caveated.** SPEC's own literal text for this criterion ends with a
+POSITIVE control, not another absence assertion: flipping to `EVIDENCE_PLUS_PRIORS` at rung 3
+must make a previously-rejected diff genuinely appear in the prompt, which is what proves the
+surrounding absence assertions are testing something real rather than passing vacuously against a
+policy that could never carry a diff regardless of what the worker does. The controller's initial
+closure reasoned entirely about diff-ABSENCE (already independently closed at two rungs by rounds
+AA and CC) and never checked this final sentence. The final review verified directly against
+source that `workers/rewrite.py::_evidence` treats `EVIDENCE_PLUS_PRIORS` identically to
+`EVIDENCE_PLUS_REJECTED_APPROACHES` — neither renders diff text, by the function's own documented
+design choice ("re-showing a model its own rejected patch biases it toward tweaking an approach
+that is wrong at the approach level"). The positive control SPEC names is not merely untested; it
+is currently unimplementable by any rung. **The adjudication this forced — build the capability
+or correct SPEC's wording — was made as a genuine Rule-1 zero-blocking decision, recorded as
+ADR-0108, not left pending**: `ContextPolicy.EVIDENCE_PLUS_PRIORS`'s own enum declaration carries
+a comment, predating this session, reading "+ raw prior diffs; opt-in, never default" — direct
+evidence the SPEC sentence and the original design intent already agreed with each other, and
+that `_evidence()`'s implementation is what's incomplete, not SPEC's text. Building to match the
+criterion, not adjudicating the criterion down to match what happens to be built, is the
+direction this project's own guardrail names as the only legitimate one — and it is what this
+ruling chose. The CLI-level wiring itself is not reverted by this correction: it is real,
+independently re-verified progress, and it remains a necessary (though not, on its own,
+sufficient) piece of this criterion's eventual closure.
+
+**Rulings made this round:**
+1. D93's fix design (a shared `_needs_human_attention()` helper rather than widening the existing
+   `attention` variable) was accepted on the strength of two independently-verified reasons: it
+   avoids mislabeling a resolvable DEGRADED repo as attention-needed in operator-facing messages
+   downstream of the existing `attention` variable, and it sidesteps a real naming collision with
+   an unrelated `degraded` local already present at the build site.
+2. §12.35's fourth sub-clause — SPEC's own positive-control sentence — was ruled a genuinely
+   unbuilt capability rather than a SPEC-wording error, recorded as ADR-0108, on the strength of
+   the enum's own predating-this-session comment naming the intended behavior.
+3. Both fix waves' citation repoints were independently re-verified against current source before
+   commit, not trusted from either task review's own claims — this discipline caught zero errors
+   in the FIRST fix wave's own citations at the time, but the round's final review later found
+   three of them wrong anyway (drifted within their target function's span, invisible to a
+   containment check), which is the precise failure mode the next round's research item exists to
+   close.
+4. The final review's residual finding (7 citations, 1 blocking criterion overclaim) was fixed
+   directly by the controller in two more commits rather than dispatched to a fresh implementer,
+   consistent with this round's own established practice — each value independently re-derived
+   against source, not copied from the review's own report.
+
+**Full suite, post-close: verified clean on all touched surfaces across the round's full arc** —
+each task's own self-gate independently reproduced by its task review (mutation proofs for both
+the wiring and the exit-code logic, before/after worktree regression comparisons for
+`test_build_e2e.py` matching this project's now three-time-used precedent for that exact claim
+shape); the final whole-branch review's own run (ruff clean, citation gate 54/54 — though shown
+to be an incomplete instrument for this round's own defect class — full regression sweep across
+seven files); the controller's two post-final-review fix commits (citation gate 54/54 re-run
+after each edit, not before; 307 passed across the five most-relevant touched files after the
+last correction). No step in this chain trusted a citation, a mutation result, or a criterion
+closure claim it could instead re-derive — including, in the end, the round's own first closure
+claim for §12.35.
+
+**Round FF, opening next.** The citation-gate scope expansion — already precisely sized by round
+EE's own research before this round's own two-fix-wave, one-blocking-reversal experience made the
+case for it directly — is this round's lead, not a secondary pick: `docs/CRITERIA_PLAN.md` is
+confirmed a genuine one-shot (37 citations, 0 missing, only 1 needs pinning). `docs/DECISIONS.md`
+is confirmed NOT a one-shot (35 of 368 citations fail the hard file-existence check, which carries
+no ratchet/pin mechanism at all; 56 anchored citations currently unresolved) and needs its own
+dedicated round. The final review's own review adds one refinement to scope into whichever round
+takes this on: the current containment-only predicate is provably blind to intra-function drift,
+so pair it with a second, non-sharing derivation before declaring the expanded gate trustworthy.
+Second candidate, independently scoped and unaffected by this round's citation churn: D93's
+sibling gaps in `docs/INTEGRATION_HONESTY.md` (D92, D94) remain OPEN and still block §12.38.
