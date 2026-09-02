@@ -7419,7 +7419,7 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12493-12730`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+(`cli.py:12500-12737`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
 2026-09-02, round VI: task 6's `cli.py` additions drifted this citation and the bare sub-citations
 inside this same paragraph — `:12347`/`:12389`/`:12335-12343`/`:12360-12376` below are NOT
 re-verified here, only the one anchored citation the automated gate flagged; a future pass should

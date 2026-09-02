@@ -12150,9 +12150,16 @@ async def _stub_supersede_inputs(
 
     Scoped to `state = 'ACTIVE'` only, unlike `_stub_reconcile_inputs`'s `ACTIVE`/`SUPERSEDED`:
     T1 is `ACTIVE -> SUPERSEDED`, and `supersede()` itself no-ops an already-`SUPERSEDED` row and
-    raises on a terminal one, so querying only `ACTIVE` never hands it either. Every row this
-    query can return therefore has `revalidation_round = 0` (schema: "0 while ACTIVE"), so folding
-    several consumers into one `grouped` record never has to reconcile a `rounds_spent` mismatch.
+    raises on a terminal one, so querying only `ACTIVE` never hands it either.
+
+    **Correction (round VI post-hoc review, 2026-09-02): the prior version of this paragraph
+    claimed "every row this query can return has `revalidation_round = 0`" — false.**
+    `next_round_record` (`orchestrator/stubs.py`) returns an `ACTIVE` row at round N > 0, so a
+    provider revalidated more than once can have ACTIVE rows at different rounds. The conclusion
+    (folding several consumers into one `grouped` record never has to reconcile a `rounds_spent`
+    mismatch) still holds, for the real reason: `next_round_record` mints a FRESH `stub_id` each
+    round, and `grouped` keys on `stub_id` — so rows from different rounds are never folded into
+    the same `grouped` entry regardless of their `revalidation_round` value.
     """
     stub_rows = await _rows(
         conn,

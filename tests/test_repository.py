@@ -2309,3 +2309,100 @@ async def test_a_phase_with_no_row_reads_as_pending_on_both_sides_of_the_snapsho
 
     assert [record.phase for record in demotions] == [Phase.TRANSFORM, Phase.BUILD]
     assert (await _phase_state(read_conn, REPO))[4][0] == "PENDING"
+
+
+# ======================================================================================
+# `insert_revalidation_task` — D101 Half B / D102: the kind='REVALIDATE' path `upsert_task`
+# refuses. Round VI's post-hoc review (task 6) found this method itself has zero production
+# callers (the real trigger inside `cli._pr_sync_impl` calls the module-level
+# `insert_revalidation_task_row` directly, on its own open connection, per this method's own
+# docstring) and its idempotency claims were measured, not tested. Pinning that measurement here.
+# ======================================================================================
+
+
+async def test_insert_revalidation_task_is_idempotent_on_the_same_revalidation_key(
+    repo: SqliteStateRepository, db_path: Path
+) -> None:
+    """Two calls with the same `revalidation_key`: the second UPSERTs the SAME row (the original
+    `task_id` wins, one row total), refreshing `dest_path` but leaving `status`/`claimed_by`
+    untouched — a re-fired T1 trigger (a resumed `--sync`, a crash between the stub UPDATE and
+    this INSERT) must not mint a duplicate REVALIDATE task or silently steal a claim already in
+    flight."""
+    first_id = str(uuid.uuid4())
+    second_id = str(uuid.uuid4())
+
+    won_first = await repo.insert_revalidation_task(
+        first_id,
+        run_id=RUN,
+        repo_id=REPO,
+        revalidation_key="r1:abc",
+        dest_path="libs/c1-OLD",
+        created_at=NOW,
+    )
+    assert won_first == first_id
+
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE tasks SET status = 'CLAIMED', claimed_by = 'w1' WHERE task_id = ?",
+            (first_id,),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    won_second = await repo.insert_revalidation_task(
+        second_id,
+        run_id=RUN,
+        repo_id=REPO,
+        revalidation_key="r1:abc",
+        dest_path="libs/c1-NEW",
+        created_at=NOW,
+    )
+    assert won_second == first_id, "a replayed trigger must not switch the row's identity"
+
+    conn = sqlite3.connect(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT task_id, dest_path, status, claimed_by, phase, kind, revalidation_key "
+            "FROM tasks WHERE kind = 'REVALIDATE'"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert rows == [
+        (first_id, "libs/c1-NEW", "CLAIMED", "w1", int(Phase.VERIFY), "REVALIDATE", "r1:abc")
+    ], "replay must refresh dest_path while preserving the in-flight claim, as one row"
+
+
+async def test_insert_revalidation_task_mints_a_new_row_for_a_different_key(
+    repo: SqliteStateRepository, db_path: Path
+) -> None:
+    """A different `revalidation_key` (a different round or provider set, §3.5.1 step 4) is a
+    genuinely different REVALIDATE task, not a replay — `ux_tasks_ident` includes
+    `IFNULL(revalidation_key, '')`, so this must mint a second row rather than colliding with the
+    first."""
+    await repo.insert_revalidation_task(
+        str(uuid.uuid4()),
+        run_id=RUN,
+        repo_id=REPO,
+        revalidation_key="r1:abc",
+        dest_path="libs/c1",
+        created_at=NOW,
+    )
+    await repo.insert_revalidation_task(
+        str(uuid.uuid4()),
+        run_id=RUN,
+        repo_id=REPO,
+        revalidation_key="r2:def",
+        dest_path="libs/c1",
+        created_at=NOW,
+    )
+
+    conn = sqlite3.connect(db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM tasks WHERE kind = 'REVALIDATE'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 2
