@@ -271,6 +271,17 @@ production gaps** (`API_CONTRACT`'s starved extraction, `CONTRACT_IMPL`/`CONTRAC
 missing persistence) rather than one undifferentiated "5 remaining" bucket. Both are real,
 traced-to-the-line findings — this round's own work, not fixture design failures.
 
+**D97 fixed, round II task 2 (`a9a1d48`), reviewed Approved — 7 of 8 `EdgeKind`s now proven.**
+`_persist_contract_edges` (`cli.py`) now writes `CONTRACT_IMPL`/`CONTRACT_CONSUME` from
+`_sequence_impl`'s existing writer block; the `xfail` is gone, the test passes for real. Task
+review found (and D23's own entry now cross-references) that this new call site inherits D23's
+defect — a retargeted edge's `retargeted_from_repo_id` is silently dropped here too — genuinely
+out of this fix's scope, not a regression. **`API_CONTRACT` remains the sole open `EdgeKind`**,
+confirmed genuinely NEW-MECHANISM by round II's own research (two unbounded extraction gaps in
+`symbolindex.py`: no consumer-reference detection for proto/gRPC symbols, and `HTTP_OPERATION`
+extraction doesn't exist at all) — not D-numbered yet, held for a future dedicated round rather
+than sized further here.
+
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
 `check_criteria()` is now wired into `_sequence_impl` (`fleet sequence`) via a new

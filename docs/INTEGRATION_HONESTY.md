@@ -1412,6 +1412,18 @@ is now yes.
 > through `_persist_scan_edges`'s call site (not re-verified here); do not assume fixing D23's
 > column closes D97, or that D97's write path alone closes D23 — read both.
 
+> ***Second forward reference (2026-09-02, round II task 2 review) — D97 is now fixed, and this
+> entry's own scope now demonstrably extends to the new call site.*** `insert_edges` no longer has
+> exactly one call site — round II task 2 added `_persist_contract_edges`, called from
+> `_sequence_impl` after a contract hoist. Task review found this new call site hits D23's exact
+> defect: a real source-scanned `INTERNAL_IMPORT` edge gets *retargeted* onto a hoisted contract
+> (kind rewritten to `CONTRACT_CONSUME`, confidence/evidence_line preserved from the original) via
+> pre-existing, unchanged `graph/cycles.py` logic, and the resulting row's
+> `retargeted_from_repo_id` is silently dropped exactly as this entry describes — confirmed live at
+> `acme-billing` in the `cycle_fleet` fixture (a second `CONTRACT_CONSUME` row at 0.8 confidence,
+> alongside a fresh 0.85 one, both losing their retarget provenance). D23 is not closed by this —
+> it is now reachable through TWO call sites instead of one, both losing the same column.
+
 `state/repository.insert_edges` (`repository.py:2368`) enumerates **fifteen** columns and
 `retargeted_from_repo_id` is not among them, though the column exists (`state/schema.sql:139`,
 added by `migrations/v002_node_kind.py`), the model carries it (`models/graph.py:172`) and
@@ -7310,7 +7322,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2269-2337`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:6698`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:6752`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7766,7 +7778,7 @@ three of the four new per-worker checks (`RewriteWorker`'s, `BuildgenWorker`'s, 
 regression test this round. Deleting any of the other three today would leave the suite green;
 flagged for a future round, not fixed here.
 
-## D97 — OPEN. `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges are computed in memory but never persisted — no production call site writes them, at any point
+## D97 — FIXED, LANDED (`a9a1d48`, round II task 2). `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges are computed in memory but never persisted — no production call site writes them, at any point
 
 **Found by round HH task 2 (2026-09-02), while attempting SPEC §12.8's residual fixture-fleet
 proof for these two `EdgeKind` members — a disclosed BLOCKED finding, not this task's own job to
@@ -7814,3 +7826,22 @@ removal rather than silently staying green forever.
 `_materialize`'s output is available post-hoist) calling `insert_edges` with the contract-kind
 edges it already computes in memory, mirroring how `_persist_scan_edges` does it for scan-time
 edges. That design choice is not made here.
+
+**Fixed, 2026-09-02 (round II task 2, `a9a1d48`), reviewed Approved.** A new
+`_persist_contract_edges` helper, called inside `_sequence_impl`'s existing `StateWriter` block
+(already used for 4 other writes), filters `report.edges` to `CONTRACT_IMPL`/`CONTRACT_CONSUME`
+and calls `insert_edges`, mirroring `_persist_scan_edges`'s exact `EdgeRow` construction — task
+review confirmed field-for-field parity. The landed `xfail(strict=True)` test now passes for real
+(genuine old-fails/new-passes: commenting out the new call reproduces the exact targeted `KeyError`
+the xfail used to pin, restored with zero drift). Task review additionally ran a fresh standalone
+script (not reusing the implementer's test) driving a real scan→sequence and querying `edges`
+directly — found **4** contract-kind rows, not 3: `acme-billing` gets two `CONTRACT_CONSUME` rows
+(0.85 from fresh manifest-based inference, 0.8 from a pre-existing, unchanged `_materialize`
+mechanism that *retargets* a real source-scanned `INTERNAL_IMPORT` edge onto the contract,
+preserving its original confidence/evidence_line). This is D23's own scope
+(`retargeted_from_repo_id` silently dropped — `EdgeRow` has no such column) extending to this new
+call site, not a defect in this fix — genuinely out of this task's scope, cross-referenced here for
+whoever picks up D23. Also noted, not fixed here: the existing fixture test's dict-comprehension
+assertion silently collapses the two `acme-billing` rows, so despite its docstring's wording it
+does not actually prove "exactly one `CONTRACT_CONSUME` row per consumer" — pre-existing test
+structure, untouched by this diff, flagged for a future pass.
