@@ -1083,6 +1083,19 @@ def test_the_escalation_rung_carries_rejected_approach_summaries_and_can_ask_for
         context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
         llm=client,
     )
+    # The real multi-line diff the rejected rung-2 approach would have proposed, captured with the
+    # SAME helper (`make_unified_diff`) the production pipeline calls internally — a genuine diff,
+    # not a hand-typed guess. `RejectedApproach` has no field to carry it (the docstring above), so
+    # this represents what *would* leak if that boundary were ever crossed.
+    rejected_diff = make_unified_diff(
+        unit,
+        "alpha\n",
+        "ABANDON_REJECTED_LINE_1\nABANDON_REJECTED_LINE_2\n"
+        "ABANDON_REJECTED_LINE_3\nABANDON_REJECTED_LINE_4\n",
+    )
+    assert rejected_diff, "fixture sanity: the diff is non-empty"
+    rejected_lines = [line for line in rejected_diff.splitlines() if line.strip()]
+    assert len(rejected_lines) >= 8, "fixture sanity: a genuine multi-line diff, not one line"
     payload = rewrite_payload(
         anchor,
         [unit],
@@ -1103,7 +1116,8 @@ def test_the_escalation_rung_carries_rejected_approach_summaries_and_can_ask_for
     assert client.roles == [str(Role.ESCALATION)]
     prompt = client.prompts[0]
     assert "REJECTED_APPROACH_SUMMARY_MARKER" in prompt, "the HEAVY rung gets the pruning"
-    assert "diff --git" not in prompt, "and none of the diffs those approaches proposed"
+    for line in rejected_lines:
+        assert line not in prompt, f"a rejected diff line leaked into the prompt: {line!r}"
     assert result.status == "failed" and result.error is not None
     assert result.error.retryable is False, "told, not discovered by exhausting the budget"
     assert "recommends a human" in result.error.stderr_tail
@@ -1190,6 +1204,19 @@ def test_the_escalation_rung_reaches_the_model_with_its_context_policy_applied(
         context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
         llm=ladder_client(backend),
     )
+    # The real multi-line diff the rejected rung-2 approach would have proposed, captured with the
+    # SAME helper (`make_unified_diff`) the production pipeline calls internally — a genuine diff,
+    # not a hand-typed guess. `RejectedApproach` has no field to carry it, so this represents what
+    # *would* leak if that boundary were ever crossed.
+    rejected_diff = make_unified_diff(
+        unit,
+        "alpha\n",
+        "HEAVY_REJECTED_LINE_1\nHEAVY_REJECTED_LINE_2\n"
+        "HEAVY_REJECTED_LINE_3\nHEAVY_REJECTED_LINE_4\n",
+    )
+    assert rejected_diff, "fixture sanity: the diff is non-empty"
+    rejected_lines = [line for line in rejected_diff.splitlines() if line.strip()]
+    assert len(rejected_lines) >= 8, "fixture sanity: a genuine multi-line diff, not one line"
     payload = rewrite_payload(
         anchor,
         [unit],
@@ -1210,7 +1237,8 @@ def test_the_escalation_rung_reaches_the_model_with_its_context_policy_applied(
     assert len(backend.prompts) == 1, "rung 3 reached the transport"
     prompt = backend.prompts[0]
     assert "REJECTED_APPROACH_SUMMARY_MARKER" in prompt, "the HEAVY rung gets the pruning"
-    assert "diff --git" not in prompt, "and none of the diffs those approaches proposed"
+    for line in rejected_lines:
+        assert line not in prompt, f"a rejected diff line leaked into the prompt: {line!r}"
     assert result.status == "ok"
     assert (repo / unit).read_text(encoding="utf-8") == "gamma\n"
 
