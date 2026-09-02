@@ -1088,6 +1088,88 @@ def test_the_repair_prompt_shows_every_line_of_a_prior_rejected_diff_under_evide
     assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
 
 
+def test_a_populated_prior_rejected_diffs_still_never_leaks_under_the_default_ladders_own_policy(
+    tmp_path: Path,
+) -> None:
+    """§12.35's own headline property, isolated from whether the payload FIELD is populated.
+
+    Found by round GG task 4's own task review: the test above moves TWO variables at once —
+    `context_policy` and `prior_rejected_diffs` — so nothing yet proved which one gates the leak.
+    `DEFAULT_LADDER` (`models/tasks.py`) runs rung 3 as `EVIDENCE_PLUS_REJECTED_APPROACHES`, not
+    `EVIDENCE_PLUS_PRIORS` — the policy this project actually ships by default. A one-token-class
+    widening of `_evidence()`'s new gate (`is EVIDENCE_PLUS_PRIORS` -> `in (EVIDENCE_PLUS_
+    REJECTED_APPROACHES, EVIDENCE_PLUS_PRIORS)`, the exact membership form the branch immediately
+    above it already uses — a plausible "reconcile the two adjacent branches" edit) passed every
+    existing test in this file silently, because none of them populates `prior_rejected_diffs`
+    under any policy OTHER than `EVIDENCE_PLUS_PRIORS`. This is CLAUDE.md's "a fixture lacking the
+    blocker certifies the defect GREEN" -- the SAME payload as the positive control above, with
+    only `context_policy` flipped back to the policy the default ladder actually runs, closes it.
+    """
+    one, two, clean = f"{DEST}/one.py", f"{DEST}/two.py", f"{DEST}/clean.py"
+    committed = "L1\nL2\nL3\nL4\n"
+    dirty = "L1 DIRTY\nL2\nL3\nL4\n"
+    after = (
+        "REJECTED_LINE_1_UNIQUE\nREJECTED_LINE_2_UNIQUE\n"
+        "REJECTED_LINE_3_UNIQUE\nREJECTED_LINE_4_UNIQUE\n"
+    )
+    repo, anchor = make_repo(tmp_path, {one: committed, two: committed, clean: "keep\n"})
+
+    rejected_diff = make_unified_diff(one, dirty, after)
+    assert rejected_diff, "fixture sanity: the rule actually changes the file"
+    rejected_lines = [line for line in rejected_diff.splitlines() if line.strip()]
+    assert len(rejected_lines) >= 8, "fixture sanity: a genuine multi-line diff, not one line"
+
+    engine = FakeRewriter({"r1": lambda _source: after})
+    worker = worker_with(engine)
+
+    (repo / one).write_text(dirty, encoding="utf-8")
+    attempt_two = asyncio.run(
+        worker.run(make_ctx(repo, attempt=2), rewrite_payload(anchor, [one]))
+    )
+    assert attempt_two.status == "failed" and attempt_two.error is not None
+
+    (repo / two).write_text(dirty, encoding="utf-8")
+    client = FakeModelClient(_proposal(clean, "keep\n", "kept\n", marker="repair"))
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_REPAIR,
+        # the default ladder's own rung-3 policy
+        context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        llm=client,
+    )
+    # The IDENTICAL payload the positive control uses -- `prior_rejected_diffs` populated exactly
+    # the same way. Only `ctx.context_policy` differs. If a future edit widens the render gate's
+    # membership test, this is what catches it.
+    payload = rewrite_payload(
+        anchor,
+        [two],
+        prior_rejected_diffs=[
+            FilePatch(
+                path=one,
+                diff=rejected_diff,
+                tier=TransformTier.DETERMINISTIC,
+                parse_probe_ok=False,
+            )
+        ],
+    )
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.TRANSFORM_REPAIR)], "attempt 3 is the WORKHORSE rung"
+    prompt = client.prompts[0]
+
+    for line in rejected_lines:
+        assert line not in prompt, (
+            f"a prior rejected diff line leaked under EVIDENCE_PLUS_REJECTED_APPROACHES despite "
+            f"prior_rejected_diffs being populated -- the gate must key on policy, not payload "
+            f"content: {line!r}"
+        )
+
+    assert result.status == "ok", "the repair patch still landed"
+    assert (repo / clean).read_text(encoding="utf-8") == "kept\n"
+
+
 def test_a_multi_file_repair_records_every_landed_path_not_just_the_unit(
     tmp_path: Path,
 ) -> None:

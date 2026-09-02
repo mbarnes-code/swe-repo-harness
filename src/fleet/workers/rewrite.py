@@ -23,11 +23,16 @@ The division of labour is the design, and every clause of it was a defect first:
   result carries `completed_units`, and re-entry resumes at what is still owed.
 * **The repair prompt gets THIS failure's verbatim stderr and nothing else** (CLAUDE.md
   guardrail 5, §3.2 step 5). Evidence is rebuilt from scratch on every invocation from the
-  failure in front of it — the worker is stateless, so it has no transcript to leak — and the
-  rejected *diff* is never rendered under `EVIDENCE_ONLY`/`EVIDENCE_PLUS_REJECTED_APPROACHES`:
-  `RejectedApproach` has no field able to hold one. `EVIDENCE_PLUS_PRIORS` is the one opt-in,
-  never-default exception — it renders `RewriteInput.prior_rejected_diffs`, a payload-only field
-  that still never touches `RejectedApproach` (§12.35, ADR-0108).
+  failure in front of it — the worker is stateless, so it has no transcript to leak. The rejected
+  *diff* is never rendered under `EVIDENCE_ONLY`/`EVIDENCE_PLUS_REJECTED_APPROACHES`, and that
+  exclusion is now an `is` identity check on `ctx.context_policy` in `_evidence()`, NOT the
+  absence of a diff-capable field — `RewriteInput.prior_rejected_diffs` exists and can carry one
+  under any policy; `RejectedApproach` itself still has no field able to hold one, but that is a
+  separate, narrower guarantee (§12.35's structural half) than what keeps the two default-adjacent
+  policies leak-free. `EVIDENCE_PLUS_PRIORS` is the one opt-in, never-default exception that reads
+  `RewriteInput.prior_rejected_diffs`; see `tests/test_workers_transform.py`'s
+  `test_a_populated_prior_rejected_diffs_still_never_leaks_under_the_default_ladders_own_policy`
+  for the proof the gate, not the payload, is what's load-bearing (§12.35, ADR-0108).
 
 `ctx.attempt` is the ladder position and `ctx.tier` is its consequence, both set by
 `BaseWorker.execute()` from the persisted `phases.attempts`. Nothing here counts attempts.
