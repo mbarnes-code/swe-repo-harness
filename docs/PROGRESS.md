@@ -8510,3 +8510,89 @@ every time, "first bold status marker per section," matching the Rollup exactly.
 3. D94 (PR-promotion mechanism) re-confirmed NEW-MECHANISM a fourth time, not ready for dispatch.
    D101 (this round's own new finding) not yet sized for dispatch either — a future round's
    research should scope both before either is attempted.
+
+### Checkpoint — round V close, round VI opened (2026-09-02)
+
+**§12 count: 27 of 48** (up from 26), re-derived form-agnostic ("first bold status marker per
+section") three separate times across this checkpoint, matching `docs/CRITERIA_PLAN.md`'s own
+Rollup table exactly each time. **§12.4 flipped DONE** — the sole criterion this round moved to
+DONE; every other landed defect fix (D101 Half A, D102) moved sub-clause state within already-OPEN
+criteria (§12.8, §38) without flipping either.
+
+**What landed, round V (5 tasks, all task-scoped-reviewed, all merged):**
+1. Task 3 (`8f3ca97`/`c8c5f37`): extended the existing generic `_pattern_symbols` extractor with a
+   `scan.api_contract_patterns` category, closing the gRPC/proto reference side of §12.8's
+   `API_CONTRACT` `EdgeKind` — **7 of 8 `EdgeKind`s now proven; `HTTP_OPERATION` is the sole
+   remaining gap**, no existing generic mechanism to extend for it (likely genuine NEW-MECHANISM).
+2. Tasks 1+2 (`271f507`/`be48e94`, hand-merged `3bc77a9`): landed `TRANSFORM_REPAIR`,
+   `MANIFEST_EXTRACT`, `API_INCOMPAT_REWRITE`, `ESCALATION` — 11 of 12 LLM roles for §12.4.
+3. Task 4 (`6f9b777`/`609f57f`): D101 Half A — an `UnmergedDependency` finding write for
+   held-for-merge stub consumers, per a controller-authored adjudication (**ADR-0112**: no
+   `RepoStatus` transition, finding only — avoids reopening the transition gate D95 just hardened).
+4. Task 5 (`16277f8`/`71fc59b`): `BUILD_AUTHORING`, the 12th and final LLM role — **§12.4 flips
+   DONE.** Reviewed with elevated scrutiny given this exact criterion's round-II history of a
+   same-day revert; the reviewer independently re-derived SPEC's literal sentence, the full 12-role
+   set, and the 12×4 backend/rung cross-product from source before confirming the flip.
+
+**Final whole-branch review (opus) found 2 real blockers, both from task 3, both fixed same-day
+(`13b1689`):** `scan_file()`'s new positional parameter broke its second caller
+(`tests/test_workers_contracts.py`, 19 tests red on `main`) — neither task 3's self-gate nor its
+task review ran that file, only the two files nearest the changed function's own text (CLAUDE.md
+§6's `94a2653` covering-set pattern, recurring one round later on a new surface). A pinned
+config-key count (180→181) went stale the same way. Plus 7 non-blocking findings (F3-F9, `db70722`):
+a false mechanism sentence in ADR-0112 (decision unaffected, only its stated reason was wrong) —
+corrected in place; a disclosed residual (SPEC §13 row 45 places the same finding at a different
+trigger point than §12.38, never reconciled); D102's citations drifted +3 from the same merge;
+**and, while fixing the ONE stale `SPEC.md` citation the review flagged, a sweep found 5 MORE
+independently-stale `SPEC.md` line citations in the same neighborhood** (§6/§19/§23/§28/§12-item-2)
+that the review itself never flagged — found by checking each citation's actual target content,
+not by trusting the number. A self-contradicting docstring and two doc/docstring listings missing
+`api_contract_patterns` were also fixed.
+
+**Round VI opened same-day with its first task** (D101 Half B / D102 sub-task A: wire T1's
+production trigger). **Process incident: the task self-merged to `main` before any review**
+(`3cc679d`/`ae0d961`) — root-caused to a controller briefing gap (a hand-written brief omitted the
+"not merged, controller's call" line every other task brief this round included), not implementer
+error. Not reverted — dispatched a post-hoc review at full pre-merge rigor instead, verdict
+**APPROVED WITH FOLLOW-UP**: the Rule-12 proof, the `_apply_stub_reconcile` refactor's purity (AST-
+diffed against the pre-change version, byte-identical modulo one variable rename), and the new
+repository method's idempotency were all independently re-measured, not just read. Findings fixed
+same-day: a false docstring claim (F1, `d5654bd`), a genuinely-dead repository method now covered
+by two pinned tests (F3, same commit) rather than removed (its documented non-transactional-caller
+use case may be needed once `fleet stubs resolve` is built). **D102 marked FIXED, LANDED — with a
+qualifier the task's own report omitted and the review caught: no production code creates a
+`stubs` row at all (§12.37/D80's own gap), so the newly-wired trigger fires against rows nothing
+creates today.** D101 narrows to Half B(ii) only (the `--sync`-triggered *clearing* of the
+finding — never in this task's build scope, still fully open). **D103 allocated** for two residual
+gaps the review surfaced: a narrow, reviewed-non-bug crash-window ordering gap (~10-line
+fix-forward named), and `stubs.revalidation_task_id` (SPEC §3.5.1 step 4), a real schema column
+verified never written in production. Task 6's own additions to `cli.py`/`repository.py` re-drifted
+citations TWICE more after `db70722`'s repair (once from the merge itself, once from this
+checkpoint's own docstring fix growing the file further) — repointed both times (`f6d11a9`,
+folded into `02d60f2`).
+
+**Disk crisis, resolved with a root cause found.** Host disk hit 276M free mid-checkpoint —
+traced to **~139 stale worktrees accumulated since round F, never cleaned up**, every one already
+merged into `main` (`git merge-base --is-ancestor`, confirmed for all 139 before removing any).
+Removed; reclaimed 1.9G → 30G free. `git fsck` clean (only expected dangling-object garbage from
+the removed worktrees' own unmerged commits, no corruption). This was very likely the actual driver
+of most of this session's earlier disk-pressure incidents, not a generically full host.
+
+**Full-suite state, checkpoint's own measurement**, no path filters, sole session: **2208 passed,
+3 failed** before this checkpoint's fixes. 2 of the 3 were exactly task 6's self-predicted citation
+re-drift (fixed, confirmed 72/72 on the citation gate afterward). The 3rd
+(`test_resume_unblocking.py::test_the_source_order_matches_the_behaviour_above`) does **not**
+reproduce standalone (passes alone, passes re-run directly against the current module) and touches
+nothing in round V or VI's diff — disclosed as a pre-existing, order-dependent flake, not chased
+further. A full clean re-run was not re-launched after this checkpoint's fixes (mypy/ruff/targeted
+test files all reconfirmed clean file-by-file instead, given the ~15-minute cost of a whole-suite
+run) — a future round should complete one rather than assume this checkpoint's disclosed gap means
+something is broken.
+
+**What's next.** §12.8: `HTTP_OPERATION` is the sole remaining `EdgeKind` gap, likely genuine
+NEW-MECHANISM (no existing extractor to extend). §38: blocked on D94 (still NEW-MECHANISM, 5
+confirmations running) and D101 Half B(ii) (finding-clearing, small once designed). D103: the
+crash-window fix-forward and `revalidation_task_id` write are both small, well-scoped, and not yet
+dispatched. §12.37 itself remains unmoved by any of this round's stub-lifecycle work — its own
+blocker (`--stub-blocked`'s stub-creation worker, `workers/buildgen.py`, never built) is upstream
+of everything D101/D102/D103 touch.
