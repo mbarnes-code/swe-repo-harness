@@ -3042,6 +3042,229 @@ def test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires(
     )
 
 
+def test_resume_repoll_prs_does_not_undo_t1_in_the_same_call(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D105 (`docs/INTEGRATION_HONESTY.md`): `fleet resume --repoll-prs` chains `_pr_sync_impl`
+    (fires T1: stub `ACTIVE` -> `SUPERSEDED`, clears the `UnmergedDependency` finding per D101
+    Half B(ii)) and `_stub_reconcile_impl` in the SAME command. Before the fix,
+    `_stub_reconcile_impl`'s sweep immediately re-visited the just-`SUPERSEDED` row: its provider's
+    PR is now `MERGED`, so `_awaiting_merge` no longer holds it, and `reconcile()`'s own correct,
+    unrelated T3 logic swept it straight to `ABANDONED` — overwriting T1's outcome and the just
+    -cleared finding inside one invocation, with no crash and no unusual timing.
+
+    Positive case: same fixture shape as
+    `test_pr_sync_clears_the_unmerged_dependency_finding_once_t1_fires` (the D101 Half B(ii) test
+    this one is the same-call sibling of), but ONE `resume --no-continue --repoll-prs` invocation
+    stands in for that test's two separate commands (`resume` then `pr --sync`) — that is exactly
+    the shape D105 says chains both calls and reaches the defect.
+
+    Control: `acme-widgets`' stub is seeded ALREADY `SUPERSEDED` (T1 never touches it this call —
+    `_stub_supersede_inputs` scopes to `state = 'ACTIVE'`), against a provider whose PR is
+    genuinely still `OPEN` at the forge but older than `pr.merge_wait_timeout_s` (default 2 days;
+    seeded 30 days old) — outside §13 row 45's carve-out window, so `reconcile()`'s pre-existing,
+    untouched T3 sweep must abandon it. Seeded ONLY between the two `resume` calls (not before the
+    first) so its abandonment is provably driven by the SECOND call's sweep — the one this fix
+    touches — rather than by the first, ordinary resume. This proves the fix's exclusion is scoped
+    to rows T1 touched THIS call and does not suppress reconcile()'s ordinary abandon logic for
+    anything else live in that same sweep.
+    """
+    from fleet import cli
+    from fleet.cli import PR_RECORD_KIND, _fingerprint
+
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_verify_degraded(db, "acme-commons")
+    _put_stub(db, consumer="acme-commons", provider="acme-billing", coord_key="acme-billing@1.0.0")
+    billing_url = "https://github.invalid/acme/monorepo/pull/2"
+    _seed_fresh_pr_record(db, "acme-billing", state="DRAFTED", url=billing_url)
+
+    # Step 1: plain resume establishes the target's held-for-merge state and its
+    # UnmergedDependency finding via D101 Half A's real code — same as the D101 Half B(ii) test.
+    # The control does not exist in the DB yet, so it cannot be swept here.
+    first = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    first_payload = json.loads(first.stdout)
+    assert "acme-commons→acme-billing@1.0.0" in first_payload["stub_reconcile"]["held_for_merge"]
+    assert first_payload["stub_reconcile"]["abandoned"] == []
+
+    conn = sqlite3.connect(db)
+    try:
+        target_before = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert target_before is not None, "Half A must have written the target's finding first"
+
+    # Now seed the control, between the two calls: a stub, its provider, and its (genuinely open,
+    # stale) PR record.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for name in ("acme-widgets", "acme-utils"):
+            conn.execute(
+                "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+                (name, name, f"https://example.invalid/{name}", "2026-08-08T12:00:00+00:00"),
+            )
+    finally:
+        conn.close()
+    _put_consumer_at_verify_degraded(db, "acme-widgets")
+
+    # The control stub: seeded directly as SUPERSEDED (not via T1), so this call's T1 never fires
+    # for it (`state = 'ACTIVE'` scoping) and it is absent from the exclude set the fix builds.
+    # `resolved_at` is required by `schema.sql`'s `CHECK (state = 'ACTIVE' OR resolved_at IS NOT
+    # NULL)` for any non-ACTIVE row.
+    stamp = "2026-08-08T12:00:00.000000+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, revalidation_round, max_revalidation_rounds, "
+            "                   state_changed_at, resolved_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'SUPERSEDED', 'PUBLISHED_ARTIFACT', 0, 2, ?, ?, ?)",
+            (
+                "33333333-3333-4333-8333-333333333333",
+                RUN_ID,
+                "acme-widgets",
+                "acme-utils@1.0.0",
+                "acme-widgets",
+                "acme-utils",
+                "1.0.0",
+                "//third_party/stubs/acme-utils",
+                stamp,
+                stamp,
+                stamp,
+            ),
+        )
+    finally:
+        conn.close()
+
+    # The control provider's PR: genuinely OPEN at the forge, but seeded 30 days old — past
+    # `pr.merge_wait_timeout_s` (default 172_800s / 2 days) — so §13 row 45's carve-out does not
+    # apply and reconcile()'s ordinary sweep must abandon it via T3, unrelated to this fix.
+    utils_url = "https://github.invalid/acme/monorepo/pull/3"
+    old_created_at = (datetime.now(UTC) - timedelta(days=30)).isoformat(timespec="microseconds")
+    payload = json.dumps(
+        {
+            "run_id": RUN_ID,
+            "repo_id": "acme-utils",
+            "wave_index": 0,
+            "branch": "migrate/acme-utils",
+            "base": "integration",
+            "title": "migrate acme-utils",
+            "body": "body",
+            "source_url": "https://example.invalid/acme-utils",
+            "source_sha": "a" * 40,
+            "state": "OPEN",
+            "url": utils_url,
+            "created_at": old_created_at,
+        }
+    )
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
+            (
+                RUN_ID,
+                "acme-utils",
+                PR_RECORD_KIND,
+                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND),
+                payload,
+                old_created_at,
+            ),
+        )
+    finally:
+        conn.close()
+
+    # T1's precondition (ADR-0011 stacking): the PROVIDER's own `phases` row must read SUCCEEDED.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        for provider in ("acme-billing", "acme-utils"):
+            for phase, status in (
+                (1, "SUCCEEDED"),
+                (2, "SUCCEEDED"),
+                (3, "SUCCEEDED"),
+                (4, "SUCCEEDED"),
+            ):
+                conn.execute(
+                    "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    (RUN_ID, provider, phase, status, "2026-08-08T12:00:00.000000+00:00"),
+                )
+    finally:
+        conn.close()
+
+    # Step 2: the ONE invocation D105 is about — `--repoll-prs` chains _pr_sync_impl (fires T1)
+    # and _stub_reconcile_impl in the same call.
+    forge = _SelectiveMergedForge(merged_url=billing_url)
+    monkeypatch.setattr(cli, "GH_RUNNER", forge)
+
+    second = runner.invoke(
+        app, [*base_args(workspace), "--json", "resume", "--no-continue", "--repoll-prs"]
+    )
+    assert second.exit_code == ExitCode.SUCCESS, second.output
+    second_payload = json.loads(second.stdout)
+
+    conn = sqlite3.connect(db)
+    try:
+        target_state = conn.execute(
+            "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = 'acme-commons' "
+            "  AND stub_coord_key = 'acme-billing@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()[0]
+        target_finding = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnmergedDependency'",
+            (RUN_ID,),
+        ).fetchone()
+        target_unresolved = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-commons' "
+            "  AND kind = 'UnresolvedStub'",
+            (RUN_ID,),
+        ).fetchone()
+        control_state = conn.execute(
+            "SELECT state, abandon_reason FROM stubs WHERE run_id = ? "
+            "  AND consumer_repo_id = 'acme-widgets' AND stub_coord_key = 'acme-utils@1.0.0'",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+
+    # The positive assertion D105 exists for: T1's outcome must survive the same-call sweep.
+    assert target_state == "SUPERSEDED", (
+        f"D105: the just-superseded stub must stay SUPERSEDED, not be re-abandoned in the same "
+        f"call, got {target_state!r}"
+    )
+    assert target_finding is None, (
+        "D105: the UnmergedDependency finding D101 Half B(ii) cleared must stay cleared, not be "
+        "replaced by a fresh UnresolvedStub finding from the same-call reconcile sweep"
+    )
+    assert target_unresolved is None, (
+        "D105: reconcile() must not have written a fresh UnresolvedStub finding for the row T1 "
+        "just superseded this call"
+    )
+    assert "acme-commons→acme-billing@1.0.0" not in second_payload["stub_reconcile"]["abandoned"]
+    assert (
+        "acme-commons→acme-billing@1.0.0"
+        in (second_payload["stub_reconcile"]["excluded_superseded_this_call"])
+    ), "the fix's own disclosure must name exactly the row it excluded"
+
+    # The control: unrelated to this call's T1 (seeded already-SUPERSEDED, between the two calls,
+    # so THIS is the only sweep that could have abandoned it), and it must still be swept by
+    # reconcile()'s ordinary, untouched T3 logic — proving the exclusion is scoped to rows T1
+    # touched THIS call only.
+    assert control_state == ("ABANDONED", "END_OF_RUN"), (
+        f"the fix must not suppress reconcile()'s ordinary T3 abandon for an unrelated stub whose "
+        f"provider's PR is genuinely open but past the merge-wait timeout, got {control_state!r}"
+    )
+    assert "acme-widgets→acme-utils@1.0.0" in second_payload["stub_reconcile"]["abandoned"]
+    assert (
+        "acme-widgets→acme-utils@1.0.0"
+        not in (second_payload["stub_reconcile"]["excluded_superseded_this_call"])
+    ), "T1 never touched the control this call, so it must not appear in the exclude disclosure"
 def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
     """Phases 1-3 `SUCCEEDED`, phase 4 `REQUIRES_HUMAN_INTERVENTION` — a repo an operator must
     already triage for a reason unrelated to any stub (§12.14: only `fleet retry`'s audited
