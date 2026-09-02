@@ -12581,3 +12581,45 @@ than ADR-0094: one field, one clear answer, no rejected alternative that itself 
 investigation — foldable into a single small ADR rather than needing a round-length adjudication,
 but, per this project's Central Number Allocation rule and the precedent ADR-0094 set for
 `llm_cache_hit`, written down rather than silently coded.
+
+## ADR-0108 — §12.35's `EVIDENCE_PLUS_PRIORS` positive control: build the capability, don't adjudicate the SPEC sentence away
+
+**Context.** Round EE's final review found `docs/SPEC.md` §12 item 35's own literal text names a
+positive control the codebase cannot currently satisfy: "Flipping rung 3 to
+`EVIDENCE_PLUS_PRIORS` via `--context-policy 3=EVIDENCE_PLUS_PRIORS` makes the diff appear — which
+is the proof the assertion tests the ladder and not the fixture." `workers/rewrite.py::_evidence`
+(~line 556) treats `ContextPolicy.EVIDENCE_PLUS_PRIORS` identically to
+`EVIDENCE_PLUS_REJECTED_APPROACHES` — neither renders a diff, and the function's own docstring
+states this is deliberate: "the previous proposal's diff is carried by no policy this worker
+implements, because re-showing a model its own rejected patch biases it toward tweaking an
+approach that is wrong at the approach level." So no rung, under any policy, can currently make a
+diff appear — the positive control is not merely untested, it is unimplementable as things stand.
+
+**The decision, made now rather than halting execution (CLAUDE.md Rule 1's "Zero-Blocking
+Decisions").** Two paths were available: (a) adjudicate SPEC's sentence away — treat the
+bias-avoidance rationale in `_evidence()`'s docstring as the real, settled design and correct
+§12.35's text to drop the positive-control requirement; or (b) treat this as a genuinely unbuilt
+capability and leave SPEC's text standing, closing the gap by building the missing branch.
+**Ruling: (b).** `ContextPolicy.EVIDENCE_PLUS_PRIORS`'s own declaration
+(`src/fleet/models/enums.py:356`) carries the comment `# + raw prior diffs; opt-in, never
+default` — the intent that THIS policy specifically (unlike `EVIDENCE_PLUS_REJECTED_APPROACHES`)
+should render raw diff text predates this session and was never implemented, not merely never
+tested. `_evidence()`'s bias-avoidance rationale is sound for
+`EVIDENCE_PLUS_REJECTED_APPROACHES` — showing a model its own already-rejected patch by default
+is a real hazard — but says nothing against `EVIDENCE_PLUS_PRIORS` ever doing so, since that
+policy's whole documented point is the opposite tradeoff, explicitly opt-in and never default.
+Per CLAUDE.md's own guardrail ("building to match the criterion is the only direction this
+project treats as a legitimate closure"), adjudicating the sentence away to match what happens to
+be built today is the wrong direction here — the enum comment is evidence the SPEC sentence and
+the original design intent agree with each other, and it is `_evidence()`'s own implementation
+that is incomplete relative to both.
+
+**Consequence.** `docs/CRITERIA_PLAN.md` §12.35 is reverted from a same-day DONE marking to OPEN
+(see its own entry for the full correction) — the CLI-level `--context-policy` wiring round EE
+task 1 landed is real, correct, independently re-verified progress and is not reverted by this
+ruling, but it is a necessary, not sufficient, piece of this criterion. **Not yet built:** a
+diff-rendering branch under `EVIDENCE_PLUS_PRIORS` in `workers/rewrite.py::_evidence`, plus the
+positive-control test SPEC's own sentence describes. A future round's research should size this
+properly rather than treat it as automatically one-shot: where the diff text would come from
+(the payload's own rejected-patch data, or a fresh git re-derivation), and whether the
+bias-avoidance design tension noted above needs its own resolution before the branch is written.

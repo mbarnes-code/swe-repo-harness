@@ -754,8 +754,9 @@ fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` a
 four.
 
 ## 35. No raw prior diff reaches a prompt
-**DONE (round EE, 2026-09-02) — worker level covered at both rungs; the CLI-level blocker (D50)
-is closed too.**
+**OPEN — reverted from a same-day DONE marking (round EE final review, 2026-09-02): SPEC's own
+positive-control sentence names a worker capability that does not exist, and cannot be closed by
+composing the work below.** See the correction after the "Done bar" paragraph for what remains.
 
 **Closed, round EE task 1 (2026-09-02, `1fb6be5`), the CLI-level proof.** `--context-policy`'s
 blanket refusal (`cli.py`'s old `_validate_transform_flags`) is gone — `_apply_context_policy_
@@ -822,10 +823,58 @@ diff text through this rung while the schema stands as it is. The test file's ow
 already says as much ("this represents what *would* leak if that boundary were ever crossed") —
 this entry should say so too, not claim more than the evidence supports.
 
-**Done bar:** met in full. Both worker-level rungs have a real per-line sweep in place (the
+**Done bar (as it stood before this correction — kept as history, not deleted):** met in full.
+Both worker-level rungs have a real per-line sweep in place (the
 `EVIDENCE_PLUS_REJECTED_APPROACHES` rung's is currently a tripwire rather than a live guard, per
 the schema constraint above — a disclosed, not-blocking residual), and the CLI-level proof is
 closed. Nothing remains open for §12.35.
+
+**Correction, final review, round EE (2026-09-02): the DONE marking above overclaimed — SPEC
+names a fourth sub-clause the "composition" argument never addressed, and the worker cannot
+satisfy it as written.** `docs/SPEC.md`'s literal text for this item ends: *"Flipping rung 3 to
+`EVIDENCE_PLUS_PRIORS` via `--context-policy 3=EVIDENCE_PLUS_PRIORS` makes the diff appear —
+which is the proof the assertion tests the ladder and not the fixture."* This is a POSITIVE
+control, not another diff-absence assertion: it exists specifically to prove the absence tests
+above aren't vacuously passing against a policy that could never render a diff regardless of
+what the worker does. The controller's DONE-flip reasoned entirely about diff-*absence* and never
+checked this sentence.
+
+**Verified directly against source, not inferred**: `workers/rewrite.py::_evidence` (~line
+554-596) treats `ContextPolicy.EVIDENCE_PLUS_PRIORS` identically to
+`EVIDENCE_PLUS_REJECTED_APPROACHES` — both add only `rejected_approaches` summaries
+(`approach_signature`/`reason`/`failure_class`/`attempt`), never a diff. The function's own
+docstring says so as a deliberate design choice: *"the previous proposal's diff is carried by no
+policy this worker implements, because re-showing a model its own rejected patch biases it toward
+tweaking an approach that is wrong at the approach level."* So flipping to `EVIDENCE_PLUS_PRIORS`
+at ANY rung cannot make a diff appear today, regardless of `--context-policy`'s wiring — the
+positive control SPEC names is not merely untested, it is **currently unimplementable**.
+
+**Not a SPEC-wording problem — a genuinely unbuilt capability, and the enum's own comment says
+so.** `ContextPolicy.EVIDENCE_PLUS_PRIORS`'s declaration (`src/fleet/models/enums.py:356`)
+carries the comment `# + raw prior diffs; opt-in, never default` — the intent that this policy
+specifically (unlike `EVIDENCE_PLUS_REJECTED_APPROACHES`) should render raw diff text has been
+documented at the enum since before this session, and `_evidence()` has simply never implemented
+that branch. Per this project's Rule 14, "building to match the criterion" is the only direction
+this project treats as legitimate closure — adjudicating the SPEC sentence away to match what's
+built is explicitly the wrong direction here, especially since the code's own rationale for NOT
+showing diffs (bias avoidance) is sound for `EVIDENCE_PLUS_REJECTED_APPROACHES` but doesn't
+actually argue against `EVIDENCE_PLUS_PRIORS` ever rendering one — that policy's whole documented
+point is the opposite tradeoff (raw diffs, opt-in, never default).
+
+**§12.35 stays OPEN. Remaining, not yet sized for dispatch**: implement a diff-rendering branch
+under `EVIDENCE_PLUS_PRIORS` specifically in `workers/rewrite.py::_evidence` (distinct from
+`EVIDENCE_PLUS_REJECTED_APPROACHES`'s existing summaries-only branch), then the positive-control
+test SPEC's own sentence describes. **The Rule-14 adjudication itself is recorded — ADR-0108**:
+building the capability, not correcting SPEC's wording, is the ruling; do not re-litigate that
+question when this is picked up, only its sizing. A future round's research should confirm: where
+the diff text would come from (payload's own rejected-patch data, or a git re-derivation), and
+whether this is a genuine one-shot or needs further design work given the bias-avoidance rationale
+already on record for the sibling policy. The CLI-level wiring closed by round EE task 1
+(`--context-policy` genuinely reaching the worker) is real, correct, independently re-verified
+progress and is NOT reverted by this correction — it is a necessary but not sufficient piece of
+this criterion's closure.
+**Done bar (current):** the EVIDENCE_PLUS_PRIORS diff-rendering capability above, plus its
+positive-control test, both still to build.
 
 ## 36. Anchoring detected mechanically
 **OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
@@ -1230,11 +1279,11 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 25 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round EE, by scanning every `^\*\*DONE` heading in this file and pairing each with its nearest preceding `## N.` heading — added §35 this round: the CLI-level `--context-policy` proof closed D50's block for real, see §35's own entry); §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 24 | 1, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round EE final review: §35 was marked DONE earlier this same round and reverted the same day — SPEC's own positive-control sentence names a worker capability, `EVIDENCE_PLUS_PRIORS` diff-rendering, that does not exist and cannot be closed by composing already-landed work; see §35's own entry for the full correction. Net count unchanged from round DD's 24, despite this round landing real, verified progress: D93 fixed and the CLI-level `--context-policy` wiring genuinely closed, neither of which flips a criterion by itself) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — now blocked on D92/D93/D94, corrected 2026-09-01 round Z, see §38's own entry — D80 is fully landed and no longer the blocker), 43 (partial) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 35 (D50's own block is genuinely closed now — the remaining blocker is a real, undispatched NEW-MECHANISM gap, `EVIDENCE_PLUS_PRIORS` diff-rendering in `workers/rewrite.py::_evidence`, found by round EE's final review; see §35's own entry), 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
