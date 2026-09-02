@@ -942,3 +942,37 @@ def test_a_contract_vendored_into_nine_repos_stays_one_row_across_a_second_scan(
         vendored_contract_fleet, "SELECT kind, key, repo_ids, severity FROM collisions"
     )
     assert collisions_after == collisions_before, "a re-scan changed the vendored collision row"
+
+
+def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
+    """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
+    `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
+    proved in isolation from the already-covered RHI trigger.
+
+    `DEGRADED` does not arise naturally from a Phase 1 scan (it is a transform/build-time
+    consequence of a stub, §3.5) — that mechanism is proved elsewhere — so this test writes the
+    phase row directly, the same technique `crash_the_phase` uses in `test_transform_e2e.py`, to
+    isolate the CLI's exit-code determination from how a repo comes to be `DEGRADED`. The re-scan
+    is real (not a stub of the CLI) so it exercises the actual `cli.py::scan` code path that
+    reads `phases` after the run and picks `ExitCode`.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+    before = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
+    assert "REQUIRES_HUMAN_INTERVENTION" not in before.values(), before
+    victim = sorted(before)[0]
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'DEGRADED' WHERE repo_id = ? AND phase = 1",
+            (victim,),
+        )
+    finally:
+        conn.close()
+
+    result = scan(fleet)
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION == 7, result.output
+
+    after = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 1"))
+    assert after[victim] == "DEGRADED", after
+    assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after

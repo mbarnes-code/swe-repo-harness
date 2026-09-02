@@ -367,6 +367,24 @@ class HumanInterventionError(FleetCliError):
     exit_code = ExitCode.REQUIRES_HUMAN_INTERVENTION
 
 
+def _needs_human_attention(statuses: Mapping[str, RepoStatus]) -> bool:
+    """§3.5.1 point 5 / D93: exit 7 whenever a repo is `REQUIRES_HUMAN_INTERVENTION` **or**
+    `DEGRADED` — a `DEGRADED` repo at end of run is reconciled, held as a draft PR, and exits 7
+    (`enums.py`'s `TERMINAL_STATUSES` comment), same numeric code as RHI since neither the SPEC
+    nor `ExitCode` gives it a separate one.
+
+    Deliberately a SEPARATE check from each site's own `attention` (RHI-only) generator rather
+    than widening `attention` itself: `attention` is read again downstream at every one of the 4
+    call sites for operator-facing `"failed"`/`"attention"` fields, and a `DEGRADED` repo is
+    RESOLVABLE (§3.5.1) — not the same as a terminal RHI failure — so folding it into `attention`
+    would mislabel a resolvable repo as one requiring human intervention in that output.
+    """
+    return any(
+        status in (RepoStatus.REQUIRES_HUMAN_INTERVENTION, RepoStatus.DEGRADED)
+        for status in statuses.values()
+    )
+
+
 class DiskExhaustedError(FleetCliError):
     """§10 exit 9: `budgets.max_disk_gb` / `preflight.min_free_bytes` breached after eviction."""
 
@@ -1866,7 +1884,11 @@ async def _scan_impl(
     exit_code = (
         halt
         if halt is not None
-        else (ExitCode.REQUIRES_HUMAN_INTERVENTION if attention else ExitCode.SUCCESS)
+        else (
+            ExitCode.REQUIRES_HUMAN_INTERVENTION
+            if _needs_human_attention(statuses)
+            else ExitCode.SUCCESS
+        )
     )
     return {
         "run_id": run_id,
@@ -5102,7 +5124,11 @@ async def _transform_impl(
     exit_code = (
         halt
         if halt is not None
-        else (ExitCode.REQUIRES_HUMAN_INTERVENTION if attention else ExitCode.SUCCESS)
+        else (
+            ExitCode.REQUIRES_HUMAN_INTERVENTION
+            if _needs_human_attention(statuses)
+            else ExitCode.SUCCESS
+        )
     )
     return {
         "run_id": run_id,
@@ -9028,7 +9054,11 @@ async def _build_impl(
     exit_code = (
         halt
         if halt is not None
-        else (ExitCode.REQUIRES_HUMAN_INTERVENTION if attention else ExitCode.SUCCESS)
+        else (
+            ExitCode.REQUIRES_HUMAN_INTERVENTION
+            if _needs_human_attention(statuses)
+            else ExitCode.SUCCESS
+        )
     )
     return {
         "run_id": run_id,
@@ -9244,7 +9274,11 @@ async def _verify_impl(
     exit_code = (
         halt
         if halt is not None
-        else (ExitCode.REQUIRES_HUMAN_INTERVENTION if attention else ExitCode.SUCCESS)
+        else (
+            ExitCode.REQUIRES_HUMAN_INTERVENTION
+            if _needs_human_attention(statuses)
+            else ExitCode.SUCCESS
+        )
     )
     return {
         "run_id": run_id,

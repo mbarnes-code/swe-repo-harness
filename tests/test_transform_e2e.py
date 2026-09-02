@@ -577,6 +577,41 @@ def test_a_failing_repo_does_not_stop_its_siblings_or_the_wave(fleet: Path) -> N
     assert len(commits_on_branch(fleet, "acme-app-ts")) == 3
 
 
+def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
+    """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
+    `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
+    proved in isolation from the already-covered RHI trigger (the test just above this one).
+
+    A real stub-consumer scenario is proven elsewhere; this test isolates the CLI's exit-code
+    determination by writing the `phases` row directly, the same technique `crash_the_phase`
+    (above) uses for a different interrupted-state scenario — so the fixture asserts what
+    `cli.py::transform` does with a `DEGRADED` phase-2 row, not how a repo comes to hold one.
+    """
+    write_rules(fleet)
+    scanned(fleet)
+    first = transform(fleet)
+    assert first.exit_code == ExitCode.SUCCESS, first.output
+    before = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert "REQUIRES_HUMAN_INTERVENTION" not in before.values(), before
+    victim = sorted(before)[0]
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'DEGRADED' WHERE repo_id = ? AND phase = 2",
+            (victim,),
+        )
+    finally:
+        conn.close()
+
+    result = transform(fleet)
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION == 7, result.output
+
+    after = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert after[victim] == "DEGRADED", after
+    assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after
+
+
 # ---------------------------------------------------------------------------------------
 # 3b. disk headroom that develops MID-WAVE (D96 phase-2 half, §11.3)
 # ---------------------------------------------------------------------------------------
