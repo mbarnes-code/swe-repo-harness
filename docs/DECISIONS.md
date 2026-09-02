@@ -12680,6 +12680,19 @@ reading with its own disclosed ADR. **Not yet built:** one real-`fleet-scan`-dri
 remaining `EdgeKind` against the real `edges` table (small, additive, TEST-ONLY per kind, following
 this round's `INTERNAL_IMPORT`/`PUBLISHED_ARTIFACT` tests as the template).
 
+> ***Correction (2026-09-02, round HH final review) — the "TEST-ONLY per kind" framing above does
+> not hold for 3 of the 5 remaining kinds; this is the demonstration, not an assumption.*** Round
+> HH proved 2 (`SHARED_RESOURCE`, `DYNAMIC_REF`) as genuinely TEST-ONLY, exactly as this ruling
+> predicted. The other 3 were dispatched the same way and did not close that way: `API_CONTRACT`'s
+> join is starved by a production extraction gap (no shipped extractor emits a non-definition API
+> symbol — `docs/CRITERIA_PLAN.md` §8's own entry), and `CONTRACT_IMPL`/`CONTRACT_CONSUME` have no
+> production write path at all (D97, `docs/INTEGRATION_HONESTY.md`) — a task dispatched as
+> TEST-ONLY came back BLOCKED, which is the proof. This ADR's central ruling — (b), leave SPEC's
+> text standing, do not narrow it to match what's proven — is unaffected and, if anything, better
+> supported: these are real, unbuilt production capabilities, the same shape as §12.35's own
+> diff-rendering gap this ADR explicitly contrasted itself against. Only the sizing claim was
+> wrong. See `docs/CRITERIA_PLAN.md` §8's own entry for the current, corrected per-kind state.
+
 ## ADR-0110 — §12.35 closes on a fixture-driven proof; production wiring for `prior_rejected_diffs` is a disclosed, separate residual
 
 **Context.** Round GG task 4 built the capability ADR-0108 ruled must exist: a new

@@ -197,8 +197,7 @@ def test_a_contract_cycle_is_dissolved_by_scan_then_sequence(cycle_fleet: Path) 
 @pytest.mark.xfail(
     strict=True,
     reason=(
-        "SPEC §12.8 residual, documented in "
-        ".superpowers/sdd/round-HH-criteria-closure/task-2-report.md: "
+        "SPEC §12.8 residual, documented as D97 in docs/INTEGRATION_HONESTY.md: "
         "graph/cycles.py::_materialize (called from break_cycles' 6c-H hoist) computes real "
         "CONTRACT_IMPL/CONTRACT_CONSUME DependencyEdge objects in memory for wave assignment, "
         "but cli.py::_sequence_impl never calls repository.insert_edges (or any other write) "

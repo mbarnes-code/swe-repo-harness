@@ -245,8 +245,7 @@ extractor in `src/fleet/workers/symbolindex.py` ever emits a non-definition `API
 symbol — `_proto_symbols` hard-codes `is_definition=True` on every `GRPC_SERVICE`/`PROTO_MESSAGE`
 it produces, and `HTTP_OPERATION` is never constructed anywhere in the file. `_api_contract_edges`
 (`infer.py:419-446`) requires exactly the symbol shape that never exists in real scan data — its
-join is structurally starved of input, independent of any fixture. `tests/test_workers_
-contracts.py:727-732`'s own docstring already documented this independently; task review confirmed
+join is structurally starved of input, independent of any fixture. `tests/test_workers_contracts.py:727-732`'s own docstring already documented this independently; task review confirmed
 the quote verbatim. **This is a production extraction-layer gap, not a fixture-design problem** —
 closing it needs a `symbolindex.py` change (real API-reference extraction, not just definitions),
 out of scope for a TEST-ONLY task. Not yet D-numbered; a future round should size it.

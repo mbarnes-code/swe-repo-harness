@@ -1401,7 +1401,18 @@ catch it" is unresolved either way; that is a narrower, separate gap from "is it
 is now yes.
 
 **D23 — OPEN. Retargeted edges are never persisted; both readers always see NULL.**
-`state/repository.insert_edges` (`repository.py:1752`) enumerates **fifteen** columns and
+
+> ***Forward reference (2026-09-02, round HH final review) — read before acting on this entry.***
+> D97 (below) found `insert_edges` has exactly ONE production call site anywhere in `src/`
+> (`_persist_scan_edges`, scan-time, before any contract can be hoisted) — so for
+> `CONTRACT_IMPL`/`CONTRACT_CONSUME` specifically, **no row is ever written at all**, not merely a
+> row missing this column. Fixing the fifteen-column list below would not, by itself, make a
+> round-trip test for those two kinds pass — `_sequence_impl` would still need a real write path
+> added first (D97's own "Not yet built"). D23's own retargeted-edge case may still be reachable
+> through `_persist_scan_edges`'s call site (not re-verified here); do not assume fixing D23's
+> column closes D97, or that D97's write path alone closes D23 — read both.
+
+`state/repository.insert_edges` (`repository.py:2368`) enumerates **fifteen** columns and
 `retargeted_from_repo_id` is not among them, though the column exists (`state/schema.sql:139`,
 added by `migrations/v002_node_kind.py`), the model carries it (`models/graph.py:172`) and
 `graph/cycles.py:736` computes it — *"preserving the original owner in
@@ -7770,8 +7781,8 @@ directly by SQL.
 has exactly ONE production call site anywhere in `src/`: `cli.py:2205`, inside
 `_persist_scan_edges` (`cli.py:2176`), itself reachable only from the scan path (`cli.py:1850`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
-(`cli.py:2196`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3028-3186`)
+(`cli.py:2195`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3028-3191`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -7780,7 +7791,7 @@ other write path (grepped in full by task review). A real run through `cycle_fle
 holding only the pre-existing `DECLARED_DEP`/`INTERNAL_IMPORT` rows from scan time — zero
 contract-kind rows, always, independent of fixture shape.
 
-**Not a duplicate of D23 — distinct and broader, cross-referenced here.** D23 (search `## D23 —`
+**Not a duplicate of D23 — distinct and broader, cross-referenced here.** D23 (search `**D23 —`
 above) diagnoses a 15-column `insert_edges` schema missing a `retargeted_from_repo_id` column,
 implying retargeted-edge rows ARE written today, just with the wrong shape. That premise does not
 hold for the mechanism this entry describes: since `insert_edges` has exactly one call site
