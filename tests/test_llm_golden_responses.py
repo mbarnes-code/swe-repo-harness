@@ -381,8 +381,9 @@ def test_a_pr_body_reply_missing_its_required_body_field_fails_schema_validation
         client_module._validate(reply, PrBody, StructuredOutputMode.TOOL_CALL)
 
 
-def test_the_unmutated_pr_body_fixture_still_validates_so_the_mutation_above_is_what_broke_it() \
-        -> None:
+def test_the_unmutated_pr_body_fixture_still_validates_so_the_mutation_above_is_what_broke_it() -> (
+    None
+):
     """Control half of the `PR_BODY` mutation pair: the identical fixture, unmutated, must still
     validate — proving the failure above is caused by the deleted `body` field, not by an
     unrelated defect in the fixture, the parse path, or `_validate` itself."""
