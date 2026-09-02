@@ -1347,7 +1347,7 @@ invoke it does not exist**. Every one of these has tests that pass. None of thos
 evidence, because the thing they exercise is not the thing that ships.
 
 **D20 — OPEN. Commits are not probe-gated in production; the ast-grep parse probe is wired only in
-tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:267`) constructs its `RewritePipeline`
+tests.** `RewriteWorker.pipeline_for` (`workers/rewrite.py:276`) constructs its `RewritePipeline`
 with `rules`, an `EngineRegistry`, `max_passes`, `params`, `tier` and `repo_id` — and **no
 `probe=`**. The only `probe=` in `src/` is `workers/rewrite.py:456`, an unrelated local in the
 repair-evidence renderer. Separately, `rewrite/apply.apply_patch` — the function whose docstring
@@ -2719,7 +2719,7 @@ is under a sixth agent's concurrent, uncommitted edit as this correction is writ
    describe the identical gap from opposite ends: D50 found the dead key; this correction found
    the live check it was supposed to feed.
 5. **Leg 3 (the evidence-domain half) — untouched, remains open.** `_record`
-   (`workers/rewrite.py:596-602`) still appends `unit` — the deterministic target name — to
+   (`workers/rewrite.py:616-622`) still appends `unit` — the deterministic target name — to
    `output.rewritten`, never `edit.path` from the landed patch. Nothing in `c5ab3b1` touches
    `_record` or its call sites (`:381`, `:453`). The original entry's description of this leg is
    unchanged and still accurate.
@@ -2743,7 +2743,7 @@ own catalog was never built on this key in the first place (`transform.max_patch
 never one of its 26/37 `KNOWN_INERT` entries) and needs no correction from this. **D49's status
 is therefore: legs 1–3 (as originally numbered) all closed in code and pinned by tests; leg 5
 above (`_record`, the evidence-domain half) is the only remaining open piece** — re-confirmed at
-this same `82654e8`: `_record` (`workers/rewrite.py:596-602`) still appends `unit`, not
+this same `82654e8`: `_record` (`workers/rewrite.py:616-622`) still appends `unit`, not
 `edit.path`. Not itself re-titled OPEN/CLOSED here, since the entry already carries two prior
 corrections layered on the original text per this file's convention; a future pass should read
 all three before citing this entry's status.
@@ -2762,7 +2762,7 @@ ever being reachable from a config file per point 1 above.
 > **[Dated note, 2026-09-01, round W research — heading moved to FIXED, LANDED, this is not a
 > new leg.]** Re-verified against `HEAD` independently of this entry's own prose: `9a7148c`
 > ("fix(D49): `_record` appends landed `FilePatch.path`, not the unit name") is an ancestor of
-> `HEAD`, `_record` (`workers/rewrite.py:584-602`) now appends `patch.path` at both call sites,
+> `HEAD`, `_record` (`workers/rewrite.py:614-634`) now appends `patch.path` at both call sites,
 > and the fix is pinned by a genuinely discriminating multi-file test
 > (`tests/test_workers_transform.py:918-957`,
 > `test_a_multi_file_repair_records_every_landed_path_not_just_the_unit`). This closes the
@@ -7585,7 +7585,7 @@ same fix wave; other `cli.py` writers noted as sharing the same "no fence bump" 
 (approximately lines 2094, 2123, 4533) were not individually confirmed as concretely reachable as
 the quarantine path and are not claimed here.
 
-## D96 — PARTLY ADDRESSED (phase-entry half FIXED, LANDED `71c3cd9`, round CC task 3; Phase-2 per-repo-worker half still OPEN). `fleet transform` has zero disk-headroom enforcement anywhere in its path — the phase most likely to consume disk at scale is the one phase left unguarded
+## D96 — FIXED, LANDED (phase-entry half `71c3cd9`, round CC task 3; Phase-2 per-repo-worker half `ebb83d3`, round DD task 2). `fleet transform` has zero disk-headroom enforcement anywhere in its path — the phase most likely to consume disk at scale is the one phase left unguarded
 
 **Found by round AA task 2 (2026-09-01), during a TEST-ONLY task closing a different §12.22
 sub-clause — disclosed, not fixed, out of that task's scope.** Verified free before writing:
@@ -7593,7 +7593,7 @@ highest allocated number was `D95`. Independently re-confirmed by the controller
 task review's word alone), against current `HEAD` — separately from task review's own trace,
 which itself went further than the implementer's original grep-only flag.
 
-**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13712`)
+**The gap, as measured, independently confirmed twice.** `_require_disk_headroom` (`cli.py:13725`)
 was called at exactly 4 sites as of when this defect was found (a 5th, `transform` itself, exists
 now — see the fix note below): `scan` (`:1016`), `build` (`:2656`), `verify` (`:2697`),
 `_continue_impl`/`fleet resume` (`:9468`). `transform`'s command body (`cli.py:3465-3538` as of

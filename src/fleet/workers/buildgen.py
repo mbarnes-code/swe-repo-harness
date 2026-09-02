@@ -301,6 +301,10 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
         output = BuildgenOutput()
 
         # -- step 1: ingest, under the single-writer mutex ------------------------------
+        # NOTE (D96, round DD): `_ingest` is itself disk-consuming (a real `git fetch`+`merge`)
+        # and runs BEFORE the `min_free_bytes` check below, unprotected. Currently dead in
+        # production — `cli.py`'s only `BuildgenInput` construction site always passes
+        # `ingest=None` — so this is a latent gap, not a reachable one, and not closed here.
         if payload.ingest is not None:
             if self._stopped(ctx):
                 return self._interrupted(ctx, output, completed, units)
