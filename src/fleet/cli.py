@@ -181,7 +181,7 @@ from fleet.orchestrator.scheduler import (
     WaveScheduler,
     ordering_descendants,
 )
-from fleet.orchestrator.stubs import ProviderFacts, StubDecision
+from fleet.orchestrator.stubs import HeldStub, ProviderFacts, StubDecision
 from fleet.orchestrator.stubs import apply as apply_stub_decision
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
 from fleet.rewrite.rules import (
@@ -9866,10 +9866,13 @@ async def _pr_records(conn: aiosqlite.Connection, run_id: str) -> dict[str, Pull
     return records
 
 
-async def _write_pr_record(
-    writer: StateWriter, run_id: str, draft: PullRequestDraft, *, now: datetime
+async def _upsert_pr_record(
+    conn: aiosqlite.Connection, run_id: str, draft: PullRequestDraft, *, now: datetime
 ) -> None:
-    """One upserted `PullRequest` row. The single writer (§11.5) is the only path to `MERGED`."""
+    """The write body of one upserted `PullRequest` row — factored out of `_write_pr_record` so a
+    caller that already holds an open write transaction (`_apply_stub_reconcile`, marking a
+    provider's PR `HELD`) can fold this write into its OWN transaction rather than opening a
+    second one via `writer.submit`, per this module's single-writer-per-transaction contract."""
     row = (
         run_id,
         draft.repo_id,
@@ -9879,20 +9882,27 @@ async def _write_pr_record(
         redact_text(draft.model_dump_json()),
         _iso(now),
     )
+    await conn.execute(
+        "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+        "                      created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+        "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+        row,
+    )
+    await conn.execute(
+        "UPDATE phases SET pr_url = ?, updated_at = ? "
+        " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+        (draft.url, _iso(now), run_id, draft.repo_id, int(Phase.VERIFY)),
+    )
+
+
+async def _write_pr_record(
+    writer: StateWriter, run_id: str, draft: PullRequestDraft, *, now: datetime
+) -> None:
+    """One upserted `PullRequest` row. The single writer (§11.5) is the only path to `MERGED`."""
 
     async def unit(conn: aiosqlite.Connection) -> None:
-        await conn.execute(
-            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
-            "                      created_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
-            "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
-            row,
-        )
-        await conn.execute(
-            "UPDATE phases SET pr_url = ?, updated_at = ? "
-            " WHERE run_id = ? AND repo_id = ? AND phase = ?",
-            (draft.url, _iso(now), run_id, draft.repo_id, int(Phase.VERIFY)),
-        )
+        await _upsert_pr_record(conn, run_id, draft, now=now)
 
     await writer.submit(unit)
 
@@ -11954,6 +11964,7 @@ async def _apply_stub_reconcile(
     run_id: str,
     records: Mapping[tuple[str, str], StubRecord],
     decisions: Sequence[StubDecision],
+    held_for_merge: Sequence[HeldStub] = (),
     *,
     now: datetime,
 ) -> None:
@@ -11961,7 +11972,16 @@ async def _apply_stub_reconcile(
     state — never re-derived here, per the module's own "the single writer persists" contract —
     and one `UnresolvedStub` finding is upserted per decision, keyed so a replayed sweep (a second
     `fleet resume` before the operator acts) cannot double-write it (§11.7's idempotency key,
-    `ux_findings_ident`)."""
+    `ux_findings_ident`).
+
+    `held_for_merge` (D92): each held row's provider PR is still `DRAFTED`/`OPEN` (`pr_open`) —
+    the fleet's own verdict that THIS run finished without resolving the stub and will never
+    promote it (`enums.py`'s `PrState.HELD` docstring). Deduped by `provider_repo_id` first — the
+    same provider can appear more than once (multiple consumers holding on one provider, or more
+    than one stub row naming the same provider), and re-upserting the same `HELD` payload twice in
+    one transaction would be harmless but wasteful. A provider absent from the run's PR records
+    (no draft ever written) has nothing to mark and is silently skipped — `HELD` is a state of an
+    existing draft, not a new one."""
     stamp = _iso(now)
     async with StateWriter(path, owner="fleet-resume") as writer:
 
@@ -12021,6 +12041,17 @@ async def _apply_stub_reconcile(
                         ),
                     )
 
+            held_providers = list(dict.fromkeys(h.provider_repo_id for h in held_for_merge))
+            if held_providers:
+                pr_records = await _pr_records(db, run_id)
+                for provider_repo_id in held_providers:
+                    draft = pr_records.get(provider_repo_id)
+                    if draft is None:
+                        continue  # no PR record for this provider — nothing to mark HELD
+                    await _upsert_pr_record(
+                        db, run_id, draft.model_copy(update={"state": PrState.HELD}), now=now
+                    )
+
         await writer.submit(unit)
 
 
@@ -12044,8 +12075,10 @@ async def _stub_reconcile_impl(
         now=now,
         open_pr_max_age_s=float(settings.config.pr.merge_wait_timeout_s),
     )
-    if not dry_run and outcome.decisions:
-        await _apply_stub_reconcile(path, run_id, records, outcome.decisions, now=now)
+    if not dry_run and (outcome.decisions or outcome.held_for_merge):
+        await _apply_stub_reconcile(
+            path, run_id, records, outcome.decisions, outcome.held_for_merge, now=now
+        )
     return {
         "abandoned": sorted(f"{d.consumer_repo_id}→{d.coord_key}" for d in outcome.decisions),
         "held_for_merge": sorted(

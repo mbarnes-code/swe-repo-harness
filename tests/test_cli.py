@@ -2705,6 +2705,11 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
     `orchestrator.stubs.reconcile()` called directly: a provider with a `DRAFTED` PR is a human
     mid-review, not a giveup, so the row is left open and reported under `held_for_merge` instead
     of abandoned — and no `UnresolvedStub` finding is written for it.
+
+    D92: the held provider's OWN `PullRequestDraft` must come back `PrState.HELD` after the sweep
+    — `enums.py` documents `HELD` as entered ONLY by `stub_reconcile`, and before this test's fix
+    nothing wrote it (the record stayed `DRAFTED` forever, even though the fleet had already
+    decided it would never promote it this run).
     """
     db = workspace / "state" / "fleet.db"
     _put_consumer_at_verify_degraded(db)
@@ -2731,10 +2736,19 @@ def test_resume_stub_reconcile_holds_a_stub_whose_provider_still_has_an_open_pr(
             "SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = 'UnresolvedStub'",
             (RUN_ID,),
         ).fetchone()[0]
+        pr_payload = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = 'acme-billing' "
+            "  AND kind = 'PullRequest'",
+            (RUN_ID,),
+        ).fetchone()[0]
     finally:
         conn.close()
     assert state == "ACTIVE", "held, not abandoned — the provider's PR is still open"
     assert finding == 0
+    assert json.loads(pr_payload)["state"] == "HELD", (
+        "D92: the held provider's own PR record must be re-persisted as PrState.HELD, the "
+        "fleet's own verdict that this run will never promote it"
+    )
 
 
 def _put_consumer_at_rhi(db: Path, repo: str = "acme-commons") -> None:
