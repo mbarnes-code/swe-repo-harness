@@ -374,6 +374,25 @@ confirmed genuinely NEW-MECHANISM by round II's own research (two unbounded extr
 extraction doesn't exist at all) — not D-numbered yet, held for a future dedicated round rather
 than sized further here.
 
+**Update, round V task 3 (`8f3ca97`, merged `c8c5f37`, task-scoped review Approved) — the
+gRPC/proto reference side of `API_CONTRACT` is now closed; `HTTP_OPERATION` is the sole remaining
+gap.** Research (round V) found a smaller slice than round II's sizing assumed: `_pattern_symbols`
+(`symbolindex.py`) is an existing generic, config-driven, cross-language regex→`SymbolKind`
+reference extractor already used for `SHARED_RESOURCE`/`DYNAMIC_REF`, and always emits
+`is_definition=False` — exactly the reference-side shape `API_CONTRACT` needed. Round V task 3
+extended it with a third pattern category (`scan.api_contract_patterns`, one language-agnostic
+regex matching gRPC's wire-level `/package.Service/Method` path literal — verified real in
+generated Python/TS/JS stubs, confirmed not to match Java's runtime-concatenated form) plus a real
+`fleet scan`-driven fixture-fleet test against the `edges` table (`tests/test_scan_e2e.py`), Rule-12
+mutation-proof reproduced independently by the task review (reverting the new call site reddens the
+positive test, discriminator test stays green). `API_CONTRACT` is now genuinely reachable
+end-to-end for the gRPC/proto case — **this was NOT a NEW-MECHANISM task after all**, contrary to
+round II's sizing; it was a pure extension of an existing generic mechanism. `HTTP_OPERATION`
+remains entirely unaddressed — no extractor exists for it at all, and (per round V task 3's own
+honest read) it likely IS genuinely NEW-MECHANISM, since there is no existing generic extractor to
+extend the way `_pattern_symbols` served this task. **§12.8 state: 7 of 8 `EdgeKind`s proven,
+`HTTP_OPERATION` the sole remaining gap.**
+
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
 `check_criteria()` is now wired into `_sequence_impl` (`fleet sequence`) via a new

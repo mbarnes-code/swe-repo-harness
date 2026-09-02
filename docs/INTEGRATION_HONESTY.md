@@ -7808,11 +7808,11 @@ standalone reproduction script (not a reuse of the implementer's own test code) 
 directly by SQL.
 
 **The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2368`)
-has exactly ONE production call site anywhere in `src/`: `cli.py:2205`, inside
-`_persist_scan_edges` (`cli.py:2176`), itself reachable only from the scan path (`cli.py:1850`).
+has exactly ONE production call site anywhere in `src/`: `cli.py:2208`, inside
+`_persist_scan_edges` (`cli.py:2179`), itself reachable only from the scan path (`cli.py:1852`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
-(`cli.py:2195`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3028-3191`)
+(`cli.py:2198`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3031-3194`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -7878,8 +7878,8 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:9529-9640`) returns early at `if not servable: return result`
-(`:9584-9585`) with `halted: None`, and `_raise_for_continuation` (`:9643-9653`) is a no-op when
+`_continue_impl` (`src/fleet/cli.py:9532-9643`) returns early at `if not servable: return result`
+(`:9587-9588`) with `halted: None`, and `_raise_for_continuation` (`:9646-9656`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
 `cli.py:1889`, `:5183`, `:9113`, `:9333`) lives exclusively inside `_scan_impl`/`_transform_impl`/
