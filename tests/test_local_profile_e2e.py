@@ -101,10 +101,20 @@ from tests.test_transform_e2e import (
 
 runner = CliRunner()
 
-#: `main` tip this task branched from (task 21 merged, piece 1). Read by
-#: `test_switching_profiles_requires_zero_src_edits` below — a `git diff --stat` against it over
-#: `src/` must be empty, since this whole task is test-only infrastructure over shipped code.
+#: `main` tip this task branched from (task 21 merged, piece 1). Paired with `_HEAD_SHA` below —
+#: `test_switching_profiles_requires_zero_src_edits` diffs this FIXED historical range, scoped to
+#: `src/`, and asserts it is empty, since this whole task is test-only infrastructure over shipped
+#: code.
 _BASE_SHA = "7b3235b30170940573b43967cbfc929f6f92db60"
+
+#: `main` tip immediately after task 22 (this file, §12.41 piece 2) merged — the merge commit
+#: `a701f48` (parents `_BASE_SHA` and the task's own single commit `1c65ae3`). Pinning the diff's
+#: SECOND endpoint here, rather than leaving it implicit (defaulting to the working tree / current
+#: `HEAD`), is the fix for a regression this task itself suffered: every unrelated commit landing
+#: to `src/` on `main` AFTER task 22 merged used to make the open-ended diff non-empty, even though
+#: task 22's own diff never touched `src/`. `_BASE_SHA..._HEAD_SHA` is a closed, immutable range —
+#: it can never gain or lose content as `main` moves forward, because both endpoints already exist.
+_HEAD_SHA = "a701f48f1b2f8e4ea62619b203eac04257a6cd1d"
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -361,18 +371,26 @@ def _assert_backend_is_openai_compatible(root: Path) -> None:
 def test_switching_profiles_requires_zero_src_edits() -> None:
     """This whole task (§12.41 piece 2) is test-only infrastructure over already-shipped
     production code (`--profile local` already existed, `openai_compatible.py` already existed,
-    `config/models.yaml`'s `local` profile already existed) — the `git diff --stat` against the
-    commit this task branched from, scoped to `src/`, must be empty."""
+    `config/models.yaml`'s `local` profile already existed) — the `git diff --stat` over `src/`,
+    scoped to the FIXED historical range `_BASE_SHA.._HEAD_SHA` this task's own commit landed in,
+    must be empty.
+
+    This is a claim about task 22's OWN diff, not a claim that `src/` never changes on `main`
+    again — so the range's second endpoint is pinned to the merge commit that landed this task,
+    not left to default to the working tree / current `HEAD`. An open-ended second endpoint would
+    make this assertion fail on every later, unrelated `src/` commit forever after — this is
+    exactly the regression round VI task 35 repaired (no §12 criterion moved; a full-suite health
+    check surfaced this test failing on unrelated `main` churn, not a real product defect)."""
     result = subprocess.run(  # noqa: S603
-        ["git", "diff", "--stat", _BASE_SHA, "--", "src/"],  # noqa: S607
+        ["git", "diff", "--stat", _BASE_SHA, _HEAD_SHA, "--", "src/"],  # noqa: S607
         cwd=_REPO_ROOT,
         capture_output=True,
         text=True,
         check=True,
     )
     assert result.stdout == "", (
-        "switching --profile from default to local is supposed to need ZERO src/ edits, but "
-        f"this branch's diff against {_BASE_SHA} (src/ only) is non-empty:\n{result.stdout}"
+        "task 22 (SPEC 12.41 piece 2) was supposed to be test-only infra needing ZERO src/ "
+        f"edits, but the diff {_BASE_SHA}..{_HEAD_SHA} (src/ only) is non-empty:\n{result.stdout}"
     )
 
 
