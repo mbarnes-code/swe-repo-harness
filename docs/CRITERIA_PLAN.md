@@ -1819,6 +1819,18 @@ genuine NEW-MECHANISM work, comparable in scope to D89 Phase 2 (multiple depende
 dedicated round), not a one-shot residual fix — deferred to a future round, same treatment §12.32
 already gives the identical fact. Do not re-run the "is this stale" investigation; it is settled.
 
+**Partial progress, 2026-09-03 (round VI task 19, commit merging `f4ba7a5`) — still OPEN, this is
+a disclosed sub-piece, not a closure.** The base ABC (`src/fleet/ecosystems/contracts/base.py`,
+ported faithfully from SPEC §7.6) and the registry mechanism (`register`/`discover`/`for_kind`/
+`reset_adapters`, mirroring `ecosystems/base.py`'s established pattern) now exist, plus the first
+of five adapters (`proto.py`, confirmed the right first pick: the only `ContractKind` with both a
+real identifier-extraction path and existing `contract_bindings` entries in all 5
+`EcosystemAdapter`s). `discover()` correctly raises today, naming the 4 still-missing kinds
+(`AVRO`, `OPENAPI`, `SHARED_LIB`, `THRIFT`) — this is expected and correct, not a defect. Still not
+built: the other 4 adapters, and wiring this registry into the actual BUILD-generation pipeline
+(`cli.py`/`bazel/generators.py`/`workers/contracts.py` are all untouched). §12.32/§12.47 both stay
+OPEN — neither's `discover()` assertion can pass until the full 5-adapter bijection lands.
+
 **Disclosed, not closed (pre-existing, unrelated to the above):** `assert_stateless` is
 structurally blind to `__slots__`-stored state (by the helper's own documented design,
 `src/fleet/workers/base.py:559-571` — a `__slots__` class has no `__dict__` for the check to
