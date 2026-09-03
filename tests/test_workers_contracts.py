@@ -637,13 +637,15 @@ def test_a_contract_no_repo_owns_is_not_invented_as_a_node(tmp_path: Path) -> No
     assert output.collisions == ()
 
 
-def test_an_avro_schema_is_reported_rather_than_guessed_at(tmp_path: Path) -> None:
-    """An `.avsc` under `idl_globs` lands in `unidentifiable_idl_paths`, not in `contracts`.
+def test_an_avro_schema_resolves_to_a_real_contract(tmp_path: Path) -> None:
+    """An `.avsc` under `idl_globs` now produces a real `AVRO` contract, not an unidentifiable path.
 
-    §3.1 5b keys `AVRO` on the schema's `namespace`, and no persisted row carries it: step 4 has
-    no `.avsc` parser and 5b may not open the file. Guessing an identifier would merge two
-    unrelated schemas into one node — so the fact is reported as data (Rule 11) and the operator
-    can act on it, instead of the fleet quietly behaving as though the schema were not there.
+    §3.1 5b keys `AVRO` on the schema's bare `namespace` field (not `namespace.name`) and step 4
+    now parses it (`symbolindex._avro_symbols`), so `_index_symbols` has a real `SymbolKind.MODULE`
+    row to key `_identify` off. This replaces the old
+    `test_an_avro_schema_is_reported_rather_than_guessed_at`, whose premise (no `.avsc` parser
+    exists, so the file is reported in `unidentifiable_idl_paths` instead of guessed at) is exactly
+    what this fix retires.
     """
     output = _run(
         _payload(
@@ -651,8 +653,64 @@ def test_an_avro_schema_is_reported_rather_than_guessed_at(tmp_path: Path) -> No
             {"acme-events": {"schema/user.avsc": '{"namespace": "acme.events", "name": "User"}'}},
         )
     )
-    assert output.contracts == ()
-    assert output.unidentifiable_idl_paths == ("acme-events:schema/user.avsc",)
+    assert output.unidentifiable_idl_paths == ()
+    nodes = _by_id(output)
+    assert list(nodes) == ["avro:acme.events"]
+    node = nodes["avro:acme.events"]
+    assert (node.kind, node.identifier) == (ContractKind.AVRO, "acme.events")
+
+
+def test_an_avro_idl_namespace_annotation_resolves_to_a_real_contract(tmp_path: Path) -> None:
+    """`.avdl`'s `@namespace("...")` annotation is a different syntax path than `.avsc`'s JSON
+    field and must be independently proven — `_avro_symbols` dispatches on suffix."""
+    avdl = '@namespace("acme.mail") protocol Mail {\n  record Message { string body; }\n}\n'
+    output = _run(_payload(tmp_path, {"acme-mail": {"schema/mail.avdl": avdl}}))
+    nodes = _by_id(output)
+    assert list(nodes) == ["avro:acme.mail"]
+    assert nodes["avro:acme.mail"].identifier == "acme.mail"
+
+
+def test_a_thrift_namespace_prefers_the_star_slot_over_a_per_language_one(tmp_path: Path) -> None:
+    """§3.1 5b (i)'s THRIFT tie-break: the `*` (all-languages) slot wins even though a
+    lexicographically-earlier per-language slot is also present — proves PRECEDENCE, not just
+    that a `*` slot is readable at all."""
+    thrift = "namespace java com.acme.events\nnamespace * acme.events.thrift\n"
+    output = _run(_payload(tmp_path, {"acme-events": {"idl/events.thrift": thrift}}))
+    nodes = _by_id(output)
+    assert list(nodes) == ["thrift:acme.events.thrift"]
+    assert nodes["thrift:acme.events.thrift"].identifier == "acme.events.thrift"
+
+
+def test_a_thrift_namespace_with_no_star_slot_picks_the_lexicographically_first(
+    tmp_path: Path,
+) -> None:
+    """The actual discriminating case (Rule 12): with no `*` slot, two per-language scopes whose
+    VALUES differ. A fixture with only one slot cannot tell "pick by the ordering rule" apart from
+    "just pick whatever slot exists" — this one can, because `java` sorts before `py` and the two
+    slots carry different values."""
+    thrift = "namespace py acme.events.py\nnamespace java acme.events.java\n"
+    output = _run(_payload(tmp_path, {"acme-events": {"idl/events.thrift": thrift}}))
+    nodes = _by_id(output)
+    assert list(nodes) == ["thrift:acme.events.java"]
+    assert nodes["thrift:acme.events.java"].identifier == "acme.events.java"
+
+
+def test_an_idl_file_with_no_namespace_falls_back_to_unpackaged(tmp_path: Path) -> None:
+    """An `.avsc`/`.thrift` with no namespace declared falls into the existing
+    `_unpackaged.<repo_id>.<dir>` path unmodified — `_identify` itself was never touched by this
+    fix, so the shared fallback must keep working for AVRO/THRIFT exactly as it already does for
+    PROTO."""
+    output = _run(
+        _payload(
+            tmp_path,
+            {
+                "acme-a": {"schema/user.avsc": '{"type": "record", "name": "User"}'},
+                "acme-b": {"idl/events.thrift": "struct Ping {\n  1: string id\n}\n"},
+            },
+        )
+    )
+    ids = sorted(_by_id(output))
+    assert ids == ["avro:_unpackaged.acme-a.schema", "thrift:_unpackaged.acme-b.idl"]
 
 
 # =======================================================================================

@@ -80,6 +80,9 @@ LANGUAGES: Final[Mapping[str, str]] = {
     ".jsx": "javascript",
     ".mjs": "javascript",
     ".proto": "proto",
+    ".avsc": "avro",
+    ".avdl": "avro",
+    ".thrift": "thrift",
     ".yaml": "yaml",
     ".yml": "yaml",
     ".json": "json",
@@ -107,9 +110,10 @@ protocol itself uses, not a codegen convention), which is what makes a single re
 where a codegen-import regex would not be: `channel.unary_unary('/acme.billing.v1.Billing/
 Charge', ...)` in a Python `*_pb2_grpc.py` stub, and the same literal shape in generated-JS/TS
 (`grpc-js`) and Go stubs (a `_FullMethodName` constant). This scanner only indexes
-Python/TS/JS/JSON/YAML/proto files (`_units()`'s `LANGUAGES`) — Go and Java stubs are never scan
-units regardless, and the claim is not extended to Java: grpc-java builds the full method name at
-runtime via `generateFullMethodName(SERVICE_NAME, "Method")`, concatenating two literals rather
+Python/TS/JS/JSON/YAML/proto/avro/thrift files (`_units()`'s `LANGUAGES`) — Go and Java stubs are
+never scan units regardless, and the claim is not extended to Java: grpc-java builds the full
+method name at runtime via `generateFullMethodName(SERVICE_NAME, "Method")`, concatenating two
+literals rather
 than embedding the joined string, so this pattern would not match a Java stub even if `.java` were
 a scan unit. The captured group is exactly `package.Service` — the same FQN `_proto_symbols` emits
 for `GRPC_SERVICE`, so no reshaping is needed for `_api_contract_edges`'s fqn-equality join."""
@@ -136,6 +140,9 @@ _PROTO_PACKAGE = re.compile(r"^\s*package\s+([\w.]+)\s*;", re.MULTILINE)
 _PROTO_SERVICE = re.compile(r"^\s*service\s+(\w+)", re.MULTILINE)
 _PROTO_MESSAGE = re.compile(r"^\s*message\s+(\w+)", re.MULTILINE)
 _PROTO_IMPORT = re.compile(r"^\s*import\s+(?:public\s+|weak\s+)?\"([^\"]+)\"", re.MULTILINE)
+_AVSC_NAMESPACE = re.compile(r'"namespace"\s*:\s*"([^"]+)"')
+_AVDL_NAMESPACE = re.compile(r'@namespace\(\s*"([^"]+)"\s*\)')
+_THRIFT_NAMESPACE = re.compile(r"^\s*namespace\s+(\*|[A-Za-z]\w*)\s+([\w.]+)", re.MULTILINE)
 _YAML_ROOT_KEY = re.compile(r"^([A-Za-z_][\w.-]*)\s*:", re.MULTILINE)
 _JSON_ROOT_KEY = re.compile(r"^\s*\"([^\"]+)\"\s*:", re.MULTILINE)
 
@@ -407,6 +414,10 @@ def scan_file(
         symbols.extend(_ts_symbols(text, repo_id, rel, language))
     elif language == "proto":
         symbols.extend(_proto_symbols(text, repo_id, rel))
+    elif language == "avro":
+        symbols.extend(_avro_symbols(text, repo_id, rel, path.suffix.lower()))
+    elif language == "thrift":
+        symbols.extend(_thrift_symbols(text, repo_id, rel))
     elif language in ("yaml", "json"):
         symbols.extend(_document_root_keys(text, repo_id, rel, language))
 
@@ -564,6 +575,38 @@ def _proto_symbols(text: str, repo_id: str, rel: str) -> list[SymbolRef]:
             )
         )
     return out
+
+
+def _avro_symbols(text: str, repo_id: str, rel: str, suffix: str) -> list[SymbolRef]:
+    """§3.1 5b (i): AVRO's identifier is the schema's `namespace` field/annotation, alone — not
+    `namespace.name` — mirroring `.proto`'s identifier being the bare `package`."""
+    pattern = _AVSC_NAMESPACE if suffix == ".avsc" else _AVDL_NAMESPACE
+    match = pattern.search(text)
+    if not match:
+        return []
+    namespace = match.group(1)
+    return [
+        _symbol(
+            repo_id, namespace, SymbolKind.MODULE, rel,
+            _line_of(text, match.start()), "avro", True, exported=True,
+        )
+    ]
+
+
+def _thrift_symbols(text: str, repo_id: str, rel: str) -> list[SymbolRef]:
+    """§3.1 5b (i): THRIFT's identifier is the namespace directive — the `*` (all-languages) slot
+    if present, else the lexicographically first per-language slot's value."""
+    slots = {m.group(1): (m.group(2), m.start()) for m in _THRIFT_NAMESPACE.finditer(text)}
+    if not slots:
+        return []
+    scope = "*" if "*" in slots else min(slots)
+    value, start = slots[scope]
+    return [
+        _symbol(
+            repo_id, value, SymbolKind.MODULE, rel,
+            _line_of(text, start), "thrift", True, exported=True,
+        )
+    ]
 
 
 def _document_root_keys(text: str, repo_id: str, rel: str, language: str) -> list[SymbolRef]:
