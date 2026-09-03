@@ -3116,6 +3116,24 @@ shrunk by the 3 keys `1963ca9` wired) — doubly stale, not merely off-by-a-litt
 "16 of 37" going forward. Groups 2/3/5 are unaffected — no key named in those groups appears in
 the diff between this entry's third correction and `HEAD` for `tests/test_config_keys_are_read.py`.
 
+**One key genuinely wired, 2026-09-03 (round VI task 24, §12.22's startup-refusal sub-clause,
+`c73d023`/`84800a7`) — with a caught, disclosed instrument limitation, not a silent count
+change.** `budgets.max_host_rss_mb` now has a real caller: `cli.py::_load_settings` calls
+`settings.validate_memory_budget(host_total_mb=_read_host_mem_total_mb())` after every
+`FleetSettings.load()`, and the value genuinely affects behavior (exit 2 on breach, independently
+mutation-proven by task-scoped review). Per this file's own ratchet, that should mean the key
+leaves `KNOWN_INERT` — but attempting the removal and re-running
+`test_every_config_key_is_read` failed: `tests/test_config_keys_are_read.py`'s own `_inert_keys()`
+scan requires the bare key name to appear in `src/fleet/` outside `settings.py`, and the new call
+site reads the field only indirectly (through `validate_memory_budget`'s own internal
+`self.max_host_rss_mb` access) — the literal token never appears at the `cli.py` call site, so the
+scan cannot see this form of wiring. The key stays in `KNOWN_INERT`, annotated in place at its own
+line, not removed — no change to this entry's own counts (they describe a different measurement
+taken before this key's wiring, and re-deriving them here would risk exactly the kind of
+uncoordinated count drift this entry's own corrections already warn against). A future pass
+extending the scan to recognize a validator-method call as a read could close this key's
+`KNOWN_INERT` entry properly.
+
 ---
 
 **D51 — OPEN, narrowly. `workers/relocate.py` lands its patches through the exact same
