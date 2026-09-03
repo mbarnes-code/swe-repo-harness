@@ -1389,6 +1389,85 @@ async def test_edge_key_is_byte_stable_through_a_persisted_write_read_and_rebuil
     )
 
 
+async def test_a_second_conflicting_retargeted_from_repo_id_does_not_overwrite_the_first(
+    repo: SqliteStateRepository,
+    db_path: Path,
+) -> None:
+    """§12.23's guarantee, isolated from the real-CLI re-run fixture's own determinism.
+
+    `insert_edges`'s `ON CONFLICT ... DO UPDATE SET` clause deliberately excludes
+    `retargeted_from_repo_id` (`docs/INTEGRATION_HONESTY.md` D23) — the column is unchanged
+    across a re-run BY CONSTRUCTION, not merely by coincidence.
+    `tests/test_sequence_e2e.py::test_the_retargeted_edges_retargeted_from_repo_id_survives_a_second_scan_and_sequence`
+    proves the real `fleet scan && fleet sequence` re-run leaves the observable end state stable
+    — but over a fixture where `graph/cycles.py::_materialize` recomputes the BYTE-IDENTICAL
+    value on every pass (same git repos, same contract, same owner), so that test alone cannot
+    distinguish "protected by the exclusion clause" from "happened to recompute the same value
+    anyway". Measured directly, not assumed: mutating that clause to INCLUDE the column does
+    **not** turn the CLI e2e re-run test red, because nothing in that fixture ever computes a
+    DIFFERENT value on a second pass (`iter_edges` itself doesn't even select the column, which
+    is a separate, pre-existing gap noted here but out of this task's scope — `_query`-style raw
+    SQL is what the CLI e2e test and this one both use to read it back).
+
+    This test removes that confound directly: it upserts the SAME `(run_id, edge_key)` a second
+    time with a DIFFERENTLY-retargeted value — the case the exclusion clause exists to guard
+    against, whether or not today's `_materialize` happens to ever produce it on a real fleet —
+    and asserts the FIRST write's value survives untouched. This is what actually goes RED under
+    the "include the column" mutation, where the CLI e2e re-run test (confirmed by direct
+    measurement) does not.
+    """
+    key = edge_key_for(
+        src_kind=NodeKind.REPO, src_id=REPO, dst_kind=NodeKind.CONTRACT,
+        dst_ref="acme.identity.v1", kind=EdgeKind.CONTRACT_CONSUME,
+        evidence_path="src/gen/identity_binding.py", evidence_line=1,
+    )
+    first = EdgeRow(
+        edge_key=key, run_id=RUN, src_id=REPO, dst_coord_key="acme.identity.v1",
+        kind=EdgeKind.CONTRACT_CONSUME, base_confidence=0.8, confidence=0.8,
+        evidence_path="src/gen/identity_binding.py", evidence_line=1, detected_at=NOW.isoformat(),
+        dst_kind="CONTRACT", dst_id="acme.identity.v1", retargeted_from_repo_id="acme-identity",
+    )
+    assert await repo.insert_edges([first]) == 1
+
+    def _read_confidence_and_retargeted_from() -> tuple[float, object]:
+        conn = sqlite3.connect(db_path)
+        try:
+            row = conn.execute(
+                "SELECT confidence, retargeted_from_repo_id FROM edges "
+                "WHERE edge_key = ? AND run_id = ?",
+                (key, RUN),
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row is not None
+        return row
+
+    assert _read_confidence_and_retargeted_from() == (0.8, "acme-identity")
+
+    # A re-run whose recomputation differs — the real CLI e2e fixture cannot produce this (its
+    # `_materialize` recomputes the identical value on every pass), but a bug or a future design
+    # change to the retarget logic legitimately could — and this is exactly what the exclusion
+    # clause defends against, "by construction", regardless of whether `_materialize` stays
+    # deterministic.
+    second = replace(
+        first,
+        confidence=0.81,
+        detected_at=(NOW + timedelta(days=1)).isoformat(),
+        retargeted_from_repo_id="acme-reporting",
+    )
+    assert await repo.insert_edges([second]) == 1  # UPSERT: still one row, not a duplicate
+
+    confidence, retargeted_from = _read_confidence_and_retargeted_from()
+    assert confidence == pytest.approx(0.81), (
+        "confidence IS in the update set and must move — confirms the second write really hit "
+        "the ON CONFLICT branch rather than being silently skipped as a no-op duplicate"
+    )
+    assert retargeted_from == "acme-identity", (
+        "retargeted_from_repo_id must stay pinned to the FIRST write's value — the ON CONFLICT "
+        f"clause excludes it by construction (D23) — read back {retargeted_from!r}"
+    )
+
+
 async def test_iter_edges_streams_every_row_of_a_large_batch(
     repo: SqliteStateRepository,
 ) -> None:

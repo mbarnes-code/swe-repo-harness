@@ -293,6 +293,76 @@ def test_the_retargeted_contract_consume_edge_persists_its_pre_hoist_owner(
 
 
 # =======================================================================================
+# §12.23's last leg — the re-run idempotency proof D23's own fix guarantees "by construction"
+# =======================================================================================
+
+
+def test_the_retargeted_edges_retargeted_from_repo_id_survives_a_second_scan_and_sequence(
+    cycle_fleet: Path,
+) -> None:
+    """§12.23's last leg: re-run idempotency for `edges.retargeted_from_repo_id`, over the SAME
+    scenario `test_the_retargeted_contract_consume_edge_persists_its_pre_hoist_owner` above proves
+    on a SINGLE run.
+
+    That test proves the value is *written* correctly once — it never re-runs, so it cannot
+    distinguish "written correctly" from "written correctly and then silently clobbered by a
+    second run". D23's ledger entry and `docs/CRITERIA_PLAN.md` §12.23 both name that distinction
+    as the one remaining gap: the `ON CONFLICT ... DO UPDATE SET` clause in `insert_edges`
+    deliberately excludes `retargeted_from_repo_id`, which guarantees the column is unchanged
+    across a re-run BY CONSTRUCTION — but "by construction" is a claim about the code, not yet a
+    claim a re-running TEST has proven.
+
+    `fleet scan && fleet sequence` twice over the identical, unchanged `cycle_fleet` repos: the
+    second `scan` re-persists the original source-scanned edges (same `run_id` — reused per
+    `_scan_run_id` when `--run` is not passed), the second `sequence` re-applies the retarget via
+    `_persist_contract_edges` (its own docstring: "re-running `fleet sequence` for the same run
+    re-materializes and re-persists the identical rows rather than duplicating them") — and the
+    assertion is that the retargeted row's `retargeted_from_repo_id` reads back byte-identical
+    before and after.
+    """
+    first = _scan_then_sequence(cycle_fleet)
+    assert first["hoisted"] == [PROTO_ID], "the hoist itself must still succeed (unchanged)"
+
+    def _retargeted_from() -> object:
+        rows = _query(
+            cycle_fleet,
+            "SELECT confidence, retargeted_from_repo_id FROM edges "
+            "WHERE kind = 'CONTRACT_CONSUME' AND src_id = ? AND evidence_path = ? "
+            "ORDER BY confidence",
+            ("acme-billing", IDENTITY_BINDING),
+        )
+        assert len(rows) == 2, (
+            "acme-billing must still carry both the retargeted real-import row and the fresh "
+            f"infer_contract_edges CONSUME row: {rows}"
+        )
+        (retargeted_confidence, retargeted_from), _fresh = rows
+        assert retargeted_confidence == pytest.approx(
+            EDGE_BASE_CONFIDENCE[EdgeKind.INTERNAL_IMPORT]
+        )
+        return retargeted_from
+
+    before = _retargeted_from()
+    assert before == OWNER, (
+        f"sanity: the first run must persist the pre-hoist owner — read {before!r}"
+    )
+
+    # the re-run: SAME fixture, unchanged git repos, SAME run_id (`fleet scan` reuses the latest
+    # run per `_scan_run_id` when `--run` is not passed — verified directly against
+    # `cli.py::_scan_run_id`, not assumed).
+    second = _scan_then_sequence(cycle_fleet)
+    assert second["hoisted"] == [], (
+        "a pre-committed (HOISTED) contract must not be re-hoisted a second time — unchanged "
+        "from `test_an_already_hoisted_contract_is_not_re_ranked_by_a_second_sequence` above"
+    )
+
+    after = _retargeted_from()
+    assert after == before == OWNER, (
+        "edges.retargeted_from_repo_id must be byte-identical across a re-run of `fleet scan "
+        f"&& fleet sequence` (§12.23) — first run read {before!r}, second run read {after!r}"
+    )
+
+
+# =======================================================================================
 # the control
 # =======================================================================================
 
