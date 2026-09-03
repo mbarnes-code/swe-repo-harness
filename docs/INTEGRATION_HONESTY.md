@@ -8590,3 +8590,30 @@ without disclosure.
 **Not yet built:** resize-capable `cpu_pool`/`subprocess` primitives, the breach-count-based
 halving trigger, and the in-flight-work-safety design a live pool/semaphore shrink needs. That
 design choice is not made here.
+
+## D111 — OPEN. §12.31 "wrong contract hoist detected and rolled back" has no mechanism anywhere
+in `src/` — confirmed multi-leg, not one-shot
+
+**Found by research-22 (2026-09-03), sizing §12.31 for round VI dispatch.** Verified free before
+allocating: form-agnostic sweep found `D110` as the highest allocated number.
+
+**The gap, as measured.** `ContractStatus.FAILED` is declared but never assigned anywhere in
+`src/fleet/`. Zero `git revert` call sites exist in the entire codebase. `_hoist_contracts`
+(`src/fleet/graph/cycles.py:581`) is a pure in-memory trial simulation with no rollback branch.
+`--forbid-hoist` (`src/fleet/cli.py:2875`) is parsed only to be explicitly refused with exit 2 —
+stubbed, not wired.
+
+**Why this is not a one-shot task.** SPEC's own §3.1 6c-H design (`docs/SPEC.md:589-629`) requires
+at minimum four to five independently dispatchable, interacting legs: (A) not-shared detection +
+state-surgery rollback; (B) a new `git revert -m 1`/`Fleet-*`-trailer primitive (no precedent
+exists anywhere in `src/fleet/vcs/`); (C) broke-owner detection via a `FILE_PATH`-collision join
+and/or Phase 3 build-failure attribution; (D) the unhoist blast-set/phase-demotion/downstream-
+merge-refusal logic; (E) finishing the already-stubbed `--forbid-hoist` wiring. This is
+structurally the same shape as the D94/D104 stub-lifecycle chain — a coordinated multi-piece
+mechanism, not a single missing wiring call — and is deliberately NOT dispatched as a single round
+VI task for the same reason that chain was repeatedly, correctly deferred rather than forced.
+Full findings: `.superpowers/sdd/round-V-criteria-closure/research-22-report.md`.
+
+**Not yet built:** any of legs A–E above. No design choice among them is made here — a future
+round should build a dedicated multi-task closure plan (mirroring how D94/D104 and §12.37/§12.38
+are tracked) before dispatching the first leg.
