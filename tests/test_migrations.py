@@ -317,7 +317,7 @@ _ROWS: tuple[tuple[str, tuple[object, ...]], ...] = (
 
 #: Tables the CURRENT baseline declares that v6 never had. A fixture built by rewinding the
 #: baseline has to drop them, or the rung that CREATEs them finds them already there.
-_POST_V6_TABLES: Final = ("reservations",)
+_POST_V6_TABLES: Final = ("reservations", "file_blobs")
 
 
 def _STEPS_THROUGH(version: int) -> tuple[MigrationStep, ...]:
@@ -389,14 +389,14 @@ def _table_shape(path: Path, table: str) -> list[tuple[object, ...]]:
 def test_registry_is_strictly_ordered_contiguous_and_ends_at_the_baseline():
     """A glob-discovered ladder can silently reorder; a gap or a duplicate corrupts data.
 
-    §6 fixes the ladder as `1 → 2 … 8 → 9`, so the registry must be exactly that: strictly
+    §6 fixes the ladder as `1 → 2 … 9 → 10`, so the registry must be exactly that: strictly
     ascending, no duplicate VERSION, no gap, and ending on the version `schema.sql` installs.
     """
     versions = [step.version for step in STEPS]
     assert versions == sorted(versions), "steps are not in ascending order"
     assert len(set(versions)) == len(versions), "duplicate VERSION in the registry"
     assert versions == list(range(EARLIEST_MIGRATABLE_VERSION + 1, LATEST_VERSION + 1))
-    assert versions == [2, 3, 4, 5, 6, 7, 8, 9]
+    assert versions == [2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert len({step.module for step in STEPS}) == len(STEPS), "two steps share a module"
 
 

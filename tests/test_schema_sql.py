@@ -35,7 +35,7 @@ SCHEMA_SQL = SCHEMA_PATH.read_text(encoding="utf-8")
 
 # Hard-coded so that silently DROPping a table or an index fails here rather than at 3 a.m. on a
 # 250-repo run. Derived counts alone cannot catch a deletion: they move with the file.
-EXPECTED_TABLE_COUNT = 22
+EXPECTED_TABLE_COUNT = 23  # D114 (a): `file_blobs` (round VI task 42)
 EXPECTED_INDEX_COUNT = 34
 
 # The PRAGMAs that reset on every new handle. schema.sql runs ONCE, so setting them there would

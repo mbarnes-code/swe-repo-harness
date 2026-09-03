@@ -479,6 +479,74 @@ def test_the_declared_dependency_edge_points_from_dependent_to_dependency(fleet:
 
 
 # ---------------------------------------------------------------------------------------
+# D114 (a)+(b): the file_blobs capture and §12 criterion 9(d)'s wiring
+# ---------------------------------------------------------------------------------------
+
+
+def test_scan_captures_file_blobs_and_sequence_resolves_every_edges_evidence_path(
+    fleet: Path,
+) -> None:
+    """D114 (a): `fleet scan` persists `file_blobs` — a real per-repo `ls-tree` capture — and
+    D114 (b): `fleet sequence`'s Phase 1 exit condition genuinely resolves criterion (d)
+    (`graph/sequence.py::check_criterion_d`) against it, rather than falling back to
+    `cli.py::_phase1_exit_report`'s old always-`True` default.
+
+    This is the positive control for the discriminator test below: it proves the capture step
+    ran and produced real rows, and that a genuinely resolving `edges.evidence_path` still passes
+    `fleet sequence` once the vacuous default is gone.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+
+    file_blobs = {
+        (str(repo_id), str(path)): str(blob_sha)
+        for repo_id, path, blob_sha in query(
+            fleet, "SELECT repo_id, path, blob_sha FROM file_blobs"
+        )
+    }
+    assert ("acme-app-ts", "package.json") in file_blobs, "the manifest itself must be captured"
+    assert ("acme-lib-ts", "package.json") in file_blobs
+    assert ("acme-app-py", "pyproject.toml") in file_blobs
+    assert all(len(sha) == 40 for sha in file_blobs.values()), "a real git blob SHA, not a stub"
+    assert "acme-empty" not in {repo for repo, _ in file_blobs}, (
+        "an empty repo (no head_sha) cut no worktree; capturing it would be a phantom entry"
+    )
+
+    result = sequence(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+
+def test_criterion_d_fails_a_real_sequence_when_an_edges_evidence_path_does_not_resolve(
+    fleet: Path,
+) -> None:
+    """Rule-12 discriminator for D114 (b). Under the OLD `evidence_exists` default (always
+    `True`, `graph/sequence.py::check_criteria`'s own fallback), `fleet sequence` exits 0
+    regardless of what `edges.evidence_path` says — the exact vacuous behavior D114 (b) closes.
+    `check_criterion_d` itself was already correct and already unit-tested
+    (`tests/test_graph_sequence.py`); this test's job is proving the CALLER-SIDE WIRING is real:
+    a real edge whose `evidence_path` is corrupted to a path never tracked at `head_sha` must now
+    fail `fleet sequence` with exit 6 and name the specific edge — a case that would ALSO have
+    silently passed under the old default.
+    """
+    assert scan(fleet).exit_code == ExitCode.SUCCESS
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        changed = conn.execute(
+            "UPDATE edges SET evidence_path = 'nonexistent/ghost.json' "
+            "WHERE src_id = 'acme-app-ts' AND dst_id = 'acme-lib-ts'"
+        ).rowcount
+    finally:
+        conn.close()
+    assert changed == 1, "the fixture's declared-dependency edge must exist to mutate"
+
+    result = sequence(fleet)
+    assert result.exit_code == ExitCode.UNRESOLVED_FINDINGS == 6, result.output
+    assert "(d)" in result.output, result.output
+    assert "acme-app-ts" in result.output, result.output
+    assert "nonexistent/ghost.json" in result.output, result.output
+
+
+# ---------------------------------------------------------------------------------------
 # re-entry
 # ---------------------------------------------------------------------------------------
 

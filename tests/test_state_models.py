@@ -1,4 +1,4 @@
-"""Contract tests for the state layer (SPEC §5, `SCHEMA_VERSION = 9`).
+"""Contract tests for the state layer (SPEC §5, `SCHEMA_VERSION = 10`).
 
 CLAUDE.md Rule 9: every test here says *why* the logic matters. Each one guards a named bug —
 either a failure mode the SPEC exists to prevent, or a defect the adversarial review found in an
@@ -524,7 +524,7 @@ def test_the_checkpoint_survives_a_crash_safe_write_and_reload(
     reloaded = MigrationState.model_validate_json(path.read_text(encoding="utf-8"))
 
     assert reloaded == sample_state
-    assert reloaded.schema_version == SCHEMA_VERSION == 9
+    assert reloaded.schema_version == SCHEMA_VERSION == 10
     assert reloaded.repos["acme-commons"].phases[Phase.TRANSFORM].transient_retries == 2
     assert reloaded.repos["acme-billing"].blocked_by == ["acme-commons"]
     assert reloaded.repos["acme-portal"].stubbed_deps == [STUB_COORD]

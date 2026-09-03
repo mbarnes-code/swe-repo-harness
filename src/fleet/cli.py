@@ -1924,6 +1924,13 @@ async def _scan_impl(
                     evidence=evidence,
                     now=_now(),
                 )
+                file_blobs = await _capture_file_blobs(
+                    run_ctx,
+                    read_conn=read_conn,
+                    writer=writer,
+                    run_id=run_id,
+                    fleet=fleet,
+                )
                 contracts = await _extract_contracts(
                     run_ctx,
                     settings,
@@ -1933,6 +1940,7 @@ async def _scan_impl(
                     fleet=fleet,
                     skip=skip_contracts,
                     now=_now(),
+                    blob_shas=file_blobs,
                 )
                 statuses = await _scan_statuses(read_conn, run_id)
             finally:
@@ -2332,6 +2340,59 @@ async def _persist_scan_edges(
     return len(edges)
 
 
+async def _capture_file_blobs(
+    ctx: RunContext,
+    *,
+    read_conn: aiosqlite.Connection,
+    writer: StateWriter,
+    run_id: str,
+    fleet: Sequence[RepoEntry],
+) -> dict[tuple[str, str], str]:
+    """D114 (a): §3.1 step 1's `ls-tree` listing, captured once per repo and persisted to
+    `file_blobs` — the shared capture mechanism `check_criterion_d` (§9(d)) and
+    `ContractsInput.blob_shas` both expect but neither has ever been fed from real scan data.
+
+    Scoped to `fleet`, not a blind `SELECT * FROM repos`: `repos` accumulates rows across runs and
+    `--only` filters (`_seed_fleet` only upserts THIS run's fleet, never deletes another run's
+    rows), so a repo this run never cloned can still carry a stale `head_sha` from an earlier
+    run/config with no worktree cut for THIS run_id. Mirrors `_contract_repo_facts`'s identical
+    scoping (query all of `repos`, then only look up the fleet's own entries).
+
+    Returns the `(repo_id, path) -> blob_sha` mapping in memory too, so `_extract_contracts` can
+    feed the same data into `ContractsInput.blob_shas` without a second `ls-tree` pass.
+    """
+    head_shas = {
+        str(row[0]): (None if row[1] is None else str(row[1]))
+        for row in await _rows(read_conn, "SELECT repo_id, head_sha FROM repos")
+    }
+    mapping: dict[tuple[str, str], str] = {}
+    rows: list[tuple[str, str, str, str]] = []
+    for entry in sorted(fleet, key=lambda e: e.name):
+        head_sha = head_shas.get(entry.name)
+        if head_sha is None:
+            continue  # no worktree was ever cut for this repo (clone.py:519-522's EmptyRepo)
+        worktree = ctx.worktree(entry.name)
+        listing = await _git_output(worktree, ["ls-tree", "-r", "-z", head_sha])
+        for item in _nul_fields(listing):
+            header, _, path = item.partition("\t")
+            _, _, blob_sha = header.rpartition(" ")
+            rows.append((run_id, entry.name, path, blob_sha))
+            mapping[(entry.name, path)] = blob_sha
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        # DELETE-then-INSERT, exactly as `_contract_rows` does for `contracts` (§11.7): a re-run
+        # of this run_id's scan cannot duplicate rows against the `(run_id, repo_id, path)` PK.
+        await conn.execute("DELETE FROM file_blobs WHERE run_id = ?", (run_id,))
+        if rows:
+            await conn.executemany(
+                "INSERT INTO file_blobs (run_id, repo_id, path, blob_sha) VALUES (?, ?, ?, ?)",
+                rows,
+            )
+
+    await writer.submit(unit)
+    return mapping
+
+
 async def _extract_contracts(
     ctx: RunContext,
     settings: FleetSettings,
@@ -2342,6 +2403,7 @@ async def _extract_contracts(
     fleet: Sequence[RepoEntry],
     skip: bool,
     now: datetime,
+    blob_shas: Mapping[tuple[str, str], str] = {},
 ) -> int:
     """§3.1 step 5b: dispatch the `contracts` worker over the WHOLE run and persist its rows.
 
@@ -2360,6 +2422,7 @@ async def _extract_contracts(
     payload = ContractsInput(
         repos=await _contract_repo_facts(ctx, read_conn, fleet),
         symbols=await _contract_symbols(read_conn, run_id),
+        blob_shas={f"{repo}\x00{path}": sha for (repo, path), sha in blob_shas.items()},
         committed=await _committed_contracts(read_conn, run_id),
         config=settings.config.scan.contracts,
         ignore_globs=tuple(settings.config.scan.ignore_globs),
@@ -3021,13 +3084,20 @@ async def _phase1_exit_report(
     committed), and `config_skipped_repo_ids` from `config/repos.yaml` directly (§3.1 (c)'s
     config-`skip` exemption is a manifest fact, not a `findings` row).
 
-    `evidence_exists` is deliberately left at its default (always-True): (d)'s own docstring says
-    the real check is a join against "the `ls-tree` path/blob-SHA listing captured at preflight
-    ... rather than stat()ing 250 checkouts a second time", and nothing in `src/` persists that
-    listing yet — `graph/collisions.py`'s `FILE_PATH`/`DEST_PATH` detectors document the identical
-    gap (§12.27) and are unwired for exactly this reason. Building a stat()-based substitute here
-    would both contradict that documented design and duplicate a capture mechanism §12.27 already
-    scoped as its own future task. Disclosed, not hidden: (d) does not fail a real run today.
+    `evidence_exists` joins against `file_blobs` — D114 (a)'s `ls-tree` path/blob-SHA capture,
+    populated once per repo during `fleet scan` (`_capture_file_blobs`) — exactly as (d)'s own
+    docstring specifies: "the caller joins against the `ls-tree` listing preflight already
+    captured ... rather than stat()ing 250 checkouts a second time". `graph/collisions.py`'s
+    `FILE_PATH`/`DEST_PATH` detectors (§12.27) reuse the same table but remain unwired — a
+    separate, later task.
+
+    `known_paths` is keyed only on real `repos.repo_id`s. `edge.src_id` is a repo_id only when
+    `edge.src_kind is NodeKind.REPO` — a CONTRACT-sourced CONTRACT->CONTRACT edge is not forbidden
+    by `models/graph.py`'s `_node_shape` validator — but every edge-construction site in
+    `graph/infer.py` hardcodes `src_kind=NodeKind.REPO` today (confirmed by direct grep, round VI
+    task 42), so no currently-emitted edge can reach `evidence_exists` with a non-repo `src_id`.
+    If a future edge kind ever sets `src_kind=CONTRACT`, this lambda needs a companion check
+    (`repo not in known_repo_ids => True`) before that edge kind ships, not before.
     """
     statuses = await _scan_statuses(conn, run_id)
     repos_with_manifests = {
@@ -3082,6 +3152,12 @@ async def _phase1_exit_report(
             (run_id, int(Phase.SCAN)),
         )
     }
+    known_paths = frozenset(
+        (str(row[0]), str(row[1]))
+        for row in await _rows(
+            conn, "SELECT repo_id, path FROM file_blobs WHERE run_id = ?", (run_id,)
+        )
+    )
     base = check_criteria(
         report,
         wave_plan,
@@ -3093,6 +3169,7 @@ async def _phase1_exit_report(
         config_skipped_repo_ids=config_skipped_repo_ids,
         baseline_ok=baseline_ok,
         failure_classes=failure_classes,
+        evidence_exists=lambda repo, path: (repo, path) in known_paths,
     )
     # check_criteria() composes (a) over EVERY repo in `statuses` unconditionally. That is
     # unsatisfiable for a real fleet: a repo gated by `EmptyRepo`/`PreflightFailed`, or by
