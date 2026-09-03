@@ -7337,10 +7337,10 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2325-2393`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2326-2394`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:6846`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:6848`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7437,9 +7437,9 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:13100-13337`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-03, round VI, EIGHT separate times now as this round's own successive `cli.py` additions
-keep shifting it — this repointing follows task 29's `cli.py` diff. Correction to this
+(`cli.py:13102-13339`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-03, round VI, NINE separate times now as this round's own successive `cli.py` additions
+keep shifting it — this repointing follows task 31's `cli.py` diff. Correction to this
 paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
 functional exemption — `test_no_unpinned_anchored_citation_
 fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
@@ -7849,12 +7849,12 @@ standalone reproduction script (not a reuse of the implementer's own test code) 
 `fleet scan` → `fleet sequence` through a genuine hoist and querying the persisted `edges` table
 directly by SQL.
 
-**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2423`)
+**The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2424`)
 has exactly ONE production call site anywhere in `src/`: `cli.py:2232`, inside
 `_persist_scan_edges` (`cli.py:2268`), itself reachable only from the scan path (`cli.py:1876`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
 (`cli.py:2222`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3120-3288`)
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3121-3289`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -7920,7 +7920,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:9736-9849`) returns early at `if not servable: return result`
+`_continue_impl` (`src/fleet/cli.py:9738-9851`) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
