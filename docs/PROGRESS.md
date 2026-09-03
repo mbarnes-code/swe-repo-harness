@@ -8879,3 +8879,67 @@ should run a fresh backlog sweep, or take on one of the two standing larger effo
 directly against its full text before flipping it — the pattern this round itself demonstrated
 twice already (never carry forward an assumption from a prior audit or from the implementer's own
 report).
+
+**Round VI, tenth wave (2026-09-03) — §12 count: 30 of 48, up from 29. Two more criteria closed
+this wave (§12.19, §12.41), taking the round's total to three (with §12.25 from the ninth wave) —
+well past the single-criterion Rule 13 obligation the round opened under.**
+
+Task 18 (§12.19's `PullRequestDraft.scc_id` leg) landed with real production wiring plus a
+previously-undocumented deadlock-hazard fix (`ATOMIC_WAVE` doesn't suppress intra-SCC ordering
+edges — without a fix, every such SCC would permanently block itself in `fleet pr`). Its review
+gave elevated scrutiny, independently reproduced both discriminators, and went further, crafting
+an additional decoupling mutation to prove the test's scoping deviation (2-repo, not SPEC's
+literal 12-repo) didn't weaken the assertion. That deviation became **ADR-0114**, mirroring
+ADR-0104's established "per-property proof accepted in place of one combined fixture" precedent:
+the 2-repo `fleet pr` wiring proof plus the pre-existing, independent 12-repo graph-layer proof
+are adjudicated as jointly satisfying the clause, since the new wiring is confirmed N-generic (no
+branch depends on `len(scc.members)`). Merging surfaced this session's recurring
+`_reconcile_tasks_with_git` citation drift a 5th time — repointed and reverified. §12.19 flipped
+DONE.
+
+With the round's Rule 13 obligation more than satisfied, research (research-12) was dispatched to
+scope D94's next piece — the trigger logic that would use task 15's git primitive to promote an
+already-open PR — and gave an honest **NOT ready** verdict: nothing in production creates a
+`stubs` row for it to fire on, and D104 (REVALIDATE task execution) is itself open and unsized.
+A follow-up research pass (research-14) sized D104 anyway, at research-12's own recommendation,
+and found a THIRD stacked layer of missing production wiring: SPEC's own BUILD.bazel
+label-rewrite mechanism has zero implementation anywhere, so even a fully-built D104 could only
+ever fire on a hand-seeded fixture, never a real tree. Two fresh gaps allocated (D107, D108) and
+disclosed; **ruled not to dispatch D104** — three research passes in a row finding one layer
+deeper than tested-but-inert scaffolding is this session's own "diminishing returns" discipline
+signaling a pivot, not a reason to keep excavating the same chain.
+
+Pivoted, via a fresh backlog sweep (research-15): confirmed §12.36/§12.27/§12.43/§12.47's
+remaining kinds are all still genuinely blocked, and identified **§12.41** ("a local-only profile
+runs the whole pipeline") as TEST-ONLY over already-working production code with no hidden
+blocker — flagging a live scope ambiguity between SPEC's literal full six-phase chain and this
+file's own stale "Phase-1-3 slice" done-bar paraphrase for the dispatcher to resolve. **Ruling:**
+the literal full chain, matching how this exact pattern was resolved before (§4's LLM-role
+criterion). Split into two sequenced tasks: task 21 built a reusable real loopback OpenAI-compatible
+stub server plus a `socket`-level network-origin guard (its review went beyond the implementer's
+own proof and independently confirmed a genuine exception-safety property the implementer's test
+never exercised); task 22 drove the full six-phase chain against it, comparing live against a
+`default`-profile baseline built in the same test rather than a hardcoded snapshot. Task 22's own
+review was the round's most rigorous: it inserted a live probe and directly observed real HTTP
+traffic reach the stub server during the guarded run, reproduced by hand the exact
+`ProcessPoolExecutor`-forkserver false positive the implementer's workaround fixes (by disabling
+the workaround and watching the failure return), and traced both SQL-backed proof-point
+assertions' causal chains end to end to confirm they fail against the baseline for the *intended*
+reason rather than a coincidental crash. §12.41 flipped DONE at SPEC's literal scope. The
+loopback-guard false positive itself — a real, disclosed, non-blocking defect in shared test
+infrastructure (fails closed, not open) — was allocated as **D109**, not fixed.
+
+Along the way this wave: task 19's stale post-task-20 docstring (a LOW review finding, "four
+still-missing kinds" when only two remained) was fixed directly as controller housekeeping;
+§12.47's own entry was annotated twice more (task 19, task 20) as the contracts registry grew to
+3 of 5 adapters (`avro`/`thrift` confirmed still blocked on missing identification-layer parsing
+infrastructure, not merely undone).
+
+**Three criteria closed in one round (§12.25, §12.19, §12.41), each independently task-reviewed
+with every discriminating claim reproduced rather than trusted — none accepted on an implementer's
+or even a prior reviewer's word alone.** Research-16 (sizing §12.22's RSS-sampling sub-clause,
+research-15's own secondary fallback) is in flight as this checkpoint is written. What remains
+identified but explicitly not dispatched this round: D94's trigger logic and D104 (both correctly
+judged premature — see above), §12.47's `avro`/`thrift` adapters (blocked on a real
+identification-layer parser that doesn't exist yet), and D109 (a small, well-scoped fix to shared
+test infrastructure, deferred to whoever next needs it).
