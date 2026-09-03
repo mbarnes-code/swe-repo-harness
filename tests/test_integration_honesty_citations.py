@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 57 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 56 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -572,10 +572,6 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     #    site inside `_verify_impl` is `cli.py:9236`; `_run_verify_wave`'s own definition starts
     #    at `cli.py:8401`. Re-pinned rather than left to coincidentally resolve, matching D84's
     #    own standing "usage sites are reported, not repointed to resolve" convention above.
-    (
-        "_wave_snapshot",
-        "cli.py:8237-8239",
-    ),  # L6330 defined at [(7358, 7380), (7358, 7380)], cited 8237-8239
     (
         "WaveScheduler.breached",
         "scheduler.py:430-437",
