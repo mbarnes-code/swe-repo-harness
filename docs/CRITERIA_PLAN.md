@@ -1555,6 +1555,49 @@ stated text now passes — both the model-id/endpoint greps and the AST clause.*
 **Done bar:** met in full. Nothing remains open for §12.40.
 
 ## 41. Local-only profile runs the whole pipeline
+**DONE (round VI tasks 21+22, 2026-09-03).** The SPEC-vs-config drift that used to block this was
+already resolved (round W, ADR-0105) — see the retained account below. What remained (9 of 11
+sub-clauses unasserted, no test running any pipeline phase under a non-`default` profile) is now
+closed, at SPEC's literal full six-phase scope, not a narrower slice: a controller ruling
+explicitly resolved a live ambiguity between SPEC's literal `scan→sequence→transform→build→
+verify→pr` text and this file's own stale "Phase-1-through-Phase-3" done-bar paraphrase in favor
+of the literal text, matching how this project resolved the identical paraphrase-understates-SPEC
+pattern before (§4's LLM-role criterion).
+
+**Task 21 (merged) built the reusable piece**: `tests/fixtures/llm/stub_openai_server.py`, a real
+`ThreadingHTTPServer` on `127.0.0.1:<ephemeral port>` serving OpenAI-compatible chat-completions in
+the exact shape `openai_compatible.py`'s parser expects, plus `assert_loopback_only()` — a
+`socket.socket.connect` monkeypatch guard proving no outbound connection during a guarded run
+targets anything but loopback. Its own review went beyond the implementer's proof and independently
+confirmed a genuine exception-safety property (the guard's `try/finally` correctly restores even
+when an exception propagates through the guarded block).
+
+**Task 22 (merged) closed the criterion**: drives the full six-phase chain under `--profile local`
+against the stub server, compared live against a `default`-profile baseline built from the same
+fixture set in the same test (not a hardcoded snapshot). All three SPEC proof points
+(`CHEAP`→`PROMPTED` negotiation with valid results; `ANTHROPIC_API_KEY` absent throughout;
+`SELECT DISTINCT backend FROM llm_cache == {'openai_compatible'}`) proven as genuine
+discriminators — the review independently traced the causal chain end to end and confirmed each
+assertion fails against the baseline for the intended reason (the missing API key means those
+roles never complete and never write to `llm_cache`), not a coincidental crash. The mechanical
+"zero `src/` edits to switch profiles" clause is satisfied by construction (a config-only flag).
+
+**A real, disclosed defect surfaced and was worked around, not hidden**: the loopback guard has a
+false positive on `ProcessPoolExecutor`'s forkserver Unix-domain socket (allocated as D109, not
+fixed — fails closed, not open, so no safety property is weakened). Task 22 substituted a
+`ThreadPoolExecutor` for the guarded run's `cpu_pool` only, and its review independently verified
+this substitution does not make the safety proof vacuous — traced `cpu_pool`'s only consumer
+(`symbolindex.py`'s CPU-bound parsing, orthogonal to the LLM call path) and directly observed real
+HTTP requests still reach the stub server during the guarded run.
+
+Disclosed, non-blocking scope notes from the landed work: the `HEAVY`/`JSON_SCHEMA` response path
+is dead code on this happy-path fixture (no `HEAVY` role fires); `fleet pr` only opens PRs for
+wave-0 libraries in this fixture (doesn't affect the required baseline/local comparison, which is
+scoped at Phase 3's `SUCCEEDED` set, independent of the PR phase).
+
+---
+
+*Retained for history, no longer live: round W's original account of the SPEC-vs-config drift.*
 **OPEN — structural gap, no test at all — NEW-MECHANISM (test infra); the SPEC-vs-config drift
 that used to block this is resolved (round W, ADR-0105).** No test anywhere runs any pipeline
 phase under a non-`default` profile (9 of 11 sub-clauses unasserted) — this is now the ONLY
@@ -1563,9 +1606,6 @@ both capability fields `false`; `config/models.yaml` omits them, deliberately) w
 adjudicated as wording-precision, not a behavior gap — `merge_capabilities`'s dict-overlay makes
 an omitted key fall through to the backend's already-`false` declared floor, byte-identical
 either way. `docs/SPEC.md`'s sentence carries a dated marker; see ADR-0105.
-**Done bar:** run at least a Phase-1-through-Phase-3 slice of the fixture fleet under `--profile
-local` (or whatever the local-only profile is named) and assert every named sub-clause. This is
-genuine new test infrastructure (a runnable local-profile fixture fleet), not a one-shot task.
 
 ## 42. New backend costs one file + one registry line
 **DONE (round DD, 2026-09-02) — confirmed by the round's final whole-branch review; the "5 of 9"
@@ -1906,11 +1946,11 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 29 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 30 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 41, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§41 added** — round VI tasks 21+22 closed the local-only-profile criterion at SPEC's literal full six-phase scope (a controller ruling explicitly rejected this file's own stale "Phase-1-3 slice" done-bar paraphrase), both tasks independently task-reviewed with every discriminator reproduced — including the review that independently traced a `ProcessPoolExecutor` workaround and confirmed it did NOT make the loopback-guard safety proof vacuous — see §41's own entry for the full account. **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) |
-| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), 41 (all NEW-MECHANISM except 39; §41's own adjudication blocker cleared round W, ADR-0105 — see above), plus all others not listed in a row above — see individual entries (round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
+| OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), plus all others not listed in a row above — see individual entries (2026-09-03: `41` removed after round VI tasks 21+22 closed it, moved to the DONE row above. Round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
 this file used to count §12.40 as DONE only for its dominant clause (no model string outside
