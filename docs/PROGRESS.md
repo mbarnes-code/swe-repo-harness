@@ -9402,3 +9402,42 @@ repaired (a split sentence in this very file). Citation-drift gate run and kept 
 merge (7 real drifts repaired in one wave alone). A recurring subagent dormancy pattern (background
 a command, wait on a notification only the controller receives) hit repeatedly across multiple
 agents this wave, recovered every time via SendMessage, filed as product feedback.
+
+## Round VI, nineteenth wave (2026-09-03) — §12.9 closed in full. §12 count: 37 of 48, up from 36.
+A second full criterion closure in the same continuous stretch, following directly from §12.8's
+own honest sizing (research-27, deferred) and the decision to size the OTHER major shared blocker
+instead of re-probing the already-deprioritized D94/D104 chain.
+
+Dispatched research-28 to size the shared FILE_PATH/blob-SHA capture gap named — but never
+D-numbered or sized — by both §9(d)'s and §12.27's own `docs/CRITERIA_PLAN.md` entries. Found
+unusually well-prepared ground: three independent modules' docstrings (`workers/contracts.py`,
+`graph/sequence.py`, `graph/collisions.py`) all already describe the identical missing mechanism
+in near-identical language, and all three already have consumer code written against it —
+`check_criterion_d` is fully implemented and takes the capture as an injected callable,
+`collisions.py`'s FILE_PATH detector is fully implemented and simply never invoked with real data.
+Sized three separable pieces: (a) the capture mechanism, (b) wiring §9(d), (c) wiring §12.27's
+FILE_PATH leg — (a)+(b) close §9(d) alone, (c) is a larger, separate follow-on. Allocated `D114`
+(shared blocker, matching D111/D113's precedent), reconciled both criteria's entries.
+
+Task 42 built (a)+(b) and landed clean, no dormancy. Self-caught two real corrections to the
+brief's own literal design sketch — not just implemented it blind: the brief's bare `CREATE TABLE`
+omitted a required migration rung this codebase's own §6 policy demands (added
+`v010_file_blobs.py`, mirroring an existing precedent); the brief's literal capture-loop SQL would
+have crashed on stale `head_sha` from repos the run never cloned (scoped the query to the run's
+own fleet instead, mirroring an existing precedent for the identical hazard). Took an optional,
+explicitly-disclosed freebie (threading the same capture into `ContractsInput.blob_shas`, closing
+a small round-VI-task-29 gap at near-zero cost). Empirically traced — not assumed from the
+brief's own disclosure — that the criterion's other named open item (the MANUAL-SCC exemption
+shape) is provably unreachable on the live CLI path by construction, genuinely orthogonal to this
+closure.
+
+Reviewed APPROVED, zero blocking findings, every claim independently reproduced including a
+from-scratch re-trace of the MANUAL-SCC unreachability claim and independent confirmation that the
+citation drift this diff caused (a large `cli.py` insertion) was pure line-number hygiene, not a
+masked logic problem. Merged; repaired 8 drifted citations plus one pin that had drifted back into
+coincidental resolution (removed per the citation gate's own instruction, census count updated to
+match); confirming test pass (190/190 across the scan/migration/schema/model test files) run
+before committing the DONE flip.
+
+**Status: zero outstanding.** §12.27's FILE_PATH leg (`D114` piece (c)) is now genuinely
+dispatchable for the first time — its blocking piece (a) has landed. Natural next dispatch.
