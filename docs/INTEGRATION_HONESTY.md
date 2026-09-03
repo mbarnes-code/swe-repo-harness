@@ -8469,3 +8469,32 @@ effectively indefinite for as long as D104 stays open — the review grepped eve
 reference and confirmed no code path anywhere (dispatch loop, git-arbitration sweep) ever executes
 one. This is disclosed, not a silent accident: the CLI reports an `excluded_awaiting_revalidation`
 payload key on every `--repoll-prs` call naming exactly which rows are held back this way.
+
+## D109 — OPEN. `tests/fixtures/llm/stub_openai_server.py`'s `assert_loopback_only()` guard has a
+false positive on `ProcessPoolExecutor`'s forkserver control channel (a Unix-domain socket)
+
+**Found by round VI task 22 (2026-09-03), while driving the full pipeline under `--profile local`
+through this fixture (task 21).** Verified free before allocating: form-agnostic sweep found `D108`
+as the highest allocated number.
+
+**The gap, as measured.** `assert_loopback_only()`'s `socket.socket.connect` monkeypatch checks the
+connection target address as a `(host, port)` tuple. `ProcessPoolExecutor`'s forkserver control
+channel connects over a Unix-domain socket, whose address is a filesystem path string, not a
+`(host, port)` tuple — the guard's tuple-only check misidentifies this as an off-loopback attempt,
+producing a false positive (`REQUIRES_HUMAN_INTERVENTION`) on any code path that spins up a real
+`ProcessPoolExecutor` (e.g. `symbolindex.py`'s per-file CPU-bound parsing) while the guard is
+active. Task 22 reproduced this directly: disabling its own workaround reproduced the exact
+false-positive failure.
+
+**Consequence.** Not a safety hole — the guard fails CLOSED (over-cautious, blocking legitimate
+local IPC) rather than open (missing a real off-loopback call), so no defect class this fixture
+exists to catch is weakened. But it is a real ergonomics trap for any future caller of this shared
+fixture that needs a real `ProcessPoolExecutor` active while the guard is engaged: task 22 worked
+around it locally (substituting a `ThreadPoolExecutor` for the guarded run's `cpu_pool` only,
+independently confirmed by review to not weaken the safety proof — the LLM call path is orthogonal
+to `cpu_pool`), but did not fix the shared fixture, correctly out of that task's own scope.
+
+**Not yet built:** teaching `assert_loopback_only()` to recognize a Unix-domain socket address
+(a `str`, not a `(host, port)` tuple) as never off-loopback by construction — a small, well-scoped
+fix to the shared fixture, deferred to whoever next needs this guard active alongside a real
+process pool. That design choice is not made here.
