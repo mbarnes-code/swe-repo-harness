@@ -87,11 +87,12 @@ def _no_real_docker_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     """Task 27 (round VI B2): `HostMemorySampler` (`orchestrator/memory_guard.py`) ticks
     UNCONDITIONALLY as soon as any of `cli.py`'s four `_run_*_wave` composition roots start a
     wave -- independent of whether that wave ever dispatches a repo, which is the whole point of
-    the redesign (SPEC §12.22). Two of its seams default to `None` in production ("really read
+    the redesign (SPEC §12.22). Three of its seams default to `None` in production ("really read
     the host"), matching `BAZEL_RUNNER`/`FILTER_REPO_RUNNER`/`RESOLVER_RUNNER`/`GAZELLE_RUNNER`'s
     existing "real unless a test opts in to a fake" contract -- but unlike those four, which only
-    fire when a worker actually dispatches real work a test would already have to set up, both of
-    these reach the real host from ANY test that merely constructs a wave, admitted repos or not:
+    fire when a worker actually dispatches real work a test would already have to set up, all
+    three of these reach the real host from ANY test that merely constructs a wave, admitted
+    repos or not:
 
     * `cli.CONTAINER_STATS_RUNNER` -- a real `docker ps` invocation.
     * `cli.CGROUP_MEMORY_READER` -- a real read of THIS session's cgroup `memory.current`, which
@@ -101,12 +102,20 @@ def _no_real_docker_stats(monkeypatch: pytest.MonkeyPatch) -> None:
       halted with `HaltReason.HOST_MEMORY` the first time this was wired without an override --
       not because anything about those tests' own memory use, but because the SESSION they ran
       inside of does.
+    * `cli.RSS_READER` (task 29 / round VI): a real `resource.getrusage(RUSAGE_SELF).ru_maxrss`
+      read of THIS pytest process. Scoped to one process rather than a whole login session, but
+      `ru_maxrss` is a PEAK over that process's entire lifetime, not per-test -- across a long,
+      import-heavy `pytest tests/` session it is not a number this fixture can assume stays under
+      `budgets.max_rss_mb`'s 4096 MB default, and the whole point of patching the two seams above
+      was refusing to make that same kind of assumption about the host. Patched to the same
+      harmless-reading fake for the same reason, not because it was measured to breach.
 
-    Both patched here to fast, harmless-reading fakes by default, for every test that has
+    All three patched here to fast, harmless-reading fakes by default, for every test that has
     `fleet.cli` loaded, so the many e2e-flavored test files that build a real wave do not silently
     gain a new host-`docker`-daemon dependency or a spurious host-memory halt they never had
-    before this task. A test proving something ABOUT either seam can still `monkeypatch.setattr
-    (cli, "CONTAINER_STATS_RUNNER"/"CGROUP_MEMORY_READER", ...)` to opt back out.
+    before this task. A test proving something ABOUT any of the three seams can still
+    `monkeypatch.setattr(cli, "CONTAINER_STATS_RUNNER"/"CGROUP_MEMORY_READER"/"RSS_READER", ...)`
+    to opt back out.
 
     `sys.modules`-gated rather than a module-level `import fleet.cli`, per this file's own module
     docstring: `cli.py` pulls in `aiosqlite`/`structlog`/`typer`/`anthropic`, and the
@@ -140,8 +149,12 @@ def _no_real_docker_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     def _zero_process_tree_bytes() -> int:
         return 0
 
+    def _zero_own_rss_bytes() -> int:
+        return 0
+
     monkeypatch.setattr(cli, "CONTAINER_STATS_RUNNER", _zero_containers)
     monkeypatch.setattr(cli, "CGROUP_MEMORY_READER", _zero_process_tree_bytes)
+    monkeypatch.setattr(cli, "RSS_READER", _zero_own_rss_bytes)
 
 
 @pytest.fixture
