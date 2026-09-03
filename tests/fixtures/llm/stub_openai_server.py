@@ -226,11 +226,25 @@ def assert_loopback_only() -> Iterator[LoopbackGuard]:
     test using this guard around a call to the fixture's own `running_stub_server()` should see
     `blocked_attempts == []` — that is the CONTROL half of Rule 12's discipline: the guard must
     stay silent on legitimate traffic, not just fire on illegitimate traffic.
+
+    **D109 fix — Unix-domain sockets are never off-loopback.** `ProcessPoolExecutor`'s
+    `forkserver` start method opens a control channel over an `AF_UNIX` socket, whose `connect()`
+    target is a filesystem path **string** (verified directly: a throwaway script connecting a
+    real `AF_UNIX` socket and printing what `socket.socket.connect` receives shows a plain `str`,
+    e.g. `/tmp/pymp-.../listener-...`, never a `(host, port)` tuple). A Unix-domain socket cannot
+    cross a machine boundary by construction — its "address" is a local filesystem path or the
+    abstract namespace, not a network endpoint — so any `str` target is recognized as always safe
+    here, one additional address SHAPE alongside the existing `(host, port)` tuple case. This does
+    NOT touch the tuple branch below: a genuine off-loopback `AF_INET`/`AF_INET6` attempt (a tuple
+    whose `host` is not in `_LOOPBACK_HOSTS`) still raises exactly as before.
     """
     guard = LoopbackGuard()
     real_connect = _socket_connect()
 
     def guarded_connect(sock: object, address: object) -> object:
+        if isinstance(address, str):
+            # AF_UNIX: a filesystem-path (or abstract-namespace) target never leaves the machine.
+            return real_connect(sock, address)
         host = address[0] if isinstance(address, tuple) else address
         if host not in _LOOPBACK_HOSTS:
             guard.blocked_attempts.append((host, address))

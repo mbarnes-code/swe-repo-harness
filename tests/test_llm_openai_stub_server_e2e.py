@@ -23,6 +23,8 @@ the actual `scan → sequence → transform → build → verify → pr` chain u
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
 
 import pytest
 from pydantic import BaseModel
@@ -32,6 +34,7 @@ from fleet.llm.client import LadderModelClient, Message, StructuredOutputMode, T
 from fleet.models.enums import ModelTier
 from fleet.models.tasks import BackendTarget
 from tests.fixtures.llm.stub_openai_server import (
+    OffLoopbackConnectionAttempt,
     assert_loopback_only,
     running_stub_server,
 )
@@ -62,6 +65,13 @@ def _stub_target(base_url: str) -> BackendTarget:
             "price": "free",
         }
     )
+
+
+def _square(x: int) -> int:
+    """Module-level (picklable) worker for the `ProcessPoolExecutor` regression test below —
+    `forkserver` sends the callable to the worker process by pickling it, which a closure or
+    lambda cannot survive."""
+    return x * x
 
 
 def _chat_body(*, content: str, finish_reason: str = "stop") -> dict[str, object]:
@@ -181,3 +191,59 @@ def test_the_guard_is_scoped_to_its_own_context_manager() -> None:
     with assert_loopback_only():
         assert socket.socket.connect is not real_connect
     assert socket.socket.connect is real_connect
+
+
+# -------------------------------------------------------------------------------------------
+# 3. D109 regression — a Unix-domain socket (a real ProcessPoolExecutor's forkserver control
+#    channel) must never trip the loopback guard, while a genuine off-loopback AF_INET attempt
+#    still must.
+# -------------------------------------------------------------------------------------------
+
+
+def test_a_real_process_pool_executor_does_not_trip_the_loopback_guard() -> None:
+    """D109: `ProcessPoolExecutor`'s `forkserver` start method opens its control channel over an
+    `AF_UNIX` socket, whose `connect()` target is a filesystem-path `str`, not a `(host, port)`
+    tuple. Before the fix, `assert_loopback_only()`'s tuple-only check misidentified that path as
+    an off-loopback host and raised `OffLoopbackConnectionAttempt`, producing a false positive on
+    any code path using a real process pool while the guard was engaged (see
+    `docs/INTEGRATION_HONESTY.md` D109). `forkserver` is used explicitly here (rather than the
+    platform default, `fork` on Linux) because `fork` never opens this control channel at all and
+    so cannot reproduce the bug — verified by hand while diagnosing this defect: a `fork`-context
+    pool leaves `blocked_attempts == []` even against the PRE-fix guard, `forkserver` does not.
+
+    `guard.blocked_attempts == []` is the CONTROL half of Rule 12's discipline (same shape as
+    `test_the_stub_server_answers_a_real_prompted_call_through_the_real_client` above): the guard
+    must stay silent on this legitimate local IPC, not merely absent an off-loopback host.
+    """
+    ctx = multiprocessing.get_context("forkserver")
+    with (
+        assert_loopback_only() as guard,
+        ProcessPoolExecutor(max_workers=2, mp_context=ctx) as pool,
+    ):
+        results = list(pool.map(_square, [1, 2, 3, 4]))
+    assert results == [1, 4, 9, 16]
+    assert guard.blocked_attempts == []
+
+
+def test_the_loopback_guard_still_catches_a_genuine_violation_after_the_unix_socket_fix() -> None:
+    """D109's regression proof: teaching the guard about `AF_UNIX` (a `str` address) must not
+    weaken its `AF_INET`/`AF_INET6` (tuple address) check. Same deterministic TEST-NET-3 target
+    and same assertions as `test_the_loopback_guard_catches_a_genuine_off_loopback_attempt` above
+    (a real network socket, not the stub server, so it exercises the tuple branch directly rather
+    than through the SDK's retry logic). A short `settimeout` guards against a hang if a future
+    change to the guard ever lets this connection attempt reach the real network unblocked (a
+    TEST-NET-3 address is never routable, so an unguarded attempt would otherwise stall on the
+    connect() syscall rather than failing fast)."""
+    import socket
+
+    with assert_loopback_only() as guard:
+        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        s.settimeout(2.0)
+        try:
+            with pytest.raises(OffLoopbackConnectionAttempt):
+                s.connect(("10.255.255.1", 65535))
+        finally:
+            s.close()
+
+    assert len(guard.blocked_attempts) == 1
+    assert guard.blocked_attempts[0][0] == "10.255.255.1"
