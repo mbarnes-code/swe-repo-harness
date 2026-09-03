@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 57 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 56 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -674,14 +674,11 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     ),  # L7371 defined at [(490, 491), (1274, 1291)], cited 1259-1259 -- genuine drift: two
     #    defs exist (an abstract Protocol stub at 490-491, the real `SqliteStateRepository`
     #    implementation at 1274-1291); the citation falls between both, nearest the real impl.
-    (
-        "_TransformSink",
-        "cli.py:4537",
-    ),  # L7408 defined at [(4195, 4347), (4195, 4347)], cited 4537-4537 -- a deliberate
-    #    USAGE-site citation: the ledger's own prose names it as "`cli.py:4537`,
-    #    `_TransformSink`'s `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`" -- the
-    #    SQL statement `_TransformSink` triggers, well past the class's own AST span, not the
-    #    class definition itself. Same category as the `RETRY_TRANSIENT` entry above.
+    # `_TransformSink` (`cli.py:4537`) pin REMOVED 2026-09-03 (round VI, task-42 citation-drift
+    #    reconciliation): task 42's ~77-line cli.py insertion shifted the class's own AST span to
+    #    (4422, 4574), which now coincidentally contains line 4537 again -- the citation resolves
+    #    for real, per the gate's own instruction ("now resolves... delete this entry from pins").
+    #    Re-pin if a future edit drifts it back out of the class's span.
 )
 
 
