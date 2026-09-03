@@ -77,6 +77,7 @@ from tests.test_migrations import _v6_database
 runner = CliRunner()
 
 REPO_SRC = Path(__file__).resolve().parents[1] / "src" / "fleet"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -5568,6 +5569,36 @@ def test_memory_budget_lets_startup_proceed_when_neither_ceiling_is_breached(
     settings = _load_settings(GlobalOptions(config_path=config_path))
     assert settings.memory_commitment_mb() <= settings.config.budgets.max_host_rss_mb, (
         "the fixture must actually clear the ceiling for this to be a real control"
+    )
+
+
+def test_the_shipped_config_fleet_yaml_clears_its_own_memory_ceiling(tmp_path: Path) -> None:
+    """The gap a task-scoped review caught: no test in this suite loaded the REAL, checked-in
+    `config/fleet.yaml` through `_load_settings` before this refusal existed, so nothing noticed
+    that the shipped file's own docstring claim -- "an empty (all-defaults) file is a fully valid,
+    real starting point" -- went false the moment the refusal was wired in. §9's documented
+    defaults alone (`concurrency.docker: 4` x `verify.container_memory: 8g` +
+    `budgets.max_rss_mb: 4096` = 36864 MiB) exceed the documented `budgets.max_host_rss_mb`
+    (12288); the shipped file now overrides ONLY `max_host_rss_mb` (to 49152) to clear that, while
+    `src/fleet/settings.py`'s own default stays 12288 to match `docs/SPEC.md`'s §9 table -- the
+    documented default and the shipped starting point are allowed to differ, and this test is what
+    would catch either one drifting back out of sync.
+
+    A COPY of the shipped `config/`, not the live directory: `_load_settings` needs a writable
+    `state/` sibling for nothing here, but copying is what the sibling `test_backend_registry_gate`
+    convention already does for the real shipped config, and it means this test cannot be affected
+    by (or accidentally mutate) the repo's actual working tree.
+    """
+    from fleet.cli import GlobalOptions, _load_settings
+
+    config_dir = tmp_path / "config"
+    shutil.copytree(REPO_ROOT / "config", config_dir)
+
+    settings = _load_settings(GlobalOptions(config_path=config_dir / "fleet.yaml"))
+
+    assert settings.memory_commitment_mb() <= settings.config.budgets.max_host_rss_mb, (
+        "the shipped config/fleet.yaml must clear its own memory ceiling with no overrides "
+        "beyond what is actually checked into the repo"
     )
 
 
