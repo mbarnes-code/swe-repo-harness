@@ -2065,10 +2065,11 @@ and adjudicated, not silently guessed at. **This is not a "SPEC is stale" situat
 "stale/overbroad" fork this entry's prior text offered is rejected on the evidence** (see
 `.superpowers/sdd/round-V-criteria-closure/research-1-report.md`'s Part A if that workspace still
 exists, or ADR-0065 directly). **Done bar:** build `src/fleet/ecosystems/contracts/` for real —
-5 adapter files + base ABC + `discover()`/`for_kind()`, per SPEC §7.6's literal design. This is
-genuine NEW-MECHANISM work, comparable in scope to D89 Phase 2 (multiple dependent tasks, its own
-dedicated round), not a one-shot residual fix — deferred to a future round, same treatment §12.32
-already gives the identical fact. Do not re-run the "is this stale" investigation; it is settled.
+5 adapter files + base ABC + `discover()`/`for_kind()`, per SPEC §7.6's literal design. **Original
+framing ("comparable in scope to D89 Phase 2... deferred to a future round") is now stale — see
+the 2026-09-03 update below: base ABC + registry + 3 of 5 adapters have since landed, and the
+identification-layer blocker for the last 2 is now cleared.** Do not re-run the "is this stale"
+investigation; that question is settled.
 
 **Partial progress, 2026-09-03 (round VI task 19, commit merging `f4ba7a5`) — still OPEN, this is
 a disclosed sub-piece, not a closure.** The base ABC (`src/fleet/ecosystems/contracts/base.py`,
@@ -2084,12 +2085,20 @@ OPEN — neither's `discover()` assertion can pass until the full 5-adapter bije
 
 **Partial progress, 2026-09-03 (round VI task 20, commit merging `64999f0`) — still OPEN, still a
 disclosed sub-piece.** `openapi.py` and `shared_lib.py` landed — 3 of 5 adapters now shipped.
-`discover()` correctly raises today, naming the 2 still-missing kinds (`AVRO`, `THRIFT`) — both
-confirmed genuinely blocked, not merely undone: their file suffixes (`.avsc`/`.avdl`/`.thrift`)
-aren't even scan units today (`symbolindex.py`'s `LANGUAGES` table has no entries for them), so no
-`ContractNode` of either kind can exist by construction. A dedicated identification-layer sizing
-pass (a real parser to write, not a table edit) is needed before either adapter can be designed —
-tracked, not yet dispatched. §12.32/§12.47 both stay OPEN.
+`discover()` correctly raises today, naming the 2 still-missing kinds (`AVRO`, `THRIFT`). At the
+time this was written, both were genuinely blocked (their file suffixes weren't even scan units).
+
+**Blocker cleared, 2026-09-03 (round VI task 34, commit merging `d68a17a`) — the identification-
+layer gap this paragraph named is now closed.** `symbolindex.py`'s `LANGUAGES` table now maps
+`.avsc`/`.avdl`→`"avro"` and `.thrift`→`"thrift"`, with real `_avro_symbols`/`_thrift_symbols`
+extractors wired into `scan_file()`; `contracts.py`'s `SYMBOL_IDENTIFIED` generalized to include
+both. A real `ContractNode` of either kind CAN now exist. **This does not itself close §12.47** —
+task 34 deliberately did not build the `avro.py`/`thrift.py` `ContractAdapter` files (out of
+scope, per its own brief) — but the identification-layer prerequisite this paragraph flagged as
+"tracked, not yet dispatched" is done; the remaining piece is templated, mechanical adapter work
+against the existing `proto.py`/`openapi.py`/`shared_lib.py` shape, not new-parser work. §12.32/
+§12.47 both stay OPEN until the two adapter files land and `discover()`'s 5-kind bijection passes
+for real.
 
 **Disclosed, not closed (pre-existing, unrelated to the above):** `assert_stateless` is
 structurally blind to `__slots__`-stored state (by the helper's own documented design,
