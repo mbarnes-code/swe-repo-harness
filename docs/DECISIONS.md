@@ -13005,3 +13005,55 @@ independent and separately tracked.
 adjudication once a worker lands it — not before, per this project's own "building to match the
 criterion is not legitimate closure" rule (Rule 14). No `docs/CRITERIA_PLAN.md` edit is made in
 this commit.
+
+## ADR-0114 — §12.19's `PullRequestDraft.scc_id` leg: a 2-repo `fleet pr` proof accepted in place of the literal 12-repo fixture
+
+**Decision (2026-09-03, round VI controller, task 18 follow-up).** `docs/SPEC.md` §12 item 19's
+literal text (`:7449`) asks for a planted **12-repo** cycle to produce `break_strategy =
+ATOMIC_WAVE` with all 12 members sharing one `wave_index` and one `PullRequestDraft.scc_id`.
+`docs/CRITERIA_PLAN.md`'s own recorded done bar for this criterion, narrowed after round Q,
+explicitly named "the 12-node cycle case." Task 18 (this round) closed the `PullRequestDraft.scc_id`
+wiring — genuinely new production code in `cli.py`'s `_pr_candidates`/`_pr_impl`/`_emit_prs` chain
+— but its own dispatch brief scoped the test to a real 2-repo cycle (`plant_cycle()`,
+`tests/test_pr_e2e.py`) rather than a 12-repo one, a controller judgment call made at dispatch time
+that was not disclosed as a deliberate scope narrowing until the task's own review flagged the gap
+against §12.19's literal wording and `docs/CRITERIA_PLAN.md`'s recorded done bar. This ADR
+adjudicates that the combination already landed — a real 2-repo `fleet pr` proof of the wiring,
+plus the pre-existing, independent 12-repo proof of the underlying SCC computation
+(`tests/test_graph_cycles.py::test_a_12_repo_cycle_shares_one_scc_id_across_all_members`) — together
+satisfy §12.19's intent, in place of one combined 12-repo `fleet pr` fixture. The SPEC sentence and
+`docs/CRITERIA_PLAN.md`'s done bar both carry a dated marker to this effect rather than being
+silently reworded or silently marked DONE against the narrower proof.
+
+**Rationale.** The property §12.19's `PullRequestDraft.scc_id` clause actually checks is *every
+member of an ATOMIC_WAVE SCC ends up sharing one PR record*, at whatever N the SCC happens to be —
+not that the wiring was specifically exercised at N=12. Two independent facts, verified rather than
+assumed, jointly close the gap a single 12-repo `fleet pr` fixture would otherwise be needed to
+close: **(1)** the SCC-computation layer (`graph/cycles.py`'s `break_cycles`/`SccResolution`) is
+already proven at 12-repo scale, independently of `fleet pr`, by the pre-existing graph-layer test
+— a genuine 12-node ring reaches one `ATOMIC_WAVE` resolution with all 12 members intact, none
+silently dropped. **(2)** task 18's own review traced every changed line of the new `fleet pr`-layer
+wiring (`_atomic_wave_findings`, the `scc_by_repo`-keyed edge filter, the `_pr_impl` grouping loop,
+the `_emit_prs`/`_emit_one_pr` shared-record persistence loop) and confirmed none of it branches on
+`len(scc.members)` or otherwise special-cases a particular N — every operation is a plain
+set/dict/list operation over `scc.members` (grouping by `scc_id`, iterating `for member in
+scc.members` to persist N records, unioning per-member dependency sets) with the same shape at
+N=2 as at N=12. A 12-repo `fleet pr` fixture exercising this code would run the identical logic
+path the 2-repo fixture already runs, N times instead of twice, over an SCC-membership set already
+proven correct at N=12 by a separate, independent test — it would not catch a defect class the
+2-repo wiring proof plus the 12-repo graph-layer proof miss between them, since neither the wiring's
+correctness nor the SCC computation's correctness has any dependency on the other's N. Building a
+full 12-repo `scan`→`sequence`→`transform`→`build`→`verify`→`pr` fixture on top of that would be
+`CLAUDE.md` Rule 2 churn: substantial new fixture-engineering surface (twelve real cyclic-dependency
+repos driven through the whole pipeline) with no additional defect class caught over what the two
+existing proofs already establish jointly.
+
+**Residual, disclosed, not adjudicated away.** This ADR does not claim a 12-repo `fleet pr` run is
+equivalent in every respect to the 2-repo one — a genuinely N-specific defect (e.g. a
+performance/memory ceiling, or an ordering assumption that only manifests past some threshold)
+would not be caught by either existing proof. No such defect class has been identified in task 18's
+diff; if one is found later, it gets its own D-number and this adjudication does not shield it.
+
+**Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.19's entry and SPEC item 19's
+own sentence should carry a dated marker recording this substitution, in the same commit as any
+edit marking §12.19 DONE — per Rule 14, not before.

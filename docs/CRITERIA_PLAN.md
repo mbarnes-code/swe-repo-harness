@@ -679,21 +679,32 @@ regression-guard sweep test (AST-based, not a hand-maintained list) now asserts 
 bar — full literal text, not a partial reading.**
 
 ## 19. Cycles broken at the stated scale
-**OPEN — SCALE-FIXTURE, narrowed (round Q task 3 landed the scale fixtures; one leg remains).**
-*(Edited post-round-Q-final-review: this entry was untouched by round Q task 3 despite the task
-landing exactly the two fixtures the old done bar named — see round-Q final review finding I2.)*
-Round Q task 3 (`13818c1`) landed both scale cases the old done bar called for:
+**DONE (round VI task 18, 2026-09-03, `PullRequestDraft.scc_id` leg closed via ADR-0114
+adjudication).** Round Q task 3 (`13818c1`) landed both scale cases the old done bar called for:
 `test_a_12_repo_cycle_shares_one_scc_id_across_all_members` (12-node fixture, all members share
 one `scc_id`) and `test_a_41_repo_cycle_completes_without_hanging` (timeout-bounded, no-hang
-property). What remains open, and the reason `OPEN` is still the correct status rather than
-`DONE`: the landed 12-node test asserts shared `scc_id` via a `CycleFinding`, not via a built
-`PullRequestDraft` — the round's own task report explicitly scopes `PullRequestDraft.scc_id` out
-("out of this file's scope"), matching `docs/SPEC.md:7449`'s literal wording ("one
-`PullRequestDraft.scc_id`") rather than the looser "assert all 12 members share one `scc_id`"
-phrasing the round plan used to describe the task.
-**Done bar (narrowed to the one remaining leg):** a test asserting the shared `scc_id` specifically
-through a built `PullRequestDraft` for the 12-node cycle case, per `docs/SPEC.md:7449`'s literal
-wording. The 41-node no-hang property is closed and does not need re-doing.
+property). What remained open — the landed 12-node test asserted shared `scc_id` via a
+`CycleFinding`, not via a built `PullRequestDraft` — is now closed: task 18 wired real production
+code (`_atomic_wave_findings` reader, `_PrCandidate.scc`, intra-SCC-edge filtering, SCC grouping
+in `_pr_impl`, shared-PR emission/persistence in `_emit_prs`/`_emit_one_pr`) so ATOMIC_WAVE members
+ship one shared `PullRequestDraft` record, and closed a previously-undocumented deadlock hazard
+found during design (`ATOMIC_WAVE` doesn't suppress intra-SCC ordering edges, so wiring SCC
+grouping in without also filtering those edges would make every such SCC permanently block itself
+in `fleet pr`). Both properties (one-PR-per-SCC; the deadlock hazard is closed) independently
+mutation-proven and independently reproduced by task-scoped review.
+
+**Scope note, disclosed via ADR-0114, not silently absorbed:** the landed test
+(`test_an_atomic_wave_scc_ships_one_pr_shared_by_every_member`, `tests/test_pr_e2e.py`) proves the
+`fleet pr`-layer wiring at a real 2-repo cycle, not literally at the SPEC's stated 12-repo scale.
+The task's own review caught this gap against `docs/SPEC.md:7449`'s literal wording and this file's
+own prior done bar; ADR-0114 adjudicates that the 2-repo wiring proof, combined with the
+pre-existing independent 12-repo proof of the underlying SCC computation (this section's own
+`test_a_12_repo_cycle_shares_one_scc_id_across_all_members`), jointly satisfy the clause's intent —
+the new wiring is confirmed N-generic (no branch depends on `len(scc.members)`), so a full 12-repo
+`fleet pr` fixture would exercise the identical code path N times over an SCC set already proven
+correct at N=12, catching no defect class the two existing proofs miss between them. `docs/SPEC.md`
+item 19 carries the matching dated marker. The 41-node no-hang property remains closed,
+independently, from round Q.
 
 ## 20. Secrets never leak
 **DONE (round V, 2026-09-01) — per-column coverage listed in the 2026-08-31 round-Q-final-review
@@ -1886,7 +1897,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 28 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 29 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) |
