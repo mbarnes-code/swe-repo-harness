@@ -113,6 +113,23 @@ NOT_OVERRIDES: dict[str, str] = {
         "the base class never literally defines visit_Call for this checker's static resolver "
         "to find — a rename here disarms the AST walk silently, but not by this mechanism"
     ),
+    "test_repository_no_list_returns.py:_Visitor.visit_FunctionDef": (
+        "an ast.NodeVisitor dispatch hook, resolved by NodeVisitor.visit() via "
+        "getattr('visit_' + node type) at runtime rather than declared on the base class — same "
+        "shape as the Visitor.visit_Call entry above, so a rename here disarms the walk silently "
+        "without tripping this checker's static resolver"
+    ),
+    "test_repository_no_list_returns.py:_Visitor.visit_AsyncFunctionDef": (
+        "an ast.NodeVisitor dispatch hook, resolved by NodeVisitor.visit() via "
+        "getattr('visit_' + node type) at runtime rather than declared on the base class — same "
+        "shape as the Visitor.visit_Call entry above, so a rename here disarms the walk silently "
+        "without tripping this checker's static resolver"
+    ),
+    "test_repository_no_list_returns.py:_Visitor._check": (
+        "a fake's own helper, not an instrument whose base counterpart went away: the visitor's "
+        "private dispatch routine, invoked directly by its two visit_* methods rather than by "
+        "ast.NodeVisitor machinery, so ast.NodeVisitor is not expected to carry it"
+    ),
 }
 
 
