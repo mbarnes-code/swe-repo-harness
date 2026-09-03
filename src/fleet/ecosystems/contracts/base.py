@@ -7,12 +7,14 @@ keyed by `ContractKind` instead of by `{name, ecosystems}` — a contract node h
 so there is no second key to check the way `ecosystems/base.py` checks `name` in addition to
 `ecosystems`.
 
-**Round VI task 19 status (ADR-0065):** only `proto.py` is shipped. `discover()` therefore always
-raises today, correctly, naming the four still-missing kinds — this is expected until
-`openapi.py`/`avro.py`/`thrift.py`/`shared_lib.py` land (§12.32/§12.47 stay OPEN until then; see
-SPEC §7.6's "NOT YET IMPLEMENTED" marker). The registration mechanism itself (`register`/
-`for_kind`/`reset_adapters`) is fully usable and tested today against test-local fake adapters —
-only the package-wide `discover()` walk is blocked on the missing four.
+**Round VI task 20 status (ADR-0065):** `proto.py`/`openapi.py`/`shared_lib.py` are shipped;
+`avro.py`/`thrift.py` are not — both are genuinely blocked on missing identification-layer
+infrastructure (their file suffixes aren't scan units today), not merely undone. `discover()`
+therefore always raises today, correctly, naming the two still-missing kinds — this is expected
+until that identification-layer gap is closed and `avro.py`/`thrift.py` land (§12.32/§12.47 stay
+OPEN until then; see SPEC §7.6's "NOT YET IMPLEMENTED" marker). The registration mechanism itself
+(`register`/`for_kind`/`reset_adapters`) is fully usable and tested today against test-local fake
+adapters — only the package-wide `discover()` walk is blocked on the missing two.
 """
 
 from __future__ import annotations
