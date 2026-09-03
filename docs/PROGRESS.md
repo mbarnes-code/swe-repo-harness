@@ -9342,3 +9342,15 @@ wave touched) before proceeding with the DONE flip; queued as this wave's next d
 
 **Status: 1 outstanding** — the `test_ecosystems.py` fixture-ordering bug, queued for dispatch now
 that §12.47's closure is committed.
+
+Task 41 fixed it: root cause empirically confirmed via `pytest --setup-show` (fixture setup order
+`monkeypatch → _no_real_docker_stats → registry`; LIFO teardown runs `registry`'s unconditional
+`discover(force=True)` before `monkeypatch`'s own revert, so the decoy test's patched `Ecosystem`
+enum is still active — a genuine, not spurious, `RuntimeError`). Fixed with one `monkeypatch.undo()`
+call at the end of the decoy test's own body. Reviewed APPROVED, zero findings, independently
+reproduced (its own `--setup-show` run, 3× clean full-file passes). Merged (`tests/test_ecosystems.py`
+162/162 combined with the citation gate on merged `main`).
+
+**Status: zero outstanding.** §12 count holds at 36/48 (this task doesn't move a criterion —
+disclosed regression repair). Round VI continues; next dispatch targets the remaining 12 open
+criteria per the standing loop.
