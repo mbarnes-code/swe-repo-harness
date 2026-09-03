@@ -201,6 +201,7 @@ def _payload(
     committed: Sequence[ContractNode] = (),
     commit_counts: Mapping[str, int] | None = None,
     publishes: Mapping[str, bool] | None = None,
+    blob_shas: Mapping[str, str] | None = None,
 ) -> ContractsInput:
     """`commit_counts` and `publishes` override ladder rungs (i) and (iii) PER REPO.
 
@@ -210,6 +211,12 @@ def _payload(
     construction and no fixture in this file could express a defect in either. The defaults below
     are the values that were hardcoded, so every fixture that does not ask for an override sees
     exactly the payload it saw before.
+
+    `blob_shas` feeds `ContractsInput.blob_shas` directly — real `fleet scan` never populates it
+    (no `ls-tree` capture exists at preflight, see `workers/contracts.py`'s module docstring), but
+    the field exists precisely to be fed a listing the moment one is available, and the discovery
+    code already honours it. A test supplying it here is exercising that documented input surface
+    directly, not fabricating capture infrastructure.
     """
     _write_fleet(root, repos)
     symbols: list[SymbolRef] = []
@@ -229,6 +236,7 @@ def _payload(
         ),
         symbols=tuple(symbols),
         committed=tuple(committed),
+        blob_shas=dict(blob_shas or {}),
         config=ContractsSection(),
         ignore_globs=scan["ignore"],
         vendor_globs=scan["vendor"],
