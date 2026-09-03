@@ -1400,7 +1400,7 @@ D22's claim either way. No test asserts the credential-mode refusal directly, so
 catch it" is unresolved either way; that is a narrower, separate gap from "is it enforced," which
 is now yes.
 
-**D23 — OPEN. Retargeted edges are never persisted; both readers always see NULL.**
+**D23 — FIXED, LANDED (round VI task 31, `d4cfc3e`/merge `31357cd`). Retargeted edges are never persisted; both readers always see NULL.**
 
 > ***Forward reference (2026-09-02, round HH final review) — read before acting on this entry.***
 > D97 (below) found `insert_edges` has exactly ONE production call site anywhere in `src/`
@@ -1435,6 +1435,32 @@ edge is simply gone, so an operator asking *"which repo did this edge originally
 `None` for every edge in every run. **Would a test catch it? Only a round-trip one** — insert an
 edge carrying the field, read it back, assert it survives. No such test exists, and a test that
 asserts on `EdgeRow` in memory passes.
+
+**FIXED, 2026-09-03 (round VI task 31, commit `d4cfc3e`, merge `31357cd`).** The brief this task
+was dispatched against assumed `EdgeRow` already carried `retargeted_from_repo_id` — investigation
+found that was false: that field belongs to `DependencyEdge` (`models/graph.py:141`), a
+structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:353`) had no such
+field at all. The real fix touched three things, not one: (1) added the field to `EdgeRow`
+itself, (2) added it to `insert_edges`'s SQL column list and params (now sixteen columns, not
+fifteen), (3) updated both production call sites (`_persist_scan_edges`, `_persist_contract_edges`
+in `cli.py`) to pass the already-computed `DependencyEdge.retargeted_from_repo_id` value through.
+Independently re-verified by task-scoped review, including the `EdgeRow`/`DependencyEdge`
+distinction itself (confirmed not a re-export or a confused correction) and column-ordering
+consistency (16 columns / 16 placeholders / 16 params, matching across the SQL, the params tuple,
+and both call sites). Mutation-proven twice — once by the implementer, independently reproduced by
+the reviewer with import-isolation pinned: reverting the column-list fix makes the new round-trip
+test read back `None` again; a companion non-retargeted-edge test stays green under the same
+mutation, proving the fix doesn't write a bogus value into every edge.
+
+The `ON CONFLICT ... DO UPDATE SET` clause deliberately still excludes this column — a disclosed
+judgment call, not an oversight — citing `docs/SPEC.md` §6's normative idempotency table text
+("DO UPDATE on confidence fields") verbatim. Review found an independently stronger justification
+the implementer didn't cite: §12 criterion 23's own literal text requires "every
+`edges.retargeted_from_repo_id` is unchanged" across an idempotent re-run, which excluding the
+column from the update clause guarantees by construction. This is a real, disclosed prerequisite
+for §12.23 (which named D23 as its specific blocker) and for §12.30 (whose own done bar silently
+depended on this same gap) — neither criterion's closure is claimed by this fix alone; both need
+their own follow-up verification against their full done bars.
 
 **D24 — OPEN. Every `test_targets()` is vacuous fleet-wide, and it is the producer, not the
 adapters.** `BuildUnit.test_srcs` and `BuildUnit.resources` (`models/build.py:53–54`) both default
