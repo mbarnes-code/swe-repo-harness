@@ -9147,3 +9147,35 @@ docs. What remains identified but not dispatched, unchanged: D94's trigger logic
 §12.47's `avro`/`thrift` adapters, §12.30 (D23's own blocker is now cleared, but the 6-repo cycle
 fixture itself was never built — a genuine follow-on, not yet sized as its own task), and the
 NEW-MECHANISM items already correctly excluded from this round's scope.
+
+## Round VI, fifteenth wave (2026-09-03) — §12.30 closed. §12 count: 35 of 48, up from 34. An EIGHTH criterion closed this round (§12.25, §12.19, §12.41, §12.22, §12.2, §12.29, §12.23, §12.30) — 27→35/48 in one round.
+
+The fourteenth wave's own closing note flagged §12.30 as a genuine follow-on now that D23's
+blocker was cleared — the round didn't stop there. A dedicated research pass (research-20) did
+not trust the design on paper: it built the proposed 6-repo hub-and-spoke fixture and ran it
+against real production graph-algorithm code (`break_cycles`, `condense_for_ordering`,
+`ordering_is_acyclic`, `assign_waves`) via a throwaway script before writing a single line of the
+worker brief, capturing every clause of the criterion's literal text as a real measured output.
+That pass also found a genuine subtlety no prior entry disclosed: a realistically scan-derived
+contract-cycle fixture structurally cannot reach `ATOMIC_WAVE` under `--no-hoist-contracts` — the
+confidence a real scan assigns a contract-carrier-evidenced edge sits below `_is_atomic`'s own
+`0.95` threshold by design, so the criterion's flip-back clause needed a hand-built unit-level
+fixture with deliberately chosen edge weights, not the real git/CLI e2e shape every other
+criterion this round used. Disclosing that shape choice explicitly — rather than defaulting to
+"e2e is always more real" — is what kept the task from silently building the wrong kind of proof.
+
+Task 33 built exactly that design and its review reproduced every one of the eight literal-text
+clauses independently, including the one easy to get subtly wrong: the flip-back control asserts
+full result equality between two genuinely different code paths (the flag-disabled call and the
+literal no-`contracts=` pre-ADR-0019 call), not merely that both happen to reach `ATOMIC_WAVE` —
+the equality is what proves "reproduces the pre-ADR-0019 outcome exactly" rather than a
+similar-looking one. Mutation-proven and independently reproduced with no findings.
+
+**Status: zero outstanding.** All eight of this round's criterion closures — §12.25, §12.19,
+§12.41, §12.22, §12.2, §12.29, §12.23, §12.30 — are independently task-reviewed (or, for the two
+ADR-only closes, directly measured and verified by the controller before committing) and
+reconciled with docs. What remains identified but not dispatched: D94's trigger logic and D104,
+§12.47's `avro`/`thrift` adapters (blocked on a real identification-layer parser that doesn't
+exist), and the NEW-MECHANISM items already correctly excluded from this round's scope (§12.31
+rollback path, §12.34 new-language adapter pair, §12.36 blocked on open D50, §12.8's
+`HTTP_OPERATION` leg, §12.11's real bazel/sandboxed combination).
