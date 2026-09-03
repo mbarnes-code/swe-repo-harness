@@ -881,13 +881,35 @@ pre-seeded halted ledger), verified by task review via a full call-chain trace a
 be a legitimate, organic exercise of the exit-3 path, not a synthetic shortcut.
 
 ## 25. The unknown repo survives the pipeline
-**OPEN — SCALE-FIXTURE.** The `no-manifest` finding and `misc/<repo_id>` destination are covered.
-`repos.kind == 'unknown'` conflates two different fields (`Ecosystem.UNKNOWN` vs. the classify
-worker's advisory `kind`) and no test exercises the real one. The unknown filegroup is never built
-under real bazel (audit row 25).
-**Done bar:** add an unknown-ecosystem repo to the real-bazel e2e fixture (currently 2 TS + 2
-Python only) and assert it builds; fix or split the `kind` conflation into two separately-named
-assertions.
+**DONE (round VI tasks 16+17, 2026-09-03).** Both done-bar items closed, independently
+task-reviewed, both reviews independently reproducing every claim rather than trusting the
+implementer's report.
+
+**Task A (real-bazel proof, task 16, merged).** A new isolated test
+(`test_the_unknown_ecosystem_filegroup_builds_under_a_real_bazel`, `tests/test_build_e2e.py`,
+using the existing `add_repos`/`real_build` helpers rather than perturbing the shared 4-repo
+`test_build_against_a_real_bazel`'s `FIXTURE_REPOS`-keyed parity assertion) proves the SPEC's
+literal checklist against real artifacts: `no-manifest` finding (`EcosystemAdapterUnavailable`),
+`dest='misc/<repo_id>'`, `wave_index=0`, a real `bazel build //...` succeeding for the scoped
+target, and a `migration_state.json` entry. 4 discriminating mutations run against real Bazel and
+reverted; the review independently reproduced the most safety-critical one (omitting `add_repos`)
+and confirmed a disclosed vacuous-pass risk (the ecosystem/dest assertions pass via a fallback
+when the repo is simply absent — only the no-manifest finding-presence assertion catches that
+case) is accurate. The review also independently confirmed 8 whole-file failures are
+pre-existing/environmental (a fresh-worktree Go/gazelle setup gap, reproduced identically on
+unmodified `main`), not a regression from this task.
+
+**Task B (`kind` conflation, task 17, merged).** Investigated both originally-suspected sites
+(`tests/test_scan_e2e.py:389`, `tests/test_workers_scan.py:1459`) and found neither actually
+conflated the two fields — both were already correctly scoped. The real gap: nothing combined
+`Ecosystem.UNKNOWN` (structural) and `repos.kind` (the classify worker's advisory field, ADR-0008)
+as two separately-named assertions against this criterion's own literal fixture scenario. One new
+test (`test_the_unknown_ecosystem_repo_and_its_advisory_kind_are_two_different_facts`,
+`tests/test_workers_scan.py`) closes that, with two independently mutation-discriminated
+assertions (breaking the classify distrust branch reddens only the advisory assertion; breaking
+the unknown-ecosystem constant reddens only the structural one). Rule 14 checked and found
+unneeded: the SPEC's own `kind='unknown'` wording is fine as descriptive prose — the two fields
+coincide on the pipeline's default path and nothing downstream branches on the advisory field.
 
 ## 26. Preflight gates rather than crashes
 **DONE (all five fixture categories landed, round O `1c8e0ef` + round P `659d4d5`).** SPEC.md
@@ -1864,7 +1886,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 27 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 28 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) |
