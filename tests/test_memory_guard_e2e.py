@@ -1,5 +1,9 @@
 """§12.22's runtime RSS-sampling sub-clause, piece B3 (round VI, task 28): the adversarial
-`getrusage`-defeating end-to-end proof, through the REAL `fleet` CLI.
+`getrusage`-defeating end-to-end proof, through the REAL `fleet` CLI. Extended by task 29 (round
+VI) with the mirror-image proof for the OTHER ceiling: `budgets.max_rss_mb`, the orchestrator's
+own RSS, which is genuinely read VIA `resource.getrusage` (see `memory_guard.py`'s module
+docstring for why that primitive is correct for this ceiling specifically, and wrong for the one
+this file's original tests below defend).
 
 Tasks 26 (`util/cgroup.py`, `sandbox/containerstats.py`, merged) and 27
 (`orchestrator/memory_guard.py`'s `HostMemorySampler`, wired into `cli.py`'s four
@@ -12,13 +16,13 @@ until this file drove it through a real `fleet scan` invocation and proved the O
     containers must fail this criterion, which is exactly what a `getrusage`-only
     implementation would pass"
 
-Every test below constructs the adversarial scenario entirely through task 26/27's own injected
-seams (`cli.CONTAINER_STATS_RUNNER`/`cli.CGROUP_MEMORY_READER`) -- per this task's hard
-environmental constraint, no real `docker` command is ever invoked and no real memory-hungry
-process is ever spawned. `tests/conftest.py`'s autouse `_no_real_docker_stats` fixture already
-patches both seams to safe zero-reading fakes for every test that loads `fleet.cli`; each test
-below explicitly re-patches them (its own documented escape hatch) to install the specific
-readings its scenario needs.
+Every test below constructs the adversarial scenario entirely through task 26/27/29's own injected
+seams (`cli.CONTAINER_STATS_RUNNER`/`cli.CGROUP_MEMORY_READER`/`cli.RSS_READER`) -- per this
+task's hard environmental constraint, no real `docker` command is ever invoked and no real
+memory-hungry process is ever spawned. `tests/conftest.py`'s autouse `_no_real_docker_stats`
+fixture already patches all three seams to safe zero-reading fakes for every test that loads
+`fleet.cli`; each test below explicitly re-patches whichever it needs (its own documented escape
+hatch) to install the specific readings its scenario needs.
 
 **Fixture scale.** SPEC's literal text calls for "indexing a synthetic 50 000-file repo." This
 file's fleet is ONE trivial one-file git repository -- see `docs/DECISIONS.md` ADR-0115 for the
@@ -224,7 +228,9 @@ def _getrusage_only_sampler(settings: FleetSettings, run_id: str) -> HostMemoryS
     return HostMemorySampler(
         run_id=run_id,
         max_host_rss_mb=settings.config.budgets.max_host_rss_mb,
+        max_rss_mb=settings.config.budgets.max_rss_mb,
         cgroup_reader=_getrusage_only_tree_bytes,
+        rss_reader=lambda: 0,  # this file's negative control is about the HOST leg only
         container_reader=_ZeroContainerReader(),  # type: ignore[arg-type]
     )
 
@@ -313,7 +319,12 @@ def test_low_readings_on_both_readers_complete_normally(
     """The control proving the halt in the primary adversarial test above is not "the run
     always halts regardless of the readings": the same fixture, the same seams, the same real
     `HostMemorySampler`/`resource_guard()` wiring -- with BOTH the process-tree cgroup reading
-    and the container total kept low -- completes normally (exit 0)."""
+    and the container total kept low -- completes normally (exit 0).
+
+    `cli.RSS_READER` is not overridden here -- `tests/conftest.py`'s autouse fixture already
+    patches it to a zero-reading fake, so this test also incidentally proves the `max_rss_mb`
+    leg (task 29) stays quiet when low, alongside `max_host_rss_mb`. The dedicated case for that
+    leg is `test_an_orchestrator_rss_breach_halts_the_run_with_exit_5` below."""
     from fleet import cli
 
     monkeypatch.setattr(cli, "CGROUP_MEMORY_READER", _low_cgroup_reader)
@@ -321,3 +332,47 @@ def test_low_readings_on_both_readers_complete_normally(
 
     result = scan(tiny_fleet)
     assert result.exit_code == ExitCode.SUCCESS, result.output
+
+
+# --------------------------------------------------------------------------------------
+# task 29 (round VI): the OTHER ceiling -- `budgets.max_rss_mb`, the orchestrator's own RSS,
+# genuinely enforced via `resource.getrusage` (the primitive §12.22 bans for the ceiling above,
+# and names as correct for this one -- see `memory_guard.py`'s module docstring)
+# --------------------------------------------------------------------------------------
+
+
+def _high_own_rss_bytes() -> int:
+    """Stands in for `cli.RSS_READER`: an orchestrator-own-RSS reading comfortably over
+    `budgets.max_rss_mb`'s 4096 MB default (5000 MB here), with the process-tree cgroup and
+    container readings held low by the same fixtures the tests above use -- isolating this
+    ceiling's breach from the other one's."""
+    return 5000 * 1024 * 1024
+
+
+def test_an_orchestrator_rss_breach_halts_the_run_with_exit_5(
+    tiny_fleet: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The end-to-end proof for `budgets.max_rss_mb` that task 28's own e2e tests never covered
+    (they only drove `max_host_rss_mb`, see this file's original module docstring). The
+    process-tree cgroup reading and the container total both stay low (`_low_cgroup_reader`,
+    `_NoContainersRunner` -- the same healthy readings the control above uses); only
+    `cli.RSS_READER` breaches. The real sampler this test drives through the ACTUAL `fleet` CLI
+    must halt the run exactly as it does for the other ceiling -- same `HaltReason.HOST_MEMORY`,
+    same exit 5, per task 29's brief (one halt reason/exit code for either ceiling)."""
+    from fleet import cli
+
+    monkeypatch.setattr(cli, "CGROUP_MEMORY_READER", _low_cgroup_reader)
+    monkeypatch.setattr(cli, "CONTAINER_STATS_RUNNER", _NoContainersRunner())
+    monkeypatch.setattr(cli, "RSS_READER", _high_own_rss_bytes)
+
+    result = scan(tiny_fleet)
+
+    assert ExitCode.MEMORY_EXHAUSTED == HOST_MEMORY_EXIT_CODE == 5
+    assert result.exit_code == ExitCode.MEMORY_EXHAUSTED, result.output
+    assert "HOST_MEMORY" in result.output
+
+    # Same pre-dispatch-refusal proof as the host-ceiling test above: the guard trips at the
+    # top of `_drive`'s loop, strictly before lease acquisition, so the PENDING row never moves.
+    assert query(
+        tiny_fleet, "SELECT status, attempts, lease_owner FROM phases WHERE phase = 1"
+    ) == [("PENDING", 0, None)]

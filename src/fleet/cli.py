@@ -159,7 +159,7 @@ from fleet.orchestrator.budgets import (
     new_cpu_pool,
 )
 from fleet.orchestrator.context import RunContext, default_logger
-from fleet.orchestrator.memory_guard import HostMemorySampler
+from fleet.orchestrator.memory_guard import HostMemorySampler, read_own_rss_bytes
 from fleet.orchestrator.reentry import (
     BlockerState,
     EvidenceRow,
@@ -1997,18 +1997,21 @@ async def _close_wave_projector(projector: Projector, ctx: RunContext) -> None:
 
 
 def _host_memory_sampler(settings: FleetSettings, run_id: str) -> HostMemorySampler:
-    """§12.22's runtime RSS-sampling sub-clause (task 27 / round VI B2): one `HostMemorySampler`
-    per wave, the SAME per-wave granularity `Projector` already uses at every one of the four
-    `_run_*_wave` composition roots below (see `memory_guard.py`'s module docstring for why that
-    granularity was chosen over a new run-lifetime object). Production callers take every default
-    except `run_id`/`max_host_rss_mb`/`container_reader` — real `cgroup` reader, §11.3's 30s
-    cadence, and `CONTAINER_STATS_RUNNER`'s own contract (`None` in production: really executes
-    `docker`)."""
+    """§12.22's runtime RSS-sampling sub-clause (task 27 / round VI B2, extended by task 29 to
+    cover BOTH ceilings): one `HostMemorySampler` per wave, the SAME per-wave granularity
+    `Projector` already uses at every one of the four `_run_*_wave` composition roots below (see
+    `memory_guard.py`'s module docstring for why that granularity was chosen over a new
+    run-lifetime object). Production callers take every default except
+    `run_id`/`max_host_rss_mb`/`max_rss_mb`/`container_reader`/`cgroup_reader`/`rss_reader` —
+    real `cgroup`/`getrusage` readers, §11.3's 30s cadence, and `CONTAINER_STATS_RUNNER`'s own
+    contract (`None` in production: really executes `docker`)."""
     return HostMemorySampler(
         run_id=run_id,
         max_host_rss_mb=settings.config.budgets.max_host_rss_mb,
+        max_rss_mb=settings.config.budgets.max_rss_mb,
         container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+        rss_reader=RSS_READER or read_own_rss_bytes,
     )
 
 
@@ -5449,6 +5452,22 @@ measured directly: `tests/test_cli.py::test_run_cost_exhausted_exits_3` and thre
 this way the first time this seam was wired without an override. `tests/conftest.py`'s autouse
 fixture patches this to a fake returning `0` by default for exactly this reason."""
 
+RSS_READER: Callable[[], int] | None = None
+"""The orchestrator's-own-peak-RSS seam for `HostMemorySampler` (§12.22's `budgets.max_rss_mb`
+leg, task 29 / round VI). Same contract as `CGROUP_MEMORY_READER` immediately above: `None` —
+production — really reads THIS process's `resource.getrusage(RUSAGE_SELF).ru_maxrss` via
+`memory_guard.read_own_rss_bytes`.
+
+Unlike `CGROUP_MEMORY_READER` (a whole LOGIN-SESSION-scoped reading shared by every process
+around it, measured at ~18.4 GiB before this task ever ran), `getrusage(RUSAGE_SELF)` is scoped
+to the calling process alone — but that process is the pytest process itself for every in-process
+`CliRunner` invocation this test suite uses, and `ru_maxrss` is a PEAK over that process's whole
+lifetime, not per-test: whatever a full `pytest tests/` session's cumulative peak RSS turns out to
+be, it is read here too. Patched to a fake for exactly the same "a test about something else must
+not spuriously halt on HOST_MEMORY" reason `CGROUP_MEMORY_READER` is — `tests/conftest.py`'s
+autouse fixture patches this to a fake returning `0` by default. A test proving something ABOUT
+this seam can `monkeypatch.setattr(cli, "RSS_READER", ...)` to opt back out."""
+
 GH_RUNNER: CommandRunner | None = None
 """The `gh` seam for §3.4 steps 4–5 — PR emission and PR STATE INGESTION. Same contract again.
 
@@ -8596,8 +8615,10 @@ async def _run_build_wave(
     sampler = HostMemorySampler(
         run_id=run_id,
         max_host_rss_mb=config.budgets.max_host_rss_mb,
+        max_rss_mb=config.budgets.max_rss_mb,
         container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+        rss_reader=RSS_READER or read_own_rss_bytes,
     )
     runner = PhaseRunner(
         ctx,
@@ -8685,8 +8706,10 @@ async def _run_verify_wave(
     sampler = HostMemorySampler(
         run_id=run_id,
         max_host_rss_mb=config.budgets.max_host_rss_mb,
+        max_rss_mb=config.budgets.max_rss_mb,
         container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+        rss_reader=RSS_READER or read_own_rss_bytes,
     )
     runner = PhaseRunner(
         ctx,
