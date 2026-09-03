@@ -464,16 +464,36 @@ violation and asserting the correct rejection (the probe-returns-False test plan
 violation and asserting the correct rejection.
 
 ## 11. Phase 3 exit condition — real bazel + sandboxed, together
-**OPEN — SCALE-FIXTURE.** Real bazel and the networkless sandbox are each proven, but never in the
-same run (audit row 11; already known, `INTEGRATION_HONESTY.md` addenda §29/§31-33, "the sandboxed
-path is still red", unretracted). Also: no test compares baseline vs. migrated test *counts*
-(`tests(//` has zero hits) — only the boolean went-to-zero case is caught, so 14→5 tests passes
-undetected.
-**Done bar:** one e2e run combining real bazel + the networkless sandbox, and one test asserting
-`migrated_test_count >= baseline_test_count` (not just non-zero).
-**Out of scope:** does not require re-litigating the existing "sandboxed path is still red" defect
-— that's tracked separately; this criterion needs the *combination* proven, which is a fixture
-composition, not a new bugfix.
+**OPEN — SCALE-FIXTURE, sized and split into two tasks (round VI, research-24, 2026-09-03).**
+"Sandboxed path is still red" (`INTEGRATION_HONESTY.md` §29/§31-33) means *never exercised
+successfully end to end*, not *cannot succeed* — §32's controlled matrix (ADR-0064) already proved,
+by direct measurement under real `docker run --network=none`, that a warm repository cache **plus**
+a matching `MODULE.bazel.lock` gets a real build to exit 0. No bugfix is a prerequisite. But two
+things have genuinely never been proven for real (only against `FakeBazel` today): real-Bazel lock
+capture-and-publish (`_publish_module_lock`), and a sandboxed build reusing that lock+cache. JVM
+fixtures are structurally excluded (L1: `maven.install` opens its own sockets, can never build
+offline under any warming strategy).
+**Done bar, split (do not attempt as one task):**
+- **Task A — test-count wiring (genuinely one-shot, no Docker/lockfile needed).** No
+  `tests(//dest/...)` query exists anywhere in `src/` today — only the boolean
+  `no_test_targets`/`tests_lost` check (`buildverify.py:646-652`), which misses shrinkage (14→5
+  passes undetected). Add `tests_query(dest)` to `src/fleet/bazel/query.py`, wire a real
+  `bazel query 'tests(//dest/...)' | wc -l` count + comparison + the `(repo, baseline, migrated)`
+  report SPEC's own sentence names, and prove the old-passes/new-fails discriminator against the
+  **existing unsandboxed** real-bazel e2e test (`test_build_against_a_real_bazel`/`real_build()`).
+  This is a small **production** addition, not "one test" — the prior phrasing here undersold it.
+- **Task B — the sandboxed combination fixture (a full task on its own).** Two coordinated
+  `fleet build` invocations: Phase A warms the repository cache + publishes a real lock
+  (unsandboxed, proving `_publish_module_lock` against real Bazel for the first time); Phase B
+  reuses that warm cache + published lock for a real sandboxed (`--network=none`) build of a
+  second, same-ecosystem repo, asserting against the container's own `attempts.exit_code` and
+  `docker_run_argv`'s `--network=none`, not just the harness's summary status. Reuses Task A's
+  `tests_query` inside the sandboxed run to fully satisfy SPEC's literal sentence — land Task B
+  second. Full design (exact preconditions, pitfalls, and the image-presence skipif pattern to
+  reuse) in `.superpowers/sdd/round-V-criteria-closure/research-24-report.md`.
+**Dispatch note:** Task B requires real `docker run` — this session found subagents can hang
+indefinitely on live Docker invocations specifically (not a FakeBazel/mocked path); dispatch with
+explicit mitigation or run under closer supervision, not as a routine unsupervised worker.
 
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
@@ -1153,12 +1173,32 @@ mutation-proven, independently reproduced by task review from scratch (matching
 `AssertionError`s, clean reverts) — commit `7427626`, merge of `agent/roundu-task2`.
 
 ## 34. New-language cost is exactly the documented touchpoints
-**OPEN — mechanism doesn't exist — NEW-MECHANISM.** `tests/fixtures/adapters/` doesn't exist; no
-fixture ecosystem has ever been added end-to-end. `ContractBindingUnavailable` and
-`unbound_contract_kinds` are declared and never exercised (audit row 34; consistent with ADR-0065).
-**Done bar:** add one genuinely new (fixture-only, not a real language) `EcosystemAdapter` +
-`ManifestAdapter` pair end to end, and assert the touchpoint count matches SPEC §1's documented
-four.
+**OPEN — split into two clauses of very different weight (round VI, research-23, 2026-09-03).**
+SPEC's literal text (`docs/SPEC.md:7466`) is two sentences joined by "and" — this file's earlier
+paraphrase covered only the first and omitted the `ContractBindingUnavailable` clause entirely.
+- **Clause A (the four documented touchpoints).** **Clause A IS one-shot-sized** — every mechanism
+  it needs already exists and was verified working live (a throwaway script, since deleted):
+  `register()`'s decorator bypass of `discover()`'s pkgutil scan needs no fixture module inside
+  `src/fleet/`, the enum-extension monkeypatch pattern is already landed precedent
+  (`test_ecosystems.py`), and the minimal adapter surface is small (3+5 abstract methods). No new
+  `src/` production code needed — genuinely test-only infrastructure, same shape as research-21's
+  AVRO/THRIFT gap. Dispatched as round VI task 39.
+- **Clause B (`ContractBindingUnavailable` finding + `BuildPlan.unbound_contract_kinds`).**
+  **NOT one-shot-sized.** `unbound_contract_kinds` is declared (`models/build.py`) and never
+  assigned in `src/`; `ContractBindingUnavailable` is never inserted as a finding anywhere (only
+  two comments reference it); the `ContractAdapter` registry exists (3 of 5 kinds — ADR-0065's
+  "does not exist" is now stale for this half) but has **zero callers** in
+  `workers/buildgen.py`/`bazel/generators.py`/`cli.py` — SPEC §13 row 31's pseudocode is the
+  design, not a description of this tree, on its emission side. Wiring it needs a real design
+  decision (where in Phase 3 contract nodes get their `BuildPlan` augmented, how the finding gets
+  inserted, whether hoisted contracts reach BuildPlan generation at all today) this research pass
+  deliberately does not resolve. Same shape as §12.31's D111 deferral — needs its own dedicated
+  leg, not bolted onto Clause A. Full findings:
+  `.superpowers/sdd/round-V-criteria-closure/research-23-report.md`.
+**Done bar:** both clauses must close before §12.34 counts DONE — Clause A alone is a partial
+closure, do not round up the `<n> of 48` count for it. Clause B's done bar: design and wire the
+Phase 3 emission call site, then extend Clause A's fixture with a fixture contract Ruby's
+`contract_bindings` omits, asserting the finding and the `BuildPlan` field.
 
 ## 35. No raw prior diff reaches a prompt
 **DONE (round GG task 4, 2026-09-02, `2657ec4`/`a5253ab`, ADR-0110) — see the closure paragraph
