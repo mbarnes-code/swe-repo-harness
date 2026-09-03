@@ -95,12 +95,12 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 #: below. Verified with `git merge-base HEAD main` at the time this file was written.
 _BASE_SHA = "016dc7710e5c519808d792d8a9ea491ae0550d46"
 
-#: This task's own landing commit (round VI task 39) — the fixed upper endpoint. A SEPARATE,
-#: immediately-following commit corrects this constant to the real value once the landing commit
-#: exists (chicken-and-egg: a commit cannot name its own hash), exactly as
+#: This task's own landing commit (round VI task 39, `f17e836` — added the fixture pair and this
+#: test file). A SEPARATE, immediately-following commit corrects this constant to the real value,
+#: since a commit cannot name its own hash (chicken-and-egg), exactly as
 #: `test_local_profile_e2e.py`'s own `_HEAD_SHA` comment documents round VI task 35 doing for the
 #: same pattern. Never left open-ended (`HEAD`/working-tree) — see that file's docstring for why.
-_HEAD_SHA = "016dc7710e5c519808d792d8a9ea491ae0550d46"
+_HEAD_SHA = "f17e836613e9da7169d975995f74646f9642a76d"
 
 _REPO_NAME = "acme-gem"
 
