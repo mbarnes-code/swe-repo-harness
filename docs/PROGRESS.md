@@ -9000,3 +9000,64 @@ shift.
 What remains: §12.22's runtime RSS-sampling sub-clause, genuinely new infrastructure needing a
 live-environment check (cgroup version, Docker CLI reachability) and a short design pass before
 worker dispatch is responsible — not a same-wave item.
+
+## Round VI, twelfth wave (2026-09-03) — §12.22 closed in full. §12 count: 31 of 48, up from 30. Four criteria closed this single round (§12.25, §12.19, §12.41, §12.22) — the largest single-round movement this session has produced.
+
+The live-environment check the eleventh wave deferred hit the SAME hang class twice more —
+research-18's subagent ran 33+ minutes with `status: running` throughout, unresponsive to a
+check-in, stopped via `TaskStop`. Run directly by the controller instead: instant, clean, no hang
+at all, narrowing the cause specifically to `docker`-touching commands inside a headless subagent
+(most likely an unanswerable permission prompt) rather than the commands themselves. Confirmed
+directly: cgroup v2 with a real per-session path resolved via `/proc/self/cgroup` (not a fixed
+root), and the `docker` CLI/daemon both reachable. **New standing constraint recorded for every
+subsequent brief this wave: a worker task needing to run `docker` live must not be dispatched as
+a background subagent** — build against injected/mockable seams instead, per this codebase's own
+established DI convention.
+
+With both open questions closed, dispatched the runtime RSS-sampling sub-clause as four sequenced
+pieces, D110 allocated up front for §11.3's halving-backoff narrative (explicitly deferred, no
+resizable primitive exists for `ProcessPoolExecutor`/`asyncio.Semaphore`, not required by §12.22's
+literal text). **Task 26 (B1)**: cgroup process-tree reader + container-stats reader, both pure
+and seam-based. Its own load-bearing correctness claim — that `memory.current` already aggregates
+the whole process tree, no per-PID enumeration needed — was independently reproduced by review in
+a fresh worktree, not trusted from the report. **Task 27 (B2)**: the periodic sampler wired into
+`resource_guard()`. Hit agent dormancy once (recovered), and disclosed a real near-miss caught
+mid-development: initial wiring caused `test_cli.py` to shell out to a REAL `docker ps` 6 times
+before being caught and fixed with proper seams plus an autouse `conftest.py` fixture. Given this
+is exactly the hazard class that had already hung two subagents, its review ran with maximum
+scrutiny and independently verified — via its own live PATH-shim `docker` binary across 260+
+tests spanning 8+ files, plus a sweep of all 28 files referencing `fleet.cli` for an
+import-timing gap — that zero real docker invocations occur anywhere. **Task 28 (B3)**: the
+adversarial `getrusage`-defeating end-to-end proof, plus ADR-0115 adjudicating the fixture scale
+down from SPEC's literal 50k-file repo to a trivial one-file fixture (mirroring ADR-0104/
+ADR-0114's precedent). **Task 29**: closed the one residual gap task 28's own honest
+self-assessment surfaced — SPEC's literal text requires BOTH `budgets.max_rss_mb` (orchestrator's
+own RSS) and `budgets.max_host_rss_mb` (whole tree + containers); only the second was built.
+Confirmed `resource.getrusage`'s ban is specific to the second ceiling, not a blanket rule, and
+wired `RUSAGE_SELF`-based enforcement as an independent second breach check. Its review
+independently re-derived §12.22's full 6-property checklist against the literal text across all
+six contributing tasks and confirmed closure unambiguously — not trusting the implementer's own
+"recommend flipping to DONE."
+
+**A genuine process gap, caught and corrected, not hidden**: task 28 was merged directly from its
+own completion notification without a task-scoped review first — the first time this round's own
+review-before-merge discipline was broken. Caught only because task 29's review noted the missing
+`task-28-review-report.md` file. Fixed with a full post-hoc review, treating task 28 as if still
+pending: APPROVED, no blocking findings, one trivial doc-accuracy note (ADR-0115 said "fourth
+test" where the file has three) fixed directly. §12.22's DONE flip was held until this closed.
+
+Citation drift repointed twice more this wave (task 27's insertion: 8 citations across 2 files,
+the 7th repoint of `_reconcile_tasks_with_git` this round; task 29's insertion: another 8 plus a
+genuine oscillation — `_wave_snapshot`'s citation is a usage-site reference whose resolution
+status legitimately flips with pure line-drift coincidence, unpinned last wave when it happened
+to resolve, re-pinned now that it doesn't).
+
+**Round total: four criteria closed (§12.25, §12.19, §12.41, §12.22), taking §12 from 27 to 31 of
+48 in one round — the largest single-round movement recorded in this file.** Every closure
+independently task-reviewed, several reviews going beyond the implementer's own proof (task 22's
+review inserted a live network probe; task 26's reproduced the aggregation finding empirically;
+task 27's review built its own PATH-shim docker binary). What remains identified but not
+dispatched: D94's trigger logic and D104 (both judged premature this round — nothing in
+production creates a `stubs` row yet, and D104 itself needs its own unsized 3-piece split),
+§12.47's `avro`/`thrift` adapters (blocked on a real identification-layer parser that doesn't
+exist), and D109 (fixed this round, see above — no longer open).
