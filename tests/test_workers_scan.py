@@ -1032,6 +1032,57 @@ def test_interrogate_synthesizes_one_manifest_for_an_unknown_ecosystem(tmp_path:
     assert result.output.findings == ("no-manifest",)
 
 
+def test_the_unknown_ecosystem_repo_and_its_advisory_kind_are_two_different_facts(
+    tmp_path: Path,
+) -> None:
+    """§12.25's fixture repo (`README.md` + a shell script, no recognizable manifest) proves two
+    genuinely different fields, not one read twice under two names.
+
+    `Ecosystem.UNKNOWN` is STRUCTURAL: no `ManifestAdapter` matched this repo's file layout, so
+    `interrogate._unknown_manifest` synthesized the §3.1 step 2 fallback `ManifestRef`. `repos.kind`
+    is ADVISORY: the classify worker's (ADR-0008) judgment about what *kind* of thing the repo is,
+    derived purely from the model's own confidence — `_kind_for` never reads the ecosystem the
+    model was told about. A repo can be structurally UNKNOWN and still get a confident,
+    non-`'unknown'` `kind` if the model is confident about the (thin) evidence; SPEC §12.25's
+    sentence describes a fixture where both readings happen to coincide, not one field read twice.
+
+    Each assertion below is proven a real, independent discriminator (Rule 12): commenting out
+    `_kind_for`'s `if not trusted: return "unknown"` branch reddens ONLY the advisory assertion;
+    pointing `_unknown_manifest`'s ecosystem at the wrong `Ecosystem` member reddens ONLY the
+    structural one. Verified by hand, not asserted by this test — see the task report.
+    """
+    root = worktree_with(
+        tmp_path, {"README.md": "# nothing to see\n", "deploy.sh": "#!/bin/sh\necho ok\n"}
+    )
+
+    interrogated = asyncio.run(
+        InterrogateWorker().run(make_ctx(root), InterrogateInput(repo_id="acme-billing"))
+    )
+    assert interrogated.status == "ok"
+    assert interrogated.output is not None
+    only = interrogated.output.manifests[0]
+
+    # STRUCTURAL: no manifest adapter matched this repo's file layout.
+    assert only.publishes is not None
+    assert only.publishes.ecosystem is Ecosystem.UNKNOWN
+
+    client = FakeModelClient(
+        RepoClassification(
+            ecosystem=Ecosystem.UNKNOWN,
+            is_library=False,
+            confidence=0.2,  # below ClassifyInput.min_confidence's 0.5 floor: distrusted
+            rationale="a README and a shell script are thin evidence",
+        )
+    )
+    classified = asyncio.run(ClassifyWorker().run(make_ctx(root, llm=client), classify_payload()))
+    assert classified.status == "ok"
+    assert classified.output is not None
+
+    # ADVISORY: the classify worker's confidence gate downgraded a distrusted answer — this
+    # branch never consults `only.publishes.ecosystem` or any other structural fact.
+    assert classified.output.kind == "unknown"
+
+
 def test_interrogate_keeps_an_unparsable_manifest_as_low_confidence(tmp_path: Path) -> None:
     """A manifest that will not parse is recorded with its error, never dropped.
 
