@@ -9354,3 +9354,51 @@ reproduced (its own `--setup-show` run, 3× clean full-file passes). Merged (`te
 **Status: zero outstanding.** §12 count holds at 36/48 (this task doesn't move a criterion —
 disclosed regression repair). Round VI continues; next dispatch targets the remaining 12 open
 criteria per the standing loop.
+
+Checked the last plausible near-term candidate: §12.8 (graph correctness) has 7 of 8 `EdgeKind`s
+proven, only `HTTP_OPERATION` open — flagged by round V as "likely NEW-MECHANISM" but never
+actually measured. Dispatched research-27 rather than trust the prediction (the AVRO/THRIFT gap
+looked the same way before research-21 disproved it). Confirmed correct this time: the gap is
+`API_CONTRACT`'s join for `OPENAPI` contracts specifically; the producer side (an OpenAPI
+`paths:`/`operationId` regex extractor) is tractable, but the consumer side has no verified,
+codegen-independent literal analogous to gRPC's wire-mandated `/package.Service/Method` path —
+needs real `openapi-generator-cli` output verified per covered language before any design can be
+written. Reconciled `docs/CRITERIA_PLAN.md` in the same commit (`f10960d`).
+
+## Round VI — the twelve remaining open criteria are now all genuinely, verifiedly blocked
+
+Every one of the 12 items still open (8, 9, 11, 14, 27, 31, 34, 36, 37, 38, 39, 43) has now been
+individually investigated this round (not just carried forward as a stale label) and confirmed to
+need one of exactly four things before it can be dispatched as a task:
+
+1. **Real Docker/lockfile groundwork** — §12.11's Task B. Deliberately held from subagent dispatch
+   per this session's own standing constraint (two live-Docker hang incidents this round).
+2. **A dedicated design leg (ADR) resolving named judgment calls** — §12.31 (`D111`), §12.34
+   Clause B (`D113`). Both sized precisely, both structurally the same shape as the pre-existing
+   D94/D104 stub-lifecycle chain: real, bounded, but not a single dispatchable task.
+3. **The D94/D104 stub-lifecycle chain itself, or a mechanism it shares** — §14, §37, §38
+   (partial), §39; §9 and §27 (partial) share a separate blocker (a missing path/blob-SHA capture
+   mechanism, tracked as one piece of work across both entries); §36 is identical to D50's own
+   closure, tracked there. None of these are new findings this round — carried forward, re-checked
+   against current source rather than assumed stale.
+4. **Empirical groundwork with a real external tool** — §12.8's `HTTP_OPERATION` half, needing
+   verified `openapi-generator-cli` output before any design is even possible (research-27).
+
+Also tracked, both partial and correctly left partial: §12.43's case (ii), blocked on the D55/D58
+circuit-breaker gap explicitly out of any single round's size class.
+
+**This is not "nothing left to do" — it's "everything left needs either a dedicated multi-task
+round (D94/D104's own chain, or a new FILE_PATH-capture round), a design-adjudication ADR before
+dispatch, or empirical work this session correctly declined to force through a subagent."** Per
+Rule 13, the next round that picks any of these up should scope itself explicitly as that kind of
+round from the start, rather than attempting another single-task dispatch against them.
+
+**This wave's own tally:** §12.47 closed in full (36/48, first full closure in three waves).
+Tasks 34 (AVRO/THRIFT identification), 38 (§12.11 Task A), 39 (§12.34 Clause A), 40 (§12.47's
+final two adapters) all landed and reviewed APPROVED. Four regressions fixed (35, 36, 37, 41), all
+independently reviewed. Three D-numbers allocated (`D111`, `D112`, `D113`), each with a full
+reconciled `docs/CRITERIA_PLAN.md` entry. One committed-doc self-inflicted defect found and
+repaired (a split sentence in this very file). Citation-drift gate run and kept clean after every
+merge (7 real drifts repaired in one wave alone). A recurring subagent dormancy pattern (background
+a command, wait on a notification only the controller receives) hit repeatedly across multiple
+agents this wave, recovered every time via SendMessage, filed as product feedback.
