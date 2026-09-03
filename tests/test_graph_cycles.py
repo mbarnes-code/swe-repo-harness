@@ -30,6 +30,7 @@ from hashlib import sha256
 from pathlib import Path
 from time import monotonic
 
+import networkx as nx  # type: ignore[import-untyped]  # no py.typed; see HONEST_GAPS
 import pytest
 
 import fleet
@@ -48,7 +49,7 @@ from fleet.graph.cycles import (
     scc_id_for,
     supersede_findings,
 )
-from fleet.graph.sequence import condense_for_ordering, ordering_is_acyclic
+from fleet.graph.sequence import assign_waves, condense_for_ordering, ordering_is_acyclic
 from fleet.models.enums import (
     BreakStrategy,
     ContractKind,
@@ -180,6 +181,51 @@ def multi_chord_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[Con
     return graph_nodes, edges, contracts
 
 
+def six_repo_hub_cycle() -> tuple[list[GraphNode], list[DependencyEdge], list[ContractNode], str]:
+    """One owner (`acme-hub`) and 5 spokes, every feedback edge running through ONE shared
+    contract. Every spoke is mutually reachable with every other spoke only through the hub — a
+    genuine 6-member SCC, not five disjoint 2-cycles (verified by the test itself via
+    `nx.strongly_connected_components` before any `break_cycles` call).
+
+    §12.30's flip-back clause needs the backward (feedback) edges at `kind=DECLARED_DEP,
+    confidence=1.0` — deliberately **not** the realistic scanned shape (`API_CONTRACT`/
+    `INTERNAL_IMPORT` below `ATOMIC_DECLARED_DEP_CONFIDENCE`) a real contract-carrier import would
+    actually produce. A genuinely scanned fixture structurally cannot flip to `ATOMIC_WAVE` under
+    `--no-hoist-contracts` — `_is_atomic` (`graph/cycles.py:558-573`) requires every feedback edge
+    to be `DECLARED_DEP` at `confidence >= 0.95`, and it falls to `EDGE_BREAK` instead (this is
+    also why `test_the_same_fleet_stays_cyclic_when_contracts_are_skipped` in
+    `tests/test_sequence_e2e.py` asserts `EDGE_BREAK`, not `ATOMIC_WAVE`, for the real e2e
+    `cycle_fleet` fixture). This does not weaken the hoist-path proof: `_materialize`'s retarget
+    match is purely by `(src_id, evidence_path)` membership in the contract's carrier set,
+    independent of `kind`/`confidence` (`cycles.py:710-720`).
+    """
+    K = "proto:acme.hub.v1"
+    spokes = [f"acme-spoke-{i}" for i in range(5)]
+    graph_nodes = nodes("acme-hub", *spokes)
+    edges: list[DependencyEdge] = []
+    for s in spokes:
+        edges.append(
+            edge("acme-hub", s, kind=EdgeKind.DECLARED_DEP, confidence=1.0, path="package.json")
+        )
+        # the feedback edge: kind/confidence chosen so --no-hoist-contracts genuinely falls to
+        # ATOMIC_WAVE (see the docstring above) -- the retarget match in _materialize is purely by
+        # (src_id, evidence_path), so this choice does not affect the hoist path at all.
+        edges.append(
+            edge(
+                s, "acme-hub", kind=EdgeKind.DECLARED_DEP, confidence=1.0, path=f"src/gen/{s}_pb.ts"
+            )
+        )
+    contracts = [
+        contract(
+            K,
+            owner="acme-hub",
+            owner_path="proto/hub.proto",
+            consumers={s: f"src/gen/{s}_pb.ts" for s in spokes},
+        ),
+    ]
+    return graph_nodes, edges, contracts, K
+
+
 def ring_cycle(n: int) -> tuple[list[GraphNode], list[DependencyEdge], tuple[str, ...]]:
     """`n` repos in one ring — `acme-00 -> acme-01 -> ... -> acme-{n-1} -> acme-00` — all
     `DECLARED_DEP` at confidence 1.0 and no contract anywhere: a genuine SCC of `n` members, not a
@@ -295,6 +341,112 @@ def test_hoisting_is_skipped_when_disabled() -> None:
     )
     assert report.resolutions[0].hoisted_contract_ids == ()
     assert report.hoisted_contracts == ()
+
+
+def test_a_planted_6_repo_contract_cycle_is_dissolved_by_hoisting_alone() -> None:
+    """§12.30 / SPEC.md:7462, the payoff clause: a 6-repo hub-and-spoke cycle whose every
+    feedback edge runs through one shared proto package is dissolved by `CONTRACT_HOIST` alone —
+    no edge broken, no `ATOMIC_WAVE`, no `MANUAL`, the contract strictly below all 6 repo waves,
+    and the 6 repos spanning more than one wave (not bundled).
+
+    Every asserted value below is a real captured output from an actual `break_cycles` run over
+    this exact fixture (`.superpowers/sdd/round-V-criteria-closure/research-20-report.md` §3), not
+    a design-time prediction.
+
+    **Persistence, composed rather than re-derived** (Rule 12/Guardrail 6 discipline: a composed
+    claim must be disclosed as composed): this test proves the graph-algorithm side only —
+    `retargeted_from_repo_id` non-null on every retargeted edge, in memory. That the column
+    actually survives the DB write path (`cli.py::_persist_contract_edges` -> `insert_edges`) is
+    proven end-to-end, over the real git/CLI `cycle_fleet` fixture, by
+    `tests/test_sequence_e2e.py::test_the_retargeted_contract_consume_edge_persists_its_pre_hoist_owner`
+    (round VI task 31/32, D23). That test drives 2 repos / 1 retarget, not 6/5 — but
+    `_persist_contract_edges` (`src/fleet/cli.py:3363-3410`) is a plain list comprehension with no
+    repo- or edge-count-specific branching (`[EdgeRow(..., retargeted_from_repo_id=edge.
+    retargeted_from_repo_id) for edge in edges if edge.kind in _CONTRACT_EDGE_KINDS]`, one bulk
+    `insert_edges` call), so its 2-repo/1-retarget proof is legitimate evidence the same write path
+    holds at this test's 6-repo/5-retarget scale too, without needing a literal 6-repo e2e re-run.
+    """
+    graph_nodes, edges, contracts, contract_id = six_repo_hub_cycle()
+    spokes = [n.node_id for n in graph_nodes if n.node_id != "acme-hub"]
+    graph = build_graph(graph_nodes, edges)
+
+    pre_break_sccs = [c for c in nx.strongly_connected_components(graph.G_dag) if len(c) > 1]
+    assert len(pre_break_sccs) == 1, "the fixture's own premise: exactly one non-trivial SCC"
+    assert pre_break_sccs[0] == {("REPO", "acme-hub"), *(("REPO", s) for s in spokes)}, (
+        "a genuine 6-member hub-and-spoke SCC, not five disjoint 2-cycles"
+    )
+
+    report = break_cycles(graph, contracts=contracts)
+    assert len(report.resolutions) == 1
+    res = report.resolutions[0]
+
+    assert res.break_strategy is BreakStrategy.CONTRACT_HOIST
+    assert res.hoisted_contract_ids == (contract_id,)
+    assert res.broken_edge_keys == (), "CONTRACT_HOIST means no whole-repo edge was broken"
+    assert sorted(res.members) == sorted(["acme-hub", *spokes])
+    assert [c.status for c in report.hoisted_contracts] == [ContractStatus.HOISTED]
+
+    condensed = condense_for_ordering(report.graph, report.resolutions)
+    assert ordering_is_acyclic(condensed), "nx.is_directed_acyclic_graph over the final ordering"
+
+    plan = assign_waves(report)
+    contract_wave = plan.wave_index_by_node[(NodeKind.CONTRACT.value, contract_id)]
+    repo_waves = {
+        repo_id: plan.wave_index_by_node[(NodeKind.REPO.value, repo_id)] for repo_id in res.members
+    }
+    assert contract_wave == 0
+    assert repo_waves == {"acme-hub": 2, **dict.fromkeys(spokes, 1)}
+    assert all(contract_wave < wave for wave in repo_waves.values()), (
+        "the contract node occupies a strictly lower wave_index than all 6 repos"
+    )
+    assert len(set(repo_waves.values())) > 1, (
+        "the 6 repos land in more than one wave -- i.e. they were not bundled"
+    )
+
+    retargeted = [e for e in report.edges if e.retargeted_from_repo_id is not None]
+    assert len(retargeted) == 5
+    assert {e.retargeted_from_repo_id for e in retargeted} == {"acme-hub"}
+    assert {e.kind for e in retargeted} == {EdgeKind.CONTRACT_CONSUME}
+
+
+def test_the_same_6_repo_cycle_flips_to_atomic_wave_under_no_hoist_contracts() -> None:
+    """§12.30's flip-back clause: re-running the same fixture with hoisting unavailable reproduces
+    the pre-ADR-0019 outcome exactly -- `ATOMIC_WAVE` with all 6 repos sharing one `wave_index` --
+    which is the proof that 6d/6e were not removed when 6c-H was added.
+
+    Two calls, not one: `config=GraphSection(hoist_contracts=False)` (the flag path) AND
+    `break_cycles(graph)` with no `contracts=` argument at all (the literal pre-ADR-0019 codepath,
+    which never had a `contracts` parameter to disable). Asserting the two calls' full
+    `SccResolution`s are equal to each other -- not merely each individually ATOMIC_WAVE -- is what
+    proves "reproduces the pre-ADR-0019 outcome exactly" rather than a merely similar-looking one.
+    """
+    graph_nodes, edges, contracts, _contract_id = six_repo_hub_cycle()
+    spokes = [n.node_id for n in graph_nodes if n.node_id != "acme-hub"]
+    graph = build_graph(graph_nodes, edges)
+
+    report_flag = break_cycles(
+        graph, contracts=contracts, config=GraphSection(hoist_contracts=False)
+    )
+    report_no_contracts = break_cycles(graph)
+
+    for report in (report_flag, report_no_contracts):
+        assert len(report.resolutions) == 1
+        res = report.resolutions[0]
+        assert res.break_strategy is BreakStrategy.ATOMIC_WAVE
+        assert res.hoisted_contract_ids == ()
+        assert sorted(res.members) == sorted(["acme-hub", *spokes])
+        plan = assign_waves(report)
+        repo_waves = {
+            plan.wave_index_by_node[(NodeKind.REPO.value, repo_id)] for repo_id in res.members
+        }
+        assert repo_waves == {0}, "all 6 repos share exactly one wave_index"
+
+    assert report_flag.resolutions[0] == report_no_contracts.resolutions[0], (
+        "the flag-disabled path and the literal no-contracts pre-ADR-0019 codepath must produce "
+        "the identical SccResolution, not merely two individually-correct ATOMIC_WAVE outcomes"
+    )
+    assert report_flag.hoisted_contracts == report_no_contracts.hoisted_contracts == ()
+    assert report_flag.edges == report_no_contracts.edges
 
 
 # =======================================================================================
