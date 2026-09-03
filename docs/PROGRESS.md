@@ -9483,3 +9483,52 @@ this correction just retired.
 **Status: zero outstanding.** No further dispatch flowing directly from this wave — the natural
 "D114 piece (c)" next-step flagged at the nineteenth wave's own close turned out not to exist.
 Next dispatch returns to the standing loop's own next-highest-impact scan.
+
+## Round VI, twenty-first wave (2026-09-03) — health check + one regression fixed. §12 count holds
+at 38/48 (disclosed non-moving wave, process-hardening only, following directly after a
+criterion-moving wave, not two in a row).
+
+Ran a fresh full test suite given the volume of this stretch's changes: **2339 passed, 1 failed**
+(17:04 wall). The one failure was real and legitimate, not a false positive:
+`test_instruments_are_armed.py`'s raw-setattr detector caught two genuine builtin `setattr(...)`
+calls in task 39's Ruby fixture (`_decoy_ruby_ecosystem`'s module-binding save/restore layer) —
+exactly the hazard that instrument exists to catch (a raw `setattr` never raises on a typo'd or
+renamed attribute, silently disarming the patch). Task 44 fixed it with a standalone
+`pytest.MonkeyPatch()` instance (correct for a `@contextmanager` function, not a test function),
+which also simplified away the old manual restore loop via `mp.undo()`. Reviewed APPROVED, zero
+findings, independently reproduced from a fresh worktree. Merged; citation gate and both touched
+test files clean on the merged tree (76/76).
+
+**Status: zero outstanding.** §12 count: 38 of 48 — up from 27 at the start of this session's
+visible stretch. Full suite is now clean modulo whatever new work lands next; no known regressions
+outstanding.
+
+## Round VI — stretch summary (this session's visible portion, ending here)
+
+Eleven criteria closed this stretch: §12.2, §12.19, §12.22, §12.23, §12.25, §12.29, §12.30, §12.41
+(the fifteenth-wave's eight), then §12.47, §12.9, §12.27 (waves eighteen through twenty). Four
+D-numbers allocated with full sizing and cross-referenced documentation (`D111`–`D114`), each
+either landed (`D112`'s test_srcs gap documented, `D114`'s pieces (a)+(b) landed for §9) or
+correctly deferred with a named reason (`D111`'s multi-leg hoist-rollback chain, `D113`'s
+Phase-3-domain-expansion blocker, `D114`'s piece (c) retired entirely once SPEC's own text was
+found already narrowed). Six regressions found and fixed (tasks 35–37, 41, 44, plus the
+`base.py` docstring/`file_blobs` citation-drift repairs threaded through every merge). Two
+self-inflicted documentation defects caught and repaired in the committed `docs/` tree itself (a
+split-sentence Edit-tool artifact in this file; a stale-since-2026-08-30 criterion framing in
+`docs/CRITERIA_PLAN.md`'s §27 entry that predated this whole round).
+
+The last one is worth naming plainly: the controller inherited and extended a stale premise
+(§12.27's FILE_PATH leg being genuinely open) across a full research pass and a D-number
+allocation before a task implementer's own honest-assessment discipline caught it by re-checking
+SPEC.md directly rather than trusting the local doc. That is the exact failure mode this project's
+own CLAUDE.md names as the load-bearing discipline — checking the parts of a brief you'd otherwise
+accept, not only the parts you doubt — and it worked because the dispatch chain kept asking a
+worker to verify rather than merely execute.
+
+Remaining 10 open criteria (8, 11, 14, 31, 34, 36, 37, 38, 39, 43) are each individually
+investigated this round and confirmed to need one of: held-back real-Docker work (§11's Task B),
+a dedicated design-adjudication ADR before dispatch (§31/`D111`, §34 Clause B/`D113`), the
+already-deprioritized D94/D104 stub-lifecycle chain (§14, §37, §38 partial, §39), verified
+empirical groundwork with a real external tool (§8's `HTTP_OPERATION` half), or D50's own closure
+(§36). None are quick wins; the next round that picks one up should scope itself as that kind of
+round from the start, per Rule 13.
