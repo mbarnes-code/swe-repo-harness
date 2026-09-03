@@ -13108,9 +13108,9 @@ before lease acquisition), so in principle even a placeholder/unreachable-URL fl
 `tests/test_cli.py`'s `workspace` fixture already uses for `test_run_cost_exhausted_exits_3`,
 another pre-dispatch halt discovered at the same `_drive` guard-poll site — would have sufficed
 for those two tests. This file uses one real, tiny repo throughout instead (rather than switching
-fixture shape per test) because the fourth test (`test_low_readings_on_both_readers_complete_
+fixture shape per test) because the third test (`test_low_readings_on_both_readers_complete_
 normally`) is a genuine no-breach control that must actually complete a real scan to exit 0, and a
-single shared fixture used identically across all four tests is simpler to read and maintain than
+single shared fixture used identically across all three tests is simpler to read and maintain than
 two different fixture shapes chosen per assertion (CLAUDE.md Rule 2).
 
 **Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.22's entry and SPEC item 22's
