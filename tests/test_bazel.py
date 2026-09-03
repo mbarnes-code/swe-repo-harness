@@ -95,6 +95,13 @@ from fleet.bazel.query import (
     select_tested_targets,
     write_target_pattern_file,
 )
+
+# `tests_query` is re-bound under a name that does not start with "test": a bare `from ... import
+# tests_query` above would put a module-level name starting with "test" into THIS file, and
+# pytest's default `python_functions` collects any such name as a test item — `tests_query` has
+# no fixture named `dest` and errors at collection. Production code (never collected by pytest)
+# keeps the SPEC-matching name; only this import site needs the alias.
+from fleet.bazel.query import tests_query as bazel_tests_query
 from fleet.ecosystems.base import ruleset_repo_names
 from fleet.ecosystems.go import GoAdapter
 from fleet.ecosystems.js import JsAdapter
@@ -800,6 +807,14 @@ def test_the_affected_only_query_is_intersected_with_this_repos_rules() -> None:
     assert rdeps_query("java/acme") == "rdeps(//..., set(kind(rule, //java/acme/...)))"
     assert rdeps_query("java/acme", affected_only=False) == "rdeps(//..., //java/acme/...)"
     assert direct_rdeps_query("java/acme").endswith(", 1)")
+
+
+def test_the_tests_query_mirrors_kind_rule_querys_shape() -> None:
+    """§12.11's test-count comparison: `tests(//<dest>/...)`, one line, no state — the same shape
+    as `kind_rule_query`, including the leading/trailing `/` strip so a `dest:` with either has
+    the same behaviour a repo without one does."""
+    assert bazel_tests_query("java/acme") == "tests(//java/acme/...)"
+    assert bazel_tests_query("/java/acme/") == "tests(//java/acme/...)"
 
 
 def test_the_test_invocation_carries_keep_going_and_the_bep(tmp_path: Path) -> None:

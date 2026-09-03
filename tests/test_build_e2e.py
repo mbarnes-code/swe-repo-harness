@@ -4178,6 +4178,7 @@ def _go_build_plans(root: Path) -> dict[str, Any]:
             requirements=(),
             gazelle=adapter.gazelle_config(units[repo_id]),
             baseline_test_count=0,
+            baseline_ok=None,
             adapter_name=adapter.name,
             adapter_degraded=False,
         )
@@ -4482,6 +4483,7 @@ def _root_file_plan(unit: BuildUnit, worktree: Path, adapter_name: str) -> cli._
         requirements=(),
         gazelle=None,
         baseline_test_count=0,
+        baseline_ok=None,
         adapter_name=adapter_name,
         adapter_degraded=False,
     )

@@ -2895,6 +2895,99 @@ def test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it(
     )
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("bazel") is None,
+    reason="bazel is not installed on this host; the whole point of this test is that a REAL "
+    "`bazel query 'tests(//...)'` count, not a RecordingRunner's canned exit code, is what "
+    "catches the shrinkage the boolean no_test_targets/tests_lost check cannot see",
+)
+async def test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_see(
+    bazel_workspace: Path, bazel_cache_home: Path, bazel_registry: str, tmp_path: Path
+) -> None:
+    """§12.11's OTHER failure, proved against a real `bazel query` rather than a canned exit code.
+
+    `test_a_repo_that_HAD_tests_and_now_has_none_is_the_regression_12_11_refuses` above proves
+    the went-to-ZERO case; this proves the case that check is blind to — a shrink from N targets
+    to M, both positive. `pkg` really declares two passing `sh_test` targets from `rules_shell` —
+    a ruleset small enough that resolving it needs no toolchain, only the two `.bzl` files the
+    `load()` reads (Bazel 9 has no native `sh_test` any more). With `baseline_test_count=3,
+    baseline_ok=True`: the build is green, both real targets run and pass, so `no_test_targets`
+    is `False` and `tests_lost` is `False` by construction — the OLD check stays green. `bazel
+    query 'tests(//pkg/...)'` counts exactly 2, which is `< 3`, so the NEW `migrated_test_count
+    >= baseline_test_count` comparison is what refuses this build, on its own, over real Bazel
+    output.
+
+    `dest=pkg` is built at the root of `bazel_workspace` directly — `BuildverifyInput.worktree`
+    names it — rather than through the full `fleet build` CLI pipeline: no ecosystem adapter in
+    `src/fleet/ecosystems/` is ever handed a `BuildUnit.test_srcs` in production today (confirmed
+    by a full-tree `grep` — nothing constructs `BuildUnit(test_srcs=...)` anywhere in `src/`), so
+    no repo in this suite's fixture fleet can reach a real NONZERO migrated test count through
+    `real_build()`/`test_build_against_a_real_bazel`'s pipeline without first fixing that
+    separate, pre-existing gap. This is the same "one test that needs the real binary" shape
+    `test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it` already uses for the premise
+    the whole exit-code classification rests on — a hand-built dependency-free workspace, real
+    subprocess bazel, no `FakeBazel`/`RecordingRunner` — applied here to `BuildverifyWorker`
+    itself rather than to a bare `subprocess.run`.
+
+    `bazel_cache_home` (not `bazel_startup_argv`): `BuildverifyWorker` owns its own `bazel` argv
+    (`_bazel_argv`/`_test_query_argv`, both keyed off `payload.bazel_bin` alone, with no room for
+    a caller-supplied `--output_user_root=`), exactly the reason `real_build()` redirects Bazel's
+    output base via `XDG_CACHE_HOME` rather than a startup flag — see that fixture's docstring.
+
+    `bazel_registry` is requested for its side effect only, as above: a session-scope proof that
+    a registry answers before this test's own `bazel` runs, since even this dependency-free
+    `MODULE.bazel` resolves `bazel_tools`' own deps through BCR.
+    """
+    # Bazel 9 has no native `sh_test` any more (migrated out to `rules_shell` — a bare
+    # `sh_test(...)` here fails to load with "name 'sh_test' is not defined"), so a REAL,
+    # nonzero test target needs the one ruleset small enough to fetch for free here: no
+    # toolchain to resolve, just the two `.bzl` files the load below reads.
+    (bazel_workspace / "MODULE.bazel").write_text(
+        'module(name = "probe")\nbazel_dep(name = "rules_shell", version = "0.8.0")\n',
+        encoding="utf-8",
+    )
+    pkg = bazel_workspace / "pkg"
+    pkg.mkdir()
+    for name in ("a", "b"):
+        script = pkg / f"ok_{name}.sh"
+        script.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        script.chmod(0o755)
+    (pkg / "BUILD.bazel").write_text(
+        'load("@rules_shell//shell:sh_test.bzl", "sh_test")\n\n'
+        'sh_test(name = "a_test", srcs = ["ok_a.sh"])\n'
+        'sh_test(name = "b_test", srcs = ["ok_b.sh"])\n',
+        encoding="utf-8",
+    )
+
+    payload = BuildverifyInput(
+        dest="pkg",
+        integration_ref=SNAPSHOT,
+        worktree=str(bazel_workspace),
+        log_dir=str(tmp_path / "logs"),
+        baseline_test_count=3,
+        baseline_ok=True,
+        run_tests=True,
+    )
+    result = await BuildverifyWorker().run(make_ctx(bazel_workspace), payload)
+
+    out = result.output
+    assert out is not None
+    assert out.build_ok is True, result.error.stderr_tail[-2000:] if result.error else result
+    assert out.no_test_targets is False and out.tests_lost is False, (
+        "the OLD check must stay green here: 2 real targets ran and passed, which is exactly "
+        "the shrinkage it cannot see"
+    )
+    assert out.migrated_test_count == 2, "a real `bazel query` really counted 2 real sh_test rules"
+    assert out.test_count_regressed is True
+    assert out.green is False, "green may not be claimed by a migration that shrank the suite"
+    assert result.status == "failed", "the NEW check must refuse this build on its own"
+    assert result.error is not None
+    assert result.error.failure_class is FailureClass.TEST_FAILURE
+    assert result.error.retryable is False, "a static target count cannot change on a re-run"
+    assert "2 test target(s)" in result.error.stderr_tail and "3" in result.error.stderr_tail
+
+
 # =======================================================================================
 # (5) prwriter: merge state is INGESTED, and a draft is a verdict
 # =======================================================================================
@@ -4135,6 +4228,7 @@ def _a_build_plan(unit: BuildUnit, adapter) -> _BuildPlan:
         requirements=(),
         gazelle=adapter.gazelle_config(unit),
         baseline_test_count=0,
+        baseline_ok=None,
         adapter_name=adapter.name,
         adapter_degraded=adapter.degraded,
     )

@@ -50,6 +50,7 @@ __all__ = [
     "registry_args",
     "sample_seed_for",
     "select_tested_targets",
+    "tests_query",
     "write_target_pattern_file",
 ]
 
@@ -107,6 +108,17 @@ def direct_rdeps_query(dest: str, *, affected_only: bool = True) -> str:
 def affected_query(dest: str, *, affected_only: bool = True) -> str:
     """Alias kept for call sites that read better as "the affected set"."""
     return rdeps_query(dest, affected_only=affected_only)
+
+
+def tests_query(dest: str) -> str:
+    """Every test target this repo's migrated package declares — `tests(//<dest>/...)`.
+
+    §12.11's test-count comparison sub-clause: `bazel query 'tests(//<dest>/...)' | wc -l` is
+    what "the tests survived the move" measures, against `repos.baseline_test_count` — a real
+    count, not the boolean "did any test target run at all" `no_test_targets`/`tests_lost` already
+    answer. Mirrors `kind_rule_query`'s shape: one line, no state.
+    """
+    return f"tests(//{dest.strip('/')}/...)"
 
 
 def registry_args(registry: str | None) -> tuple[str, ...]:
