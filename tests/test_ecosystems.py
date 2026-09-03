@@ -94,6 +94,16 @@ def test_discover_raises_naming_a_decoy_ecosystem_member_with_no_adapter(
     message = str(excinfo.value)
     assert "no EcosystemAdapter is registered for ['decoy']" in message
     assert "total bijection over Ecosystem" in message
+    # `monkeypatch`'s automatic revert of `base.Ecosystem` happens in its own fixture
+    # finalizer, which — per pytest's LIFO teardown order — runs AFTER the autouse
+    # `registry` fixture's teardown (registry was set up after monkeypatch, since it
+    # depends on it transitively via fixture ordering). `registry`'s teardown calls
+    # `ecosystems.discover(force=True)` to restore a clean registry for the next test;
+    # if `base.Ecosystem` is still the decoy enum at that point, that call correctly
+    # (and spuriously, from this test's perspective) raises the same RuntimeError again,
+    # surfacing as a teardown ERROR on this test. Force the revert here, before
+    # `registry`'s teardown runs, so the shared fixture sees the real `Ecosystem` again.
+    monkeypatch.undo()
 
 
 def test_duplicate_ecosystem_registration_raises_naming_both_claimants() -> None:
