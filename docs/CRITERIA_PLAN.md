@@ -817,12 +817,50 @@ all in this fixture and risked a false-negative test. `docs/PROGRESS.md`'s `<n> 
 now count §12.21.
 
 ## 22. Memory + disk ceilings
-**OPEN — mostly missing — NEW-MECHANISM, plus a real production gap disclosed round AA.**
-`resource_guard` defaults to a no-op (`lambda: None`) — RSS/cgroup sampling is not implemented at
-all, not just untested (audit row 22). `budgets.max_host_rss_mb` is `KNOWN_INERT` (D50).
-**Done bar:** the RSS-sampling sub-clause is blocked on implementing `resource_guard` for real —
-this is the one item in this file that's genuinely new infrastructure, not a wiring/test gap.
-Track it as its own round.
+**DONE (round VI tasks 26+27+28+29, 2026-09-03).** All four bundled sub-clauses closed; see each
+sub-section below for its own account. `resource_guard` is no longer a no-op.
+
+**Runtime RSS-sampling — closed, the sub-clause that used to be this entry's sole blocker.**
+Built as four sequenced tasks, each independently task-reviewed (task 28's review was dispatched
+post-hoc after a controller process gap — the round's ledger discloses this; the review still
+found it APPROVED with no blocking findings):
+- **Task 26 (B1)**: `src/fleet/util/cgroup.py` (process-tree cgroup v2 `memory.current` reader,
+  resolving the process's own nested path via `/proc/self/cgroup` rather than a hardcoded root)
+  and `src/fleet/sandbox/containerstats.py` (`ContainerStatsReader` for `fleet-<run_id>-*`
+  containers). Load-bearing finding, independently reproduced by review: `memory.current` already
+  aggregates the whole process tree — no per-PID enumeration needed. Built and tested entirely
+  against injected seams; never invoked a real `docker` command (a hard constraint this round,
+  after two subagents hung 30-60+ minutes doing exactly that).
+- **Task 27 (B2)**: `src/fleet/orchestrator/memory_guard.py`'s `HostMemorySampler`, one per wave,
+  wired into `resource_guard()` at each of `cli.py`'s four wave-composition roots. Self-caught and
+  fixed a real near-miss during development: initial wiring caused `test_cli.py` to shell out to
+  real `docker ps` 6 times — fixed with proper `CONTAINER_STATS_RUNNER`/`CGROUP_MEMORY_READER`
+  seams plus an autouse `conftest.py` fixture. Independently re-verified with maximum scrutiny by
+  review (a live PATH-shim `docker` binary, 260+ tests across 8+ files, all 28 files referencing
+  `fleet.cli` swept for an import-timing gap) — zero real docker invocations confirmed.
+- **Task 28 (B3)**: the adversarial `getrusage`-defeating end-to-end proof — a fixture whose
+  injected container reading breaches `max_host_rss_mb` while the injected orchestrator reading
+  stays low, correctly halts (exit 5); a `getrusage`-only sampler stand-in, under the identical
+  injected breach, does NOT catch it (SPEC's own named anti-pattern, made real). **ADR-0115**
+  adjudicates the fixture scale down from SPEC's literal 50 000-file repo to a trivial one-file
+  fixture, mirroring ADR-0104/ADR-0114's "prove the mechanism, not the literal scale" precedent —
+  the property under test doesn't depend on file count.
+- **Task 29**: closed the one remaining gap — `budgets.max_rss_mb` (the orchestrator's OWN RSS,
+  distinct from the whole tree) was never enforced by tasks 26-28. `read_own_rss_bytes()` via
+  `resource.getrusage(RUSAGE_SELF).ru_maxrss` (Linux KiB, independently re-measured and confirmed
+  by review against `/proc/self/status`'s `VmHWM`), folded in as an independent second breach
+  check. SPEC §11.3's "not from `resource.getrusage`" ban is specific to the whole-tree/container
+  ceiling — confirmed by review against the SPEC text directly — `getrusage` is the correct,
+  intended source for the orchestrator's-own-RSS ceiling, since cgroup `memory.current`
+  structurally cannot isolate the orchestrator from its own tree. Task 29's review independently
+  re-derived §12.22's full 6-property checklist against the literal text across all six
+  contributing tasks (24/25/26/27/28/29) and confirmed closure unambiguously.
+
+Two disclosed, non-blocking residuals carry forward, neither undermining the literal-text
+closure: ADR-0115's fixture-scale substitution (above), and a pre-existing timing gap — a breach
+that starts and clears strictly within one uninterrupted repo-dispatch call is invisible to
+`_drive`'s once-per-dispatch poll site (unchanged by this round, applies identically to both
+ceilings now).
 
 **Two more sub-clauses closed, 2026-09-03 (round VI tasks 24+25) — still OPEN overall, the
 runtime RSS-sampling sub-clause above remains the sole blocker.** A dedicated research pass
@@ -1976,10 +2014,10 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 30 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 24, 25, 26, 28, 32, 33, 35, 40, 41, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§41 added** — round VI tasks 21+22 closed the local-only-profile criterion at SPEC's literal full six-phase scope (a controller ruling explicitly rejected this file's own stale "Phase-1-3 slice" done-bar paraphrase), both tasks independently task-reviewed with every discriminator reproduced — including the review that independently traced a `ProcessPoolExecutor` workaround and confirmed it did NOT make the loopback-guard safety proof vacuous — see §41's own entry for the full account. **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 31 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 32, 33, 35, 40, 41, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§22 added** — round VI tasks 26+27+28+29 closed the runtime RSS-sampling sub-clause (the sole remaining blocker for this criterion), four sequenced pieces each independently task-reviewed (task 28's review was dispatched post-hoc after a controller process gap, found APPROVED with no blocking findings), the final review re-deriving the full 6-property checklist against SPEC's literal text and confirming closure unambiguously — see §22's own entry for the full account. **§41 added** — round VI tasks 21+22 closed the local-only-profile criterion at SPEC's literal full six-phase scope (a controller ruling explicitly rejected this file's own stale "Phase-1-3 slice" done-bar paraphrase), both tasks independently task-reviewed with every discriminator reproduced — including the review that independently traced a `ProcessPoolExecutor` workaround and confirmed it did NOT make the loopback-guard safety proof vacuous — see §41's own entry for the full account. **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
-| OPEN — blocked on an existing D-number, don't duplicate | 4 | 22 (partial, D50 for one sub-clause only — its RSS-sampling piece, NEW-MECHANISM not D50-blocked per round EE research, see §22's own entry for the correction owed), 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) |
+| OPEN — blocked on an existing D-number, don't duplicate | 3 | 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) — `22` removed 2026-09-03 after round VI tasks 26-29 closed it, moved to the DONE row above |
 | OPEN — everything else (TEST-ONLY / SCALE-FIXTURE / NEW-MECHANISM) | remainder | 14 (misattributed to D50 until round X — real blocker is §37's `--stub-blocked` stub-creation worker, not a D-number, see §14's own entry), 27, 37, 39 (mis-bucketed as D-number-blocked until round Z research — its own entry names no D-number, only §37's wiring), plus all others not listed in a row above — see individual entries (2026-09-03: `41` removed after round VI tasks 21+22 closed it, moved to the DONE row above. Round GG's own final review, 2026-09-02: this row previously still listed `35` after §35 moved to the DONE row above — the two rows contradicted each other; corrected here, `35` removed) |
 
 Historical note on §12.40's DONE marking (superseded — kept as history only, no live instruction):
