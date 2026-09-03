@@ -279,11 +279,9 @@ def _decoy_ruby_ecosystem() -> Iterator[RealEcosystem]:
     )
     ruby_member: RealEcosystem = getattr(decoy, "RUBY")  # noqa: B009 (mypy can't see decoy's members)
 
-    saved_bindings = [
-        (module, attr, getattr(module, attr)) for module, attr in _ECOSYSTEM_MODULE_BINDINGS
-    ]
+    mp = pytest.MonkeyPatch()
     for module, attr in _ECOSYSTEM_MODULE_BINDINGS:
-        setattr(module, attr, decoy)
+        mp.setattr(module, attr, decoy)  # raising=True is the default -- exactly the fix
 
     saved_fields: list[tuple[type[FleetModel], str, Any]] = []
     rebuilt: set[type[FleetModel]] = set()
@@ -320,8 +318,7 @@ def _decoy_ruby_ecosystem() -> Iterator[RealEcosystem]:
             model_cls.model_fields[field_name].annotation = original
         for model_cls in rebuilt:
             model_cls.model_rebuild(force=True)
-        for module, attr, original in saved_bindings:
-            setattr(module, attr, original)
+        mp.undo()
         ecosystems_base.reset_adapters()
         manifests_base.reset_adapters()
         ecosystems_base.discover(force=True)
