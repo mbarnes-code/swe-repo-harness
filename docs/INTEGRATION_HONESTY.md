@@ -7419,10 +7419,11 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:12804-13041`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-02, round VI, FOUR separate times as this round's own successive `cli.py` additions kept
-shifting it. Correction to this paragraph's own prior self: the "at `<sha>`" suffix a previous
-repointing added here was NOT a functional exemption — `test_no_unpinned_anchored_citation_
+(`cli.py:12955-13192`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-03, round VI, FIVE separate times now as this round's own successive `cli.py` additions
+keep shifting it — this repointing follows task 18's +247/−49 `cli.py` diff. Correction to this
+paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
+functional exemption — `test_no_unpinned_anchored_citation_
 fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
 convention (that convention marks a paragraph's CENSUS NUMBER claims as historical via
 `_RECORD_MARKER`, a different check entirely) — the citation gate still required a live-resolving
