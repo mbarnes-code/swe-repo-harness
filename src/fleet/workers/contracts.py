@@ -98,16 +98,21 @@ IDENTIFIER_SOURCES: Final[Mapping[str, ContractKind]] = {
 }
 """IDL suffix → `ContractKind`, for a path that also matches `scan.contracts.idl_globs`."""
 
-SYMBOL_IDENTIFIED: Final[Mapping[ContractKind, str]] = {ContractKind.PROTO: "proto"}
+SYMBOL_IDENTIFIED: Final[Mapping[ContractKind, str]] = {
+    ContractKind.PROTO: "proto",
+    ContractKind.AVRO: "avro",
+    ContractKind.THRIFT: "thrift",
+}
 """Kind → the `symbols.language` whose `SymbolKind.MODULE` definition row IS the identifier.
 
-Only `PROTO` is here, and that is a **spec gap, not an omission**: §3.1 5b keys `AVRO` on the
-`namespace` field and `THRIFT` on the `namespace` directive, and `workers/symbolindex.py` parses
-neither (`LANGUAGES` has no `.avsc`/`.avdl`/`.thrift` entry), so no persisted row carries either
-value. Reading them would mean opening the file, which 5b may not do. An `.avsc`/`.thrift` under
-`idl_globs` is therefore reported in `ContractsOutput.unidentifiable_idl_paths` instead of being
-guessed at — a contract whose identity was invented would collapse two unrelated schemas into one
-node."""
+`workers/symbolindex.py` parses all three: `.proto`'s `package`, `.avsc`/`.avdl`'s `namespace`
+field/annotation (§3.1 5b keys AVRO on the bare namespace, not `namespace.name`), and `.thrift`'s
+namespace directive (the `*` slot if present, else the lexicographically first per-language slot
+— §3.1 5b's own tie-break). Each emits a single `SymbolKind.MODULE` definition row per file, same
+shape as `.proto`'s package row, so `_index_symbols` needs no per-kind branching to collect them.
+An IDL file under `idl_globs` with no such row (e.g. no `namespace` declared) still falls back to
+`_unpackaged.<repo_id>.<dir>` in `_identify` below, rather than being guessed at — a contract
+whose identity was invented would collapse two unrelated schemas into one node."""
 
 TARGET_PATH: Final[Mapping[ContractKind, str]] = {
     ContractKind.PROTO: "proto/{dotted}",
@@ -468,7 +473,7 @@ def _index_symbols(symbols: Sequence[SymbolRef]) -> _Index:
         elif (
             symbol.kind is SymbolKind.MODULE
             and symbol.is_definition
-            and symbol.language == SYMBOL_IDENTIFIED[ContractKind.PROTO]
+            and symbol.language in SYMBOL_IDENTIFIED.values()
         ):
             packages.setdefault(key, symbol.fqn)
         elif symbol.kind is SymbolKind.IMPORT and symbol.language == "proto":
