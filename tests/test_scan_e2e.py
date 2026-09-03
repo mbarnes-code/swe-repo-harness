@@ -56,6 +56,11 @@ run:
   work_dir: work/
 concurrency:
   cpu_pool_workers: 1
+  docker: 1
+verify:
+  container_memory: 64m
+budgets:
+  max_rss_mb: 512
 preflight:
   # §11.3's floor is 50 GiB, which no developer machine — and no CI runner — clears with room to
   # spare, so a fixture that left it at the default would exit 9 before Phase 1 started. Lowered
@@ -64,6 +69,10 @@ preflight:
   # it belongs, against a floor no volume can clear (`test_cli.py`, `test_workers_scan.py`).
   min_free_bytes: 1048576
 """
+"""§11.3/§12.22: `concurrency.docker`/`verify.container_memory`/`budgets.max_rss_mb` above are
+lowered the same way `min_free_bytes` is -- the shipped defaults (4 x 8 GiB + 4 GiB = 36864 MiB)
+breach `budgets.max_host_rss_mb` (12288) by design, and `_load_settings` now enforces
+`validate_memory_budget` at startup. The refusal itself is asserted separately (`test_cli.py`)."""
 """Contracts are left ENABLED (the shipped default). This fleet declares no IDL, so §3.1 step 5b
 discovers nothing — which is the case worth having in the end-to-end file: a fleet that shares no
 contract must produce zero `contracts` rows *and still exit 0*, rather than the refusal this

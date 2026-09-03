@@ -72,6 +72,11 @@ graph:
   hoist_contracts: false
 concurrency:
   cpu_pool_workers: 1
+  docker: 1
+verify:
+  container_memory: 64m
+budgets:
+  max_rss_mb: 512
 transform:
   rules_dir: config/rules
   engines:
@@ -84,6 +89,9 @@ preflight:
   # it belongs, against a floor no volume can clear (`test_cli.py`, `test_workers_scan.py`).
   min_free_bytes: 1048576
 """
+#: §11.3/§12.22: `concurrency.docker`/`verify.container_memory`/`budgets.max_rss_mb` above are
+#: lowered the same way `min_free_bytes` is -- see the note on `tests/test_scan_e2e.py`'s
+#: `FLEET_YAML`.
 
 #: A real `Rewriter` (§7.4): pure `source` → patch, no worktree read, no tool on PATH. It is a
 #: search/replace driven by the rule's own params, with `{{dest_path}}`/`{{repo_id}}` rendered

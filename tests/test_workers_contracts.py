@@ -916,6 +916,11 @@ run:
   work_dir: work/
 concurrency:
   cpu_pool_workers: 1
+  docker: 1
+verify:
+  container_memory: 64m
+budgets:
+  max_rss_mb: 512
 preflight:
   # §11.3's floor is 50 GiB, which no developer machine — and no CI runner — clears with room to
   # spare, so a fixture that left it at the default would exit 9 before Phase 1 started. Lowered
@@ -924,6 +929,8 @@ preflight:
   # it belongs, against a floor no volume can clear (`test_cli.py`, `test_workers_scan.py`).
   min_free_bytes: 1048576
 """
+#: §11.3/§12.22: the concurrency/verify/budgets keys above are lowered the same way
+#: `min_free_bytes` is -- see the note on `tests/test_scan_e2e.py`'s `FLEET_YAML`.
 """No `graph:` section at all: contract hoisting is ON by default, which is precisely the
 configuration `fleet scan` used to refuse to run under."""
 
