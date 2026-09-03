@@ -474,6 +474,202 @@ async def test_d42_probe_genuine_no_still_returns_the_old_answer_without_raising
 
 
 # --------------------------------------------------------------------------------------
+# git.py — D94's foundational primitive: `rebase`, `abort_rebase`, `push_force_with_lease`.
+# This is the git-level building block a later PR-promotion mechanism will call
+# (`docs/INTEGRATION_HONESTY.md`, `## D94 —`) — no caller exists yet, nothing here is wired to
+# anything. `push_force_with_lease`'s safety property is a property of git's SERVER-side lease
+# check, not of argument-spelling (this file's own testing philosophy, module docstring above),
+# so the discriminating test below runs against a real bare remote, never mocked.
+# --------------------------------------------------------------------------------------
+@pytest.fixture
+def remote_and_clone(tmp_path: Path) -> tuple[Path, Path]:
+    """A bare `remote.git` plus one clone with `main` checked out and pushed once — the minimum
+    shape `push_force_with_lease` needs a real server-side lease check against."""
+
+    async def build() -> tuple[Path, Path]:
+        remote = tmp_path / "remote.git"
+        await _sh(tmp_path, "init", "-q", "--bare", str(remote))
+        clone = tmp_path / "clone"
+        await _sh(tmp_path, "clone", "-q", str(remote), str(clone))
+        await _sh(clone, "config", "user.email", "fleet@example.invalid")
+        await _sh(clone, "config", "user.name", "Fleet Test")
+        _write_files(clone, {"a.txt": "v1\n"})
+        await _sh(clone, "add", "--all")
+        await _sh(clone, "commit", "-m", "c1")
+        await _sh(clone, "push", "-q", "origin", "main")
+        return remote, clone
+
+    return asyncio.run(build())
+
+
+async def _remote_tip(tmp_path: Path, remote: Path, ref: str = "main") -> str:
+    """Read a bare repo's ref directly, never through a clone's own belief about it — the
+    discriminating assertion in the negative safety test below depends on this being an
+    independent read."""
+    return (await _git_out(tmp_path, f"--git-dir={remote}", "rev-parse", ref)).strip()
+
+
+async def test_rebase_onto_a_clean_target_replays_commits_and_reports_ok(
+    git: Git, tmp_path: Path
+) -> None:
+    """The success path: a clean rebase returns `True`, and the branch's own commit is still
+    present with the main-only commit now an ancestor of it — proving history was REPLAYED onto
+    the new base, not merged or dropped."""
+    await _write_and_commit(git.path, "on_branch.txt", "branch work\n", "branch commit")
+
+    await git.exec(["checkout", "main"])
+    await _write_and_commit(git.path, "on_main.txt", "main work\n", "main-only commit")
+    main_tip = await git.rev_parse("main")
+    await git.exec(["checkout", BRANCH])
+
+    assert await git.rebase("main") is True
+
+    assert await git.is_ancestor(main_tip, BRANCH) is True
+    replayed = await git.log(f"{main_tip}..HEAD")
+    assert [c.subject for c in replayed] == ["branch commit"]
+
+
+async def test_rebase_onto_a_conflicting_target_leaves_it_mid_flight_and_abort_restores_the_tip(
+    git: Git,
+) -> None:
+    """A conflict is a settled, meaningful `False`, not an exception — and `abort_rebase()`
+    returns the branch to EXACTLY its pre-rebase tip, with `REBASE_HEAD` cleared."""
+    await _write_and_commit(git.path, "a.txt", "branch version\n", "branch edits a.txt")
+    branch_tip = await git.rev_parse(BRANCH)
+
+    await git.exec(["checkout", "main"])
+    await _write_and_commit(git.path, "a.txt", "main version\n", "main edits a.txt")
+    await git.exec(["checkout", BRANCH])
+
+    assert await git.rebase("main") is False
+    assert await git.resolve("REBASE_HEAD") is not None, "rebase must be genuinely mid-flight"
+
+    await git.abort_rebase()
+
+    assert await git.rev_parse(BRANCH) == branch_tip
+    assert await git.resolve("REBASE_HEAD") is None
+
+
+async def test_rebase_onto_an_unknown_ref_raises_rather_than_reporting_a_conflict(
+    git: Git,
+) -> None:
+    """The discriminating case between the `raise` and `return False` branches: an unresolvable
+    `onto` must not be silently read as "a conflict happened" just because both are non-zero
+    exits — `REBASE_HEAD` never gets written for this failure."""
+    with pytest.raises(GitCommandError) as caught:
+        await git.rebase("does-not-exist")
+    assert "invalid upstream" in caught.value.stderr
+    assert await git.resolve("REBASE_HEAD") is None
+
+
+async def test_abort_rebase_with_nothing_in_progress_raises(git: Git) -> None:
+    with pytest.raises(GitCommandError):
+        await git.abort_rebase()
+
+
+async def test_push_force_with_lease_with_the_correct_expected_sha_succeeds(
+    remote_and_clone: tuple[Path, Path], tmp_path: Path
+) -> None:
+    remote, clone = remote_and_clone
+    expected_sha = await _remote_tip(tmp_path, remote)
+
+    await _write_and_commit(clone, "b.txt", "v2\n", "a second commit")
+    git_clone = Git(clone, timeout_s=60)
+    new_tip = await git_clone.rev_parse("HEAD")
+
+    await git_clone.push_force_with_lease("origin", "main", expected_sha=expected_sha)
+
+    assert await _remote_tip(tmp_path, remote) == new_tip
+
+
+async def test_push_force_with_lease_refuses_when_the_remote_moved_past_the_expected_sha(
+    remote_and_clone: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The core safety proof. Clone B pushes first, moving the bare remote's `main`; clone A,
+    still holding its now-STALE belief of `origin/main` as `expected_sha`, must be refused by
+    the server — and the remote tip, read independently via the bare repo (never through either
+    clone's own belief), must still be clone B's commit, unchanged.
+
+    This is the discriminating test named by the brief: an implementation that silently used
+    bare `--force` instead of the explicit `--force-with-lease=<branch>:<sha>` form would pass
+    every other test in this file and fail only this one.
+    """
+    remote, clone_a = remote_and_clone
+    stale_sha = await _remote_tip(tmp_path, remote)
+
+    clone_b = tmp_path / "clone_b"
+    await _sh(tmp_path, "clone", "-q", str(remote), str(clone_b))
+    await _sh(clone_b, "config", "user.email", "fleet@example.invalid")
+    await _sh(clone_b, "config", "user.name", "Fleet Test")
+    await _write_and_commit(clone_b, "concurrent.txt", "clone B's work\n", "clone B's commit")
+    await _sh(clone_b, "push", "-q", "origin", "main")
+    b_tip = await _remote_tip(tmp_path, remote)
+    assert b_tip != stale_sha, "the setup must actually move the remote, or this test is vacuous"
+
+    await _write_and_commit(clone_a, "a_only.txt", "clone A's work\n", "clone A's commit")
+    git_a = Git(clone_a, timeout_s=60)
+
+    with pytest.raises(GitCommandError) as caught:
+        await git_a.push_force_with_lease("origin", "main", expected_sha=stale_sha)
+    assert "stale info" in caught.value.stderr or "rejected" in caught.value.stderr
+
+    assert await _remote_tip(tmp_path, remote) == b_tip, "clone B's push must survive unchanged"
+
+
+async def test_push_force_with_lease_to_a_branch_that_does_not_exist_yet_raises(
+    remote_and_clone: tuple[Path, Path],
+) -> None:
+    """A LOCAL branch that does not exist at all fails at refspec resolution (`src refspec ...
+    does not match any`) — an ordinary git failure unrelated to lease semantics (it would fail
+    identically under bare `--force` or no force at all), but still something this method must
+    not swallow. `expected_sha` here is an ordinary (wrong-looking but non-sentinel) SHA, not the
+    all-zero sentinel — that scenario (a branch that exists LOCALLY but was never pushed to the
+    remote) is a different failure mode, covered separately by
+    `test_push_force_with_lease_refuses_the_all_zero_sentinel_on_an_unpushed_branch`
+    below (round VI task 15 review finding B: conflating the two here would make this test pass
+    for the wrong reason)."""
+    _remote, clone = remote_and_clone
+    git_clone = Git(clone, timeout_s=60)
+    with pytest.raises(GitCommandError) as caught:
+        await git_clone.push_force_with_lease(
+            "origin", "does-not-exist-branch", expected_sha="1" * 40
+        )
+    assert "does not match any" in caught.value.stderr
+
+
+async def test_push_force_with_lease_refuses_the_all_zero_sentinel_on_an_unpushed_branch(
+    remote_and_clone: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The real "branch does not exist ON THE REMOTE yet" scenario (round VI task 15 review
+    finding B): a branch that exists LOCALLY but has never been pushed. Git's own
+    force-with-lease semantics treat the all-zero SHA (`"0" * 40`, and the empty string
+    identically) as a sentinel meaning "the ref must NOT currently exist" — passing it here would
+    otherwise silently CREATE the remote branch, exit 0, no exception (verified empirically
+    before this guard was added: the un-guarded call succeeded and left a new
+    `refs/heads/feature-branch` on the bare remote). `push_force_with_lease` must refuse
+    client-side, before git ever runs, and nothing must land on the remote."""
+    remote, clone = remote_and_clone
+    git_clone = Git(clone, timeout_s=60)
+    await git_clone.exec(["checkout", "-b", "feature-branch"])
+
+    with pytest.raises(ValueError, match="all-zero"):
+        await git_clone.push_force_with_lease("origin", "feature-branch", expected_sha="0" * 40)
+    with pytest.raises(ValueError, match="all-zero"):
+        await git_clone.push_force_with_lease("origin", "feature-branch", expected_sha="")
+
+    # Independently confirm the guard fired BEFORE git ran: no branch was created on the remote.
+    result = await _sh(
+        tmp_path,
+        f"--git-dir={remote}",
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/feature-branch",
+    )
+    assert result.exit_code != 0, "the all-zero sentinel must never reach git at all"
+
+
+# --------------------------------------------------------------------------------------
 # commits.py — the patch id and the trailer round-trip
 # --------------------------------------------------------------------------------------
 def test_patch_id_is_a_pure_function_of_content() -> None:
