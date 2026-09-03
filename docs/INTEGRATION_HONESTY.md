@@ -8669,3 +8669,45 @@ sentence checks, and a real-bazel fixture's test target count can be proven nonz
 **Not yet built:** whatever wiring would populate `test_sources()`/`test_srcs` from a real
 ecosystem adapter's manifest scan — no design decision (which adapters, what discovery heuristic)
 is made here.
+
+## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
+design leg before any dispatch — bigger than first estimated, one live blocker found
+
+**Found by research-23 (2026-09-03), sized further by research-25 (2026-09-03).** Verified free
+before allocating: form-agnostic sweep found `D112` as the highest allocated number.
+
+**The gap, as measured.** A hoisted `ContractNode` has zero Phase 3 existence today beyond a
+`wave_members` row: `cli.py:_eligible_build_units`'s `node_kind = 'REPO'` filter excludes CONTRACT
+rows by construction, so no `phases` row, ingest, `BuildPlan`, or dispatch is ever created for a
+contract — `_build_impl` never queries the `contracts` table. Making
+`BuildPlan.unbound_contract_kinds` real needs standing up a real slice of Phase 3 pipeline for
+contract nodes, not one lookup bolted onto `buildgen.py`'s existing per-repo loop.
+
+**A live, currently-blocking defect, not just missing wiring.** SPEC §13 row 31's own emission
+pseudocode opens with `contracts.for_kind(contract.kind)`, which requires `contracts.discover()`
+to have already run — but `contracts.base.discover()` unconditionally raises `RuntimeError` today
+because `avro.py`/`thrift.py` are unshipped (§12.32/§12.47 territory) and it asserts total
+bijection over the whole `ContractKind` enum regardless of which kind triggered the call. Wiring
+Clause B "the obvious way" (eager `discover()` at Phase 3 startup, mirroring
+`ecosystems.base.discover()`'s pattern) would make every run containing so much as one hoisted
+contract of ANY kind — including a fully-bound one — fail loudly, directly contradicting the
+criterion's own "and the run still completes" clause.
+
+**Judgment calls a design leg must resolve before dispatch (none picked here):**
+1. How to populate the contract registry without tripping the bijection assert — block Clause B on
+   §12.32/§12.47 landing first, or bypass `discover()` for this call site with a scoped direct
+   import of only the kinds a run's actual contracts need (the latter is research-25's own Agent
+   Recommendation, not adjudicated).
+2. How Phase 3's domain grows to admit CONTRACT-kind wave members — full contract ingest/worktree/
+   publish machinery, or a narrower post-pass reading already-committed contracts and persisting
+   their `BuildPlan`s without solving "does a hoisted contract's own `BUILD.bazel` get published."
+   Research-25 flags the narrower reading as possibly one-shot once explicitly chosen.
+3. Which failures are allowed to become a `ContractBindingUnavailable` finding (a missing binding
+   — the criterion's whole point) versus which must still fail loud (a missing adapter for a real,
+   in-use kind — the guardrail against silently softening judgment call 1's blocker into a no-op).
+
+Full findings: `.superpowers/sdd/round-V-criteria-closure/research-23-report.md` (Q5),
+`.superpowers/sdd/round-V-criteria-closure/research-25-report.md` (full sizing).
+
+**Not yet built:** any resolution to the three judgment calls above, the Phase 3 domain expansion,
+or the emission wiring itself. No design choice among them is made here.

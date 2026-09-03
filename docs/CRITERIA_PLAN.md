@@ -1209,21 +1209,26 @@ paraphrase covered only the first and omitted the `ContractBindingUnavailable` c
   "zero outside `enums.py`" wording, since this fixture never touches `enums.py` at all (disclosed
   in the test's own docstring). Mutation-proven, independently reproduced by review.
 - **Clause B (`ContractBindingUnavailable` finding + `BuildPlan.unbound_contract_kinds`).**
-  **NOT one-shot-sized.** `unbound_contract_kinds` is declared (`models/build.py`) and never
-  assigned in `src/`; `ContractBindingUnavailable` is never inserted as a finding anywhere (only
-  two comments reference it); the `ContractAdapter` registry exists (3 of 5 kinds — ADR-0065's
-  "does not exist" is now stale for this half) but has **zero callers** in
-  `workers/buildgen.py`/`bazel/generators.py`/`cli.py` — SPEC §13 row 31's pseudocode is the
-  design, not a description of this tree, on its emission side. Wiring it needs a real design
-  decision (where in Phase 3 contract nodes get their `BuildPlan` augmented, how the finding gets
-  inserted, whether hoisted contracts reach BuildPlan generation at all today) this research pass
-  deliberately does not resolve. Same shape as §12.31's D111 deferral — needs its own dedicated
-  leg, not bolted onto Clause A. Full findings:
-  `.superpowers/sdd/round-V-criteria-closure/research-23-report.md`.
+  **NOT one-shot-sized — confirmed and sized further by research-25 (2026-09-03), now `D113`.**
+  A hoisted `ContractNode` has zero Phase 3 existence today beyond a `wave_members` row —
+  `_eligible_build_units`'s `node_kind = 'REPO'` filter excludes CONTRACT rows by construction, no
+  `phases`/ingest/`BuildPlan`/dispatch is ever created for one. Worse: SPEC's own emission
+  pseudocode requires `contracts.discover()`, which **unconditionally raises today** (avro/thrift
+  unshipped, total-bijection assert over the whole enum) — wiring "the obvious way" would make
+  every run with any hoisted contract of any kind fail loudly, contradicting the criterion's own
+  "and the run still completes" clause. Needs a dedicated design leg resolving three judgment
+  calls (discover()-bypass shape; full contract ingest vs. a narrower committed-contracts-only
+  post-pass, possibly one-shot once chosen; which failures may become a finding vs. must still
+  fail loud) before any worker dispatch. Same shape as §12.31's D111 deferral. Full findings:
+  `.superpowers/sdd/round-V-criteria-closure/research-23-report.md` (Q5),
+  `.superpowers/sdd/round-V-criteria-closure/research-25-report.md` (full sizing).
 **Done bar:** both clauses must close before §12.34 counts DONE — Clause A alone is a partial
-closure, do not round up the `<n> of 48` count for it. Clause B's done bar: design and wire the
-Phase 3 emission call site, then extend Clause A's fixture with a fixture contract Ruby's
-`contract_bindings` omits, asserting the finding and the `BuildPlan` field.
+closure, do not round up the `<n> of 48` count for it. Clause B's done bar: a design leg (ADR)
+resolving the three judgment calls above, then wire per that decision, then extend Clause A's
+fixture with a fixture contract Ruby's `contract_bindings` omits, asserting the finding and the
+`BuildPlan` field.
+**D-number:** `D113` — see `docs/INTEGRATION_HONESTY.md`. Do not file a second D-number for this
+gap.
 
 ## 35. No raw prior diff reaches a prompt
 **DONE (round GG task 4, 2026-09-02, `2657ec4`/`a5253ab`, ADR-0110) — see the closure paragraph
