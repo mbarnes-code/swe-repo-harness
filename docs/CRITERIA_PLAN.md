@@ -906,7 +906,20 @@ the floor) — it is a separate, real gap in a phase this criterion's own text d
 tracked on its own number rather than silently reopening the sub-clause just closed.
 
 ## 23. Idempotency — re-scan, re-transform
-**OPEN — one sub-clause blocked on D23, otherwise DONE (round S, `4e1975d`).** Re-transform is
+**OPEN — D23 fixed, but the specific re-run idempotency test for `retargeted_from_repo_id` is not
+yet built — otherwise DONE (round S, `4e1975d`).** D23 (`docs/INTEGRATION_HONESTY.md`) is now
+FIXED, LANDED (round VI task 31) — `edges.retargeted_from_repo_id` is genuinely persisted, and the
+`ON CONFLICT ... DO UPDATE SET` clause deliberately excludes it, which guarantees the value is
+unchanged across a re-run BY CONSTRUCTION (task 31's own review independently connected this to
+this criterion's own literal text). But task 31's own round-trip test proves only that the value
+is written correctly on ONE run — it does not (and was not scoped to) assert the specific re-scan/
+re-sequence idempotency property this criterion needs: that re-running `fleet scan`/`fleet
+sequence` a second time over the same retargeted edge leaves `retargeted_from_repo_id` unchanged.
+**Done bar (narrowed to this one remaining leg):** extend an existing contract-retargeting fixture
+(reuse task 31's own, or `tests/test_sequence_e2e.py`'s pre-existing coverage) to run `fleet scan
+&& fleet sequence` TWICE over the same retargeted-edge scenario and assert
+`retargeted_from_repo_id` is identical before and after the second run — a real re-run idempotency
+proof, not the single-run round-trip task 31 already closed. Re-transform is
 fully covered. Re-scan now covers all 8 of the named tables (`edges, contracts, symbols,
 manifests, findings, collisions, waves, wave_members` per `docs/SPEC.md:7453`): 6 under re-scan
 directly in `tests/test_scan_e2e.py` (`symbols, edges, manifests, findings` extended in-place,
@@ -916,10 +929,12 @@ via a genuine 9-repo, real-git, real-CLI vendored-contract fixture newly added t
 2026-08-31:** this entry's prior "6 of 8" line predates round S and had no citation; re-measured
 against `tests/test_scan_e2e.py` at round S's start, the true pre-round figure was **3 of 8**
 (`edges, symbols, manifests`) — round S closed the remaining 5.
-**Remaining, genuinely unclosable by a test:** `edges.retargeted_from_repo_id` is never persisted
-(`state/repository.py`'s `insert_edges`/`EdgeRow` carry no such column/field at all — the value
-`graph/cycles.py:736` computes in memory is structurally dropped before it reaches SQL) — this is
-`D23` (`docs/INTEGRATION_HONESTY.md`), OPEN, not something a TEST-ONLY task can close.
+**Remaining, historical — D23 is now fixed, kept for the record rather than deleted.** This
+paragraph originally read: "`edges.retargeted_from_repo_id` is never persisted... this is D23...
+not something a TEST-ONLY task can close." That was true when written; D23 landed round VI task 31
+(see above) — the column is now written, and the value survives a re-run by construction (the
+`ON CONFLICT` clause excludes it). What remains is purely TEST-ONLY now: the re-run idempotency
+assertion named in the done bar above.
 **Done bar:** fix D23 (persist `retargeted_from_repo_id` for real), then one test asserting it
 survives a second scan unchanged. Everything else in this criterion is already closed.
 
