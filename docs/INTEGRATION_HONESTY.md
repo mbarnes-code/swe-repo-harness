@@ -8302,6 +8302,67 @@ one — not confirmed here), and the call site that feeds that report to `settle
 applies the resulting `StubDecision`. That design choice is not made here — this entry only
 establishes the gap exists and is now tracked, following D102's own precedent.
 
+**Design choice made, 2026-09-03 (round VI, research-14) — sizing only, not a fix.** The
+`_COARSE_TASK_KIND` dict this entry points at above is the wrong mechanism: that's D89/ADR-0101's
+git-arbitration bookkeeping, and its own comment explicitly excludes `REVALIDATE` by design. The
+real dispatch mechanism is the hand-composed `_run_*_wave` functions (`_run_verify_wave` traced in
+full) — no `_run_revalidate_wave` exists, and `REVALIDATE` tasks sit outside `wave_members`
+entirely, so they need their own driving loop (natural home: a new `fleet resume` step). SPEC's
+own text confirms revalidation reuses `VerifyPipelineWorker`/`BuildverifyWorker`, not a new worker.
+Splits into 3 pieces: (a) small `VerifyInput` field-threading, (b) the claiming loop +
+`settle_revalidation` caller (MEDIUM, comparable to a §37 sub-task), (c) a `consumer_status` →
+`phases` write (see D108 below — currently a silent no-op this piece must not reuse unmodified).
+**Not dispatched this round** — see D107/D108, found by the same research pass, which make even
+this full 3-piece build land as tested-but-inert infrastructure on a real tree.
+
+## D107 — OPEN. Nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub target to
+the real one once the stub resolves — SPEC §3.5.1 item 1 has zero production implementation
+
+**Found by research-14 (2026-09-03), while sizing D104.** Verified free before allocating:
+form-agnostic sweep found `D106` as the highest allocated number.
+
+**The gap, as measured.** SPEC §3.5.1 item 1 (`docs/SPEC.md:1725-1868`) describes a consumer
+repo's generated Bazel target depending on a stub's placeholder label at hoist time, and that
+label being rewritten to the real target once the awaited coordinate resolves. `grep -rn` across
+`src/fleet/` for any code that rewrites a generated `BUILD.bazel` dependency label post-hoist finds
+nothing — the mechanism SPEC describes for closing this loop does not exist anywhere.
+
+**Consequence.** `verified_against_stubs` (the field D104's T2 trigger needs to go empty for a
+consumer) can never actually clear on a real tree, because nothing ever performs the rewrite that
+would make the awaited coordinate genuinely resolved from the consumer's own build graph's point
+of view — D104's T2 can only be exercised via a hand-seeded fixture, never end-to-end. This sits
+upstream of D104 the same way §37's stub-creation gap sits upstream of D102/D104 — a third,
+independent layer in the same chain.
+
+**Not yet built:** the rewrite mechanism itself — where in the pipeline it would run (a new Phase-3
+sub-step, most likely, since it operates on already-generated `BUILD.bazel` content), what
+triggers it (presumably the same "stub resolved" signal D104/T2 would need), and how it locates
+every consumer-side label referencing a given stub. Genuinely unsized here — that design choice is
+not made in this entry.
+
+## D108 — OPEN. `StubDecision.consumer_status` has zero production readers — `_apply_stub_decisions`
+writes only `stubs`/`findings`, never `phases`
+
+**Found by research-14 (2026-09-03), while sizing D104.** Verified free before allocating:
+form-agnostic sweep found `D107` (allocated immediately above, same commit) as the highest number.
+
+**The gap, as measured.** `StubDecision.consumer_status` is the field meant to promote a consumer
+repo to `SUCCEEDED` or escalate it to `REQUIRES_HUMAN_INTERVENTION` once its stub is resolved or
+permanently diverged. `_apply_stub_decisions` (the landed D105/D106 call site) writes only to the
+`stubs` and `findings` tables — `grep -rn "consumer_status"` across `src/fleet/` finds no site that
+reads this field and writes `phases`.
+
+**Consequence, currently silent and currently harmless.** Every `StubDecision` kind actually
+produced in production today (T1, T4, T3-reconcile) leaves `consumer_status` at a value that keeps
+the consumer `DEGRADED` regardless, so this gap has caused no observed defect yet. It becomes
+live the moment D104's T2 (`RESOLVED`) or T3-`STUB_DIVERGED` transitions are wired in — those are
+exactly the decision kinds `consumer_status` exists to act on, and reusing `_apply_stub_decisions`
+unmodified would silently swallow them.
+
+**Not yet built:** the `phases`-write call site for `consumer_status`. Trivial in isolation, but
+correctly scoped as part of whichever future task wires D104's T2/T3 transitions in (D104-c above),
+not dispatched standalone — there is nothing for it to act on until D104 lands.
+
 ---
 
 ## D105 — FIXED, LANDED (round VI task 11, `d8c1cd7`/`0243792`). `fleet resume --repoll-prs` can immediately abandon a stub T1 just superseded, in
