@@ -8806,3 +8806,44 @@ items remain identified in this session's own backlog as of this checkpoint — 
 should either take on D94 properly or run a fresh sweep for anything newly smaller, following this
 project's own "diminishing returns" discipline rather than re-deriving the same NEW-MECHANISM
 conclusions a sixth time.
+
+**Round VI, eighth wave (2026-09-03) — §12 count: 28 of 48, up from 27. First criterion movement
+since §12.4.** Per Rule 13, the previous checkpoint's own D94 pivot (task 15, `Git.rebase`/
+`abort_rebase`/`push_force_with_lease`, D94's foundational git primitive) was explicitly disclosed
+as not moving a criterion, obligating this round to close one. A dedicated research pass
+(research-10) swept the backlog for the next unblocked, well-scoped target — found the four
+originally-suspected candidates (§12.9, §12.24, §12.42, §12.47) either already DONE (stale prompt
+framing) or genuinely blocked/oversized, and instead surfaced §12.25 ("the unknown repo survives
+the pipeline") as unblocked with its machinery already shipped. Two parallel tasks closed both of
+its done-bar items: task 16 proved the unknown-ecosystem `filegroup` builds green under a REAL
+`bazel` (an isolated new test, chosen over perturbing the shared 4-repo real-bazel test's
+`FIXTURE_REPOS`-keyed parity assertion); task 17 investigated a suspected `kind='unknown'` field
+conflation, found neither originally-flagged site actually conflated anything, and closed the real
+gap (nothing combined `Ecosystem.UNKNOWN` and the classify worker's advisory `repos.kind` as two
+separately-named assertions) with one new test. Both independently task-reviewed with every claim
+reproduced, not trusted — including the reviewer catching and self-correcting its own first flawed
+attempt to verify task 16's "8 pre-existing failures, not a regression" claim before confirming it
+genuinely holds against unmodified `main`. §12.25 flipped DONE (`7ba2dcd`).
+
+Task 15's fix round (two review findings: a format-debt self-gate error, and a real
+silent-remote-branch-creation footgun in `push_force_with_lease`) landed and was independently
+re-verified by a scoped re-review before merge (`741e9a2`); D94's ledger entry annotated in place
+(dated, stays OPEN — this is a disclosed sub-piece).
+
+A second research pass (research-11) sized two further candidates precisely: §12.19 (SCC members
+sharing one `PullRequestDraft.scc_id`, not just one `CycleFinding.scc_id` — genuinely
+criterion-moving, and it found and designed around a previously-undocumented deadlock hazard:
+`ATOMIC_WAVE` doesn't suppress intra-SCC ordering edges, so wiring SCC grouping in without also
+filtering those edges would make every such SCC permanently block itself in `fleet pr`) and
+§12.47's contracts-registry residual (real, ADR-0065-adjudicated, but even its smallest slice
+can't flip §12.32/§12.47 to DONE — both require the full 5-adapter bijection, so it's disclosed
+foundation work). Dispatched both in parallel: task 19 (contracts-registry base ABC + registry
+mechanism + one `proto` adapter, explicitly disclosed non-criterion-moving, paired this round with
+§12.19's criterion-moving work per Rule 13) landed and was independently reviewed — merged
+(`f4ba7a5`), §12.47's `CRITERIA_PLAN.md` entry annotated in place (stays OPEN). Task 18 (§12.19's
+production wiring) is in flight as this checkpoint is written.
+
+**Status: 1 task outstanding (task 18, §12.19).** Once it lands and is reviewed, re-measure §12.19
+directly against its full text before flipping it — the pattern this round itself demonstrated
+twice already (never carry forward an assumption from a prior audit or from the implementer's own
+report).
