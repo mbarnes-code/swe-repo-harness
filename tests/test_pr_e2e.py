@@ -37,7 +37,7 @@ import json
 import sqlite3
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import pytest
@@ -864,6 +864,117 @@ def test_the_run_digest_moves_when_a_cycle_break_decision_moves_and_not_otherwis
     assert changed["sections"]["cycles"] != first["sections"]["cycles"], changed
     assert changed["digest"] != first["digest"], changed
     assert cycles_through_the_projection(fleet)[0].break_strategy is BreakStrategy.ATOMIC_WAVE
+
+
+# ---------------------------------------------------------------------------------------
+# 6b. §12.19's remaining leg — `PullRequestDraft.scc_id` shared by every ATOMIC_WAVE member,
+#     not just `CycleFinding.scc_id`, and the intra-SCC deadlock hazard closed alongside it
+# ---------------------------------------------------------------------------------------
+
+
+def pr_records_through_the_module(root: Path) -> dict[str, Any]:
+    """`cli._pr_records`, via the real reader -- never by re-parsing `findings` by hand here."""
+
+    async def read() -> dict[str, Any]:
+        conn = await connect_ro(root / "state" / "fleet.db")
+        try:
+            return await cli._pr_records(conn, run_id_of(root))
+        finally:
+            await conn.close()
+
+    return asyncio.run(read())
+
+
+def verified_through_a_planted_cycle(root: Path) -> list[Any]:
+    """Plant a real 2-repo cycle, force it ATOMIC_WAVE, and drive it all the way to VERIFY.
+
+    Mirrors `verified()` above but must sequence with `--scc-atomic-threshold 1` BEFORE transform
+    runs, since Phase 3 coarsens an ATOMIC_WAVE SCC into one shared Bazel target (§3.1 6e) — a
+    plain `scanned()` would resolve this same 2-repo cycle as `EDGE_BREAK` instead.
+    """
+    plant_cycle(root)
+    assert scan(root).exit_code == ExitCode.SUCCESS
+    assert sequence(root, "--scc-atomic-threshold", "1").exit_code == ExitCode.SUCCESS
+    assert transform(root).exit_code == ExitCode.SUCCESS
+    assert build(root, "--no-sandbox").exit_code == ExitCode.SUCCESS
+    assert verify(root).exit_code == ExitCode.SUCCESS
+    cycles = cycles_through_the_projection(root)
+    assert cycles, "the planted cycle must reach MigrationState.cycles"
+    assert cycles[0].break_strategy is BreakStrategy.ATOMIC_WAVE, cycles[0]
+    return cycles
+
+
+def test_an_atomic_wave_scc_ships_one_pr_shared_by_every_member(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """§12.19's remaining leg: `PullRequestDraft.scc_id` -- not just `CycleFinding.scc_id` -- is
+    shared by every ATOMIC_WAVE member, and exactly ONE `gh pr create` fires for the whole SCC.
+
+    This fixture fleet has FOUR repos, only two of which are in the planted cycle, so the same
+    `fleet pr` invocation also ships the untouched `acme-lib-py` (independent, wave 0) with its
+    OWN separate PR -- correctly, since it shares no SCC with anything. The assertion below is
+    therefore scoped to the two SCC members' own branches, not to the total call count for the
+    whole fleet: it proves the SCC fires exactly one `gh pr create` (for the primary member's
+    branch) and NEVER a second one for its fellow member, which is what §12.19's remaining leg is
+    actually about. `test_pr_opens_one_pr_per_eligible_repo_...` already proves the ordinary
+    per-repo case unaffected.
+    """
+    finding = verified_through_a_planted_cycle(fleet)[0]
+    members = sorted(finding.members)
+    assert members == ["acme-app-ts", "acme-lib-ts"], finding
+    primary = min(members)
+
+    result = run_pr(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    created = forge.created()  # head branch -> argv, one entry per REAL `gh pr create` call
+    member_branches = {f"migrate/{member}" for member in members}
+    fired_for_scc = member_branches & set(created)
+    assert fired_for_scc == {f"migrate/{primary}"}, (
+        "the SCC must fire exactly one `gh pr create`, for the primary member's branch only "
+        f"(§12.19's remaining leg) -- got {fired_for_scc}"
+    )
+
+    records = pr_records_through_the_module(fleet)
+    assert set(members) <= set(records), records  # both SCC members got their own record
+    urls = {records[member].url for member in members}
+    assert len(urls) == 1, "every member's PullRequestDraft.url must be the SAME url"
+    scc_ids = {records[member].scc_id for member in members}
+    assert scc_ids == {finding.scc_id}, scc_ids
+    member_sets = {tuple(sorted(records[member].member_repo_ids)) for member in members}
+    assert member_sets == {tuple(members)}, member_sets
+
+    phase_urls = dict(query(fleet, "SELECT repo_id, pr_url FROM phases WHERE phase = 4"))
+    for member in members:
+        assert phase_urls[member] in urls, phase_urls
+
+
+def test_an_atomic_wave_member_is_not_blocked_on_its_own_scc_mates_pr(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """The deadlock hazard `research-11`/task 18's brief found: `ATOMIC_WAVE` does not suppress
+    the intra-SCC ordering edge, so `acme-lib-ts` -> `acme-app-ts` (planted by `plant_cycle`) is a
+    real, unsuppressed row in `edges`. Without filtering it out of `_pr_candidates`' dependency
+    set, each member would show up "blocking" on its own fellow member's PR being MERGED -- a PR
+    that cannot be MERGED before it exists, because they are going to share ONE not-yet-opened PR.
+    This asserts neither member is HELD, and that the shared PR opens in the same invocation.
+    """
+    finding = verified_through_a_planted_cycle(fleet)[0]
+    members = sorted(finding.members)
+
+    result = run_pr(fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    body = payload(result)
+
+    held = cast(dict[str, list[str]], body["held"])
+    for member in members:
+        assert member not in held, (
+            f"{member} is HELD on {held.get(member)} -- an SCC mate's own not-yet-opened shared "
+            "PR must never be read as a blocking dependency"
+        )
+    opened = cast(dict[str, str], body["opened"])
+    for member in members:
+        assert member in opened, body  # shipped, not just un-held
 
 
 # ---------------------------------------------------------------------------------------

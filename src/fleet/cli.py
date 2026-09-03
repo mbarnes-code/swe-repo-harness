@@ -10414,6 +10414,33 @@ class _PrCandidate:
     stub_states: dict[str, StubState]
     stub_fidelity: dict[str, StubFidelity]
     dependencies: tuple[str, ...]
+    scc: CycleFinding | None = None
+    """Set iff this repo is a member of an ATOMIC_WAVE SCC (§12.19's remaining leg): the whole
+    group ships as ONE `PullRequestDraft`, not one per member. `None` for every other repo — the
+    overwhelmingly common singleton case — which is unaffected by any of this."""
+
+
+async def _atomic_wave_findings(conn: aiosqlite.Connection, run_id: str) -> dict[str, CycleFinding]:
+    """repo_id -> its CycleFinding, for every member of an ATOMIC_WAVE SCC in this run.
+
+    Read from the `CycleDetected` findings `fleet sequence` persists (`_persist_cycle_findings`),
+    the same source `MigrationState.cycles` reads — DELETE-then-inserted every run, so this always
+    sees current SCC membership, never a stale one. A repo absent from the result is not in any
+    ATOMIC_WAVE SCC (it may still be in an EDGE_BREAK/CONTRACT_HOIST/MANUAL one, or in none).
+    """
+    rows = await _rows(
+        conn,
+        "SELECT payload FROM findings WHERE run_id = ? AND kind = ?",
+        (run_id, CYCLE_FINDING_KIND),
+    )
+    out: dict[str, CycleFinding] = {}
+    for row in rows:
+        finding = CycleFinding.model_validate_json(str(row[0]))
+        if finding.break_strategy is not BreakStrategy.ATOMIC_WAVE:
+            continue
+        for member in finding.members:
+            out[member] = finding
+    return out
 
 
 async def _pr_candidates(
@@ -10467,8 +10494,16 @@ async def _pr_candidates(
         stub_state.setdefault(str(row[0]), {})[str(row[1])] = StubState(str(row[2]))
         stub_tier.setdefault(str(row[0]), {})[str(row[1])] = StubFidelity(str(row[3]))
 
+    scc_by_repo = await _atomic_wave_findings(conn, run_id)
+
     dependencies: dict[str, set[str]] = {}
     for dependency, dependent in await _ordering_pairs(conn, settings, run_id):
+        if (
+            dependency in scc_by_repo
+            and dependent in scc_by_repo
+            and scc_by_repo[dependency].scc_id == scc_by_repo[dependent].scc_id
+        ):
+            continue  # same shared PR, not a real precedence constraint (the deadlock hazard)
         dependencies.setdefault(dependent, set()).add(dependency)
 
     reports = await _verifications(conn, run_id)
@@ -10498,6 +10533,7 @@ async def _pr_candidates(
                 stub_states=stubs,
                 stub_fidelity=stub_tier.get(repo_id, {}),
                 dependencies=tuple(sorted(dependencies.get(repo_id, set()))),
+                scc=scc_by_repo.get(repo_id),
             )
         )
     return tuple(candidates), tuple(unverified)
@@ -10526,6 +10562,30 @@ def _report_with_stubs(
     )
 
 
+def _pr_units(candidates: Sequence[_PrCandidate]) -> tuple[tuple[_PrCandidate, ...], ...]:
+    """Group `candidates` into the units `fleet pr` ships: one element for a singleton repo, or
+    every PRESENT member of one ATOMIC_WAVE SCC sharing one `scc.scc_id` — §12.19's remaining
+    leg, `PullRequestDraft.scc_id` shared by every member, not just `CycleFinding.scc_id`.
+
+    Grouped by `scc_id` (a string), not by `CycleFinding` object identity — resilient even if a
+    future caller sources two distinct finding objects for the same id. Order-preserving over
+    `candidates`, which `_pr_candidates` already yields as `sorted(statuses.items())`.
+    """
+    groups: dict[str, list[_PrCandidate]] = {}
+    order: list[str] = []
+    for candidate in candidates:
+        key = (
+            f"scc:{candidate.scc.scc_id}"
+            if candidate.scc is not None
+            else f"repo:{candidate.repo_id}"
+        )
+        if key not in groups:
+            groups[key] = []
+            order.append(key)
+        groups[key].append(candidate)
+    return tuple(tuple(groups[key]) for key in order)
+
+
 async def _pr_impl(
     opts: GlobalOptions,
     settings: FleetSettings,
@@ -10537,15 +10597,18 @@ async def _pr_impl(
     ready: bool,
     dry_run: bool,
 ) -> dict[str, object]:
-    """§3.4 step 4 over one fleet: one PR per eligible repo, stacked, through `PrwriterWorker`.
+    """§3.4 step 4 over one fleet: one PR per eligible repo, stacked, through `PrwriterWorker` —
+    except an ATOMIC_WAVE SCC, whose present members ship as ONE shared PR (§12.19's remaining
+    leg, `PullRequestDraft.scc_id`).
 
-    Eligibility is the ADR-0011 stacking rule read off INGESTED state: a repo ships only when
-    every ordering dependency has a `PullRequestDraft` whose state is `MERGED`. Anything else is
-    HELD — reported, not failed, and not shipped — because the dependency may merge in five
-    minutes and burning a repo's attempt on someone else's review latency is what
-    `pr.merge_wait_timeout_s` exists to bound. The worker then applies the same rule a second time
-    against what the forge says right now, which is the difference between "observed" and
-    "assumed" that §3.4 step 5 is written to enforce.
+    Eligibility is the ADR-0011 stacking rule read off INGESTED state: a unit ships only when
+    every EXTERNAL ordering dependency (intra-SCC edges are filtered at `_pr_candidates` — they
+    are not a real precedence constraint once the members share one not-yet-opened PR) has a
+    `PullRequestDraft` whose state is `MERGED`. Anything else is HELD — reported, not failed, and
+    not shipped — because the dependency may merge in five minutes and burning a repo's attempt on
+    someone else's review latency is what `pr.merge_wait_timeout_s` exists to bound. The worker
+    then applies the same rule a second time against what the forge says right now, which is the
+    difference between "observed" and "assumed" that §3.4 step 5 is written to enforce.
     """
     log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     conn = await connect_ro(path)
@@ -10555,31 +10618,59 @@ async def _pr_impl(
     finally:
         await conn.close()
 
-    eligible: list[_PrCandidate] = []
+    eligible: list[tuple[_PrCandidate, ...]] = []
     already: list[str] = []
     held: dict[str, list[str]] = {}
-    for candidate in candidates:
-        existing = records.get(candidate.repo_id)
-        if existing is not None and existing.url:
-            already.append(candidate.repo_id)
+    scc_incomplete: dict[str, list[str]] = {}
+    for unit in _pr_units(candidates):
+        scc = unit[0].scc
+        member_ids = {candidate.repo_id for candidate in unit}
+        if scc is not None:
+            missing = sorted(set(scc.members) - member_ids)
+            if missing:
+                # Reported like an unverified repo is today — shipped by nothing, never silently
+                # dropped (Rule 11). Phase 3's coarsened single Bazel target implies every member
+                # should finish VERIFY together, but nothing in `phases` enforces that, so this is
+                # a real defensive check, not paranoia.
+                scc_incomplete[scc.scc_id] = missing
+                continue
+        existing_urls: set[str] = {
+            url
+            for candidate in unit
+            if candidate.repo_id in records and (url := records[candidate.repo_id].url)
+        }
+        if existing_urls:
+            if len(existing_urls) > 1:
+                raise PrEmissionError(
+                    f"SCC {scc.scc_id if scc else '<singleton>'!r} members carry DIFFERENT "
+                    f"PullRequestDraft.url values: {sorted(existing_urls)!r} — they share one PR "
+                    "by construction, so this is a prior bug or a manual DB edit, not something "
+                    "this command may silently pick a winner over."
+                )
+            already.extend(sorted(member_ids))
             continue
         blocking = sorted(
-            dep
-            for dep in candidate.dependencies
-            if dep not in records or records[dep].state is not PrState.MERGED
+            {
+                dep
+                for candidate in unit
+                for dep in candidate.dependencies
+                if dep not in member_ids
+                and (dep not in records or records[dep].state is not PrState.MERGED)
+            }
         )
         if blocking:
-            held[candidate.repo_id] = blocking
+            for repo_id in member_ids:
+                held[repo_id] = blocking
             continue
-        eligible.append(candidate)
-    eligible.sort(key=lambda item: (item.wave_index, item.repo_id))
+        eligible.append(unit)
+    eligible.sort(key=lambda unit: (min(c.wave_index for c in unit), min(c.repo_id for c in unit)))
 
     opened: dict[str, str] = {}
     drafted: list[str] = []
     failed: dict[str, str] = {}
     if eligible and not dry_run:
         opened, drafted, held_late, failed = await _emit_prs(
-            settings, path, run_id=run_id, candidates=eligible, records=records, ready=ready
+            settings, path, run_id=run_id, units=eligible, records=records, ready=ready
         )
         held.update(held_late)
 
@@ -10587,10 +10678,11 @@ async def _pr_impl(
         "run_id": run_id,
         "opened": dict(sorted(opened.items())),
         "draft": sorted(drafted),
-        "eligible": [candidate.repo_id for candidate in eligible],
+        "eligible": sorted(candidate.repo_id for unit in eligible for candidate in unit),
         "held": dict(sorted(held.items())),
         "already_open": sorted(already),
         "unverified": list(unverified),
+        "scc_incomplete": dict(sorted(scc_incomplete.items())),
         "failed": dict(sorted(failed.items())),
         "dry_run": dry_run,
         "exit_code": int(ExitCode.SUCCESS if not failed else ExitCode.UNEXPECTED_ERROR),
@@ -10631,11 +10723,15 @@ async def _emit_prs(
     path: Path,
     *,
     run_id: str,
-    candidates: Sequence[_PrCandidate],
+    units: Sequence[tuple[_PrCandidate, ...]],
     records: Mapping[str, PullRequestDraft],
     ready: bool,
 ) -> tuple[dict[str, str], list[str], dict[str, list[str]], dict[str, str]]:
-    """Compose the run and dispatch `PrwriterWorker` once per eligible repo, in stack order.
+    """Compose the run and dispatch `PrwriterWorker` once per eligible unit, in stack order.
+
+    A "unit" is one repo, or every present member of an ATOMIC_WAVE SCC sharing one shared PR
+    (§12.19's remaining leg). Exactly one `PrwriterWorker.run()` call per unit either way — an SCC
+    never gets one `gh pr create` per member.
 
     `gh` runs with the MONOREPO working copy as its cwd, not a per-repo worktree: the PR is
     against the monorepo's integration branch, so that is the repository whose remote `gh` must
@@ -10677,30 +10773,45 @@ async def _emit_prs(
                 )
                 worker = PrwriterWorker(runner=GH_RUNNER)
                 try:
-                    for candidate in candidates:
+                    for unit in units:
+                        member_ids = [candidate.repo_id for candidate in unit]
                         outcome = await _emit_one_pr(
                             ctx,
                             worker,
                             settings,
-                            candidate,
+                            unit,
                             records=records,
                             monorepo_path=monorepo_path,
                             pr_root=pr_root,
                             ready=ready,
                         )
                         if isinstance(outcome, str):
-                            failed[candidate.repo_id] = outcome
+                            for repo_id in member_ids:
+                                failed[repo_id] = outcome
                             continue
                         if outcome.held:
-                            held[candidate.repo_id] = list(outcome.unmerged_dependencies)
+                            for repo_id in member_ids:
+                                held[repo_id] = list(outcome.unmerged_dependencies)
                             continue
                         if outcome.pr is None:  # pragma: no cover - `ok` implies a draft record
-                            failed[candidate.repo_id] = "the worker returned ok with no PR record"
+                            for repo_id in member_ids:
+                                failed[repo_id] = "the worker returned ok with no PR record"
                             continue
-                        await _write_pr_record(writer, run_id, outcome.pr, now=_now())
-                        opened[candidate.repo_id] = outcome.pr.url or ""
-                        if outcome.draft:
-                            drafted.append(candidate.repo_id)
+                        # Persist the SAME draft against every member (repo_id swapped): this,
+                        # plus `_upsert_pr_record`'s existing per-repo `findings` upsert and
+                        # `phases.pr_url` write, IS the entire "one shared PR" mechanism — N
+                        # ordinary per-repo rows sharing an identical url/scc_id/member_repo_ids
+                        # body, no new table.
+                        for repo_id in member_ids:
+                            await _write_pr_record(
+                                writer,
+                                run_id,
+                                outcome.pr.model_copy(update={"repo_id": repo_id}),
+                                now=_now(),
+                            )
+                            opened[repo_id] = outcome.pr.url or ""
+                            if outcome.draft:
+                                drafted.append(repo_id)
                 finally:
                     # `finally`, not "after the loop": `_write_pr_record` and `_emit_one_pr` can
                     # both raise, and a drain placed after the loop would discard the buffer on
@@ -10720,35 +10831,70 @@ async def _emit_one_pr(
     ctx: RunContext,
     worker: PrwriterWorker,
     settings: FleetSettings,
-    candidate: _PrCandidate,
+    unit: Sequence[_PrCandidate],
     *,
     records: Mapping[str, PullRequestDraft],
     monorepo_path: Path,
     pr_root: Path,
     ready: bool,
 ) -> PrwriterOutput | str:
-    """One repo's PR, or a string naming why it could not be opened."""
+    """One repo's PR, or an ATOMIC_WAVE SCC's single shared PR — or a string naming why not.
+
+    `unit` is one candidate for a singleton repo, or every present member of one ATOMIC_WAVE SCC.
+    The **primary member** — `min(repo_id)`, this file's existing `sorted(repo_ids)` determinism
+    convention (also `test_a_12_repo_cycle_shares_one_scc_id_across_all_members`'s) — supplies the
+    report, status, stub state and seed the body is rendered from (an Agent Recommendation: §3.1
+    6e says members share one coarsened Bazel target, but the SPEC does not say whose
+    `VerificationReport` backs the shared PR body). `dependencies` is the union of every member's
+    dependencies — already filtered of intra-group edges at `_pr_candidates` — minus the group's
+    own members, so the deadlock hazard closed there never resurfaces here.
+    """
     config = settings.config
+    primary = min(unit, key=lambda candidate: candidate.repo_id)
+    member_ids = frozenset(candidate.repo_id for candidate in unit)
+    scc = primary.scc
+
+    if scc is not None:
+        # Defensible strengthening (Agent Recommendation, not SPEC-mandated): members share one
+        # coarsened Bazel target under §3.1 6e, so a disagreement here means Phase 3/4 diverged
+        # for members that were supposed to finish together — fail loud rather than silently
+        # picking the primary's verdict for repos that may have failed differently (Rule 11).
+        verdicts = {candidate.report.verdict for candidate in unit}
+        equivalences = {candidate.report.equivalence for candidate in unit}
+        if len(verdicts) > 1 or len(equivalences) > 1:
+            return (
+                f"SCC {scc.scc_id!r} members disagree on verification outcome: "
+                f"verdicts={sorted(verdicts)!r}, "
+                f"equivalence={sorted(str(item) for item in equivalences)!r} — refusing to pick "
+                "one member's report silently for a PR the whole SCC shares"
+            )
+
+    dependencies = sorted(
+        {dep for candidate in unit for dep in candidate.dependencies} - member_ids
+    )
+
     try:
         payload = PrwriterInput(
-            report=candidate.report,
-            wave_index=candidate.wave_index,
-            branch=f"migrate/{candidate.repo_id}",
+            report=primary.report,
+            wave_index=primary.wave_index,
+            branch=f"migrate/{primary.repo_id}",
             base=config.pr.base,
-            source_url=candidate.source_url,
-            source_sha=candidate.source_sha,
+            source_url=primary.source_url,
+            source_sha=primary.source_sha,
             dependencies=[
                 DependencyPr(
                     repo_id=dep,
                     url=records[dep].url if dep in records else None,
                     state=records[dep].state if dep in records else PrState.DRAFTED,
                 )
-                for dep in candidate.dependencies
+                for dep in dependencies
             ],
-            repo_status=candidate.status,
-            stub_states=candidate.stub_states,
-            stub_fidelity=candidate.stub_fidelity,
-            rdeps_sample_seed=candidate.seed,
+            repo_status=primary.status,
+            stub_states=primary.stub_states,
+            stub_fidelity=primary.stub_fidelity,
+            rdeps_sample_seed=primary.seed,
+            scc_id=scc.scc_id if scc is not None else None,
+            member_repo_ids=sorted(member_ids) if scc is not None else [],
             ready=ready,
             log_dir=str(pr_root / "bodies"),
             # §3.4 through whichever forge `pr.forge` names. The token is NOT here and cannot be:
@@ -10764,7 +10910,7 @@ async def _emit_one_pr(
         return f"the PR payload does not validate: {exc}"
 
     worker_ctx = ctx.worker_context(
-        repo_id=candidate.repo_id,
+        repo_id=primary.repo_id,
         phase=Phase.VERIFY,
         attempt=1,
         lease_fence=0,
@@ -10782,8 +10928,8 @@ async def _emit_one_pr(
 
     if not await worker.preconditions_hold(worker_ctx, payload):
         return (
-            f"§3.4's preconditions do not hold: verdict={candidate.report.verdict!r}, "
-            f"status={candidate.status.value}. A PR opened on a FAIL report would present a red "
+            f"§3.4's preconditions do not hold: verdict={primary.report.verdict!r}, "
+            f"status={primary.status.value}. A PR opened on a FAIL report would present a red "
             "verification as reviewable work."
         )
     result = await worker.run(worker_ctx, payload)
@@ -10814,6 +10960,11 @@ def _pr_lines(result: Mapping[str, object]) -> list[str]:
     lines += [
         f"  SKIPPED {repo}: no persisted VerificationReport"
         for repo in cast(Sequence[str], result["unverified"])
+    ]
+    scc_incomplete = cast(Mapping[str, Sequence[str]], result["scc_incomplete"])
+    lines += [
+        f"  SCC INCOMPLETE {scc_id}: waiting on VERIFY for {', '.join(missing)}"
+        for scc_id, missing in sorted(scc_incomplete.items())
     ]
     return lines
 
