@@ -9105,3 +9105,45 @@ and D104, §12.47's `avro`/`thrift` adapters, and the newer NEW-MECHANISM items 
 sweep confirmed correctly excluded (§12.31 rollback path, §12.34 new-language adapter pair,
 §12.36 blocked on open D50, §12.8's `HTTP_OPERATION` leg, §12.11's real bazel/sandboxed
 combination, §12.30's D23-blocked cycle fixture).
+
+## Round VI, fourteenth wave (2026-09-03) — §12.23 closed. §12 count: 34 of 48, up from 33. A SEVENTH criterion closed this round (§12.25, §12.19, §12.41, §12.22, §12.2, §12.29, §12.23) — 27→34/48 in one round, more than a full criterion per wave sustained across fourteen consecutive waves.
+
+Rather than stop at §12.29's own closure, research-19's own flagged small prerequisite — D23
+(`edges.retargeted_from_repo_id` never persisted, blocking §12.23 directly and a silent
+dependency of §12.30's own done bar) — was picked up immediately. Task 31 fixed it, catching and
+correcting the dispatch brief's own wrong premise along the way: the brief assumed `EdgeRow`
+already carried the field: investigation found that field actually belongs to `DependencyEdge`, a
+structurally distinct class, and `EdgeRow` had none at all. The real fix touched three things —
+the model field, the SQL column list, and both production call sites — not the one line the brief
+described. Its review went further than confirming the fix works: it found a stronger
+justification than the implementer's own for a design choice (excluding the column from
+`ON CONFLICT ... DO UPDATE SET`), tying it directly to §12.23's own literal "unchanged across a
+re-run" text — a connection worth making explicit rather than leaving implicit in a citation.
+
+That connection turned into the round's last task: D23's fix alone proved the value is written
+once, not that it survives a re-run. Task 32 built the missing test, and its own investigation
+produced this wave's second self-caught correction: the brief assumed the obvious end-to-end
+re-run test would double as the mutation discriminator for the `ON CONFLICT` design choice.
+Measured directly rather than assumed, this was false — `graph/cycles.py::_materialize`
+recomputes the identical value fresh from scan-persisted data on every run of this deterministic
+fixture, so the e2e test stays green regardless of whether the excluded column would have been
+overwritten. The implementer built a second, repository-level test specifically to discriminate
+that case. Both were needed: one proves SPEC's literal text through a real CLI run, the other
+proves the mechanism a real re-run's own determinism would otherwise hide. Task 32's review
+reproduced both the mutation proof and the structural claim behind it independently, in a fresh
+worktree, before confirming the closure.
+
+**Two dispatch-brief premises were wrong this wave, and both were caught by the workers
+investigating rather than assuming — not by review, and not by the controller.** Neither
+correction was treated as a problem to route around; each became the actual finding the task
+delivered. This is the same discipline CLAUDE.md's Guardrail 6 names for measured claims generally,
+now showing up specifically in how a controller-authored brief's own assumptions get tested before
+being built on.
+
+**Status: zero outstanding.** All seven of this round's criterion closures — §12.25, §12.19,
+§12.41, §12.22, §12.2, §12.29, §12.23 — are independently task-reviewed (or, for the two ADR-only
+closes, directly measured and verified by the controller before committing) and reconciled with
+docs. What remains identified but not dispatched, unchanged: D94's trigger logic and D104,
+§12.47's `avro`/`thrift` adapters, §12.30 (D23's own blocker is now cleared, but the 6-repo cycle
+fixture itself was never built — a genuine follow-on, not yet sized as its own task), and the
+NEW-MECHANISM items already correctly excluded from this round's scope.
