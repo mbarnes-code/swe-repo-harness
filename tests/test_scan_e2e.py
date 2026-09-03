@@ -443,13 +443,20 @@ def test_the_declared_dependency_edge_points_from_dependent_to_dependency(fleet:
     Why separately from the wave assertion: the wave order is the *consequence*, and a test that
     only checks the consequence cannot say whether a future inversion happened in inference or in
     layering. This pins the orientation at the row level, where §3.1 step 5 states it.
+
+    D23 companion (`_persist_scan_edges`'s own path, the common case): scan-time inference never
+    retargets an edge — only `graph/cycles.py::_materialize`, run at `fleet sequence` time after a
+    contract hoist, does that — so every row `_persist_scan_edges` writes must read back
+    `retargeted_from_repo_id IS NULL`. Asserted here, not merely left implicit, so the fix that
+    makes D23's retargeted case persist (see `test_sequence_e2e.py`) cannot be a regression that
+    writes a bogus value into every ordinary edge instead.
     """
     assert scan(fleet).exit_code == ExitCode.SUCCESS
 
     rows = query(
         fleet,
-        "SELECT src_id, dst_id, kind, evidence_path, confidence FROM edges "
-        " WHERE dst_id IS NOT NULL ORDER BY src_id, dst_id",
+        "SELECT src_id, dst_id, kind, evidence_path, confidence, retargeted_from_repo_id "
+        "FROM edges WHERE dst_id IS NOT NULL ORDER BY src_id, dst_id",
     )
     declared = {(str(row[0]), str(row[1])) for row in rows}
     assert ("acme-app-ts", "acme-lib-ts") in declared
@@ -459,6 +466,11 @@ def test_the_declared_dependency_edge_points_from_dependent_to_dependency(fleet:
     npm_edge = next(row for row in rows if row[0] == "acme-app-ts")
     assert npm_edge[3] == "package.json", "an edge must name the file that proves it"
     assert float(npm_edge[4]) >= 0.5, "a declared dependency below min_confidence orders nothing"
+
+    assert rows, "fixture must produce at least one edge for this assertion to mean anything"
+    assert all(row[5] is None for row in rows), (
+        f"a scan-time edge must never carry a retarget provenance: {rows}"
+    )
 
     # §3.5's admission key is derived from the same graph: the libraries carry a blast radius.
     radii = dict(query(fleet, "SELECT repo_id, blast_radius FROM repos"))
