@@ -215,8 +215,20 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # `settings.py:1253`'s `llm_concurrency` accessor DOES apply it correctly — but nothing
         # outside `settings.py` calls `llm_concurrency` either (only `tests/test_settings.py`).
         "fleet.yaml:llm.concurrency_overrides",             # settings.py:683
-        # `validate_memory_budget` (settings.py:1272) is the only reader and is never called —
-        # `memory_commitment_mb`'s own docstring says the caller "decides"; none does.
+        # `validate_memory_budget` (settings.py:1272) IS now called — round VI task 24
+        # (`c73d023`/`84800a7`) wired `cli.py::_load_settings` to call
+        # `settings.validate_memory_budget(host_total_mb=_read_host_mem_total_mb())` after every
+        # `FleetSettings.load()`, so the value now genuinely affects behavior (exit 2 on breach).
+        # **Not removed from this list**: this file's own `_inert_keys()` scan requires the bare
+        # key name to appear in `src/fleet/` outside `settings.py`, and the new call site reads
+        # the field only indirectly (through `validate_memory_budget`'s own internal
+        # `self.max_host_rss_mb` access) — the literal token never appears at the cli.py call
+        # site, so the scan's own mechanism cannot see the new wiring. Verified by running the
+        # test after removing this line: `test_every_config_key_is_read` failed, confirming the
+        # scan genuinely doesn't detect this indirect form. Left annotated rather than removed
+        # per this file's own ratchet (removal is a stricter claim than the scan currently
+        # supports) — a future pass extending the scan to recognize a validator-method call as a
+        # read could close this properly.
         "fleet.yaml:budgets.max_host_rss_mb",               # settings.py:265
         # `fleet.yaml:pr.merge_wait_timeout_s` REMOVED 2026-08-30 (round M, D80 wiring,
         # `9c20eeb`): `cli.py`'s `_resume_impl` now passes `open_pr_max_age_s=
