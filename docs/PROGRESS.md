@@ -9441,3 +9441,45 @@ before committing the DONE flip.
 
 **Status: zero outstanding.** §12.27's FILE_PATH leg (`D114` piece (c)) is now genuinely
 dispatchable for the first time — its blocking piece (a) has landed. Natural next dispatch.
+
+## Round VI, twentieth wave (2026-09-03) — §12.27 corrected and closed. §12 count: 38 of 48, up
+from 37. A finding that matters more than the number: **§12.27 has been fully satisfied since
+before this round started**, and this file itself is why nobody noticed.
+
+Dispatched task 43 to build D114's piece (c) — wiring real data into `graph/collisions.py`'s
+already-implemented FILE_PATH detector, per this file's own "PARTIALLY CLOSED... DEST_PATH/
+FILE_PATH reclassified NEW-MECHANISM" framing for §12.27, written 2026-08-30. The implementer
+built the engineering correctly and completely (4/4 new tests, mutation-proven, 279 tests green in
+a regression sweep) — and then, as its own honest-assessment obligation, re-read SPEC.md's literal
+§12.27 text before claiming closure rather than trusting the brief's premise. **SPEC's text had
+already been corrected on 2026-08-28 — two days before this file's own "DEST_PATH/FILE_PATH
+reclassified NEW-MECHANISM" framing was written** — to retire FILE_PATH/DEST_PATH from the
+criterion entirely, narrowing it to COORDINATE alone, which was already closed by `3da6e79`. The
+correction's own text gives a structural reason, not just a data-availability one: `_file_collisions`
+sets a `resolution` on every branch, so a FILE_PATH row can never satisfy the exit-6 "blocking"
+clause regardless of whether real data reaches it — and states explicitly, "a reconciler must not
+close the gap by passing `dests=`/`files=` at the `fleet sequence` call." Task 43 built exactly
+that. The implementer reproduced the structural reason empirically (a genuine `severity='error'`
+FILE_PATH collision, with real data wired through, still exits 0) rather than taking SPEC's word
+for it, and reported this as a lead finding instead of silently claiming the task closed anything.
+
+This staleness predates this round and this session — it survived a 2026-08-30 write, this
+session's own `D114` allocation (research-28 sized the "shared blocker" without either research-28
+or the controller re-checking SPEC.md's primary text directly, inheriting the local
+`docs/CRITERIA_PLAN.md` entry's premise instead), and this round's own task-43 dispatch brief. The
+chain that caught it was exactly the one this project's CLAUDE.md names as load-bearing: not
+trusting a ruling (the brief's premise) over the primary source, and checking even the parts of a
+task you'd otherwise accept without question.
+
+Corrected in the same commit: `docs/CRITERIA_PLAN.md`'s §27 entry rewritten with the true state at
+the top and the stale 2026-08-30 text preserved below as history; the Rollup table's DONE row
+gains `27`, `37→38`; `D114`'s own ledger entry annotated in place (piece (a)+(b) unaffected and
+remains correctly landed for §9(d); piece (c) retired, not deferred). Task 43's branch
+(`agent/roundvi-task43`, commit `894fb4d`) is real, correct, tested engineering that directly
+contradicts SPEC's own explicit instruction — **not merged**, left on its branch as a record
+rather than silently discarded, so nobody re-attempts it from a fresh read of the stale framing
+this correction just retired.
+
+**Status: zero outstanding.** No further dispatch flowing directly from this wave — the natural
+"D114 piece (c)" next-step flagged at the nineteenth wave's own close turned out not to exist.
+Next dispatch returns to the standing loop's own next-highest-impact scan.
