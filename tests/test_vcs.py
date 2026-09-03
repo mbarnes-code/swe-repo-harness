@@ -619,14 +619,54 @@ async def test_push_force_with_lease_refuses_when_the_remote_moved_past_the_expe
 async def test_push_force_with_lease_to_a_branch_that_does_not_exist_yet_raises(
     remote_and_clone: tuple[Path, Path],
 ) -> None:
-    """No bare/empty-lease "create" form exists on this method — `expected_sha` is always a real
-    sha, so a branch that isn't there yet fails loud rather than silently getting created."""
+    """A LOCAL branch that does not exist at all fails at refspec resolution (`src refspec ...
+    does not match any`) — an ordinary git failure unrelated to lease semantics (it would fail
+    identically under bare `--force` or no force at all), but still something this method must
+    not swallow. `expected_sha` here is an ordinary (wrong-looking but non-sentinel) SHA, not the
+    all-zero sentinel — that scenario (a branch that exists LOCALLY but was never pushed to the
+    remote) is a different failure mode, covered separately by
+    `test_push_force_with_lease_refuses_the_all_zero_sentinel_on_an_unpushed_branch`
+    below (round VI task 15 review finding B: conflating the two here would make this test pass
+    for the wrong reason)."""
     _remote, clone = remote_and_clone
     git_clone = Git(clone, timeout_s=60)
-    with pytest.raises(GitCommandError):
+    with pytest.raises(GitCommandError) as caught:
         await git_clone.push_force_with_lease(
-            "origin", "does-not-exist-branch", expected_sha="0" * 40
+            "origin", "does-not-exist-branch", expected_sha="1" * 40
         )
+    assert "does not match any" in caught.value.stderr
+
+
+async def test_push_force_with_lease_refuses_the_all_zero_sentinel_on_an_unpushed_branch(
+    remote_and_clone: tuple[Path, Path], tmp_path: Path
+) -> None:
+    """The real "branch does not exist ON THE REMOTE yet" scenario (round VI task 15 review
+    finding B): a branch that exists LOCALLY but has never been pushed. Git's own
+    force-with-lease semantics treat the all-zero SHA (`"0" * 40`, and the empty string
+    identically) as a sentinel meaning "the ref must NOT currently exist" — passing it here would
+    otherwise silently CREATE the remote branch, exit 0, no exception (verified empirically
+    before this guard was added: the un-guarded call succeeded and left a new
+    `refs/heads/feature-branch` on the bare remote). `push_force_with_lease` must refuse
+    client-side, before git ever runs, and nothing must land on the remote."""
+    remote, clone = remote_and_clone
+    git_clone = Git(clone, timeout_s=60)
+    await git_clone.exec(["checkout", "-b", "feature-branch"])
+
+    with pytest.raises(ValueError, match="all-zero"):
+        await git_clone.push_force_with_lease("origin", "feature-branch", expected_sha="0" * 40)
+    with pytest.raises(ValueError, match="all-zero"):
+        await git_clone.push_force_with_lease("origin", "feature-branch", expected_sha="")
+
+    # Independently confirm the guard fired BEFORE git ran: no branch was created on the remote.
+    result = await _sh(
+        tmp_path,
+        f"--git-dir={remote}",
+        "show-ref",
+        "--verify",
+        "--quiet",
+        "refs/heads/feature-branch",
+    )
+    assert result.exit_code != 0, "the all-zero sentinel must never reach git at all"
 
 
 # --------------------------------------------------------------------------------------

@@ -621,8 +621,12 @@ class Git:
         if await self.resolve("REBASE_HEAD") is not None:
             return False  # settled, genuine conflict — mid-flight, caller must abort or resolve
         raise GitCommandError(
-            result.argv, result.exit_code, result.stderr_tail,
-            cwd=self.path, timed_out=result.timed_out, started=result.started,
+            result.argv,
+            result.exit_code,
+            result.stderr_tail,
+            cwd=self.path,
+            timed_out=result.timed_out,
+            started=result.started,
         )
 
     async def abort_rebase(self) -> None:
@@ -650,17 +654,40 @@ class Git:
         (`tests/test_vcs.py::test_push_force_with_lease_refuses_when_the_remote_moved_past_the_expected_sha`
         proves the server-side refusal, not a client-side guess).
 
-        Raises `GitCommandError` on ANY refusal: the remote branch moved past `expected_sha`
-        (`! [rejected] ... (stale info)`, exit 1 — the exact property this method exists to
-        guarantee), the branch does not exist, or a genuine network/auth failure. All three are
-        equally "this push did not happen," and the caller cannot safely treat any of them as
-        partial success — it must re-read the forge (`Forge.view`) before deciding what to do
-        next, so raising with `.stderr` naming the reason already gives it everything it needs.
-        Deliberately does NOT collapse to a bool the way `rebase` does: unlike a conflict, there
-        is nothing here for THIS method's caller to resolve in place.
+        `expected_sha` must be a real commit SHA the caller believes the remote branch currently
+        points at — **never** the empty string or the all-zero SHA (`"0" * 40`). That value is
+        git's own sentinel for "the ref must NOT currently exist yet", and passing it is git's
+        documented way to force-with-lease a BRAND NEW ref into existence: verified empirically
+        that a branch which exists locally but has never been pushed accepts a push with the
+        all-zero lease with exit 0, silently creating the remote branch
+        (`tests/test_vcs.py::test_push_force_with_lease_refuses_the_all_zero_sentinel_on_an_unpushed_branch`).
+        That is exactly the "silent create fallback" the paragraph below says does not exist, so
+        this method refuses the sentinel client-side with `ValueError` before git ever runs,
+        rather than let it slip through as an unremarkable success. This primitive's only
+        intended purpose is updating a branch that already exists on the remote — D94's eventual
+        caller always reads a real tip back from `Forge.view()` first — so there is no legitimate
+        call site for the "create" sentinel here.
+
+        Raises `GitCommandError` on any OTHER refusal: the remote branch moved past
+        `expected_sha` (`! [rejected] ... (stale info)`, exit 1 — the exact property this method
+        exists to guarantee), a genuinely nonexistent LOCAL branch (`src refspec ... does not
+        match any` — a plain refspec-resolution failure, not lease-specific), or a genuine
+        network/auth failure. All are equally "this push did not happen," and the caller cannot
+        safely treat any of them as partial success — it must re-read the forge (`Forge.view`)
+        before deciding what to do next, so raising with `.stderr` naming the reason already
+        gives it everything it needs. Deliberately does NOT collapse to a bool the way `rebase`
+        does: unlike a conflict, there is nothing here for THIS method's caller to resolve in
+        place.
 
         No `with_identity` — push does not create commit objects.
         """
+        if set(expected_sha) <= {"0"}:
+            raise ValueError(
+                f"push_force_with_lease: expected_sha={expected_sha!r} is empty or the all-zero "
+                "sentinel, which tells git the remote ref must NOT exist yet and would silently "
+                "create it on push instead of refusing — pass a real SHA read back from the "
+                "remote (e.g. via Forge.view())"
+            )
         await self.exec(["push", f"--force-with-lease={branch}:{expected_sha}", remote, branch])
 
 
