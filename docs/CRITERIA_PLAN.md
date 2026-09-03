@@ -428,6 +428,25 @@ honest read) it likely IS genuinely NEW-MECHANISM, since there is no existing ge
 extend the way `_pattern_symbols` served this task. **§12.8 state: 7 of 8 `EdgeKind`s proven,
 `HTTP_OPERATION` the sole remaining gap.**
 
+**Sized, round VI research-27 (2026-09-03) — round V's prediction confirmed correct, for a
+sharper reason.** The remaining gap is specifically `EdgeKind.API_CONTRACT`'s `_api_contract_edges`
+join (`graph/infer.py:419-444`) for the `OPENAPI` `ContractKind`, not a separate mechanism — SPEC
+never asks for framework route-decorator scanning, and the join itself needs zero code changes
+(pure FQN-string equality, kind-agnostic). **Producer side is tractable**: an OpenAPI
+`paths:`/`operationId` regex extractor, same bounded style as the existing `.proto`/`.avsc`/
+`.thrift` extractors. **Consumer side is the real blocker**: unlike gRPC's `/package.Service/Method`
+(mandated by the wire protocol itself — what makes that regex "honest," per round V's own design
+principle), HTTP has no verified, codegen-independent, cross-language literal that appears
+identically in both an OpenAPI document and consumer code. The only candidate (OpenAPI-generator
+output preserving the path template) is exactly the "codegen convention, not protocol invariant"
+case that design principle disqualifies — and nobody has verified it against real generated output
+for this project's covered languages (Python/TS/JS; Go/JVM structurally invisible to the scanner
+regardless). **Done bar (revised):** a future round must first verify real
+`openapi-generator-cli` output per covered language — the same empirical groundwork round V did
+for gRPC before its task 3 became one-shot-able — before any design can be written. Not
+dispatchable as-is; not D-numbered (per research-27's own instruction, this is groundwork to do,
+not yet a named defect).
+
 ## 9. Phase 1 exit condition is a runtime gate
 **PARTLY ADDRESSED (landed round M, `42e760f`/`agent/roundm-task1`, reviewed Approved).**
 `check_criteria()` is now wired into `_sequence_impl` (`fleet sequence`) via a new
