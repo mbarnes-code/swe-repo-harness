@@ -5822,6 +5822,12 @@ class BuildInput(WorkerInput):
         description="`repos.baseline_test_count`, passed to `buildverify` so §12.11's "
         "green-and-empty failure is distinguishable from a library that never had tests.",
     )
+    baseline_ok: bool | None = Field(
+        default=None,
+        description="`repos.baseline_ok`, passed to `buildverify` so §12.11's real "
+        "`bazel query 'tests(//<dest>/...)'` count comparison runs only for a repo whose native "
+        "baseline was actually measured.",
+    )
     requirements: list[ExternalRequirement] = Field(default_factory=list)
     ruleset_versions: dict[str, str] = Field(default_factory=dict)
     integration_ref: str = Field(min_length=1, pattern=r"^refs/")
@@ -6077,12 +6083,17 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
         4, fine) from "this migration DELETED the repo's tests" (exit 4 with a positive baseline,
         a real defect) by comparing against this number, and every repo arrived carrying the
         default 0 — so the second case was indistinguishable from the first for the whole fleet.
+
+        `baseline_ok` is passed the same way and for the same reason: it is what gates
+        `buildverify`'s real `bazel query 'tests(//<dest>/...)'` count comparison (the shrinkage
+        case `baseline_test_count` alone cannot express — see `BuildverifyInput.baseline_ok`).
         """
         return BuildverifyInput(
             dest=payload.dest,
             integration_ref=payload.integration_ref,
             worktree=None,
             baseline_test_count=payload.baseline_test_count,
+            baseline_ok=payload.baseline_ok,
             log_dir=payload.log_dir,
             bazel_bin=payload.bazel_bin,
             run_tests=payload.run_tests,
@@ -6690,6 +6701,12 @@ class _RepoFacts:
     because Phase 3 is where §12.11's green-and-empty check happens and the worker cannot query.
     Defaulting to 0 is `baseline_ok IS NULL`'s meaning: "unknown", which §12.11 treats as "this
     library never had tests" rather than as a lost suite."""
+    baseline_ok: bool | None = None
+    """`repos.baseline_ok`, read alongside `baseline_test_count` for the same reason: §12.11's
+    real `bazel query 'tests(//<dest>/...)'` count comparison runs only for a repo whose native
+    baseline was actually measured (`True`) — never for one that was never measured (`None`, SQL
+    NULL) or whose own baseline build failed (`False`), neither of which makes `baseline_test_count`
+    a number this migration can be held to."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -6758,6 +6775,9 @@ class _BuildPlan:
     baseline_test_count: int
     """§12.11's other half, carried from `repos` so `buildverify` can tell "never had tests" from
     "the migration deleted them". Zero for every repo until it was threaded through here."""
+    baseline_ok: bool | None
+    """`repos.baseline_ok`, carried alongside `baseline_test_count`: `buildverify`'s real
+    `bazel query 'tests(//<dest>/...)'` count comparison runs only when this is `True`."""
     adapter_name: str
     adapter_degraded: bool
     """True iff the adapter that emitted these targets says so — `EcosystemAdapter.degraded`,
@@ -7100,7 +7120,7 @@ async def _repo_facts(conn: aiosqlite.Connection) -> dict[str, _RepoFacts]:
     rows = await _rows(
         conn,
         "SELECT r.repo_id, r.dest_path, r.ecosystems, c.ecosystem, c.grp, c.name, c.version, "
-        "       r.baseline_test_count "
+        "       r.baseline_test_count, r.baseline_ok "
         "  FROM repos AS r LEFT JOIN coordinates AS c ON c.coord_key = r.primary_coord_key",
     )
     facts: dict[str, _RepoFacts] = {}
@@ -7125,6 +7145,7 @@ async def _repo_facts(conn: aiosqlite.Connection) -> dict[str, _RepoFacts]:
             ecosystem=ecosystem,
             published=published,
             baseline_test_count=int(row[7] or 0),
+            baseline_ok=None if row[8] is None else bool(row[8]),
         )
     return facts
 
@@ -8351,6 +8372,7 @@ async def _plan_build(
         # one command line) and a per-repo plan cannot hold a fleet-wide fact.
         root_targets=tuple(adapter.root_targets(unit)),
         baseline_test_count=facts.baseline_test_count,
+        baseline_ok=facts.baseline_ok,
         requirements=tuple(
             ExternalRequirement(
                 coord_key=coordinate.key,
@@ -8497,6 +8519,7 @@ def _build_payloads(
             # what makes GENERATE's unconditional re-render harmless on every re-entry.
             support_files=[*root_files, *plan.package_files, *plan.gazelle_files],
             baseline_test_count=plan.baseline_test_count,
+            baseline_ok=plan.baseline_ok,
             requirements=requirements,
             ruleset_versions=dict(settings.config.build.ruleset_versions),
             integration_ref=plan.integration_ref,

@@ -44,6 +44,7 @@ from typing import ClassVar, Final, Literal
 
 from pydantic import Field, field_validator
 
+from fleet.bazel.query import BazelQueryError, parse_target_labels, query_stdout, tests_query
 from fleet.llm.calls import Evidence, diagnose_build
 from fleet.llm.client import LlmError
 from fleet.models.base import FleetModel
@@ -576,6 +577,14 @@ class BuildverifyInput(WorkerInput):
         "run with `baseline_ok IS NULL` back-fills to, i.e. 'unknown') from 'this migration "
         "DELETED the repo's tests' (>0 with an empty migrated test set), which §12.11 refuses.",
     )
+    baseline_ok: bool | None = Field(
+        default=None,
+        description="`repos.baseline_ok`, tri-state: `True` (1) is a real measured native "
+        "baseline, `False` (0) is a native baseline that itself failed to build, `None` (SQL "
+        "NULL) is 'never measured'. §12.11's `bazel query 'tests(//<dest>/...)'` count "
+        "comparison runs only when this is `True` — the ONLY case `baseline_test_count` is a "
+        "number this migration can be held to; `False`/`None` make no promise about a count.",
+    )
     jobs: int | None = Field(default=None, description="Bounded by the container CPU cap (§3.4)")
     keep_going: bool = True
     build_event_json: bool = Field(
@@ -642,6 +651,18 @@ class BuildverifyOutput(WorkerOutput):
         description="Echo of the input, so §12.11's `(repo, baseline, migrated)` table is "
         "readable off the checkpoint without a second join back to `repos`",
     )
+    baseline_ok: bool | None = Field(
+        default=None, description="Echo of the input — the same tri-state as `repos.baseline_ok`"
+    )
+    migrated_test_count: int = Field(
+        default=0,
+        ge=0,
+        description="`bazel query 'tests(//<dest>/...)' | wc -l` over the migrated tree — a real "
+        "count, run only when `baseline_ok` is `True` (§12.11). The `migrated` half of the "
+        "`(repo, baseline, migrated)` triple; `0` when the query never ran (`baseline_ok` is not "
+        "`True`) as well as when it genuinely found nothing — `baseline_ok`/`baseline_test_count` "
+        "on the same row disambiguate the two, exactly as they already do for `no_test_targets`.",
+    )
 
     @property
     def tests_lost(self) -> bool:
@@ -652,8 +673,22 @@ class BuildverifyOutput(WorkerOutput):
         return self.no_test_targets and self.baseline_test_count > 0
 
     @property
+    def test_count_regressed(self) -> bool:
+        """§12.11's OTHER failure, the one `tests_lost` cannot see: a shrink from N to M, both
+        positive (14 targets natively, 5 after the move — the build is green, tests ran, and
+        `no_test_targets` is `False` throughout). Only meaningful when `baseline_ok` is `True`:
+        that is the one case §12.11 asks `migrated_test_count >= baseline_test_count` of at all —
+        `False`/`None` make no promise about a count, so neither can regress one."""
+        return self.baseline_ok is True and self.migrated_test_count < self.baseline_test_count
+
+    @property
     def green(self) -> bool:
-        return self.build_ok and (self.test_ok or not self.tests_ran) and not self.tests_lost
+        return (
+            self.build_ok
+            and (self.test_ok or not self.tests_ran)
+            and not self.tests_lost
+            and not self.test_count_regressed
+        )
 
 
 @register_worker
@@ -902,6 +937,7 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             dest=payload.dest,
             integration_ref=payload.integration_ref,
             baseline_test_count=payload.baseline_test_count,
+            baseline_ok=payload.baseline_ok,
         )
         units = [BUILD_UNIT] + ([TEST_UNIT] if payload.run_tests else [])
         completed: list[str] = []
@@ -996,6 +1032,78 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
                     evidence=[payload.integration_ref, *self._log_refs(output)],
                 )
             completed.append(unit)
+
+        if payload.run_tests and payload.baseline_ok is True:
+            # §12.11's OTHER failure. Everything above only asks whether ANY test target ran
+            # (`no_test_targets`/`tests_lost`), so a shrink from 14 targets to 5 is invisible to
+            # it: 5 > 0, the test step exited 0, `no_test_targets` is False. This block asks the
+            # real question — `bazel query 'tests(//<dest>/...)'`, counted, against
+            # `baseline_test_count` — and only when `baseline_ok is True`: `False`/`None` make no
+            # promise about a count (`BuildverifyInput.baseline_ok`'s docstring).
+            query_result = await runner(
+                self._test_query_argv(payload), cwd=worktree, deadline=ctx.deadline
+            )
+            if not query_result.ok:
+                # `bazel build` and `bazel test` both already exited 0 over this exact tree, so a
+                # query failure here is infrastructure — a poisoned output base, a daemon that
+                # died between steps — not a defect in the generated BUILD files themselves.
+                return WorkerResult[BuildverifyOutput](
+                    status="failed",
+                    output=output,
+                    completed_units=completed,
+                    usage=usage,
+                    error=WorkerError(
+                        failure_class=FailureClass.BUILD_ERROR,
+                        retryable=True,
+                        exit_code=query_result.exit_code,
+                        stderr_tail=(
+                            f"§12.11: `bazel query 'tests(//{payload.dest}/...)'` failed after "
+                            "`bazel build`/`bazel test` both exited 0 over the same tree — "
+                            "infrastructure, not a BUILD.bazel defect: "
+                            f"{query_result.stderr_tail or query_result.stdout_tail}"
+                        ),
+                    ),
+                    evidence=[payload.integration_ref, *self._log_refs(output)],
+                )
+            try:
+                output.migrated_test_count = len(
+                    parse_target_labels(query_stdout(tests_query(payload.dest), query_result))
+                )
+            except BazelQueryError as exc:
+                return WorkerResult[BuildverifyOutput](
+                    status="failed",
+                    output=output,
+                    completed_units=completed,
+                    usage=usage,
+                    error=WorkerError(
+                        failure_class=FailureClass.BUILD_ERROR,
+                        retryable=True,
+                        stderr_tail=f"§12.11: {exc}",
+                    ),
+                    evidence=[payload.integration_ref, *self._log_refs(output)],
+                )
+            if output.test_count_regressed:
+                return WorkerResult[BuildverifyOutput](
+                    status="failed",
+                    output=output,
+                    completed_units=completed,
+                    usage=usage,
+                    error=WorkerError(
+                        failure_class=FailureClass.TEST_FAILURE,
+                        retryable=False,
+                        stderr_tail=(
+                            f"§12.11: `bazel query 'tests(//{payload.dest}/...)'` found "
+                            f"{output.migrated_test_count} test target(s) after the move, fewer "
+                            f"than the {payload.baseline_test_count} `repos.baseline_test_count` "
+                            "recorded natively. The build was green and every test that DID run "
+                            "passed — this is the shrinkage `no_test_targets`/`tests_lost` "
+                            "cannot see, because some targets ran, just fewer than before. "
+                            "Re-running this rung cannot change a static target count, which is "
+                            "why this is not retryable."
+                        ),
+                    ),
+                    evidence=[payload.integration_ref, *self._log_refs(output)],
+                )
 
         return WorkerResult[BuildverifyOutput](
             status="ok",
@@ -1144,6 +1252,29 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
             cache.flag(sandboxed=payload.image is not None) for cache in payload.cache_mounts
         )
         argv.extend(payload.extra_args)
+        return tuple(argv)
+
+    def _test_query_argv(self, payload: BuildverifyInput) -> tuple[str, ...]:
+        """`bazel query --output=label 'tests(//<dest>/...)'` — §12.11's real count.
+
+        Host-only, deliberately, for the reason `BuildverifyInput.image` is not consulted here:
+        wiring this to run INSIDE the `--network=none` sandbox is a separate, later task (this
+        one proves the count-comparison mechanism against the existing unsandboxed real-bazel
+        path — see that task's brief). A query needs no `--build_event_json_file` (nothing
+        executes) and no `--jobs` (nothing to parallelize), so it borrows only the two flags
+        `_bazel_argv` shares with every bazel invocation this worker makes: `--keep_going`, so
+        one unparseable package cannot hide the rest of the closure, and the cache flags, which
+        loading-phase resolution needs exactly as much as build does (the same `CacheMount`
+        objects, on purpose — see `_bazel_argv`'s docstring on why a mount and its flag must
+        never name different directories).
+        """
+        argv = [payload.bazel_bin, "query", "--output=label"]
+        if payload.keep_going:
+            argv.append("--keep_going")
+        argv.extend(
+            cache.flag(sandboxed=payload.image is not None) for cache in payload.cache_mounts
+        )
+        argv.append(tests_query(payload.dest))
         return tuple(argv)
 
     def _argv(
