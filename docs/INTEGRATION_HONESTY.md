@@ -8712,8 +8712,9 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-23-report.md`
 **Not yet built:** any resolution to the three judgment calls above, the Phase 3 domain expansion,
 or the emission wiring itself. No design choice among them is made here.
 
-## D114 — OPEN. No path/blob-SHA `ls-tree` listing is ever captured or persisted at scan time,
-blocking §9(d) and §12.27's FILE_PATH collision leg
+## D114 — FIXED, LANDED (round VI task 42, `79024e6`) for §9(d). No path/blob-SHA `ls-tree`
+listing is ever captured or persisted at scan time — blocked §9(d); did NOT block §12.27 as
+originally framed below (correction dated 2026-09-03, see end of entry)
 
 **Found by round VI research-28 (2026-09-03), sizing the shared blocker named — but never
 D-numbered — by both §9's and §12.27's own `docs/CRITERIA_PLAN.md` entries.** Verified free
@@ -8752,3 +8753,19 @@ split. (c) is a separate, larger follow-on task, dispatched only after (a) lands
 
 **Not yet built:** any of (a)/(b)/(c). No design choice among them beyond what research-28's report
 already specifies is made here.
+
+**Correction, 2026-09-03 (round VI task 43's own investigation) — piece (c)'s premise was wrong;
+this entry's framing above is left as-is per this project's "annotate, never rewrite" discipline,
+corrected here rather than edited in place.** §12.27's SPEC.md text (`docs/SPEC.md:7459`) was
+already corrected on 2026-08-28 — before this D-number was even allocated — to retire FILE_PATH
+from the criterion's literal text entirely, not merely defer it pending a capture mechanism.
+`docs/CRITERIA_PLAN.md`'s own §12.27 entry had gone stale in the same way (describing FILE_PATH as
+a legitimately blocked leg since 2026-08-30), and this D-number's own piece-(c) framing inherited
+that stale premise without an independent check against SPEC.md's primary text. Beyond the
+data-availability question piece (a) answers, SPEC's own correction gives a SECOND, structural
+reason FILE_PATH can never satisfy §12.27's exit-6 clause: `_file_collisions` sets a `resolution`
+on every branch, so a FILE_PATH row can never be `blocking` regardless of whether real data
+reaches it — task 43 confirmed this empirically (a genuine `severity='error'` FILE_PATH collision
+still exits 0 with real data wired through). **Piece (a)+(b) closing §9(d) is unaffected and
+remains correctly landed. Piece (c) is retired, not merely deferred — do not dispatch it.** Full
+account in `docs/CRITERIA_PLAN.md`'s §27 entry.
