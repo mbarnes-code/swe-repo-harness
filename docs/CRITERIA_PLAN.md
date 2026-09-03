@@ -824,6 +824,36 @@ all, not just untested (audit row 22). `budgets.max_host_rss_mb` is `KNOWN_INERT
 this is the one item in this file that's genuinely new infrastructure, not a wiring/test gap.
 Track it as its own round.
 
+**Two more sub-clauses closed, 2026-09-03 (round VI tasks 24+25) — still OPEN overall, the
+runtime RSS-sampling sub-clause above remains the sole blocker.** A dedicated research pass
+(research-17) found this criterion bundles four sub-clauses, not one: disk (closed above),
+runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic, and a
+`state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
+
+**Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
+`validate_memory_budget` (`settings.py:1288-1300`) already had the complete, correct arithmetic
+with zero callers — wired into `cli.py::_load_settings` via a new injectable
+`_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.
+resource_guard`). Closed a real scope surprise along the way: the shipped memory-budget defaults
+breach the shipped ceiling by design, so wiring the check broke every fixture using those
+defaults — fixed by lowering config knobs in 7 fixture files (a real, traced precedent,
+`preflight.min_free_bytes` at `a1178f7`) plus raising `budgets.max_host_rss_mb` in the shipped
+`config/fleet.yaml` itself (not the Pydantic default, which stays `12288` matching SPEC's own §9
+table) so the shipped file still loads — independently judged sound by review: the check's two
+legs (config ceiling vs. real host `MemTotal`) are independent, so this doesn't defeat the
+check's actual host-memory protection. `budgets.max_host_rss_mb` is annotated, not removed, from
+`tests/test_config_keys_are_read.py`'s `KNOWN_INERT` — that file's own scan requires the bare key
+name outside `settings.py`, and the new call site reads it only indirectly; see
+`docs/INTEGRATION_HONESTY.md`'s D50 entry for the full account.
+
+**Task 25 — `state/repository.py` no-list-return check.** A dedicated return-type-inspection test
+(`tests/test_repository_no_list_returns.py`), function set derived via a token-based AST walk
+(not hardcoded), confirming the property already held by construction — every `iter_*` function
+is a genuine generator, `fetchmany`/`yield`, never `fetchall`/`list`. No `src/` change needed.
+
+Neither task claims or moves §12.22's overall status — both independently task-reviewed with
+every discriminating claim reproduced.
+
 **Disk-ceiling sub-clause — closed, round AA task 2 (2026-09-01, `0df7075`).** Exit-9-on-disk-
 ceiling was already covered; post-exit `migration_state.json` validity is now proven too:
 `tests/test_cli.py::test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched` runs a
