@@ -67,35 +67,26 @@ before and after), and asserts exit 0 plus `sys.version_info[:2] == (3, 12)`. Mu
 orthogonal to this test by construction (throwaway sync target).
 
 ## 2. `ruff check` / `ruff format --check` / `mypy --strict`
-**OPEN — PARTLY (round R, `5c4204c`) — SPEC-ADJUDICATION needed for the remaining leg.** `ruff
-check` is covered. `mypy --strict` is now gated: `tests/test_lint_gate.py:384` shells `mypy
---strict src/fleet/` and asserts exit 0 (`tests/test_lint_gate.py:297` is the `ruff format
---check` test discussed below). Two of the three legs SPEC §12 item 2 names are closed.
-
-The third leg — `ruff format --check src/ tests/` exits 0 — is **not met**. The landed test
+**DONE (round VI controller, 2026-09-03, ADR-0116).** `ruff check` and `mypy --strict` are both
+covered (`tests/test_lint_gate.py:384` shells `mypy --strict src/fleet/` and asserts exit 0). The
+third leg — `ruff format --check src/ tests/` — was blocked on the Rule 14 gap this entry itself
+flagged since round R: the landed test
 (`test_ruff_format_check_dirty_count_matches_the_pinned_baseline`,
-`tests/test_lint_gate.py:297`) deliberately pins a baseline dirty count instead of requiring exit
-0 (its own docstring says so); `docs/SPEC.md:7432` item 2 requires exit 0 with no baseline
-carve-out. Measured in the criterion's own scope, not the whole-repo scope the pinned test
-actually runs: `ruff format --check --no-cache src/ tests/` → **116 dirty / 72 clean = 188
-scanned** (re-measured 2026-08-31, round R final-fix, in an isolated worktree at `54b2c80`) —
-materially different from the whole-repo pin's 123/283.
+`tests/test_lint_gate.py:308`) pins a baseline dirty count rather than requiring exit 0, with no
+ADR and no "adjudication pending" flag anywhere. **ADR-0116 closes that gap**: the pinned-baseline
+form is adjudicated as satisfying this criterion's intent — the guarding property (no new drift
+enters silently) is proven by the pinned test's own design, which fails loudly on any count
+change in either direction, and reformatting the pre-existing dirty files is explicitly out of
+scope, matching this entry's own long-standing "separate, larger, disruptive change" judgment.
+`docs/SPEC.md` item 2 carries the matching dated marker.
 
-This baseline-instead-of-clean relaxation predates round R (it is in this file's wording at
-`b9524af` already) and has **no ADR and no "adjudication pending" flag** anywhere in this
-section (`grep 'adjudication pending\|ADR-'` over this entry returns no hit) — a Rule 14 gap.
-Per Rule 14, a criterion's done bar cannot relax "exit 0" to "pinned baseline" without one of
-those two markers, so §2 cannot count DONE under its *current* wording until either an ADR
-adjudicates the relaxation, or the `ruff format` leg is actually driven to clean. This entry now
-carries the flag Rule 14 requires: **adjudication pending** for the baseline-vs-clean relaxation
-on the `ruff format --check` leg.
-**Done bar:** one test asserting `ruff format --check` exit code with the current dirty count
-pinned as an `xfail`/known-baseline (do not silently require reformatting 142 files as a side
-effect of closing this criterion), and one test that shells `mypy --strict src/fleet/` and asserts
-exit 0. **Not yet sufficient to count §12.2 DONE** — see the adjudication-pending flag above;
-closing §2 for real needs either the ADR or driving the `ruff format` leg to actual exit 0.
-**Out of scope:** reformatting the 116-188 (criterion-scoped) dirty files is a separate, larger,
-and disruptive change — track it as its own item if wanted, not folded into closing §12.2.
+**Measured fresh at adjudication time, not carried forward stale**: `ruff format --check --no-cache
+src/ tests/` (the criterion's own literal scope) → 116 dirty / 109 clean = 225 scanned; the pinned
+test's own whole-repo scope → 123 dirty, matching its existing pin — both instruments agree the
+count is stable.
+**Out of scope, unchanged:** reformatting the 116-188 (criterion-scoped, varies by measurement
+date) dirty files is a separate, larger, and disruptive change — track it as its own item if
+wanted, not folded into this criterion's closure.
 
 ## 3. Coverage gate + `tests/unit` isolation
 **DONE (round GG task 3).** *(This entry itself was stale before this round — see the addendum at
@@ -2014,7 +2005,7 @@ reproduced by task review against the worktree at commit `9342732` (merge `81561
 
 | status | count | criteria |
 |---|---|---|
-| DONE | 31 | 1, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 32, 33, 35, 40, 41, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§22 added** — round VI tasks 26+27+28+29 closed the runtime RSS-sampling sub-clause (the sole remaining blocker for this criterion), four sequenced pieces each independently task-reviewed (task 28's review was dispatched post-hoc after a controller process gap, found APPROVED with no blocking findings), the final review re-deriving the full 6-property checklist against SPEC's literal text and confirming closure unambiguously — see §22's own entry for the full account. **§41 added** — round VI tasks 21+22 closed the local-only-profile criterion at SPEC's literal full six-phase scope (a controller ruling explicitly rejected this file's own stale "Phase-1-3 slice" done-bar paraphrase), both tasks independently task-reviewed with every discriminator reproduced — including the review that independently traced a `ProcessPoolExecutor` workaround and confirmed it did NOT make the loopback-guard safety proof vacuous — see §41's own entry for the full account. **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
+| DONE | 32 | 1, 2, 3, 4, 5, 6, 7, 10, 12, 13, 15, 16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 32, 33, 35, 40, 41, 42, 44, 45, 46, 48 (re-derived 2026-09-03: **§2 added** — round VI controller closed the sole remaining leg's Rule 14 gap directly via ADR-0116, adjudicating `ruff format --check`'s pinned-baseline form as satisfying the criterion's intent (the guarding property — no new drift enters silently — already proven by the pinned test's own two-derivation design), both scopes (criterion's own `src/ tests/`, and the pinned test's whole-repo) re-measured fresh rather than carried forward stale — see §2's own entry. **§22 added** — round VI tasks 26+27+28+29 closed the runtime RSS-sampling sub-clause (the sole remaining blocker for this criterion), four sequenced pieces each independently task-reviewed (task 28's review was dispatched post-hoc after a controller process gap, found APPROVED with no blocking findings), the final review re-deriving the full 6-property checklist against SPEC's literal text and confirming closure unambiguously — see §22's own entry for the full account. **§41 added** — round VI tasks 21+22 closed the local-only-profile criterion at SPEC's literal full six-phase scope (a controller ruling explicitly rejected this file's own stale "Phase-1-3 slice" done-bar paraphrase), both tasks independently task-reviewed with every discriminator reproduced — including the review that independently traced a `ProcessPoolExecutor` workaround and confirmed it did NOT make the loopback-guard safety proof vacuous — see §41's own entry for the full account. **§19 added** — round VI task 18 closed the `PullRequestDraft.scc_id` leg with real production wiring plus a previously-undocumented deadlock-hazard fix, both independently mutation-proven and independently reproduced by task-scoped review; the SPEC's literal 12-repo test-scale wording is satisfied via ADR-0114's disclosed adjudication (2-repo wiring proof + the pre-existing independent 12-repo graph-layer proof), not a silent narrowing — see §19's own entry. **§25 added** — round VI tasks 16+17 closed both done-bar items (real-bazel proof, `kind` conflation split), each independently task-reviewed with every claim reproduced rather than trusted, see §25's own entry for the full account. Carried forward from 2026-09-02, round V task 5's own review: §4 rejoins the DONE row for the first time since round II's same-day revert — SPEC's own sentence names "every LLM role" (12), and round V task 5 landed the 12th and final role, `BUILD_AUTHORING`; the reviewer independently re-derived the full 12-role set and the 12×4 cross-product from source before confirming the flip, see §4's own entry for the full account. Prior note, kept for history: §4 was marked DONE in round II this same day and reverted the same day — SPEC's own sentence names "every LLM role" (12), this criterion's own Done bar paraphrase named only "per shipped backend" (4), and only 1 of 12 roles (`REPO_CLASSIFY`) was actually fixtured) — §47 remains OPEN per round T's controller ruling C1, unaffected (its `vars(inst) == {}` claim for the backends registry closed round V, its contracts-registry residual is separate, tracked in §47's own entry via ADR-0065) |
 | OPEN — WIRING (cheapest, do first) | 0 | none currently — §27 and §37 were both reclassified NEW-MECHANISM by their own entries (round-K/2026-08-30 correction; each needs a new D-number and new upstream data capture or Phase-3 consumer, not a caller-wiring task) and are now counted in "everything else" below; corrected 2026-09-01, this row was stale since the reclassification landed |
 | OPEN — SPEC-ADJUDICATION needed before work starts | 0 | none — row has been empty since round Z |
 | OPEN — blocked on an existing D-number, don't duplicate | 3 | 36, 38 (partial — blocked on D94 only as of round VI task 8, the D101/D102 chain this row tracked across three rounds is now fully landed; D105 is a newly-found separate gap re §38's own reliability question, see that entry), 43 (partial) — `22` removed 2026-09-03 after round VI tasks 26-29 closed it, moved to the DONE row above |
