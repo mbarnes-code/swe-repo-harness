@@ -1280,14 +1280,14 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7069-7108`) always constructs `published: Coordinate` with `version_spec=None`. This is
+  (`cli.py:7088-7127`) always constructs `published: Coordinate` with `version_spec=None`. This is
   a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
   history kept as the record of what was true when this paragraph was written, not repointed to
   the post-fix state.**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7178-7271`) resolves every
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7197-7290`) resolves every
   consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -1320,7 +1320,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:8752-8787`) filters on the literal string
+blockers above**: `_eligible_build_units` (`cli.py:8775-8810`) filters on the literal string
 `phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
