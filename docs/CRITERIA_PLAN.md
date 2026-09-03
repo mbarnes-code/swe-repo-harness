@@ -466,9 +466,16 @@ point once it exists.
 **Also open:** the `MANUAL`-SCC exemption shape is only exercised at the `check_criteria()` unit
 level — an earlier guard in `_sequence_impl` refuses `MANUAL` SCCs before the new gate runs, so
 live CLI traffic never reaches that one shape through the wired path (disclosed, not a regression).
-**Done bar (remaining):** wire criterion `(d)` once a real path/blob-SHA capture mechanism exists
-(shared with §12.27's FILE_PATH leg — track as one piece of work, not two). Until then this
-criterion stays PARTLY ADDRESSED, not DONE — do not round up the `<n> of 48` count for it.
+**Sized, round VI research-28 (2026-09-03), now `D114`.** The shared blocker is genuinely
+dispatchable — unusually well-prepared ground, since `check_criterion_d` is already fully
+implemented and takes the capture as an injected callable; the gap is a new `file_blobs` table +
+one `git ls-tree` capture step (reusing existing `_git_output`/`_nul_fields` helpers) plus a single
+query+lambda wiring `_phase1_exit_report`. See `D114` for the full sizing (three pieces: capture
+mechanism, §9(d) wiring, §12.27 FILE_PATH wiring — the first two close §9(d) alone).
+**Done bar (remaining):** land `D114`'s pieces (a)+(b) — the capture mechanism plus criterion (d)'s
+wiring. Until then this criterion stays PARTLY ADDRESSED, not DONE — do not round up the
+`<n> of 48` count for it. The MANUAL-SCC exemption shape above is a separate, smaller disclosed gap
+— confirm whether it also blocks DONE before flipping, do not assume (d) alone is sufficient.
 **Out of scope:** `check_criteria()`'s other sub-checks' internal logic was not and should not be
 touched further — already correct.
 
@@ -1071,11 +1078,18 @@ listing nothing upstream captures; DEST_PATH's `dest_rewrites` has no consumer b
 doesn't perform the relocation it would assert. Neither is a caller-wiring task anymore — each
 needs new upstream data capture (FILE_PATH) or a new Phase-3 consumer (DEST_PATH) first.
 **Done bar (COORDINATE leg):** none — already closed, do not re-touch.
-**Done bar (DEST_PATH/FILE_PATH legs):** file a D-number for each (per `3da6e79`'s own
-recommendation) before starting; FILE_PATH's done bar is "capture path+blob-SHA per claim
-somewhere in the scan pipeline, then wire the detector"; DEST_PATH's is "give Phase 3 a real
-relocation-tracking consumer, then wire the detector" — both are multi-step, do not attempt as a
-single one-shot task.
+**FILE_PATH leg sized, round VI research-28 (2026-09-03), now `D114`** (shared with §9(d)'s
+identical blocker — same D-number, do not file a second one). `graph/collisions.py`'s detector
+(`FileClaim`, `_file_collisions`) is already fully implemented and simply never invoked with real
+data. Once `D114`'s capture mechanism (piece (a)) lands, this leg's own wiring (piece (c)) is a
+real 3-table join (`repos.dest_path` + the new `file_blobs` table + `contracts.source_paths`) plus
+a `wave_plan` lookup, reusing `relocate.py::relocated_path` — one-shot once (a) exists, but larger
+than §9(d)'s own (b) piece and dispatched separately, after (a) lands. See `D114`'s own ledger
+entry for the full three-piece split.
+**Done bar (FILE_PATH leg):** land `D114` piece (a) (if not already landed by §9's own task),
+then piece (c) as its own task.
+**Done bar (DEST_PATH leg):** unchanged — "give Phase 3 a real relocation-tracking consumer, then
+wire the detector" — multi-step, not sized this round, no D-number filed yet.
 **Out of scope:** do not re-implement or duplicate a second COORDINATE call site.
 
 ## 28. Single writer, pool children have no DB handle

@@ -8711,3 +8711,44 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-23-report.md`
 
 **Not yet built:** any resolution to the three judgment calls above, the Phase 3 domain expansion,
 or the emission wiring itself. No design choice among them is made here.
+
+## D114 — OPEN. No path/blob-SHA `ls-tree` listing is ever captured or persisted at scan time,
+blocking §9(d) and §12.27's FILE_PATH collision leg
+
+**Found by round VI research-28 (2026-09-03), sizing the shared blocker named — but never
+D-numbered — by both §9's and §12.27's own `docs/CRITERIA_PLAN.md` entries.** Verified free
+before allocating: form-agnostic sweep found `D113` as the highest allocated number.
+
+**The gap, as measured.** Three independent modules' docstrings (`workers/contracts.py`,
+`graph/sequence.py`, `graph/collisions.py`) all describe the identical missing mechanism in
+near-identical language, and all three already have consumer code written against it
+(`ContractsInput.blob_shas`, `check_criterion_d`'s injected `evidence_exists` callback,
+`collisions.py`'s `FileClaim`/`_file_collisions`) — but nothing in `src/` ever runs `git ls-tree`
+against a repo's full tree at `head_sha` and persists the result. `workers/clone.py` computes
+`head_sha` and cuts the worktree every later step reads from, but never lists it. No existing
+table is a superset of "every tracked file at `head_sha`" (`manifests` is manifest-files-only,
+`symbols` is symbol-occurrences-only).
+
+**Unusually well-prepared ground, not a speculative design.** The consuming interface is already
+frozen and agreed in three places: `check_criterion_d` is fully implemented and takes the capture
+as an injected callable (`graph/sequence.py:566-586`), and `graph/collisions.py`'s FILE_PATH
+detector (`FileClaim`, `_file_collisions`) is fully implemented and simply never invoked with real
+data. In every case the gap is real production data never being computed, not missing algorithm
+code.
+
+**Sizing, three separable pieces (full design in
+`.superpowers/sdd/round-V-criteria-closure/research-28-report.md`):**
+- (a) the capture mechanism itself — a new `file_blobs` table + one `git ls-tree -r -z <head_sha>`
+  call per already-cloned repo, reusing `_git_output`/`_nul_fields` verbatim (already used
+  identically for `_tracked_at`'s Phase-3 `ls-tree`).
+- (b) wiring §9(d)'s `check_criterion_d` to consume it — zero changes to `graph/sequence.py`
+  itself; a single query + lambda in `_phase1_exit_report`.
+- (c) wiring §12.27's FILE_PATH collision leg to consume it — a real 3-table join (`repos.dest_path`
+  + the new table + `contracts.source_paths`) plus a `wave_plan` lookup, reusing
+  `relocate.py::relocated_path` and the already-complete `_file_collisions`/`FileClaim` machinery.
+
+**(a)+(b) together close §9(d) independently of (c)** — mirroring the §12.34 Clause A/Clause B
+split. (c) is a separate, larger follow-on task, dispatched only after (a) lands.
+
+**Not yet built:** any of (a)/(b)/(c). No design choice among them beyond what research-28's report
+already specifies is made here.
