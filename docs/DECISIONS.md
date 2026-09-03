@@ -13154,3 +13154,43 @@ follow-on if ever wanted; this ADR only settles that the PINNED form is what "do
 **Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.2's entry and SPEC item 2's
 own sentence should carry a dated marker recording this substitution, in the same commit as
 marking §12.2 DONE — per Rule 14, not before.
+
+## ADR-0117 — §12.29's divergent-modifier clause: worker-level proof accepted as satisfying intent, real-scan reachability not required for DONE
+
+**Decision (2026-09-03, round VI controller).** `docs/SPEC.md` item 29's literal text includes: "a
+divergent fourth copy flips the collision to `severity='error'` and applies the `divergent` ×0.5
+modifier." Round VI task 30 built and closed every other sub-clause of this criterion at literal
+scale, but found — and its task-scoped review independently re-confirmed against
+`cli.py::_extract_contracts` directly — that this specific clause is structurally unreachable from
+a real `fleet scan` today: the CLI never populates `ContractsInput.blob_shas`, so
+`content_sha256` is always empty and neither the severity escalation nor the `divergent` modifier
+can fire from production scan data. This is the same root cause as the disclosed, no-D-number
+§12.9/§12.27 blob-SHA capture blocker. Task 30 correctly declined to build blob-SHA capture
+(explicitly out of its own scope) and instead proved the mechanism directly against
+`ContractsInput.blob_shas` — a real, documented input field the worker fully honours —
+(`tests/test_contracts_criterion_scale.py::test_a_divergent_fourth_copy_flips_the_collision_and_applies_the_modifier`)
+and drafted a marker leaving the adjudication open. **This ADR closes that adjudication**: the
+worker-level proof is accepted as satisfying this clause's intent for the purpose of counting
+§12.29 DONE, in place of literal end-to-end real-scan reachability — mirroring ADR-0065's own
+precedent for §12.32's equivalent situation (a sub-clause self-declared unreachable, adjudicated
+as not blocking the surrounding criterion's DONE status).
+
+**Rationale.** The property this clause actually guards is *the extraction worker correctly
+detects and penalizes divergent contract copies when it has the data to compare them* — not that
+today's `fleet scan` command specifically wires that data through. The worker-level test proves
+exactly that property, through the real production code path (`ContractExtractionWorker`'s own
+divergence-detection and confidence-modifier logic), with real, documented model fields — not a
+mock or a reimplementation. The gap is entirely upstream, in `cli.py`'s own construction of
+`ContractsInput` (missing `blob_shas=`), which is the SAME gap already disclosed and tracked
+(without a dedicated D-number) alongside §12.9/§12.27's blob-SHA capture blocker — this ADR does
+not duplicate that tracking, it only settles that §12.29 does not need to wait for it.
+
+**What this ADR does NOT decide.** It does not retire the clause's wording, and it does not close
+the underlying blob-SHA capture gap — both remain open questions for whenever §12.9/§12.27's
+shared capture mechanism is designed and built. If that mechanism lands and wires `blob_shas`
+through `cli.py::_extract_contracts`, this clause becomes reachable end-to-end for free, and this
+ADR's adjudication becomes moot rather than contradicted.
+
+**Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.29's entry and SPEC item 29's
+own sentence carry a dated marker recording this adjudication, in the same commit as marking
+§12.29 DONE — per Rule 14, not before.
