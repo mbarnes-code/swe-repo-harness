@@ -1,0 +1,232 @@
+"""`HostMemorySampler`: a genuine periodic background task that samples host memory on its own
+timer and feeds `PhaseRunner`'s `resource_guard` (SPEC §12.22 runtime RSS-sampling sub-clause,
+task 27 / round VI B2).
+
+**Scope, precisely.** Task 26 (B1, merged) built two PURE, injectable-seam-based readers --
+`fleet.util.cgroup.read_process_tree_memory_bytes` (this process's cgroup v2 `memory.current`,
+which already aggregates the whole process tree per that module's own finding) and
+`fleet.sandbox.containerstats.ContainerStatsReader` (sums every running `fleet-<run_id>-*`
+container's `docker stats` MEM USAGE) -- and deliberately did nothing periodic and touched
+nothing in `PhaseRunner`. This module is that wiring: a real `asyncio.create_task`-based
+background loop that ticks on its own schedule, independent of repo-dispatch activity, plus the
+`resource_guard()` implementation that reads what it last found. **It does NOT build the
+end-to-end adversarial 50k-file (or ADR'd smaller) proof test -- that is task 28 (B3), dispatched
+separately after this lands and is reviewed** (Rule 13: this task alone does not close §12.22 or
+its RSS-sampling sub-clause).
+
+**Which ceiling this enforces, and which it deliberately does not (a disclosed gap, not a silent
+one).** `BudgetsSection` (`settings.py`) carries TWO memory ceilings: `max_rss_mb` ("orchestrator
+process only") and `max_host_rss_mb` ("whole tree + containers"). This sampler enforces ONLY
+`max_host_rss_mb`, comparing it against `cgroup_reader() + container_reader.read_total(run_id)`
+-- exactly "the whole process tree plus every container" the ceiling's own comment names, and
+exactly what task 26's two readers together measure. It does NOT separately enforce
+`max_rss_mb` (orchestrator-only): no primitive for an orchestrator-only reading exists in this
+codebase (task 26 built a whole-TREE cgroup reader specifically because `memory.current` already
+aggregates descendants, so there is no cgroup-based way to isolate "just the orchestrator" from
+what it shares a cgroup with), and `docs/SPEC.md` §11.3 itself frames that number as informational
+rather than a halt trigger: *"The host ceiling is the one that matters, and it is not
+`resource.getrusage`... `getrusage` is retained only as the per-process number in the same
+event"* -- i.e. §11.3's own halt policy (halve → halt after 3 checks) is driven by the host
+ceiling alone, never by the orchestrator-only figure. Comparing the whole-tree total against
+`max_rss_mb` instead (or in addition) would be wrong, not merely imprecise: `max_rss_mb`'s
+default (4096) is smaller than `max_host_rss_mb`'s (12288) precisely because pool children and
+containers are expected to add real memory on top of the orchestrator's own footprint, so a
+whole-tree reading routinely and legitimately exceeds `max_rss_mb` on a healthy multi-process run
+-- comparing it there would be a false-positive halt on ordinary healthy operation, not a
+narrower/safer check. This gap (no orchestrator-only enforcement) is unclosed by this task and is
+named here rather than silently absorbed into "the memory ceiling is enforced".
+
+**Breach-counting policy -- an Agent Recommendation (judgment call), not SPEC-mandated.** §12.22's
+own literal criterion text says only that RSS "keeps under the ceiling... throughout" and that a
+fault-injected variant must fail (halt); it names no debounce count. §11.3's narrative "3
+consecutive breaches" language exists specifically to gate the THIRD check after two rounds of
+halving the `cpu_pool`/`subprocess` semaphores -- a backoff step D110 (`docs/INTEGRATION_HONESTY.
+md`) records as deliberately deferred (no resize-capable primitive exists for either semaphore).
+Without the halving step in between, "3 consecutive breaches" has no independent justification as
+a standalone debounce for this simpler sample→compare→halt path: it would just delay a halt by two
+sample intervals for no corresponding backoff action taken in between. This sampler HALTS ON THE
+FIRST over-ceiling sample -- the more conservative reading the brief itself flags as the
+defensible default, and the one consistent with the criterion's own literal "keeps RSS under the
+ceiling... throughout" (any measured excursion above the ceiling is itself the violation).
+
+**Lifecycle -- the real architectural decision this task's brief left to investigation.**
+`RunContext` (`orchestrator/context.py`) is a **frozen** dataclass assembled once per
+`PhaseRunner(...)` call site in `cli.py`, and `PhaseRunner` itself is likewise constructed fresh
+at every one of those same four call sites (`_run_scan_wave`/`_run_transform_wave`/
+`_run_build_wave`/`_run_verify_wave`) -- one wave, one `RunContext`, one `PhaseRunner`, one
+`Projector`, all torn down together in that composition root's own `try/finally`
+(`_close_wave_projector`). There is no larger "whole run" lifetime object anywhere below the CLI
+command boundary itself: a `fleet transform`/`fleet build`/`fleet verify` invocation loops over
+MULTIPLE waves, reconstructing `RunContext`+`PhaseRunner`+`Projector` on every iteration, and
+`_continue_impl` chains separate phase composition roots end to end rather than sharing one. Given
+that, this sampler's lifecycle is scoped to the SAME granularity those three objects already use
+-- one `HostMemorySampler` per composition-root call, started before `PhaseRunner.run_wave()` and
+stopped after, in each of the four `_run_*_wave` functions in `cli.py`. This is not a new lifecycle
+shape: it is the existing `Projector.start()`/`_close_wave_projector` idiom, used a fifth time, for
+a fifth per-wave collaborator -- rather than inventing a new run-lifetime singleton (which would
+mean either a mutable field forced onto `RunContext`'s frozen dataclass via
+`object.__setattr__`, matching no existing precedent there other than the two ALREADY-derived
+fields it documents as exceptions, or a new module-global the CLI drives across phase boundaries,
+which is exactly the shape CLAUDE.md Guardrail 3 asks orchestration state not to take). Scoping to
+`PhaseRunner`'s own constructor/lifecycle instead of the composition root was the other option the
+brief named; it was rejected because `PhaseRunner.__init__` already accepts `resource_guard` as a
+bare synchronous `Callable` with no async lifecycle of its own (existing tests construct
+`PhaseRunner(..., resource_guard=some_lambda)` directly, with no `start`/`stop` step), and giving
+`PhaseRunner` an async `start`/`stop` pair to own only for this one collaborator would touch
+`PhaseRunner.__init__`/`run_wave()`'s signature and every existing call site for no benefit over
+handing it an already-running guard the same way `resource_guard` is already handed in --
+`sampler.guard` is a plain zero-arg callable, `resource_guard`'s exact declared type.
+
+**Why the wave-scoped choice still satisfies "sample every second, throughout" for the SPEC's own
+literal test scenario.** Indexing ONE synthetic large repo is a single SCAN wave: one
+`_run_scan_wave` call, one `HostMemorySampler` alive for that call's whole duration, ticking on its
+own `asyncio.Task` concurrently with `PhaseRunner.run_wave`'s per-repo `TaskGroup` -- independent
+of whether `_drive`'s own poll site (`reason = self._guard()`, checked once per repo-dispatch
+attempt) has any dispatch boundary to poll at *inside* that one long call. The sampler's own tick
+loop does not depend on that call site at all; it runs on its own clock regardless of what the one
+in-flight dispatch is doing. What this task does NOT change is `_drive`'s poll site itself --
+`resource_guard()` is still read only once per repo-dispatch attempt, so a breach that both starts
+and clears strictly *within* one uninterrupted dispatch call, before the NEXT poll, would still not
+be observed by that call site even though the sampler's own internal state was briefly correct.
+Flagged here rather than silently left implicit: closing that residual timing gap, if the
+adversarial proof (task 28 / B3) finds it load-bearing, is a change to `_drive`'s own poll
+frequency/shape, which this task's brief scoped OUT ("no downstream changes needed... the
+halt/exit-5 plumbing already works").
+"""
+
+from __future__ import annotations
+
+import asyncio
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
+from typing import Final
+from uuid import UUID
+
+from fleet.orchestrator.runner import HaltReason
+from fleet.sandbox.containerstats import ContainerStatsReader
+from fleet.util.cgroup import read_process_tree_memory_bytes
+
+__all__ = ["DEFAULT_SAMPLE_INTERVAL_S", "HostMemorySampler"]
+
+#: §11.3's narrative production sampling cadence. §12.22's literal criterion text demands "every
+#: second" for the test scenario instead -- neither number is hardcoded into the sampler itself;
+#: this is only `HostMemorySampler.__init__`'s default, the same shape `resource_guard` itself is
+#: injected in, so a caller (test or production) states its own interval explicitly.
+DEFAULT_SAMPLE_INTERVAL_S: Final = 30.0
+
+_BYTES_PER_MB: Final = 1024 * 1024
+
+
+class HostMemorySampler:
+    """Ticks on its own `asyncio.Task`, independent of repo-dispatch activity, and exposes
+    `guard()` -- a synchronous zero-arg callable matching `PhaseRunner`'s declared
+    `resource_guard: Callable[[], HaltReason | None]` type exactly, so a caller wires it in with
+    `PhaseRunner(..., resource_guard=sampler.guard)`, no adapter needed.
+
+    **State holder: a plain mutable attribute, not a lock.** This is asyncio -- one thread, one
+    event loop. `_tick()` writes `self._breached` in a single statement with no `await` between
+    reading the two sources and writing the flag's *final* value (the two reads ARE separately
+    awaited, but nothing observes `_breached` in between; it is only ever assigned once per tick,
+    after both readings are in hand), and `guard()` reads it in a single statement with no `await`
+    at all. A reader task and a writer task can only interleave at an `await` point, and there is
+    no `await` on either side of that one assignment/read, so no lock is needed for correctness
+    here -- unlike e.g. `CostLedger`, which guards durable, multi-step read-modify-write sequences
+    a lock genuinely protects.
+    """
+
+    def __init__(
+        self,
+        *,
+        run_id: UUID | str,
+        max_host_rss_mb: int,
+        interval_s: float = DEFAULT_SAMPLE_INTERVAL_S,
+        cgroup_reader: Callable[[], int] = read_process_tree_memory_bytes,
+        container_reader: ContainerStatsReader | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    ) -> None:
+        self._run_id = run_id
+        self._ceiling_bytes = max_host_rss_mb * _BYTES_PER_MB
+        self._interval_s = interval_s
+        self._cgroup_reader = cgroup_reader
+        #: Defaulted here (not at the module level) so a production caller that supplies nothing
+        #: gets the REAL reader (real `docker` CLI, over `fleet.util.proc.run`) -- and a test that
+        #: forgets to override this constructs a real reader too, which is exactly the fail-loud
+        #: outcome wanted rather than a silently-fake default.
+        self._container_reader = (
+            container_reader if container_reader is not None else (ContainerStatsReader())
+        )
+        self._sleep = sleep
+        self._breached = False
+        self._task: asyncio.Task[None] | None = None
+
+    def guard(self) -> HaltReason | None:
+        """`PhaseRunner`'s `resource_guard()`. Never awaits, never raises -- see class
+        docstring for why the plain attribute read is safe. A sampler `_tick()` failure (the
+        cgroup/container reader raised) does NOT surface here: it would be misattributed as an
+        unrelated single repo's failure by `PhaseRunner._isolated`'s blanket `except Exception`,
+        which is the wrong place for a host-level infrastructure failure to be blamed. It
+        surfaces instead when the caller `stop()`s this sampler at wave teardown (below), OUTSIDE
+        `PhaseRunner.run_wave()`'s per-repo isolation boundary, where a re-raised reader failure
+        correctly fails the whole wave rather than one repo (Rule 11: fail loud, but at the
+        right scope)."""
+        return HaltReason.HOST_MEMORY if self._breached else None
+
+    async def _tick(self) -> None:
+        """One sample: whole process tree (task 26's cgroup reader) plus every running
+        `fleet-<run_id>-*` container (task 26's `ContainerStatsReader`), compared against
+        `max_host_rss_mb` alone -- see module docstring for why `max_rss_mb` is not checked
+        here. `>=`, not `>`: "keeps RSS under the ceiling" (§12.22) reads a sample sitting
+        exactly AT the ceiling as not under it."""
+        tree_bytes = self._cgroup_reader()
+        container_total = await self._container_reader.read_total(self._run_id)
+        total_bytes = tree_bytes + container_total.total_bytes
+        self._breached = total_bytes >= self._ceiling_bytes
+
+    async def _run_forever(self) -> None:
+        """Tick immediately on start (so `guard()` reflects a real reading as soon as possible
+        rather than only after the first full interval elapses), then every `interval_s`
+        thereafter, forever -- cancelled from outside by `stop()`. A `_tick()` exception (the
+        underlying reader raised `CgroupUnavailableError`/`ContainerStatsUnavailableError`) ends
+        this loop and is stored on the task; it is deliberately NOT caught here, so it propagates
+        when `stop()` awaits the task below rather than being silently absorbed -- an unreadable
+        host is not the same fact as "the host has room," and Rule 11 forbids collapsing those."""
+        while True:
+            await self._tick()
+            await self._sleep(self._interval_s)
+
+    @property
+    def is_running(self) -> bool:
+        """Whether a background task is currently owned by this sampler -- `True` from `start()`
+        until the matching `stop()` returns (even if `stop()` is about to re-raise a reader
+        failure; see `stop()`'s docstring, `self._task` is cleared before that re-raise so a
+        caller's own cleanup can tell the sampler is no longer running)."""
+        return self._task is not None
+
+    def start(self) -> None:
+        """Starts the background task. Not re-entrant: calling this twice without an
+        intervening `stop()` is a caller bug (two ticking tasks racing to write the same
+        `_breached` flag), raised loudly rather than silently replacing the first task and
+        leaking it un-cancelled."""
+        if self._task is not None:
+            raise RuntimeError(
+                "HostMemorySampler.start() called while a sampler task is already running "
+                "-- call stop() first"
+            )
+        self._task = asyncio.create_task(
+            self._run_forever(), name=f"host-memory-sampler-{self._run_id}"
+        )
+
+    async def stop(self) -> None:
+        """Cancels and awaits the background task -- mirrors `PhaseRunner._dispatch`'s own
+        `heartbeat.cancel(); with suppress(asyncio.CancelledError): await heartbeat` shape
+        exactly, the one existing periodic-task-teardown pattern in this codebase. A no-op if
+        `start()` was never called or `stop()` already ran (idempotent, so a caller's own
+        `finally` need not track whether it already cleaned up). Re-raises any NON-cancellation
+        exception the task ended with -- see `guard()`'s docstring for why that must happen here
+        and not inside `guard()` itself."""
+        if self._task is None:
+            return
+        task, self._task = self._task, None
+        task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task
