@@ -3160,6 +3160,30 @@ uncoordinated count drift this entry's own corrections already warn against). A 
 extending the scan to recognize a validator-method call as a read could close this key's
 `KNOWN_INERT` entry properly.
 
+**Marker, 2026-09-03 (round VI task 36) — `budgets.max_host_rss_mb` now OUT of `KNOWN_INERT`; the
+"future pass" the paragraph above deferred was not needed, because a *different* call site closed
+the gap the scan can see.** A full-suite run found
+`test_known_inert_keys_are_still_inert[fleet.yaml:budgets.max_host_rss_mb]` **FAILING** — not
+because the scan changed, but because the code did: task 27/29's `HostMemorySampler` wiring
+(`cli.py::_host_memory_sampler`, `cli.py:2010`, plus the two `_run_*_wave` composition roots at
+`cli.py:8619` and `:8710`) constructs `HostMemorySampler(..., max_host_rss_mb=settings.config.
+budgets.max_host_rss_mb, ...)` — a direct, literal `config.budgets.max_host_rss_mb` attribute read
+outside `settings.py`, landed after the paragraph above was written and independent of task 24's
+`validate_memory_budget` indirection it describes. `_readers("max_host_rss_mb")` now returns
+`['cli.py', 'orchestrator/memory_guard.py']` — a real, non-empty reader list, not a scan
+regression. Investigated by running both `test_every_config_key_is_read` and
+`test_known_inert_keys_are_still_inert` directly (not guessed): the former was never the
+contradiction (removing the `KNOWN_INERT` line changes nothing for it — `_inert_keys()` already
+excludes this key once real readers exist, so it was never in the `unexplained` set either way);
+the latter was correctly reporting that the `KNOWN_INERT` allowlist's claim ("this key is inert")
+had gone stale. Reconciled by deleting `"fleet.yaml:budgets.max_host_rss_mb"` from `KNOWN_INERT`
+in `tests/test_config_keys_are_read.py` (comment left in place, extended with this history) —
+`tests/test_config_keys_are_read.py` run whole, no `-k`: 47/47 pass. This closes this one key's
+piece of D50 (now genuinely, directly read, joining the other keys this entry already tracks as
+wired out of the 26/37/38/46-count history above); **D50's heading stays OPEN** — the remaining
+`KNOWN_INERT` members this entry catalogs (Group 1's 9 `llm.rate_limit.*` keys and the other
+groups) are unaffected by this task and untouched by it.
+
 ---
 
 **D51 — OPEN, narrowly. `workers/relocate.py` lands its patches through the exact same

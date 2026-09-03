@@ -219,17 +219,24 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # (`c73d023`/`84800a7`) wired `cli.py::_load_settings` to call
         # `settings.validate_memory_budget(host_total_mb=_read_host_mem_total_mb())` after every
         # `FleetSettings.load()`, so the value now genuinely affects behavior (exit 2 on breach).
-        # **Not removed from this list**: this file's own `_inert_keys()` scan requires the bare
-        # key name to appear in `src/fleet/` outside `settings.py`, and the new call site reads
-        # the field only indirectly (through `validate_memory_budget`'s own internal
-        # `self.max_host_rss_mb` access) — the literal token never appears at the cli.py call
-        # site, so the scan's own mechanism cannot see the new wiring. Verified by running the
-        # test after removing this line: `test_every_config_key_is_read` failed, confirming the
-        # scan genuinely doesn't detect this indirect form. Left annotated rather than removed
-        # per this file's own ratchet (removal is a stricter claim than the scan currently
-        # supports) — a future pass extending the scan to recognize a validator-method call as a
-        # read could close this properly.
-        "fleet.yaml:budgets.max_host_rss_mb",               # settings.py:265
+        # At that point it was left annotated rather than removed: the field was still read only
+        # *indirectly* through `validate_memory_budget`'s own internal `self.max_host_rss_mb`
+        # access, and the literal token did not yet appear at any cli.py call site, so the plain
+        # bare-name scan this file uses could not see that form of wiring.
+        # `fleet.yaml:budgets.max_host_rss_mb` REMOVED 2026-09-03 (round VI task 36): task 27/29's
+        # `_host_memory_sampler` (`cli.py:2010`) and the two `_run_*_wave` composition roots
+        # (`cli.py:8619`, `:8710`) construct `HostMemorySampler(..., max_host_rss_mb=
+        # settings.config.budgets.max_host_rss_mb, ...)` / `max_host_rss_mb=config.budgets.
+        # max_host_rss_mb` — a direct, literal attribute read outside settings.py, distinct from
+        # and in addition to task 24's indirect `validate_memory_budget` call. The bare-name scan
+        # now finds it for real (`_readers("max_host_rss_mb")` returns `['cli.py',
+        # 'orchestrator/memory_guard.py']`), so `test_known_inert_keys_are_still_inert` started
+        # failing — correctly: the key is no longer inert by this file's own predicate, and
+        # `test_every_config_key_is_read` agrees (removing the line changes nothing there, because
+        # `_inert_keys()` already excludes this key once real readers exist). Per this file's own
+        # ratchet, "a key leaving this list only ever means 'now proven read'" — verified by
+        # running the full file after the removal (see task-36-report.md for the run). See D50
+        # in docs/INTEGRATION_HONESTY.md for the annotated ledger history of this key.
         # `fleet.yaml:pr.merge_wait_timeout_s` REMOVED 2026-08-30 (round M, D80 wiring,
         # `9c20eeb`): `cli.py`'s `_resume_impl` now passes `open_pr_max_age_s=
         # float(settings.config.pr.merge_wait_timeout_s)` into `orchestrator/stubs.py::reconcile`,
