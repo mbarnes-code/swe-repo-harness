@@ -108,6 +108,7 @@ from fleet.ecosystems import go as go_adapter
 from fleet.models.build import BuildUnit, SupportFile
 from fleet.models.enums import Ecosystem
 from fleet.models.repo import Coordinate
+from fleet.models.state import MigrationState
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
     BCR_MIRROR_REGISTRY,
@@ -4862,6 +4863,113 @@ def test_build_against_a_real_bazel(
     # `//ts/acme/app:node_modules/@acme/lib`.
     # This is the assertion the old `xfail` reason described as impossible.
     assert (checkout / "bazel-bin/ts/acme/app/src/main.js").is_file(), built.stderr[-8000:]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("bazel") is None,
+    reason=(
+        "bazel is not installed on this host; the whole point of this test is that a real bazel "
+        "reads the unknown-ecosystem repo's generated filegroup and exits 0 over it, which "
+        "`test_an_unknown_ecosystem_still_falls_back_visibly` cannot show through `FakeBazel`'s "
+        "canned answer table"
+    ),
+)
+def test_the_unknown_ecosystem_filegroup_builds_under_a_real_bazel(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    tmp_path: Path,
+    bazel_cache_home: Path,
+    bazel_registry: str,
+    bazel_fetch_bazelrc: str,
+    bazel_startup_argv: tuple[str, ...],
+) -> None:
+    """SPEC §12.25's other half: `test_an_unknown_ecosystem_still_falls_back_visibly` proves the
+    no-manifest/`filegroup`/dest/finding shape end-to-end, but through `FakeBazel` — a canned
+    answer table, not a build system that ever read the tree. This is the same claim asked of a
+    real `bazel build //...`: `acme-runbooks` (no manifest any adapter recognizes) still gets a
+    `no-manifest` finding, `Ecosystem.UNKNOWN`, `dest='misc/acme-runbooks'`, `wave_index=0`, a
+    `filegroup` BUILD target that a real Bazel accepts with exit 0, and a row in
+    `migration_state.json` — the same checklist SPEC §12 item 25 states, over the artifact real
+    Bazel produced rather than a fake's table.
+
+    **`add_repos`, not `only_repos`.** `acme-runbooks` is grown onto the base
+    `tests.test_scan_e2e.FIXTURE_REPOS` fleet exactly as `test_two_js_repos_with_different_npm_
+    dependencies_both_build` and `test_two_python_repos_with_different_pypi_dependencies_both_
+    build` grow it for their own added repos — a new, isolated test function rather than an
+    extra assertion block inside `test_build_against_a_real_bazel`, because that test's own
+    `set(merged) == set(DESTINATIONS)` parity assertion is keyed on the exact 4-member
+    `FIXTURE_REPOS` set and growing it in place would need `DESTINATIONS` to grow too, which
+    risks perturbing an assertion this task was told not to touch. `acme-runbooks` declares no
+    external dependency and its adapter fetches no toolchain (`workspace_deps` returns `[]`,
+    `ruleset`/`extension`/`repo_name` are all `None`), so unlike the Rust fixture two tests below,
+    growing the fleet by one repo here does not risk this session's shared Bazel output-base
+    ceiling.
+    """
+    add_repos(fleet, ["acme-runbooks"])
+    result = real_build(fleet, monorepo, bazel_cache_home, bazel_registry, bazel_fetch_bazelrc)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    # -- Phase 1: the no-manifest finding, and the ecosystem it was classified into ------------
+    ecosystems.discover()
+    assert repo_ecosystem(fleet, "acme-runbooks") is Ecosystem.UNKNOWN
+    unknown = ecosystems.for_ecosystem(Ecosystem.UNKNOWN)
+    dest = f"{unknown.monorepo_dir}/acme-runbooks"
+    assert dest == "misc/acme-runbooks", dest
+
+    no_manifest_rows = query(fleet, "SELECT repo_id FROM findings WHERE kind = 'no-manifest'")
+    assert [str(row[0]) for row in no_manifest_rows] == ["acme-runbooks"], no_manifest_rows
+    degraded_rows = query(
+        fleet, "SELECT repo_id, payload FROM findings WHERE kind = 'EcosystemAdapterUnavailable'"
+    )
+    assert [str(row[0]) for row in degraded_rows] == ["acme-runbooks"], degraded_rows
+    assert json.loads(str(degraded_rows[0][1]))["dest"] == dest, degraded_rows
+
+    # -- §3.1 step 7: no dependencies ⇒ wave 0 --------------------------------------------------
+    assert wave_index(fleet, "acme-runbooks") == 0, "an unknown repo with no deps must land wave 0"
+
+    # -- Phase 3, over the real artifact: the generated BUILD.bazel and a real bazel build ------
+    checkout = tmp_path / "integration-checkout"
+    git(monorepo, "worktree", "add", "--detach", str(checkout), "integration")
+    for known_dest in DESTINATIONS.values():
+        assert (checkout / known_dest / "BUILD.bazel").is_file(), (
+            f"{known_dest} generated no BUILD.bazel"
+        )
+    body = (checkout / dest / "BUILD.bazel").read_text(encoding="utf-8")
+    assert "filegroup(" in body, body
+    assert "fleet_adapter=unknown" in body, body
+
+    built = subprocess.run(  # noqa: S603
+        [*bazel_startup_argv, "build", "//..."],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800.0,
+    )
+    assert built.returncode == 0, built.stderr[-8000:]
+    assert "Build completed successfully" in built.stderr, built.stderr[-8000:]
+
+    # Scoped to just this repo's own target, so a green `//...` above cannot be hiding a
+    # `filegroup` that Bazel silently skipped because nothing else in the graph reaches it: this
+    # is the assertion the SPEC's "a `filegroup` BUILD target that builds green" clause makes,
+    # asked directly of the one target rather than inferred from the whole monorepo's exit code.
+    scoped = subprocess.run(  # noqa: S603
+        [*bazel_startup_argv, "build", f"//{dest}:acme-runbooks"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=300.0,
+    )
+    assert scoped.returncode == 0, scoped.stderr[-8000:]
+    assert "Build completed successfully" in scoped.stderr, scoped.stderr[-8000:]
+
+    # -- migration_state.json: the repo is neither dropped nor a crash -------------------------
+    projection = fleet / "migration_state.json"
+    state = MigrationState.model_validate_json(projection.read_text(encoding="utf-8"))
+    assert "acme-runbooks" in state.repos, sorted(state.repos)
+    assert state.repos["acme-runbooks"].status.value == "SUCCEEDED", state.repos["acme-runbooks"]
 
 
 #: The two Rust fixtures' destinations. `rust/<crate>` is the RustAdapter's own answer
