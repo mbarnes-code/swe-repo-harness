@@ -8843,6 +8843,38 @@ mechanism + one `proto` adapter, explicitly disclosed non-criterion-moving, pair
 (`f4ba7a5`), §12.47's `CRITERIA_PLAN.md` entry annotated in place (stays OPEN). Task 18 (§12.19's
 production wiring) is in flight as this checkpoint is written.
 
+**Round VI, ninth wave (2026-09-03) — §12 count: 29 of 48, up from 28. Two criteria closed this
+round (§12.25, §12.19), well past the single-criterion Rule 13 obligation this round opened
+under.** Task 18 landed the wiring research-11 designed: `_atomic_wave_findings`, `_PrCandidate.
+scc`, intra-SCC-edge filtering, SCC grouping in `_pr_impl`, shared-PR emission/persistence in
+`_emit_prs`/`_emit_one_pr`. Task-scoped review gave elevated scrutiny given the criterion stakes,
+independently reproduced both discriminators (one-PR-per-SCC; the deadlock-hazard regression),
+and went beyond the report to craft an additional decoupling mutation proving the test-scoping
+deviation doesn't weaken the assertion. Verdict: APPROVED WITH FOLLOW-UP — one real Medium
+finding, that the SPEC's literal 12-repo wording wasn't met (task 18 tested at 2-repo scale per
+its own dispatch brief, a controller scoping call not disclosed as deliberate until the review
+caught it against the file's own recorded done bar).
+
+Merging surfaced this session's recurring `_reconcile_tasks_with_git` citation drift a 5th time
+(repointed, re-verified clean). The review's finding was resolved by **ADR-0114**, mirroring
+ADR-0104's established "per-property proof accepted in place of one combined fixture" precedent:
+the 2-repo `fleet pr` wiring proof, combined with the pre-existing and independent 12-repo
+graph-layer SCC-computation proof (`test_a_12_repo_cycle_shares_one_scc_id_across_all_members`),
+is adjudicated as jointly satisfying the clause's intent — the new wiring is confirmed N-generic
+(no branch depends on `len(scc.members)`), so a full 12-repo `fleet pr` fixture would exercise the
+identical code path N times over an SCC set already proven correct at N=12, catching no defect
+class the two existing proofs miss. Dated markers added to `docs/SPEC.md` item 19 and the ADR
+itself; `docs/CRITERIA_PLAN.md`'s §12.19 entry and the Rollup table updated in the same commit
+per Rule 14, never building to match the criterion.
+
+**All dispatched work in this round is now landed, reviewed, and reconciled with docs — the round
+ledger shows zero outstanding items.** D94 remains the standing NEW-MECHANISM candidate (its
+foundational git primitive landed this round via task 15; trigger logic, body regeneration, and
+`Forge.mark_ready` wiring remain). The contracts-registry has its first adapter (task 19); four
+more (`openapi`/`avro`/`thrift`/`shared_lib`) are needed before §12.32/§12.47 can move. No other
+small, pre-scoped item remains identified from this round's own research passes — the next round
+should run a fresh backlog sweep, or take on one of the two standing larger efforts above.
+
 **Status: 1 task outstanding (task 18, §12.19).** Once it lands and is reviewed, re-measure §12.19
 directly against its full text before flipping it — the pattern this round itself demonstrated
 twice already (never carry forward an assumption from a prior audit or from the implementer's own
