@@ -9233,6 +9233,7 @@ chains of this size rather than forcing a premature dispatch to keep the count m
 picks a genuinely one-shot criterion from the remaining 13 open items — §12.34 (a fixture-only new
 `EcosystemAdapter`/`ManifestAdapter` pair, well-bounded) and §12.11 (combining the already-proven
 real-bazel and networkless-sandbox paths in one run) are the leading candidates; §12.9/§12.27's
+shared FILE_PATH capture mechanism and the D94/D104 chain remain correctly excluded as multi-step.
 
 ## Round VI, seventeenth wave (2026-09-03) — §12.11 Task A and §12.34 Clause A landed. §12 count
 holds at 35 of 48 (no criterion fully moved — both are disclosed partial closures. **This is a
@@ -9282,4 +9283,62 @@ with their remaining gaps named (§12.11: Task B, the missing cross-repo report 
 exclusion-set assertion; §12.34: Clause B). Next wave should prioritize whichever of Task B or
 Clause B sizes to a genuine one-shot closing the full criterion, to avoid a third consecutive
 non-moving wave.
-shared FILE_PATH capture mechanism and the D94/D104 chain remain correctly excluded as multi-step.
+
+**Correction (caught while appending the next checkpoint):** the line immediately above this one
+used to end the file as an orphaned sentence fragment ("shared FILE_PATH capture mechanism and
+the D94/D104 chain remain correctly excluded as multi-step.") — an Edit-tool anchor collision
+during the sixteenth-wave insertion split a sentence from the fifteenth-wave checkpoint and left
+its continuation stranded at the file's end, disconnected from its own sentence. Reattached to its
+original sentence (search "leading candidates; §12.9/§12.27's" above) rather than left broken;
+this note discloses the repair per this project's own "annotate, never silently rewrite" ledger
+discipline, since `docs/PROGRESS.md` is a committed, chronological record.
+
+## Round VI, eighteenth wave (2026-09-03) — §12.47 closed in full. §12 count: 36 of 48, up from
+35. The first full new criterion closure in three waves, ending the two-consecutive-non-mover
+streak flagged at the seventeenth wave's own close.
+
+Both leading candidates from the seventeenth wave (§12.31's D111, §12.34's Clause B) were
+correctly deferred rather than forced — research-25 sized Clause B further and found it bigger
+than first estimated (a hoisted `ContractNode` has zero Phase 3 existence today, and
+`contracts.discover()` unconditionally raises today because avro/thrift are unshipped, which would
+break every run with any hoisted contract if wired naively). Allocated `D113`, reconciled docs.
+
+Rather than dispatch another blind research pass, checked the remaining 12 open criteria directly.
+Found a genuine, self-inflicted staleness: §12.47's own entry still described the AVRO/THRIFT
+identification-layer gap as open and undispatched — but round VI task 34, landed *earlier in this
+same round*, had already closed exactly that gap. The tracking doc simply hadn't been swept for
+this consequence when task 34 landed (it was scoped to §12.32/§12.47's *adapter* work, not their
+own *blocker* description). Corrected in place per Guardrail 7. With the blocker cleared and 3 of
+5 `ContractAdapter`s already shipped (round VI tasks 19/20), only 2 small, templated files
+remained — a genuinely different shape of remaining work than the entry's own stale "comparable in
+scope to D89 Phase 2" framing suggested.
+
+Dispatched research-26 to nail the exact design before writing a brief. It verified the design
+live (registering prototype adapters against the real registry mechanism, confirming the 5-kind
+bijection, statelessness, and correct output) and self-corrected a wrong premise in its own brief:
+the brief assumed no shipped `EcosystemAdapter` binds AVRO/THRIFT, which was false — `jvm.py` binds
+both (`java_avro_library`/`java_thrift_library`), letting the new adapters' tests use a real
+binding instead of an invented one. Task 40 transcribed this design essentially verbatim (`proto.py`
+with three string-literal substitutions) and landed clean, no dormancy this time — the "never
+background/Monitor" instruction from the seventeenth wave's own pattern was baked directly into
+this wave's every dispatch and held throughout.
+
+Reviewed APPROVED, zero blocking findings, flagged explicitly as the round's most consequential
+review — every claim independently reproduced from a separately-pinned worktree, including a live
+re-run of the real package-walking `discover()` from scratch rather than trusted from the
+implementer's own script, and the naive-cd import-isolation hazard reproduced first to prove the
+pinning actually mattered before trusting the pinned result. Merged; citation-drift gate clean;
+fixed the one disclosed non-blocking finding (`base.py`'s stale "not shipped" docstring).
+
+Before flipping §12.47 to DONE, ran a controller confirming pass across every §12.47-relevant test
+file (`test_registries_stateless.py`, all 6 `test_ecosystems_contracts_*.py`, `test_manifests.py`,
+`test_ecosystems.py`): **152 passed, 1 error.** The error is
+`test_ecosystems.py::test_discover_raises_naming_a_decoy_ecosystem_member_with_no_adapter` — a
+pre-existing, unrelated `EcosystemAdapter`-registry fixture-teardown-ordering bug the controller
+itself diagnosed early this session (before dispatching tasks 35/36/37) but never actually
+dispatched a fix for — an oversight, caught only now by re-running the file this checkpoint's own
+confirming pass needed anyway. Confirmed orthogonal to §12.47 (different registry, no file this
+wave touched) before proceeding with the DONE flip; queued as this wave's next dispatch.
+
+**Status: 1 outstanding** — the `test_ecosystems.py` fixture-ordering bug, queued for dispatch now
+that §12.47's closure is committed.
