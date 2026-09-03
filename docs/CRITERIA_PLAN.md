@@ -1864,6 +1864,15 @@ built: the other 4 adapters, and wiring this registry into the actual BUILD-gene
 (`cli.py`/`bazel/generators.py`/`workers/contracts.py` are all untouched). §12.32/§12.47 both stay
 OPEN — neither's `discover()` assertion can pass until the full 5-adapter bijection lands.
 
+**Partial progress, 2026-09-03 (round VI task 20, commit merging `64999f0`) — still OPEN, still a
+disclosed sub-piece.** `openapi.py` and `shared_lib.py` landed — 3 of 5 adapters now shipped.
+`discover()` correctly raises today, naming the 2 still-missing kinds (`AVRO`, `THRIFT`) — both
+confirmed genuinely blocked, not merely undone: their file suffixes (`.avsc`/`.avdl`/`.thrift`)
+aren't even scan units today (`symbolindex.py`'s `LANGUAGES` table has no entries for them), so no
+`ContractNode` of either kind can exist by construction. A dedicated identification-layer sizing
+pass (a real parser to write, not a table edit) is needed before either adapter can be designed —
+tracked, not yet dispatched. §12.32/§12.47 both stay OPEN.
+
 **Disclosed, not closed (pre-existing, unrelated to the above):** `assert_stateless` is
 structurally blind to `__slots__`-stored state (by the helper's own documented design,
 `src/fleet/workers/base.py:559-571` — a `__slots__` class has no `__dict__` for the check to
