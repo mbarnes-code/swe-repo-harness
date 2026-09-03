@@ -495,6 +495,25 @@ offline under any warming strategy).
 indefinitely on live Docker invocations specifically (not a FakeBazel/mocked path); dispatch with
 explicit mitigation or run under closer supervision, not as a routine unsupervised worker.
 
+**Task A landed (round VI task 38, 2026-09-03), reviewed APPROVED, zero blocking findings.**
+`tests_query(dest)` added; real production wiring (`BuildverifyInput.baseline_ok`,
+`BuildverifyOutput.migrated_test_count`, `test_count_regressed`) refuses
+(`FailureClass.TEST_FAILURE`, non-retryable) on a real regression, threaded through the existing
+`_repo_facts → … → _buildverify_input` chain. Mutation-proven, independently reproduced by review.
+**Three gaps disclosed, not closed by Task A:**
+1. `BuildUnit.test_srcs` is never populated by any production adapter, so no adapter can ever
+   emit a real nonzero test target through `real_build()`'s own path — the discriminator had to be
+   proven directly against `BuildverifyWorker` with a hand-built workspace instead. Filed as
+   `D112` (`docs/INTEGRATION_HONESTY.md`).
+2. The `(repo, baseline, migrated)` cross-repo report table SPEC's own sentence names isn't built
+   — only embedded in the failing repo's error message, matching the pre-existing `tests_lost`
+   check's own absence, but not what the brief asked for on the *new* check. A small follow-up
+   (most naturally new columns on `fleet status`).
+3. The "exclusion set is empty under shipped config" assertion isn't built — nothing writes
+   `repos.baseline_ok` under the shipped config today.
+Do not round up the `<n> of 48` count for §12.11 — Task A is a partial closure; Task B plus the
+three gaps above remain before this criterion counts DONE.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
@@ -1182,7 +1201,13 @@ paraphrase covered only the first and omitted the `ContractBindingUnavailable` c
   `src/fleet/`, the enum-extension monkeypatch pattern is already landed precedent
   (`test_ecosystems.py`), and the minimal adapter surface is small (3+5 abstract methods). No new
   `src/` production code needed — genuinely test-only infrastructure, same shape as research-21's
-  AVRO/THRIFT gap. Dispatched as round VI task 39.
+  AVRO/THRIFT gap. **Landed round VI task 39, reviewed APPROVED, zero blocking findings.**
+  `tests/fixtures/adapters/ruby_manifest.py`/`ruby_ecosystem.py` (factory-pattern judgment call,
+  the decoy `Ecosystem.RUBY` member baked in via `make_ruby_*_adapter(ruby_member)`), driven
+  through a real `scan → sequence → transform → build` run, with a zero-`src/fleet/`-diff
+  assertion over a fixed historical commit range — a strictly stronger claim than SPEC's literal
+  "zero outside `enums.py`" wording, since this fixture never touches `enums.py` at all (disclosed
+  in the test's own docstring). Mutation-proven, independently reproduced by review.
 - **Clause B (`ContractBindingUnavailable` finding + `BuildPlan.unbound_contract_kinds`).**
   **NOT one-shot-sized.** `unbound_contract_kinds` is declared (`models/build.py`) and never
   assigned in `src/`; `ContractBindingUnavailable` is never inserted as a finding anywhere (only

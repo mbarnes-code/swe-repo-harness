@@ -8641,3 +8641,31 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-22-report.md`
 **Not yet built:** any of legs A–E above. No design choice among them is made here — a future
 round should build a dedicated multi-task closure plan (mirroring how D94/D104 and §12.37/§12.38
 are tracked) before dispatching the first leg.
+
+## D112 — OPEN. `BuildUnit.test_srcs` is never populated by any production ecosystem adapter — no
+adapter can ever emit a real nonzero test target
+
+**Found by round VI task 38 (2026-09-03), while sizing §12.11 Task A's discriminator test.**
+Verified free before allocating: form-agnostic sweep found `D111` as the highest allocated number.
+Independently confirmed by task-scoped review before this entry was written: `grep -rn
+"test_srcs=" src/` returns zero hits; the sole production `BuildUnit(...)` construction site
+(`cli.py:8328` at review time — verify current line) never passes `test_srcs`; every ecosystem
+adapter's `test_targets()` reads it via `test_sources()`, which is always empty.
+
+**Consequence.** No path through `test_build_against_a_real_bazel`/`real_build()` (the codebase's
+one existing unsandboxed real-bazel e2e test) can ever exercise a real nonzero `bazel test`
+target — every real-bazel proof in this repo runs zero tests, not because the fixture repos have
+none, but because nothing wires a `BuildUnit`'s discovered test sources into its constructor call.
+Task 38's own §12.11 discriminator had to be proven directly against `BuildverifyWorker` with a
+hand-built real-bazel workspace instead, sidestepping this gap rather than fixing it (a
+disclosed, deliberate scope narrowing per Guardrail 6's "verify the resolved value" discipline —
+not a silent workaround).
+
+**Not required by §12.11's literal text** — `tests(//dest/...)`'s COUNT is what SPEC's own
+sentence checks, and a real-bazel fixture's test target count can be proven nonzero another way
+(as task 38's own discriminator did). This gap only blocks proving the discriminator through the
+*existing* `real_build()` e2e path specifically, not the count-comparison mechanism itself.
+
+**Not yet built:** whatever wiring would populate `test_sources()`/`test_srcs` from a real
+ecosystem adapter's manifest scan — no design decision (which adapters, what discovery heuristic)
+is made here.
