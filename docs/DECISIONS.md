@@ -13057,3 +13057,62 @@ diff; if one is found later, it gets its own D-number and this adjudication does
 **Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.19's entry and SPEC item 19's
 own sentence should carry a dated marker recording this substitution, in the same commit as any
 edit marking §12.19 DONE — per Rule 14, not before.
+
+## ADR-0115 — §12.22's runtime RSS-sampling adversarial proof: a one-repo fixture accepted in place of the literal 50 000-file synthetic repo
+
+**Decision (2026-09-03, round VI task 28).** `docs/SPEC.md` §12 item 22's literal text (`:7454`)
+asks for the RSS-sampling proof to be built against "a synthetic 50 000-file repo," including the
+"variant test that inflates only the pool children and the containers must fail this criterion"
+adversarial half — the specific test this task built. `tests/test_memory_guard_e2e.py`'s fleet is
+ONE trivial one-file git repository, not a 50 000-file one. This ADR adjudicates that substitution
+explicitly, per `research-17-report.md` §3e's prior reasoning (round VI research, not previously
+turned into a decision) and mirroring ADR-0104/ADR-0114's "prove the mechanism, not the literal
+scale" precedent structure.
+
+**Rationale.** The property under test is that `HostMemorySampler` (task 27, `orchestrator/
+memory_guard.py`) correctly compares two INJECTED numbers — a process-tree cgroup reading and a
+container-stats total, both supplied entirely through task 26/27's own seams
+(`cli.CGROUP_MEMORY_READER`/`cli.CONTAINER_STATS_RUNNER`), never through real memory pressure —
+against `budgets.max_host_rss_mb`, and halts or does not accordingly. Nothing about that
+comparison's correctness depends on how many files the one repo in the fleet happens to contain:
+the sampler's tick loop (`memory_guard.py::_tick`) reads `cgroup_reader()` and
+`container_reader.read_total(run_id)` unconditionally, on its own timer, independent of what (if
+anything) `PhaseRunner` is doing with any admitted repo at that moment — the same property
+`memory_guard.py`'s own module docstring already establishes about the sampler's lifecycle
+("ticks on its own `asyncio.Task`, independent of repo-dispatch activity"). This task's own
+tests make the independence sharper than that: in both the primary adversarial halt and its
+negative control, `PhaseRunner._drive`'s `resource_guard()` poll fires at the very TOP of its
+per-repo loop, strictly BEFORE lease acquisition and before any clone — so the discriminating
+assertion in every halt-path test here is settled before a single byte of the fixture repo is
+ever read. A 50 000-file repo would exercise the identical seam-comparison logic, the identical
+poll-before-dispatch ordering, and the identical `RunHalted`/exit-5 plumbing, N files later and
+with no different code path reached in between. The file count is not load-bearing for the
+mechanism this test exists to prove.
+
+**What a 50 000-file fixture WOULD prove that this ADR does not claim to.** A genuine large
+synthetic repo matters for a *non-injected*, organic-memory-pressure proof — real sustained RSS
+growth from real symbol-indexing work, sampled over real wall-clock duration, with no seam in the
+loop at all. Nothing in this suite (this task included) proves that scenario, and this ADR does
+not claim it does. `research-17-report.md` §3e names the same distinction: the 50k count "exists
+to produce enough sustained, real memory pressure ... for the adversarial-fault-injection scenario
+to be meaningful," not because the comparison mechanism itself needs it — and the adversarial
+scenario this task builds deliberately never attempts organic pressure at all (this task's hard
+environmental constraint forbids it: no real `docker`, no real memory-hungry process, anywhere).
+If a genuine organic-pressure proof at real scale is later judged necessary to close some other
+disclosed gap, it gets its own task and its own fixture; this ADR does not shield that gap or
+claim to have closed it.
+
+**Precedent for "no real fixture at all" in the halt-path tests specifically.** The primary
+adversarial test and its negative control never reach real per-repo dispatch (the guard trips
+before lease acquisition), so in principle even a placeholder/unreachable-URL fleet — the shape
+`tests/test_cli.py`'s `workspace` fixture already uses for `test_run_cost_exhausted_exits_3`,
+another pre-dispatch halt discovered at the same `_drive` guard-poll site — would have sufficed
+for those two tests. This file uses one real, tiny repo throughout instead (rather than switching
+fixture shape per test) because the fourth test (`test_low_readings_on_both_readers_complete_
+normally`) is a genuine no-breach control that must actually complete a real scan to exit 0, and a
+single shared fixture used identically across all four tests is simpler to read and maintain than
+two different fixture shapes chosen per assertion (CLAUDE.md Rule 2).
+
+**Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.22's entry and SPEC item 22's
+own sentence should carry a dated marker recording this substitution, in the same commit as any
+edit marking §12.22 DONE — per Rule 14, not before.
