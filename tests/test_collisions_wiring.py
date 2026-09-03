@@ -90,9 +90,16 @@ run:
   work_dir: work/
 concurrency:
   cpu_pool_workers: 1
+  docker: 1
+verify:
+  container_memory: 64m
+budgets:
+  max_rss_mb: 512
 preflight:
   min_free_bytes: 1048576
 """
+#: §11.3/§12.22: the concurrency/verify/budgets keys above are lowered the same way
+#: `min_free_bytes` is -- see the note on `tests/test_scan_e2e.py`'s `FLEET_YAML`.
 
 SHARED = "npm:@acme:shared"
 """`Coordinate.key` for `@acme/shared` — `"{ecosystem}:{group}:{name}"`, ADR-0017."""

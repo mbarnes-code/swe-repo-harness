@@ -5,3 +5,16 @@
 # an operator adds a key only to diverge from a §9 default (e.g. `run.monorepo_path`, which
 # defaults to the placeholder `../acme-monorepo`). CLI flags beat `FLEET_*` env, which beats this
 # file, which beats the defaults (§9).
+#
+# ONE exception to "nothing is invented here" (round VI task 24, §12.22 sub-clause 2 follow-up):
+# `budgets.max_host_rss_mb` below. §9's own `concurrency.docker` (4) x `verify.container_memory`
+# (8g) + `budgets.max_rss_mb` (4096) commits 36864 MiB, which the *documented* default ceiling of
+# 12288 MiB (settings.py, matching docs/SPEC.md §9's table) cannot clear — `_load_settings` now
+# enforces this at startup (§11.3), so the shipped, all-other-defaults file would otherwise refuse
+# to load on every host. Raised here rather than in `settings.py` (which stays matched to the
+# SPEC's documented default table) so the documented default and this repo's actual shipped
+# starting point can differ without either one lying: the documented default is still 12288, and
+# an operator who deletes this key gets that value back, breaching the ceiling exactly as
+# settings.py's own `memory_commitment_mb` docstring already disclosed it would.
+budgets:
+  max_host_rss_mb: 49152  # 48 GiB; clears the 36864 MiB commitment above with headroom to spare

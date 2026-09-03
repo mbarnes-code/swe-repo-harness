@@ -617,7 +617,31 @@ def _run[T](coro: Coroutine[Any, Any, T]) -> T:
 # --------------------------------------------------------------------------------------
 
 
-def _load_settings(opts: GlobalOptions) -> FleetSettings:
+def _read_host_mem_total_mb() -> int | None:
+    """Linux `/proc/meminfo`'s `MemTotal:` line, in MiB (§11.3's startup refusal leg).
+
+    A one-time plain file read at startup, not a live/streaming sample — the runtime RSS
+    watchdog that samples cgroup `memory.current` throughout a run is separate, larger scope
+    (not built here). Returns `None` on ANY failure: a missing or unreadable `/proc/meminfo`
+    (non-Linux host, odd container) must never crash a startup that has nothing to do with
+    memory ceilings — `validate_memory_budget` treats `None` as "skip this leg" and still runs
+    the `budgets.max_host_rss_mb` leg, which needs no host reading at all.
+    """
+    try:
+        with Path("/proc/meminfo").open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("MemTotal:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        return None
+    return None
+
+
+def _load_settings(
+    opts: GlobalOptions,
+    *,
+    host_mem_reader: Callable[[], int | None] = _read_host_mem_total_mb,
+) -> FleetSettings:
     """§9's loader, with `--profile` and `--max-cost-usd` folded in as CLI overrides.
 
     `--profile` is routed here and nowhere else, so it reaches `LlmRouter` and the `llm_cache`
@@ -637,6 +661,17 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
 
     Idempotent: `import_module` is `sys.modules`-cached, so a second call re-registers nothing and
     cannot trip `register_backend`'s duplicate check.
+
+    **§11.3's startup refusal lives here too.** `FleetSettings.validate_memory_budget` is the
+    complete, correct `concurrency.docker × verify.container_memory + budgets.max_rss_mb` check
+    against `budgets.max_host_rss_mb` and the host's `MemTotal` — this is the single place a
+    loaded settings object is available and `ConfigError` is already mapped to exit 2 by
+    `_mapped_errors` at every one of this function's callers, exactly the `llm.discover()`
+    reasoning above ("the only place that can be checked is where the profile is resolved").
+    `host_mem_reader` is injected (mirrors `PhaseRunner`'s `resource_guard`) so a test can supply
+    a fake `MemTotal` without depending on the real machine's memory size; `_read_host_mem_total_mb`
+    returns `None` on any read failure, which skips only the MemTotal leg — the `max_host_rss_mb`
+    leg needs no host reading and always runs.
     """
     overrides: dict[str, Any] = {}
     if opts.profile is not None:
@@ -651,9 +686,11 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
         overrides["llm.cache_mode"] = cache_mode
 
     backends = tuple(discover())
+    host_total_mb = host_mem_reader()
     settings = FleetSettings.load(
         opts.config_dir, cli_overrides=overrides, known_backends=backends
     )
+    settings.validate_memory_budget(host_total_mb=host_total_mb)
     if opts.max_cost_usd is None:
         return settings
 
@@ -665,9 +702,11 @@ def _load_settings(opts: GlobalOptions) -> FleetSettings:
             "raising a run ceiling is `fleet resume --raise-budget`, which is audited."
         )
     overrides["budgets.run_max_cost_usd"] = opts.max_cost_usd
-    return FleetSettings.load(
+    final = FleetSettings.load(
         opts.config_dir, cli_overrides=overrides, known_backends=backends
     )
+    final.validate_memory_budget(host_total_mb=host_total_mb)
+    return final
 
 
 def llm_router(settings: FleetSettings) -> LlmRouter:

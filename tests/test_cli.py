@@ -77,6 +77,7 @@ from tests.test_migrations import _v6_database
 runner = CliRunner()
 
 REPO_SRC = Path(__file__).resolve().parents[1] / "src" / "fleet"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 RUN_ID = "11111111-1111-4111-8111-111111111111"
 
@@ -157,6 +158,16 @@ FLEET_YAML = (
     # command on a developer volume, so the fixture lowers it rather than disabling it. The
     # refusal is asserted separately, against a floor no volume can clear.
     "preflight:\n  min_free_bytes: 1048576\n"
+    # §11.3/§12.22: the shipped defaults (`concurrency.docker: 4` x `verify.container_memory:
+    # 8g` + `budgets.max_rss_mb: 4096` = 36864 MiB) breach the shipped `budgets.max_host_rss_mb`
+    # (12288) by design (settings.py's own `memory_commitment_mb` docstring says so) -- now that
+    # `_load_settings` enforces `validate_memory_budget` at startup, an unmodified default would
+    # refuse every command in this file with exit 2. Lowered the same way `min_free_bytes` is
+    # lowered above, not disabled: the refusal itself is asserted separately, against a
+    # commitment no ceiling can clear.
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  max_rss_mb: 512\n"
 )
 
 
@@ -1528,7 +1539,12 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
 
     fleet_yaml = (
         "run:\n  monorepo_path: ../acme-monorepo\n  cache_dir: cache/\n  work_dir: work/\n"
-        "concurrency:\n  cpu_pool_workers: 1\n"
+        # §11.3/§12.22: see the note on `FLEET_YAML` above -- the shipped memory-budget
+        # defaults breach `budgets.max_host_rss_mb` by design, so this fixture lowers the
+        # commitment the same way it lowers `min_free_bytes`.
+        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n"
+        "verify:\n  container_memory: 64m\n"
+        "budgets:\n  max_rss_mb: 512\n"
         "preflight:\n  min_free_bytes: 1048576\n"
     )
     repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
@@ -1830,7 +1846,12 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
 
     fleet_yaml = (
         "run:\n  monorepo_path: ../acme-monorepo\n  cache_dir: cache/\n  work_dir: work/\n"
-        "concurrency:\n  cpu_pool_workers: 1\n"
+        # §11.3/§12.22: see the note on `FLEET_YAML` above -- the shipped memory-budget
+        # defaults breach `budgets.max_host_rss_mb` by design, so this fixture lowers the
+        # commitment the same way it lowers `min_free_bytes`.
+        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n"
+        "verify:\n  container_memory: 64m\n"
+        "budgets:\n  max_rss_mb: 512\n"
         "preflight:\n  min_free_bytes: 1048576\n"
     )
     repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
@@ -2176,7 +2197,10 @@ def test_abort_checkpoints_and_regenerates_the_projection(workspace: Path) -> No
 CONTINUE_KNOBS_YAML = (
     "run:\n  monorepo_path: ../acme-monorepo\n"
     "preflight:\n  min_free_bytes: 1048576\n"
-    "budgets:\n  build_timeout_s: 999\n"
+    # §11.3/§12.22: see the note on `FLEET_YAML` above.
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  build_timeout_s: 999\n  max_rss_mb: 512\n"
 )
 """`FLEET_YAML` with `budgets.build_timeout_s` set to a value NO Typer default shares.
 
@@ -2188,6 +2212,10 @@ the default fixture. 999 is what makes that mutation expressible."""
 IMPATIENT_STALE_YAML = (
     "run:\n  monorepo_path: ../acme-monorepo\n  stale_after_s: 30\n"
     "preflight:\n  min_free_bytes: 1048576\n"
+    # §11.3/§12.22: see the note on `FLEET_YAML` above.
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  max_rss_mb: 512\n"
 )
 """`FLEET_YAML` with the config liveness horizon cut to 30 s — the operator action that makes the
 two clocks disagree, since `phases.heartbeat_ttl_seconds` stays at the schema's 300."""
@@ -3717,6 +3745,10 @@ def test_resume_reclaims_once_both_horizons_are_breached(workspace: Path) -> Non
 REAP_YAML = (
     "run:\n  monorepo_path: monorepo\n  work_dir: work/\n"
     "preflight:\n  min_free_bytes: 1048576\n"
+    # §11.3/§12.22: see the note on `FLEET_YAML` above.
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  max_rss_mb: 512\n"
 )
 """`FLEET_YAML` with the repo INSIDE the workspace. The shipped fixture says `../acme-monorepo`,
 which resolves above `tmp_path` into pytest's shared tmp base — a directory a sibling test (or a
@@ -5341,6 +5373,11 @@ report the free-space number the kernel actually gave the harness."""
 DISK_FLOOR_YAML = (
     "run:\n  monorepo_path: ../acme-monorepo\n"
     f"preflight:\n  min_free_bytes: {IMPOSSIBLE_FLOOR}\n"
+    # §11.3/§12.22: see the note on `FLEET_YAML` above -- otherwise the memory-budget refusal
+    # fires before this fixture's disk-floor refusal ever gets exercised.
+    "concurrency:\n  docker: 1\n"
+    "verify:\n  container_memory: 64m\n"
+    "budgets:\n  max_rss_mb: 512\n"
 )
 
 
@@ -5441,6 +5478,128 @@ def test_a_reachable_floor_lets_the_phase_proceed(
 
     outcome: dict[str, object] = _require_disk_headroom(settings)
     assert outcome["disk_bytes_freed"] == 0, "nothing to evict, and the floor was cleared"
+
+
+# --------------------------------------------------------------------------------------
+# §11.3/§12.22 — the memory-budget startup refusal (D50's `max_host_rss_mb` leg)
+# --------------------------------------------------------------------------------------
+
+BREACHING_MEMORY_YAML = (
+    "run:\n  monorepo_path: ../acme-monorepo\n"
+    "preflight:\n  min_free_bytes: 1048576\n"
+    "concurrency:\n  docker: 4\n"
+    "verify:\n  container_memory: 8g\n"
+    "budgets:\n  max_rss_mb: 4096\n  max_host_rss_mb: 12288\n"
+)
+"""`FLEET_YAML` with the memory knobs put back to §9's shipped defaults (`FLEET_YAML` above lowers
+them so the rest of this file doesn't trip the refusal this section exists to test): 4 x 8192 +
+4096 = 36864 MiB, which exceeds `max_host_rss_mb` (12288) exactly as `memory_commitment_mb`'s own
+docstring says the shipped defaults do (settings.py)."""
+
+
+def test_memory_budget_refuses_startup_when_the_pure_arithmetic_breaches_max_host_rss_mb(
+    tmp_path: Path,
+) -> None:
+    """§12.22 sub-clause 2 (startup refusal): `concurrency.docker x verify.container_memory +
+    budgets.max_rss_mb` exceeding `budgets.max_host_rss_mb` exits 2 -- deterministic, no MemTotal
+    reading involved (this is the leg `validate_memory_budget` checks with no host argument at
+    all). Real discriminator, not a gate that fires on everything: `test_...proceeds_...` below is
+    the SAME fixture family with the commitment brought back under the ceiling, and it exits 0.
+    """
+    from fleet.cli import GlobalOptions, _load_settings
+    from fleet.settings import ConfigError
+
+    config_path = write_config(tmp_path, fleet=BREACHING_MEMORY_YAML)
+
+    with pytest.raises(ConfigError) as raised:
+        _load_settings(GlobalOptions(config_path=config_path), host_mem_reader=lambda: None)
+
+    assert raised.value.exit_code == ExitCode.USAGE == 2
+    message = str(raised.value)
+    assert "budgets.max_host_rss_mb" in message, message
+    assert "36864" in message and "12288" in message, message
+
+
+def test_memory_budget_refuses_startup_via_the_memtotal_leg_specifically(
+    tmp_path: Path,
+) -> None:
+    """The SAME commitment as above, but under a `budgets.max_host_rss_mb` raised high enough
+    that ONLY the injected `host_mem_reader` (a fake, small MemTotal) can trip the refusal --
+    proving the MemTotal leg is actually wired, not merely `max_host_rss_mb` alone. Injection
+    mirrors `PhaseRunner`'s `resource_guard`: a test supplies a fake reading rather than
+    depending on the real machine's memory size.
+    """
+    from fleet.cli import GlobalOptions, _load_settings
+    from fleet.settings import ConfigError
+
+    fleet_yaml = (
+        "run:\n  monorepo_path: ../acme-monorepo\n"
+        "preflight:\n  min_free_bytes: 1048576\n"
+        "concurrency:\n  docker: 4\n"
+        "verify:\n  container_memory: 8g\n"
+        # `max_host_rss_mb` raised well above the 36864 MiB commitment: this leg alone would
+        # pass, isolating the MemTotal leg as the one specifically under test.
+        "budgets:\n  max_rss_mb: 4096\n  max_host_rss_mb: 1000000\n"
+    )
+    config_path = write_config(tmp_path, fleet=fleet_yaml)
+
+    # A fake host with far less MemTotal than the 36864 MiB commitment.
+    with pytest.raises(ConfigError) as raised:
+        _load_settings(GlobalOptions(config_path=config_path), host_mem_reader=lambda: 8192)
+
+    assert raised.value.exit_code == ExitCode.USAGE == 2
+    message = str(raised.value)
+    assert "the host's MemTotal" in message, message
+    assert "36864" in message and "8192" in message, message
+
+
+def test_memory_budget_lets_startup_proceed_when_neither_ceiling_is_breached(
+    tmp_path: Path,
+) -> None:
+    """The negative control. A refusal that fired unconditionally would pass both tests above
+    (and every other test in this file, since none of them override the memory knobs away from
+    a breaching default) -- which is why `FLEET_YAML` lowers the commitment rather than the
+    refusal never running at all. Same fixture shape as the two tests above, commitment brought
+    under both `max_host_rss_mb` and a real host_mem_reader reading -- `_load_settings` returns
+    normally rather than raising."""
+    from fleet.cli import GlobalOptions, _load_settings
+
+    config_path = write_config(tmp_path)  # FLEET_YAML's own lowered concurrency/verify/budgets
+
+    settings = _load_settings(GlobalOptions(config_path=config_path))
+    assert settings.memory_commitment_mb() <= settings.config.budgets.max_host_rss_mb, (
+        "the fixture must actually clear the ceiling for this to be a real control"
+    )
+
+
+def test_the_shipped_config_fleet_yaml_clears_its_own_memory_ceiling(tmp_path: Path) -> None:
+    """The gap a task-scoped review caught: no test in this suite loaded the REAL, checked-in
+    `config/fleet.yaml` through `_load_settings` before this refusal existed, so nothing noticed
+    that the shipped file's own docstring claim -- "an empty (all-defaults) file is a fully valid,
+    real starting point" -- went false the moment the refusal was wired in. §9's documented
+    defaults alone (`concurrency.docker: 4` x `verify.container_memory: 8g` +
+    `budgets.max_rss_mb: 4096` = 36864 MiB) exceed the documented `budgets.max_host_rss_mb`
+    (12288); the shipped file now overrides ONLY `max_host_rss_mb` (to 49152) to clear that, while
+    `src/fleet/settings.py`'s own default stays 12288 to match `docs/SPEC.md`'s §9 table -- the
+    documented default and the shipped starting point are allowed to differ, and this test is what
+    would catch either one drifting back out of sync.
+
+    A COPY of the shipped `config/`, not the live directory: `_load_settings` needs a writable
+    `state/` sibling for nothing here, but copying is what the sibling `test_backend_registry_gate`
+    convention already does for the real shipped config, and it means this test cannot be affected
+    by (or accidentally mutate) the repo's actual working tree.
+    """
+    from fleet.cli import GlobalOptions, _load_settings
+
+    config_dir = tmp_path / "config"
+    shutil.copytree(REPO_ROOT / "config", config_dir)
+
+    settings = _load_settings(GlobalOptions(config_path=config_dir / "fleet.yaml"))
+
+    assert settings.memory_commitment_mb() <= settings.config.budgets.max_host_rss_mb, (
+        "the shipped config/fleet.yaml must clear its own memory ceiling with no overrides "
+        "beyond what is actually checked into the repo"
+    )
 
 
 def test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched(
