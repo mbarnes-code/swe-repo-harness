@@ -8470,7 +8470,7 @@ reference and confirmed no code path anywhere (dispatch loop, git-arbitration sw
 one. This is disclosed, not a silent accident: the CLI reports an `excluded_awaiting_revalidation`
 payload key on every `--repoll-prs` call naming exactly which rows are held back this way.
 
-## D109 — OPEN. `tests/fixtures/llm/stub_openai_server.py`'s `assert_loopback_only()` guard has a
+## D109 — FIXED, LANDED (round VI task 23, `380e3f0`/merge). `tests/fixtures/llm/stub_openai_server.py`'s `assert_loopback_only()` guard has a
 false positive on `ProcessPoolExecutor`'s forkserver control channel (a Unix-domain socket)
 
 **Found by round VI task 22 (2026-09-03), while driving the full pipeline under `--profile local`
@@ -8498,3 +8498,19 @@ to `cpu_pool`), but did not fix the shared fixture, correctly out of that task's
 (a `str`, not a `(host, port)` tuple) as never off-loopback by construction — a small, well-scoped
 fix to the shared fixture, deferred to whoever next needs this guard active alongside a real
 process pool. That design choice is not made here.
+
+**FIXED, 2026-09-03 (round VI task 23, commit `380e3f0`).** Reproduced the original bug first
+(using `multiprocessing.get_context("forkserver")` specifically — the platform-default `fork`
+context does not open the `AF_UNIX` control channel and so does not reproduce it, independently
+confirmed by task-scoped review with its own probe script), then fixed the guard additively: a
+new `isinstance(address, str)` branch recognizing a Unix-domain socket address runs before the
+original, byte-identical tuple-based `(host, port)` off-loopback check — the existing detection is
+untouched. Both discriminator directions independently reproduced by review: reverting the fix
+turns the false-positive regression test RED (with the exact pre-fix failure) while the
+genuine-off-loopback-attempt test stays green, proving the two checks are independent; restoring
+returns both to green. Disclosed scope limit (Linux's abstract-namespace `bytes` address variant
+left unhandled) independently confirmed sound, not a corner cut: CPython's own
+`multiprocessing.connection.arbitrary_address('AF_UNIX')` unconditionally returns a filesystem-path
+`str` on every platform, and this repo's only production `forkserver` caller
+(`orchestrator/budgets.py::new_cpu_pool`) builds its pool the standard way — no code anywhere
+produces the unhandled shape.
