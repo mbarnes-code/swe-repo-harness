@@ -8943,3 +8943,60 @@ identified but explicitly not dispatched this round: D94's trigger logic and D10
 judged premature — see above), §12.47's `avro`/`thrift` adapters (blocked on a real
 identification-layer parser that doesn't exist yet), and D109 (a small, well-scoped fix to shared
 test infrastructure, deferred to whoever next needs it).
+
+**Round VI, eleventh wave (2026-09-03) — §12 count stays 30 of 48; D109 fixed, D50 partially
+wired, §12.22 gains two proven sub-clauses (still OPEN).** Task 23 fixed D109 directly (the
+loopback guard's Unix-domain-socket false positive), reproducing the original bug first via
+`multiprocessing.get_context("forkserver")` specifically — its review independently confirmed
+`fork` genuinely does not reproduce the bug with its own probe script, so the test's choice of
+context is load-bearing, not incidental. D109 flipped FIXED, LANDED.
+
+Research-16's first attempt at sizing §12.22's RSS-sampling sub-clause ran for over an hour with
+`status: running` throughout — stuck inside a blocking tool call, not idle between turns, so the
+usual dormancy-recovery SendMessage pattern didn't apply (a distinct failure mode from the one
+already in memory, flagged as product feedback). Stopped via TaskStop and redispatched
+(research-17) with hard constraints against any live/blocking command — completed cleanly,
+confirming the constraint was the fix.
+
+Research-17 found §12.22 bundles four sub-clauses, not one: disk (already closed), a
+`state/repository.py` no-list-return check (small, unnamed in this file's own prior entry, likely
+already satisfied by construction), a startup-refusal wiring gap (small, one-shot — the arithmetic
+already existed and was correct, just uncalled), and runtime RSS-sampling (genuinely new
+infrastructure — the halt-plumbing is 100% wired already, but the existing guard only polls at
+repo-dispatch boundaries, which a single long 50k-file scan has none of, so this needs a genuine
+new periodic background task, not tighter polling; also flagged SPEC's own §11.3 halving-backoff
+narrative as not required by the criterion's literal text and recommended explicitly deferring it
+rather than silently building or dropping it). Correctly sized runtime sampling as 2-3 tasks
+needing its own round with real architectural decisions still open (Docker SDK vs CLI-shim,
+cgroup v1 vs v2, a possible fixture-scale ADR) — not forced into this wave.
+
+Two small, independent pieces dispatched and landed: task 25 (the return-type check, confirmed
+already satisfied — no `src/` change needed, function set derived via a token-based AST walk after
+catching and fixing its own false-positive substring match on `*_ledger` functions) and task 24
+(the startup-refusal wiring). Task 24 hit the agent-dormancy pattern once (recovered via
+SendMessage) and surfaced a real, disclosed scope expansion: the shipped memory-budget defaults
+breach the shipped ceiling by design, so wiring the check broke 98 of 169 `test_cli.py` tests on
+first run — fixed by lowering config knobs in 7 fixture files, following a real, traced precedent
+(`preflight.min_free_bytes` at `a1178f7`, independently confirmed by review, not invented to
+justify an ad-hoc fix). The review caught a HIGH finding the implementer's own report missed: the
+shipped `config/fleet.yaml` itself failed to load under the new check. Fixed in a resumed round by
+raising `budgets.max_host_rss_mb` in the shipped file only (not the Pydantic default, which stays
+matched to SPEC's own table) — the review's design judgment, independently reasoned rather than
+just confirmed technically working, found the check's two legs (config ceiling vs. real host
+`MemTotal`) are independent, so this doesn't defeat the check's actual protection.
+
+Attempting the standard `KNOWN_INERT` removal for the now-wired key caught a real instrument
+limitation before it shipped: `tests/test_config_keys_are_read.py`'s own scan requires the bare
+key name outside `settings.py`, and the new call site reads it only indirectly — the removal was
+reverted to an annotation, in both the test file and D50's ledger entry, rather than landing a
+false claim the file's own test would have silently permitted (nothing else checks this).
+
+Merging task 24 also surfaced this session's largest single citation-drift event: 8 citations
+across two files, at graduated offsets (task 24's `cli.py` diff added code at two separate
+points), repointed using the citation gate's own "defined at" output rather than a guessed uniform
+shift.
+
+**Status: zero outstanding — all dispatched work landed, reviewed, and reconciled with docs.**
+What remains: §12.22's runtime RSS-sampling sub-clause, genuinely new infrastructure needing a
+live-environment check (cgroup version, Docker CLI reachability) and a short design pass before
+worker dispatch is responsible — not a same-wave item.
