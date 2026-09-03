@@ -8532,3 +8532,35 @@ left unhandled) independently confirmed sound, not a corner cut: CPython's own
 `str` on every platform, and this repo's only production `forkserver` caller
 (`orchestrator/budgets.py::new_cpu_pool`) builds its pool the standard way — no code anywhere
 produces the unhandled shape.
+
+## D110 — OPEN. §11.3's narrative "halve cpu_pool/subprocess semaphores on a breach" backoff step
+has no resizable primitive to call — deliberately deferred, not part of §12.22's literal text
+
+**Found by research-17 (2026-09-03), while sizing §12.22's runtime RSS-sampling sub-clause.**
+Verified free before allocating: form-agnostic sweep found `D109` as the highest allocated number.
+
+**The gap, as measured.** `docs/SPEC.md`'s §11.3 narrative states that a resource-guard breach
+"halves the effective `cpu_pool` and `subprocess` semaphores" before a third-consecutive-breach
+hard halt. `src/fleet/orchestrator/budgets.py`'s `Limits` dataclass has no live-resizable primitive
+for either: `Limits.subprocess` is a plain `asyncio.Semaphore` (no resize API); `Limits.cpu_pool`
+is a `ProcessPoolExecutor` (worker count fixed at construction, no supported way to shrink it live
+without carefully handling in-flight work). The only resizable primitive anywhere in this module,
+`Limits.llm`'s `ResizableLimiter`, has zero production callers of its own `.resize()` — its own
+docstring says "what calls `resize()`, and with what, is a later change."
+
+**Consequence.** §11.3's narrative behavior (graduated backoff before a hard halt) is not
+implementable today without first building new resize-capable replacements for `ProcessPoolExecutor`
+and `asyncio.Semaphore` — a materially bigger, riskier change with its own correctness surface (an
+in-flight-work-during-shrink hazard neither primitive is designed to handle).
+
+**Not required by §12.22's literal acceptance text**, which only requires (i) RSS stays under the
+ceiling throughout, sampled correctly, and (ii) a variant that inflates only pool children/
+containers fails the criterion correctly (i.e. halts/exits 5) — not that a halving step happens
+first. Deliberately deferred: round VI's RSS-sampling implementation (tasks B1/B2/B3) is
+explicitly scoped to the sample→compare→halt(exit 5) path only, per this D-ticket, rather than
+either silently building the resize infrastructure or silently dropping the narrative's promise
+without disclosure.
+
+**Not yet built:** resize-capable `cpu_pool`/`subprocess` primitives, the breach-count-based
+halving trigger, and the in-flight-work-safety design a live pool/semaphore shrink needs. That
+design choice is not made here.
