@@ -1,4 +1,4 @@
--- fleet state schema — the v9 BASELINE for a FRESH database (SPEC §6).
+-- fleet state schema — the v10 BASELINE for a FRESH database (SPEC §6).
 --
 -- This file is DATA, not a startup side effect. It is applied by `fleet migrate-db` (§10) and by
 -- nothing else. §6 "Migration policy" is normative: `CREATE TABLE IF NOT EXISTS` creates a
@@ -7,14 +7,14 @@
 -- `PRAGMA user_version` at startup and REFUSE TO START if it differs from the compiled-in
 -- version; they never run this file.
 --
--- A brand-new database gets this file and lands directly at user_version = 9. The ordered
--- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 8→9) exists only for databases that already
+-- A brand-new database gets this file and lands directly at user_version = 10. The ordered
+-- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 9→10) exists only for databases that already
 -- hold data; it is never replayed against a fresh one.
 --
 -- ---------------------------------------------------------------------------------------------
 -- PRAGMAs. Only the PERSISTENT ones live here, because this file runs once:
 --   * journal_mode = WAL   — stored in the database header, survives close (§6, ADR-0004)
---   * user_version = 9     — stored in the database header (§5 SCHEMA_VERSION)
+--   * user_version = 10    — stored in the database header (§5 SCHEMA_VERSION)
 --
 -- The rest are PER-CONNECTION and reset to their defaults on every new handle. `state/db.py`
 -- MUST issue these on EVERY connection it opens (read and write alike); setting them here would
@@ -219,6 +219,19 @@ CREATE TABLE IF NOT EXISTS symbols (
     exported      INTEGER NOT NULL DEFAULT 0,
     -- IDEMPOTENCY KEY: a re-indexed file cannot duplicate rows (§11.7)
     UNIQUE (run_id, repo_id, path, line, fqn, kind)
+);
+
+CREATE TABLE IF NOT EXISTS file_blobs (        -- §3.1 step 1's ls-tree listing, captured once per
+                                                -- repo at preflight and never persisted before v10:
+                                                -- the path/blob-SHA capture §9(d) and §12.27's
+                                                -- FILE_PATH leg (D114) are both blocked on it.
+    run_id    TEXT NOT NULL REFERENCES runs(run_id) ON DELETE CASCADE,
+    repo_id   TEXT NOT NULL REFERENCES repos(repo_id) ON DELETE CASCADE,
+    path      TEXT NOT NULL,                   -- repo-relative, POSIX, as `ls-tree` reports it
+    blob_sha  TEXT NOT NULL,
+    -- IDEMPOTENCY KEY (§11.7): a re-run of the same run_id's capture step DELETEs and re-inserts
+    -- (mirroring `contracts`/`symbols`), so this PK is never actually raced.
+    PRIMARY KEY (run_id, repo_id, path)
 );
 
 -- ---------- Phase 1 output ----------
@@ -888,6 +901,6 @@ CREATE INDEX IF NOT EXISTS ix_stubs_provider  ON stubs (run_id, provider_repo_id
 CREATE INDEX IF NOT EXISTS ix_stubs_open      ON stubs (run_id, state)
     WHERE state IN ('ACTIVE','SUPERSEDED');   -- the end-of-run reconciliation sweep
 
--- The baseline lands directly at 9 (§5 SCHEMA_VERSION). Workers refuse to start against any
+-- The baseline lands directly at 10 (§5 SCHEMA_VERSION). Workers refuse to start against any
 -- other value; the vNNN ladder is for databases that already hold data, never for this file.
-PRAGMA user_version = 9;
+PRAGMA user_version = 10;

@@ -60,6 +60,7 @@ from fleet.migrations import (
     v007_logical_keys,
     v008_reservations,
     v009_coordinate_version,
+    v010_file_blobs,
 )
 
 __all__ = [
@@ -135,6 +136,9 @@ STEPS: Final[tuple[MigrationStep, ...]] = (
         v009_coordinate_version.VERSION,
         v009_coordinate_version.upgrade,
         v009_coordinate_version.__name__,
+    ),
+    MigrationStep(
+        v010_file_blobs.VERSION, v010_file_blobs.upgrade, v010_file_blobs.__name__
     ),
 )
 
