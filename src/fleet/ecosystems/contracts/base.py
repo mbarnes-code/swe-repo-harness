@@ -7,14 +7,14 @@ keyed by `ContractKind` instead of by `{name, ecosystems}` — a contract node h
 so there is no second key to check the way `ecosystems/base.py` checks `name` in addition to
 `ecosystems`.
 
-**Round VI task 20 status (ADR-0065):** `proto.py`/`openapi.py`/`shared_lib.py` are shipped;
-`avro.py`/`thrift.py` are not — both are genuinely blocked on missing identification-layer
-infrastructure (their file suffixes aren't scan units today), not merely undone. `discover()`
-therefore always raises today, correctly, naming the two still-missing kinds — this is expected
-until that identification-layer gap is closed and `avro.py`/`thrift.py` land (§12.32/§12.47 stay
-OPEN until then; see SPEC §7.6's "NOT YET IMPLEMENTED" marker). The registration mechanism itself
-(`register`/`for_kind`/`reset_adapters`) is fully usable and tested today against test-local fake
-adapters — only the package-wide `discover()` walk is blocked on the missing two.
+**Round VI task 40 status:** all five adapters are shipped (`proto.py`, `openapi.py`,
+`shared_lib.py`, `avro.py`, `thrift.py`) — `discover()`'s bijection over `ContractKind` is total
+and every registered instance is stateless (§12.47's contracts-registry sub-clause). Not yet
+wired: no caller anywhere in `src/fleet/workers/buildgen.py`, `src/fleet/bazel/generators.py`, or
+`src/fleet/cli.py` invokes `for_kind()`/`neutral_targets()`/`binding_target()` to actually emit a
+contract's Bazel targets — see `docs/INTEGRATION_HONESTY.md`'s D113 for that separate gap
+(§12.34's Clause B), which also needs the registry populated without tripping this file's own
+bijection assert for a partial `discover()` call.
 """
 
 from __future__ import annotations
