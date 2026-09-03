@@ -9061,3 +9061,47 @@ dispatched: D94's trigger logic and D104 (both judged premature this round — n
 production creates a `stubs` row yet, and D104 itself needs its own unsized 3-piece split),
 §12.47's `avro`/`thrift` adapters (blocked on a real identification-layer parser that doesn't
 exist), and D109 (fixed this round, see above — no longer open).
+
+## Round VI, thirteenth wave (2026-09-03) — §12 count: 33 of 48, up from 31. Two more criteria closed (§12.2, §12.29), taking the round's total to SIX (§12.25, §12.19, §12.41, §12.22, §12.2, §12.29) — 27→33/48 in one round.
+
+A fresh backlog sweep (research-19) walked all 17 remaining OPEN criteria against live source,
+not just prose. Two candidates that looked equally promising by their CRITERIA_PLAN labels alone
+(both marked SCALE-FIXTURE) turned out to have real, undisclosed hidden blockers on direct
+verification, correctly ruled out rather than dispatched: §12.11 (the sandboxed `--network=none`
+Bazel path is genuinely RED — no warmed repository cache, a real unresolved production gap, not a
+fixture-composition one) and §12.30 (its own done bar hides D23's `retargeted_from_repo_id` gap,
+freshly reachable through the exact call path the fixture would exercise — a task dispatched
+against the entry as written would hit an unbuildable assertion). §12.36's D50 blocker was
+re-verified accurate, not stale, on request.
+
+Top recommendation, §12.29 (contract extraction), was TEST-ONLY over already-working production
+code with a precise done bar: the literal 5-repo fixture, a missing node-integrity query, and one
+sub-clause (the `divergent` ×0.5 modifier) confirmed structurally unreachable from real scan data
+by the same root cause as §12.9/§12.27's disclosed blob-SHA blocker. A secondary candidate, §12.2
+(the `ruff format --check` leg's own long-standing Rule 14 gap — a pinned-baseline test with no
+ADR and no adjudication-pending flag since round R), was handled directly by the controller rather
+than dispatched: **ADR-0116** adjudicates the pinned form as satisfying the criterion's intent,
+both scopes re-measured fresh (116/225 criterion-scoped, 123 whole-repo) rather than carried
+forward stale, both now-passing lint-gate tests verified directly before committing.
+
+Task 30 closed §12.29's testable sub-clauses at literal scale and drafted a Rule-14 marker for the
+unreachable one — correctly leaving the adjudication itself unresolved, since a worker isn't
+authorized to make that call. Its review resolved a stale IDE-diagnostic discrepancy first (a
+`No parameter named "blob_shas"` finding, tracked to a tool that resolved a companion hunk's
+signature against `main` instead of the same commit's own patch) before assessing anything else,
+then independently reproduced every other claim including the node-integrity query's Rule-12
+validation with its own standalone fixture. Applying the drafted marker surfaced that it was
+disclosed as *pending*, not *resolved* — matching this project's own established precedent
+(ADR-0065/§12.32) that an unresolved flag keeps a criterion from counting DONE, not something a
+draft alone settles. **ADR-0117** closed it: the worker-level proof against
+`ContractsInput.blob_shas` is adjudicated as satisfying the clause's intent in place of literal
+real-scan reachability, mirroring ADR-0065's own structure exactly.
+
+**Status: zero outstanding.** All six of this round's criterion closures — §12.25, §12.19,
+§12.41, §12.22, §12.2, §12.29 — are independently task-reviewed (or, for the two ADR-only closes,
+directly measured and verified by the controller before committing) and reconciled with docs.
+What remains identified but not dispatched, unchanged from the twelfth wave: D94's trigger logic
+and D104, §12.47's `avro`/`thrift` adapters, and the newer NEW-MECHANISM items this wave's own
+sweep confirmed correctly excluded (§12.31 rollback path, §12.34 new-language adapter pair,
+§12.36 blocked on open D50, §12.8's `HTTP_OPERATION` leg, §12.11's real bazel/sandboxed
+combination, §12.30's D23-blocked cycle fixture).
