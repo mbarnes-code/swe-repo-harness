@@ -584,6 +584,85 @@ class Git:
         self._require_settled(result)
         return result.ok
 
+    async def rebase(self, onto: str) -> bool:
+        """`git rebase <onto>`, run with the harness identity (rebase recommits every replayed
+        patch, so a host with no git identity configured fails it exactly as it fails `commit`
+        — verified empirically, not assumed).
+
+        Returns `True` when the rebase completes cleanly: HEAD now sits on `onto` with this
+        branch's commits replayed on top. This is the ONLY case where `Git` methods on this
+        repo remain safe to call without checking rebase state first.
+
+        Returns `False` on a CONFLICT that leaves the rebase mid-flight (`REBASE_HEAD` resolves;
+        `.git/rebase-merge` or `.git/rebase-apply` exists) — a settled, meaningful "no" the
+        caller must react to, the same probe shape as `apply_check`: a refusal git can coherently
+        report is returned, not raised. The caller MUST call `abort_rebase()` before doing
+        anything else with this repo; every other method on this class assumes no rebase is in
+        progress. There is no `continue_rebase()` on this class (see module docstring context in
+        D94's own ledger entry): a conflict is a stop condition for this primitive, not something
+        it resolves.
+
+        Raises `GitCommandError` for anything else that stops the rebase without leaving a
+        conflict to resolve — an unknown `onto` (`fatal: invalid upstream`, exit 128), a dirty
+        worktree (`error: cannot rebase: You have unstaged changes`, exit 1) — verified
+        empirically that NEITHER of those leaves `REBASE_HEAD` resolvable, which is exactly the
+        signal this method uses to tell "conflict, recoverable" from "never really started."
+
+        Deliberately the two-argument `git rebase <onto>` form only, not the three-argument
+        `git rebase --onto <newbase> <upstream> [<branch>]` transplant form: the caller this
+        primitive is built for rebases an entire branch onto its updated target, it never needs
+        to transplant a sub-range onto a different base, and adding the unused form now would be
+        exactly the premature abstraction CLAUDE.md Rule 2 forbids.
+        """
+        result = await self.exec(["rebase", onto], check=False, with_identity=True)
+        if result.ok:
+            return True
+        self._require_settled(result)  # raises on never-started / killed-at-deadline (D42)
+        if await self.resolve("REBASE_HEAD") is not None:
+            return False  # settled, genuine conflict — mid-flight, caller must abort or resolve
+        raise GitCommandError(
+            result.argv, result.exit_code, result.stderr_tail,
+            cwd=self.path, timed_out=result.timed_out, started=result.started,
+        )
+
+    async def abort_rebase(self) -> None:
+        """`git rebase --abort` — return to the exact pre-rebase state (git restores the
+        original branch tip itself; nothing here needs to remember it).
+
+        Raises `GitCommandError` (Rule 11) if there is no rebase in progress or the abort itself
+        fails — a caller reaching for this after `rebase()` returned `False` and finding git says
+        there is nothing to abort is a real surprise (a second caller raced it, or state drifted)
+        and must not be swallowed.
+        """
+        await self.exec(["rebase", "--abort"])
+
+    async def push_force_with_lease(self, remote: str, branch: str, *, expected_sha: str) -> None:
+        """`git push --force-with-lease=<branch>:<expected_sha> <remote> <branch>`.
+
+        The EXPLICIT `<branch>:<expected-sha>` form, never the bare `--force-with-lease` flag.
+        The bare flag's safety depends on this repo's remote-tracking ref
+        (`refs/remotes/<remote>/<branch>`) already being current via a prior `fetch` — a caller
+        that skipped the fetch gets "force-with-lease" in name only, no different from `--force`.
+        The explicit form instead has the SERVER compare its own current tip against
+        `expected_sha` directly (e.g. the tip this harness last read back from `Forge.view()` for
+        this PR) — the safety property does not depend on this repo's local state at all, which
+        is what makes it correct without a fetch and directly testable
+        (`tests/test_vcs.py::test_push_force_with_lease_refuses_when_the_remote_moved_past_the_expected_sha`
+        proves the server-side refusal, not a client-side guess).
+
+        Raises `GitCommandError` on ANY refusal: the remote branch moved past `expected_sha`
+        (`! [rejected] ... (stale info)`, exit 1 — the exact property this method exists to
+        guarantee), the branch does not exist, or a genuine network/auth failure. All three are
+        equally "this push did not happen," and the caller cannot safely treat any of them as
+        partial success — it must re-read the forge (`Forge.view`) before deciding what to do
+        next, so raising with `.stderr` naming the reason already gives it everything it needs.
+        Deliberately does NOT collapse to a bool the way `rebase` does: unlike a conflict, there
+        is nothing here for THIS method's caller to resolve in place.
+
+        No `with_identity` — push does not create commit objects.
+        """
+        await self.exec(["push", f"--force-with-lease={branch}:{expected_sha}", remote, branch])
+
 
 def _parse_log(out: str, keys: Sequence[str]) -> tuple[CommitInfo, ...]:
     """NUL-delimited records, `\\x1f`-delimited fields. Trailer-less commits yield empty tuples
