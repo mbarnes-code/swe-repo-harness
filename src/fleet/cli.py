@@ -2321,6 +2321,7 @@ async def _persist_scan_edges(
                     detected_at=_iso(edge.detected_at),
                     ambiguous=edge.ambiguous,
                     ordering_suppressed=edge.ordering_suppressed,
+                    retargeted_from_repo_id=edge.retargeted_from_repo_id,
                 )
                 for edge in edges
             ]
@@ -3401,6 +3402,7 @@ async def _persist_contract_edges(
                 detected_at=_iso(edge.detected_at),
                 ambiguous=edge.ambiguous,
                 ordering_suppressed=edge.ordering_suppressed,
+                retargeted_from_repo_id=edge.retargeted_from_repo_id,
             )
             for edge in contract_edges
         ]

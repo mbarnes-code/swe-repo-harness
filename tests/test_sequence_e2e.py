@@ -242,6 +242,57 @@ def test_the_hoisted_contract_produces_real_contract_impl_and_consume_edges_in_t
 
 
 # =======================================================================================
+# D23 — the retargeted edge's pre-hoist owner must persist, not just be computed
+# =======================================================================================
+
+
+def test_the_retargeted_contract_consume_edge_persists_its_pre_hoist_owner(
+    cycle_fleet: Path,
+) -> None:
+    """D23's round-trip proof: `retargeted_from_repo_id` must survive `insert_edges`, not merely
+    be computed correctly in memory by `graph/cycles.py::_materialize`.
+
+    `acme-billing`'s own generated binding (`IDENTITY_BINDING`) both imports `@acme/identity` —
+    a real, source-scanned `INTERNAL_IMPORT` edge at 0.8 confidence, `acme-billing -> acme-identity`
+    — and is itself the contract's checked-in generated carrier for `acme-billing`. That is exactly
+    what `_materialize` retargets onto the hoisted contract (kind rewritten to `CONTRACT_CONSUME`,
+    `retargeted_from_repo_id` set to the pre-retarget destination, `acme-identity`) — distinct from
+    the fresh 0.85-confidence `CONTRACT_CONSUME` row `infer_contract_edges` always writes for every
+    consumer of a hoisted contract, which was never retargeted and must read back NULL.
+
+    Before the fix, `insert_edges` enumerated fifteen columns and dropped this one silently — both
+    rows below existed in `edges`, and `retargeted_from_repo_id` read NULL for both.
+    """
+    payload = _scan_then_sequence(cycle_fleet)
+    assert payload["hoisted"] == [PROTO_ID], "the hoist itself must still succeed (unchanged)"
+
+    rows = _query(
+        cycle_fleet,
+        "SELECT confidence, retargeted_from_repo_id FROM edges "
+        "WHERE kind = 'CONTRACT_CONSUME' AND src_id = ? AND evidence_path = ? "
+        "ORDER BY confidence",
+        ("acme-billing", IDENTITY_BINDING),
+    )
+    assert len(rows) == 2, (
+        "acme-billing must carry both the retargeted real-import row and the fresh "
+        f"infer_contract_edges CONSUME row: {rows}"
+    )
+    (retargeted_confidence, retargeted_from), (fresh_confidence, fresh_from) = rows
+
+    assert retargeted_confidence == pytest.approx(EDGE_BASE_CONFIDENCE[EdgeKind.INTERNAL_IMPORT])
+    assert retargeted_from == OWNER, (
+        "the retargeted edge's pre-hoist destination (acme-identity) must survive the write path "
+        f"— read back {retargeted_from!r}"
+    )
+
+    assert fresh_confidence == pytest.approx(EDGE_BASE_CONFIDENCE[EdgeKind.CONTRACT_CONSUME])
+    assert fresh_from is None, (
+        "infer_contract_edges' own fresh CONSUME row was never retargeted and must stay NULL "
+        f"— read back {fresh_from!r}"
+    )
+
+
+# =======================================================================================
 # the control
 # =======================================================================================
 

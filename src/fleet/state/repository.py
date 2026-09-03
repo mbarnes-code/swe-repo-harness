@@ -368,6 +368,7 @@ class EdgeRow:
     evidence_line: int = -1
     ambiguous: bool = False
     ordering_suppressed: bool = False
+    retargeted_from_repo_id: str | None = None
     edge_id: int | None = None
 
 
@@ -2428,8 +2429,9 @@ class SqliteStateRepository:
         sql = (
             "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
             "    dst_coord_key, kind, base_confidence, confidence, ambiguous, "
-            "    ordering_suppressed, evidence_path, evidence_line, detected_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+            "    ordering_suppressed, evidence_path, evidence_line, detected_at, "
+            "    retargeted_from_repo_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
             "ON CONFLICT (run_id, edge_key) DO UPDATE SET confidence = excluded.confidence, "
             "    ambiguous = excluded.ambiguous, "
             "    ordering_suppressed = excluded.ordering_suppressed"
@@ -2451,6 +2453,7 @@ class SqliteStateRepository:
                 r.evidence_path,
                 r.evidence_line,
                 r.detected_at,
+                r.retargeted_from_repo_id,
             )
             for r in rows
         ]
