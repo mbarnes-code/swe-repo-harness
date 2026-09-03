@@ -8766,3 +8766,43 @@ this round, is the starting point — re-verify it's still current before dispat
 rounds of blocker-landing work may have changed what's reusable). D106 needs its own investigation.
 D94 remains the standing NEW-MECHANISM candidate for a dedicated round if nothing smaller surfaces
 first.
+
+### Checkpoint — round VI, seventh wave (2026-09-02, same day): D106 confirmed and fixed; the stub-creation bundle deferred honestly
+
+**§12 count: 27 of 48, unchanged.** Two research passes (research-7, research-8, `c4e1cf2`)
+re-scoped the stub-creation-logic bundle now that all three §37 structural blockers are landed,
+correcting two errors in the original pre-blocker sizing (version-sourcing now free; the assembly
+site traced to the wrong phase — TRANSFORM, not BUILD, matching ADR-0113's own long-unexplained
+phrasing) and surfacing a genuinely deeper, non-stub-specific gap: no orchestrator code anywhere
+dynamically constructs a `RewriteRule` for ANY cross-repo relocation today, stub-eligible or not —
+only static, operator-authored YAML. **Rather than force a worker-ready brief on top of an
+unresolved wider-system question, this was documented honestly and deferred to a future round.**
+This is the same discipline round VI task 9 demonstrated when it correctly reported §37's original
+Blocker A investigation BLOCKED instead of forcing a fit — the pattern held a second time, one
+level deeper into the same investigation.
+
+**D106 confirmed real and fixed** (`d503eb2`/`877155f`, task-scoped review Approved): a stub
+superseded in one `fleet resume` call, surviving un-revalidated into a later separate call, was
+incorrectly re-abandoned by `reconcile()`'s ordinary sweep — D105's own exclusion set is
+call-scoped and never persisted, so it could not protect this case. This was explicitly NOT
+assumed real; the task was authorized to report it refuted and only proceeded to build a fix after
+a genuine two-separate-invocation test reproduced the bug. Fix: a revalidation-task-aware exclusion
+query, additive with D105's own mechanism, `reconcile()` itself untouched. The review independently
+confirmed the fix's correctness GIVEN D104 stays open (nothing currently executes a `REVALIDATE`
+task, so this exclusion's protection is effectively indefinite for now) — disclosed via a payload
+key on every call, not a silent accident.
+
+**Round VI's defect-ledger tally, complete as of this checkpoint: D101 (fully closed, 3 pieces),
+D102 (closed, qualified), D103 (closed, 2 gaps), D105 (closed), D106 (closed) — five defects fully
+resolved, plus §37's three structural blockers (ADR-0113 + two direct dispatches) and D104
+allocated-but-deferred (genuinely NEW-MECHANISM). Every fix in this list was independently
+task-reviewed and, where the fix's own correctness depended on another open item (D104) staying
+open, that dependency was explicitly checked, not assumed.**
+
+**What's next.** The stub-creation-logic bundle needs the underlying dynamic-`RewriteRule`-
+construction question resolved first — a genuinely open, cross-cutting design question, not sized
+here. D94 remains the standing NEW-MECHANISM candidate for a dedicated round. No small, well-scoped
+items remain identified in this session's own backlog as of this checkpoint — the next round
+should either take on D94 properly or run a fresh sweep for anything newly smaller, following this
+project's own "diminishing returns" discipline rather than re-deriving the same NEW-MECHANISM
+conclusions a sixth time.
