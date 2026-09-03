@@ -9233,4 +9233,53 @@ chains of this size rather than forcing a premature dispatch to keep the count m
 picks a genuinely one-shot criterion from the remaining 13 open items — §12.34 (a fixture-only new
 `EcosystemAdapter`/`ManifestAdapter` pair, well-bounded) and §12.11 (combining the already-proven
 real-bazel and networkless-sandbox paths in one run) are the leading candidates; §12.9/§12.27's
+
+## Round VI, seventeenth wave (2026-09-03) — §12.11 Task A and §12.34 Clause A landed. §12 count
+holds at 35 of 48 (no criterion fully moved — both are disclosed partial closures. **This is a
+second consecutive non-criterion-moving wave** (the sixteenth wave was also non-moving, disclosed
+process-hardening). Per Rule 13, flagging this explicitly rather than letting it pass silently:
+the constraint is about a whole dispatched *round* going two-in-a-row without closing a criterion,
+and round VI as a whole closed eight criteria earlier this same round — but the pattern at the
+wave granularity is worth naming so the next wave prioritizes a full closure, not another partial.
+
+Sized §12.11 and §12.34 via two parallel research passes (research-24, research-23) rather than
+trusting `docs/CRITERIA_PLAN.md`'s own thinner paraphrases. Both found the existing framing
+misleading in different directions: §12.11's entry simultaneously claimed the sandboxed path was
+"still red" and that closing it was "a fixture composition, not a new bugfix" — research-24
+resolved the apparent contradiction (never-exercised, not cannot-succeed — ADR-0064's controlled
+matrix superseded the original diagnosis) and split it into a genuinely one-shot, Docker-free Task
+A and a real, Docker-requiring Task B. §12.34's entry omitted the criterion's entire second
+sentence (the `ContractBindingUnavailable` clause) — research-23 split it into a one-shot Clause A
+(every mechanism already existed, verified live) and a genuine NEW-MECHANISM Clause B with zero
+driver-side wiring anywhere. Both splits were reconciled into `docs/CRITERIA_PLAN.md` in the same
+commits as the sizing findings, not left implicit.
+
+Dispatched the two Docker-free, genuinely one-shot pieces (Task A, Clause A) as tasks 38/39. Held
+Task B (real `docker run --network=none`) rather than dispatching it to a subagent, per this
+session's own standing constraint from two earlier live-Docker hang incidents this round.
+
+Both implementer AND both reviewer agents fell into the same dormancy trap repeatedly this wave —
+task 38's implementer twice (once via backgrounded Bash, once via Monitor, despite the brief's
+explicit warning), and task 38's reviewer three times in a row (the last via a hard "never
+background/Monitor, foreground only" instruction that finally held). Recovered every time via
+SendMessage rather than redispatching fresh, losing no real work — task 38's reviewer's own
+mutation-test backup file was still on disk and picked up mid-stream on its final resume. Filed as
+product feedback (repeated instruction-following failure on an explicit constraint), since this
+is now a session-wide pattern rather than an isolated incident.
+
+Both tasks reviewed APPROVED, zero blocking findings, every claim independently reproduced
+(mutation proofs re-run from scratch, zero-diff assertions re-confirmed against the fixed commit
+range, both of task 39's disclosed research-design corrections checked against real source). Task
+38's reviewer additionally independently confirmed a claim central to its own scope deviation — a
+full-tree grep confirming `BuildUnit.test_srcs` is genuinely never populated by any production
+adapter — before the controller allocated `D112` for it, rather than trusting the implementer's
+self-report. Both branches merged; citation-drift gate caught 7 real drifted citations from
+`cli.py`/`buildverify.py`'s growth this wave, repointed using the gate's own hints, re-verified
+clean (72/72) before committing.
+
+**Status: zero outstanding.** §12.11 and §12.34 are both now recorded as landed partial closures
+with their remaining gaps named (§12.11: Task B, the missing cross-repo report table, the unbuilt
+exclusion-set assertion; §12.34: Clause B). Next wave should prioritize whichever of Task B or
+Clause B sizes to a genuine one-shot closing the full criterion, to avoid a third consecutive
+non-moving wave.
 shared FILE_PATH capture mechanism and the D94/D104 chain remain correctly excluded as multi-step.
