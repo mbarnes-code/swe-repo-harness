@@ -9179,3 +9179,58 @@ reconciled with docs. What remains identified but not dispatched: D94's trigger 
 exist), and the NEW-MECHANISM items already correctly excluded from this round's scope (§12.31
 rollback path, §12.34 new-language adapter pair, §12.36 blocked on open D50, §12.8's
 `HTTP_OPERATION` leg, §12.11's real bazel/sandboxed combination).
+
+## Round VI, sixteenth wave (2026-09-03) — health check, three regressions repaired, §12.47's
+identification-layer gap closed, §12.31 sized and correctly deferred. §12 count holds at 35 of 48
+(no criterion moved this wave — disclosed per Rule 13 as process-hardening, following directly
+after eight consecutive criterion-moving rounds, not two non-moving rounds in a row).
+
+Ran the full test suite as a health check after the prior wave's ~19-task volume: **2321 passed,
+3 failed, 1 error** on `main` @ `f7b2419`. All three triaged directly by inspection (no research
+pass needed) rather than guessed at: `test_switching_profiles_requires_zero_src_edits`'s
+`_BASE_SHA` was pinned to §12.41 piece 2's own branch point, so every unrelated `src/` commit
+landing afterward (this round's own memory_guard/cgroup/containerstats/repository work included)
+tripped its diff-must-be-empty assertion — the test's own claim was about one historical task's
+diff, not "src/ never changes again." `test_known_inert_keys_are_still_inert[...max_host_rss_mb]`
+was catching exactly what it exists to catch: round VI tasks 27/29's own wiring gave the key a
+genuine direct read outside `settings.py`, superseding D50's earlier "indirect read only" finding
+the `KNOWN_INERT` entry was based on. `test_no_test_subclass_defines_a_method_its_base_no_longer_has`
+flagged a `NodeVisitor` helper class added by commit `0a71873` — a **different, concurrent lane's**
+work, not round VI's own — that never got a `NOT_OVERRIDES` allowlist entry, despite the file
+already carrying the exact precedent for this shape of finding.
+
+While task 34 (AVRO/THRIFT, dispatched at the close of the fifteenth wave) was in review, three
+fix briefs were written directly from this triage — no separate research dispatch, since all three
+root causes were already resolved by inspection. Then a genuine infra incident: all four
+dispatched agents (task 34's review plus the three fixes) died mid-flight from what the platform
+reported as transient connectivity failures — an API error, a stalled response stream, and a
+connection refused — none of which were real logic failures, and none resumable (they no longer
+appeared in the session's own agent list). Rather than assume a clean restart was needed, each
+worktree was inspected first: task 35's fix was uncommitted but essentially complete, task 37's
+fix was already committed but unverified, task 36 had made zero progress, and the review had never
+started. Redispatch briefs were tailored per state — resume-and-verify for 35/37, clean redispatch
+for 36 and the review — rather than treating all four identically. All four landed clean on retry;
+task 35's resumed worker additionally caught and fixed a false citation the interrupted draft had
+left pointing at a nonexistent ledger entry, self-corrected before merge. task 34's review
+independently reproduced both Rule-12 mutations on the THRIFT tie-break with a zero-change gate
+confirming genuine mutation each time, and independently confirmed the untouched-scope claims
+(`_identify`, `_discover_carriers`, `TARGET_PATH`, etc.) via byte-for-byte diff rather than
+trusting the report. Verdict: APPROVED, zero findings. All four merged; citation-drift gate and
+every directly-touched test file re-run clean against the merged tree.
+
+In parallel, research-22 sized §12.31 ("wrong contract hoist detected and rolled back") — the
+strongest-looking one-shot candidate among the 13 still-open §12 items, since it directly extends
+this round's own §12.29/§12.30 contract-hoist work. It is not one-shot: SPEC's §3.1 6c-H design
+needs four to five interacting legs (not-shared detection + rollback, a new `git revert`
+primitive with no existing precedent anywhere in `src/fleet/vcs/`, broke-owner detection, unhoist
+blast-set logic, and finishing the already-stubbed `--forbid-hoist` wiring) — structurally the
+same shape as the D94/D104 chain. Allocated `D111` and reconciled `docs/CRITERIA_PLAN.md`'s §12.31
+entry and Rollup table in the same commit as the ledger entry, rather than letting the sizing
+finding sit undisclosed. Correctly deferred, matching this project's own repeated precedent for
+chains of this size rather than forcing a premature dispatch to keep the count moving.
+
+**Status: zero outstanding.** No §12 criterion moved this wave (disclosed per Rule 13). Next wave
+picks a genuinely one-shot criterion from the remaining 13 open items — §12.34 (a fixture-only new
+`EcosystemAdapter`/`ManifestAdapter` pair, well-bounded) and §12.11 (combining the already-proven
+real-bazel and networkless-sandbox paths in one run) are the leading candidates; §12.9/§12.27's
+shared FILE_PATH capture mechanism and the D94/D104 chain remain correctly excluded as multi-step.
