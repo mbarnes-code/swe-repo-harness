@@ -7634,6 +7634,19 @@ logic deciding when an existing open PR should be re-examined for promotion. Thi
 NEW-MECHANISM sized, not a caller-wiring gap — genuinely new logic, not a one-shot. That design
 choice is not made here.
 
+**Partial progress, 2026-09-03 (round VI task 15, commit `741e9a2`, merge of
+`agent/roundvi-task10`) — status stays OPEN, this is a disclosed sub-piece, not a fix.** A
+dedicated research pass (`research-9`) designed and an implementer built the git-level primitive
+this mechanism will need: `Git.rebase(onto)`, `Git.abort_rebase()`, and
+`Git.push_force_with_lease(remote, branch, *, expected_sha)` in `src/fleet/vcs/git.py`. The
+force-with-lease safety property (stale `expected_sha` refuses rather than clobbers the remote)
+and a silent-branch-creation guard were both proven by discriminating mutation, independently
+reproduced by two separate task-scoped reviews. **Still not built:** the trigger logic deciding
+when an already-open PR should be re-examined for promotion, the body-regeneration step, and the
+`Forge.mark_ready` wiring — this primitive has no caller anywhere in `src/` yet. §12.38's
+resolution sub-clause remains untestable for the same reason stated above; this piece alone does
+not move it.
+
 ## D95 — FIXED, LANDED (`00b9e68`, merge of `agent/roundz-task3`; component commit `f9df242`). `state/repository.py::complete_phase`'s RHI-escalation leg wrote raw SQL bypassing `transition()`, letting a stale-but-not-reclaimed fence corrupt the state model's own `ALLOWED_TRANSITIONS` invariant
 
 **Found and fixed in the same task, round Z task 3 (2026-09-01), closing the specific
