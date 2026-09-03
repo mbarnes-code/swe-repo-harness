@@ -159,6 +159,7 @@ from fleet.orchestrator.budgets import (
     new_cpu_pool,
 )
 from fleet.orchestrator.context import RunContext, default_logger
+from fleet.orchestrator.memory_guard import HostMemorySampler
 from fleet.orchestrator.reentry import (
     BlockerState,
     EvidenceRow,
@@ -208,6 +209,7 @@ from fleet.rewrite.rules import (
     rule_matches_path,
 )
 from fleet.sandbox.container import ContainerSandbox, claims
+from fleet.sandbox.containerstats import ContainerStatsReader
 from fleet.sandbox.worktree import (
     WorktreeError,
     WorktreeManager,
@@ -249,6 +251,7 @@ from fleet.state.repository import (
     SymbolRow,
     insert_revalidation_task_row,
 )
+from fleet.util.cgroup import read_process_tree_memory_bytes
 from fleet.util.fs import atomic_write, scoped_tempdir
 from fleet.util.fs import free_bytes as disk_free_bytes
 from fleet.util.hashing import sha256_text
@@ -1993,6 +1996,22 @@ async def _close_wave_projector(projector: Projector, ctx: RunContext) -> None:
         )
 
 
+def _host_memory_sampler(settings: FleetSettings, run_id: str) -> HostMemorySampler:
+    """§12.22's runtime RSS-sampling sub-clause (task 27 / round VI B2): one `HostMemorySampler`
+    per wave, the SAME per-wave granularity `Projector` already uses at every one of the four
+    `_run_*_wave` composition roots below (see `memory_guard.py`'s module docstring for why that
+    granularity was chosen over a new run-lifetime object). Production callers take every default
+    except `run_id`/`max_host_rss_mb`/`container_reader` — real `cgroup` reader, §11.3's 30s
+    cadence, and `CONTAINER_STATS_RUNNER`'s own contract (`None` in production: really executes
+    `docker`)."""
+    return HostMemorySampler(
+        run_id=run_id,
+        max_host_rss_mb=settings.config.budgets.max_host_rss_mb,
+        container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
+        cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+    )
+
+
 async def _run_scan_wave(
     settings: FleetSettings,
     *,
@@ -2054,6 +2073,7 @@ async def _run_scan_wave(
         budgets=settings.config.budgets,
         clock=_now,
     )
+    sampler = _host_memory_sampler(settings, run_id)
     runner = PhaseRunner(
         ctx,
         ScanPipelineWorker(),
@@ -2062,12 +2082,17 @@ async def _run_scan_wave(
         sink=_ScanSink(
             writer=writer, repository=repository, run_id=run_id, evidence=evidence
         ),
+        resource_guard=sampler.guard,
     )
+    sampler.start()
     try:
-        await projector.start()
-        return await runner.run_wave(SCAN_WAVE_INDEX), ctx
+        try:
+            await projector.start()
+            return await runner.run_wave(SCAN_WAVE_INDEX), ctx
+        finally:
+            await _close_wave_projector(projector, ctx)
     finally:
-        await _close_wave_projector(projector, ctx)
+        await sampler.stop()
 
 
 def _scan_payloads(
@@ -4964,6 +4989,7 @@ async def _run_transform_wave(
         clock=ctx.clock,
         lease_ttl_s=ctx.lease_ttl_s,
     )
+    sampler = _host_memory_sampler(settings, run_id)
     runner = PhaseRunner(
         ctx,
         TransformPipelineWorker(),
@@ -4977,12 +5003,17 @@ async def _run_transform_wave(
             evidence=evidence,
         ),
         pre_dispatch=claim_hook,
+        resource_guard=sampler.guard,
     )
+    sampler.start()
     try:
-        await projector.start()
-        return await runner.run_wave(wave_index)
+        try:
+            await projector.start()
+            return await runner.run_wave(wave_index)
+        finally:
+            await _close_wave_projector(projector, ctx)
     finally:
-        await _close_wave_projector(projector, ctx)
+        await sampler.stop()
 
 
 async def _transform_criterion(
@@ -5387,6 +5418,36 @@ Which flags, and therefore what the generator is allowed to reach for, are NOT h
 executes what an adapter declared, in a scratch directory that is never a build worktree, and
 folds what came back into the plan as `SupportFile` content so that the ADR-0054 publish
 contract — published bytes are the PLANNED bytes — holds over generator output unchanged."""
+
+CONTAINER_STATS_RUNNER: CommandRunner | None = None
+"""The `docker ps`/`docker stats` seam for `HostMemorySampler`'s per-wave `ContainerStatsReader`
+(§12.22 runtime RSS-sampling sub-clause, task 27 / round VI B2). Same contract as the four above:
+`None` — production — really executes `docker`. Unlike the four above, which only fire when a
+worker actually dispatches real work a test would have to opt into, `HostMemorySampler` ticks
+UNCONDITIONALLY as soon as a wave starts (`memory_guard.py`'s whole point is sampling independent
+of dispatch activity) — so leaving this `None` in a test that merely constructs one of the four
+`_run_*_wave` composition roots, with no repo ever admitted, still shells out to a real `docker
+ps`. `tests/conftest.py`'s autouse fixture patches this to a fast, zero-container fake for every
+test that has `fleet.cli` loaded, precisely because this seam's default reach is broader than the
+other four's."""
+
+CGROUP_MEMORY_READER: Callable[[], int] | None = None
+"""The whole-process-tree `memory.current` seam for `HostMemorySampler`, same contract and same
+"reaches every wave unconditionally" reason as `CONTAINER_STATS_RUNNER` immediately above. `None`
+— production — really reads this HOST's real cgroup v2 `memory.current` via
+`read_process_tree_memory_bytes`.
+
+**Why a test cannot simply leave this `None`, unlike the other five seams**: this is not a
+per-process cgroup. On a real developer sandbox or CI runner, `/proc/self/cgroup` typically
+resolves to a whole LOGIN-SESSION-scoped cgroup (`user.slice/user-<uid>.slice/session-<n>.scope`)
+shared by every process in that session — the test runner, this very pytest process, an editor,
+every other tool running alongside it — not something scoped to the test. Measured live in this
+task's own development sandbox: ~18.4 GiB, already over `BudgetsSection.max_host_rss_mb`'s
+12 288 MB default before a single test writes a byte. Left `None`, EVERY test that reaches a real
+wave spuriously halts with `HaltReason.HOST_MEMORY` regardless of what that test is about —
+measured directly: `tests/test_cli.py::test_run_cost_exhausted_exits_3` and three others failed
+this way the first time this seam was wired without an override. `tests/conftest.py`'s autouse
+fixture patches this to a fake returning `0` by default for exactly this reason."""
 
 GH_RUNNER: CommandRunner | None = None
 """The `gh` seam for §3.4 steps 4–5 — PR emission and PR STATE INGESTION. Same contract again.
@@ -8532,6 +8593,12 @@ async def _run_build_wave(
         clock=_now,
         descendants=ordering_descendants(await _ordering_pairs(read_conn, settings, run_id)),
     )
+    sampler = HostMemorySampler(
+        run_id=run_id,
+        max_host_rss_mb=config.budgets.max_host_rss_mb,
+        container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
+        cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+    )
     runner = PhaseRunner(
         ctx,
         BuildPipelineWorker(bazel_runner=BAZEL_RUNNER),
@@ -8547,12 +8614,17 @@ async def _run_build_wave(
             run_id=run_id,
             evidence=evidence,
         ),
+        resource_guard=sampler.guard,
     )
+    sampler.start()
     try:
-        await projector.start()
-        return await runner.run_wave(wave_index)
+        try:
+            await projector.start()
+            return await runner.run_wave(wave_index)
+        finally:
+            await _close_wave_projector(projector, ctx)
     finally:
-        await _close_wave_projector(projector, ctx)
+        await sampler.stop()
 
 
 async def _run_verify_wave(
@@ -8610,6 +8682,12 @@ async def _run_verify_wave(
         clock=_now,
         descendants=ordering_descendants(await _ordering_pairs(read_conn, settings, run_id)),
     )
+    sampler = HostMemorySampler(
+        run_id=run_id,
+        max_host_rss_mb=config.budgets.max_host_rss_mb,
+        container_reader=ContainerStatsReader(runner=CONTAINER_STATS_RUNNER or proc_run),
+        cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
+    )
     runner = PhaseRunner(
         ctx,
         VerifyPipelineWorker(bazel_runner=BAZEL_RUNNER),
@@ -8630,12 +8708,17 @@ async def _run_verify_wave(
             writer=writer,
             run_id=run_id,
         ),
+        resource_guard=sampler.guard,
     )
+    sampler.start()
     try:
-        await projector.start()
-        return await runner.run_wave(wave_index)
+        try:
+            await projector.start()
+            return await runner.run_wave(wave_index)
+        finally:
+            await _close_wave_projector(projector, ctx)
     finally:
-        await _close_wave_projector(projector, ctx)
+        await sampler.stop()
 
 
 async def _gated_members(

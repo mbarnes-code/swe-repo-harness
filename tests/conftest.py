@@ -82,6 +82,68 @@ FROZEN_NOW = datetime(2026, 8, 8, 12, 0, 0, tzinfo=UTC)
 RUN_ID = UUID("00000000-0000-4000-8000-000000000001")
 
 
+@pytest.fixture(autouse=True)
+def _no_real_docker_stats(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Task 27 (round VI B2): `HostMemorySampler` (`orchestrator/memory_guard.py`) ticks
+    UNCONDITIONALLY as soon as any of `cli.py`'s four `_run_*_wave` composition roots start a
+    wave -- independent of whether that wave ever dispatches a repo, which is the whole point of
+    the redesign (SPEC §12.22). Two of its seams default to `None` in production ("really read
+    the host"), matching `BAZEL_RUNNER`/`FILTER_REPO_RUNNER`/`RESOLVER_RUNNER`/`GAZELLE_RUNNER`'s
+    existing "real unless a test opts in to a fake" contract -- but unlike those four, which only
+    fire when a worker actually dispatches real work a test would already have to set up, both of
+    these reach the real host from ANY test that merely constructs a wave, admitted repos or not:
+
+    * `cli.CONTAINER_STATS_RUNNER` -- a real `docker ps` invocation.
+    * `cli.CGROUP_MEMORY_READER` -- a real read of THIS session's cgroup `memory.current`, which
+      on a real sandbox is shared by every process in the login session, not scoped to the test;
+      measured live at ~18.4 GiB, already over `budgets.max_host_rss_mb`'s 12 288 MB default. Left
+      real, `tests/test_cli.py::test_run_cost_exhausted_exits_3` and three siblings spuriously
+      halted with `HaltReason.HOST_MEMORY` the first time this was wired without an override --
+      not because anything about those tests' own memory use, but because the SESSION they ran
+      inside of does.
+
+    Both patched here to fast, harmless-reading fakes by default, for every test that has
+    `fleet.cli` loaded, so the many e2e-flavored test files that build a real wave do not silently
+    gain a new host-`docker`-daemon dependency or a spurious host-memory halt they never had
+    before this task. A test proving something ABOUT either seam can still `monkeypatch.setattr
+    (cli, "CONTAINER_STATS_RUNNER"/"CGROUP_MEMORY_READER", ...)` to opt back out.
+
+    `sys.modules`-gated rather than a module-level `import fleet.cli`, per this file's own module
+    docstring: `cli.py` pulls in `aiosqlite`/`structlog`/`typer`/`anthropic`, and the
+    state/worker-layer tests this file is kept dependency-light for never import it -- so this
+    fixture costs them nothing beyond the `sys.modules` membership check itself.
+    """
+    if "fleet.cli" not in sys.modules:
+        return
+    cli = sys.modules["fleet.cli"]
+
+    from fleet.util.proc import ProcResult
+
+    async def _zero_containers(
+        argv: object,
+        *,
+        cwd: object = None,
+        env: object = None,
+        deadline: object = None,
+        timeout_s: object = None,
+    ) -> ProcResult:
+        return ProcResult(
+            argv=tuple(argv),  # type: ignore[arg-type]
+            exit_code=0,
+            stdout_tail="",
+            stderr_tail="",
+            duration_ms=0,
+            timed_out=False,
+            started=True,
+        )
+
+    def _zero_process_tree_bytes() -> int:
+        return 0
+
+    monkeypatch.setattr(cli, "CONTAINER_STATS_RUNNER", _zero_containers)
+    monkeypatch.setattr(cli, "CGROUP_MEMORY_READER", _zero_process_tree_bytes)
+
+
 @pytest.fixture
 def frozen_now() -> datetime:
     """A fixed tz-aware instant, so round-trip equality is not a race against the clock."""
