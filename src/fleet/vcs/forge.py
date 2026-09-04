@@ -16,12 +16,12 @@ call sites rather than guessed:
   nothing in this spec ever writes it — which would deadlock the fleet at the first wave
   boundary"*, and three gates consume `PrState.MERGED`.
 * `mark_ready` — `prwriter`'s `READY_UNIT` and `fleet pr --ready`.
+* `edit_body` — `cli._promote_one_pr` (§12.38/D94): once a stub blocking an already-open draft PR
+  resolves, the resolution re-uses the SAME PR (its number, url and review history survive), so
+  the body must be regenerated in place rather than a new PR opened. `github.py` has carried this
+  method since before it had a caller; `gitea.py` gained it with this Protocol addition.
 * `available` — the honest probe the CLI and the tests gate on, so a missing binary or an
   unreachable forge fails loudly instead of passing vacuously.
-
-`edit_body` is deliberately NOT on the Protocol: no caller in the harness invokes it today, and a
-Protocol method with no call site is an abstraction a second driver would have to implement for
-nobody.
 
 `PrStatus`, `PrSyncItem` and `NON_TERMINAL_STATES` live here rather than in `github.py` because
 they describe *a PR*, not *GitHub*; `github.py` re-exports them so every existing import keeps
@@ -146,6 +146,11 @@ class Forge(Protocol):
     async def mark_ready(self, url: str) -> None:
         """Promote out of draft. The refusal-while-stubs-are-active rule lives in the CLI layer
         (§3.5.1); this is only the forge call it makes once that check passes."""
+        ...
+
+    async def edit_body(self, url: str, body_file: Path, *, title: str | None = None) -> None:
+        """Regenerate an existing PR's body (§3.5.1 resolution re-uses the same PR, so its
+        number, url, and review history survive a revalidation round)."""
         ...
 
     async def view(self, url: str) -> PrStatus:

@@ -314,6 +314,7 @@ from fleet.workers.prwriter import (
     PrwriterInput,
     PrwriterOutput,
     PrwriterWorker,
+    render_body,
 )
 from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
 from fleet.workers.relocate import RelocateInput, RelocateOutput, relocated_path
@@ -10823,9 +10824,16 @@ def _report_with_stubs(
     `equivalence` is what forces the draft. Re-validating rather than mutating is what re-runs
     `_derive_equivalence`, so `STUB_LIMITED` is derived from the data exactly as §5.1 requires and
     never assigned by this caller.
+
+    Unconditional — an early `if not states: return report` used to skip this when `states` is
+    EMPTY, which is correct for a repo that never used a stub (its persisted
+    `verified_against_stubs` is already `[]`) but wrong for one whose stub has since RESOLVED:
+    `states` only ever holds `ACTIVE`/`SUPERSEDED` rows, so a resolved stub also reads as empty,
+    and the early return left the STALE `STUB_LIMITED`/`verified_against_stubs` from when Phase 4
+    persisted the report still in force — the exact "re-derive against the stub rows as they
+    stand NOW" this function promises, silently not happening for the one case (a resolution)
+    that changes the answer. §12.38/D94's promotion path depends on this being genuinely current.
     """
-    if not states:
-        return report
     return VerificationReport.model_validate(
         report.model_dump()
         | {
@@ -10895,6 +10903,7 @@ async def _pr_impl(
     already: list[str] = []
     held: dict[str, list[str]] = {}
     scc_incomplete: dict[str, list[str]] = {}
+    promotable: list[tuple[tuple[_PrCandidate, ...], str, PullRequestDraft]] = []
     for unit in _pr_units(candidates):
         scc = unit[0].scc
         member_ids = {candidate.repo_id for candidate in unit}
@@ -10920,7 +10929,26 @@ async def _pr_impl(
                     "by construction, so this is a prior bug or a manual DB edit, not something "
                     "this command may silently pick a winner over."
                 )
-            already.extend(sorted(member_ids))
+            url = next(iter(existing_urls))
+            record = records.get(min(member_ids))
+            # §12.38/D94: an already-open PR is a PROMOTION candidate, not a plain no-op, once its
+            # blocking stub has resolved. `PrState.HELD` is entered ONLY from `DRAFTED`, ONLY by
+            # end-of-run `stub_reconcile` abandoning THIS PR's own stub(s) (`enums.py::PrState`
+            # docstring) — it is the fleet's own verdict that a PAST run gave up on ever promoting
+            # this draft. A unit whose members ALL currently carry an empty `stub_states` (the
+            # same `state IN ('ACTIVE','SUPERSEDED')` shape `_pr_candidates` already queries) has
+            # nothing open left to protect: every stub either never existed or has since reached a
+            # terminal state (`RESOLVED`, or a NEW row re-opened and itself resolved — see
+            # `next_round_record`). A PR that is `DRAFTED`/`OPEN` (this run's own, or one still
+            # waiting on an unrelated dependency) is untouched, exactly as before D94.
+            if (
+                record is not None
+                and record.state is PrState.HELD
+                and not any(candidate.stub_states for candidate in unit)
+            ):
+                promotable.append((unit, url, record))
+            else:
+                already.extend(sorted(member_ids))
             continue
         blocking = sorted(
             {
@@ -10947,6 +10975,20 @@ async def _pr_impl(
         )
         held.update(held_late)
 
+    promoted: dict[str, str] = {}
+    if promotable and not dry_run:
+        promoted, promote_failed = await _promote_prs(
+            settings, path, run_id=run_id, promotable=promotable, records=records
+        )
+        failed.update(promote_failed)
+    # A promotion candidate that was not actually promoted this call — `dry_run`, or a failure
+    # recorded above — is reported exactly like every other already-open PR: still open, still
+    # untouched. `promoted` is the only way a repo_id here is NOT folded back into `already_open`.
+    for unit, _url, _record in promotable:
+        promo_ids = sorted(candidate.repo_id for candidate in unit)
+        if not any(repo_id in promoted for repo_id in promo_ids):
+            already.extend(promo_ids)
+
     return {
         "run_id": run_id,
         "opened": dict(sorted(opened.items())),
@@ -10956,6 +10998,7 @@ async def _pr_impl(
         "already_open": sorted(already),
         "unverified": list(unverified),
         "scc_incomplete": dict(sorted(scc_incomplete.items())),
+        "promoted": dict(sorted(promoted.items())),
         "failed": dict(sorted(failed.items())),
         "dry_run": dry_run,
         "exit_code": int(ExitCode.SUCCESS if not failed else ExitCode.UNEXPECTED_ERROR),
@@ -11215,6 +11258,203 @@ async def _emit_one_pr(
     if error is None:  # pragma: no cover - a non-ok result always carries its error
         return f"forge {payload.forge!r} failed with no error attached"
     return f"{error.exception_type}: {error.stderr_tail}"
+
+
+_MIGRATION_NOTES_MARKER: Final = "\n### Migration notes\n\n"
+"""Exactly the tail `workers.prwriter.render_body` emits when `notes` (model-authored prose) is
+non-empty: `lines += ["", "### Migration notes", "", notes]` then `"\n".join(lines) + "\n"`."""
+
+
+def _extract_migration_notes(body: str) -> str:
+    """The model-authored `### Migration notes` section verbatim, or `""` if the body has none —
+    the ONE part of a rendered body `_regenerate_pr_body` must never touch (this task's brief:
+    "do not touch the LLM-authored portion of the body if one exists"). Everything after the
+    marker IS `notes` verbatim (`render_body`'s own construction), so extraction is exact, not a
+    reconstruction — the final `"\n"` `render_body` appends to the whole body is stripped back off.
+    """
+    idx = body.find(_MIGRATION_NOTES_MARKER)
+    if idx == -1:
+        return ""
+    return body[idx + len(_MIGRATION_NOTES_MARKER) :].removesuffix("\n")
+
+
+def _regenerate_pr_body(
+    unit: Sequence[_PrCandidate],
+    record: PullRequestDraft,
+    records: Mapping[str, PullRequestDraft],
+    *,
+    draft: bool,
+) -> str:
+    """§12.38/D94's body regeneration: re-render the WHOLE body from `workers.prwriter.render_body`
+    against the unit's CURRENT `VerificationReport`, rather than surgically deleting only the
+    `STUB_BANNER` block. A surgical delete leaves the body self-contradicting: `render_body` also
+    prints "- Equivalence: `{report.equivalence.value}`" in the metadata section BELOW the
+    banner, so dropping only the banner leaves a body with no stub warning that still claims
+    `STUB_LIMITED` a few lines down. Re-rendering keeps every mechanically-derived line consistent
+    with each other by construction — the same property a fresh (never-before-opened) PR's body
+    already has, because it too comes from exactly this function.
+
+    The one exception, per this task's brief: model-authored prose is carried through UNCHANGED
+    from `record.body`'s own `### Migration notes` section (`_extract_migration_notes`), never
+    regenerated — that would mean a fresh LLM call this mechanism has no business making.
+    """
+    primary = min(unit, key=lambda candidate: candidate.repo_id)
+    member_ids = frozenset(candidate.repo_id for candidate in unit)
+    dependencies = sorted(
+        {dep for candidate in unit for dep in candidate.dependencies} - member_ids
+    )
+    payload = PrwriterInput(
+        report=primary.report,
+        wave_index=record.wave_index,
+        branch=record.branch,
+        base=record.base,
+        source_url=record.source_url,
+        source_sha=record.source_sha,
+        dependencies=[
+            DependencyPr(
+                repo_id=dep,
+                url=records[dep].url if dep in records else None,
+                state=records[dep].state if dep in records else PrState.DRAFTED,
+            )
+            for dep in dependencies
+        ],
+        repo_status=primary.status,
+        stub_states=primary.stub_states,
+        stub_fidelity=primary.stub_fidelity,
+        contract_id=record.contract_id,
+        scc_id=record.scc_id,
+        member_repo_ids=list(record.member_repo_ids),
+        weak_edges=list(record.weak_edges),
+        revalidation_round=record.revalidation_round + 1,
+    )
+    return render_body(
+        payload,
+        repo_id=record.repo_id,
+        draft=draft,
+        notes=_extract_migration_notes(record.body),
+    )
+
+
+async def _remote_branch_tip(git: Git, remote: str, branch: str) -> str | None:
+    """The remote's CURRENT tip for `branch`, read fresh via `ls-remote` — never a locally cached
+    remote-tracking ref, which `push_force_with_lease`'s explicit `<branch>:<expected-sha>` form
+    does not depend on (`vcs/git.py::push_force_with_lease`'s own docstring). `None` when the
+    remote has no such ref yet."""
+    out = await git.text(["ls-remote", remote, f"refs/heads/{branch}"])
+    if not out.strip():
+        return None
+    return out.split()[0]
+
+
+async def _promote_one_pr(
+    git: Git, forge: Forge, record: PullRequestDraft, *, url: str, body: str, body_path: Path
+) -> str | None:
+    """The mechanical half of one §12.38/D94 promotion: rebase `record.branch` onto `record.base`'s
+    current tip, regenerate the body on the forge, force-push under lease, and mark the PR ready.
+
+    Returns `None` on success, or a string naming why promotion did not happen. Every failure path
+    leaves the PR exactly as it was — still its pre-promotion branch and body, still `HELD` (the
+    caller does not write a state update unless this returns `None`) — reported rather than raised
+    (Rule 11) and never a silent skip: a rebase conflict aborts the rebase before returning, and a
+    stale `expected_sha` is `push_force_with_lease`'s own refusal, not guessed past here.
+    """
+    if await git.resolve(record.branch) is None:
+        return f"{record.branch!r} does not exist in {git.path}; nothing to rebase"
+    try:
+        remote_tip = await _remote_branch_tip(git, "origin", record.branch)
+    except GitCommandError as exc:
+        return f"could not read the remote tip of {record.branch!r}: {exc}"
+    if remote_tip is None:
+        return f"no 'origin' ref for {record.branch!r}; nothing to force-push onto"
+
+    await git.checkout(record.branch)
+    try:
+        clean = await git.rebase(record.base)
+    except GitCommandError as exc:
+        return f"rebase onto {record.base!r} failed: {exc}"
+    if not clean:
+        await git.abort_rebase()
+        return f"rebase onto {record.base!r} conflicted; left as-is (draft, unpromoted)"
+
+    body_path.parent.mkdir(parents=True, exist_ok=True)
+    body_path.write_text(body, encoding="utf-8")
+    try:
+        await forge.edit_body(url, body_path)
+    except ForgeError as exc:
+        return f"regenerating the PR body failed: {exc}"
+
+    try:
+        await git.push_force_with_lease("origin", record.branch, expected_sha=remote_tip)
+    except (GitCommandError, ValueError) as exc:
+        return f"push_force_with_lease refused: {exc}"
+
+    try:
+        await forge.mark_ready(url)
+    except ForgeError as exc:
+        return f"rebase and push succeeded but mark_ready failed: {exc}"
+    return None
+
+
+async def _promote_prs(
+    settings: FleetSettings,
+    path: Path,
+    *,
+    run_id: str,
+    promotable: Sequence[tuple[tuple[_PrCandidate, ...], str, PullRequestDraft]],
+    records: Mapping[str, PullRequestDraft],
+) -> tuple[dict[str, str], dict[str, str]]:
+    """`(promoted, failed)` — §12.38/D94's promotion pass over every unit `_pr_impl` found to be a
+    genuine promotion candidate: already open, `HELD`, and with nothing left in `stubs` to protect.
+
+    One unit at a time, in the order the caller built `promotable`. A promotion failure is
+    recorded in `failed` and never raised — the PR is left exactly as `_promote_one_pr` left it.
+    A promotion success writes ONE new `PullRequestDraft` state to every member (mirroring
+    `_emit_prs`'s own "same draft against every member" shared-PR mechanism): `state=OPEN`,
+    the regenerated body, `equivalence`/`stubbed_deps` re-derived from the unit's own now-current
+    `VerificationReport` (never hand-set to `FULL` — a unit that was ALSO `CLOSURE_SAMPLED` stays
+    `CLOSURE_SAMPLED` once its stub banner alone is dropped), `unresolved_stub_states={}`, and
+    `revalidation_round` bumped — exactly the field this project's model docstring
+    (`models/tasks.py::PullRequestDraft.revalidation_round`) already describes this mechanism by.
+
+    `records` is the SAME fleet-wide `PullRequestDraft` map `_pr_impl` already threads everywhere
+    else — needed here so `_regenerate_pr_body` can render each dependency's CURRENT observed
+    state, exactly as a fresh PR's body would (`_emit_one_pr`'s own `DependencyPr` construction).
+    """
+    monorepo, monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    forge = _forge(settings, cwd=monorepo_path)
+    pr_root = (settings.root / settings.config.run.work_dir).resolve() / "pr"
+    promoted: dict[str, str] = {}
+    failed: dict[str, str] = {}
+    async with StateWriter(path, owner="fleet-pr") as writer:
+        for unit, url, record in promotable:
+            member_ids = sorted(candidate.repo_id for candidate in unit)
+            primary = min(unit, key=lambda candidate: candidate.repo_id)
+            new_body = _regenerate_pr_body(unit, record, records, draft=False)
+            round_index = record.revalidation_round + 1
+            body_path = pr_root / "bodies" / run_id / f"{record.repo_id}-{round_index}-pr-body.md"
+            reason = await _promote_one_pr(
+                monorepo, forge, record, url=url, body=new_body, body_path=body_path
+            )
+            if reason is not None:
+                for repo_id in member_ids:
+                    failed[repo_id] = reason
+                continue
+            updated = record.model_copy(
+                update={
+                    "state": PrState.OPEN,
+                    "body": new_body,
+                    "equivalence": primary.report.equivalence,
+                    "unresolved_stub_states": {},
+                    "stubbed_deps": list(primary.report.verified_against_stubs),
+                    "revalidation_round": round_index,
+                }
+            )
+            for repo_id in member_ids:
+                await _write_pr_record(
+                    writer, run_id, updated.model_copy(update={"repo_id": repo_id}), now=_now()
+                )
+                promoted[repo_id] = url
+    return promoted, failed
 
 
 def _pr_lines(result: Mapping[str, object]) -> list[str]:

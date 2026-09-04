@@ -735,6 +735,109 @@ def test_pr_ready_succeeds_once_a_stub_is_genuinely_resolved(
 
 
 # ---------------------------------------------------------------------------------------
+# 3b. §12.38/D94 — promoting an already-open, HELD PR once its blocking stub resolves
+# ---------------------------------------------------------------------------------------
+
+
+def hold_pr(root: Path, repo_id: str) -> None:
+    """Force the exact end state a real end-of-run `stub_reconcile` leaves behind for a consumer
+    whose stub it just abandoned: the persisted `PullRequestDraft` moved `DRAFTED` -> `HELD`
+    (`cli._apply_stub_reconcile`'s own write). Written straight to SQLite for the same reason
+    `degrade`/`resolve_stub` above are: no worker in this tree ever runs a real `fleet resume`
+    stub-abandon-then-re-emit-and-resolve cycle within one test, so the PRECONDITION is planted
+    directly and the mechanism THIS task built is what gets exercised on top of it.
+    """
+    run_id = run_id_of(root)
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        row = conn.execute(
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
+            (run_id, repo_id),
+        ).fetchone()
+        assert row is not None, f"{repo_id} has no PullRequestDraft to hold"
+        held = json.loads(str(row[0]))
+        held["state"] = "HELD"
+        conn.execute(
+            "UPDATE findings SET payload = ? "
+            " WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
+            (json.dumps(held), run_id, repo_id),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """§12.38/D94's TRIGGER, exercised through `fleet pr` itself, not through the private
+    functions directly (those are `tests/test_cli.py`'s job).
+
+    `acme-lib-py` (a wave-0 graph source, so nothing else can hold it) is degraded against a live
+    stub, opened as a draft, forced `HELD` (the state a real end-of-run `stub_reconcile` leaves
+    behind — `hold_pr` above), and the stub is then resolved. A second `fleet pr` invocation must
+    NOT treat this as a plain no-op `already_open`: it must ATTEMPT promotion.
+
+    This monorepo checkout carries no local `migrate/acme-lib-py` branch — §3.3's ingest merges
+    straight onto `integration` and leaves no per-repo branch behind, a real and separately
+    disclosed gap this task does not touch (`_promote_one_pr`'s own mechanics, proven against a
+    real branch/remote, live in `tests/test_cli.py`) — so the attempt fails at `_promote_one_pr`'s
+    very FIRST check rather than silently doing nothing. That failure is exactly the discriminating
+    proof the trigger fired: a genuinely-just-`already_open` PR (`test_re_running_fleet_pr_opens_
+    no_second_pr` above) is never attempted at all and never appears in `failed`.
+    """
+    verified(fleet)
+    degrade(fleet, "acme-lib-py", state="ACTIVE")
+    opened = run_pr(fleet, "--repo", "acme-lib-py")
+    assert opened.exit_code == ExitCode.SUCCESS, opened.output
+    assert pr_states(fleet)["acme-lib-py"] == PrState.DRAFTED.value, pr_states(fleet)
+
+    hold_pr(fleet, "acme-lib-py")
+    conn = sqlite3.connect(fleet / "state" / "fleet.db")
+    conn.execute(
+        "UPDATE stubs SET state = 'RESOLVED', resolved_at = '2026-08-09T00:00:00+00:00' "
+        " WHERE run_id = ? AND repo_id = ? AND state = 'ACTIVE'",
+        (run_id_of(fleet), "acme-lib-py"),
+    )
+    conn.commit()
+    conn.close()
+    assert pr_states(fleet)["acme-lib-py"] == PrState.HELD.value, "setup check: the PR is HELD"
+
+    again = run_pr(fleet, "--repo", "acme-lib-py")
+    assert again.exit_code == ExitCode.UNEXPECTED_ERROR, again.output
+    body = payload(again)
+    assert "acme-lib-py" in body["failed"], body
+    assert "does not exist" in body["failed"]["acme-lib-py"], body["failed"]
+    assert body["already_open"] == ["acme-lib-py"], body
+    assert body["promoted"] == {}, body
+    assert not forge.commands("pr", "ready"), (
+        "mark_ready must never fire for a promotion attempt that failed before it got there"
+    )
+    assert pr_states(fleet)["acme-lib-py"] == PrState.HELD.value, (
+        "a failed promotion attempt must leave the PR exactly as it was — Rule 11: reported, "
+        "never a silent skip and never a state change on a path that did not succeed"
+    )
+
+
+def test_re_running_fleet_pr_leaves_a_genuinely_already_open_pr_out_of_failed(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """The control for the promotion test above: a plain re-run over PRs that were never `HELD`
+    must not even ATTEMPT promotion, so `failed` stays empty and the exit code stays SUCCESS —
+    the D94 trigger is scoped to `HELD` and nothing else moves it.
+    """
+    verified(fleet)
+    assert run_pr(fleet).exit_code == ExitCode.SUCCESS
+
+    again = run_pr(fleet)
+    assert again.exit_code == ExitCode.SUCCESS, again.output
+    body = payload(again)
+    assert body["failed"] == {}, body
+    assert body["promoted"] == {}, body
+    assert sorted(body["already_open"]) == list(LIBRARIES), body
+
+
+# ---------------------------------------------------------------------------------------
 # 4. ADR-0011 — an unmerged dependency holds its dependent rather than failing it
 # ---------------------------------------------------------------------------------------
 

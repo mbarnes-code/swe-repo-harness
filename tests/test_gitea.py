@@ -481,7 +481,7 @@ def test_a_passed_deadline_is_not_mistaken_for_a_missing_curl(tmp_path: Path) ->
 # --------------------------------------------------------------------------------------
 # the seam: both drivers, one Protocol
 # --------------------------------------------------------------------------------------
-FORGE_METHODS = ("available", "create_pr", "mark_ready", "view", "sync")
+FORGE_METHODS = ("available", "create_pr", "mark_ready", "edit_body", "view", "sync")
 
 
 @pytest.mark.parametrize("driver", [GH.GitHubCli, GT.GiteaForge], ids=["github", "gitea"])
