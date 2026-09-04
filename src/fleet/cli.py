@@ -11518,7 +11518,7 @@ async def _promote_one_pr(
         return f"rebase onto {record.base!r} conflicted; left as-is (draft, unpromoted)"
 
     body_path.parent.mkdir(parents=True, exist_ok=True)
-    body_path.write_text(body, encoding="utf-8")
+    await asyncio.to_thread(body_path.write_text, body, encoding="utf-8")
     try:
         await forge.edit_body(url, body_path)
     except ForgeError as exc:
@@ -11731,8 +11731,8 @@ async def _test_count_report(
     out: dict[str, dict[str, object]] = {}
     for repo_id, baseline_test_count, baseline_ok, migrated_test_count in await _rows(
         conn,
-        "SELECT repo_id, baseline_test_count, baseline_ok, migrated_test_count "
-        f"  FROM repos WHERE repo_id IN ({placeholders})",  # noqa: S608 -- placeholders are `?`s
+        "SELECT repo_id, baseline_test_count, baseline_ok, migrated_test_count "  # noqa: S608
+        f"  FROM repos WHERE repo_id IN ({placeholders})",  # placeholders are `?`s
         tuple(ids),
     ):
         baseline_ok_value = None if baseline_ok is None else bool(baseline_ok)

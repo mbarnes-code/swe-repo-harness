@@ -38,12 +38,12 @@ from fleet.migrations import (
     MigrationStep,
     MigrationStepError,
     MigrationVersionError,
+    _support,
     current_version,
     migrate,
     v007_logical_keys,
     v008_reservations,
 )
-from fleet.migrations import _support
 from fleet.migrations._support import sha256_nul
 from fleet.models.graph import edge_key_for
 from fleet.state.db import SCHEMA_PATH

@@ -73,10 +73,7 @@ def test_a_genuinely_different_fix_does_not_collide() -> None:
 def test_the_signature_is_deterministic_across_repeated_calls() -> None:
     """`--llm-cache read-only` reproduces every signature byte-identically (§12.36): the pure
     half of that guarantee is that this function is a deterministic pure computation."""
-    diff = (
-        f"--- a/{DEST}/x.py\n+++ b/{DEST}/x.py\n@@ -1,2 +1,2 @@\n"
-        " a\n-b\n+c\n"
-    )
+    diff = f"--- a/{DEST}/x.py\n+++ b/{DEST}/x.py\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
     sigs = {_sig([diff]) for _ in range(5)}
     assert len(sigs) == 1
 
@@ -94,9 +91,7 @@ def test_a_whitespace_only_hunk_is_discarded_entirely() -> None:
         f"--- a/{DEST}/x.py\n+++ b/{DEST}/x.py\n@@ -1,2 +1,2 @@\n"
         " a\n-  b\n+b\n"  # same token stream, different leading whitespace
     )
-    real_change = (
-        f"--- a/{DEST}/y.py\n+++ b/{DEST}/y.py\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
-    )
+    real_change = f"--- a/{DEST}/y.py\n+++ b/{DEST}/y.py\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
     # A diff with ONLY a whitespace-only hunk contributes nothing: combined with a real change to
     # a SECOND file, its signature must equal the real change alone.
     assert _sig([reformat_only, real_change]) == _sig([real_change])
@@ -175,8 +170,12 @@ def test_ast_grep_fallback_warns_once_and_never_for_an_unmapped_language(
     monkeypatch.setattr(approach_mod, "_warned_ast_grep_fallback", False)
 
     async def _missing_binary(
-        argv: object, *, cwd: object = None, env: object = None,
-        deadline: object = None, timeout_s: object = None,
+        argv: object,
+        *,
+        cwd: object = None,
+        env: object = None,
+        deadline: object = None,
+        timeout_s: object = None,
     ) -> None:
         raise FileNotFoundError("ast-grep")
 
@@ -211,9 +210,14 @@ def test_ast_grep_fallback_warns_once_and_never_for_an_unmapped_language(
 def test_ast_grep_fallback_is_silent_when_no_logger_is_supplied() -> None:
     """`log=None` (the default) must never raise — most callers, including every OTHER test in
     this file, have no bound logger to hand."""
+
     async def _missing_binary(
-        argv: object, *, cwd: object = None, env: object = None,
-        deadline: object = None, timeout_s: object = None,
+        argv: object,
+        *,
+        cwd: object = None,
+        env: object = None,
+        deadline: object = None,
+        timeout_s: object = None,
     ) -> None:
         raise FileNotFoundError("ast-grep")
 

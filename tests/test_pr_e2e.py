@@ -751,7 +751,8 @@ def hold_pr(root: Path, repo_id: str) -> None:
     conn = sqlite3.connect(root / "state" / "fleet.db")
     try:
         row = conn.execute(
-            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
+            "SELECT payload FROM findings "
+            "WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
             (run_id, repo_id),
         ).fetchone()
         assert row is not None, f"{repo_id} has no PullRequestDraft to hold"

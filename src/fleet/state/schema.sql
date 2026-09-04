@@ -361,6 +361,9 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'OperatorAbort' | 'StubAbandoned'
                                                   -- | 'WaveBudgetRaised' | 'RunBudgetRaised'
                                                   --     -- cli.py, one dedicated writer each
+                                                  -- | 'AnchoringGuardOff' -- cli.py's
+                                                  --     _TransformSink.__call__, the
+                                                  --     --no-anchoring-guard repeat-applied case
     severity   TEXT NOT NULL DEFAULT 'warn',
     fingerprint TEXT NOT NULL,                    -- sha256 of the semantic identity of the finding
     payload    TEXT NOT NULL,                     -- Pydantic dump_json, post-redaction

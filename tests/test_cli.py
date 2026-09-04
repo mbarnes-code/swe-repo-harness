@@ -55,8 +55,8 @@ from fleet.cli import (
     _BuildEvidence,
     _BuildSink,
     _extract_migration_notes,
-    _prepare_repo,
     _PrCandidate,
+    _prepare_repo,
     _promote_one_pr,
     _regenerate_pr_body,
     _report_with_stubs,
@@ -8208,19 +8208,19 @@ def _promotion_repo(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def _held_pr_record(**overrides: object) -> PullRequestDraft:
-    base: dict[str, object] = dict(
-        run_id=uuid.UUID(RUN_ID),
-        repo_id="acme-lib-py",
-        wave_index=0,
-        branch="migrate/acme-lib-py",
-        base="integration",
-        title="[fleet wave 0] migrate acme-lib-py into the monorepo",
-        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True),
-        source_url="https://example.invalid/acme-lib-py",
-        source_sha="a" * 40,
-        state=PrState.HELD,
-        url="https://github.invalid/acme/monorepo/pull/acme-lib-py",
-    )
+    base: dict[str, object] = {
+        "run_id": uuid.UUID(RUN_ID),
+        "repo_id": "acme-lib-py",
+        "wave_index": 0,
+        "branch": "migrate/acme-lib-py",
+        "base": "integration",
+        "title": "[fleet wave 0] migrate acme-lib-py into the monorepo",
+        "body": render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True),
+        "source_url": "https://example.invalid/acme-lib-py",
+        "source_sha": "a" * 40,
+        "state": PrState.HELD,
+        "url": "https://github.invalid/acme/monorepo/pull/acme-lib-py",
+    }
     base.update(overrides)
     return PullRequestDraft(**base)
 
@@ -8287,7 +8287,9 @@ def test_promote_one_pr_leaves_a_conflicting_rebase_untouched(tmp_path: Path) ->
     )
 
     assert reason is not None and "conflicted" in reason, reason
-    assert _sh(clone, "rev-parse", "migrate/acme-lib-py") == pre_tip, "the local branch must be untouched"
+    assert (
+        _sh(clone, "rev-parse", "migrate/acme-lib-py") == pre_tip
+    ), "the local branch must be untouched"
     assert asyncio.run(git.resolve("REBASE_HEAD")) is None, "the rebase must have been aborted"
     assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip
     assert not body_path.exists()
@@ -8328,7 +8330,12 @@ def test_promote_one_pr_reports_a_refused_push_and_never_marks_ready(
 
     async def refuse(*_args: object, **_kwargs: object) -> None:
         raise GitCommandError(
-            ("git", "push"), 1, "! [rejected] (stale info)", cwd=clone, timed_out=False, started=True
+            ("git", "push"),
+            1,
+            "! [rejected] (stale info)",
+            cwd=clone,
+            timed_out=False,
+            started=True,
         )
 
     monkeypatch.setattr(git, "push_force_with_lease", refuse)
