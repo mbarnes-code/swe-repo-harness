@@ -9625,20 +9625,28 @@ independently re-verified by review before merge.
 **Documentation reconciliation (controller, same wave).** `docs/CRITERIA_PLAN.md`: §36 flipped
 DONE (with the ChangeKind/ApproachChangeKind correction folded in after fix round 1 landed);
 §38 updated — D94 itself is closed, the criterion now blocked on the newly-allocated `D115`
-(branch-topology) and the pre-existing `D105`; §11 gap 2 marked closed (gaps 1/`D112` and 3
-remain); Rollup table updated 38→39, `36` moved from the D-number-blocked row to DONE, and a
-stray stale `27` mention in the "everything else" row (already DONE since the twentieth wave, not
-previously caught) removed while in the neighborhood. `docs/INTEGRATION_HONESTY.md`: D94 updated
-in place to record the landing; new entry `D115` allocated (re-derived from the measured maximum
-across all three heading forms — `D114` — not from a range read in any document, per this
-project's own Central Number Allocation rule).
+alone; §11 gap 2 marked closed (gaps 1/`D112` and 3 remain); Rollup table updated 38→39, `36`
+moved from the D-number-blocked row to DONE, and a stray stale `27` mention in the "everything
+else" row (already DONE since the twentieth wave, not previously caught) removed while in the
+neighborhood. `docs/INTEGRATION_HONESTY.md`: D94 updated in place to record the landing; new
+entry `D115` allocated (re-derived from the measured maximum across all three heading forms —
+`D114` — not from a range read in any document, per this project's own Central Number Allocation
+rule). **Self-caught error, same commit**: an earlier draft of this §38 update also named `D105`
+as a second open blocker, copied forward from this file's own round VI task 8 paragraph — before
+committing, a direct check against `docs/INTEGRATION_HONESTY.md` found D105 has read `FIXED,
+LANDED` since round VI task 11 (`d8c1cd7`/`0243792`), two tasks after task 8's paragraph named it
+and never revisited. Corrected in the same commit rather than propagated forward another wave —
+exactly the "check the primary source, not the local doc" discipline this project's own CLAUDE.md
+names as load-bearing, caught this time by the controller's own pre-commit check rather than by a
+worker or reviewer.
 
 **Status: main green.** Full suite: 2368 passed pre-task-48/49, lint gates (`test_lint_gate.py`,
 `test_findings_kinds.py`) independently re-confirmed clean post-task-49 (11/11), citation-hygiene
-gate confirmed clean post-task-48 (71/71). §12 count: 39 of 48, up from 38 at this wave's start —
-one criterion closed (§36), two partially advanced (§38's D94 leg, §11's gap 2), one new D-number
-allocated (`D115`) with a disclosed, narrower blocker than what it replaced. Next dispatch:
-whichever of `D115` (branch-topology, unblocks §38 further), `D105` (§38's `--repoll-prs`
-reliability gap), or research-29's HTTP_OPERATION result (once summarized) has the clearest
-worker-ready shape: this round's own investigation should determine which before dispatching, not
-assume from this list alone.
+gate confirmed clean post-task-48 (71/71) and re-confirmed again after this checkpoint's own edits
+(a fresh drift this checkpoint's own buildverify.py-adjacent citation caught and fixed pre-commit
+— see `_sweep_containers` above). §12 count: 39 of 48, up from 38 at this wave's start — one
+criterion closed (§36), two partially advanced (§38's D94 leg, §11's gap 2), one new D-number
+allocated (`D115`) as §38's sole remaining blocker. Next dispatch: `D115` (branch-topology —
+needs a design ruling on how/whether to create `migrate/<repo>` inside monorepo ingest before a
+worker can be dispatched) or research-29's HTTP_OPERATION result (once summarized), whichever has
+the clearer worker-ready shape once investigated.
