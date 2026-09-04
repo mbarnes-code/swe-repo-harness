@@ -671,9 +671,10 @@ class BuildverifyOutput(WorkerOutput):
         "immediately alongside `migrated_test_count`'s assignment below, before the "
         "`test_count_regressed` check — so it is `True` on a regression too, not only on a clean "
         "run. Read by `docs/CRITERIA_PLAN.md` §11 gap 2's durable-persistence write site "
-        "(`cli.py::BuildPipelineWorker`/`_BuildSink`) to decide whether `repos."
-        "migrated_test_count` should be written at all: writing `0` here would be indistinguishable "
-        "from a genuine zero-test measurement once it reaches the durable column.",
+        "(`cli.py::BuildPipelineWorker`/`_BuildSink`) to decide whether "
+        "`repos.migrated_test_count` should be written at all: writing `0` here would be "
+        "indistinguishable from a genuine zero-test measurement once it reaches the durable "
+        "column.",
     )
 
     @property

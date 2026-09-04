@@ -212,12 +212,22 @@ async def _ast_grep_kind(
         target = tmp / f"snippet{PurePosixPath(path).suffix or '.txt'}"
         target.write_text(text, encoding="utf-8")
         if import_kinds is not None and await _matches_any_kind(
-            target, language, import_kinds, binary=binary, runner=runner, timeout_s=timeout_s,
+            target,
+            language,
+            import_kinds,
+            binary=binary,
+            runner=runner,
+            timeout_s=timeout_s,
             log=log,
         ):
             return ApproachChangeKind.IMPORT_REWRITE
         if package_kinds is not None and await _matches_any_kind(
-            target, language, package_kinds, binary=binary, runner=runner, timeout_s=timeout_s,
+            target,
+            language,
+            package_kinds,
+            binary=binary,
+            runner=runner,
+            timeout_s=timeout_s,
             log=log,
         ):
             return ApproachChangeKind.PACKAGE_DECL
@@ -296,8 +306,7 @@ async def compute_approach_signature(
             path = file_diff.path
             if file_diff.old_path == "/dev/null":
                 elements.extend(
-                    ApproachElement(path, ApproachChangeKind.FILE_ADD, "")
-                    for _ in file_diff.hunks
+                    ApproachElement(path, ApproachChangeKind.FILE_ADD, "") for _ in file_diff.hunks
                 )
                 continue
             if file_diff.new_path == "/dev/null":
