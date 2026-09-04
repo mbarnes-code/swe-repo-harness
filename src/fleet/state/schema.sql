@@ -1,4 +1,4 @@
--- fleet state schema — the v10 BASELINE for a FRESH database (SPEC §6).
+-- fleet state schema — the v11 BASELINE for a FRESH database (SPEC §6).
 --
 -- This file is DATA, not a startup side effect. It is applied by `fleet migrate-db` (§10) and by
 -- nothing else. §6 "Migration policy" is normative: `CREATE TABLE IF NOT EXISTS` creates a
@@ -7,14 +7,14 @@
 -- `PRAGMA user_version` at startup and REFUSE TO START if it differs from the compiled-in
 -- version; they never run this file.
 --
--- A brand-new database gets this file and lands directly at user_version = 10. The ordered
--- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 9→10) exists only for databases that already
+-- A brand-new database gets this file and lands directly at user_version = 11. The ordered
+-- `src/fleet/migrations/vNNN_*.py` ladder (1→2 … 10→11) exists only for databases that already
 -- hold data; it is never replayed against a fresh one.
 --
 -- ---------------------------------------------------------------------------------------------
 -- PRAGMAs. Only the PERSISTENT ones live here, because this file runs once:
 --   * journal_mode = WAL   — stored in the database header, survives close (§6, ADR-0004)
---   * user_version = 10    — stored in the database header (§5 SCHEMA_VERSION)
+--   * user_version = 11    — stored in the database header (§5 SCHEMA_VERSION)
 --
 -- The rest are PER-CONNECTION and reset to their defaults on every new handle. `state/db.py`
 -- MUST issue these on EVERY connection it opens (read and write alike); setting them here would
@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS repos (
     baseline_ok         INTEGER,                  -- NULL = not run, 0 = red => SKIPPED+BaselineRed
     baseline_test_count INTEGER NOT NULL DEFAULT 0
                         CHECK (baseline_test_count >= 0),
+    -- migrated test count (§12.11, added v10 -> v11): the OTHER half of the `(repo, baseline,
+    -- migrated)` report — a real `bazel query 'tests(//dest/...)'` count over the migrated
+    -- package. NULL = never measured (no run's `bazel query` step has reached this repo yet);
+    -- 0 is a real, meaningful "zero test targets after the move" measurement and is NOT the same
+    -- as NULL, unlike `baseline_test_count` above, which repeats `baseline_ok`'s NULL/0/1
+    -- tri-state one column over instead of drawing its own.
+    migrated_test_count INTEGER,
     -- graph-derived (§3.5)
     blast_radius   INTEGER NOT NULL DEFAULT 0,
     updated_at     TEXT NOT NULL
@@ -903,4 +910,4 @@ CREATE INDEX IF NOT EXISTS ix_stubs_open      ON stubs (run_id, state)
 
 -- The baseline lands directly at 10 (§5 SCHEMA_VERSION). Workers refuse to start against any
 -- other value; the vNNN ladder is for databases that already hold data, never for this file.
-PRAGMA user_version = 10;
+PRAGMA user_version = 11;
