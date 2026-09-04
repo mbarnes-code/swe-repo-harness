@@ -779,13 +779,14 @@ def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves
     behind — `hold_pr` above), and the stub is then resolved. A second `fleet pr` invocation must
     NOT treat this as a plain no-op `already_open`: it must ATTEMPT promotion.
 
-    This monorepo checkout carries no local `migrate/acme-lib-py` branch — §3.3's ingest merges
-    straight onto `integration` and leaves no per-repo branch behind, a real and separately
-    disclosed gap this task does not touch (`_promote_one_pr`'s own mechanics, proven against a
-    real branch/remote, live in `tests/test_cli.py`) — so the attempt fails at `_promote_one_pr`'s
-    very FIRST check rather than silently doing nothing. That failure is exactly the discriminating
-    proof the trigger fired: a genuinely-just-`already_open` PR (`test_re_running_fleet_pr_opens_
-    no_second_pr` above) is never attempted at all and never appears in `failed`.
+    D115 (`filter_repo.py::ingest()`, closed round VI task 50 per ADR-0118) makes §3.3's ingest
+    create a local `migrate/acme-lib-py` branch in this monorepo checkout, so `_promote_one_pr`'s
+    FIRST precondition check (`record.branch` must exist) now passes. This checkout still has no
+    real `origin` remote configured (a separate, disclosed, and still-refused gap — `cli.py:10096
+    -10113`'s `--push` refusal), so the attempt now fails at `_promote_one_pr`'s SECOND check
+    instead, reading the remote tip of `migrate/acme-lib-py`. That failure is still exactly the
+    discriminating proof the trigger fired: a genuinely-just-`already_open` PR (`test_re_running_
+    fleet_pr_opens_no_second_pr` above) is never attempted at all and never appears in `failed`.
     """
     verified(fleet)
     degrade(fleet, "acme-lib-py", state="ACTIVE")
@@ -808,7 +809,11 @@ def test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves
     assert again.exit_code == ExitCode.UNEXPECTED_ERROR, again.output
     body = payload(again)
     assert "acme-lib-py" in body["failed"], body
-    assert "does not exist" in body["failed"]["acme-lib-py"], body["failed"]
+    assert "could not read the remote tip of" in body["failed"]["acme-lib-py"], body["failed"]
+    assert "does not exist" not in body["failed"]["acme-lib-py"], (
+        "D115 is fixed: migrate/acme-lib-py must exist locally by the time this runs, so the "
+        "FIRST precondition check must not be the one that fires", body["failed"]
+    )
     assert body["already_open"] == ["acme-lib-py"], body
     assert body["promoted"] == {}, body
     assert not forge.commands("pr", "ready"), (

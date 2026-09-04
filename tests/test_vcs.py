@@ -1187,6 +1187,20 @@ async def test_ingest_merges_with_provenance_and_is_safe_to_re_run(tmp_path: Pat
     assert merge.trailer(FR.SOURCE_REPO_TRAILER) == REPO_ID
     assert merge.trailer(FR.SOURCE_SHA_TRAILER) == source_sha
 
+    # D115: a fresh ingest creates `migrate/<repo>` inside the monorepo, an alias of the merge
+    # commit, so D94's PR-promotion mechanism has something to operate on.
+    migrate_ref = f"migrate/{REPO_ID}"
+    assert await git_.rev_parse(migrate_ref) == result.merge_sha
+
+    # Drift `migrate/<repo>` to a DIFFERENT, but still valid, object before the re-run — a plain
+    # "still equals result.merge_sha" check after the re-run cannot discriminate the idempotent
+    # path's own `create_branch` call from simply never having moved the branch a second time,
+    # since the branch already points at the right sha from the first call. Only a genuine
+    # drift-and-repoint proves the idempotent path re-asserts the ref itself.
+    assert source_sha != result.merge_sha
+    await git_.create_branch(migrate_ref, source_sha, force=True)
+    assert await git_.rev_parse(migrate_ref) == source_sha
+
     again = await FR.ingest(
         git_, source_dir=source, source=provenance, run_id=RUN_ID,
         integration_branch="integration",
@@ -1194,6 +1208,9 @@ async def test_ingest_merges_with_provenance_and_is_safe_to_re_run(tmp_path: Pat
     assert again.already_present is True
     assert again.merge_sha == result.merge_sha
     assert again.snapshot.seq == result.snapshot.seq + 1  # a fresh, immutable ref per build
+
+    # Idempotent path: `migrate/<repo>` is corrected back to the merge commit, not left drifted.
+    assert await git_.rev_parse(migrate_ref) == result.merge_sha
 
     # Every build reads a snapshot, never the branch: the first snapshot still names the tree it
     # named, even though the branch has moved on since.
@@ -1203,6 +1220,61 @@ async def test_ingest_merges_with_provenance_and_is_safe_to_re_run(tmp_path: Pat
         await git_.exec(["checkout", "-b", "elsewhere"])
         await FR.ingest(git_, source_dir=source, source=provenance, run_id=RUN_ID,
                         integration_branch="integration")
+
+
+async def test_ingest_repoints_a_stale_migrate_branch_to_the_correct_sha(tmp_path: Path) -> None:
+    """D115/ADR-0118: `migrate/<repo>` is created with `force=True` because a prior, unrelated
+    process (or a previous crashed attempt) may have already left that name pointing somewhere
+    else. `ingest()` must correct it, not refuse or silently leave it stale."""
+    mono = tmp_path / "mono"
+    await _init_repo(mono, files={"README.md": "monorepo\n"})
+    await _sh(mono, "checkout", "-b", "integration")
+    source = tmp_path / "filtered"
+    await _init_repo(source, files={"ts/@acme/billing/index.ts": "export const x = 1;\n"})
+    head = (await _sh(source, "rev-parse", "HEAD")).stdout_tail.strip()
+    git_ = Git(mono, timeout_s=60)
+    provenance = FR.SourceProvenance(repo_id=REPO_ID, sha=head)
+
+    # Seed `migrate/<repo>` pointing at some unrelated, wrong sha (the integration branch's own
+    # initial commit) BEFORE ingest ever runs.
+    stale_target = await git_.rev_parse("integration")
+    await git_.create_branch(f"migrate/{REPO_ID}", stale_target)
+    assert await git_.rev_parse(f"migrate/{REPO_ID}") == stale_target
+
+    result = await FR.ingest(
+        git_, source_dir=source, source=provenance, run_id=RUN_ID,
+        integration_branch="integration",
+    )
+
+    assert await git_.rev_parse(f"migrate/{REPO_ID}") != stale_target
+    assert await git_.rev_parse(f"migrate/{REPO_ID}") == result.merge_sha
+
+
+async def test_ingest_makes_migrate_branch_resolvable_for_promote_one_pr_first_check(
+    tmp_path: Path,
+) -> None:
+    """D115: `_promote_one_pr`'s very first precondition check resolves `migrate/<repo_id>` and
+    refuses if it's `None`. This proves that check now passes after a real `ingest()`, without
+    driving the whole `fleet pr` CLI (item 5 of the task-50 brief's test list)."""
+    mono = tmp_path / "mono"
+    await _init_repo(mono, files={"README.md": "monorepo\n"})
+    await _sh(mono, "checkout", "-b", "integration")
+    source = tmp_path / "filtered"
+    await _init_repo(source, files={"ts/@acme/billing/index.ts": "export const x = 1;\n"})
+    head = (await _sh(source, "rev-parse", "HEAD")).stdout_tail.strip()
+    git_ = Git(mono, timeout_s=60)
+    provenance = FR.SourceProvenance(repo_id=REPO_ID, sha=head)
+
+    assert await git_.resolve(f"migrate/{REPO_ID}") is None  # pre-condition: not yet reachable
+
+    result = await FR.ingest(
+        git_, source_dir=source, source=provenance, run_id=RUN_ID,
+        integration_branch="integration",
+    )
+
+    resolved = await git_.resolve(f"migrate/{REPO_ID}")
+    assert resolved is not None
+    assert resolved == result.merge_sha
 
 
 async def test_snapshot_refs_are_monotonic_and_immutable(repo: Path) -> None:
