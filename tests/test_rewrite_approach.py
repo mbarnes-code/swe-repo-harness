@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 
+import pytest
+
 from fleet.rewrite.approach import compute_approach_signature
 
 DEST = "java/com/acme/billing"
@@ -143,3 +145,81 @@ def test_a_file_add_and_a_file_delete_are_distinct_kinds() -> None:
 #     that out, so the mutation is a real, discriminating perturbation of the property under test.
 #   - The file was restored from the backup and `diff`-verified byte-identical before this test
 #     file was committed.
+
+
+# =======================================================================================
+# 3. Fix round 1 (task review): the ast-grep fallback warns once, never for an unmapped
+#    language, and never on the common (no logger) path.
+# =======================================================================================
+class _RecordingLog:
+    """The one method `_warn_ast_grep_fallback` calls — a structlog `BoundLogger` narrowed to
+    exactly what this module needs, so no real structlog wiring is required to test it."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    def warning(self, event: str, **kw: object) -> None:
+        self.calls.append({"event": event, **kw})
+
+
+def test_ast_grep_fallback_warns_once_and_never_for_an_unmapped_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reviewed gap (fix round 1): a broken/absent `ast-grep` used to degrade classification
+    silently, forever, with nothing to notice it by. `_warn_ast_grep_fallback` fires exactly once
+    per process on a GENUINE ast-grep failure and never for a language simply absent from the
+    kind maps, which is a disclosed, by-design gap rather than a degradation.
+    """
+    import fleet.rewrite.approach as approach_mod
+
+    monkeypatch.setattr(approach_mod, "_warned_ast_grep_fallback", False)
+
+    async def _missing_binary(
+        argv: object, *, cwd: object = None, env: object = None,
+        deadline: object = None, timeout_s: object = None,
+    ) -> None:
+        raise FileNotFoundError("ast-grep")
+
+    import_diff = (
+        f"--- a/{DEST}/x.py\n+++ b/{DEST}/x.py\n@@ -1,2 +1,2 @@\n"
+        " a\n-import old_thing\n+import new_thing\n"
+    )
+    log = _RecordingLog()
+    sig1 = asyncio.run(
+        compute_approach_signature([import_diff], runner=_missing_binary, log=log)  # type: ignore[arg-type]
+    )
+    assert len(log.calls) == 1, "warns on the FIRST ast-grep failure"
+    assert log.calls[0]["event"] == "approach_signature_ast_grep_fallback"
+    assert log.calls[0]["reason"] == "binary not found on PATH"
+
+    # A second, independent call must NOT warn again — one warning per process.
+    sig2 = asyncio.run(
+        compute_approach_signature([import_diff], runner=_missing_binary, log=log)  # type: ignore[arg-type]
+    )
+    assert len(log.calls) == 1, "the second occurrence is silent"
+    assert sig1 == sig2, "the fallback classification is still deterministic"
+
+    # An unmapped language (ruby is not in _IMPORT_KINDS/_PACKAGE_KINDS) never even reaches
+    # ast-grep, so it must never warn — proven with the REAL default runner, never invoked here.
+    monkeypatch.setattr(approach_mod, "_warned_ast_grep_fallback", False)
+    ruby_log = _RecordingLog()
+    ruby_diff = f"--- a/{DEST}/x.rb\n+++ b/{DEST}/x.rb\n@@ -1,2 +1,2 @@\n a\n-b\n+c\n"
+    asyncio.run(compute_approach_signature([ruby_diff], log=ruby_log))  # type: ignore[arg-type]
+    assert ruby_log.calls == [], "an unmapped language is a disclosed gap, not a degradation"
+
+
+def test_ast_grep_fallback_is_silent_when_no_logger_is_supplied() -> None:
+    """`log=None` (the default) must never raise — most callers, including every OTHER test in
+    this file, have no bound logger to hand."""
+    async def _missing_binary(
+        argv: object, *, cwd: object = None, env: object = None,
+        deadline: object = None, timeout_s: object = None,
+    ) -> None:
+        raise FileNotFoundError("ast-grep")
+
+    diff = (
+        f"--- a/{DEST}/x.py\n+++ b/{DEST}/x.py\n@@ -1,2 +1,2 @@\n"
+        " a\n-import old_thing\n+import new_thing\n"
+    )
+    sig = asyncio.run(compute_approach_signature([diff], runner=_missing_binary))  # type: ignore[arg-type]
+    assert len(sig) == 64

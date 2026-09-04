@@ -14,8 +14,11 @@ everything a diff carries that is NOT about the approach:
 `docs/SPEC.md:899-917` (ADR-0021 / §3.2 step 5) names a closed `change_kind` vocabulary
 (`IMPORT_REWRITE`, `PACKAGE_DECL`, `PATH_ALIAS`, `SYMBOL_RENAME`, `DEP_ADD`, `DEP_REMOVE`,
 `FILE_ADD`, `FILE_DELETE`, `OTHER`) and a `target_symbol` sourced from `symbols.fqn` — the
-project's own indexed symbol table. This module has no database access (it is a pure
-diff-in/signature-out function, callable with nothing but a list of unified diffs), so:
+project's own indexed symbol table. `fleet.models.enums.ApproachChangeKind` already declares
+exactly that vocabulary (its own docstring: "assigned by ast-grep in `rewrite/approach.py`") and
+is what `ApproachElement.change_kind` is typed as below — this module never redefines it. This
+module has no database access (it is a pure diff-in/signature-out function, callable with nothing
+but a list of unified diffs), so:
 
 * `target_symbol` is approximated by scanning the hunk's OWN lines (the diff's `@@` context plus
   the changed lines) for the nearest preceding `def`/`class`/`function`/`func` signature, rather
@@ -46,37 +49,25 @@ from __future__ import annotations
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
-from typing import Final
+from typing import TYPE_CHECKING, Final
 
 import yaml  # type: ignore[import-untyped]  # types-PyYAML is not a dependency
 
+from fleet.models.enums import ApproachChangeKind
 from fleet.rewrite.apply import Hunk, _hunk_payload, parse_unified_diff
 from fleet.rewrite.rules import language_for_path
 from fleet.util.fs import scoped_tempdir
 from fleet.util.proc import CommandRunner, run
 
+if TYPE_CHECKING:
+    from structlog.stdlib import BoundLogger
+
 __all__ = [
     "ApproachElement",
-    "ChangeKind",
     "compute_approach_signature",
 ]
-
-
-class ChangeKind(StrEnum):
-    """The closed vocabulary `docs/SPEC.md:906-909` names, per surviving hunk."""
-
-    IMPORT_REWRITE = "IMPORT_REWRITE"
-    PACKAGE_DECL = "PACKAGE_DECL"
-    PATH_ALIAS = "PATH_ALIAS"
-    SYMBOL_RENAME = "SYMBOL_RENAME"
-    DEP_ADD = "DEP_ADD"
-    DEP_REMOVE = "DEP_REMOVE"
-    FILE_ADD = "FILE_ADD"
-    FILE_DELETE = "FILE_DELETE"
-    OTHER = "OTHER"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,7 +75,7 @@ class ApproachElement:
     """One surviving hunk, normalized. `docs/SPEC.md:905`: `(path, change_kind, target_symbol)`."""
 
     path: str
-    change_kind: ChangeKind
+    change_kind: ApproachChangeKind
     target_symbol: str
 
 
@@ -110,6 +101,40 @@ _PACKAGE_KINDS: Final[Mapping[str, tuple[str, ...]]] = {
 _DEF_LINE: Final = re.compile(
     r"^[+\- ]?\s*(?:async\s+)?(?:def|class|function|func)\s+([A-Za-z_][A-Za-z0-9_]*)"
 )
+
+_warned_ast_grep_fallback = False
+"""Module-level, process-lifetime latch for `_warn_ast_grep_fallback` — see that function."""
+
+
+def _warn_ast_grep_fallback(log: BoundLogger | None, *, reason: str, binary: str) -> None:
+    """Fired the FIRST time (per process) `ast-grep` itself fails or is absent — never when a
+    language is simply unmapped, which is a disclosed, by-design gap, not a degradation.
+
+    The reviewed gap this closes: `_matches_any_kind` silently fell back to the coarser
+    add/remove/OTHER heuristic with no signal at all, so a broken or absent `ast-grep` on some
+    host degraded classification fidelity forever with nothing to notice it by. `log` is `None`
+    in the common unit-test path (`compute_approach_signature`'s default) and whenever a caller
+    has none to hand — degrading silently to no-log-at-all there is intentional (this helper must
+    never raise, and a missing logger is not itself the condition being reported); the guard's own
+    caller (`workers/rewrite.py::RewriteWorker._repair_guarded`) always passes `ctx.log`.
+
+    ONE warning per process, not one per hunk/call: a host with no `ast-grep` installed would
+    otherwise emit one line per classified hunk for the lifetime of the run, which is exactly the
+    kind of noise that gets a real signal muted. Not lock-guarded — two concurrent first-callers
+    racing into a duplicate line is an acceptable cost for staying dependency-free here.
+    """
+    global _warned_ast_grep_fallback
+    if _warned_ast_grep_fallback or log is None:
+        return
+    _warned_ast_grep_fallback = True
+    log.warning(
+        "approach_signature_ast_grep_fallback",
+        reason=reason,
+        binary=binary,
+        detail="ast-grep classification failed or is unavailable; ApproachChangeKind "
+        "falls back to the coarser add/remove/OTHER heuristic for IMPORT_REWRITE/"
+        "PACKAGE_DECL-eligible hunks until this process exits (logged once)",
+    )
 
 
 def _target_symbol(hunk: Hunk) -> str:
@@ -142,7 +167,8 @@ async def _classify(
     binary: str,
     runner: CommandRunner,
     timeout_s: float,
-) -> ChangeKind:
+    log: BoundLogger | None,
+) -> ApproachChangeKind:
     """`docs/SPEC.md:907-908`'s closed vocabulary, structural where `ast-grep` can tell and
     diff-structural (pure add / pure remove) otherwise."""
     pre, post = _hunk_payload(hunk.lines)
@@ -152,15 +178,15 @@ async def _classify(
     language = language_for_path(path)
     if language is not None and text.strip():
         kind = await _ast_grep_kind(
-            text, path, language, binary=binary, runner=runner, timeout_s=timeout_s
+            text, path, language, binary=binary, runner=runner, timeout_s=timeout_s, log=log
         )
         if kind is not None:
             return kind
     if not post:  # pure removal
-        return ChangeKind.DEP_REMOVE
+        return ApproachChangeKind.DEP_REMOVE
     if not pre:  # pure insertion
-        return ChangeKind.DEP_ADD
-    return ChangeKind.OTHER
+        return ApproachChangeKind.DEP_ADD
+    return ApproachChangeKind.OTHER
 
 
 async def _ast_grep_kind(
@@ -171,10 +197,13 @@ async def _ast_grep_kind(
     binary: str,
     runner: CommandRunner,
     timeout_s: float,
-) -> ChangeKind | None:
+    log: BoundLogger | None,
+) -> ApproachChangeKind | None:
     """`None` when `ast-grep` is unavailable, the snippet fails to error-free parse a match, or
     the language is not in either kind map — the caller then falls back to the add/remove/OTHER
-    heuristic (see module docstring)."""
+    heuristic (see module docstring). Only the FIRST of those (`ast-grep` genuinely failing) is
+    logged — a language simply absent from `_IMPORT_KINDS`/`_PACKAGE_KINDS` is by design, not a
+    degradation, so it returns `None` here without ever reaching `_warn_ast_grep_fallback`."""
     import_kinds = _IMPORT_KINDS.get(language)
     package_kinds = _PACKAGE_KINDS.get(language)
     if import_kinds is None and package_kinds is None:
@@ -183,13 +212,15 @@ async def _ast_grep_kind(
         target = tmp / f"snippet{PurePosixPath(path).suffix or '.txt'}"
         target.write_text(text, encoding="utf-8")
         if import_kinds is not None and await _matches_any_kind(
-            target, language, import_kinds, binary=binary, runner=runner, timeout_s=timeout_s
+            target, language, import_kinds, binary=binary, runner=runner, timeout_s=timeout_s,
+            log=log,
         ):
-            return ChangeKind.IMPORT_REWRITE
+            return ApproachChangeKind.IMPORT_REWRITE
         if package_kinds is not None and await _matches_any_kind(
-            target, language, package_kinds, binary=binary, runner=runner, timeout_s=timeout_s
+            target, language, package_kinds, binary=binary, runner=runner, timeout_s=timeout_s,
+            log=log,
         ):
-            return ChangeKind.PACKAGE_DECL
+            return ApproachChangeKind.PACKAGE_DECL
     return None
 
 
@@ -201,6 +232,7 @@ async def _matches_any_kind(
     binary: str,
     runner: CommandRunner,
     timeout_s: float,
+    log: BoundLogger | None,
 ) -> bool:
     document = yaml.safe_dump(
         {
@@ -214,8 +246,17 @@ async def _matches_any_kind(
     try:
         result = await runner(argv, timeout_s=timeout_s)
     except FileNotFoundError:
-        return False  # ast-grep not on PATH: degrade to the structural fallback, never raise
+        # ast-grep not on PATH: degrade to the structural fallback, never raise (see the module
+        # docstring for why raising would be worse) — but signal it, once, so a host missing the
+        # binary does not silently lose classification fidelity forever with nothing to notice.
+        _warn_ast_grep_fallback(log, reason="binary not found on PATH", binary=binary)
+        return False
     if not result.started or result.timed_out:
+        _warn_ast_grep_fallback(
+            log,
+            reason="timed out" if result.timed_out else "did not start before the deadline",
+            binary=binary,
+        )
         return False
     stripped = result.stdout_tail.strip()
     return bool(stripped) and stripped not in ("[]", "null")
@@ -230,6 +271,7 @@ async def compute_approach_signature(
     binary: str = "ast-grep",
     runner: CommandRunner = run,
     timeout_s: float = 15.0,
+    log: BoundLogger | None = None,
 ) -> str:
     """`docs/SPEC.md:899-917`: one 64-hex fingerprint over EVERY diff a rung proposed.
 
@@ -239,6 +281,14 @@ async def compute_approach_signature(
     are parsed structurally, whitespace-only hunks are discarded, and the surviving
     `ApproachElement`s are SORTED before hashing (`docs/SPEC.md:912`) — order in the input diffs,
     order of hunks within a file, and order of files in `diffs` are all irrelevant.
+
+    `log` is optional (defaults to `None`, so every caller that has no bound logger to hand —
+    tests included — needs no fake): when `ast-grep` itself fails or is absent (as opposed to a
+    language simply not being in `_IMPORT_KINDS`/`_PACKAGE_KINDS`, which is by design), a single
+    warning is emitted for the lifetime of the process (`_warn_ast_grep_fallback`), so a
+    broken/absent `ast-grep` on some host does not silently degrade classification fidelity
+    forever with nothing to notice it by. `workers/rewrite.py::RewriteWorker._repair_guarded`
+    always passes `ctx.log`.
     """
     elements: list[ApproachElement] = []
     for diff in diffs:
@@ -246,19 +296,21 @@ async def compute_approach_signature(
             path = file_diff.path
             if file_diff.old_path == "/dev/null":
                 elements.extend(
-                    ApproachElement(path, ChangeKind.FILE_ADD, "") for _ in file_diff.hunks
+                    ApproachElement(path, ApproachChangeKind.FILE_ADD, "")
+                    for _ in file_diff.hunks
                 )
                 continue
             if file_diff.new_path == "/dev/null":
                 elements.extend(
-                    ApproachElement(path, ChangeKind.FILE_DELETE, "") for _ in file_diff.hunks
+                    ApproachElement(path, ApproachChangeKind.FILE_DELETE, "")
+                    for _ in file_diff.hunks
                 )
                 continue
             for hunk in file_diff.hunks:
                 if _is_whitespace_only(hunk):
                     continue
                 kind = await _classify(
-                    hunk, path, binary=binary, runner=runner, timeout_s=timeout_s
+                    hunk, path, binary=binary, runner=runner, timeout_s=timeout_s, log=log
                 )
                 elements.append(ApproachElement(path, kind, _target_symbol(hunk)))
     joined = "\n".join(

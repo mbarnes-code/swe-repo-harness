@@ -656,7 +656,9 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
             )
             if repair is None or repair.abandon_reason is not None or not repair.patches:
                 return repair
-            signature = await compute_approach_signature([p.diff for p in repair.patches])
+            signature = await compute_approach_signature(
+                [p.diff for p in repair.patches], log=ctx.log
+            )
             repair = replace(repair, approach_signature=signature)
             if signature not in known:
                 return repair  # fresh approach: proceed normally
