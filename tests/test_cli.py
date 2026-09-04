@@ -51,6 +51,9 @@ from fleet.cli import (
     ExitCode,
     TransformStepUnavailableError,
     _abandon_repo,
+    _AttemptWriter,
+    _BuildEvidence,
+    _BuildSink,
     _prepare_repo,
     _TransformPlan,
     app,
@@ -69,7 +72,7 @@ from fleet.state.db import SCHEMA_PATH, StateWriter
 from fleet.util.proc import ProcResult
 from fleet.util.proc import run as proc_run
 from fleet.vcs.git import Git, GitCommandError, GitError
-from fleet.workers.base import WorkerContext
+from fleet.workers.base import WorkerContext, WorkerResult
 from fleet.workers.classify import ClassifyWorker
 from fleet.workers.clone import CloneWorker
 from tests.test_migrations import _v6_database
@@ -1334,6 +1337,64 @@ def test_status_json_is_machine_readable(workspace: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["run_id"] == RUN_ID
     assert payload["repos"][0]["repo"] == "acme-commons"
+
+
+def test_status_json_reports_the_repo_baseline_migrated_test_count_triple(workspace: Path) -> None:
+    """§12.11's `(repo, baseline, migrated)` report table, the durable half `docs/CRITERIA_PLAN.md`
+    §11 gap 2 asks for (round VI task 47) — `fleet status --json` must render
+    `baseline_test_count`/`migrated_test_count`/`test_count_regressed` for BOTH the never-measured
+    case (`migrated_test_count IS NULL`, `repos.baseline_test_count`'s own DEFAULT of 0) and a real
+    measured regression (14 native tests, 5 after the move), and must never let a real `0`
+    measurement collapse into "not measured" — `acme-billing` below has genuinely zero migrated
+    tests and must NOT read as NULL.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "RUNNING")
+    _put_in_flight(db, "acme-billing", "SUCCEEDED")
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE repos SET baseline_test_count = 14, baseline_ok = 1, migrated_test_count = 5 "
+            "WHERE repo_id = 'acme-commons'"
+        )
+        conn.execute(
+            "UPDATE repos SET baseline_test_count = 0, baseline_ok = 1, migrated_test_count = 0 "
+            "WHERE repo_id = 'acme-billing'"
+        )
+    finally:
+        conn.close()
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "status"])
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    by_repo = {r["repo"]: r for r in json.loads(result.stdout)["repos"]}
+    assert by_repo["acme-commons"]["baseline_test_count"] == 14
+    assert by_repo["acme-commons"]["migrated_test_count"] == 5
+    assert by_repo["acme-commons"]["test_count_regressed"] is True
+    assert by_repo["acme-billing"]["baseline_test_count"] == 0
+    assert by_repo["acme-billing"]["migrated_test_count"] == 0, (
+        "a real zero measurement must render as 0, never collapse into the NULL 'unmeasured' case"
+    )
+    assert by_repo["acme-billing"]["test_count_regressed"] is False
+
+
+def test_status_json_treats_an_unmeasured_migrated_test_count_as_not_regressed(
+    workspace: Path,
+) -> None:
+    """A repo whose `bazel query` step has never run (`migrated_test_count IS NULL`, the default
+    for every pre-existing row after the v10 -> v11 migration) must read as "not yet measured",
+    never as a regression — the same NULL-is-not-a-comparable-number rule
+    `BuildverifyOutput.test_count_regressed` itself enforces via `baseline_ok is True`."""
+    db = workspace / "state" / "fleet.db"
+    _put_in_flight(db, "acme-commons", "RUNNING")
+
+    result = runner.invoke(app, [*base_args(workspace), "--json", "status"])
+
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    row = json.loads(result.stdout)["repos"][0]
+    assert row["repo"] == "acme-commons"
+    assert row["migrated_test_count"] is None
+    assert row["test_count_regressed"] is False
 
 
 def test_status_metrics_out_writes_prometheus_text(workspace: Path) -> None:
@@ -6707,6 +6768,179 @@ async def test_publish_module_lock_survives_a_crash_between_materialize_and_comm
     )
     shown = await integration_git.text(["show", f"integration:{MODULE_LOCK_PATH}"])
     assert shown == lock_content.strip()
+
+
+async def test_migrated_test_count_reaches_repos_after_a_measured_run(
+    tmp_path: Path, worker_ctx: WorkerContext
+) -> None:
+    """§12.11's `(repo, baseline, migrated)` report, the durable write half (`docs/CRITERIA_PLAN.
+    md` §11 gap 2, round VI task 47). `BuildverifyOutput.migrated_test_count` used to live only in
+    the in-memory `WorkerOutput` for the life of one worker run; this drives it through the REAL
+    `BuildPipelineWorker.run` copy step and the REAL `_BuildSink` write, onto a real `repos` row.
+
+    The inner `buildverify` worker is stubbed rather than real, for the same reason `test_workers_
+    build.py::test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_see` needs a
+    hand-built workspace outside the full pipeline: gap 1 (D112) means no production adapter ever
+    populates `BuildUnit.test_srcs`, so `BuildPipelineWorker.run()` itself can never reach a real
+    nonzero `migrated_test_count` end to end today — confirmed by a full-tree grep, same as that
+    test's own docstring records. The stub stands in for exactly what a real measured `bazel
+    query` hands back (`migrated_test_count_measured=True`); everything downstream of it — the
+    composite worker's copy step, `_BuildSink`, the SQLite write — is real production code.
+    """
+    from fleet.cli import BUILDVERIFY_STEP, VERIFY_UNIT
+    from fleet.state.db import initialize_database
+    from fleet.state.repository import SqliteStateRepository
+    from fleet.workers.buildverify import BuildverifyOutput
+
+    class _StubBuildverify:
+        async def preconditions_hold(self, ctx: WorkerContext, payload: object) -> bool:
+            return True
+
+        async def run(
+            self, ctx: WorkerContext, payload: BuildInput
+        ) -> WorkerResult[BuildverifyOutput]:
+            return WorkerResult[BuildverifyOutput](
+                status="ok",
+                output=BuildverifyOutput(
+                    dest=payload.dest,
+                    integration_ref=payload.integration_ref,
+                    build_ok=True,
+                    test_ok=True,
+                    tests_ran=True,
+                    migrated_test_count=5,
+                    migrated_test_count_measured=True,
+                ),
+                completed_units=["build", "test"],
+            )
+
+    worker = BuildPipelineWorker()
+    worker._workers[BUILDVERIFY_STEP] = _StubBuildverify()  # type: ignore[assignment]
+
+    unit = BuildUnit(unit_id="acme-commons", ecosystem=Ecosystem.UNKNOWN, dest="libs/widget")
+    payload = BuildInput(
+        repo_id="acme-commons",
+        dest="libs/widget",
+        unit=unit,
+        integration_ref="refs/fleet/test/integration/0",
+        integration_worktree=str(tmp_path / "unused-integration"),
+        lock_dir=str(tmp_path / "locks"),
+        remaining_units=(VERIFY_UNIT,),
+    )
+
+    result = await worker.run(worker_ctx, payload)
+
+    assert result.output is not None
+    assert result.output.migrated_test_count == 5, (
+        "BuildPipelineWorker.run must copy migrated_test_count when the inner "
+        "migrated_test_count_measured is True"
+    )
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-w47-migrated-test-count") as writer:
+        from fleet.state.db import connect_ro
+
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            now = datetime(2026, 9, 4, tzinfo=UTC)
+            await repo.upsert_run(
+                "run-w47", started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await repo.upsert_repo(
+                "acme-commons",
+                name="acme-commons",
+                url="https://example.invalid/acme-commons.git",
+                now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer,
+                repository=repo,
+                read_conn=read_conn,
+                run_id="run-w47",
+                clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts,
+                writer=writer,
+                run_id="run-w47",
+                evidence=_BuildEvidence(),
+                clock=lambda: now,
+            )
+            await sink(repo_id="acme-commons", phase=Phase.BUILD, fence=1, result=result)
+        finally:
+            await read_conn.close()
+
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = plain.execute(
+            "SELECT migrated_test_count FROM repos WHERE repo_id = ?", ("acme-commons",)
+        ).fetchone()
+    finally:
+        plain.close()
+    assert row == (5,), "the measured count must reach repos.migrated_test_count"
+
+
+async def test_a_never_measured_migrated_test_count_writes_nothing_to_repos(
+    tmp_path: Path,
+) -> None:
+    """The other half of the same write site: `BuildOutput.migrated_test_count is None` (the
+    inner `bazel query` step never ran) must leave `repos.migrated_test_count` untouched at its
+    NULL default — writing a `0` here would be indistinguishable from a genuine zero-test
+    measurement once it lands in the durable column (`docs/CRITERIA_PLAN.md` §11 gap 2)."""
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-w47-unmeasured") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            now = datetime(2026, 9, 4, tzinfo=UTC)
+            await repo.upsert_run(
+                "run-w47b", started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            await repo.upsert_repo(
+                "acme-commons",
+                name="acme-commons",
+                url="https://example.invalid/acme-commons.git",
+                now=now,
+            )
+            attempts = _AttemptWriter(
+                writer=writer,
+                repository=repo,
+                read_conn=read_conn,
+                run_id="run-w47b",
+                clock=lambda: now,
+            )
+            sink = _BuildSink(
+                attempts=attempts,
+                writer=writer,
+                run_id="run-w47b",
+                evidence=_BuildEvidence(),
+                clock=lambda: now,
+            )
+            await sink(
+                repo_id="acme-commons",
+                phase=Phase.BUILD,
+                fence=1,
+                result=WorkerResult[BuildOutput](
+                    status="ok",
+                    output=BuildOutput(repo_id="acme-commons", build_ok=True),
+                ),
+            )
+        finally:
+            await read_conn.close()
+
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        row = plain.execute(
+            "SELECT migrated_test_count FROM repos WHERE repo_id = ?", ("acme-commons",)
+        ).fetchone()
+    finally:
+        plain.close()
+    assert row == (None,), "an unmeasured count must never be written as a real 0"
 
 
 # --------------------------------------------------------------------------------------

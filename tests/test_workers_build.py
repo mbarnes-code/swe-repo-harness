@@ -2895,6 +2895,66 @@ def test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it(
     )
 
 
+def _query_ok(*labels: str) -> RecordingRunner:
+    """Build green, test green, `bazel query 'tests(//<dest>/...)'` green with `labels`."""
+    stdout = "".join(f"{label}\n" for label in labels)
+    return RecordingRunner(
+        [
+            (lambda p: "query" in p, ok(stdout)),
+            (lambda p: True, ok("INFO: Build completed successfully, 4 total actions\n")),
+        ]
+    )
+
+
+async def test_migrated_test_count_measured_is_true_only_when_the_query_actually_ran(
+    tmp_path,
+) -> None:
+    """`BuildverifyOutput.migrated_test_count_measured` (round VI task 47, `docs/CRITERIA_PLAN.md`
+    §11 gap 2) is the one bit the durable-persistence write site needs and `migrated_test_count`
+    alone cannot carry: that field's own `0` default means BOTH "the query never ran" and
+    "measured, found nothing" (see its docstring). This is the boolean's own worker-level proof,
+    the counterpart to `test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_see`
+    below, which needs a real `bazel` binary and is skipped without one — this needs neither.
+    """
+    dest = a_package(tmp_path)
+
+    # baseline_ok is True (and run_tests defaults True): the query step runs for real.
+    measured_payload = BuildverifyInput(
+        dest=dest,
+        integration_ref=SNAPSHOT,
+        log_dir=str(tmp_path / "logs"),
+        baseline_test_count=2,
+        baseline_ok=True,
+    )
+    measured = await BuildverifyWorker(runner=_query_ok("//pkg:a_test", "//pkg:b_test")).run(
+        make_ctx(tmp_path), measured_payload
+    )
+    out = measured.output
+    assert out is not None
+    assert measured.status == "ok", measured.error
+    assert out.migrated_test_count == 2
+    assert out.migrated_test_count_measured is True, (
+        "the query really ran and returned a count — this must be recorded as measured"
+    )
+
+    # baseline_ok defaults to None: §12.11's count comparison never runs (`BuildverifyInput.
+    # baseline_ok`'s own docstring), so the query step must never even be dispatched.
+    unmeasured_payload = BuildverifyInput(
+        dest=dest, integration_ref=SNAPSHOT, log_dir=str(tmp_path / "logs")
+    )
+    unmeasured = await BuildverifyWorker(runner=_query_ok("//pkg:a_test", "//pkg:b_test")).run(
+        make_ctx(tmp_path), unmeasured_payload
+    )
+    out = unmeasured.output
+    assert out is not None
+    assert unmeasured.status == "ok", unmeasured.error
+    assert out.migrated_test_count == 0, "the default — the query never ran to overwrite it"
+    assert out.migrated_test_count_measured is False, (
+        "no query ran, so this must stay False rather than default to a value indistinguishable "
+        "from a real zero-test measurement once it reaches `repos.migrated_test_count`"
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     shutil.which("bazel") is None,

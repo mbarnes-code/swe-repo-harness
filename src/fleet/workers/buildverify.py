@@ -663,6 +663,18 @@ class BuildverifyOutput(WorkerOutput):
         "`True`) as well as when it genuinely found nothing — `baseline_ok`/`baseline_test_count` "
         "on the same row disambiguate the two, exactly as they already do for `no_test_targets`.",
     )
+    migrated_test_count_measured: bool = Field(
+        default=False,
+        description="`True` iff the `bazel query` step actually ran and returned a count — the "
+        "one bit `migrated_test_count` alone cannot carry, because its own `0` default means both "
+        "'never measured' and 'measured, found nothing' (see that field's own docstring). Set "
+        "immediately alongside `migrated_test_count`'s assignment below, before the "
+        "`test_count_regressed` check — so it is `True` on a regression too, not only on a clean "
+        "run. Read by `docs/CRITERIA_PLAN.md` §11 gap 2's durable-persistence write site "
+        "(`cli.py::BuildPipelineWorker`/`_BuildSink`) to decide whether `repos."
+        "migrated_test_count` should be written at all: writing `0` here would be indistinguishable "
+        "from a genuine zero-test measurement once it reaches the durable column.",
+    )
 
     @property
     def tests_lost(self) -> bool:
@@ -1069,6 +1081,7 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
                 output.migrated_test_count = len(
                     parse_target_labels(query_stdout(tests_query(payload.dest), query_result))
                 )
+                output.migrated_test_count_measured = True
             except BazelQueryError as exc:
                 return WorkerResult[BuildverifyOutput](
                     status="failed",

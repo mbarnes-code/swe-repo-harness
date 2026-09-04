@@ -43,6 +43,7 @@ from fleet.migrations import (
     v007_logical_keys,
     v008_reservations,
 )
+from fleet.migrations import _support
 from fleet.migrations._support import sha256_nul
 from fleet.models.graph import edge_key_for
 from fleet.state.db import SCHEMA_PATH
@@ -389,14 +390,14 @@ def _table_shape(path: Path, table: str) -> list[tuple[object, ...]]:
 def test_registry_is_strictly_ordered_contiguous_and_ends_at_the_baseline():
     """A glob-discovered ladder can silently reorder; a gap or a duplicate corrupts data.
 
-    §6 fixes the ladder as `1 → 2 … 9 → 10`, so the registry must be exactly that: strictly
+    §6 fixes the ladder as `1 → 2 … 10 → 11`, so the registry must be exactly that: strictly
     ascending, no duplicate VERSION, no gap, and ending on the version `schema.sql` installs.
     """
     versions = [step.version for step in STEPS]
     assert versions == sorted(versions), "steps are not in ascending order"
     assert len(set(versions)) == len(versions), "duplicate VERSION in the registry"
     assert versions == list(range(EARLIEST_MIGRATABLE_VERSION + 1, LATEST_VERSION + 1))
-    assert versions == [2, 3, 4, 5, 6, 7, 8, 9, 10]
+    assert versions == [2, 3, 4, 5, 6, 7, 8, 9, 10, 11]
     assert len({step.module for step in STEPS}) == len(STEPS), "two steps share a module"
 
 
@@ -844,6 +845,115 @@ def test_the_reservations_table_a_migration_builds_matches_a_fresh_one(tmp_path)
             )
         }
         assert v008_reservations.INDEX in indexes, f"the reaper's only scan is missing in {db}"
+
+
+def _repos_ddl_before_v11() -> str:
+    """`repos`'s live `CREATE TABLE`, with exactly the one column this rung adds stripped back
+    out — derived from the real baseline rather than hand-copied, so the fixture cannot drift
+    from the REST of `repos`'s shape the way a fully hand-typed `CREATE TABLE` could."""
+    live = _support.baseline_table_ddl(SCHEMA_SQL)["repos"]
+    marker = "migrated_test_count INTEGER, "
+    assert marker in live, "v011's own column definition text moved; update this fixture"
+    return live.replace(marker, "", 1)
+
+
+def _v10_database_without_migrated_test_count(path: Path) -> Path:
+    """A database GENUINELY at `user_version = 10`, `repos` missing `migrated_test_count` —
+    the shape a real database already at v10 before this rung shipped actually has.
+
+    `_v6_database(..., up_to=10)` does NOT produce this shape: `repos` is on 6 → 7's `_REBUILD`
+    list, and that rebuild sources its target DDL from the *live* `state/schema.sql`
+    (`v011_migrated_test_count`'s own docstring explains why), so replaying the ladder with
+    TODAY's code gives `repos.migrated_test_count` four rungs early, at v7, NULL by its declared
+    absence of a DEFAULT. Both shapes are real — a database migrated fully from before v7 using
+    today's code, and a database that has genuinely sat at v10 since before this rung existed —
+    and this fixture is the second one, built by hand because the ladder itself cannot produce it
+    anymore now that this rung has landed.
+    """
+    _fresh_baseline(path)
+    conn = sqlite3.connect(path, isolation_level=None)
+    try:
+        conn.execute("PRAGMA foreign_keys = OFF")
+        conn.execute("DROP TABLE repos")
+        conn.execute(_repos_ddl_before_v11())
+        for repo_id, name, radius in (("repo-a", "alpha", 7), ("repo-b", "beta", 2)):
+            conn.execute(
+                "INSERT INTO repos (repo_id, name, url, blast_radius, updated_at) "
+                "VALUES (?,?,?,?,?)",
+                (repo_id, name, f"git@x/{name}.git", radius, NOW),
+            )
+        conn.execute("PRAGMA user_version = 10")
+    finally:
+        conn.close()
+    return path
+
+
+def test_the_ten_to_eleven_step_adds_migrated_test_count_as_null_not_zero(tmp_path):
+    """§12.11's `(repo, baseline, migrated)` report needs a durable place for the `migrated` half
+    (`docs/CRITERIA_PLAN.md` §11 gap 2). `repo-a`/`repo-b` pre-exist this rung with no test count
+    ever measured, so the back-fill MUST be NULL — 0 is a real "zero test targets" measurement and
+    conflating the two is exactly the trap `baseline_test_count`'s own pre-7 back-fill note warns
+    about, just for the column one over."""
+    db = _v10_database_without_migrated_test_count(tmp_path / "fleet.db")
+    assert current_version(db) == 10
+    assert "migrated_test_count" not in {
+        row[1] for row in _query(db, "PRAGMA table_info('repos')")
+    }
+
+    before, after = migrate(db, steps=_STEPS_THROUGH(11))
+
+    assert (before, after) == (10, 11)
+    assert current_version(db) == 11
+    rows = _query(db, "SELECT repo_id, migrated_test_count FROM repos ORDER BY repo_id")
+    assert rows == [("repo-a", None), ("repo-b", None)], "pre-existing rows must back-fill to NULL"
+
+
+def test_a_full_ladder_replay_from_v6_gets_the_same_column_four_rungs_early(tmp_path):
+    """The OTHER real path: a database migrated fully from before v7 using TODAY's code gets
+    `repos.migrated_test_count` at v7 already (6 → 7's rebuild reads the live `schema.sql`), and
+    this rung's own guard must recognise that and do nothing rather than raise "duplicate column"
+    — see `v011_migrated_test_count`'s docstring for why both paths are real."""
+    db = _v6_database(tmp_path / "fleet.db", up_to=7)
+    assert current_version(db) == 7
+    rows = _query(db, "SELECT repo_id, migrated_test_count FROM repos ORDER BY repo_id")
+    assert rows == [("repo-a", None), ("repo-b", None)], "the rebuild's own DEFAULT-less NULL"
+
+    before, after = migrate(db, steps=_STEPS_THROUGH(11))
+
+    assert (before, after) == (7, 11)
+    assert current_version(db) == 11
+    assert _query(
+        db, "SELECT repo_id, migrated_test_count FROM repos ORDER BY repo_id"
+    ) == [("repo-a", None), ("repo-b", None)], "the guard must not touch a column already there"
+
+
+def test_the_migrated_test_count_column_a_migration_builds_matches_a_fresh_one(tmp_path):
+    """Migrated-at-11 and fresh-at-11 must be the same shape (name, type, notnull, default) —
+    the same structural-identity guarantee `test_migrated_tables_match_a_freshly_created_v7_
+    baseline` proves for the whole 6 → 7 rebuild, narrowed to this rung's one `ADD COLUMN`."""
+    migrated = _v6_database(tmp_path / "old.db", up_to=6)
+    migrate(migrated)
+    fresh = _fresh_baseline(tmp_path / "new.db")
+
+    assert _table_shape(migrated, "repos") == _table_shape(fresh, "repos")
+
+
+def test_migrating_a_current_v11_database_is_idempotent_for_migrated_test_count(tmp_path):
+    """`fleet migrate-db` run twice on an already-current database must not touch a column it
+    already added — the general no-op guarantee `test_migrating_an_already_current_database_is_a_
+    no_op` proves for the whole schema, re-asserted here for the specific value this rung writes."""
+    db = _v6_database(tmp_path / "fleet.db", up_to=11)
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute("UPDATE repos SET migrated_test_count = 5 WHERE repo_id = 'repo-a'")
+    finally:
+        conn.close()
+
+    assert migrate(db) == (LATEST_VERSION, LATEST_VERSION)
+
+    assert _query(
+        db, "SELECT repo_id, migrated_test_count FROM repos ORDER BY repo_id"
+    ) == [("repo-a", 5), ("repo-b", None)]
 
 
 # --------------------------------------------------------------------------------------

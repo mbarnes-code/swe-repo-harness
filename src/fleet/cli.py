@@ -39,7 +39,7 @@ import os
 import shutil
 import sqlite3
 import time
-from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
+from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -5964,6 +5964,14 @@ class BuildOutput(WorkerOutput):
     build_ok: bool = False
     test_ok: bool = False
     tests_ran: bool = False
+    migrated_test_count: int | None = None
+    """`BuildverifyOutput.migrated_test_count`, carried across only when `BuildverifyOutput.
+    migrated_test_count_measured` was `True` — i.e. the real `bazel query 'tests(//<dest>/...)'`
+    step actually ran (§12.11). `None` means "never measured" and is the honest bootstrap answer
+    for a CONTRACT node (`run_tests=False`) and for any repo with no `baseline_ok IS True` native
+    baseline to compare against — the same NULL-means-unmeasured distinction `repos.
+    baseline_test_count`/`baseline_ok` already draw, so `0` is never written here as a stand-in
+    for "not measured" (`docs/CRITERIA_PLAN.md` §11 gap 2, round VI task 47)."""
     published_sha: str = ""
     already_published: bool = False
     module_lock_published: bool = False
@@ -6102,6 +6110,8 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
                 output.build_ok = verified.build_ok
                 output.test_ok = verified.test_ok
                 output.tests_ran = verified.tests_ran
+                if verified.migrated_test_count_measured:
+                    output.migrated_test_count = verified.migrated_test_count
             if result.status != "ok":
                 return self._handoff(result, units, landed, output)
             landed.append(VERIFY_UNIT)
@@ -7106,6 +7116,22 @@ class _BuildSink:
                 severity="warn",
                 now=self._clock(),
             )
+        if output.migrated_test_count is not None:
+            # §12.11's `(repo, baseline, migrated)` report, `migrated` half (`docs/CRITERIA_PLAN.
+            # md` §11 gap 2). Written whenever the real `bazel query 'tests(//<dest>/...)'` step
+            # actually ran — including on a `test_count_regressed` REFUSAL, not only on a green
+            # dispatch, since a regression is exactly the case §12.11 needs this row for. `None`
+            # (never measured) writes nothing, on purpose: a `0` written here would be
+            # indistinguishable from a genuine zero-test measurement once it reaches this column.
+            migrated_params = (output.migrated_test_count, _iso(self._clock()), repo_id)
+
+            async def write_migrated_test_count(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "UPDATE repos SET migrated_test_count = ?, updated_at = ? WHERE repo_id = ?",
+                    migrated_params,
+                )
+
+            await self._writer.submit(write_migrated_test_count)
         if not output.published_sha:
             return
         params = (output.published_sha, _iso(self._clock()), self._run_id, repo_id, int(phase),
@@ -11295,6 +11321,55 @@ def _parse_filters(raw: Sequence[str]) -> dict[str, str]:
     return out
 
 
+#: `fleet status`'s fallback for a repo `_test_count_report` found no `repos` row for — should
+#: never actually fire (every `state.repos` id comes from a `phases JOIN repos` projection, so a
+#: matching `repos` row is guaranteed), kept only so a `--filter`/re-entry race degrades to the
+#: same "not yet measured" reading the column's own NULL means, rather than a `KeyError`.
+_NO_TEST_COUNT_REPORT: Final[dict[str, object]] = {
+    "baseline_test_count": 0,
+    "baseline_ok": None,
+    "migrated_test_count": None,
+    "test_count_regressed": False,
+}
+
+
+async def _test_count_report(
+    conn: aiosqlite.Connection, repo_ids: Iterable[str]
+) -> dict[str, dict[str, object]]:
+    """§12.11's `(repo, baseline, migrated)` report, the `fleet status` half (`docs/CRITERIA_PLAN.
+    md` §11 gap 2): `repos.baseline_test_count`/`baseline_ok`/`migrated_test_count` per repo, plus
+    the derived `test_count_regressed` — the SAME comparison `BuildverifyOutput.
+    test_count_regressed` itself uses (`baseline_ok is True and migrated_test_count <
+    baseline_test_count`), not restated independently, with `migrated_test_count IS NULL` read as
+    "not yet measured" and therefore never regressed.
+    """
+    ids = list(dict.fromkeys(repo_ids))
+    if not ids:
+        return {}
+    placeholders = ", ".join("?" for _ in ids)
+    out: dict[str, dict[str, object]] = {}
+    for repo_id, baseline_test_count, baseline_ok, migrated_test_count in await _rows(
+        conn,
+        "SELECT repo_id, baseline_test_count, baseline_ok, migrated_test_count "
+        f"  FROM repos WHERE repo_id IN ({placeholders})",  # noqa: S608 -- placeholders are `?`s
+        tuple(ids),
+    ):
+        baseline_ok_value = None if baseline_ok is None else bool(baseline_ok)
+        migrated_value = None if migrated_test_count is None else int(migrated_test_count)
+        regressed = (
+            baseline_ok_value is True
+            and migrated_value is not None
+            and migrated_value < int(baseline_test_count)
+        )
+        out[str(repo_id)] = {
+            "baseline_test_count": int(baseline_test_count),
+            "baseline_ok": baseline_ok_value,
+            "migrated_test_count": migrated_value,
+            "test_count_regressed": regressed,
+        }
+    return out
+
+
 async def _status_once(
     opts: GlobalOptions,
     path: Path,
@@ -11319,6 +11394,7 @@ async def _status_once(
             return
 
         state = await build_state(conn, UUID(run_id))
+        test_counts = await _test_count_report(conn, state.repos.keys())
         rows = [
             {
                 "repo": repo_id,
@@ -11329,6 +11405,7 @@ async def _status_once(
                 "blast_radius": repo.blast_radius,
                 "blocked_by": list(repo.blocked_by),
                 "stubbed_deps": list(repo.stubbed_deps),
+                **test_counts.get(repo_id, _NO_TEST_COUNT_REPORT),
             }
             for repo_id, repo in sorted(state.repos.items())
         ]
@@ -11358,7 +11435,10 @@ async def _status_once(
         lines = [f"run {run_id}  ({len(rows)} repos)"]
         lines += [
             f"  {r['repo']:<32} phase={r['phase']} {r['status']:<28} "
-            f"wave={r['wave']} attempts={r['attempts']} blast={r['blast_radius']}"
+            f"wave={r['wave']} attempts={r['attempts']} blast={r['blast_radius']} "
+            f"tests={r['baseline_test_count']}->"
+            f"{'?' if r['migrated_test_count'] is None else r['migrated_test_count']}"
+            f"{' REGRESSED' if r['test_count_regressed'] else ''}"
             for r in rows
         ]
         if metrics:
