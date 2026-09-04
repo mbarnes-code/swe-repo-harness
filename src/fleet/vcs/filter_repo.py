@@ -455,6 +455,7 @@ async def ingest(
         existing = await already_ingested(git, integration_branch, source)
         if existing is not None:
             snapshot = await integration_snapshot(git, run_id, tip=integration_branch)
+            await git.create_branch(f"migrate/{source.repo_id}", existing, force=True)
             return IngestResult(
                 merge_sha=existing, snapshot=snapshot, already_present=True, source=source
             )
@@ -462,6 +463,7 @@ async def ingest(
         rev = await fetch_local(git, source_dir, source_ref=source_ref, dest_ref=incoming)
         merge_sha = await merge_source(git, rev=rev, source=source)
         snapshot = await integration_snapshot(git, run_id, tip=integration_branch)
+        await git.create_branch(f"migrate/{source.repo_id}", merge_sha, force=True)
         return IngestResult(
             merge_sha=merge_sha, snapshot=snapshot, already_present=False, source=source
         )
