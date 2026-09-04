@@ -42,7 +42,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import ClassVar, Final
 from uuid import UUID, uuid5
@@ -52,10 +52,12 @@ from pydantic import Field, JsonValue
 from fleet.llm.calls import escalate_repair, propose_repair
 from fleet.llm.client import LlmError
 from fleet.llm.schemas import ProposedFileEdit
+from fleet.models.base import FleetModel
 from fleet.models.enums import ContextPolicy, FailureClass, Phase, TransformTier
 from fleet.models.tasks import FilePatch, RejectedApproach, TokenUsage
 from fleet.orchestrator.registry import register_worker
 from fleet.rewrite.apply import check_diff
+from fleet.rewrite.approach import compute_approach_signature
 from fleet.rewrite.pipeline import DEFAULT_MAX_PASSES, RewriteOutcome, RewritePipeline
 from fleet.rewrite.rules import EngineRegistry, RewriteRule
 from fleet.util.fs import DiskFloorBreached, require_free_space, scoped_tempdir
@@ -84,6 +86,9 @@ from fleet.workers.base import (
 
 __all__ = [
     "TASK_NAMESPACE",
+    "AnchoredRejection",
+    "FailedApproach",
+    "GuardOffEvent",
     "RewriteInput",
     "RewriteOutput",
     "RewriteWorker",
@@ -211,6 +216,42 @@ class _Repair:
     patches: tuple[FilePatch, ...]
     usage: TokenUsage
     abandon_reason: str | None = None
+    approach_signature: str | None = None
+    """The candidate's ADR-0021 fingerprint, set whenever `patches` is non-empty (§3.2 step 5) —
+    carried so `run()` can record a LATER, genuine failure (a post-signature `git apply` or
+    `check_diff` rejection) into `rejected_approaches` without recomputing it."""
+
+
+class AnchoredRejection(FleetModel):
+    """One proposal rejected BEFORE any probe or worktree mutation because its
+    `approach_signature` collided with this unit's own `rejected_approaches` set (ADR-0021, §3.2
+    step 5) — the ladder's memory event for exactly one `attempts` row with
+    `failure_class='ANCHORED_REPEAT'`, `exit_code=NULL`, `command='[]'`. The LLM call that
+    produced it still cost something (`usage`); detection is free, the call was not.
+    """
+
+    unit: str
+    approach_signature: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=280)
+    usage: TokenUsage = Field(default_factory=TokenUsage)
+
+
+class FailedApproach(FleetModel):
+    """One proposal that reached `git apply`/`check_diff` and was genuinely rejected — the
+    signal `rejected_approaches` (ADR-0021) exists to carry forward, never a diff."""
+
+    unit: str
+    approach_signature: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reason: str = Field(min_length=1, max_length=280)
+    failure_class: FailureClass
+
+
+class GuardOffEvent(FleetModel):
+    """`--no-anchoring-guard` let a colliding proposal apply anyway (ADR-0021, §10): the run's
+    `findings` record that the guard was off for this unit."""
+
+    unit: str
+    approach_signature: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
 class RewriteInput(WorkerInput):
@@ -249,6 +290,25 @@ class RewriteInput(WorkerInput):
         description="ADR-0021 memory, rendered ONLY under EVIDENCE_PLUS_REJECTED_APPROACHES. It "
         "carries no diff text, so a raw prior patch cannot travel inside it.",
     )
+    anchoring_enabled: bool = Field(
+        default=True,
+        description="`transform.anchoring.enabled`; `--no-anchoring-guard` sets this False for "
+        "the run (§10). False means signatures are still computed, never enforced: a colliding "
+        "proposal is applied anyway and the run's findings record the guard was off.",
+    )
+    max_reasks_per_rung: int = Field(
+        default=1,
+        ge=0,
+        description="`transform.anchoring.max_reasks_per_rung` (ADR-0021, §3.2 step 5). A "
+        "re-ask does NOT count as an attempt: it is spent inside this same rung's invocation.",
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="The D89/ADR-0101 coarse `tasks` row id for this dispatch — what "
+        "`rejected_approaches.task_id`'s FK references (no per-unit `tasks` row exists). `None` "
+        "only in a hand-built payload with no driver behind it; the guard then falls back to a "
+        "per-unit synthetic id (`task_id_for`) that is never written to SQL.",
+    )
     prior_rejected_diffs: list[FilePatch] = Field(
         default_factory=list,
         description="ADR-0021/ADR-0108: already-rejected FilePatches for this task's ladder, "
@@ -277,6 +337,23 @@ class RewriteOutput(WorkerOutput):
     commits: list[str] = Field(default_factory=list)
     skipped: list[str] = Field(default_factory=list, description="Guard said already applied")
     unresolved: list[str] = Field(default_factory=list, description="§3.2 success needs this empty")
+    anchored_rejections: list[AnchoredRejection] = Field(
+        default_factory=list,
+        description="ADR-0021: one entry per proposal rejected before any probe or worktree "
+        "mutation. The caller writes one `attempts` row per entry (`failure_class="
+        "'ANCHORED_REPEAT'`, `exit_code=NULL`) — this list never itself reaches SQLite.",
+    )
+    failed_approaches: list[FailedApproach] = Field(
+        default_factory=list,
+        description="ADR-0021: a proposal that reached `git apply`/`check_diff` and was "
+        "genuinely rejected. The caller inserts each into `rejected_approaches` so a later "
+        "rung's EVIDENCE_PLUS_REJECTED_APPROACHES render can cite it.",
+    )
+    guard_off: list[GuardOffEvent] = Field(
+        default_factory=list,
+        description="`--no-anchoring-guard` applied a colliding proposal anyway. The caller "
+        "writes one `findings` row per entry.",
+    )
 
 
 @register_worker
@@ -448,8 +525,12 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                         continue
 
                 # Unresolved after the deterministic rung: escalate, or carry the evidence out.
-                repair = await self._repair(
-                    ctx, payload, unit=unit, source=source, evidence=repair_evidence
+                # ADR-0021 §3.2 step 5: `_repair_guarded` is `_repair` plus the anti-anchoring
+                # guard — it may call `_repair` more than once (re-asks), each rejected candidate
+                # recorded on `output.anchored_rejections` and never reaching `land_patches`.
+                repair = await self._repair_guarded(
+                    ctx, payload, unit=unit, source=source, evidence=repair_evidence,
+                    output=output,
                 )
                 usage = accumulate(usage, repair.usage) if repair is not None else usage
                 # `abandon_recommended` is checked BEFORE the patches, not after: the schema makes
@@ -483,6 +564,10 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                     # way the deterministic branch gates its own patch above.
                     path, reason = rejected
                     output.unresolved.append(unit)
+                    self._record_failed_approach(
+                        output, repair, unit=unit, reason=f"check_diff: {reason}",
+                        failure_class=FailureClass.PATCH_REJECTED,
+                    )
                     return self._failed(
                         FailureClass.PATCH_REJECTED,
                         retryable=True,  # a later rung may propose a smaller or in-tree patch
@@ -506,6 +591,10 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                     )
                 except (PatchApplyError, GitCommandError) as exc:
                     output.unresolved.append(unit)
+                    self._record_failed_approach(
+                        output, repair, unit=unit, reason="git apply rejected the proposal",
+                        failure_class=FailureClass.PATCH_REJECTED,
+                    )
                     return self._failed(
                         FailureClass.PATCH_REJECTED,
                         retryable=True,
@@ -528,6 +617,75 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
 
     # ------------------------------------------------------------------ the ladder's one call
 
+    async def _repair_guarded(
+        self,
+        ctx: WorkerContext,
+        payload: RewriteInput,
+        *,
+        unit: str,
+        source: str,
+        evidence: tuple[FailureClass, str, str] | None,
+        output: RewriteOutput,
+    ) -> _Repair | None:
+        """`_repair` plus the ADR-0021 anti-anchoring guard (§3.2 step 5, `docs/SPEC.md:899-935`).
+
+        Computes `approach_signature` (`rewrite/approach.py`) on every candidate BEFORE it can
+        reach `check_diff`/`land_patches` — i.e. before any worktree mutation or probe — and
+        checks it against this unit's own `rejected_approaches` set (`ctx.db`, read-only). On a
+        collision with the guard enabled, the candidate is rejected for free (recorded on
+        `output.anchored_rejections`, never applied) and the rung is RE-ASKED, same evidence plus
+        the freshly-collided signature, up to `payload.max_reasks_per_rung` times — a re-ask is
+        NOT an attempt, so this loop never touches `phases.attempts`. Exhausting the budget still
+        anchored abandons the rung exactly as any other repair failure would (the caller's
+        existing `abandon_reason` branch). With the guard disabled (`--no-anchoring-guard`), a
+        collision is applied anyway and recorded on `output.guard_off` instead.
+        """
+        if ctx.tier is TransformTier.DETERMINISTIC or evidence is None:
+            return None
+        # `payload.task_id` is the COARSE `tasks` row a real driver mints (`rejected_approaches`
+        # has no per-unit `tasks` row to reference); a hand-built payload with no driver behind
+        # it falls back to the per-unit synthetic id, which is never written to SQL either way.
+        task_id = payload.task_id or str(task_id_for(ctx, self.phase, unit))
+        known = set(await ctx.db.get_rejected_approach_signatures(str(ctx.run_id), task_id))
+        extra_signatures: list[str] = []
+        reasks_used = 0
+        while True:
+            repair = await self._repair(
+                ctx, payload, unit=unit, source=source, evidence=evidence,
+                extra_rejected_signatures=extra_signatures,
+            )
+            if repair is None or repair.abandon_reason is not None or not repair.patches:
+                return repair
+            signature = await compute_approach_signature(
+                [p.diff for p in repair.patches], log=ctx.log
+            )
+            repair = replace(repair, approach_signature=signature)
+            if signature not in known:
+                return repair  # fresh approach: proceed normally
+            if not payload.anchoring_enabled:
+                output.guard_off.append(
+                    GuardOffEvent(unit=unit, approach_signature=signature)
+                )
+                return repair  # apply the repeat anyway; the finding records the guard was off
+            output.anchored_rejections.append(
+                AnchoredRejection(
+                    unit=unit,
+                    approach_signature=signature,
+                    reason=f"{unit}: proposal re-fingerprints a rejected approach ({signature})",
+                    usage=repair.usage,
+                )
+            )
+            if reasks_used >= payload.max_reasks_per_rung:
+                return _Repair(
+                    patches=(),
+                    usage=TokenUsage(),
+                    abandon_reason=f"{unit}: anchored on {signature} after "
+                    f"{reasks_used} re-ask(s) exhausted the budget",
+                )
+            reasks_used += 1
+            known = known | {signature}
+            extra_signatures = [*extra_signatures, signature]
+
     async def _repair(
         self,
         ctx: WorkerContext,
@@ -536,6 +694,7 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         unit: str,
         source: str,
         evidence: tuple[FailureClass, str, str] | None,
+        extra_rejected_signatures: Sequence[str] = (),
     ) -> _Repair | None:
         """Ask the rung's role for a patch through `ctx.llm`, §7.7's one call surface.
 
@@ -551,7 +710,8 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         client = ctx.llm
         failure, probe, stderr = evidence
         rendered = self._evidence(
-            ctx, payload, unit=unit, source=source, failure=failure, probe=probe, stderr=stderr
+            ctx, payload, unit=unit, source=source, failure=failure, probe=probe, stderr=stderr,
+            extra_rejected_signatures=extra_rejected_signatures,
         )
         try:
             if ctx.tier is TransformTier.LLM_ESCALATION:
@@ -581,6 +741,7 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         failure: FailureClass,
         probe: str,
         stderr: str,
+        extra_rejected_signatures: Sequence[str] = (),
     ) -> dict[str, JsonValue]:
         """The rung's context, composed by `ContextPolicy` (§3.2 step 5, ADR-0021).
 
@@ -592,6 +753,12 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         — a raw diff travels only via `payload.prior_rejected_diffs` (§12.35, ADR-0108). `stderr`
         is the verbatim text of the failure being repaired right now — this worker holds no
         transcript to append.
+
+        `extra_rejected_signatures` is a THIRD, policy-independent channel: `_repair_guarded`'s
+        anti-anchoring re-ask populates it with the signature(s) that just collided, so a re-ask
+        avoids repeating them even under a rung whose normal `ContextPolicy` renders no
+        rejected-approach summaries at all (the default ladder's rung 2 is `EVIDENCE_ONLY`).
+        Never a diff — only the signature, same as every other channel here.
         """
         rendered: dict[str, JsonValue] = {
             "repo_id": ctx.repo_id,
@@ -623,6 +790,8 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
                 {"path": prior.path, "diff": prior.diff}
                 for prior in payload.prior_rejected_diffs
             ]
+        if extra_rejected_signatures:
+            rendered["locally_rejected_signatures"] = list(extra_rejected_signatures)
         return rendered
 
     # ------------------------------------------------------------------ result shaping
@@ -636,6 +805,32 @@ class RewriteWorker(BaseWorker[RewriteInput, RewriteOutput]):
         return tuple(
             FilePatch(path=edit.path, diff=edit.diff, tier=tier, parse_probe_ok=False)
             for edit in files
+        )
+
+    @staticmethod
+    def _record_failed_approach(
+        output: RewriteOutput,
+        repair: _Repair,
+        *,
+        unit: str,
+        reason: str,
+        failure_class: FailureClass,
+    ) -> None:
+        """ADR-0021, §3.2 step 5: a proposal that reached `git apply`/`check_diff` and was
+        genuinely rejected is a FAILED proposal, not an anchored one — its signature (already
+        computed by `_repair_guarded`) is carried forward so a later rung can be shown it.
+        No-op when the candidate had no signature (never happens for a non-empty `repair.patches`,
+        but `approach_signature` is `str | None` on `_Repair` so this stays defensive).
+        """
+        if repair.approach_signature is None:
+            return
+        output.failed_approaches.append(
+            FailedApproach(
+                unit=unit,
+                approach_signature=repair.approach_signature,
+                reason=reason[:280],
+                failure_class=failure_class,
+            )
         )
 
     @staticmethod

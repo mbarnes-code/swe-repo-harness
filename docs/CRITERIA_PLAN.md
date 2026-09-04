@@ -1465,19 +1465,71 @@ fixture-driven test (this criterion's own proof shape, per SPEC's literal framin
 is driven through the full ladder") exercises a populated one. This is symmetric with
 `RewriteInput.rejected_approaches` (`EVIDENCE_PLUS_REJECTED_APPROACHES`'s own field) being equally
 unpopulated by any production caller — round GG's own research confirmed zero production
-constructors of `RejectedApproach` anywhere — and §12.36 (anchoring detection) is the criterion
-that actually depends on that production data flow existing; it correctly stays OPEN, blocked on
-D50. ADR-0110 rules this criterion's own header — "no raw prior diff reaches a prompt under the
-default ladder" — is a claim about worker behavior given inputs, not about where production
-sources those inputs, so the gap belongs to §12.36/D50, not here. **Not yet built (tracked
-informally, no D-number — a disclosed scope boundary, not a defect):** wiring
-`PhaseRunner._drive()`/its `_payloads` Protocol to thread a real prior rung's rejected `FilePatch`
-into the next rung's payload (research's §1e, this round).
+constructors of `RejectedApproach` anywhere — and §12.36 (anchoring detection) was, AT THE TIME
+THIS PARAGRAPH WAS WRITTEN, the criterion that actually depended on that production data flow
+existing, and correctly stayed OPEN, blocked on D50. **Corrected 2026-09-04 (round VI task 46):
+§12.36 is now DONE (see its own entry below) and was never blocked on D50 — that framing was
+itself wrong, per §36's own corrected entry.** §12.36's guard reads `rejected_approaches`
+directly from `ctx.db` (`RewriteWorker._repair_guarded`), independent of
+`RewriteInput.rejected_approaches`/`payload.rejected_approaches` — the field this paragraph is
+about — which THIS task deliberately left unpopulated by any production caller, exactly as
+described above; that remains true and is §12.35's own residual, not §12.36's. ADR-0110 rules
+this criterion's own header — "no raw prior diff reaches a prompt under the default ladder" — is
+a claim about worker behavior given inputs, not about where production sources those inputs, so
+the gap belongs to §12.35, not §36. **Not yet built (tracked informally, no D-number — a disclosed
+scope boundary, not a defect):** wiring `PhaseRunner._drive()`/its `_payloads` Protocol to thread
+a real prior rung's rejected `FilePatch` into the next rung's payload (research's §1e, this
+round).
 
 ## 36. Anchoring detected mechanically
-**OPEN — already tracked, D50.** `rewrite/approach.py` doesn't exist; `--no-anchoring-guard`
-self-declares the gap in its own refusal message (audit row 36).
-**Done bar:** identical to D50's closure. Do not open a separate effort here.
+**DONE (round VI task 46, 2026-09-04).** **Corrected framing:** the "identical to D50's closure"
+line above was wrong — D50 is a generic dead-config-key defect class covering 37 unrelated keys;
+§36's gap was a real missing detection mechanism, not a config-key wiring gap (confirmed against
+`--no-anchoring-guard`'s own refusal message before this task, which named the true cause:
+`rewrite/approach.py` did not exist and no `rejected_approaches` row was ever written).
+
+Built: `src/fleet/rewrite/approach.py` (`compute_approach_signature`, `ApproachElement`,
+`ChangeKind` — a closed-vocabulary, offset/whitespace/hunk-order-insensitive fingerprint over one
+or more unified diffs, using the real vendored `tools/bin/ast-grep` to classify import/package
+hunks structurally); the guard itself in
+`workers/rewrite.py::RewriteWorker._repair_guarded` (collision check against
+`ctx.db.get_rejected_approach_signatures`, re-ask loop bounded by
+`transform.anchoring.max_reasks_per_rung`, `--no-anchoring-guard` override via
+`transform.anchoring.enabled`); the DB layer (`state/repository.py`:
+`ReadOnlyRepository.get_rejected_approach_signatures`,
+`StateRepository.record_rejected_approach`, `RejectedApproachRow`); and the `cli.py` wiring
+(`TransformInput`/`TransformOutput`'s `anchoring_enabled`/`max_reasks_per_rung`/`task_id`/
+`anchored_rejections`/`failed_approaches`/`guard_off` fields, `_TransformSink`'s extra
+`attempts`/`rejected_approaches`/`findings` writes, `_apply_anchoring_override`, and removal of
+`_validate_transform_flags`'s `--no-anchoring-guard` refusal).
+
+**Agent Recommendation, load-bearing — read before treating a "coincidental collision" as a
+bug.** `ApproachElement` is exactly SPEC's literal 3-tuple `(path, change_kind, target_symbol)`
+with no content hash. Two DIFFERENT one-line edits to the SAME symbol under the SAME `change_kind`
+(e.g. two distinct one-line tweaks to the same function's `return` statement, both bucketed
+`OTHER`) fingerprint IDENTICALLY — this is what the tuple's own definition implies, not an
+implementation gap. `target_symbol` is also a text heuristic (nearest preceding `def`/`class`/
+`function`/`func` line in the hunk's OWN context), not a real `symbols.fqn` lookup — this module
+has no database access. See the module's own docstring for the full disclosure, including which
+`ChangeKind` members are real `ast-grep` structural classifications (`IMPORT_REWRITE`,
+`PACKAGE_DECL`) versus diff-structural fallbacks (`DEP_ADD`/`DEP_REMOVE` broadened from "a
+manifest line changed" to "pure insertion/deletion"; `PATH_ALIAS`/`SYMBOL_RENAME` fold into
+`OTHER`, undetected).
+
+**Scope disclosed, not closed silently:** primary tests are worker-level
+(`tests/test_workers_transform.py`, `tests/test_rewrite_approach.py`) per this task's own brief,
+which explicitly scoped fixture-building there; `_TransformSink`'s real SQLite writes are
+exercised by the existing `tests/test_cli.py` suite (unchanged behaviour on every path this task
+did not touch) plus mypy/ruff, not by a NEW dedicated full-fleet `fleet transform
+--no-anchoring-guard` e2e fixture in `tests/test_transform_e2e.py` — `--llm-cache read-only`
+byte-identical reproduction is asserted only as the pure-function determinism half
+(`test_the_signature_is_deterministic_across_repeated_calls`), not as a full CLI cache-mode
+integration test. `transform.anchoring.on_exhausted` (`advance`/`fail`) stays unwired: this
+guard's reask-exhaustion path always defers to the ladder's ordinary rung-failure handling, which
+is `advance`-shaped by construction — `fail`'s "terminate immediately even with a next rung
+available" branch has no code and the config key stays in `KNOWN_INERT`
+(`tests/test_config_keys_are_read.py`).
+**Done bar:** met. Any further work here is enhancement, not closure.
 
 ## 37. Stub lifecycle — only way out of DEGRADED
 **OPEN — PARTLY ADDRESSED (2026-08-30). D80 landed (resume-time reconciliation), but the
@@ -1517,14 +1569,14 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7187-7227`) always constructs `published: Coordinate` with `version_spec=None`. This is
+  (`cli.py:7328-7368`) always constructs `published: Coordinate` with `version_spec=None`. This is
   a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
   history kept as the record of what was true when this paragraph was written, not repointed to
   the post-fix state.**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7297-7390`) resolves every
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7438-7531`) resolves every
   consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -1557,7 +1609,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:8877-8912`) filters on the literal string
+blockers above**: `_eligible_build_units` (`cli.py:9018-9053`) filters on the literal string
 `phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row

@@ -67,6 +67,7 @@ from fleet.models.tasks import (
 )
 from fleet.orchestrator.retry import LadderState, RetryAction, RetryPolicy
 from fleet.rewrite.apply import make_unified_diff
+from fleet.rewrite.approach import compute_approach_signature
 from fleet.rewrite.pipeline import RewritePipeline
 from fleet.rewrite.rules import EngineRegistry, RewriteRule
 from fleet.state.repository import PhaseRow
@@ -139,10 +140,19 @@ class FakeRewriter:
 
 
 class FakeDb:
-    """`ReadOnlyRepository` narrowed to the one row `BaseWorker.execute()` reads: the lease."""
+    """`ReadOnlyRepository` narrowed to the one row `BaseWorker.execute()` reads: the lease, plus
+    an in-memory `rejected_approaches` set the anchoring-guard tests seed directly (ADR-0021)."""
+
+    def __init__(self, rejected: Mapping[str, frozenset[str]] | None = None) -> None:
+        self._rejected = dict(rejected or {})
 
     async def get_phase(self, run_id: str, repo_id: str, phase: Phase) -> PhaseRow | None:
         return None
+
+    async def get_rejected_approach_signatures(
+        self, run_id: str, task_id: str
+    ) -> frozenset[str]:
+        return self._rejected.get(task_id, frozenset())
 
 
 class FakeModelClient:
@@ -309,6 +319,7 @@ def make_ctx(
     context_policy: ContextPolicy | None = None,
     llm: object | None = None,
     seconds_left: float = 3600.0,
+    db: object | None = None,
 ) -> WorkerContext:
     """A context whose only real collaborators are the worktree and (optionally) a model client.
 
@@ -327,7 +338,7 @@ def make_ctx(
         deadline=deadline,
         cancel=asyncio.Event(),
         budget=CallBudget(remaining_tokens=200_000, remaining_usd=5.0, deadline=deadline),
-        db=FakeDb(),
+        db=FakeDb() if db is None else db,
         llm=sentinel if llm is None else llm,
         router=sentinel,
         limits=sentinel,
@@ -1546,3 +1557,238 @@ def test_relocate_is_partial_when_the_deadline_lands_mid_plan(tmp_path: Path,
     assert finished.status == "ok"
     assert len(log_entries(repo, anchor)) == 4, "two more commits, not four"
     assert not (repo / "java/java").exists()
+
+
+# =======================================================================================
+# 10. ADR-0021 §3.2 step 5 / §12.36: the anchoring guard
+# =======================================================================================
+class ScriptedRepairClient:
+    """A `ModelClient` that answers with a QUEUE of canned proposals, one per call.
+
+    Unlike `FakeModelClient` (one fixed value), this is what drives the anti-anchoring RE-ASK:
+    the same rung calls the model more than once when a proposal anchors, and the second call
+    must see a genuinely different scripted answer.
+    """
+
+    def __init__(self, values: Sequence[BaseModel]) -> None:
+        self._queue = list(values)
+        self.prompts: list[str] = []
+        self.roles: list[str] = []
+
+    async def complete[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        tier_override: ModelTier | None = None,
+        max_output_tokens: int | None = None,
+        timeout_s: float | None = None,
+        budget: CallBudget | None = None,
+    ) -> ModelResponse[T]:
+        self.roles.append(role)
+        self.prompts.append("\n".join(message.content for message in messages))
+        value = self._queue.pop(0)
+        return ModelResponse(
+            value=response_model.model_validate_json(value.model_dump_json()),
+            usage=TokenUsage(role=role, input_tokens=100, output_tokens=20, cost_usd=0.02),
+            mode=StructuredOutputMode.JSON_SCHEMA,
+            finish_reason="stop",
+        )
+
+    async def _empty(self) -> AsyncIterator[StreamEvent]:
+        return
+        yield StreamEvent()  # pragma: no cover - never reached; makes this an async generator
+
+    def stream[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        return self._empty().__aiter__()
+
+    async def capabilities(self, role: str) -> ModelCapabilities:
+        return ModelCapabilities()
+
+
+def _escalation(target: str, diff: str, *, marker: str) -> LlmEscalationProposal:
+    return LlmEscalationProposal(
+        files=(ProposedFileEdit(path=target, diff=diff),),
+        approach_summary=f"rewrite {target} ({marker})",
+        rationale="the deterministic rule could not land; the model proposes a fix",
+    )
+
+
+def test_the_anchoring_guard_rejects_a_repeated_approach_before_any_probe_reasks_once_and_lands_a_genuinely_different_fix(  # noqa: E501
+    tmp_path: Path,
+) -> None:
+    """SPEC's own §12.36 scenario, end to end at the worker layer.
+
+    A signature already sits in `rejected_approaches` for this unit's task (simulating a prior
+    rung's genuine failure). The escalation rung's FIRST call proposes "the same idea, retyped" —
+    re-indented, with a shifted hunk offset — which must collide and be rejected before any
+    worktree mutation; the re-ask (budget 1) then proposes a genuinely different fix, which must
+    land normally.
+    """
+    target = f"{DEST}/repair_target.py"
+    before = "import os\n\n\ndef handler():\n    return None\n"
+    repo, anchor = make_repo(tmp_path, {target: before})
+    worker = worker_with(FakeRewriter({}))  # no rule fires: RULE_MISS, the unresolved case
+
+    # Fix A touches the `return` statement inside `handler` — an OTHER-kind change at symbol
+    # "handler". Fix A v2 is the SAME idea, retyped: re-indented, an extra blank line, a shifted
+    # hunk offset — none of which may move the fingerprint (docs/SPEC.md:912).
+    fix_a_v1 = (
+        f"--- a/{target}\n+++ b/{target}\n@@ -4,2 +4,2 @@\n"
+        " def handler():\n-    return None\n+    return Money()\n"
+    )
+    fix_a_v2 = (
+        f"--- a/{target}\n+++ b/{target}\n@@ -3,3 +3,4 @@\n"
+        "+\n def handler():\n-    return None\n+    return   Money()\n"
+    )
+    # Fix B is genuinely different AT THE APPROACH LEVEL: an import-statement addition (a
+    # different `change_kind`, IMPORT_REWRITE, at no enclosing symbol) rather than another tweak
+    # to `handler`'s body — SPEC's ApproachElement is `(path, change_kind, target_symbol)`, so two
+    # different one-line edits to the SAME symbol under the SAME kind are "the same approach" by
+    # design; a genuinely different approach must differ in kind or symbol, not merely in content.
+    after = "import os\nimport sys\n\n\ndef handler():\n    return None\n"
+    fix_b = make_unified_diff(target, before, after)
+    assert fix_b, "fixture sanity: a genuine, real diff"
+
+    seeded_signature = asyncio.run(compute_approach_signature([fix_a_v1]))
+    task_id = str(rewrite_mod.task_id_for_ids(RUN_ID, REPO_ID, int(Phase.TRANSFORM), target))
+    db = FakeDb({task_id: frozenset({seeded_signature})})
+
+    client = ScriptedRepairClient(
+        [
+            _escalation(target, fix_a_v2, marker="anchored repeat"),
+            _escalation(target, fix_b, marker="genuinely different"),
+        ]
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_ESCALATION,
+        context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        llm=client,
+        db=db,
+    )
+    payload = rewrite_payload(anchor, [target], rules=[], max_reasks_per_rung=1)
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.ESCALATION), str(Role.ESCALATION)], (
+        "one call, then exactly one re-ask — the budget"
+    )
+    assert result.status == "ok", "the genuinely different fix landed"
+    assert result.output is not None
+
+    # -- the collision: exactly one anchored rejection, recorded but not applied --------------
+    rejections = result.output.anchored_rejections
+    assert len(rejections) == 1
+    rejection = rejections[0]
+    assert rejection.approach_signature == seeded_signature, (
+        "two identical approach_signatures — the re-indented/re-ordered/offset-shifted repeat "
+        "fingerprints identically to the one already in rejected_approaches"
+    )
+    assert rejection.unit == target
+    assert rejection.usage.cost_usd > 0, (
+        "non-zero cost_usd on the rejected call: the LLM call that produced it still cost "
+        "something even though detection is free"
+    )
+
+    # -- zero worktree mutation / zero container starts for the rejected candidate -------------
+    entries = log_entries(repo, anchor)
+    assert len(entries) == 1, "exactly ONE commit: the genuinely different fix, never the repeat"
+    assert (repo / target).read_text(encoding="utf-8") == (
+        "import os\nimport sys\n\n\ndef handler():\n    return None\n"
+    )
+
+    # -- the second (fresh) signature is different and is what actually landed -----------------
+    landed_signature = asyncio.run(compute_approach_signature([fix_b]))
+    assert landed_signature != seeded_signature
+
+
+def test_no_anchoring_guard_applies_the_repeat_and_records_a_guard_off_event(
+    tmp_path: Path,
+) -> None:
+    """`--no-anchoring-guard` (`payload.anchoring_enabled=False`): a collision is applied anyway,
+    and the run's findings record the guard was off (§10, ADR-0021)."""
+    target = f"{DEST}/repair_target.py"
+    repo, anchor = make_repo(tmp_path, {target: "def handler():\n    return None\n"})
+    worker = worker_with(FakeRewriter({}))
+
+    fix_a_v1 = (
+        f"--- a/{target}\n+++ b/{target}\n@@ -1,2 +1,2 @@\n"
+        " def handler():\n-    return None\n+    return Money()\n"
+    )
+    fix_a_v2 = make_unified_diff(
+        target, "def handler():\n    return None\n", "def handler():\n    return Money()\n"
+    )
+    seeded_signature = asyncio.run(compute_approach_signature([fix_a_v1]))
+    task_id = str(rewrite_mod.task_id_for_ids(RUN_ID, REPO_ID, int(Phase.TRANSFORM), target))
+    db = FakeDb({task_id: frozenset({seeded_signature})})
+
+    client = ScriptedRepairClient([_escalation(target, fix_a_v2, marker="repeat, guard off")])
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_ESCALATION,
+        context_policy=ContextPolicy.EVIDENCE_PLUS_REJECTED_APPROACHES,
+        llm=client,
+        db=db,
+    )
+    payload = rewrite_payload(anchor, [target], rules=[], anchoring_enabled=False)
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert client.roles == [str(Role.ESCALATION)], (
+        "no re-ask: the collision was applied, not rejected"
+    )
+    assert result.status == "ok"
+    assert result.output is not None
+    assert result.output.anchored_rejections == [], "guard off: nothing was REJECTED"
+    assert len(result.output.guard_off) == 1
+    event = result.output.guard_off[0]
+    assert event.unit == target
+    assert event.approach_signature == seeded_signature
+    assert len(log_entries(repo, anchor)) == 1, "the repeat WAS applied"
+    assert (repo / target).read_text(encoding="utf-8") == "def handler():\n    return Money()\n"
+
+
+def test_a_genuinely_rejected_proposal_is_recorded_as_a_failed_approach(tmp_path: Path) -> None:
+    """ADR-0021: a proposal that reaches `check_diff` and is genuinely rejected (never merely
+    anchored) is what `rejected_approaches` exists to remember for a LATER rung — its signature is
+    carried on `output.failed_approaches`, distinct from `anchored_rejections`."""
+    target = f"{DEST}/repair_target.py"
+    repo, anchor = make_repo(tmp_path, {target: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))
+    out_of_tree_diff = make_unified_diff(
+        "OUTSIDE/escape.py", "alpha\n", "ALPHA\n"
+    )
+    client = ScriptedRepairClient(
+        [_escalation("OUTSIDE/escape.py", out_of_tree_diff, marker="escapes the subtree")]
+    )
+    ctx = make_ctx(
+        repo,
+        attempt=3,
+        tier=TransformTier.LLM_ESCALATION,
+        context_policy=ContextPolicy.EVIDENCE_ONLY,
+        llm=client,
+    )
+    payload = rewrite_payload(anchor, [target], rules=[])
+
+    result = asyncio.run(worker.run(ctx, payload))
+
+    assert result.status == "failed"
+    assert result.output is not None
+    assert result.output.anchored_rejections == [], "this was never a collision"
+    assert len(result.output.failed_approaches) == 1
+    failed = result.output.failed_approaches[0]
+    assert failed.unit == target
+    assert failed.failure_class == FailureClass.PATCH_REJECTED
+    assert len(failed.approach_signature) == 64
+    assert len(log_entries(repo, anchor)) == 0, "check_diff rejects before any commit"
