@@ -13194,3 +13194,57 @@ ADR's adjudication becomes moot rather than contradicted.
 **Consequence for `docs/CRITERIA_PLAN.md` and `docs/SPEC.md`**: §12.29's entry and SPEC item 29's
 own sentence carry a dated marker recording this adjudication, in the same commit as marking
 §12.29 DONE — per Rule 14, not before.
+
+## ADR-0118 — D115: `migrate/<repo>` inside the monorepo checkout is created at ingest time, as a plain alias of the merge commit, owned by `filter_repo.py::ingest()`
+
+**Decision (2026-09-04, round VI controller, research-30).** `D115` (`docs/INTEGRATION_HONESTY.md`)
+names the gap: this monorepo's ingest never creates a per-repo `migrate/<repo>` branch, so §12.38/
+D94's PR-promotion mechanism (round VI task 45) has no live path to run against — `_promote_one_pr`
+fails at its first precondition check on every real invocation. Research-30 read `filter_repo.py
+::ingest()`, both its callers, `_promote_one_pr`'s actual rebase/force-push sequence, and every
+SPEC mention of `migrate/<repo>`, and reached a decided design rather than a menu of options, per
+this project's own Rule 1 ("evaluate industry best practices, pick the optimal option... proceed
+immediately").
+
+Four decisions, all accepted as recommended:
+1. **Created at ingest time**, inside `filter_repo.py::ingest()` itself, unconditionally for every
+   repo that reaches Phase 3 ingest — the only choke point shared by both existing callers
+   (`cli.py::_ingest_build_source`, `workers/buildgen.py::BuildgenWorker._ingest`) without
+   duplicating logic. Lazy (PR-creation-time) creation was considered and rejected: promotion can
+   run in a later, resumed `fleet pr` invocation against a `PullRequestDraft` row from an earlier
+   process, so a lazy scheme would need two independent code paths to agree byte-for-byte on
+   naming and target sha — the exact risk this decision avoids by having one writer, one moment.
+2. **Points at the merge commit `ingest()` already produces** (`IngestResult.merge_sha`/
+   `existing`) — a plain alias ref, never a divergent branch. Verified against `_promote_one_pr`'s
+   actual code: rebasing raw, unrelated-history git-filter-repo output onto `integration` (which
+   already contains that same content) would conflict wall-to-wall on every path. Aliasing to the
+   already-merged commit makes the later rebase a trivial no-op by construction.
+3. **Owned by `filter_repo.py::ingest()`**, not a new `cli.py` call site — the existing home for
+   every other ref this sequence produces, under the same `IntegrationMutex`, and `cli.py`'s
+   PR-emission layer never has `merge_sha` in scope (it only ever computed the branch *name*).
+4. **Purely additive** — no `ALLOWED_TRANSITIONS`, scheduler, or state-machine code is touched, no
+   existing test asserts the exhaustive ref set `ingest()` produces. Not an ADR-0113-style
+   state-machine adjudication; logged here only because Rule 1 asks every non-trivial design
+   choice to be recorded, not because a tested invariant changes.
+
+**The exact change**: two lines in `ingest()` (429-467) — `await git.create_branch(f"migrate/
+{source.repo_id}", <sha>, force=True)` on both the idempotent (`existing`) and fresh-merge
+(`merge_sha`) return paths, using the pre-existing `Git.create_branch` primitive
+(`vcs/git.py:369-374`). `IngestResult`'s shape is unchanged.
+
+**Disclosed alongside this decision, not part of it — two separate, pre-existing gaps this design
+does not touch:** (a) `migrate/<repo>` is a namesake collision — SPEC's every mention of that
+string (§3.2, ADR-0024) describes a *different* branch, living in each repo's own standalone
+Phase-2 worktree, not the monorepo; the two are same-string, different-git-repository concepts,
+and a future reader grepping SPEC for `migrate/<repo>` will land on the wrong one unless warned —
+this paragraph is that warning. (b) `_promote_one_pr` never restores `integration` as the checked-
+out branch after `git.checkout(record.branch)`; inert today only because the pre-existing `--push`
+refusal (`cli.py:10096-10113`) always fires first and prevents that checkout from ever executing —
+worth a line in whichever future task implements `--push`, not this one.
+
+**Rationale.** The property D115 actually blocks is *a real `migrate/<repo>` ref exists so D94's
+already-correct promotion mechanics have something to operate on* — not a new promotion capability
+(D94 itself is done) and not a push implementation (already disclosed, separately refused). Ingest
+is where every other per-repo ref this pipeline produces already gets created, under the same
+lock, from the same data; adding one more ref there is the smallest surface change that closes the
+gap for both existing callers at once.
