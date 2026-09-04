@@ -4,10 +4,11 @@
 opening two paragraphs originally used `cli.py`'s then-blanket refusal of `--context-policy` as
 the motivating example for the whole file's design — round EE wired `transform.ladder.
 context_policy` through to the worker for real (`orchestrator/runner.py:523`), closing §12.35's
-CLI-level proof, and the refusal was removed. `--stub-blocked` and `--no-anchoring-guard` are
-still refused in the same block, for the same reason — *a flag that parses and is then dropped is
-read by the operator as honoured* — so the file's motivating pattern still holds for those two;
-only the `--context-policy` half of the original example is now historical.
+CLI-level proof, and the refusal was removed. `--stub-blocked` is still refused in the same block,
+for the same reason — *a flag that parses and is then dropped is read by the operator as
+honoured* — so the file's motivating pattern still holds for that one. `--no-anchoring-guard` is
+ALSO no longer refused (round VI task 46, §12.36): it now sets `transform.anchoring.enabled:
+false` for real. Two of the original example's three refusals are now historical.
 
 That refusal covers the flag layer only. The identical defect one layer down — a **config key**
 behind the same missing code — is still accepted silently: `config/fleet.yaml` validates, the
@@ -159,22 +160,23 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:llm.failover.cooldown_s",              # settings.py:662
         "fleet.yaml:llm.failover.on_tier_exhausted",       # settings.py:664
         #
-        # --- ADR-0021 anti-anchoring: §3.2 step 5 has no implementation -------------------
-        # `models/tasks.py:211` declares `TransformTask.reasks` and nothing ever increments it,
-        # so neither the per-rung cap nor its exhaustion policy has a counter to act on. Same
-        # missing machinery `cli.py` cites when it refuses `--no-anchoring-guard`.
-        "fleet.yaml:transform.anchoring.max_reasks_per_rung",  # settings.py:427
+        # --- ADR-0021 anti-anchoring: §3.2 step 5 -----------------------------------------
+        # `max_reasks_per_rung`, the section itself, and `.enabled` are READ as of round VI
+        # task 46 (§12.36): `rewrite/approach.py`'s `approach_signature` fingerprinting and
+        # `workers/rewrite.py::RewriteWorker._repair_guarded` genuinely read
+        # `payload.anchoring_enabled`/`payload.max_reasks_per_rung`, threaded from
+        # `settings.config.transform.anchoring.{enabled,max_reasks_per_rung}` by
+        # `cli._transform_payloads`/`cli._apply_anchoring_override` (the latter is what
+        # `--no-anchoring-guard` now sets, in place of the refusal this file used to cite).
+        # `.enabled` stays in `QUALIFIED_MATCH_KEYS` below (same reasoning `transform.ladder.
+        # context_policy` documents): the bare leaf still collides with the genuinely-wired
+        # `scan.contracts.enabled`, so only the QUALIFIED pair is evidence, and keeping it
+        # qualified is what would catch a revert. `on_exhausted` (`advance`/`fail` at reask
+        # exhaustion) is NOT wired — this task's guard always defers to the ladder's ordinary
+        # rung-failure handling, which is `advance`-shaped by construction; `fail`'s "terminate
+        # immediately even with a next rung available" branch has no code — so it alone stays
+        # inert here.
         "fleet.yaml:transform.anchoring.on_exhausted",         # settings.py:428
-        # The section name itself: `settings.py:465`'s `anchoring: AnchoringSection =
-        # AnchoringSection()` is the only mention of `anchoring` in `settings.py`, and nothing
-        # outside it ever writes `config.transform.anchoring` or `.anchoring.`. Every other
-        # occurrence in the tree is prose about ADR-0021 (`models/tasks.py`, `llm/cache.py`,
-        # `llm/schemas.py`, `state/schema.sql`, `cli.py`'s `--no-anchoring-guard` refusal).
-        "fleet.yaml:transform.anchoring",                       # settings.py:465
-        # `.enabled` is its own leaf, same section: the bare scan calls it read only because it
-        # collides with the genuinely-wired `scan.contracts.enabled` (`cli.py:2094`) — no
-        # `anchoring.enabled` occurs anywhere qualified. Decided via qualified match.
-        "fleet.yaml:transform.anchoring.enabled",               # settings.py:426
         #
         # --- §3.1 the native baseline build/test gate -------------------------------------
         # The `BaselineBuild` section name appears nowhere outside its declaration; its two

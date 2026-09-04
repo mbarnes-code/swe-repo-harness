@@ -247,6 +247,7 @@ from fleet.state.repository import (
     BlockerResolver,
     EdgeRow,
     FloorSnapshotStaleError,
+    RejectedApproachRow,
     SqliteStateRepository,
     SymbolRow,
     insert_revalidation_task_row,
@@ -317,7 +318,14 @@ from fleet.workers.prwriter import (
 )
 from fleet.workers.rdepverify import RdepverifyInput, RdepverifyOutput
 from fleet.workers.relocate import RelocateInput, RelocateOutput, relocated_path
-from fleet.workers.rewrite import RewriteInput, RewriteOutput, task_id_for_ids
+from fleet.workers.rewrite import (
+    AnchoredRejection,
+    FailedApproach,
+    GuardOffEvent,
+    RewriteInput,
+    RewriteOutput,
+    task_id_for_ids,
+)
 from fleet.workers.symbolindex import SymbolIndexInput, SymbolIndexOutput
 
 __all__ = [
@@ -3747,10 +3755,11 @@ def transform(
             deterministic_only=deterministic_only,
             stub_blocked=stub_blocked,
             context_policy=context_policy or (),
-            no_anchoring_guard=no_anchoring_guard,
         )
         if policy_overrides:
             settings = _apply_context_policy_overrides(settings, policy_overrides)
+        if no_anchoring_guard:
+            settings = _apply_anchoring_override(settings, enabled=False)
         _check_wave_budget(opts, settings, run_id, wave)
         result = _run(
             _transform_impl(
@@ -3800,7 +3809,6 @@ def _validate_transform_flags(
     deterministic_only: bool,
     stub_blocked: bool,
     context_policy: Sequence[str],
-    no_anchoring_guard: bool,
 ) -> tuple[int, dict[int, ContextPolicy]]:
     """Every transform flag either does what it says or is refused here (§10).
 
@@ -3823,13 +3831,6 @@ def _validate_transform_flags(
             f"or add rungs to transform.ladder."
         )
     policies = _parse_context_policies(context_policy, max_attempts)
-    if no_anchoring_guard:
-        raise UsageError(
-            "--no-anchoring-guard names a guard that does not exist: §3.2 step 5's "
-            "`approach_signature` fingerprinting has no implementation (`rewrite/approach.py` is "
-            "absent) and no `rejected_approaches` row is ever written, so there is nothing to "
-            "disable. Accepting the flag would report a guard as bypassed that never ran."
-        )
     if stub_blocked:
         raise UsageError(
             "--stub-blocked is not implemented: emitting a generated stub for a blocked "
@@ -3860,6 +3861,28 @@ def _apply_context_policy_overrides(
         for index, rung in enumerate(settings.config.transform.ladder, start=1)
     )
     transform = settings.config.transform.model_copy(update={"ladder": rungs})
+    config = settings.config.model_copy(update={"transform": transform})
+    return replace(settings, config=config)
+
+
+def _apply_anchoring_override(settings: FleetSettings, *, enabled: bool) -> FleetSettings:
+    """`--no-anchoring-guard` (§10, ADR-0021, §12.36): a per-run edit of
+    `transform.anchoring.enabled` only.
+
+    Signatures are still computed and persisted either way (`RewriteInput.anchoring_enabled` is
+    what the guard itself branches on, not this function) — `False` means a collision is applied
+    rather than rejected, and the run's `findings` record that it happened. Same shape as
+    `_apply_context_policy_overrides` immediately above: an in-process settings copy, nothing
+    written to `config/fleet.yaml`, computed downstream of `section_digests` so the drift check
+    is unaffected.
+    """
+    transform = settings.config.transform.model_copy(
+        update={
+            "anchoring": settings.config.transform.anchoring.model_copy(
+                update={"enabled": enabled}
+            )
+        }
+    )
     config = settings.config.model_copy(update={"transform": transform})
     return replace(settings, config=config)
 
@@ -3933,6 +3956,26 @@ class TransformInput(WorkerInput):
         "`RelocateInput.min_free_bytes`/`RewriteInput.min_free_bytes` — re-checked before EACH "
         "repo's Phase 2 work rather than once at startup (§11.3).",
     )
+    anchoring_enabled: bool = Field(
+        default=True,
+        description="`transform.anchoring.enabled`; `--no-anchoring-guard` sets this False for "
+        "the run (§10, ADR-0021). Threaded onto `RewriteInput.anchoring_enabled`.",
+    )
+    max_reasks_per_rung: int = Field(
+        default=1,
+        ge=0,
+        description="`transform.anchoring.max_reasks_per_rung` (ADR-0021, §3.2 step 5). "
+        "Threaded onto `RewriteInput.max_reasks_per_rung`.",
+    )
+    task_id: str | None = Field(
+        default=None,
+        description="The D89/ADR-0101 COARSE `tasks` row id for this `(run, repo, TRANSFORM)` "
+        "dispatch — the only `tasks` row `rejected_approaches.task_id`'s FK can reference (no "
+        "per-unit `tasks` row exists anywhere in this schema). `_transform_payloads` sets it via "
+        "the same idempotent `_coarse_task_id` the claim hook and the sink already call; `None` "
+        "only in a hand-built payload with no driver behind it (e.g. a unit test), in which case "
+        "the anchoring guard falls back to a per-unit synthetic id that is never written to SQL.",
+    )
     remaining_units: tuple[str, ...] | None = None
 
 
@@ -3956,6 +3999,22 @@ class TransformOutput(WorkerOutput):
     skipped: list[str] = Field(default_factory=list)
     rewritten: list[str] = Field(default_factory=list)
     unresolved: list[str] = Field(default_factory=list)
+    anchored_rejections: list[AnchoredRejection] = Field(
+        default_factory=list,
+        description="ADR-0021 §3.2 step 5, carried up from `RewriteOutput` — one per proposal "
+        "rejected before any probe or worktree mutation. `_TransformSink` writes one `attempts` "
+        "row per entry (`failure_class='ANCHORED_REPEAT'`, `exit_code=NULL`, `command='[]'`).",
+    )
+    failed_approaches: list[FailedApproach] = Field(
+        default_factory=list,
+        description="ADR-0021, carried up from `RewriteOutput` — a genuinely rejected proposal "
+        "(never merely anchored). `_TransformSink` inserts each into `rejected_approaches`.",
+    )
+    guard_off: list[GuardOffEvent] = Field(
+        default_factory=list,
+        description="`--no-anchoring-guard` applied a colliding proposal anyway. "
+        "`_TransformSink` writes one `findings` row per entry.",
+    )
 
 
 def _transform_units(payload: TransformInput) -> list[str]:
@@ -4056,6 +4115,9 @@ class TransformPipelineWorker(BaseWorker[TransformInput, TransformOutput]):
             output.skipped.extend(f"{REWRITE_UNIT}{unit}" for unit in rewritten.skipped)
             output.rewritten.extend(rewritten.rewritten)
             output.unresolved.extend(rewritten.unresolved)
+            output.anchored_rejections.extend(rewritten.anchored_rejections)
+            output.failed_approaches.extend(rewritten.failed_approaches)
+            output.guard_off.extend(rewritten.guard_off)
         landed.extend(f"{REWRITE_UNIT}{unit}" for unit in result.completed_units)
         landed = list(dict.fromkeys(landed))
         if result.status != "ok":
@@ -4097,6 +4159,9 @@ class TransformPipelineWorker(BaseWorker[TransformInput, TransformOutput]):
             max_passes=payload.max_passes,
             max_patch_bytes=payload.max_patch_bytes,
             min_free_bytes=payload.min_free_bytes,
+            anchoring_enabled=payload.anchoring_enabled,
+            max_reasks_per_rung=payload.max_reasks_per_rung,
+            task_id=payload.task_id,
             completed_units=[
                 target
                 for target in payload.targets
@@ -4424,10 +4489,13 @@ class _TransformClaimHook:
 class _TransformSink:
     """Persists one dispatch's ADR-0024 pointers under the fence that produced it (§11.5).
 
-    Two writes and no third: an `attempts` row carrying the rung, its cost and the commit it
-    produced, and `phases.post_commit_sha`. **No diff, no tree SHA and no patch blob** — git holds
-    the code state and SQLite holds a pointer to it, and the moment SQLite holds a second copy of
-    the change it can drift from the branch across a crash (ADR-0024).
+    The core is two writes and no third: an `attempts` row carrying the rung, its cost and the
+    commit it produced, and `phases.post_commit_sha`. **No diff, no tree SHA and no patch blob** —
+    git holds the code state and SQLite holds a pointer to it, and the moment SQLite holds a
+    second copy of the change it can drift from the branch across a crash (ADR-0024). ADR-0021's
+    anchoring guard (§12.36) adds a bounded, EVENT-driven set beside that core — one `attempts`
+    row per rejected candidate, one `rejected_approaches` insert per genuinely failed one, one
+    `findings` row per `--no-anchoring-guard` collision — never a diff either.
 
     Called before the terminal status for the same reason the scan sink is: a `SUCCEEDED` phase
     is never re-admitted, so evidence written after the status is evidence a crash can lose.
@@ -4517,6 +4585,59 @@ class _TransformSink:
                 already_applied=bool(output.skipped),
             )
         )
+        # ADR-0021 §3.2 step 5 (§12.36): the anchoring guard's own evidence. `task_id` here is
+        # the SAME coarse row `attempts.task_id` above just pointed at — the only `tasks` row
+        # `rejected_approaches.task_id`'s FK can reference (no per-unit `tasks` row exists in
+        # this schema). Written whether or not the dispatch as a whole succeeded: a rejected
+        # candidate is real evidence regardless of how the rest of the dispatch turned out.
+        for rejection in output.anchored_rejections:
+            await self._repository.record_attempt(
+                AttemptRow(
+                    attempt_id=str(uuid4()),
+                    run_id=self._run_id,
+                    repo_id=repo_id,
+                    task_id=task_id,
+                    phase=phase,
+                    attempt=attempt,
+                    retry_ordinal=await self._next_ordinal(repo_id, phase, attempt),
+                    started_at=stamp,
+                    finished_at=stamp,
+                    tier=output.tier,
+                    context_policy=output.context_policy,
+                    approach_signature=rejection.approach_signature,
+                    command="[]",
+                    failure_class=str(FailureClass.ANCHORED_REPEAT),
+                    exit_code=None,
+                    cost_usd=rejection.usage.cost_usd,
+                    input_tokens=rejection.usage.input_tokens,
+                    output_tokens=rejection.usage.output_tokens,
+                    llm_backend=rejection.usage.backend or None,
+                )
+            )
+        if task_id is not None:
+            for failed in output.failed_approaches:
+                await self._repository.record_rejected_approach(
+                    RejectedApproachRow(
+                        run_id=self._run_id,
+                        task_id=task_id,
+                        approach_signature=failed.approach_signature,
+                        reason=failed.reason,
+                        failure_class=str(failed.failure_class),
+                        attempt=attempt,
+                        tier=output.tier,
+                        created_at=stamp,
+                    )
+                )
+        for event in output.guard_off:
+            await _note_finding(
+                self._writer,
+                self._run_id,
+                repo_id,
+                kind="AnchoringGuardOff",
+                payload={"unit": event.unit, "approach_signature": event.approach_signature},
+                severity="warn",
+                now=self._clock(),
+            )
         # Ordering hazard (found reviewing D89 Phase 2 Task B, corrected 2026-09-01): this used to
         # resolve the coarse row to DONE in a separate writer unit BEFORE writing
         # `phases.post_commit_sha` below. A crash in that window left `tasks.status = 'DONE'`
@@ -4961,16 +5082,31 @@ def _transform_payloads(
     settings: FleetSettings,
     plans: Mapping[str, _TransformPlan],
     rules: Sequence[RewriteRule],
+    *,
+    repository: SqliteStateRepository,
+    read_conn: aiosqlite.Connection,
+    run_id: str,
 ) -> PayloadFactory[TransformInput]:
-    """One repo's dispatch payload, built from its plan. Injected (Guardrail 3)."""
+    """One repo's dispatch payload, built from its plan. Injected (Guardrail 3).
+
+    `repository`/`read_conn`/`run_id` exist for exactly one reason: `TransformInput.task_id`
+    (ADR-0021) needs the SAME coarse `tasks` row id `_TransformClaimHook`/`_TransformSink` mint —
+    `_coarse_task_id`'s `upsert_task` call is idempotent, so calling it a third time here returns
+    the identical id rather than minting a competing one.
+    """
     engines = dict(settings.config.transform.engines)
     max_passes = settings.config.transform.max_passes
     max_patch_bytes = settings.config.transform.max_patch_bytes
     min_free_bytes = settings.config.preflight.min_free_bytes
+    anchoring_enabled = settings.config.transform.anchoring.enabled
+    max_reasks_per_rung = settings.config.transform.anchoring.max_reasks_per_rung
 
     async def build(
         *, repo_id: str, phase: Phase, attempt: int, remaining_units: Sequence[str] | None
     ) -> TransformInput:
+        task_id = await _coarse_task_id(
+            repository, read_conn, run_id=run_id, repo_id=repo_id, phase=phase, now=_now()
+        )
         _ = (phase, attempt)
         plan = plans[repo_id]
         return TransformInput(
@@ -5000,6 +5136,9 @@ def _transform_payloads(
             max_passes=max_passes,
             max_patch_bytes=max_patch_bytes,
             min_free_bytes=min_free_bytes,
+            anchoring_enabled=anchoring_enabled,
+            max_reasks_per_rung=max_reasks_per_rung,
+            task_id=task_id,
             remaining_units=None if remaining_units is None else tuple(remaining_units),
         )
 
@@ -5076,7 +5215,9 @@ async def _run_transform_wave(
         ctx,
         TransformPipelineWorker(),
         scheduler,
-        payloads=_transform_payloads(settings, plans, rules),
+        payloads=_transform_payloads(
+            settings, plans, rules, repository=repository, read_conn=read_conn, run_id=run_id
+        ),
         sink=_TransformSink(
             writer=writer,
             repository=repository,

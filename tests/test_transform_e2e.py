@@ -850,22 +850,27 @@ def test_an_indeterminate_probe_blocks_the_run_unlike_a_genuinely_missing_engine
 
 
 def test_transform_refuses_the_flags_it_cannot_honour(fleet: Path) -> None:
-    """`--stub-blocked` and `--no-anchoring-guard` exit 2 rather than parsing and doing nothing.
+    """`--stub-blocked` exits 2 rather than parsing and doing nothing.
 
     Why a test and not a docstring: an accepted-and-ignored flag is indistinguishable from an
-    honoured one at the exit code, which is all CI reads. An operator who disabled the anchoring
-    guard and got no change has been told by exit 0 that the harness agreed with them.
+    honoured one at the exit code, which is all CI reads.
 
-    `--context-policy` USED to be a third flag here — closed (§12.35): it now genuinely reaches
+    `--context-policy` USED to be a second flag here — closed (§12.35): it now genuinely reaches
     the worker (`cli._apply_context_policy_overrides` → `FleetSettings.config.transform.ladder`
     → `orchestrator/runner.py::_drive`'s `LadderState` → `BaseWorker.execute`), so
     `test_context_policy_reaches_the_worker_not_the_hardcoded_default` below is its discriminating
-    proof instead of a refusal.
+    proof instead of a refusal. `--no-anchoring-guard` USED to be a THIRD flag here — closed
+    (§12.36, ADR-0021): `rewrite/approach.py`'s `approach_signature` fingerprinting and the
+    `rejected_approaches` guard now exist (`workers/rewrite.py::RewriteWorker._repair_guarded`),
+    so the flag genuinely sets `transform.anchoring.enabled: false`
+    (`cli._apply_anchoring_override`) rather than naming a guard that does not exist; the
+    worker-level proof of its effect —
+    a colliding proposal applied anyway, with a `GuardOffEvent` recorded — is
+    `tests/test_workers_transform.py::test_no_anchoring_guard_applies_the_repeat_and_records_a_guard_off_event`.
     """
     scanned(fleet)
     for flag in (
         ["--stub-blocked"],
-        ["--no-anchoring-guard"],
         ["--max-attempts", "9"],
     ):
         refused = transform(fleet, *flag)

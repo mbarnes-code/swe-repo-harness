@@ -6446,6 +6446,8 @@ def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
     from fleet.cli import Phase, TransformPipelineWorker, _transform_payloads, _TransformPlan
     from fleet.rewrite.apply import check_diff
     from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+    from fleet.state.repository import SqliteStateRepository
 
     config = write_config(
         tmp_path,
@@ -6465,10 +6467,25 @@ def test_transform_max_patch_bytes_is_threaded_from_settings_to_rewrite_input(
         sources=(),
         targets=("dest/file.ts",),
     )
-    build = _transform_payloads(settings, {"repo1": plan}, rules=[])
-    payload = asyncio.run(
-        build(repo_id="repo1", phase=Phase.TRANSFORM, attempt=1, remaining_units=None)
-    )
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("repo1",))
+
+    async def _build_payload() -> object:
+        async with StateWriter(db_path, owner="test-max-patch-bytes") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                build = _transform_payloads(
+                    settings, {"repo1": plan}, rules=[],
+                    repository=repository, read_conn=read_conn, run_id=RUN_ID,
+                )
+                return await build(
+                    repo_id="repo1", phase=Phase.TRANSFORM, attempt=1, remaining_units=None
+                )
+            finally:
+                await read_conn.close()
+
+    payload = asyncio.run(_build_payload())
     assert payload.max_patch_bytes == 100, (
         "TransformInput.max_patch_bytes must carry the configured value, not its own "
         "1_048_576 field default"

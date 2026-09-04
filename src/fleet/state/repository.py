@@ -117,6 +117,7 @@ __all__ = [
     "LeaseStolenError",
     "PhaseRow",
     "ReadOnlyRepository",
+    "RejectedApproachRow",
     "RepoBudgetRefusedError",
     "RepoLedgerRow",
     "RepositoryError",
@@ -428,6 +429,21 @@ class AttemptRow:
     already_applied: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class RejectedApproachRow:
+    """One `rejected_approaches` row (ADR-0021, §3.2 step 5) — the ladder's memory of one FAILED
+    proposal for one unit's task, never a diff."""
+
+    run_id: str
+    task_id: str
+    approach_signature: str
+    reason: str
+    failure_class: str
+    attempt: int
+    tier: str
+    created_at: str
+
+
 # --------------------------------------------------------------------------------------
 # the Protocol — orchestration logic depends on THIS, never on the SQLite class
 # --------------------------------------------------------------------------------------
@@ -443,6 +459,10 @@ class ReadOnlyRepository(Protocol):
     """
 
     async def get_phase(self, run_id: str, repo_id: str, phase: Phase) -> PhaseRow | None: ...
+
+    async def get_rejected_approach_signatures(
+        self, run_id: str, task_id: str
+    ) -> frozenset[str]: ...
 
     async def get_budget(self, run_id: str) -> BudgetLedgerRow | None: ...
 
@@ -613,6 +633,8 @@ class StateRepository(ReadOnlyRepository, Protocol):
 
     # -- evidence ----------------------------------------------------------------------
     async def record_attempt(self, row: AttemptRow) -> None: ...
+
+    async def record_rejected_approach(self, row: RejectedApproachRow) -> None: ...
 
     async def insert_symbols(self, rows: Sequence[SymbolRow]) -> int: ...
 
@@ -962,6 +984,23 @@ class SqliteStateRepository:
     # ==================================================================================
     # reads — the injected mode=ro connection
     # ==================================================================================
+
+    async def get_rejected_approach_signatures(
+        self, run_id: str, task_id: str
+    ) -> frozenset[str]:
+        """ADR-0021 §3.2 step 5: the anchoring guard's collision set for one unit's task.
+
+        `task_id` here is the PER-UNIT id `workers.rewrite.task_id_for` derives (the same one
+        that becomes the `Fleet-Task-Id` trailer) — `rejected_approaches`'s own PK, not the
+        coarse per-dispatch `tasks` row `attempts.task_id` points at.
+        """
+        sql = (
+            "SELECT approach_signature FROM rejected_approaches "
+            " WHERE run_id = ? AND task_id = ?"
+        )
+        async with self._read.execute(sql, (run_id, task_id)) as cursor:
+            rows = await cursor.fetchall()
+        return frozenset(str(row[0]) for row in rows)
 
     async def get_phase(self, run_id: str, repo_id: str, phase: Phase) -> PhaseRow | None:
         sql = (
@@ -2386,6 +2425,34 @@ class SqliteStateRepository:
             int(row.already_applied),
             row.started_at,
             row.finished_at,
+        )
+
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(sql, params)
+
+        await self._writer.submit(unit)
+
+    async def record_rejected_approach(self, row: RejectedApproachRow) -> None:
+        """One `rejected_approaches` row (ADR-0021 §3.2 step 5) — a FAILED proposal's fingerprint,
+        never a diff. `ON CONFLICT DO NOTHING`: the table's own PK comment (`schema.sql`) says a
+        re-proposed signature IS the anchoring signal, not a second refutation, so the FIRST
+        refutation stands rather than being overwritten by a later re-ask's restatement.
+        """
+        sql = (
+            "INSERT INTO rejected_approaches (run_id, task_id, approach_signature, reason, "
+            "    failure_class, attempt, tier, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (task_id, approach_signature) DO NOTHING"
+        )
+        params = (
+            row.run_id,
+            row.task_id,
+            row.approach_signature,
+            redact_text(row.reason),
+            row.failure_class,
+            row.attempt,
+            row.tier,
+            row.created_at,
         )
 
         async def unit(conn: aiosqlite.Connection) -> None:
