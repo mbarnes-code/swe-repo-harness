@@ -9532,3 +9532,113 @@ already-deprioritized D94/D104 stub-lifecycle chain (§14, §37, §38 partial, �
 empirical groundwork with a real external tool (§8's `HTTP_OPERATION` half), or D50's own closure
 (§36). None are quick wins; the next round that picks one up should scope itself as that kind of
 round from the start, per Rule 13.
+
+## Round VI, twenty-second wave (2026-09-04) — §12 count: 39 of 48, up from 38. First wave run
+under explicit 3-workers/1-research/1-review parallel dispatch, per this round's own instruction.
+
+Targeted the round's ten remaining open criteria per the twenty-first wave's own close-out list.
+Dispatched four agents in parallel from a fresh worktree each (tasks 45-47, plus research-29),
+followed by a fifth (task 48) and sixth (task 49) once post-merge verification surfaced real
+regressions the individual task reviewers correctly did not catch (each was scoped to its own
+task's files, not the whole repo).
+
+**Task 45 — §12.38 (D94), DONE_WITH_CONCERNS, reviewed Approved with nits, merged `9ed6e74`.**
+Built the promotion mechanism `D94`'s prior rounds left unbuilt: `_pr_impl`'s already-open-PR
+branch now distinguishes a genuine promotion candidate (`PrState.HELD`, confirmed the single
+production writer) from an ordinary already-open PR, and drives it through rebase → body
+regeneration → force-push-with-lease → `Forge.mark_ready`, reusing every existing primitive
+(built by earlier rounds) with zero reimplementation. Two discriminating Rule-12 mutations,
+independently reproduced by review. Disclosed, not fixed: this monorepo's ingest never creates a
+per-repo `migrate/<repo>` branch, so a real promotion attempt fails at its first precondition
+check today — proven correct via a real git bare-remote/clone (6 unit tests), reported through
+`failed`, never faked. Allocated `D115` for this gap (`docs/INTEGRATION_HONESTY.md`); D94 itself
+is now closed. Merging this task hit a real conflict in `tests/test_cli.py`'s import list against
+task 47 (already merged) — resolved by combining both lists; 317 tests green post-merge.
+
+**Task 46 — §12.36, DONE, reviewed Approved after one fix round, merged `bd4a93b`.** Built the
+mechanical anchoring-detection mechanism SPEC's item 36 requires from scratch:
+`src/fleet/rewrite/approach.py` (`compute_approach_signature`, using the real vendored
+`tools/bin/ast-grep`) plus the guard wired into `workers/rewrite.py::RewriteWorker._repair_guarded`
+before any probe/worktree mutation, reusing pre-existing, previously-unconsumed schema
+(`attempts.approach_signature`, the `rejected_approaches` table) that had sat unused since an
+earlier round. Every clause of SPEC's literal scenario verified clause-by-clause by the reviewer
+against the actual test suite. **Central, disclosed design finding, independently reproduced and
+adjudicated by the reviewer as a faithful reading of SPEC's own formula, not a defect**: SPEC's
+`ApproachElement` 3-tuple has no content hash, so two genuinely different edits to the same
+symbol under the same `change_kind` can fingerprint identically — this is what the literal tuple
+implies, not an implementer shortcut, correctly flagged as an Agent Recommendation rather than
+silently patched with an unauthorized SPEC deviation (CLAUDE.md Rule 14). Fix round 1 addressed
+two Important findings: an undisclosed duplicate `ChangeKind` enum (now reuses the pre-existing
+`models.enums.ApproachChangeKind`) and a silently-degrading ast-grep-unavailable fallback (now
+logs once per process). Scoped re-review: both ADDRESSED, no new breakage.
+
+**Task 47 — §12.11 Task A's gap 2, DONE, reviewed Approved zero findings, merged `ee2dfe1`.**
+Persisted `migrated_test_count` durably (`repos.migrated_test_count`, nullable, new migration
+`v011`) and surfaced the `(repo, baseline, migrated)` report SPEC's own sentence names on
+`fleet status`. Caught and correctly navigated a real hazard along the way: `repos` sits on the
+6→7 migration's `_REBUILD` list, which sources its rebuild DDL from the *live* `schema.sql` — an
+unguarded `ADD COLUMN` on the new column would have made it appear four rungs early on a replayed
+ladder; the landed fix guards on column presence and is tested both ways (a full v6 replay, and
+the direct v10→v11 step). 421 tests green, mutation-proven, independently reproduced.
+
+**Research-29 — §12.8's `HTTP_OPERATION` empirical groundwork.** Dispatched read-only, no code
+changes authorized; ran long (~2h). Findings not yet folded into this checkpoint — see the next
+wave's entry once the summary lands, or this round's own ledger for status if picked up later.
+
+**Task 48 — citation-drift regression, DONE_WITH_CONCERNS treated as DONE after investigation,
+reviewed Approved, merged `128e901`.** The wave's own full-suite closing check (a discipline this
+round ran that earlier waves sometimes skipped) found `tests/test_integration_honesty_citations.py`
+red on 3 counts after merging tasks 45/46: task 46's edits to `cli.py`/`workers/rewrite.py` shifted
+line numbers under 9 pre-existing citations in `docs/INTEGRATION_HONESTY.md`/`docs/CRITERIA_PLAN.md`
+(not the 5 originally briefed — the implementer found 4 more that drifted after the brief was
+written, disclosed rather than silently expanding scope). All 9 repointed; the file's own
+self-referential census number was re-measured (not assumed) after the fix and matched the
+existing prose exactly (56 == 56), confirmed via a sabotage-then-revert integrity check.
+**A second claim from the same task did NOT survive investigation**: the implementer additionally
+reported "3 pre-existing failures" in the anchoring-guard test files as a live regression on main.
+The controller's own re-run showed this does not reproduce on the primary checkout (312/312 pass,
+5/5 repeated) but does reproduce deterministically inside that task's own worktree (5/5) —
+root-caused to `tools/bin/ast-grep` being untracked in git (`git ls-files tools/bin/` lists only
+`cargo`/`gazelle`/`go`/`rustc`), so a fresh `git worktree add` never brings the 53MB binary over,
+`tests/conftest.py`'s PATH-prepend fixture derives `TOOLS_BIN` from each tree's own root, and the
+anchoring guard correctly (per its already-reviewed, disclosed design) falls back to a coarser
+heuristic that under-discriminates on that specific fixture pair — the same content-hash-free
+collision risk task 46's review already adjudicated as acceptable, surfacing through an
+environment gap rather than a code defect. Ruled NOT a regression; no fix task dispatched for it,
+flagged here as a process gotcha for future worktree-based verification of anchoring-guard tests.
+
+**Task 49 — post-merge lint-gate regressions, DONE, reviewed Approved zero findings, merged
+`f69c9da`.** A full `pytest -q` run on main after tasks 45-48 (2368 passed / 3 failed before this
+task) found three real, non-functional lint-gate failures nothing upstream caught, since every
+individual task reviewer correctly scoped to their own task's files rather than the whole repo:
+`ruff format`'s pinned dirty-file baseline (123) drifted to 125 — root-caused precisely to exactly
+two brand-new files (`rewrite/approach.py`, `tests/test_rewrite_approach.py`) never run through
+`ruff format`, confirmed by isolated check before dispatch so the fix touched only those two files
+and never the ~123-file deliberate pre-existing baseline; 10 real `ruff check` violations across
+files this wave touched, including the controller's own earlier manual merge-conflict resolution
+in `tests/test_cli.py`'s import list left slightly mis-sorted; and task 46's new `AnchoringGuardOff`
+finding kind undeclared in `schema.sql`'s self-checked documentation census — which turned out to
+require a matching edit to `docs/SPEC.md`'s own duplicate copy too, a requirement of the target
+test's own two-copies-agree check rather than scope creep, correctly disclosed as such. All three
+independently re-verified by review before merge.
+
+**Documentation reconciliation (controller, same wave).** `docs/CRITERIA_PLAN.md`: §36 flipped
+DONE (with the ChangeKind/ApproachChangeKind correction folded in after fix round 1 landed);
+§38 updated — D94 itself is closed, the criterion now blocked on the newly-allocated `D115`
+(branch-topology) and the pre-existing `D105`; §11 gap 2 marked closed (gaps 1/`D112` and 3
+remain); Rollup table updated 38→39, `36` moved from the D-number-blocked row to DONE, and a
+stray stale `27` mention in the "everything else" row (already DONE since the twentieth wave, not
+previously caught) removed while in the neighborhood. `docs/INTEGRATION_HONESTY.md`: D94 updated
+in place to record the landing; new entry `D115` allocated (re-derived from the measured maximum
+across all three heading forms — `D114` — not from a range read in any document, per this
+project's own Central Number Allocation rule).
+
+**Status: main green.** Full suite: 2368 passed pre-task-48/49, lint gates (`test_lint_gate.py`,
+`test_findings_kinds.py`) independently re-confirmed clean post-task-49 (11/11), citation-hygiene
+gate confirmed clean post-task-48 (71/71). §12 count: 39 of 48, up from 38 at this wave's start —
+one criterion closed (§36), two partially advanced (§38's D94 leg, §11's gap 2), one new D-number
+allocated (`D115`) with a disclosed, narrower blocker than what it replaced. Next dispatch:
+whichever of `D115` (branch-topology, unblocks §38 further), `D105` (§38's `--repoll-prs`
+reliability gap), or research-29's HTTP_OPERATION result (once summarized) has the clearest
+worker-ready shape: this round's own investigation should determine which before dispatching, not
+assume from this list alone.

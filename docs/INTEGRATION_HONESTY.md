@@ -4967,7 +4967,7 @@ or the prefix" is documented on that dataclass, because `name` is what an operat
 call sites above lived in modules this entry's original fix did not own. `5ed4e47` moves both to
 `list_with_verdict` **in the modules that own them**, as this section called for. Verified directly
 against the code at `main` `f10a863` (not the commit message):
-`workers/buildverify.py:1162-1223`'s `_sweep_containers` awaits `sandbox.list_with_verdict(prefix)` and, on a failed
+`workers/buildverify.py:1163-1224`'s `_sweep_containers` awaits `sandbox.list_with_verdict(prefix)` and, on a failed
 listing, logs a `container_sweep_listing_failed` warning and returns without sweeping — still
 deliberately not raising, for the reason this section already gave (all three of `_sweep_containers`'s
 call sites are cleanup after something else already failed); `cli.py:10605`'s `--dry-run` branch
@@ -7715,6 +7715,49 @@ when an already-open PR should be re-examined for promotion, the body-regenerati
 `Forge.mark_ready` wiring — this primitive has no caller anywhere in `src/` yet. §12.38's
 resolution sub-clause remains untestable for the same reason stated above; this piece alone does
 not move it.
+
+**Update, round VI task 45 (2026-09-04, `a70c985`, merged `9ed6e74`, task-scoped review Approved
+with nits) — the remaining three pieces all land: status now `PARTLY ADDRESSED`, not `OPEN`.**
+`_pr_impl`'s already-open-PR branch now distinguishes a genuine promotion candidate (`PrState.
+HELD`, written only by `_apply_stub_reconcile`'s end-of-run stub-abandonment path — confirmed the
+single production writer, never conflated with the separate "dependency not merged" `held` dict
+`_pr_impl` already tracks) from an ordinary already-open PR, and drives it through `_promote_one_pr`
+(`Git.rebase` → `_regenerate_pr_body` → `Git.push_force_with_lease` → `Forge.mark_ready`), reusing
+every existing primitive with no reimplementation. Body regeneration uses the full `render_body`
+path (not a surgical delete) after task review confirmed a surgical delete would leave a stale
+`Equivalence:` line — verbatim-preserves any `### Migration notes` section via
+`_extract_migration_notes`. Two genuinely discriminating Rule-12 mutations (always-promotes /
+never-promotes), independently reproduced by review. **Real, disclosed, not-fixed gap found in the
+same task, allocated `D115` below**: this monorepo's ingest never creates a per-repo
+`migrate/<repo>` branch, so a real `fleet pr` promotion attempt fails at its first check today —
+proven correct via a real git bare-remote/clone (6 unit tests), reported through `failed`, never
+silently skipped or crashed. **§12.38's resolution sub-clause is now testable end-to-end at the
+mechanism level and blocked at the branch-topology level** — see `D115`.
+
+## D115 — OPEN. `fleet pr`'s PR-promotion mechanism (D94) has no live path to run against: this
+monorepo's ingest never creates a per-repo `migrate/<repo>` branch, so promotion's first
+precondition check always fails in production
+
+**Found by round VI task 45 (2026-09-04), disclosed rather than forced into scope — the task's
+own brief explicitly put `vcs/git.py` and `orchestrator/stubs.py` off-limits, and this gap sits
+one layer up, in PR/ingest topology.** `_ingest_build_source`/`vcs.filter_repo.ingest`
+(`src/fleet/vcs/filter_repo.py:429`) merges each repo's rewritten history directly onto
+`integration`, never creating a `migrate/<repo>` branch inside the monorepo checkout. This is the
+same family as the pre-existing, already-disclosed `_emit_prs --push` refusal ("not implemented...
+no code path in `src/fleet/vcs/`", `cli.py:10096-10113`) — not something this task introduced.
+
+**Consequence.** D94's promotion mechanics (`_promote_one_pr`) are correct and proven against a
+real git bare-remote + clone (6 unit tests: clean rebase, conflict-abort, missing branch, refused
+push, failed body edit), but a promotion attempted through the real `fleet pr` CLI path fails at
+its very first check ("`migrate/<repo>` does not exist") because that branch was never created.
+`tests/test_pr_e2e.py::test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves`
+asserts this real, honest outcome (Rule 11: reported via `failed`, never faked or swallowed) —
+it proves the TRIGGER fires correctly, discriminated from a genuinely-still-open control case.
+
+**Not yet built:** the decision of how/whether to create a `migrate/<repo>` branch in the
+monorepo, at ingest time or at PR-creation time — a design question, not sized further here.
+Closing D115 is what makes D94's mechanism reachable from a real `fleet pr` invocation; D94's own
+mechanism does not need to change when D115 lands.
 
 ## D95 — FIXED, LANDED (`00b9e68`, merge of `agent/roundz-task3`; component commit `f9df242`). `state/repository.py::complete_phase`'s RHI-escalation leg wrote raw SQL bypassing `transition()`, letting a stale-but-not-reclaimed fence corrupt the state model's own `ALLOWED_TRANSITIONS` invariant
 
