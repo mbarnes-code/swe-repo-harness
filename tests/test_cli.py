@@ -51,7 +51,12 @@ from fleet.cli import (
     ExitCode,
     TransformStepUnavailableError,
     _abandon_repo,
+    _extract_migration_notes,
     _prepare_repo,
+    _PrCandidate,
+    _promote_one_pr,
+    _regenerate_pr_body,
+    _report_with_stubs,
     _TransformPlan,
     app,
     command_paths,
@@ -60,18 +65,29 @@ from fleet.llm.client import discover as llm_discover
 from fleet.llm.roles import SPEC_ROLE_TIERS
 from fleet.migrations import LATEST_VERSION
 from fleet.models.build import BuildUnit, SupportFile
-from fleet.models.enums import Ecosystem, Phase
+from fleet.models.enums import (
+    Ecosystem,
+    Equivalence,
+    Phase,
+    PrState,
+    RepoStatus,
+    StubFidelity,
+    StubState,
+)
 from fleet.models.state import SCHEMA_VERSION, MigrationState
+from fleet.models.tasks import PullRequestDraft, VerificationReport
 from fleet.sandbox.container import ContainerSandbox
 from fleet.sandbox.worktree import WorktreeManager
 from fleet.state import db as dbmod
 from fleet.state.db import SCHEMA_PATH, StateWriter
 from fleet.util.proc import ProcResult
 from fleet.util.proc import run as proc_run
+from fleet.vcs.forge import ForgeError
 from fleet.vcs.git import Git, GitCommandError, GitError
 from fleet.workers.base import WorkerContext
 from fleet.workers.classify import ClassifyWorker
 from fleet.workers.clone import CloneWorker
+from fleet.workers.prwriter import SAMPLED_BANNER, STUB_BANNER, PrwriterInput, render_body
 from tests.test_migrations import _v6_database
 
 runner = CliRunner()
@@ -7715,4 +7731,386 @@ def test_state_repository_imports_first_in_a_fresh_interpreter(tmp_path: Path) -
     assert reverse.returncode == 0, (
         "the order that always worked stopped working, so the deferral broke something other "
         f"than the cycle:\n{reverse.stderr}"
+    )
+
+
+# --------------------------------------------------------------------------------------
+# §12.38/D94 — promoting an already-open, HELD PR once its blocking stub resolves
+# --------------------------------------------------------------------------------------
+
+
+def _stub_report(*, stubbed: bool, truncated: bool = False) -> VerificationReport:
+    coord = "npm:@acme/gone"
+    return VerificationReport(
+        run_id=uuid.UUID(RUN_ID),
+        repo_id="acme-lib-py",
+        build_ok=True,
+        test_ok=True,
+        rdeps_query="deps(//acme/lib-py:all)",
+        rdeps_target_count=3,
+        rdeps_tested=1 if truncated else 3,
+        rdeps_ok=True,
+        rdeps_truncated=truncated,
+        verdict="PASS",
+        verified_against_stubs=[coord] if stubbed else [],
+        stub_fidelity={coord: StubFidelity.PUBLISHED_ARTIFACT} if stubbed else {},
+    )
+
+
+def _stub_payload(
+    *, stubbed: bool, truncated: bool = False, revalidation_round: int = 0
+) -> PrwriterInput:
+    coord = "npm:@acme/gone"
+    return PrwriterInput(
+        report=_stub_report(stubbed=stubbed, truncated=truncated),
+        wave_index=0,
+        branch="migrate/acme-lib-py",
+        base="integration",
+        source_url="https://example.invalid/acme-lib-py",
+        source_sha="a" * 40,
+        repo_status=RepoStatus.DEGRADED if stubbed else RepoStatus.SUCCEEDED,
+        stub_states={coord: StubState.ACTIVE} if stubbed else {},
+        stub_fidelity={coord: StubFidelity.PUBLISHED_ARTIFACT} if stubbed else {},
+        revalidation_round=revalidation_round,
+    )
+
+
+def _pr_candidate(*, stubbed: bool, truncated: bool = False) -> _PrCandidate:
+    coord = "npm:@acme/gone"
+    return _PrCandidate(
+        repo_id="acme-lib-py",
+        wave_index=0,
+        status=RepoStatus.DEGRADED if stubbed else RepoStatus.SUCCEEDED,
+        source_url="https://example.invalid/acme-lib-py",
+        source_sha="a" * 40,
+        report=_stub_report(stubbed=stubbed, truncated=truncated),
+        seed="seed-1",
+        stub_states={coord: StubState.ACTIVE} if stubbed else {},
+        stub_fidelity={coord: StubFidelity.PUBLISHED_ARTIFACT} if stubbed else {},
+        dependencies=(),
+    )
+
+
+def test_extract_migration_notes_is_empty_without_a_notes_section() -> None:
+    body = render_body(_stub_payload(stubbed=False), repo_id="acme-lib-py", draft=False)
+    assert "### Migration notes" not in body
+    assert _extract_migration_notes(body) == ""
+
+
+def test_extract_migration_notes_recovers_the_model_authored_prose_verbatim() -> None:
+    notes = "Renamed the package per the acme style guide; nothing else moved."
+    body = render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True, notes=notes)
+    assert _extract_migration_notes(body) == notes
+
+
+def test_regenerate_pr_body_matches_a_fresh_render_once_the_stub_is_gone() -> None:
+    """`_regenerate_pr_body` must produce EXACTLY what a fresh (never-before-opened) PR's body
+    would be for the SAME now-current, no-longer-stubbed state — proven by comparing against
+    `render_body` called directly, not by asserting a hand-picked shape. This is the discriminating
+    case a naive "delete only the banner block" approach fails: `render_body` also prints
+    "- Equivalence: `STUB_LIMITED`" in the metadata section below the banner, so only a full
+    re-render keeps that line consistent with the (now absent) banner. `revalidation_round=1`
+    matches `_regenerate_pr_body` bumping `record.revalidation_round` (default 0) by one.
+    """
+    record = _held_pr_record(
+        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True)
+    )
+    unit = (_pr_candidate(stubbed=False),)
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    expected = render_body(
+        _stub_payload(stubbed=False, revalidation_round=1), repo_id="acme-lib-py", draft=False
+    )
+    assert regenerated == expected
+    assert STUB_BANNER not in regenerated
+    assert "Equivalence: `STUB_LIMITED`" not in regenerated
+
+
+def test_regenerate_pr_body_still_carries_a_trailing_sampled_banner() -> None:
+    """A unit that was ALSO `CLOSURE_SAMPLED` must stay `CLOSURE_SAMPLED` once its stub banner
+    alone resolves — the other half of the equivalence precedence `_derive_equivalence` fixes."""
+    record = _held_pr_record(
+        body=render_body(
+            _stub_payload(stubbed=True, truncated=True), repo_id="acme-lib-py", draft=True
+        )
+    )
+    unit = (_pr_candidate(stubbed=False, truncated=True),)
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert STUB_BANNER not in regenerated
+    assert SAMPLED_BANNER in regenerated
+    expected = render_body(
+        _stub_payload(stubbed=False, truncated=True, revalidation_round=1),
+        repo_id="acme-lib-py",
+        draft=False,
+    )
+    assert regenerated == expected
+
+
+def test_regenerate_pr_body_preserves_the_original_migration_notes_verbatim() -> None:
+    """The one thing this task's brief forbids touching: model-authored prose must survive a
+    regeneration UNCHANGED — this mechanism makes no LLM call of its own."""
+    notes = "Renamed the package per the acme style guide; nothing else moved."
+    record = _held_pr_record(
+        body=render_body(
+            _stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True, notes=notes
+        )
+    )
+    unit = (_pr_candidate(stubbed=False),)
+    regenerated = _regenerate_pr_body(unit, record, {}, draft=False)
+    assert notes in regenerated
+    expected = render_body(
+        _stub_payload(stubbed=False, revalidation_round=1),
+        repo_id="acme-lib-py",
+        draft=False,
+        notes=notes,
+    )
+    assert regenerated == expected
+
+
+def test_report_with_stubs_clears_a_stale_stub_limited_verdict_once_the_stub_resolves() -> None:
+    """The bug this task's fix closes: `_pr_candidates`'s stub query only ever returns
+    `ACTIVE`/`SUPERSEDED` rows, so a stub that has since RESOLVED reads as `states == {}` — exactly
+    like a repo that never used a stub at all. The old `if not states: return report` conflated
+    the two and kept serving the STALE `STUB_LIMITED` report from when Phase 4 persisted it. This
+    is the discriminating case: a report that WAS stub-limited, re-derived against an empty
+    (now-resolved) state, must come back `FULL` — never silently unchanged.
+    """
+    stale = _stub_report(stubbed=True)
+    current = _report_with_stubs(stale, {}, {})
+    assert current.equivalence is Equivalence.FULL
+    assert current.verified_against_stubs == []
+    assert current.stub_fidelity == {}
+
+
+def test_report_with_stubs_is_a_genuine_noop_for_a_repo_that_never_had_a_stub() -> None:
+    """The OTHER half of the same fix: a repo whose report was never stub-limited must still come
+    back unchanged when `states` is empty — the fix must not turn `_report_with_stubs` into
+    something that mutates a report that needed no re-derivation at all."""
+    clean = _stub_report(stubbed=False)
+    assert _report_with_stubs(clean, {}, {}) == clean
+
+
+class _FakeForgeForPromotion:
+    """A `Forge` double exercising only the two calls `_promote_one_pr` makes — `edit_body` and
+    `mark_ready` — recorded so a test can assert both the calls AND their order relative to the
+    git operations around them."""
+
+    def __init__(self, *, fail_edit: bool = False, fail_ready: bool = False) -> None:
+        self.edited: list[tuple[str, Path]] = []
+        self.readied: list[str] = []
+        self._fail_edit = fail_edit
+        self._fail_ready = fail_ready
+
+    async def edit_body(self, url: str, body_file: Path, *, title: str | None = None) -> None:
+        if self._fail_edit:
+            raise ForgeError("edit_body failed")
+        self.edited.append((url, body_file))
+
+    async def mark_ready(self, url: str) -> None:
+        if self._fail_ready:
+            raise ForgeError("mark_ready failed")
+        self.readied.append(url)
+
+
+def _sh(cwd: Path, *args: str) -> str:
+    return subprocess.run(  # noqa: S603
+        ["git", "-C", str(cwd), *args],  # noqa: S607 - "git" from PATH, as every suite does
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _promotion_repo(tmp_path: Path) -> tuple[Path, Path]:
+    """A bare `remote.git` plus a clone with `integration` (the base) and `migrate/acme-lib-py`
+    (the PR branch) both pushed, `integration` one commit AHEAD of the branch's fork point — the
+    minimum real shape a §12.38/D94 promotion rebases and force-pushes against. Mirrors
+    `tests/test_vcs.py`'s `remote_and_clone` fixture (D94's own git-primitive tests), scoped here
+    to two named branches instead of one anonymous `main`.
+    """
+    remote = tmp_path / "remote.git"
+    clone = tmp_path / "clone"
+    _sh(tmp_path, "init", "-q", "--bare", str(remote))
+    _sh(tmp_path, "clone", "-q", str(remote), str(clone))
+    _sh(clone, "config", "user.email", "fleet-test@example.invalid")
+    _sh(clone, "config", "user.name", "fleet-test")
+
+    _sh(clone, "checkout", "-q", "-b", "integration")
+    (clone / "a.txt").write_text("v1\n", encoding="utf-8")
+    _sh(clone, "add", "-A")
+    _sh(clone, "commit", "-q", "-m", "root")
+    _sh(clone, "push", "-q", "origin", "integration")
+
+    _sh(clone, "checkout", "-q", "-b", "migrate/acme-lib-py")
+    (clone / "acme.txt").write_text("acme work\n", encoding="utf-8")
+    _sh(clone, "add", "-A")
+    _sh(clone, "commit", "-q", "-m", "acme-lib-py migration")
+    _sh(clone, "push", "-q", "origin", "migrate/acme-lib-py")
+
+    _sh(clone, "checkout", "-q", "integration")
+    (clone / "b.txt").write_text("v2\n", encoding="utf-8")
+    _sh(clone, "add", "-A")
+    _sh(clone, "commit", "-q", "-m", "someone else landed while the PR was HELD")
+    _sh(clone, "push", "-q", "origin", "integration")
+
+    _sh(clone, "checkout", "-q", "migrate/acme-lib-py")
+    return remote, clone
+
+
+def _held_pr_record(**overrides: object) -> PullRequestDraft:
+    base: dict[str, object] = dict(
+        run_id=uuid.UUID(RUN_ID),
+        repo_id="acme-lib-py",
+        wave_index=0,
+        branch="migrate/acme-lib-py",
+        base="integration",
+        title="[fleet wave 0] migrate acme-lib-py into the monorepo",
+        body=render_body(_stub_payload(stubbed=True), repo_id="acme-lib-py", draft=True),
+        source_url="https://example.invalid/acme-lib-py",
+        source_sha="a" * 40,
+        state=PrState.HELD,
+        url="https://github.invalid/acme/monorepo/pull/acme-lib-py",
+    )
+    base.update(overrides)
+    return PullRequestDraft(**base)
+
+
+def test_promote_one_pr_rebases_regenerates_the_body_and_marks_ready(tmp_path: Path) -> None:
+    """The success path, over REAL git and a real bare remote (no fake at the git layer, per this
+    module's own convention for `Git` primitives): rebase happens, the body is handed to the
+    forge, the push moves the REMOTE branch (read back independently from the bare repo, never
+    from the clone's own belief about it), and `mark_ready` fires last."""
+    remote, clone = _promotion_repo(tmp_path)
+    git = Git(clone)
+    forge = _FakeForgeForPromotion()
+    record = _held_pr_record()
+    new_body = render_body(_stub_payload(stubbed=False), repo_id="acme-lib-py", draft=False)
+    body_path = tmp_path / "out" / "body.md"
+
+    reason = asyncio.run(
+        _promote_one_pr(git, forge, record, url=record.url, body=new_body, body_path=body_path)
+    )
+
+    assert reason is None, reason
+    assert body_path.read_text(encoding="utf-8") == new_body
+    assert forge.edited == [(record.url, body_path)]
+    assert forge.readied == [record.url]
+
+    integration_tip = _sh(remote, "rev-parse", "integration")
+    branch_tip = _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py")
+    ancestor = subprocess.run(  # noqa: S603
+        ["git", "-C", str(remote), "merge-base", "--is-ancestor", integration_tip, branch_tip],  # noqa: S607
+        check=False,
+    )
+    assert ancestor.returncode == 0, (
+        "the remote branch must have been rebased onto the new integration tip, not merely "
+        "force-pushed unchanged"
+    )
+
+
+def test_promote_one_pr_leaves_a_conflicting_rebase_untouched(tmp_path: Path) -> None:
+    """A genuine conflict must abort the rebase, touch nothing on the forge, and leave the local
+    AND remote branch at exactly their pre-promotion tip — the discriminating proof that a
+    conflict is reported, not silently promoted past."""
+    remote, clone = _promotion_repo(tmp_path)
+    _sh(clone, "checkout", "-q", "integration")
+    (clone / "a.txt").write_text("integration change\n", encoding="utf-8")
+    _sh(clone, "add", "-A")
+    _sh(clone, "commit", "-q", "-m", "conflicting edit on integration")
+    _sh(clone, "push", "-q", "origin", "integration")
+
+    _sh(clone, "checkout", "-q", "migrate/acme-lib-py")
+    (clone / "a.txt").write_text("pr branch change\n", encoding="utf-8")
+    _sh(clone, "add", "-A")
+    _sh(clone, "commit", "-q", "-m", "conflicting edit on the pr branch")
+    _sh(clone, "push", "-q", "origin", "migrate/acme-lib-py")
+
+    git = Git(clone)
+    pre_tip = _sh(clone, "rev-parse", "migrate/acme-lib-py")
+    pre_remote_tip = _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py")
+    forge = _FakeForgeForPromotion()
+    record = _held_pr_record()
+    body_path = tmp_path / "out" / "body.md"
+
+    reason = asyncio.run(
+        _promote_one_pr(git, forge, record, url=record.url, body="new body", body_path=body_path)
+    )
+
+    assert reason is not None and "conflicted" in reason, reason
+    assert _sh(clone, "rev-parse", "migrate/acme-lib-py") == pre_tip, "the local branch must be untouched"
+    assert asyncio.run(git.resolve("REBASE_HEAD")) is None, "the rebase must have been aborted"
+    assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip
+    assert not body_path.exists()
+    assert forge.edited == []
+    assert forge.readied == []
+
+
+def test_promote_one_pr_reports_a_missing_branch_rather_than_crashing(tmp_path: Path) -> None:
+    """`migrate/<repo>` not existing in this checkout is a REAL, currently-shipped gap (§3.3's
+    ingest merges straight onto `integration` and leaves no per-repo branch behind) — this must be
+    a reported failure, never a crash and never a silent no-op promotion."""
+    _remote, clone = _promotion_repo(tmp_path)
+    git = Git(clone)
+    forge = _FakeForgeForPromotion()
+    record = _held_pr_record(branch="migrate/does-not-exist")
+    body_path = tmp_path / "out" / "body.md"
+
+    reason = asyncio.run(
+        _promote_one_pr(git, forge, record, url=record.url, body="x", body_path=body_path)
+    )
+
+    assert reason is not None and "does not exist" in reason, reason
+    assert forge.edited == []
+    assert forge.readied == []
+
+
+def test_promote_one_pr_reports_a_refused_push_and_never_marks_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale-lease push refusal (already proven at the `Git` primitive level in
+    `tests/test_vcs.py`) must still leave `mark_ready` uncalled here — the ORDERING guarantee this
+    function adds on top of the primitive, proven by forcing the refusal at this seam."""
+    remote, clone = _promotion_repo(tmp_path)
+    git = Git(clone)
+    forge = _FakeForgeForPromotion()
+    record = _held_pr_record()
+    body_path = tmp_path / "out" / "body.md"
+
+    async def refuse(*_args: object, **_kwargs: object) -> None:
+        raise GitCommandError(
+            ("git", "push"), 1, "! [rejected] (stale info)", cwd=clone, timed_out=False, started=True
+        )
+
+    monkeypatch.setattr(git, "push_force_with_lease", refuse)
+
+    reason = asyncio.run(
+        _promote_one_pr(git, forge, record, url=record.url, body="new body", body_path=body_path)
+    )
+
+    assert reason is not None and "push_force_with_lease refused" in reason, reason
+    assert forge.edited, "the body is regenerated on the forge before the push is attempted"
+    assert forge.readied == [], "mark_ready must not fire once the push failed"
+    unchanged = _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py")
+    assert unchanged, "the remote branch is untouched by a refused push"
+
+
+def test_promote_one_pr_reports_a_failed_body_edit_and_never_pushes_or_marks_ready(
+    tmp_path: Path,
+) -> None:
+    """A forge that refuses the body edit must stop the promotion before the push — never ship a
+    ready PR that still carries the stub-pending notice because the edit silently failed."""
+    remote, clone = _promotion_repo(tmp_path)
+    git = Git(clone)
+    forge = _FakeForgeForPromotion(fail_edit=True)
+    record = _held_pr_record()
+    body_path = tmp_path / "out" / "body.md"
+    pre_remote_tip = _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py")
+
+    reason = asyncio.run(
+        _promote_one_pr(git, forge, record, url=record.url, body="new body", body_path=body_path)
+    )
+
+    assert reason is not None and "regenerating the PR body failed" in reason, reason
+    assert forge.readied == []
+    assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip, (
+        "a failed body edit must not leave the branch force-pushed anyway"
     )

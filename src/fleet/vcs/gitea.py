@@ -429,6 +429,21 @@ class GiteaForge:
             return
         await self._exec("PATCH", path, body={"title": strip_wip(title)})
 
+    async def edit_body(self, url: str, body_file: Path, *, title: str | None = None) -> None:
+        """`PATCH /repos/{owner}/{repo}/pulls/{index}` with a new `body` (and `title`, if given).
+
+        Mirrors `github.py`'s `edit_body`: §3.5.1's resolution re-uses the same PR rather than
+        opening a second one, so its number, url and review history survive a revalidation round.
+        Unlike `mark_ready`, this never reads the current title first — a caller not passing
+        `title` leaves it untouched, so there is nothing stale to guard against.
+        """
+        ref = parse_pr_url(url)
+        path = f"/repos/{ref.owner}/{ref.repo}/pulls/{ref.index}"
+        body: dict[str, object] = {"body": _read_body(body_file)}
+        if title is not None:
+            body["title"] = title
+        await self._exec("PATCH", path, body=body)
+
     async def view(self, url: str) -> PrStatus:
         """`GET /repos/{owner}/{repo}/pulls/{index}` → `PrStatus`. The only source of `MERGED`."""
         ref = parse_pr_url(url)
