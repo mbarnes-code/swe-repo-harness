@@ -9650,3 +9650,72 @@ allocated (`D115`) as §38's sole remaining blocker. Next dispatch: `D115` (bran
 needs a design ruling on how/whether to create `migrate/<repo>` inside monorepo ingest before a
 worker can be dispatched) or research-29's HTTP_OPERATION result (once summarized), whichever has
 the clearer worker-ready shape once investigated.
+
+## Round VI, twenty-third wave (2026-09-05) — §12 count: 40 of 48, up from 39. Design-then-build
+sequencing: two design-research passes each fed directly into a worker dispatch this same wave.
+
+**Research-30 + Task 50 — §12.38's D115, CLOSED.** Research-30 (dispatched read-only) read
+`filter_repo.py::ingest()`, both its callers, and `_promote_one_pr`'s actual rebase/force-push
+sequence, and reached a decided four-part design rather than a menu: create `migrate/<repo>` at
+ingest time (the one choke point covering both callers), as a plain alias of the merge commit
+`ingest()` already produces (verified against `_promote_one_pr`'s real code — a divergent branch
+would conflict wall-to-wall on every path), owned by `ingest()` itself, purely additive. Logged as
+`ADR-0118`. Task 50 implemented the exact two-line change plus three new tests (fresh-merge,
+idempotent re-run, stale-branch re-point), reviewed Approved zero findings — including an
+independently-reproduced verification that a pre-existing task-45 test's assertion update
+(triggered by D115's fix moving `_promote_one_pr`'s failure point from its first precondition
+check to its second) is a genuine strengthening, not a masked regression. **D94, D105, and D115
+are now all closed** — no D-number blocks §12.38 any more, though its own 20-sub-clause text
+needs a fresh re-audit before it counts DONE (flagged as next dispatch, not claimed closed on the
+strength of this alone).
+
+**Research-29 (resumed) + Task 51 — §12.8's last gap, CLOSED, all 8 `EdgeKind`s now proven.**
+Research-29 ran unusually long (>2h) without reaching its core empirical question; nudged to wrap
+up, it reported a small, bounded, mechanical remainder (three staged `docker run
+openapi-generator-cli` commands) rather than an open-ended investigation. The controller ran those
+three commands directly instead of a further research round-trip: the OpenAPI path template
+survives byte-identical across three independent generators (python, typescript-fetch,
+typescript-axios) and matches the spec's own `paths:` key exactly, overturning a prior round's "no
+known codegen-independent literal" framing — the literal is load-bearing for HTTP-request
+correctness, not a stylistic convention, the same honesty bar that accepted gRPC's own wire-level
+literal. Task 51 built the extractor symmetrically (OpenAPI-definition side, generated-client
+consumer side) through `symbolindex.py`'s existing config-driven pattern mechanism, needing zero
+changes to the join (`graph/infer.py::_api_contract_edges`, confirmed zero-line diff). Reviewed
+Approved after one fix round (missing JSON-branch test coverage; an undisclosed broader
+false-positive class the reviewer found by constructing their own test cases beyond the
+implementer's fixtures — closed via disclosure, not a regex change, since the join's
+exact-FQN-match requirement already bounds the practical risk). **The task's own Rule-12 mutation
+testing caught a real bug before it shipped**: a naive single-file mutation produced a false
+all-pass because the real CLI path reads from a second, independent default-pattern dict in
+`settings.py`, pre-existing since round V — caught, not trusted, both copies now kept in sync.
+
+**Three self-caught documentation errors this wave, all fixed in the same session rather than
+left for the next wave to trip over — worth naming as a pattern, not just individually.** (1) An
+earlier wave's checkpoint named `D105` as an open §38 blocker; it had actually been `FIXED,
+LANDED` two tasks after it was found, in the same prior round — caught by the controller's own
+pre-commit citation/lint recheck before the claim ever left the session. (2) A citation this
+wave's own checkpoint added (`docs/CRITERIA_PLAN.md`'s §8 entry, pointing at research-29's report
+as containing "full generated-code evidence") was written before checking that the cited file
+actually contained it — the task-51 reviewer caught that the report was still its stopped-early
+version with no docker output at all. Fixed by appending a dated addendum with the actual evidence
+(already gathered) rather than rewriting the original record — the underlying technical claim was
+true throughout, only the citation's target was wrong. (3) D115 itself was closed by task 50 but
+never flipped from `OPEN` in `docs/INTEGRATION_HONESTY.md` until this checkpoint — caught while
+writing this very entry, not by an external reviewer. None of these were caught by a subagent;
+all three were caught by the controller's own discipline of re-checking primary sources before
+propagating a claim forward — the load-bearing habit this project's CLAUDE.md names explicitly,
+demonstrated here on the controller's own output, not just on workers'.
+
+**Status: main green.** Citation-hygiene, lint-gate, and findings-kinds gates re-verified clean
+(82/82) immediately before the closing commit. §12 count: 40 of 48, up from 38 at the start of
+this session's visible stretch (twenty-second + twenty-third waves combined: §36, §8 closed;
+§11's gap 2, §38's D94/D105/D115 legs all advanced). Remaining 8 open criteria: 14, 31, 34
+(Clause B), 37, 38 (needs the re-audit named above), 39, 43 (case ii). None are quick wins — 31/34
+need dedicated design ADRs before dispatch (same shape as this wave's own D115 design-then-build
+sequencing, which worked well and is worth repeating for 31/34's D111/D113 chains), 14/37/39 are
+the still-deferred D80-adjacent stub-creation-logic bundle (blocked on a pre-existing, wider
+rewrite-rule-construction gap per round VI's own research-7/8), and 43's case (ii) needs its own
+dedicated round for the D55/D58 circuit-breaker gap. Next dispatch: §38's fresh 20-sub-clause
+re-audit (cheapest, no new design needed) or a design pass for §31/D111 or §34/D113 (highest
+remaining architectural leverage), whichever a future round's own investigation finds
+better-scoped first.
