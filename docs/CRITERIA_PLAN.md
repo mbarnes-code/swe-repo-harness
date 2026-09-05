@@ -447,6 +447,39 @@ for gRPC before its task 3 became one-shot-able — before any design can be wri
 dispatchable as-is; not D-numbered (per research-27's own instruction, this is groundwork to do,
 not yet a named defect).
 
+**Groundwork done, round VI research-29 + controller (2026-09-05) — the "no known literal"
+premise above does not survive the actual empirical check, corrected here rather than left
+standing.** Real `docker run openapitools/openapi-generator-cli generate` (image pulled and run
+directly, not simulated) against a representative 2-operation spec (`GET /widgets/{widgetId}`,
+`POST /widgets`), for `python`, `typescript-fetch`, and `typescript-axios` — three independent
+generators across both languages this project's scanner covers — shows the **literal path
+template, brace placeholders and all** (`/widgets/{widgetId}`, `/widgets`) embedded verbatim in
+every generated client's actual request-construction code: `resource_path='/widgets/{widgetId}'`
+(Python), `` `/widgets/{widgetId}` `` (both TS generators). Byte-identical across all three
+generators, and byte-identical to the OpenAPI spec's own `paths:` key. **This is not merely a
+"codegen convention" the way research-27 framed the only prior candidate** — a client that made
+an HTTP request without embedding this exact path template literally somewhere would not
+correctly implement the OpenAPI contract it was generated from; the literal is load-bearing for
+correctness, not a stylistic choice a generator happens to share, which is the same honesty
+argument round V's design principle used to accept gRPC's wire-level path. Full generated-code
+evidence in `.superpowers/sdd/round-VI-criteria-closure/research-29-report.md`.
+
+**Revised done bar: DISPATCHABLE now, same one-shot shape as gRPC's own closure (round V task
+3).** Extend `symbolindex.py`'s existing `DEFAULT_API_CONTRACT_PATTERNS`/`_pattern_symbols`
+mechanism (already the generic, config-driven reference extractor gRPC's fix used, `scan.
+api_contract_patterns` in `fleet.yaml`) with a new category matching a quoted/backtick path
+literal containing a `{param}`-style placeholder, wired symmetrically on both sides: a
+DEFINITION-side extractor over OpenAPI YAML `paths:` keys (producing the same FQN shape, the path
+template itself, normalized consistently — e.g. leading slash kept, placeholder braces kept
+verbatim since they matched byte-for-byte across all three generators) and this new CONSUMER-side
+pattern over generated Python/TS/JS. **Design risk to size and prove, not wave through**: gRPC's
+pattern is safe from false positives because `/package.Service/Method`'s dotted-FQN-then-bare-
+method shape is distinctive; a bare "quoted string starting with `/`" pattern is not — ordinary
+URL literals, log messages, and file paths could false-positive-match. A real fixture proving the
+chosen pattern does NOT match a plausible non-API `/`-prefixed string literal (Rule 12: the
+mutation that removes this specificity must redden a dedicated false-positive test, not just the
+positive one) is part of this closure's own done bar, not an afterthought.
+
 ## 9. Phase 1 exit condition is a runtime gate
 **DONE (round VI task 42, 2026-09-03 — see the closing note at the end of this entry; history
 below kept as the record of what was true at each point).**
