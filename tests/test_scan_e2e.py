@@ -1618,6 +1618,382 @@ def test_a_grpc_stub_naming_a_different_service_produces_no_api_contract_edge(
     assert edges == [], edges
 
 
+# ---------------------------------------------------------------------------------------
+# API_CONTRACT, HTTP_OPERATION side (§12 item 8's LAST gap, round VI research-29 +
+# CRITERIA_PLAN §8's revised done bar)
+# ---------------------------------------------------------------------------------------
+#
+# The gRPC block above closed the reference (consumer) side for GRPC_SERVICE; HTTP_OPERATION was
+# the sole remaining EdgeKind gap because nothing ever produced either side of it: `_proto_symbols`
+# never runs over YAML/JSON OpenAPI documents, and `_pattern_symbols` had no pattern for an HTTP
+# path template. `_openapi_path_symbols` (workers/symbolindex.py) now extracts the DEFINITION side
+# from an OpenAPI document's `paths:` block (gated on the document's own `openapi:`/`swagger:`
+# root key, per `_is_openapi_document`), and `DEFAULT_API_CONTRACT_PATTERNS["http_path_template"]`
+# extracts the REFERENCE side from a generated-client-shaped literal — research-29's real
+# `openapi-generator-cli` run found this exact literal, brace placeholders included, survives
+# byte-identical across python/typescript-fetch/typescript-axios and matches the spec's own
+# `paths:` key, which is what makes a single FQN-equality join (unmodified `_api_contract_edges`)
+# honest here.
+
+_OPENAPI_WIDGET_SPEC = """\
+openapi: 3.0.0
+info:
+  title: Widget API
+  version: 1.0.0
+paths:
+  /widgets/{widgetId}:
+    get:
+      operationId: getWidget
+      responses:
+        '200':
+          description: OK
+  /widgets:
+    post:
+      operationId: createWidget
+      responses:
+        '201':
+          description: Created
+"""
+
+
+@pytest.fixture
+def http_contract_fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`acme-http-provider` defines the OpenAPI spec; `acme-http-consumer` never sees the spec
+    file at all — only a hand-written stand-in for an `openapi-generator-cli` python client's
+    `resource_path = '/widgets/{widgetId}'` line (research-29's own generated-output evidence)."""
+    sources = {
+        "acme-http-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-http-provider",
+            {
+                "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-http-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-http-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_http_consumer/default_api.py": (
+                    "class DefaultApi:\n"
+                    "    def get_widget(self, widget_id, **kwargs):\n"
+                    "        resource_path = '/widgets/{widgetId}'\n"
+                    "        return self._call(resource_path)\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def test_an_openapi_path_template_produces_a_real_api_contract_edge(
+    http_contract_fleet: Path,
+) -> None:
+    """§12 item 8's last `EdgeKind`: API_CONTRACT proven for HTTP_OPERATION against a real
+    `fleet scan`, not only a hand-built `InferenceInput`.
+
+    `acme-http-consumer/acme_http_consumer/default_api.py` line 3 names
+    `/widgets/{widgetId}` inside a plain string literal — `http_path_template` captures it as an
+    `HTTP_OPERATION` reference (`is_definition=False`), and
+    `acme-http-provider/openapi/widgets.yaml` line 6's `/widgets/{widgetId}:` key under the
+    document's `openapi:` root is `_openapi_path_symbols`' real DEFINITION
+    (`is_definition=True`) it resolves to.
+    """
+    result = scan(http_contract_fleet)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        http_contract_fleet,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line FROM edges "
+        "WHERE kind = 'API_CONTRACT'",
+    )
+    assert edges == [
+        (
+            "acme-http-consumer",
+            "acme-http-provider",
+            "API_CONTRACT",
+            "acme_http_consumer/default_api.py",
+            3,
+        )
+    ], edges
+
+
+def test_an_openapi_consumer_naming_an_undefined_path_produces_no_api_contract_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 12: the fixture-fleet proof above is a genuine discriminator, not a vacuous one.
+
+    Same two repos, same `http_path_template` shape — but the consumer's literal is
+    `/gadgets/{gadgetId}`, which `acme-http-provider`'s spec never defines.
+    `_api_contract_edges`'s `definitions.get(sym.fqn, [])` must come back empty for that FQN and
+    emit nothing.
+    """
+    sources = {
+        "acme-http-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-http-provider",
+            {
+                "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-http-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-http-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_http_consumer/other_api.py": (
+                    "class OtherApi:\n"
+                    "    def get_gadget(self, gadget_id, **kwargs):\n"
+                    "        resource_path = '/gadgets/{gadgetId}'\n"
+                    "        return self._call(resource_path)\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(workspace, "SELECT kind FROM edges WHERE kind = 'API_CONTRACT'")
+    assert edges == [], edges
+
+
+def test_an_fstring_path_literal_does_not_produce_a_spurious_api_contract_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Rule 12's REQUIRED false-positive fixture (CRITERIA_PLAN §8's revised done bar): a bare
+    `/`-prefixed string is nowhere near as distinctive as gRPC's dotted-FQN-then-bare-method
+    shape, so `http_path_template` must not fire on the realistic false positive CRITERIA_PLAN §8
+    names — an ordinary dynamic log/file-path literal that merely LOOKS like a path template.
+
+    The consumer file below logs an f-string, `f"/widgets/{widgetId}"`, that is BYTE-IDENTICAL to
+    `acme-http-provider`'s real defined path `/widgets/{widgetId}` — deliberately, so that if
+    `http_path_template` did not exclude f-strings this WOULD resolve against a real definition
+    and produce a genuine (spurious) edge. This is what makes the fixture a real discriminator
+    rather than one that merely differs by FQN: reverting `http_path_template`'s
+    `(?<![fFrRbB])` lookbehind reddens exactly this test while leaving
+    `test_an_openapi_path_template_produces_a_real_api_contract_edge` (a plain, non-f-string
+    literal) green.
+    """
+    sources = {
+        "acme-http-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-http-provider",
+            {
+                "openapi/widgets.yaml": _OPENAPI_WIDGET_SPEC,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-http-fp-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-http-fp-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-fp-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_http_fp_consumer/jobs.py": (
+                    "import logging\n"
+                    "\n"
+                    "logger = logging.getLogger(__name__)\n"
+                    "\n"
+                    "\n"
+                    "def handle_widget(widgetId):\n"
+                    '    logger.info(f"/widgets/{widgetId}")\n'
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(workspace, "SELECT kind FROM edges WHERE kind = 'API_CONTRACT'")
+    assert edges == [], edges
+
+
+_OPENAPI_WIDGET_SPEC_JSON = """\
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Widget API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/widgets/{widgetId}": {
+      "get": {
+        "operationId": "getWidget"
+      }
+    },
+    "/widgets": {
+      "post": {
+        "operationId": "createWidget"
+      }
+    }
+  }
+}
+"""
+
+
+def test_an_openapi_json_path_template_produces_a_real_api_contract_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task review finding: the JSON branch (`_openapi_json_path_symbols`/`_matching_brace`/the
+    JSON arm of `_openapi_path_symbols`, ~50 lines) had zero committed test coverage — only the
+    YAML fixture above was proven through a real `fleet scan`. Same shape as
+    `test_an_openapi_path_template_produces_a_real_api_contract_edge`, JSON spec instead of YAML:
+    `acme-http-json-provider/openapi/widgets.json` line 8's `"/widgets/{widgetId}":` key (a
+    depth-1 child of the root `"paths"` object, found via `_matching_brace`'s quote-aware brace
+    counting) is the real DEFINITION, and
+    `acme-http-json-consumer/acme_http_json_consumer/default_api.py` line 3's
+    `'/widgets/{widgetId}'` literal is the real REFERENCE `http_path_template` captures.
+    """
+    sources = {
+        "acme-http-json-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-http-json-provider",
+            {
+                "openapi/widgets.json": _OPENAPI_WIDGET_SPEC_JSON,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-json-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-http-json-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-http-json-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-json-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_http_json_consumer/default_api.py": (
+                    "class DefaultApi:\n"
+                    "    def get_widget(self, widget_id, **kwargs):\n"
+                    "        resource_path = '/widgets/{widgetId}'\n"
+                    "        return self._call(resource_path)\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        workspace,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line FROM edges "
+        "WHERE kind = 'API_CONTRACT'",
+    )
+    assert edges == [
+        (
+            "acme-http-json-consumer",
+            "acme-http-json-provider",
+            "API_CONTRACT",
+            "acme_http_json_consumer/default_api.py",
+            3,
+        )
+    ], edges
+
+
+def test_a_json_paths_key_with_no_openapi_root_produces_no_http_operation_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task review finding: the JSON branch's gate (`_is_openapi_document`, reused from
+    `_document_root_keys`' own result) was only checked by the reviewer's own manual, uncommitted
+    invocation. A JSON document with a root `"paths"` key AND a `/`-shaped child key, but no
+    `openapi`/`swagger` root key, must produce ZERO `HTTP_OPERATION` symbols — proving
+    `_openapi_json_path_symbols` never runs against an arbitrary JSON file's own unrelated
+    `paths:`-named key.
+    """
+    sources = {
+        "acme-unrelated-json": _make_repo(
+            tmp_path / "sources",
+            "acme-unrelated-json",
+            {
+                "config/routes.json": (
+                    '{\n  "paths": {\n    "/not/an/api": {"foo": "bar"}\n  },\n'
+                    '  "unrelated": true\n}\n'
+                ),
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-unrelated-json"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    symbols = query(
+        workspace,
+        "SELECT fqn FROM symbols WHERE repo_id = 'acme-unrelated-json' AND kind = 'http_operation'",
+    )
+    assert symbols == [], symbols
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,

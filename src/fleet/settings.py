@@ -399,11 +399,31 @@ class ScanSection(Section):
     api_contract_patterns: dict[str, str] = Field(
         default_factory=lambda: {
             "grpc_method_path": r"[\"']/((?:[A-Za-z_]\w*\.)+[A-Za-z_]\w*)/[A-Za-z_]\w*[\"']",
+            "http_path_template": (
+                r"(?<![fFrRbB])[\"'`](/(?:[\w.-]+/)*\{[A-Za-z_]\w*\}"
+                r"(?:/(?:[\w.-]+|\{[A-Za-z_]\w*\}))*)[\"'`]"
+            ),
         },
-        description="A gRPC stub's wire-level RPC path, `/package.Service/Method` — the one "
-        "string every generated client emits verbatim regardless of target language. Captures "
-        "`package.Service`, the same FQN `_proto_symbols` emits for `GRPC_SERVICE` definitions, "
-        "as an `is_definition=False` reference (§12.8, API_CONTRACT).",
+        description="`grpc_method_path`: a gRPC stub's wire-level RPC path, "
+        "`/package.Service/Method` — the one string every generated client emits verbatim "
+        "regardless of target language. Captures `package.Service`, the same FQN "
+        "`_proto_symbols` emits for `GRPC_SERVICE` definitions, as an `is_definition=False` "
+        "reference (§12.8, API_CONTRACT). `http_path_template`: an OpenAPI path template, "
+        "`/widgets/{widgetId}` shaped, verified byte-identical across `openapi-generator-cli`'s "
+        "python/typescript-fetch/typescript-axios output (round VI research-29) — requires at "
+        "least one `{param}` placeholder segment and excludes any literal immediately preceded "
+        "by a Python string-prefix letter (f/r/b), to keep false-positive risk down against "
+        "ordinary URL/log/file-path literals. Captures the path template as an "
+        "`is_definition=False` `HTTP_OPERATION` reference. DISCLOSED false-positive class the "
+        "f/r/b-prefix exclusion does NOT rule out (task review, round VI task 51 fix round 1): "
+        "any bare, non-prefixed quoted string with a `{name}`-shaped segment still matches "
+        "regardless of HTTP relevance — a log/file-path template, a same-repo Flask-style "
+        "`add_url_rule('/widgets/{widgetId}', ...)` registration, a cache key, a cron path, an "
+        "S3 key template. Accepted rather than patched: `_api_contract_edges` requires an EXACT "
+        "fqn match against a real `is_definition=True` HTTP_OPERATION symbol elsewhere in the "
+        "fleet, so this needs a coincidental literal collision to produce a wrong edge, and "
+        "tightening the regex further risks under-matching real generated-client code — see "
+        "`symbolindex.py`'s `DEFAULT_API_CONTRACT_PATTERNS` docstring for the full disclosure.",
     )
     contracts: ContractsSection = ContractsSection()
 
