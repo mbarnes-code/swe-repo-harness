@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sqlite3
+import subprocess
 from collections.abc import Iterator, Mapping, Sequence
 from pathlib import Path
 from typing import Any, cast
@@ -161,6 +162,11 @@ class FakeForge:
             case ("pr", "view", url, "--json", _fields):
                 return self._result(call, stdout=self._view(url))
             case ("pr", "ready", _url):
+                return self._result(call)
+            case ("pr", "edit", _url, "--body-file", _body_file, *_rest):
+                # `Forge.edit_body` (`vcs/github.py:250-255`) — the §12.38/D94 promotion path's
+                # body regeneration. Recorded like every other call, so `forge.commands("pr",
+                # "edit")` proves it fired without needing a dedicated accessor.
                 return self._result(call)
             case _:  # pragma: no cover - an unrecognised argv is a test bug, loudly
                 raise AssertionError(f"unexpected gh invocation: {call}")
@@ -841,6 +847,134 @@ def test_re_running_fleet_pr_leaves_a_genuinely_already_open_pr_out_of_failed(
     assert body["failed"] == {}, body
     assert body["promoted"] == {}, body
     assert sorted(body["already_open"]) == list(LIBRARIES), body
+
+
+def _git_rev(repo: Path, ref: str) -> str:
+    return subprocess.run(  # noqa: S603
+        ["git", "-C", str(repo), "rev-parse", ref],  # noqa: S607 - `git` from PATH, as elsewhere
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+
+def _is_ancestor(repo: Path, ancestor: str, descendant: str) -> bool:
+    return (
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo), "merge-base", "--is-ancestor", ancestor, descendant],  # noqa: S607
+            check=False,
+        ).returncode
+        == 0
+    )
+
+
+def promotion_remote_for(monorepo_path: Path) -> Path:
+    """Give the e2e monorepo checkout (`tests/test_build_e2e.py::make_monorepo`, `git init`-only,
+    no `origin`) a real bare remote — the shape `_promote_one_pr`'s remote-tip read
+    (`cli.py::_remote_branch_tip`) needs. Mirrors `tests/test_cli.py::_promotion_repo`'s
+    bare-remote pattern, but built around the REAL monorepo this suite's own pipeline ingests
+    into, not a throwaway one.
+
+    Call this AFTER `verified()` has run (so `migrate/<repo>` branches D115 creates already exist
+    locally) and after any commit meant to simulate work landing on `integration` while a PR was
+    `HELD`, so the push captures both branches at the tips the promotion attempt should see.
+    """
+    remote = monorepo_path.parent / "monorepo-remote.git"
+    _git(monorepo_path.parent, "init", "-q", "--bare", str(remote))
+    _git(monorepo_path, "remote", "add", "origin", str(remote))
+    _git(monorepo_path, "push", "-q", "origin", "integration", "migrate/acme-lib-py")
+    return remote
+
+
+def pr_record(root: Path, repo_id: str) -> dict[str, Any]:
+    """The full persisted `PullRequestDraft` payload for one repo. `pr_states()` above only
+    projects `state` — some assertions (`url`, `revalidation_round`) need the whole record."""
+    rows = query(
+        root,
+        "SELECT payload FROM findings WHERE kind = 'PullRequest' AND repo_id = ? "
+        "ORDER BY repo_id",
+        (repo_id,),
+    )
+    assert rows, f"no PullRequestDraft for {repo_id}"
+    return dict(json.loads(str(rows[0][0])))
+
+
+def test_pr_promotes_an_already_open_held_pr_through_the_real_cli_end_to_end(
+    fleet: Path, monorepo: Path, bazel: FakeBazel, forge: FakeForge  # noqa: F811
+) -> None:
+    """§12.38/D94's resolution mechanics (clauses 6-12), driven through the REAL `fleet pr` CLI
+    end to end — the gap research-31 found: the trigger test above proves the promotion is
+    ATTEMPTED but deliberately stops at `_promote_one_pr`'s second precondition (no real `origin`
+    in that fixture); `tests/test_cli.py::test_promote_one_pr_rebases_regenerates_the_body_and_
+    marks_ready` (+ siblings) proves the git/forge mechanics but calls `_promote_one_pr` directly,
+    bypassing `_pr_impl`/`_promote_prs`. This test connects the two: a real `origin` remote, a
+    real `HELD`-then-resolved PR, and a plain `fleet pr --repo acme-lib-py` re-run that must
+    actually SUCCEED and write the promoted state.
+
+    Same setup as `test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves`
+    (degrade -> open -> `hold_pr` -> resolve the stub), reusing its helpers rather than
+    duplicating them, but against a monorepo checkout that has a real bare `origin` — with an
+    extra commit landed on `integration` first, standing in for "someone else's PR merged while
+    ours was HELD" (mirrors `tests/test_cli.py::_promotion_repo`'s `b.txt` commit), so the
+    post-promotion ancestor check proves a genuine rebase and not a no-op.
+    """
+    verified(fleet)
+    degrade(fleet, "acme-lib-py", state="ACTIVE")
+    opened = run_pr(fleet, "--repo", "acme-lib-py")
+    assert opened.exit_code == ExitCode.SUCCESS, opened.output
+    assert pr_states(fleet)["acme-lib-py"] == PrState.DRAFTED.value, pr_states(fleet)
+    pre_promotion_url = pr_record(fleet, "acme-lib-py")["url"]
+
+    hold_pr(fleet, "acme-lib-py")
+    conn = sqlite3.connect(fleet / "state" / "fleet.db")
+    conn.execute(
+        "UPDATE stubs SET state = 'RESOLVED', resolved_at = '2026-08-09T00:00:00+00:00' "
+        " WHERE run_id = ? AND repo_id = ? AND state = 'ACTIVE'",
+        (run_id_of(fleet), "acme-lib-py"),
+    )
+    conn.commit()
+    conn.close()
+    assert pr_states(fleet)["acme-lib-py"] == PrState.HELD.value, "setup check: the PR is HELD"
+
+    # "Someone else landed while the PR was HELD" — a real commit on `integration`, so the
+    # promotion's rebase has genuine work to do and is not a trivial no-op fast-forward.
+    (monorepo / "someone-else-landed.txt").write_text("late arrival\n", encoding="utf-8")
+    _git(monorepo, "add", "-A")
+    _git(monorepo, "commit", "-q", "-m", "someone else landed while the PR was HELD")
+
+    remote = promotion_remote_for(monorepo)
+
+    again = run_pr(fleet, "--repo", "acme-lib-py")
+    assert again.exit_code == ExitCode.SUCCESS, again.output
+    body = payload(again)
+    assert body["promoted"] == {"acme-lib-py": forge.url_for("acme-lib-py")}, body
+    assert body["failed"] == {}, body
+
+    assert pr_states(fleet)["acme-lib-py"] == PrState.OPEN.value, pr_states(fleet)
+    record = pr_record(fleet, "acme-lib-py")
+    assert record["url"] == pre_promotion_url, record
+    assert record["revalidation_round"] == 1, record
+
+    assert forge.commands("pr", "ready"), (
+        "clause 9/10/11: mark_ready must fire once rebase+push+body-edit all succeeded"
+    )
+    assert forge.commands("pr", "edit"), "clause 11: the body must be regenerated on the forge"
+    creates_for_acme_lib_py = [
+        call for call in forge.commands("pr", "create") if "migrate/acme-lib-py" in call
+    ]
+    assert len(creates_for_acme_lib_py) == 1, (
+        "clause 12 (positive half): no second `gh pr create` for this repo", forge.calls
+    )
+    assert not forge.commands("pr", "close"), (
+        "clause 12 (negative half): a resolution never closes and re-opens a PR", forge.calls
+    )
+
+    integration_tip = _git_rev(remote, "integration")
+    branch_tip = _git_rev(remote, "refs/heads/migrate/acme-lib-py")
+    assert _is_ancestor(remote, integration_tip, branch_tip), (
+        "the remote migrate/acme-lib-py branch must have been rebased onto integration's "
+        "current tip, not merely force-pushed unchanged"
+    )
 
 
 # ---------------------------------------------------------------------------------------
