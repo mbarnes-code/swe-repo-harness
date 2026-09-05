@@ -1856,6 +1856,144 @@ def test_an_fstring_path_literal_does_not_produce_a_spurious_api_contract_edge(
     assert edges == [], edges
 
 
+_OPENAPI_WIDGET_SPEC_JSON = """\
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Widget API",
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/widgets/{widgetId}": {
+      "get": {
+        "operationId": "getWidget"
+      }
+    },
+    "/widgets": {
+      "post": {
+        "operationId": "createWidget"
+      }
+    }
+  }
+}
+"""
+
+
+def test_an_openapi_json_path_template_produces_a_real_api_contract_edge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task review finding: the JSON branch (`_openapi_json_path_symbols`/`_matching_brace`/the
+    JSON arm of `_openapi_path_symbols`, ~50 lines) had zero committed test coverage — only the
+    YAML fixture above was proven through a real `fleet scan`. Same shape as
+    `test_an_openapi_path_template_produces_a_real_api_contract_edge`, JSON spec instead of YAML:
+    `acme-http-json-provider/openapi/widgets.json` line 8's `"/widgets/{widgetId}":` key (a
+    depth-1 child of the root `"paths"` object, found via `_matching_brace`'s quote-aware brace
+    counting) is the real DEFINITION, and
+    `acme-http-json-consumer/acme_http_json_consumer/default_api.py` line 3's
+    `'/widgets/{widgetId}'` literal is the real REFERENCE `http_path_template` captures.
+    """
+    sources = {
+        "acme-http-json-provider": _make_repo(
+            tmp_path / "sources",
+            "acme-http-json-provider",
+            {
+                "openapi/widgets.json": _OPENAPI_WIDGET_SPEC_JSON,
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-json-provider"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+        "acme-http-json-consumer": _make_repo(
+            tmp_path / "sources",
+            "acme-http-json-consumer",
+            {
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-http-json-consumer"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+                "acme_http_json_consumer/default_api.py": (
+                    "class DefaultApi:\n"
+                    "    def get_widget(self, widget_id, **kwargs):\n"
+                    "        resource_path = '/widgets/{widgetId}'\n"
+                    "        return self._call(resource_path)\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    edges = query(
+        workspace,
+        "SELECT src_id, dst_id, kind, evidence_path, evidence_line FROM edges "
+        "WHERE kind = 'API_CONTRACT'",
+    )
+    assert edges == [
+        (
+            "acme-http-json-consumer",
+            "acme-http-json-provider",
+            "API_CONTRACT",
+            "acme_http_json_consumer/default_api.py",
+            3,
+        )
+    ], edges
+
+
+def test_a_json_paths_key_with_no_openapi_root_produces_no_http_operation_symbols(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Task review finding: the JSON branch's gate (`_is_openapi_document`, reused from
+    `_document_root_keys`' own result) was only checked by the reviewer's own manual, uncommitted
+    invocation. A JSON document with a root `"paths"` key AND a `/`-shaped child key, but no
+    `openapi`/`swagger` root key, must produce ZERO `HTTP_OPERATION` symbols — proving
+    `_openapi_json_path_symbols` never runs against an arbitrary JSON file's own unrelated
+    `paths:`-named key.
+    """
+    sources = {
+        "acme-unrelated-json": _make_repo(
+            tmp_path / "sources",
+            "acme-unrelated-json",
+            {
+                "config/routes.json": (
+                    '{\n  "paths": {\n    "/not/an/api": {"foo": "bar"}\n  },\n'
+                    '  "unrelated": true\n}\n'
+                ),
+                "pyproject.toml": (
+                    "[project]\n"
+                    'name = "acme-unrelated-json"\n'
+                    'version = "1.0.0"\n'
+                    "dependencies = []\n"
+                ),
+            },
+        ),
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_config(workspace, sources, names=list(sources))
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+
+    result = scan(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    symbols = query(
+        workspace,
+        "SELECT fqn FROM symbols WHERE repo_id = 'acme-unrelated-json' AND kind = 'http_operation'",
+    )
+    assert symbols == [], symbols
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,

@@ -414,7 +414,16 @@ class ScanSection(Section):
         "least one `{param}` placeholder segment and excludes any literal immediately preceded "
         "by a Python string-prefix letter (f/r/b), to keep false-positive risk down against "
         "ordinary URL/log/file-path literals. Captures the path template as an "
-        "`is_definition=False` `HTTP_OPERATION` reference.",
+        "`is_definition=False` `HTTP_OPERATION` reference. DISCLOSED false-positive class the "
+        "f/r/b-prefix exclusion does NOT rule out (task review, round VI task 51 fix round 1): "
+        "any bare, non-prefixed quoted string with a `{name}`-shaped segment still matches "
+        "regardless of HTTP relevance — a log/file-path template, a same-repo Flask-style "
+        "`add_url_rule('/widgets/{widgetId}', ...)` registration, a cache key, a cron path, an "
+        "S3 key template. Accepted rather than patched: `_api_contract_edges` requires an EXACT "
+        "fqn match against a real `is_definition=True` HTTP_OPERATION symbol elsewhere in the "
+        "fleet, so this needs a coincidental literal collision to produce a wrong edge, and "
+        "tightening the regex further risks under-matching real generated-client code — see "
+        "`symbolindex.py`'s `DEFAULT_API_CONTRACT_PATTERNS` docstring for the full disclosure.",
     )
     contracts: ContractsSection = ContractsSection()
 
