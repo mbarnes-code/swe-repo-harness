@@ -7734,7 +7734,7 @@ proven correct via a real git bare-remote/clone (6 unit tests), reported through
 silently skipped or crashed. **§12.38's resolution sub-clause is now testable end-to-end at the
 mechanism level and blocked at the branch-topology level** — see `D115`.
 
-## D115 — OPEN. `fleet pr`'s PR-promotion mechanism (D94) has no live path to run against: this
+## D115 — FIXED, LANDED (round VI task 50, `cbd3883`, merged `73d480f`, task-scoped review Approved zero findings). `fleet pr`'s PR-promotion mechanism (D94) has no live path to run against: this
 monorepo's ingest never creates a per-repo `migrate/<repo>` branch, so promotion's first
 precondition check always fails in production
 
@@ -7758,6 +7758,21 @@ it proves the TRIGGER fires correctly, discriminated from a genuinely-still-open
 monorepo, at ingest time or at PR-creation time — a design question, not sized further here.
 Closing D115 is what makes D94's mechanism reachable from a real `fleet pr` invocation; D94's own
 mechanism does not need to change when D115 lands.
+
+**Fixed, round VI task 50 (2026-09-05), per the decided design in `docs/DECISIONS.md`'s ADR-0118
+(research-30).** `filter_repo.py::ingest()` now creates `migrate/<repo_id>` as a plain alias of
+the merge commit it already produces (`await git.create_branch(f"migrate/{source.repo_id}",
+<merge_sha or existing>, force=True)`), on both the fresh-merge and idempotent paths, inside the
+existing `IntegrationMutex`. Purely additive — `IngestResult`'s shape unchanged, no other call
+site modified. Three new tests prove: a fresh ingest's branch points at the real `merge_sha`; the
+idempotent re-run path also gets it; a stale pre-existing branch pointing elsewhere is correctly
+re-pointed (`force=True`). Task review independently reproduced both Rule-12 mutations and traced
+the actual old-passes/new-fails discriminator on a pre-existing task-45 test
+(`tests/test_pr_e2e.py::test_pr_attempts_promotion_of_an_already_open_held_pr_once_its_stub_resolves`),
+confirming D115's fix genuinely moves `_promote_one_pr`'s failure point from its first
+precondition check ("`migrate/<repo>` does not exist") to its second (no `origin` ref — still
+correctly refused, since `--push` remains separately unimplemented), not merely re-labeling the
+same failure. §12.38 is no longer blocked on D115.
 
 ## D95 — FIXED, LANDED (`00b9e68`, merge of `agent/roundz-task3`; component commit `f9df242`). `state/repository.py::complete_phase`'s RHI-escalation leg wrote raw SQL bypassing `transition()`, letting a stale-but-not-reclaimed fence corrupt the state model's own `ALLOWED_TRANSITIONS` invariant
 
