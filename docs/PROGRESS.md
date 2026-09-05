@@ -9719,3 +9719,43 @@ dedicated round for the D55/D58 circuit-breaker gap. Next dispatch: §38's fresh
 re-audit (cheapest, no new design needed) or a design pass for §31/D111 or §34/D113 (highest
 remaining architectural leverage), whichever a future round's own investigation finds
 better-scoped first.
+
+## Round VI, twenty-fourth wave (2026-09-05) — §12 count: 41 of 48, up from 40. A single
+research→build cycle, same shape as the twenty-third wave's D115/§12.8 closures, applied to §38.
+
+**Research-31 + Task 52 — §12.38, CLOSED, all 20 sub-clauses COVERED.** With D94/D105/D115 all
+freshly closed by the twenty-third wave, research-31 (dispatched read-only) re-derived SPEC's
+§12.38 text fresh into 20 sub-clauses — deliberately not trusting round IV's own count or
+enumeration, which turned out to match by independent re-derivation rather than by carrying it
+forward. 13 of 20 were already covered by existing tests. The remaining 7 (the "resolution
+mechanics for an already-open PR" group every prior audit found blocked on D94) had, on close
+inspection, zero remaining production defect — every blocking D-number was already `FIXED,
+LANDED` — but were proven across two tests that had never been connected: one drove the real CLI
+and proved the trigger fires, deliberately stopping short for lack of a real `origin` remote in
+its fixture; the other proved the real git/forge mechanics but called the promotion function
+directly, bypassing the CLI. Research-31 also surfaced a genuine test-infrastructure landmine
+along the way, not a hypothetical one: the e2e test double for the forge CLI had no case for the
+real `gh pr edit` invocation, so a real promotion reaching that call today would have crashed the
+double with an assertion error rather than completing — found by inspection before it could bite
+anyone running this path for real. Task 52 implemented research-31's own recipe exactly
+(TEST-ONLY — confirmed by a byte-diff showing the commit is pure test-file addition, zero lines
+touched anywhere in `src/`): a promotion-capable fixture with a real bare `origin`, the missing
+test-double case, and one new end-to-end test proving all seven remaining clauses together through
+a genuine `fleet pr` invocation. Task-scoped review independently reproduced every load-bearing
+claim rather than trusting the report — the Rule-12 mutation, the old-passes/new-fails
+discriminator proving the missing test-double case was a real gap and not a defensive add, and
+byte-identity confirming the two pre-existing tests this task connects were left untouched — and
+returned zero findings.
+
+**Status: main green.** Citation-hygiene, lint-gate, and findings-kinds gates re-verified clean
+(82/82) before the closing commit; no citation drift this wave (task 52 touched only a test file,
+no production docstrings to shift line numbers under). §12 count: 41 of 48 — three criteria closed
+in two consecutive waves this session (§36, §8, §38), each following the same design-or-research-
+then-build sequencing rather than a single large speculative task. Remaining 7 open criteria: 14,
+31, 34 (Clause B), 37, 39, 43 (case ii) — one fewer than the twenty-third wave's own count, since
+§38 is now closed. None are quick wins by this point: 31 and 34 each need a dedicated design ADR
+before dispatch (the same shape that worked twice this session for D115 and, less directly, for
+§12.8's groundwork) — natural next target for a fresh research pass. 14/37/39 remain genuinely
+deferred behind the pre-existing, wider rewrite-rule-construction gap round VI's own research-7/8
+found and scoped as out of reach for a quick fix. 43's case (ii) needs its own dedicated round for
+the D55/D58 circuit-breaker gap, per that criterion's own long-standing note.
