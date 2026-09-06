@@ -13468,3 +13468,140 @@ one shipped, and now says so.
 (unbuilt) or for any future leg; if a later leg needs one, that is a fresh decision, not an
 extension of this one. It does not change the shape of the `ContractHoistOverride` finding itself,
 nor `carry_over_committed`'s existing `HOISTED`/`MIGRATED` handling.
+
+## ADR-0122 — §12.31 / D111 Leg D: un-hoist mechanism, blast-set demotion, revert-series
+atomicity, and downstream-merge refusal
+
+**Decision (2026-09-06, round VI, D111 Leg D design pass).** Leg D is D111's fourth leg: un-hoist
+a contract that a `HoistBrokeOwner` finding (Leg C1 or C2) has already condemned, when that hoist
+is already merged and persisted — across process boundaries, from a crash-safe DB state, not an
+in-memory trial (Leg A, landed, ADR-0120). Legs A (rollback pattern), B (`git revert` primitive),
+and E (`--forbid-hoist` sticky-status carry-over) are landed and are Leg D's only hard
+prerequisites. This ADR settles the seven judgment calls Leg D's design requires, all resolvable
+by tracing primary sources rather than by controller value judgment.
+
+**Decision 1 — D117's resolution: exclude, never reconstruct, and never delete.** D117
+(`docs/INTEGRATION_HONESTY.md`) is confirmed as written: `retargeted_from_repo_id`-based
+reconstruction is structurally impossible for a REPO-dst edge (`DependencyEdge._node_shape`,
+`models/graph.py:194-206`, raises on a missing `dst_coordinate`; `_materialize`,
+`cycles.py:729-739`, is what discards it). But D117's own proposed remedy (a) — delete/supersede
+the contract-kind edge rows — is under-specified: `_graph_nodes` (`cli.py:3646-3665`) already
+filters contracts to `status IN ('HOISTED', 'MIGRATED')`, but `_graph_edges`
+(`cli.py:3858-3902`) applies no such filter, so setting `contracts.status='FAILED'` and leaving
+the edges alone is not stale data — it is a hard `GraphError` crash on the very next `fleet
+sequence` (`build_graph`, `graph/build.py:152-176`, raises on any edge naming a node absent from
+`nodes`), including `_persist_blast_radii`'s independent call (`cli.py:2770-2772`). A real `DELETE
+FROM edges` would also be the project's first-ever such statement, cutting against §13 row 1's
+"broken edges are never deleted" philosophy and against D117's own audit concern. Reusing
+`ordering_suppressed` does not work mechanically either — `build_graph`'s `_link` call requires
+its `dst` to be `known` unconditionally, before `ordering_suppressed` is even checked.
+
+**The chosen mechanism: filter `_graph_edges` the same way `_graph_nodes` already filters
+contracts, at read time.** Add to `_graph_edges`'s query:
+```sql
+AND (dst_kind != 'CONTRACT'
+     OR dst_id IN (SELECT contract_id FROM contracts
+                    WHERE run_id = ? AND status IN ('HOISTED','MIGRATED')))
+```
+Nothing is ever deleted; the contract-kind row stays in the table forever as an audit record of
+exactly what was retargeted and when. The next `fleet sequence`'s graph build never sees the row,
+because the row's destination node is (correctly) absent from `_graph_nodes` too. The untouched
+pre-hoist repo→repo row is what the DAG reads instead, with zero reconstruction. No `UPDATE edges`
+write is required for the un-hoist itself — setting `contracts.status = 'FAILED'` is sufficient,
+because the new filter keys off `contracts.status`, not off anything on the edge row.
+`edges.retargeted_from_repo_id` keeps its one true purpose: an audit trail of what a (possibly
+still-live) hoist retargeted, read by nothing at rollback time.
+
+**Rule-14 corrections landed in this same commit** (four sites asserting or implying the false
+"exact reconstruction from `retargeted_from_repo_id`" claim, swept per CLAUDE.md Guardrail 7):
+`docs/SPEC.md` §3.1 6c-H's rollback paragraph, §13 row 28, §12.31's own criterion sentence (a dated
+in-place marker citing this ADR, per Rule 14), and `src/fleet/models/graph.py`'s
+`retargeted_from_repo_id` docstring. Two mentions checked and ruled **not** part of this class —
+`SPEC.md:749` and `SPEC.md:7375` describe a different, already-correct mechanism (edges recomputed
+fresh from `symbols`/`manifests` on a whole-run rebuild, with `retargeted_from_repo_id` merely
+re-stamped as an audit marker). `SPEC.md:1694`'s looser language ("restores the true graph")
+remains true under this mechanism and needs no factual correction.
+
+**Decision 2 — the unhoist blast-set query and its timing.** Query: `SELECT DISTINCT src_id FROM
+edges WHERE run_id = ? AND dst_kind = 'CONTRACT' AND dst_id = ? AND kind IN
+('CONTRACT_CONSUME', 'CONTRACT_IMPL')`. Timing: read fresh from `edges` at rollback time, inside
+the same transaction that writes `contracts.status = 'FAILED'`, before anything about those rows
+changes. Per Decision 1, nothing ever deletes or mutates these rows at all, so there is no
+snapshot-capture problem to solve — the blast set is stable and re-derivable at any later point by
+the same query, with or without a crash in between.
+
+**Decision 3 — demotion mechanism: the low-level write primitive, not `_demote_to_floors`.**
+`cli._demote_to_floors` (`cli.py:14493-14540`) is the wrong layer: it is §11.5 step 5's driver over
+`orchestrator.reentry.phase_floor`/`evidence_holds`/`resume_floor`, which computes a floor by
+walking backward through Git evidence — the wrong question for Leg D, which already knows the
+target phase without asking Git anything. **Decision:** for each blast-set member whose current
+`phases` row is `SUCCEEDED` beyond `Phase.TRANSFORM`, call
+`SqliteStateRepository.demote_to_floor(run_id, repo_id, floor=Phase.TRANSFORM,
+reason="hoist_rollback:<contract_id>", now=..., observed=...)` directly, with `floor` supplied as
+the fixed constant `Phase.TRANSFORM` — bypassing `phase_floor`/`evidence_holds`/`resume_floor`
+entirely (the floor is decided, not computed). This reuse makes two required guarantees free:
+`phases.attempts` is not incremented (`demote_to_floor` demotes through `demote()`, never
+`transition(..., resume=True)`, mirroring ADR-0014's `TRANSIENT_INFRA` precedent), and a
+`PhaseDemoted` finding is written per demoted phase automatically (`demote_to_floor`'s own
+contract, `state/repository.py:1685-1686`). **Leg D additionally writes its own
+`HoistRollbackDemotion` finding**, distinct from the automatic `PhaseDemoted` rows, mirroring the
+existing writer pattern (`_persist_cycle_findings`/`ContractNotShared`'s
+DELETE-then-INSERT-keyed-on-`(run_id, kind)` shape, `cli.py:3394-3447`).
+
+**Decision 4 — revert-series atomicity across multiple merges.** Design: pre-check, then commit —
+validate the whole series before any of it touches the real integration branch. (1) Compute the
+ordered revert list (the contract's own merge sha, plus each blast-set member's merge sha for
+already-`MERGED` PRs), ordered reverse-chronological. (2) Dry-check the whole series in a
+disposable worktree (`sandbox/worktree.py`) at the integration branch's current tip; any genuine
+conflict refuses the entire rollback (`RepoStatus.REQUIRES_HUMAN_INTERVENTION`-equivalent), discards
+the worktree, and stops — no commit has touched the real branch. (3) Record the tip the dry-check
+validated against; if the branch moved before the real pass starts, abort and re-derive from
+scratch (mirrors `push_force_with_lease`'s CAS pattern, `vcs/git.py:699-710`). (4) Commit the real
+pass, same order, via `revert_and_commit`, stamping every commit with the idempotency trailer
+(Decision 5); a conflict in the real pass despite a clean dry-check is a should-never-happen race
+that fails loud (Rule 11). (5) Crash recovery uses the idempotency trailer, not re-validation —
+`fleet resume`'s Leg D re-entry point re-reads which shas already landed and continues from the
+first not-yet-reverted one.
+
+**Decision 5 — idempotency trailer.** `FleetTrailers` (`vcs/commits.py:157-178`) gains one
+optional field, `contract_rollback_id: str | None = None`, appended last so every existing call
+site is unaffected. `as_mapping()` includes `Fleet-Contract-Rollback-Id: <contract_rollback_id>`
+only when the field is not `None`. Value: the failed contract's own `contract_id`. Every revert
+commit in one rollback series carries the same trailer value, plus a body naming the specific
+original sha it reverts (`"This reverts commit <sha>."`). Resume query: extend
+`commits.commits_in_range`'s shape (or a small sibling function) to search
+`scoped_range(pre_commit_sha, integration_branch)` for commits carrying
+`Fleet-Contract-Rollback-Id == contract_id`, checking each ordered sha's revert body.
+
+**Decision 6 — downstream-merge-refusal traversal: transitive, not single-hop.** `cli.py`'s
+existing `fleet pr` refusal (`cli.py:11502-11514`) checks exactly one hop and is safe as
+single-hop only because it re-runs on every `fleet pr` invocation. Leg D's refusal decision is
+made once, irrevocably, so it needs the full transitive closure. **Mechanism:** reuse
+`graph/query.py::descendants(graph, node)` exactly as `blast_radius` already does
+(`graph/query.py:43-50`), seeded at each blast-set member whose PR is `MERGED`. If that descendant
+set (excluding the blast set itself) contains any repo whose PR is also `MERGED`, refuse:
+`RepoStatus.REQUIRES_HUMAN_INTERVENTION`, `FailureClass.CYCLE`, for the whole blast set.
+
+**Decision 7 — Leg D's real dependency is the finding, not Leg C1/C2's own scoping.** Leg D
+consumes "a `HoistBrokeOwner` finding + `contracts.status = 'FAILED'` for contract X exists" as
+its complete input contract. It does not need to know whether Leg C1 (FILE_PATH collision) or Leg
+C2 (build-failure attribution) produced that finding — SPEC's own text treats both disjuncts as
+routing to the identical rollback procedure (`docs/SPEC.md:604-621`). Leg D's design and
+implementation may proceed without waiting on either C1 or C2's own scoping to finish.
+
+**Consequences.** Positive: D117 closes with a mechanism simpler than any of its three
+originally-named options (no reconstruction, no new `DELETE`), reuses five already-landed or
+already-existing primitives (`demote_to_floor`, `graph/query.py::descendants`,
+`sandbox/worktree.py`, `push_force_with_lease`'s CAS pattern, `revert_and_commit`) rather than
+inventing new machinery, and closes a previously-unknown crash risk (`_graph_edges`/`build_graph`'s
+`GraphError` on a vanished contract node) that would otherwise have surfaced the first time any
+contract ever reached `FAILED`. Scope this ADR does NOT decide: it does not design Leg C1 or Leg
+C2 (the finding Leg D consumes as input, produced elsewhere); it does not change
+`ordering_suppressed`'s existing semantics or `_graph_nodes`'s existing filter, only extends the
+identical filter to `_graph_edges`; it does not build a general "any status transition needs a
+graph-consistency filter" abstraction — the one filter added here is scoped to the concrete crash
+this ADR found (Rule 2). Follow-on work this ADR authorizes but does not itself detail:
+`task-65-brief.md` scopes only the first, self-contained slice of Leg D (the DB/graph-level
+mechanism — Decisions 1, 2, 3, and 6). Two further slices — the git-mechanics revert-series
+execution (Decisions 4/5) and the production wiring from whichever leg (C1/C2) produces the
+triggering finding — are named as separate future tasks, not designed away by omission.

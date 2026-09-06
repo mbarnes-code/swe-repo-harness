@@ -8928,7 +8928,7 @@ rollback record: restoring it un-hoists the edge exactly."
 carries). `dst_coordinate` becomes `None` (unrecoverable) and `kind` becomes `CONTRACT_CONSUME`
 (unrecoverable — the original `DECLARED_DEP`/`INTERNAL_IMPORT`/`API_CONTRACT`/etc. value is not
 stored anywhere). The loss is structurally fatal, not merely lossy:
-`DependencyEdge._node_shape` (`models/graph.py:194-206`) raises `"a REPO dst edge must carry
+`DependencyEdge._node_shape` (`models/graph.py:197-210`) raises `"a REPO dst edge must carry
 dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted retargeted row
 alone — a `ValidationError`, not a wrong-but-valid edge.
 
@@ -8950,6 +8950,21 @@ literally will build a reconstruction path that raises `ValidationError` on firs
 contract rows, no reconstruction — matches what already works) or via some other mechanism; whether
 `SPEC.md:598-600`/`models/graph.py:172-176`'s "exact" language should be corrected now or left for
 the Leg C/D design pass to correct alongside its own build. No design choice is made here.
+
+**Update, 2026-09-06 (round VI, D111 Leg D design pass, ADR-0122): the remedy choice above is now
+decided.** Neither of D117's own two named remedy options is what got chosen: the mechanism is
+**exclusion at graph-build read time**, not a preserved-row-plus-`DELETE` and not reconstruction.
+`_graph_edges` (`cli.py:3858-3902`) is widened with the identical `contracts.status IN
+('HOISTED','MIGRATED')` predicate `_graph_nodes` already applies, so a `FAILED`/`REJECTED`
+contract's edge rows are simply never read into the next graph build — the untouched pre-hoist
+repo→repo row stands in their place, and nothing is ever deleted or reconstructed. This also
+surfaced a previously-unknown correctness gap this entry's own investigation did not find:
+`_graph_edges` had **no** filter symmetric to `_graph_nodes`'s, so setting `contracts.status =
+'FAILED'` and leaving edges alone (D117's own remedy option (a), taken literally, minus the
+`DELETE`) would crash the very next `fleet sequence` with a `GraphError` on the vanished contract
+node. Full account: `docs/DECISIONS.md` ADR-0122. **This heading stays `OPEN`** — an ADR is a
+design decision, not the fix; it moves once Leg D's code (task-65-brief.md and its
+not-yet-written successors) actually lands the mechanism.
 
 ## D114 — FIXED, LANDED (round VI task 42, `79024e6`) for §9(d). No path/blob-SHA `ls-tree`
 listing is ever captured or persisted at scan time — blocked §9(d); did NOT block §12.27 as
