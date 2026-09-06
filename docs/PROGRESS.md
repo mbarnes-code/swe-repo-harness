@@ -9759,3 +9759,63 @@ before dispatch (the same shape that worked twice this session for D115 and, les
 deferred behind the pre-existing, wider rewrite-rule-construction gap round VI's own research-7/8
 found and scoped as out of reach for a quick fix. 43's case (ii) needs its own dedicated round for
 the D55/D58 circuit-breaker gap, per that criterion's own long-standing note.
+
+## Round VI, twenty-fifth wave (2026-09-06) — §12 count: 42 of 48, up from 41. First wave using
+this session's full 3-worker/1-research/1-review parallel dispatch pattern, dynamically
+reallocated when the concrete work available didn't support it.
+
+**Dispatch shape, and the ruling behind it.** Directed to dispatch 5 subagents at a time (3
+workers, 1 research, 1 review), the controller found only two independently dispatchable
+worker-ready tasks existed at wave start (both under §12.11: D112, and the exclusion-set gap) —
+everything else open (§31, §34-B, §37/39/14, §43-ii) was blocked on undone design work. Ruling:
+reallocated to 2 workers / 2 research / 1 review (review deferred until workers report), logged in
+the wave's own ledger (`.superpowers/sdd/round-VI-criteria-closure/progress.md`) rather than
+forcing a third worker onto undesigned ground.
+
+**Tasks 53+54 (§12.11) — both landed, reviewed Approved, zero findings each.** Task 53 fixes
+`D112` for Python only (`BuildUnit.test_srcs` wiring in `_plan_build`), proven against the real
+`tools/bin/bazel` toolchain. Task 54 proves SPEC's last §12.11 sentence and found the gap was
+bigger than scoped: nothing in `src/fleet/` ever writes `repos.baseline_ok`, so the "exclusion
+set" is the whole fleet under the shipped config, not empty — filed as `D116`, pinned with a
+`strict=True` xfail rather than weakened. §12.11 itself stays OPEN (Task B plus the JS/Rust/JVM
+slice of D112 remain), but D112's Python fix unblocked Task B, dispatched this same wave as
+task 57 (in flight at this checkpoint — see next wave's account).
+
+**Research-32 (§12.31/D111) + research-33 (§12.34-B/D113) — both complete, both used to dispatch
+worker-ready tasks the same wave.** Research-32 corrected round-V research-22's 5-leg ordering
+(A/B/E are root-level, not sequential; E is the durable half of the operator story, not a
+rollback follow-on) and scoped Leg A as the correct first dispatch — task 55, in flight at this
+checkpoint. Research-33 resolved all three of D113's open judgment calls, landed as **ADR-0119**,
+and produced a one-shot worker-ready brief the same wave — **task 56, landed and reviewed Approved
+zero findings**, closing §12.34 Clause B and, with Clause A already closed (round VI task 39),
+**§12.34 in full**.
+
+**A live instance of the exact hazard CLAUDE.md's Central Number Allocation section warns
+about, and the exact hazard its citation-drift guardrail warns about — both this wave, both
+caught mechanically rather than by review.** Dispatching task 55, the controller omitted the ADR
+number its own brief required "at dispatch" — the worker correctly refused to self-allocate and
+reported `NEEDS_CONTEXT` rather than guessing (a second, independent, concurrent D-number
+allocation happened the same wave without collision: task 54 self-allocated `D116` for an
+unrelated finding while the controller allocated `D117` for a different one, both verified free
+against `main`'s state at their own allocation moments). Resumed the same agent via `SendMessage`
+with `ADR-0120` rather than redispatching fresh. Separately: merging tasks 53 and 56 each shifted
+`cli.py` line numbers enough to drift pre-existing anchored citations past the citation-hygiene
+gate's tolerance — 3 citations after task 53's merge, 8 more after task 56's (a live demonstration
+of `CLAUDE.md`'s own point that this class recurs "in each of the two rounds that followed" a
+prior fix) — both caught by the gate itself before the merge commit, both repointed in the same
+commit per Guardrail 7 rather than deferred.
+
+**Controller-landed documentation, same wave:** `ADR-0119` (§12.34-B design), `D117` (SPEC's and
+`models/graph.py`'s "exact restore via `retargeted_from_repo_id`" claim measured false — doesn't
+block Leg A, matters for the future Legs C/D), a Rule-14 "adjudication pending" flag on §12.32's
+DONE marking (its carve-out — "`ecosystems/contracts/` does not exist" — was falsified by round VI
+task 40, found by research-33 as a side effect of its own investigation), and three stale
+docstring/SPEC corrections landed in the same commit as the finding that falsified them
+(`src/fleet/ecosystems/contracts/{base,__init__}.py`, `docs/SPEC.md:1313-1315`).
+
+**Status: main green.** Citation-hygiene and findings-kinds gates re-verified clean at every merge
+this wave (75, then 75, then 79, then 75 passed — re-measured fresh each time, never carried
+forward). §12 count: 42 of 48, up from 41 — §12.34 closed. **§32's DONE status is now flagged, not
+settled** — a future wave's short re-audit (same shape as §12.38's research-31) is the natural
+next dispatch to resolve it, alongside task 55 (§12.31 Leg A, resumed with ADR-0120) and task 57
+(§12.11 Task B) both still in flight at this checkpoint.
