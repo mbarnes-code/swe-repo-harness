@@ -103,6 +103,7 @@ from fleet.migrations import (
     migrate,
 )
 from fleet.models.build import (
+    BuildPlan,
     BuildTarget,
     BuildUnit,
     GazelleConfig,
@@ -215,6 +216,7 @@ from fleet.sandbox.worktree import (
     WorktreeManager,
     run_prefix,
     sandbox_name,
+    slug,
 )
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
@@ -8336,14 +8338,25 @@ async def _note_finding(
     payload: Mapping[str, object],
     severity: str,
     now: datetime,
+    fingerprint_parts: tuple[str, ...] | None = None,
 ) -> None:
-    """One `findings` row, idempotent on its semantic identity (§11.7)."""
+    """One `findings` row, idempotent on its semantic identity (§11.7).
+
+    `fingerprint_parts` defaults to today's `(run_id, repo_id or "", kind)` — the shape every
+    call site before ADR-0119 relied on. A caller that raises more than one row of the same
+    `kind` for the same `repo_id` (or, as `ContractBindingUnavailable` does, for no `repo_id` at
+    all: `repo_id IS NULL`, so `IFNULL(repo_id, '')` collapses every such row of the run onto one
+    idempotency-key slot) must supply a finer key or every payload but the last is silently lost
+    on conflict (precedent: `_apply_stub_decisions`'s own hand-rolled INSERT, which fingerprints
+    on `(run_id, consumer_repo_id, coord_key)` for exactly this reason, predating this parameter).
+    """
+    parts = fingerprint_parts if fingerprint_parts is not None else (run_id, repo_id or "", kind)
     row = (
         run_id,
         repo_id,
         kind,
         severity,
-        _fingerprint(run_id, repo_id or "", kind),
+        _fingerprint(*parts),
         redact_text(json.dumps(dict(payload), sort_keys=True)),
         _iso(now),
     )
@@ -9080,6 +9093,36 @@ async def _eligible_build_units(
     return tuple(str(row[0]) for row in rows)
 
 
+async def _eligible_contract_units(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[ContractNode, ...]:
+    """The RUN's Phase 3 CONTRACT domain (§12.34 Clause B / D113, ADR-0119): every wave-member
+    contract whose `contracts.status` is `HOISTED` or `MIGRATED`.
+
+    Eligibility is the contract's own `status`, never a phase status: a contract has no `phases`
+    row (`ContractStatus`'s own docstring, `models/enums.py:244`), so there is nothing to gate on
+    the way `_eligible_build_units` gates on TRANSFORM `SUCCEEDED`. Rehydration goes through
+    `_sequence_contracts` (Rule 8: reuse, don't write a second reader), filtered down to this
+    run's wave-member contract ids and to the two post-commit statuses; `_sequence_contracts`'s
+    own `ORDER BY contract_id` keeps the result deterministic.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT node_id FROM wave_members WHERE run_id = ? AND node_kind = 'CONTRACT'",
+        (run_id,),
+    )
+    wave_contract_ids = {str(row[0]) for row in rows}
+    if not wave_contract_ids:
+        return ()
+    nodes = await _sequence_contracts(conn, run_id)
+    return tuple(
+        node
+        for node in nodes
+        if node.contract_id in wave_contract_ids
+        and node.status in (ContractStatus.HOISTED, ContractStatus.MIGRATED)
+    )
+
+
 async def _build_impl(
     opts: GlobalOptions,
     settings: FleetSettings,
@@ -9322,6 +9365,97 @@ async def _build_impl(
                                 severity="warn",
                                 now=_now(),
                             )
+                # ---- PASS 2b: HOISTED/MIGRATED contracts' BuildPlans (§12.34 Clause B / D113,
+                # ADR-0119) -------------------------------------------------------------------
+                #
+                # Read-only over already-committed contracts: creates no `phases` row, cuts no
+                # worktree, takes no lease, dispatches no worker, and publishes no BUILD.bazel —
+                # a CONTRACT wave member stays invisible to every query above that filters
+                # `node_kind = 'REPO'` (`_eligible_build_units`, `_open_phase_waves`,
+                # `_gated_members`, `_wave_repos`, the ledger rollups, `state/projection.py`), so
+                # this pass changes no scheduling invariant. `contracts.discover()` runs at most
+                # once, and only when this run actually has an eligible contract, so a
+                # contract-free fleet pays no import cost and gains no new failure mode.
+                contract_units = (
+                    await _eligible_contract_units(read_conn, run_id) if waves else ()
+                )
+                if contract_units:
+                    from fleet.ecosystems import contracts as ecosystems_contracts
+
+                    ecosystems_contracts.discover()
+                    for cnode in contract_units:
+                        if cnode.kind is ContractKind.SHARED_LIB:
+                            # ADR-0119: SPEC §7.6 delegates SHARED_LIB emission wholesale to
+                            # EcosystemAdapter.generate_targets, so neutral_targets() is [] and
+                            # BuildPlan._delegation_is_explicit rejects an `adapter` plan with no
+                            # targets — constructing one here would raise and break the
+                            # criterion's own "and the run still completes" clause.
+                            continue
+                        # HOISTED/MIGRATED implies `extractable`, which ContractNode's own
+                        # validator (`models/graph.py::_hoistable_is_substantiated`) already
+                        # requires to carry a non-null `hoist_target_path` — unreachable in
+                        # practice, asserted here only to narrow the type; a violation raises
+                        # unhandled, exactly as ADR-0119 requires for this invariant.
+                        assert cnode.hoist_target_path is not None, (
+                            f"{cnode.contract_id}: {cnode.status.value} with no "
+                            "hoist_target_path"
+                        )
+                        cadapter = ecosystems_contracts.for_kind(cnode.kind)
+                        targets = cadapter.neutral_targets(cnode)
+                        unbound: list[tuple[str, Ecosystem]] = []
+                        # No `facts.get(r, _RepoFacts(None, Ecosystem.UNKNOWN))` fallback here,
+                        # deliberately (ADR-0119): a `consumer_repo_ids` entry with no `repos`
+                        # row is a violated internal invariant, not a legitimate binding gap, and
+                        # must raise unhandled rather than fabricate a finding about a repo that
+                        # does not exist.
+                        consuming = sorted({facts[r].ecosystem for r in cnode.consumer_repo_ids})
+                        for eco in consuming:
+                            rule = ecosystems.for_ecosystem(eco).contract_bindings.get(cnode.kind)
+                            if rule is None:
+                                unbound.append((cnode.contract_id, eco))
+                                await _note_finding(
+                                    writer,
+                                    run_id,
+                                    None,
+                                    kind="ContractBindingUnavailable",
+                                    payload={
+                                        "contract_id": cnode.contract_id,
+                                        "contract_kind": cnode.kind.value,
+                                        "ecosystem": eco.value,
+                                        "hoist_target_path": cnode.hoist_target_path,
+                                        "repo_ids": sorted(
+                                            r
+                                            for r in cnode.consumer_repo_ids
+                                            if facts[r].ecosystem == eco
+                                        ),
+                                        "detail": (
+                                            f"{eco.value} has no contract_bindings entry for "
+                                            f"{cnode.kind.value}; teach {eco.value}'s "
+                                            "EcosystemAdapter.contract_bindings a rule name for "
+                                            "this kind to bind it"
+                                        ),
+                                    },
+                                    severity="warn",
+                                    now=_now(),
+                                    fingerprint_parts=(run_id, cnode.contract_id, eco.value),
+                                )
+                                continue
+                            targets.append(cadapter.binding_target(cnode, eco, rule))
+                        cplan = BuildPlan(
+                            unit_id=cnode.contract_id,
+                            dest=cnode.hoist_target_path,
+                            generated_by="adapter",
+                            targets=targets,
+                            unbound_contract_kinds=unbound,
+                        )
+                        cplan_path = (
+                            settings.root
+                            / "artifacts"
+                            / "build"
+                            / run_id
+                            / f"{slug(cnode.contract_id)}.plan.json"
+                        )
+                        atomic_write(cplan_path, redact_text(cplan.model_dump_json(indent=2)))
                 # ---- PASS 3: §3.3 step 2's fleet-wide root files, resolved ONCE -------------
                 #
                 # Once per ecosystem (ADR-0048) over the WHOLE domain, and once per RUN rather
