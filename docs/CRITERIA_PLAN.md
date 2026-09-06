@@ -1541,19 +1541,38 @@ is recorded as a disclosed-optional future task, not dispatched under the "Leg C
 account: `.superpowers/sdd/round-VI-criteria-closure/research-35-report.md`. **Next dispatch on
 this axis: scope Leg C2 (build-failure attribution), not Leg C1.**
 
-**Update, round VI research-35 (2026-09-06) — Leg D scoped, ready for an ADR + design dispatch.**
-Prerequisites (Legs A, B, E) are all landed. Research-35 named seven judgment calls a Leg D design
-must settle, load-bearing among them: `D117`'s resolution (the "exact" un-hoist-via-
-`retargeted_from_repo_id` claim is structurally broken for a REPO-dst edge — the sound fix is
-superseding/expiring the contract-kind rows and letting the never-deleted pre-hoist repo→repo row
-stand, not "reconstructing" anything), the unhoist blast-set query and timing, the demotion
-mechanism (not evidence-based like `_demote_to_floors` — a deliberate unconditional consequence of
-rollback), revert-series atomicity across multiple merges, the idempotency trailer `RevertOutcome`
-itself defers to this leg, and the downstream-merge-refusal traversal (single-hop vs. transitive).
-**Leg D's real dependency is on whichever leg produces the `HoistBrokeOwner` finding (Leg C2, not
-C1) — its design does not need to wait on C1/C2's own scoping, only on treating that finding's
-existence as an input contract.** Full account (all seven calls in detail):
-`.superpowers/sdd/round-VI-criteria-closure/research-35-report.md`.
+**Update, 2026-09-06 (round VI, D111 Leg D design pass) — Leg D is now scoped via ADR-0122; no code
+landed yet.** Seven judgment calls settled, all by tracing primary sources rather than by
+controller value judgment: (1) D117's remedy is exclusion at graph-build read time — widen
+`_graph_edges` with the identical `contracts.status IN ('HOISTED','MIGRATED')` predicate
+`_graph_nodes` already applies, never reconstruct, never `DELETE FROM edges` — which also
+surfaced a previously-unknown crash (`_graph_edges`/`build_graph`'s `GraphError` on any edge
+naming a vanished contract node, since `_graph_edges` had no filter symmetric to `_graph_nodes`'s);
+(2) the unhoist blast-set query runs fresh, inside the same transaction as the `contracts.status =
+'FAILED'` write, with no snapshot table needed because nothing ever mutates the edge rows; (3)
+demotion calls `SqliteStateRepository.demote_to_floor` directly with `floor=Phase.TRANSFORM` fixed
+as a decided constant, bypassing `cli._demote_to_floors`'s Git-evidence floor computation
+entirely, which makes "no `attempts` increment" and "a `PhaseDemoted` finding per demotion" free;
+(4) revert-series atomicity is pre-check-then-commit — dry-check the whole ordered series in a
+disposable worktree before any real commit, re-validate the branch tip did not move, and treat a
+real-pass conflict after a clean dry-check as a should-never-happen loud failure; (5) idempotency
+uses one new optional `FleetTrailers` field, `Fleet-Contract-Rollback-Id` (the contract's own
+`contract_id`), read back on resume the same way §11.5 step 4 already asks Git whether a mutation
+landed; (6) the downstream-merge-refusal traversal is the full transitive closure via the existing
+`graph/query.py::descendants` primitive, not the single-hop check `fleet pr` uses (that check gets
+away with single-hop only because it re-runs every invocation; Leg D's refusal is a one-shot,
+irrevocable gate); (7) Leg D's only real input dependency is the triggering finding + `FAILED`
+status, not which of Leg C1/C2 produced it, so Leg D's own build does not wait on either's
+scoping. Full design and the Rule-14 `docs/SPEC.md` corrections it required: `docs/DECISIONS.md`
+ADR-0122; annotation on `docs/INTEGRATION_HONESTY.md` D117 (heading stays `OPEN`). **Split into
+slices, not one task:** `task-65-brief.md` scopes only slice 1 — the DB/graph-level mechanism
+(Decisions 1, 2, 3, 6): persisted un-hoist, blast-set demotion, and the downstream-merge refusal
+check, no git. Two further slices are named but not yet briefed (no task number allocated as of
+this update — `task-66-brief.md` exists but is Leg C2's own, unrelated build-failure-attribution
+task, re-verified at the moment of this edit rather than assumed from the ADR draft's stale working
+name): the git-mechanics revert-series execution (Decisions 4/5) and the production wiring from
+whichever leg (C1/C2) produces the triggering `HoistBrokeOwner` finding. No code has landed for Leg
+D; this criterion is not marked DONE.
 
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists

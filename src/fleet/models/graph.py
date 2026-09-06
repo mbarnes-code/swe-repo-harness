@@ -172,7 +172,11 @@ class DependencyEdge(FleetModel):
     retargeted_from_repo_id: RepoId | None = Field(
         default=None,
         description="Pre-hoist dst repo when this row was retargeted to a contract node "
-        "(§3.1 5b viii). The rollback record: restoring it un-hoists the edge exactly.",
+        "(§3.1 5b viii). Audit record of what a hoist retargeted — NOT a reconstruction "
+        "recipe (D117/ADR-0122). The un-hoist mechanism excludes this row from the graph "
+        "read (`contracts.status` leaving `HOISTED`/`MIGRATED`) and lets the never-deleted "
+        "original repo→repo row stand; this field is never read back into a reconstructed "
+        "edge.",
     )
     kind: EdgeKind
     version_spec: str | None = None
