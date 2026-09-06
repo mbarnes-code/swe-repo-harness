@@ -6813,10 +6813,11 @@ async def test_migrated_test_count_reaches_repos_after_a_measured_run(
 
     The inner `buildverify` worker is stubbed rather than real, for the same reason `test_workers_
     build.py::test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_see` needs a
-    hand-built workspace outside the full pipeline: gap 1 (D112) means no production adapter ever
-    populates `BuildUnit.test_srcs`, so `BuildPipelineWorker.run()` itself can never reach a real
-    nonzero `migrated_test_count` end to end today — confirmed by a full-tree grep, same as that
-    test's own docstring records. The stub stands in for exactly what a real measured `bazel
+    hand-built workspace outside the full pipeline: as of round VI task 53, gap 1 (D112) is closed
+    for Python only — `_plan_build` populates `BuildUnit.test_srcs` for that ecosystem, but
+    JS/Rust/JVM adapters still never receive one in production, so `BuildPipelineWorker.run()`
+    still can't reach a real nonzero `migrated_test_count` end to end for this fixture's ecosystem
+    today. The stub stands in for exactly what a real measured `bazel
     query` hands back (`migrated_test_count_measured=True`); everything downstream of it — the
     composite worker's copy step, `_BuildSink`, the SQLite write — is real production code.
     """

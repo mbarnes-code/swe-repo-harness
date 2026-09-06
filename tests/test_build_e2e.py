@@ -1117,6 +1117,37 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
     },
     #: No manifest any adapter recognizes ⇒ `Ecosystem.UNKNOWN` ⇒ the §3.1 step 2 floor.
     "acme-runbooks": {"README.txt": "on-call runbooks\n", "notes/oncall.txt": "page someone\n"},
+    #: D112: every OTHER Python fixture in this file (and in `test_scan_e2e.FIXTURE_REPOS`) ships
+    #: zero test files, so `test_sources()` has always returned `[]` for every real-Bazel run this
+    #: suite has ever done — the gap `D112` in `docs/INTEGRATION_HONESTY.md` describes. This is
+    #: the first Python fixture with a real `test_*.py`, named by pytest's own default discovery
+    #: convention (`docs/INTEGRATION_HONESTY.md`'s `## D112` entry, `_is_python_test_src` in
+    #: `cli.py`). The assertion is a bare module-level `assert`, not a `pytest`-collected
+    #: function: `py.py`'s `test_targets()` sets `main=test_srcs[0]` and no `deps` on a test
+    #: framework, so a real `bazel test` executes this file as a plain script — a `def test_…():`
+    #: never called would make the target "pass" vacuously and prove nothing about a real defect
+    #: failing it.
+    "acme-widgets-py": {
+        "pyproject.toml": (
+            "[project]\nname = \"acme-widgets-py\"\nversion = \"0.1.0\"\ndependencies = []\n"
+        ),
+        "acme_widgets_py/__init__.py": (
+            "def double(value: int) -> int:\n    return value * 2\n"
+        ),
+        # Self-contained rather than `from acme_widgets_py import double`: `main`'s own directory
+        # and the package's `imports = ["."]` root would BOTH be on `sys.path` under a real
+        # `py_test` runfiles tree, and this fixture has no need to find out whether that
+        # resolves the same module twice or not. What must be real is the ASSERT: a bare
+        # top-level statement, not a `def test_…():` `pytest` would collect but `py_test`'s
+        # `main=` (no `deps` on a test framework — `py.py:test_targets()`) never calls.
+        "acme_widgets_py/test_widgets.py": (
+            "def _double(value: int) -> int:\n"
+            "    return value * 2\n"
+            "\n"
+            "\n"
+            "assert _double(21) == 42\n"
+        ),
+    },
 }
 
 
@@ -2749,6 +2780,51 @@ def test_a_jvm_repo_and_a_js_repo_generate_real_ecosystem_appropriate_targets(
     # name, every load label and every external repo, which is what "the adapter decides" means.
     assert result.exit_code == ExitCode.SUCCESS
     assert payload(result)["adapter_unavailable"] == [], result.output
+
+
+def test_a_python_repo_with_a_real_test_file_gets_a_real_py_test_target(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """D112, over `FakeBazel`: a Python repo with a real `test_*.py` gets a real `py_test`
+    target, and the test file is NOT also a `py_library` source.
+
+    **The discriminator.** Before round VI task 53's fix, `_plan_build` never populated
+    `BuildUnit.test_srcs` — `cli.py:_plan_build` passed only `srcs=list(srcs)`, so it defaulted
+    to `[]` (`models/build.py`'s `Field(default_factory=list)`) — and `test_sources()`
+    (`ecosystems/base.py`) filters exactly that empty list, so `py.py:test_targets()`'s `if not
+    test_srcs: return []` guard always fired. `generate_targets()`'s `py_library` swallowed
+    `acme_widgets_py/test_widgets.py` into its OWN `srcs` instead (nothing partitioned it out),
+    because `sources()` reads `unit.srcs` and nothing upstream removed the test file from it. So
+    pre-fix this assertion set is exactly reversed: no `py_test(` in the body, and the test file
+    present in the `py_library` `srcs=[...]` list. This is `D112` in
+    `docs/INTEGRATION_HONESTY.md`, and the report for this task records the revert-and-rerun that
+    proves it (`git stash` the `cli.py` hunk, rerun this test, RED; restore it, GREEN).
+    """
+    add_repos(fleet, ["acme-widgets-py"])
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dest = relocations(filter_repo)["acme-widgets-py"]
+    body = (build_worktree(fleet, "acme-widgets-py") / dest / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert "py_test(" in body, body
+    assert 'name = "acme-widgets-py_test"' in body, body
+    assert '"acme_widgets_py/test_widgets.py"' in body, body
+    assert 'main = "acme_widgets_py/test_widgets.py"' in body, body
+
+    # The library target still exists (`__init__.py` is real library source) but its `srcs` no
+    # longer swallows the test file — that is the "not double-declared" half of the claim, and
+    # the half a test asserting ONLY "a `py_test` exists" would miss entirely.
+    library_start = body.index("py_library(")
+    test_start = body.index("py_test(")
+    library_body = body[library_start:test_start]
+    assert '"acme_widgets_py/__init__.py"' in library_body, library_body
+    assert '"acme_widgets_py/test_widgets.py"' not in library_body, library_body
 
 
 def test_destinations_come_from_the_adapters_not_from_the_driver(
@@ -5348,6 +5424,76 @@ def test_two_python_repos_with_different_pypi_dependencies_both_build(
     detail += f"--- bazel stderr ---\n{built.stderr[-8000:]}"
     assert built.returncode == 0, detail
     assert "Build completed successfully" in built.stderr, detail
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("bazel") is None,
+    reason=(
+        "bazel is not installed on this host; this is D112's own proof, and it is exactly the "
+        "one no `FakeBazel` invocation can give: that a real `bazel test` runs and PASSES a "
+        "target built from a `test_srcs` list a real ecosystem adapter actually populated"
+    ),
+)
+def test_a_python_test_target_runs_and_passes_under_a_real_bazel(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    tmp_path: Path,
+    bazel_cache_home: Path,
+    bazel_registry: str,
+    bazel_fetch_bazelrc: str,
+    bazel_startup_argv: tuple[str, ...],
+) -> None:
+    """D112, closed end to end: `bazel test //py/acme-widgets-py:acme-widgets-py_test` PASSES
+    against the real toolchain, over a target `fleet build` emitted from a real `test_srcs` list.
+
+    **Why this and not just the `FakeBazel` version above.** `docs/INTEGRATION_HONESTY.md`'s
+    `## D112` entry's whole point is that no real-Bazel path had EVER produced a nonzero test
+    target — `test_build_against_a_real_bazel`'s own `bazel build //...` never runs `bazel test`
+    at all, and every existing real-Bazel test in this file asks `build`, never `test`. A
+    `FakeBazel` seam answering from a canned table cannot show a test binary actually executing
+    and exiting 0; only a real `bazel test` invocation, over a real Python interpreter running
+    the real `assert double(21) == 42`-shaped script, can.
+
+    Run alongside the fast unit-tier test above (same file, `@pytest.mark.integration`, skipped
+    together) rather than in it, per this task's brief: a real Bazel invocation is too slow for
+    the fast tier.
+    """
+    add_repos(fleet, ["acme-widgets-py"])
+    result = real_build(fleet, monorepo, bazel_cache_home, bazel_registry, bazel_fetch_bazelrc)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    checkout = tmp_path / "integration-checkout"
+    git(monorepo, "worktree", "add", "--detach", str(checkout), "integration")
+    dest = "py/acme-widgets-py"
+    build_file = checkout / dest / "BUILD.bazel"
+    assert build_file.is_file(), f"{dest} generated no BUILD.bazel"
+    body = build_file.read_text(encoding="utf-8")
+    assert "py_test(" in body, body
+
+    tested = subprocess.run(  # noqa: S603
+        [*bazel_startup_argv, "test", f"//{dest}:acme-widgets-py_test", "--test_output=errors"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800.0,
+    )
+    detail = (
+        f"fleet build exited {result.exit_code}\n\n--- bazel test stderr ---\n"
+        f"{tested.stderr[-8000:]}"
+    )
+    # `--test_output=errors` prints nothing about a PASSING test but the failing test's own
+    # output on a red one, so the exit code plus Bazel's own "completed successfully" summary —
+    # not a `PASSED`/`FAILED` string that only appears under `--test_output=all` or in the test
+    # log — is what a passing `bazel test` actually asserts about itself. A failing target makes
+    # `bazel test`'s OWN exit nonzero and its summary read "FAILED", which this would catch.
+    assert tested.returncode == 0, detail
+    assert f"//{dest}:acme-widgets-py_test" in tested.stderr, detail
+    assert "Build completed successfully" in tested.stderr, detail
+    log = checkout / "bazel-testlogs" / dest / "acme-widgets-py_test" / "test.log"
+    assert log.is_file(), f"{detail}\n(no test.log at {log})"
+    assert "Traceback" not in log.read_text(encoding="utf-8"), log.read_text(encoding="utf-8")
 
 
 @pytest.mark.integration

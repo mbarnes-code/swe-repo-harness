@@ -8567,6 +8567,7 @@ async def _plan_build(
     await monorepo.exec(["worktree", "add", "--detach", "--force", str(worktree), snapshot.ref])
 
     srcs = await _dest_sources(worktree, dest)
+    non_test_srcs, test_srcs = _partition_test_srcs(facts.ecosystem, srcs)
     external = await asyncio.to_thread(
         _external_coordinates, worktree / dest, manifest_paths, owned_keys
     )
@@ -8574,7 +8575,8 @@ async def _plan_build(
         unit_id=repo_id,
         ecosystem=facts.ecosystem,
         dest=dest,
-        srcs=list(srcs),
+        srcs=non_test_srcs,
+        test_srcs=test_srcs,
         published=facts.published,
         internal_deps=list(internal_deps),
         # Deduplicated to one row per coordinate: `workspace_deps()` renders one tag call each,
@@ -8681,6 +8683,35 @@ async def _dest_sources(worktree: Path, dest: str) -> tuple[str, ...]:
     return tuple(
         sorted(path[len(prefix) :] for path in _nul_fields(out) if path.startswith(prefix))
     )
+
+
+def _is_python_test_src(path: str) -> bool:
+    """`pytest`'s own default discovery convention (`test_*.py` / `*_test.py`), by basename.
+
+    D112: nothing upstream of `test_sources()`/`accepts_src()` (`ecosystems/base.py`) ever
+    populated `BuildUnit.test_srcs`, so no adapter could emit a real test target. This is the
+    heuristic that fills it for ONE ecosystem (Python) — matched on the basename so a file
+    several directories under `dest` (e.g. `tests/test_widgets.py`) still counts.
+    """
+    name = path.rsplit("/", 1)[-1]
+    return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+
+
+def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[list[str], list[str]]:
+    """Split a unit's discovered sources into `(srcs, test_srcs)` for one ecosystem — D112.
+
+    Scoped to `Ecosystem.PYPI` only (round VI task 53): the other three adapters' `test_targets()`
+    already read `test_sources()` correctly, but nobody has yet made a design call on their own
+    test-file conventions (JS's `*.test.ts` vs colocated `__tests__/`, Rust's `#[cfg(test)]`
+    in-file modules, JVM's `src/test/java` layout), so every non-Python ecosystem keeps its whole
+    walk in `srcs` exactly as before this task — `test_srcs` stays `()` for them, which is a no-op
+    against `test_sources()`'s existing (always empty) behavior.
+    """
+    if ecosystem is not Ecosystem.PYPI:
+        return list(srcs), []
+    test_srcs = [path for path in srcs if _is_python_test_src(path)]
+    rest = [path for path in srcs if not _is_python_test_src(path)]
+    return rest, test_srcs
 
 
 def _phase_config(settings: FleetSettings, phase: Phase, timeout_s: int) -> FleetConfig:

@@ -7487,9 +7487,10 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:13663-13900`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-04, round VI, TEN separate times now as this round's own successive `cli.py` additions
-keep shifting it — this repointing follows task 48's citation-hygiene sweep. Correction to this
+(`cli.py:13694-13931`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-06, round VI, ELEVEN separate times now as this round's own successive `cli.py` additions
+keep shifting it — this repointing follows round VI task 53's merge, which added
+`_partition_test_srcs`/`_is_python_test_src` above this function. Correction to this
 paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
 functional exemption — `test_no_unpinned_anchored_citation_
 fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
@@ -8028,7 +8029,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:10006-10119`) returns early at `if not servable: return result`
+`_continue_impl` (`src/fleet/cli.py:10037-10150`) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
@@ -8700,8 +8701,8 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-22-report.md`
 round should build a dedicated multi-task closure plan (mirroring how D94/D104 and §12.37/§12.38
 are tracked) before dispatching the first leg.
 
-## D112 — OPEN. `BuildUnit.test_srcs` is never populated by any production ecosystem adapter — no
-adapter can ever emit a real nonzero test target
+## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
+adapter — no adapter can ever emit a real nonzero test target
 
 **Found by round VI task 38 (2026-09-03), while sizing §12.11 Task A's discriminator test.**
 Verified free before allocating: form-agnostic sweep found `D111` as the highest allocated number.
@@ -8727,6 +8728,24 @@ sentence checks, and a real-bazel fixture's test target count can be proven nonz
 **Not yet built:** whatever wiring would populate `test_sources()`/`test_srcs` from a real
 ecosystem adapter's manifest scan — no design decision (which adapters, what discovery heuristic)
 is made here.
+
+**PARTLY ADDRESSED (round VI task 53, 2026-09-06, `018259b`) — Python only, JS/Rust/JVM still
+untouched.** `_plan_build` (`cli.py`) now calls `_partition_test_srcs(facts.ecosystem, srcs)`
+before constructing `BuildUnit`, which — for `Ecosystem.PYPI` only — splits `_dest_sources`'s walk
+by pytest's own `test_*.py`/`*_test.py` discovery convention (`_is_python_test_src`) into
+`(srcs, test_srcs)`; every other ecosystem gets `test_srcs=()` unchanged, exactly as this entry
+originally described. Proven end to end and disclosed as narrowed, not closed: the fast covering
+test `tests/test_build_e2e.py::test_a_python_repo_with_a_real_test_file_gets_a_real_py_test_target`
+(revert-and-rerun RED/GREEN plus a mutation on `_is_python_test_src`, both in-worktree per Rule
+12) and the real-Bazel `tests/test_build_e2e.py::
+test_a_python_test_target_runs_and_passes_under_a_real_bazel` (`@pytest.mark.integration`) —
+`bazel test //py/acme-widgets-py:acme-widgets-py_test` PASSES, the first real-Bazel nonzero
+test-target result this codebase has ever produced through `real_build()`'s own path. **This does
+NOT close D112** — JS/Rust/JVM adapters still never populate `test_srcs`, and no design decision
+for their own test-file conventions has been made (see the still-current "Not yet built" paragraph
+above, which remains true for those three). Do not round the `<n> of 48` §12 count up on this
+account; §11's Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, and
+it is dispatched separately.
 
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found

@@ -630,6 +630,13 @@ tests independently re-run by review. **Gaps 1 (`D112`) and 3 (exclusion-set ass
 open** — this closes gap 2 only. Do not round up the `<n> of 48` count for §12.11 — Task B plus
 gaps 1 and 3 still remain.
 
+**Gap 1 (`D112`) narrowed, not closed (round VI task 53, 2026-09-06, `018259b`).** `test_srcs` is
+now populated for the Python adapter only — see `docs/INTEGRATION_HONESTY.md`'s `## D112` entry
+for the proof. JS/Rust/JVM still never populate it, so gap 1 is still open for those three and
+Task B still has no real-Bazel path to a nonzero test target outside Python. Do not round up the
+`<n> of 48` count for §12.11 on this account — Task B (still pending) plus the JS/Rust/JVM slice
+of gap 1 plus gap 3 remain.
+
 **Gap 3 measured, not closed (round VI task 54, 2026-09-06).** The "exclusion set is empty under
 shipped config" prose above understated the finding: it isn't merely "unbuilt", it's
 **measurably false** under the shipped default config as this codebase stands today.
@@ -646,9 +653,12 @@ under_the_shipped_config` is a `strict=True` xfail pinning the target state — 
 turns it into an unexpected-pass CI failure, forcing the marker's own deletion, matching the D97
 precedent (`CLAUDE.md` §6). Mutation-proven (a second, non-xfail test in the same file drives the
 same real DB in both directions to show the assertion is a genuine `baseline_ok IS NULL` read,
-not a tautology). **Gap 1 (`D112`) is the only gap left with no fixture-driven test proving its
-current state** — Task B plus gap 1 remain before this criterion counts DONE; gap 3 is now
-PROVEN OPEN (not merely disclosed) via `D116`.
+not a tautology). Gap 3 is now **PROVEN OPEN** (not merely disclosed) via `D116` — a strictly
+larger gap than gap 1's Python-only narrowing above, since it means no repo, in any ecosystem,
+ever gets a measured native baseline under the shipped config today. **Current state of all three
+gaps: Task B still pending; gap 1 open for JS/Rust/JVM (Python closed, round VI task 53); gap 3
+open (`D116`, round VI task 54).** Do not round up the `<n> of 48` count for §12.11 — none of the
+three gaps are fully closed.
 
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
@@ -1763,7 +1773,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9045-9080`) filters on the literal string
+blockers above**: `_eligible_build_units` (`cli.py:9076-9111`) filters on the literal string
 `phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row

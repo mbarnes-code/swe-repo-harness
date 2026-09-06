@@ -2979,10 +2979,12 @@ async def test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_s
     output.
 
     `dest=pkg` is built at the root of `bazel_workspace` directly — `BuildverifyInput.worktree`
-    names it — rather than through the full `fleet build` CLI pipeline: no ecosystem adapter in
-    `src/fleet/ecosystems/` is ever handed a `BuildUnit.test_srcs` in production today (confirmed
-    by a full-tree `grep` — nothing constructs `BuildUnit(test_srcs=...)` anywhere in `src/`), so
-    no repo in this suite's fixture fleet can reach a real NONZERO migrated test count through
+    names it — rather than through the full `fleet build` CLI pipeline: as of round VI task 53
+    (`D112`, `docs/INTEGRATION_HONESTY.md`), `_plan_build` populates `BuildUnit.test_srcs` for the
+    Python ecosystem only — JS/Rust/JVM adapters still never receive one in production. This
+    fixture's own workspace is hand-built here specifically to sidestep that ecosystem-scoped gap
+    rather than depend on it, so this test's validity is unaffected either way. No repo in this
+    suite's fixture fleet can reach a real NONZERO migrated test count through
     `real_build()`/`test_build_against_a_real_bazel`'s pipeline without first fixing that
     separate, pre-existing gap. This is the same "one test that needs the real binary" shape
     `test_real_bazel_exit_4_means_no_tests_and_exit_1_dominates_it` already uses for the premise
