@@ -56,7 +56,7 @@ from fleet.models.graph import (
     GraphNode,
     edge_key_for,
 )
-from fleet.settings import GraphSection
+from fleet.settings import ContractsSection, GraphSection
 
 __all__ = [
     "ATOMIC_DECLARED_DEP_CONFIDENCE",
@@ -109,15 +109,21 @@ type EdgeClass = Literal["TREE", "FORWARD", "CROSS", "BACK"]
 type _Nodes = dict[NodeRef, GraphNode]
 type _Committed = dict[str, ContractNode]
 type _SccOutcome = tuple[
-    "SccResolution", _Nodes, list[DependencyEdge], FleetGraph, _Committed
+    "SccResolution", _Nodes, list[DependencyEdge], FleetGraph, _Committed,
+    tuple["GraphFinding", ...], tuple[ContractNode, ...],
 ]
 type _HoistOutcome = tuple[
-    tuple[str, ...], _Nodes, list[DependencyEdge], FleetGraph, _Committed
+    tuple[str, ...], _Nodes, list[DependencyEdge], FleetGraph, _Committed,
+    tuple["GraphFinding", ...], tuple[ContractNode, ...],
 ]
 """The state threaded through the ladder: the resolution (or the hoisted ids), the node set, the
 edge rows, the graph rebuilt from them, and the contracts committed so far. Threaded rather than
 held on an object because every rung must hand the *next* rung a graph that already reflects its
-own decision — 6d must break edges in the graph 6c-H hoisted into."""
+own decision — 6d must break edges in the graph 6c-H hoisted into.
+
+The last two elements — a `GraphFinding` tuple and a rejected-`ContractNode` tuple — are 6c-H's
+not-shared-after-retarget outcome (§12.31 case (i), Leg A): threaded the same way as everything
+else here so a rejection inside one SCC's hoist loop reaches `CycleReport` without a side channel."""
 
 
 def scc_id_for(members: Iterable[str]) -> str:
@@ -299,6 +305,13 @@ class CycleReport:
     graph: FleetGraph
     hoisted_contracts: tuple[ContractNode, ...]
     findings: tuple[GraphFinding, ...] = ()
+    rejected_contracts: tuple[ContractNode, ...] = ()
+    """§12.31 case (i), Leg A: contracts 6c-H tried to hoist and rolled back in-memory because the
+    materialized edges did not corroborate `scan.contracts.min_consumers` distinct consumers. Each
+    carries `status=ContractStatus.REJECTED` and `status_detail="not_shared_after_retarget"` —
+    distinct from the 5b (vi) detection-time rejection's `status_detail="min_consumers"`
+    (`workers/contracts.py`) — because this is a different question asked at a different time:
+    "do the retargeted edges corroborate the count 5b already checked?", not the count itself."""
 
     @property
     def manual_repo_ids(self) -> tuple[str, ...]:
@@ -376,14 +389,25 @@ def break_cycles(
     *,
     contracts: Sequence[ContractNode] = (),
     config: GraphSection | None = None,
+    min_consumers: int | None = None,
 ) -> CycleReport:
     """Run §3.1 step 6 end to end and return the sequenced-ready graph.
 
     The ladder, in order and without a skipped rung: 6a condense, 6b classify, 6c rank, **6c-H
     hoist**, 6d break, 6e atomic/manual. Hoisting runs strictly before any whole-repo edge is
     broken and before any atomic wave is considered, exactly as §3.1 6c-H requires.
+
+    `min_consumers` is §12.31 case (i)'s not-shared-after-retarget threshold — the same question
+    `scan.contracts.min_consumers` already answered once at 5b (vi) detection time, re-asked here
+    of the retargeted edges. `None` (the default, and every production call site) resolves to
+    `ContractsSection().min_consumers` — the single source of truth `workers/contracts.py` also
+    reads — rather than a literal default, so the two checks can never drift apart. It is a config
+    value, not an operator-facing override: nothing in `cli.py` threads a flag to it.
     """
     cfg = config or GraphSection()
+    resolved_min_consumers = (
+        ContractsSection().min_consumers if min_consumers is None else min_consumers
+    )
     nodes: _Nodes = {
         (kind, node_id): GraphNode(kind=NodeKind(kind), node_id=node_id)
         for kind, node_id in graph.node_refs()
@@ -405,12 +429,14 @@ def break_cycles(
 
     current = _rebuild(nodes.values(), edges, cfg)
     resolutions: list[SccResolution] = []
+    findings: list[GraphFinding] = []
+    rejected_contracts: list[ContractNode] = []
 
     for members in _nontrivial_sccs(current.G_dag):
         member_ids = tuple(node_id for kind, node_id in members if kind == NodeKind.REPO.value)
         if len(member_ids) < 2:  # pragma: no cover - a contract is a sink, so this cannot happen
             continue
-        resolution, nodes, edges, current, committed = _resolve_scc(
+        resolution, nodes, edges, current, committed, scc_findings, scc_rejected = _resolve_scc(
             members=members,
             member_ids=member_ids,
             nodes=nodes,
@@ -419,8 +445,11 @@ def break_cycles(
             contracts=by_id,
             committed=committed,
             cfg=cfg,
+            min_consumers=resolved_min_consumers,
         )
         resolutions.append(resolution)
+        findings.extend(scc_findings)
+        rejected_contracts.extend(scc_rejected)
 
     hoisted = tuple(
         contract
@@ -433,6 +462,8 @@ def break_cycles(
         edges=tuple(sorted(edges, key=lambda e: e.edge_key)),
         graph=current,
         hoisted_contracts=hoisted,
+        findings=tuple(sorted(findings, key=lambda f: f.fingerprint)),
+        rejected_contracts=tuple(sorted(rejected_contracts, key=lambda c: c.contract_id)),
     )
 
 
@@ -446,6 +477,7 @@ def _resolve_scc(
     contracts: Mapping[str, ContractNode],
     committed: _Committed,
     cfg: GraphSection,
+    min_consumers: int,
 ) -> _SccOutcome:
     scc_id = scc_id_for(member_ids)
     edge_keys = _intra_edge_keys(graph.G_dag, members)
@@ -470,11 +502,15 @@ def _resolve_scc(
             edges,
             graph,
             committed,
+            (),
+            (),
         )
 
     hoisted_ids: tuple[str, ...] = ()
+    findings: tuple[GraphFinding, ...] = ()
+    rejected: tuple[ContractNode, ...] = ()
     if cfg.hoist_contracts:
-        hoisted_ids, nodes, edges, graph, committed = _hoist_contracts(
+        hoisted_ids, nodes, edges, graph, committed, findings, rejected = _hoist_contracts(
             member_ids=member_ids,
             nodes=nodes,
             edges=edges,
@@ -482,6 +518,7 @@ def _resolve_scc(
             contracts=contracts,
             committed=committed,
             cfg=cfg,
+            min_consumers=min_consumers,
         )
 
     live = _live_component(graph.G_dag, member_ids)
@@ -509,6 +546,8 @@ def _resolve_scc(
             edges,
             graph,
             committed,
+            findings,
+            rejected,
         )
 
     broken: list[str] = []
@@ -552,6 +591,8 @@ def _resolve_scc(
         edges,
         graph,
         committed,
+        findings,
+        rejected,
     )
 
 
@@ -587,6 +628,7 @@ def _hoist_contracts(
     contracts: Mapping[str, ContractNode],
     committed: _Committed,
     cfg: GraphSection,
+    min_consumers: int,
 ) -> _HoistOutcome:
     """§3.1 6c-H. **Saturate, then commit greedily** — never a one-at-a-time loop that stops at
     the first zero-gain trial.
@@ -599,6 +641,21 @@ def _hoist_contracts(
     yes, the greedy commit loop decides *which* hoists to spend, and it terminates by
     construction: every iteration commits a distinct contract, so it is bounded at `len(C)`.
     `max_hoists_per_scc` is a safety valve, not the terminating condition.
+
+    **§12.31 case (i), Leg A — not-shared-after-retarget, checked before commit.** SPEC (§3.1
+    6c-H "When the extraction was wrong") describes counting `edges` "at the end of 6c-H"; this
+    checks the SAME observable — distinct repos on the contract's inbound `CONTRACT_CONSUME` edges
+    once retargeted — but INSIDE the loop, before `chosen` enters `committed`/`nodes` (ADR-0120).
+    That placement is what makes the rollback exact: `edges` is reassigned to the materialized
+    result only on the accept path, so on the reject path the pre-`_materialize` `edges` (this
+    function's own local variable) is never overwritten and needs no reconstruction — a
+    reconstruction the retargeted rows themselves cannot support (`retargeted_from_repo_id`
+    survives the retarget but `_materialize` also drops `dst_coordinate`, and
+    `DependencyEdge._node_shape` requires it for a REPO-kind dst; research-32 flagged the two
+    sentences claiming otherwise for controller adjudication, out of scope here). It also keeps
+    the rejected contract out of `nodes`/`committed` by construction, so it can never reach
+    `wave_members` without a compensating delete — there is no `DELETE FROM wave_members` in this
+    codebase and this task adds none.
     """
     members = set(member_ids)
     candidates = tuple(
@@ -611,16 +668,18 @@ def _hoist_contracts(
         and contract.extraction_confidence >= cfg.min_extraction_confidence
     )
     if not candidates:
-        return (), nodes, edges, graph, committed
+        return (), nodes, edges, graph, committed, (), ()
 
     saturated = _trial_graph(nodes, edges, candidates, cfg)
     if _live_component(saturated.G_dag, member_ids):
         # No subset of C dissolves S: hoisting cannot finish the job, so 6d owns this SCC and
         # nothing is committed. Falling through with partial hoists would spend blast radius for
         # an ordering change that still needs an edge broken.
-        return (), nodes, edges, graph, committed
+        return (), nodes, edges, graph, committed, (), ()
 
     hoisted: list[str] = []
+    findings: list[GraphFinding] = []
+    rejected: list[ContractNode] = []
     remaining = list(candidates)
     live = _live_component(graph.G_dag, member_ids)
     while live and remaining and len(hoisted) < cfg.max_hoists_per_scc:
@@ -640,7 +699,46 @@ def _hoist_contracts(
         scored.sort(key=lambda row: row[:4])
         chosen = scored[0][4]
 
-        edges = _materialize(edges, (chosen,))
+        materialized = _materialize(edges, (chosen,))
+        post_retarget_consumers = {
+            str(e.src_id)
+            for e in materialized
+            if e.dst_kind is NodeKind.CONTRACT
+            and e.dst_id == chosen.contract_id
+            and e.kind is EdgeKind.CONTRACT_CONSUME
+        }
+        if len(post_retarget_consumers) < min_consumers:
+            # Reject, in memory, exactly: `edges` is never reassigned to `materialized`, so it
+            # stays the pre-`_materialize` snapshot — no restore step is needed because nothing
+            # was committed. `nodes`/`committed`/`hoisted`/`graph`/`live` are equally untouched,
+            # so the SCC the caller sees is still cyclic (the guard at `_resolve_scc`'s
+            # "the SCC dissolved with no hoist committed" cannot trip: `graph` here is identical
+            # to what the caller already rebuilt `live` from).
+            rejected.append(
+                chosen.model_copy(
+                    update={
+                        "status": ContractStatus.REJECTED,
+                        "status_detail": "not_shared_after_retarget",
+                    }
+                )
+            )
+            findings.append(
+                GraphFinding(
+                    kind="ContractNotShared",
+                    severity="warn",
+                    repo_id=chosen.owning_repo_id,
+                    payload={
+                        "contract_id": chosen.contract_id,
+                        "declared_consumers": str(len(chosen.consumer_repo_ids)),
+                        "post_retarget_consumers": str(len(post_retarget_consumers)),
+                        "min_consumers": str(min_consumers),
+                    },
+                )
+            )
+            remaining = [c for c in remaining if c.contract_id != chosen.contract_id]
+            continue
+
+        edges = materialized
         nodes[chosen.node.key] = chosen.node
         committed[chosen.contract_id] = chosen.model_copy(
             update={"status": ContractStatus.HOISTED}
@@ -650,7 +748,7 @@ def _hoist_contracts(
         graph = _rebuild(nodes.values(), edges, cfg)
         live = _live_component(graph.G_dag, member_ids)
 
-    return tuple(hoisted), nodes, edges, graph, committed
+    return tuple(hoisted), nodes, edges, graph, committed, tuple(findings), tuple(rejected)
 
 
 # =======================================================================================

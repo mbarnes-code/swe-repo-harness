@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 56 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 55 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -455,10 +455,18 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "max_patch_bytes",
         "cli.py:3219-3224",
     ),  # L2727 defined at [(3332, 3338), (4165, 4165)], cited 3219-3224
-    (
-        "TransformInput",
-        "cli.py:4025",
-    ),  # L2728 defined at [(3312, 3339), (3312, 3339)], cited 4025-4025
+    # RETIRED 2026-09-06 (round VI task 55) under the stated exception above, not repointed.
+    # `TransformInput` (`cli.py:4025`), cited in D49's "Second correction" at
+    # `docs/INTEGRATION_HONESTY.md:2780`, began RESOLVING through drift unrelated to this
+    # citation: task 55's own `cli.py` edits (§12.31 Leg A) inserted lines well before line
+    # 4025, and `TransformInput`'s class definition moved to cli.py:4017-4072 -- the cited
+    # 4025 now falls in its interior. The citation names a USAGE site, not the class
+    # definition: `_transform_payloads` (now `cli.py:5174`) reads
+    # `settings.config.transform.max_patch_bytes` at `cli.py:5192` and sets it on the
+    # `TransformInput` it builds via `max_patch_bytes=max_patch_bytes` at `cli.py:5230` --
+    # both well outside the class body, so the drift-into-resolution is coincidental, not a
+    # real re-verification. Left unrepointed per this file's own stated policy for a usage
+    # site drifting into accidental resolution.
     (
         "RunContext.llm_policy",
         "orchestrator/context.py:140",

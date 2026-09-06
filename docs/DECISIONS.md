@@ -13331,3 +13331,74 @@ ecosystems/contracts/` does not exist, so there is no `discover()` to call" — 
 `41929a2`, and §12.32 is marked DONE partly on that carve-out. That is a Rule 14 adjudication for
 the controller (now flagged in place at `docs/SPEC.md:7471` and in `docs/CRITERIA_PLAN.md`'s §32
 entry), tracked separately from this decision.
+
+## ADR-0120 — §12.31 case (i) / D111 Leg A: the not-shared-after-retarget check runs inside the
+6c-H commit loop, not "at the end of 6c-H"
+
+**Decision (2026-09-06, round VI, task 55).** `D111` (`docs/INTEGRATION_HONESTY.md:8676`) names a
+5-leg mechanism for §12.31 ("wrong contract hoist detected and rolled back") with nothing built.
+This ADR covers Leg A only — case (i), *"a contract whose consumers all resolve to the owner"* —
+and is the placement decision `.superpowers/sdd/round-VI-criteria-closure/task-55-brief.md`
+required be recorded here in the same commit as the code (case (ii), the unhoist blast set, and
+`--forbid-hoist`/`--force-hoist` are Legs B–E, explicitly out of scope).
+
+**The question.** `docs/SPEC.md:589-596` (§3.1 6c-H "When the extraction was wrong") describes the
+not-shared signal as detected *"at the end of 6c-H by counting `edges`"* — i.e., after the greedy
+commit loop in `graph/cycles.py::_hoist_contracts` finishes committing whichever contracts it
+chose. Built literally, that requires reconstructing a rejected contract's pre-hoist edges from
+the committed, retargeted rows — via `edges.retargeted_from_repo_id`, the column SPEC and
+`models/graph.py:172-176` both say makes that reconstruction exact.
+
+**It is not exact, and research-32 already measured why.** `_materialize` (`cycles.py:729-739`, at
+task 55's dispatch commit `3277b1c`) overwrites `kind` and sets `dst_coordinate=None` on a
+retargeted edge; `DependencyEdge._node_shape` (`models/graph.py:194-206`) raises `"a REPO dst edge
+must carry dst_coordinate"` on any attempt to turn it back into a REPO→REPO row. `retargeted_from_
+repo_id` alone is not enough — the destination coordinate is gone. Building "detect after commit,
+reconstruct from the retarget" would either (a) widen the validator to accept a coordinate-less
+REPO dst edge, permanently loosening a model invariant to serve one rollback path, or (b) ship a
+rollback that cannot actually restore the edge it claims to. Neither is acceptable, and research-32
+flagged the two sentences making the "exact reconstruction" claim (`SPEC.md:598-600`,
+`models/graph.py:172-176`) for separate controller adjudication — this ADR does not touch them.
+
+**The decision: check the same observable, one loop iteration earlier.** `_hoist_contracts`'s
+greedy commit loop already computes `materialized = _materialize(edges, (chosen,))` before
+committing `chosen` (`cycles.py:643` at dispatch). Leg A counts the distinct `src_id` repos on
+`materialized`'s inbound `CONTRACT_CONSUME` edges for `chosen.contract_id` **at that point**,
+before `edges` is reassigned to `materialized` and before `chosen` enters `nodes`/`committed`. If
+the count is below `scan.contracts.min_consumers`, the local `materialized` variable is simply
+never assigned back to `edges` — the loop's own pre-existing variable already holds the exact
+pre-hoist snapshot, so "restore" costs nothing and reconstructs nothing. `chosen` is recorded as
+`ContractStatus.REJECTED` with `status_detail="not_shared_after_retarget"` (distinct from the 5b
+(vi) detection-time rejection's `status_detail="min_consumers"`,
+`tests/test_workers_contracts.py:759`) and a `ContractNotShared` `GraphFinding` at `severity=
+"warn"` (SPEC's own word, `SPEC.md:597`); the loop drops the contract from `remaining` and
+continues. The SCC is still live afterward by construction (`graph`/`edges` were never touched for
+the rejected candidate), so `_resolve_scc`'s `"the SCC dissolved with no hoist committed"` guard
+(`cycles.py:488-492` at dispatch) cannot trip, and control falls through to 6d/6e unchanged — the
+observables §12.31 case (i) names (`ContractNotShared` finding, `contracts.status='REJECTED'`, no
+contract node in `wave_members`) are identical to a literal "end of 6c-H" reading; only the
+*mechanism* differs.
+
+**Config: `min_consumers` threads through `break_cycles → _resolve_scc → _hoist_contracts` as a
+new keyword-only parameter, defaulted from `ContractsSection().min_consumers` when `None`.** Not
+added to `GraphSection` (`settings.py:431-448`, all `_hoist_contracts` otherwise receives) — that
+would create a second source of truth for one number sitting five lines away in the same file
+(`settings.py:343`), the same field `workers/contracts.py:797`'s 5b (vi) detection-time check
+already reads. `cli._sequence_impl` never passes it explicitly, so every production call resolves
+from settings; no `--min-consumers` CLI flag exists or is implied by this decision.
+
+**Why the loop's own state is a legitimate rollback mechanism and not a hack.** `_hoist_contracts`
+already threads `nodes`/`edges`/`graph`/`committed` by value through the ladder rather than
+mutating a shared object (module docstring: *"every rung must hand the next rung a graph that
+already reflects its own decision"*). A rejection is simply a loop iteration that computes a trial,
+decides not to keep it, and discards the local variable holding that trial — the same shape every
+other loop in this module already has for "compute, then decide." No new state-management pattern
+is introduced.
+
+**What this ADR does NOT decide.** It does not build case (ii) (`HoistBrokeOwner`,
+`ContractStatus.FAILED`, `git revert -m 1`), the unhoist blast set, `HoistRollbackDemotion`, phase
+demotion, the downstream-merge refusal, `--forbid-hoist`/`--force-hoist`'s wiring (left in place,
+untouched), or the Phase 4 `bazel query rdeps` second detection point — all Legs B–E, dispatched
+separately. It does not adjudicate `SPEC.md:598-600` / `models/graph.py:172-176`'s "exact
+reconstruction from `retargeted_from_repo_id`" claim, which research-32 flagged for the controller
+and which this task's placement decision routes around rather than resolves.

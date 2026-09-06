@@ -1381,6 +1381,23 @@ before dispatch, not assumed); Leg C needs splitting (C1 collision-join is brief
 build-attribution needs its own scoping pass); Leg D needs a design ADR before any build task,
 same shape as this criterion's own D111 deferral pattern.
 
+**Update, round VI task 55 (2026-09-06) — Leg A landed; case (i) closed, case (ii) still open.**
+`graph/cycles.py::_hoist_contracts` now rejects a contract in memory, before it enters
+`committed`/`nodes`, when its materialized retargeted edges corroborate fewer than
+`scan.contracts.min_consumers` distinct consumers — `ContractStatus.REJECTED`,
+`status_detail="not_shared_after_retarget"`, a `ContractNotShared` `GraphFinding`
+(`severity="warn"`), no contract node ever reaches `wave_members` (kept out by construction, not
+by a compensating delete), and `phases.attempts` is unaffected by construction (`fleet sequence`
+never calls `complete_phase`). Persisted by `cli._rejected_contract_rows` /
+`_persist_contract_not_shared_findings`, proven end to end through the real CLI against the
+database. Placement decision (inside the commit loop vs. "at the end of 6c-H" per SPEC's prose)
+recorded in `docs/DECISIONS.md` as ADR-0120. **This closes criterion 31's case (i) only.**
+`ContractStatus.FAILED` is still never assigned, `git revert` still has zero call sites in
+`src/fleet/`, and `--forbid-hoist` is still stubbed — the whole of case (ii) and Legs B–E remain
+exactly as sized above, undiminished. `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`
+(a dated in-body marker records Leg A there); this criterion is not marked DONE. Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-55-report.md`.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (landed round N task 3, `7cf3147`, reviewed Approved).** SPEC.md item 32's text has three
 checkable parts plus one explicit carve-out: (1) `discover()` key set equals `set(Ecosystem)`
@@ -1733,14 +1750,14 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7355-7395`) always constructs `published: Coordinate` with `version_spec=None`. This is
+  (`cli.py:7447-7487`) always constructs `published: Coordinate` with `version_spec=None`. This is
   a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
   history kept as the record of what was true when this paragraph was written, not repointed to
   the post-fix state.**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7465-7558`) resolves every
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7557-7650`) resolves every
   consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -1773,7 +1790,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9076-9111`) filters on the literal string
+blockers above**: `_eligible_build_units` (`cli.py:9168-9203`) filters on the literal string
 `phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
