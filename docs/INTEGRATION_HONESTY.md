@@ -8700,8 +8700,8 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-22-report.md`
 round should build a dedicated multi-task closure plan (mirroring how D94/D104 and §12.37/§12.38
 are tracked) before dispatching the first leg.
 
-## D112 — OPEN. `BuildUnit.test_srcs` is never populated by any production ecosystem adapter — no
-adapter can ever emit a real nonzero test target
+## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
+adapter — no adapter can ever emit a real nonzero test target
 
 **Found by round VI task 38 (2026-09-03), while sizing §12.11 Task A's discriminator test.**
 Verified free before allocating: form-agnostic sweep found `D111` as the highest allocated number.
@@ -8727,6 +8727,24 @@ sentence checks, and a real-bazel fixture's test target count can be proven nonz
 **Not yet built:** whatever wiring would populate `test_sources()`/`test_srcs` from a real
 ecosystem adapter's manifest scan — no design decision (which adapters, what discovery heuristic)
 is made here.
+
+**PARTLY ADDRESSED (round VI task 53, 2026-09-06, `018259b`) — Python only, JS/Rust/JVM still
+untouched.** `_plan_build` (`cli.py`) now calls `_partition_test_srcs(facts.ecosystem, srcs)`
+before constructing `BuildUnit`, which — for `Ecosystem.PYPI` only — splits `_dest_sources`'s walk
+by pytest's own `test_*.py`/`*_test.py` discovery convention (`_is_python_test_src`) into
+`(srcs, test_srcs)`; every other ecosystem gets `test_srcs=()` unchanged, exactly as this entry
+originally described. Proven end to end and disclosed as narrowed, not closed: the fast covering
+test `tests/test_build_e2e.py::test_a_python_repo_with_a_real_test_file_gets_a_real_py_test_target`
+(revert-and-rerun RED/GREEN plus a mutation on `_is_python_test_src`, both in-worktree per Rule
+12) and the real-Bazel `tests/test_build_e2e.py::
+test_a_python_test_target_runs_and_passes_under_a_real_bazel` (`@pytest.mark.integration`) —
+`bazel test //py/acme-widgets-py:acme-widgets-py_test` PASSES, the first real-Bazel nonzero
+test-target result this codebase has ever produced through `real_build()`'s own path. **This does
+NOT close D112** — JS/Rust/JVM adapters still never populate `test_srcs`, and no design decision
+for their own test-file conventions has been made (see the still-current "Not yet built" paragraph
+above, which remains true for those three). Do not round the `<n> of 48` §12 count up on this
+account; §11's Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, and
+it is dispatched separately.
 
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found

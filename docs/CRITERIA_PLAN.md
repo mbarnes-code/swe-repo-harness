@@ -630,6 +630,13 @@ tests independently re-run by review. **Gaps 1 (`D112`) and 3 (exclusion-set ass
 open** — this closes gap 2 only. Do not round up the `<n> of 48` count for §12.11 — Task B plus
 gaps 1 and 3 still remain.
 
+**Gap 1 (`D112`) narrowed, not closed (round VI task 53, 2026-09-06, `018259b`).** `test_srcs` is
+now populated for the Python adapter only — see `docs/INTEGRATION_HONESTY.md`'s `## D112` entry
+for the proof. JS/Rust/JVM still never populate it, so gap 1 is still open for those three and
+Task B still has no real-Bazel path to a nonzero test target outside Python. Do not round up the
+`<n> of 48` count for §12.11 on this account — Task B (still pending) plus the JS/Rust/JVM slice
+of gap 1 plus gap 3 remain.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
