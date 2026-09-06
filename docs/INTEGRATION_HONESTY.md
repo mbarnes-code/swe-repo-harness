@@ -9095,3 +9095,83 @@ constructs a sandboxed (`image` set) payload and asserts `_test_query_argv` emit
 container-side, cache paths. Mutation-proven: reverting to `sandboxed=payload.image is not None`
 flips both cache flags to the container-side paths this bug used to emit, reddening the new test;
 task-scoped re-review independently traced this mutation rather than trusting the report.
+
+## D119 — OPEN. `tests/test_ecosystems_contracts_base.py`'s autouse teardown leaves the contracts
+registry unrecoverably empty for the rest of a realistic pytest session, and `fleet build`'s PASS
+2b now depends on it being populated
+
+**Found by round VI research-34 (2026-09-06), re-auditing §12.32's DONE marking.** Verified free
+before allocating: form-agnostic sweep found `D118` as the highest allocated number.
+
+**The gap, as measured.** `src/fleet/ecosystems/contracts/base.py:136-153`: `discover(force=False)`
+calls `importlib.import_module(...)` per adapter module, which for a module already in
+`sys.modules` returns the cached module without re-running its `@register` decorators — so
+`_BY_KIND` stays empty and `discover()` raises. `tests/test_ecosystems_contracts_base.py:33-39`'s
+autouse `_clean_registry` fixture tears down with a bare `reset_adapters()` and never restores
+(unlike the landed precedent for the sibling registry, `tests/test_ecosystems.py:41-51`, whose
+teardown follows `reset_adapters()` with `discover(force=True)` specifically to prevent this class
+of cross-test contamination). `src/fleet/cli.py:9527` — `fleet build`'s PASS 2b, landed this same
+session by round VI task 56 (`57d7171`) — calls a plain `discover()` with no `force=`, and is the
+first in-tree caller; before task 56 this fixture's omission had no observable consequence.
+
+**Reproduced two ways.** In isolation: `pytest tests/test_ecosystems_contracts_base.py
+"tests/test_new_language_touchpoints_e2e.py::test_contract_binding_unavailable_finding_and_unbound_contract_kinds_end_to_end"`
+is GREEN alone (adapter modules never previously imported, so `discover()`'s own `import_module`
+call really executes them); adding the five `tests/test_ecosystems_contracts_{avro,base,openapi,
+proto,shared_lib,thrift}.py` files ahead of it (which import all five adapter modules at
+collection) turns it RED with `RuntimeError: no ContractAdapter is registered for [...]`. **A full,
+unfiltered `pytest tests/` run at `6844a04` confirms this is not a narrow-selection artefact: 6
+failed, 2384 passed, 1 xfailed, 2 errors in 1141.77s, including this exact failure** — `main` was
+red on this test at that commit.
+
+**Fix recommended (Agent Recommendation, TEST-ONLY):** restore the fixture teardown to match
+`tests/test_ecosystems.py`'s own landed precedent — `reset_adapters(); yield; reset_adapters();
+discover(force=True)`. Rejected alternative: making `discover()` reload whenever `_BY_KIND` is
+empty even without `force=True` — this would change production semantics of a registry function to
+paper over a test hook's own misuse (Rule 2/3), not recommended.
+
+**Not yet built:** the fix. Dispatched as
+`.superpowers/sdd/round-VI-criteria-closure/task-61-brief.md`, bundled with the still-missing
+§12.32 bijection test and one stale docstring in the same file.
+
+## D120 — OPEN. §12.6(a)'s "no branch outside the adapter packages" invariant is violated by two
+already-landed, deliberate changes this same session — `tests/test_ecosystems.py` has 3 live,
+deterministic reds on `main`
+
+**Found by round VI research-34 (2026-09-06), as a side effect of the same full-suite run that
+found `D119`.** Verified free before allocating: form-agnostic sweep found `D119` as the highest
+allocated number (allocated immediately above, same investigation).
+
+**The gap, as measured.** `tests/test_ecosystems.py`'s §12.6(a)/(b) enforcement tests (a regex
+line-scan plus an AST walk over `ast.Compare`/`ast.Subscript` nodes, `_no_ecosystem_branch...`/
+`_no_bare_compare_or_subscript_names_a_kind_member...`) assert, with — per the AST test's own
+docstring — "no allowance whatsoever" (the one documented exception, ADR-0100, is a `Subscript`
+whose base is a module-scope dict-literal table in the same file), that no `Ecosystem` or
+`ContractKind` member is named in a branch or bare compare/subscript anywhere outside
+`src/fleet/manifests/`/`src/fleet/ecosystems/`. Two commits landed this same session violate this
+directly:
+- `src/fleet/cli.py:8834` (`if ecosystem is not Ecosystem.PYPI:`, inside `_partition_test_srcs`,
+  round VI task 53, D112's Python-only scoping) — the comment at `:8827` names the site itself.
+- `src/fleet/cli.py:9529` (`cnode.kind is ContractKind.SHARED_LIB`, round VI task 56's `fleet
+  build` PASS 2b, ADR-0119's deliberate `SHARED_LIB` carve-out).
+
+Reproduced in isolation, deterministically, in 1.8s:
+`pytest tests/test_ecosystems.py -k "no_ecosystem_branch or no_ecosystem_member_other or
+no_bare_compare"` → `3 failed, 87 deselected`. Not an ordering artefact — unlike `D119`, this
+reproduces standalone.
+
+**Why this is a real defect, not a false positive.** §12.6's own stated purpose (per the AST
+test's docstring) is that adding a language must be a file-drop, and precedent exists for treating
+exactly this shape as a genuine bug rather than an acceptable exception: ADR-0100 itself was
+adjudicated after `workers/contracts.py:758`'s `if kind is ContractKind.OPENAPI:` was found
+violating the identical rule and was fixed, not exempted. Both D112's and ADR-0119's own design
+work were done without checking this pre-existing invariant test, and neither commit's own review
+caught it (the covering test files each task ran did not include `tests/test_ecosystems.py`).
+
+**Not yet built:** the fix. ADR-0100's own precedent (a module-scope dict/set-literal table,
+looked up rather than branched on) is the natural pattern for both sites — e.g. a
+`_PYTHON_ONLY_TEST_PARTITION: Final[frozenset[Ecosystem]]`-style table for D112's site and an
+equivalent named table for the `SHARED_LIB` skip — but no design choice is made here, and neither
+site should be patched without also re-confirming the fix doesn't reintroduce a second source of
+truth (the same class of defect task 55's fix round caught in a different location this session).
+No task briefed yet; this is the controller's next dispatch.
