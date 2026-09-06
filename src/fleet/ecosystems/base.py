@@ -35,7 +35,7 @@ import pkgutil
 import sys
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Final
 
 from fleet.models.build import (
     BuildTarget,
@@ -53,6 +53,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 __all__ = [
+    "TEST_SRC_PARTITIONED_ECOSYSTEMS",
     "AdapterCoordinateError",
     "EcosystemAdapter",
     "RegistryNotDiscoveredError",
@@ -703,6 +704,21 @@ def reset_adapters() -> None:
 # =======================================================================================
 # Registry-derived data, for callers that must stay ecosystem-free
 # =======================================================================================
+
+
+TEST_SRC_PARTITIONED_ECOSYSTEMS: Final[frozenset[Ecosystem]] = frozenset({Ecosystem.PYPI})
+"""D112 (round VI task 53): the ecosystems whose discovered `srcs` `cli._partition_test_srcs`
+splits into `(srcs, test_srcs)` before a `BuildUnit` exists. `test_targets()` already reads
+`test_sources()` correctly for every adapter, but only one ecosystem's test-file convention has
+been decided (`cli._is_python_test_src`'s `test_*.py`/`*_test.py`) — the other three keep their
+whole walk in `srcs`, matching `test_sources()`'s existing (always empty) behavior for them, until
+someone makes that same design call for JS/Rust/JVM.
+
+A driver-side scoping table, not adapter capability data, so it is a flat constant here rather
+than an `EcosystemAdapter` `ClassVar`: §12.6/ADR-0100 forbid `cli.py` from naming `Ecosystem.PYPI`
+in a bare `Compare`, so `_partition_test_srcs` reads `ecosystem not in
+TEST_SRC_PARTITIONED_ECOSYSTEMS` — the compliant table-lookup shape, same runtime behavior as the
+`Compare` it replaces (round VI task 62, D120)."""
 
 
 def monorepo_dirs() -> dict[Ecosystem, str]:

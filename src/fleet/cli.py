@@ -69,7 +69,11 @@ from fleet.bazel.layout import (
 )
 from fleet.bazel.lockfile import MODULE_LOCK_PATH, check_lock_registry
 from fleet.bazel.query import DEFAULT_RDEPS_LIMIT, DEFAULT_SAMPLE_N
-from fleet.ecosystems.base import EcosystemAdapter, path_segment
+from fleet.ecosystems.base import (
+    TEST_SRC_PARTITIONED_ECOSYSTEMS,
+    EcosystemAdapter,
+    path_segment,
+)
 from fleet.graph.build import GraphError, build_graph
 from fleet.graph.collisions import CollisionInput, CoordinateClaim, audit_collisions
 from fleet.graph.cycles import CycleReport, GraphFinding, break_cycles
@@ -8953,14 +8957,17 @@ def _is_python_test_src(path: str) -> bool:
 def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[list[str], list[str]]:
     """Split a unit's discovered sources into `(srcs, test_srcs)` for one ecosystem — D112.
 
-    Scoped to `Ecosystem.PYPI` only (round VI task 53): the other three adapters' `test_targets()`
-    already read `test_sources()` correctly, but nobody has yet made a design call on their own
-    test-file conventions (JS's `*.test.ts` vs colocated `__tests__/`, Rust's `#[cfg(test)]`
-    in-file modules, JVM's `src/test/java` layout), so every non-Python ecosystem keeps its whole
-    walk in `srcs` exactly as before this task — `test_srcs` stays `()` for them, which is a no-op
-    against `test_sources()`'s existing (always empty) behavior.
+    Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` only (round VI task 53): the other
+    three adapters' `test_targets()` already read `test_sources()` correctly, but nobody has yet
+    made a design call on their own test-file conventions (JS's `*.test.ts` vs colocated
+    `__tests__/`, Rust's `#[cfg(test)]` in-file modules, JVM's `src/test/java` layout), so every
+    non-member ecosystem keeps its whole walk in `srcs` exactly as before this task — `test_srcs`
+    stays `()` for them, which is a no-op against `test_sources()`'s existing (always empty)
+    behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round VI
+    task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two adapter
+    packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime behavior.
     """
-    if ecosystem is not Ecosystem.PYPI:
+    if ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS:
         return list(srcs), []
     test_srcs = [path for path in srcs if _is_python_test_src(path)]
     rest = [path for path in srcs if not _is_python_test_src(path)]
@@ -9364,6 +9371,16 @@ async def _eligible_build_units(
     return tuple(str(row[0]) for row in rows)
 
 
+_BUILD_PASS_2B_SKIPPED_KINDS: Final[frozenset[ContractKind]] = frozenset({ContractKind.SHARED_LIB})
+"""ADR-0119: PASS 2b (`_build_impl`) skips these kinds entirely — SPEC §7.6 delegates their
+emission wholesale to `EcosystemAdapter.generate_targets`, so `neutral_targets()` is `[]` for them
+and `BuildPlan._delegation_is_explicit` rejects an `adapter` plan with no targets; constructing one
+here would raise and break ADR-0119's own "and the run still completes" clause. Only `SHARED_LIB`
+today. A table lookup rather than a `Compare` naming a bare member (round VI task 62, D120,
+ADR-0100): §12.6's confinement gate forbids the latter outside the two adapter packages, and this
+is the compliant shape, same runtime behavior as the `Compare` it replaces."""
+
+
 async def _eligible_contract_units(
     conn: aiosqlite.Connection, run_id: str
 ) -> tuple[ContractNode, ...]:
@@ -9655,12 +9672,8 @@ async def _build_impl(
 
                     ecosystems_contracts.discover()
                     for cnode in contract_units:
-                        if cnode.kind is ContractKind.SHARED_LIB:
-                            # ADR-0119: SPEC §7.6 delegates SHARED_LIB emission wholesale to
-                            # EcosystemAdapter.generate_targets, so neutral_targets() is [] and
-                            # BuildPlan._delegation_is_explicit rejects an `adapter` plan with no
-                            # targets — constructing one here would raise and break the
-                            # criterion's own "and the run still completes" clause.
+                        if cnode.kind in _BUILD_PASS_2B_SKIPPED_KINDS:
+                            # See _BUILD_PASS_2B_SKIPPED_KINDS's docstring (ADR-0119).
                             continue
                         # HOISTED/MIGRATED implies `extractable`, which ContractNode's own
                         # validator (`models/graph.py::_hoistable_is_substantiated`) already
