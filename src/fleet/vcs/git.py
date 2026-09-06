@@ -640,6 +640,62 @@ class Git:
         """
         await self.exec(["rebase", "--abort"])
 
+    async def revert(self, sha: str, *, mainline: int = 1) -> bool:
+        """`git revert --no-commit -m <mainline> <sha>` — stage a revert without committing it.
+
+        SPEC §3.1's hoist rollback (`docs/SPEC.md:606-610`, D111 Leg B): "revert its merge commit
+        on the integration branch with `git revert -m 1`, carrying the standard `Fleet-*` commit
+        trailers like any other mutation (§3.2 step 6)". `--no-commit` is what makes that
+        possible — a plain `git revert` writes its own commit message and gives the caller no
+        hook to add trailers, so this method only ever stages the revert into the index
+        (mirroring `apply()`'s split from `commit()`); `vcs.commits.revert_and_commit` does the
+        follow-up `commit()` call with the caller's subject and `FleetTrailers`.
+
+        `mainline` is git's 1-based parent index, passed through even for an ordinary
+        single-parent commit — verified empirically that git 2.43 accepts `-m 1` there (parent 1
+        is simply the only parent) and only refuses a mainline number the commit does not
+        actually have ("does not have parent N", exit 128, surfaced below as an ordinary
+        `GitCommandError`). This method does not itself distinguish merge from non-merge commits;
+        git already does.
+
+        Returns `True` when the revert stages cleanly (the index now holds the reverted tree,
+        ready to commit). Returns `False` on a CONFLICT that leaves it mid-flight (`REVERT_HEAD`
+        resolves) — a settled, meaningful "no", the same probe shape as `rebase()`: the caller
+        MUST call `abort_revert()` before doing anything else with this repo. Verified
+        empirically that `REVERT_HEAD` also resolves after a CLEAN `--no-commit` revert (git
+        leaves the sequencer state around until something clears it — a subsequent `commit()`
+        clears it the same way `git revert --continue` would), so the `False` branch below is
+        reached only via git's own non-zero exit; `REVERT_HEAD` is then read only to confirm a
+        genuine, resolvable conflict rather than some other failure that never got that far,
+        exactly the way `rebase()` reads `REBASE_HEAD`.
+
+        Raises `GitCommandError` for anything else: an unknown `sha`, a `mainline` the commit
+        does not have, or an unsettled probe (D42, via `_require_settled`).
+        """
+        result = await self.exec(["revert", "--no-commit", "-m", str(mainline), sha], check=False)
+        if result.ok:
+            return True
+        self._require_settled(result)  # raises on never-started / killed-at-deadline (D42)
+        if await self.resolve("REVERT_HEAD") is not None:
+            return False  # settled, genuine conflict — mid-flight, caller must abort or resolve
+        raise GitCommandError(
+            result.argv,
+            result.exit_code,
+            result.stderr_tail,
+            cwd=self.path,
+            timed_out=result.timed_out,
+            started=result.started,
+        )
+
+    async def abort_revert(self) -> None:
+        """`git revert --abort` — return to exactly the pre-revert state (git restores the index
+        and worktree itself; nothing here needs to remember them).
+
+        Raises `GitCommandError` (Rule 11) if there is no revert in progress or the abort itself
+        fails, mirroring `abort_rebase()`.
+        """
+        await self.exec(["revert", "--abort"])
+
     async def push_force_with_lease(self, remote: str, branch: str, *, expected_sha: str) -> None:
         """`git push --force-with-lease=<branch>:<expected_sha> <remote> <branch>`.
 

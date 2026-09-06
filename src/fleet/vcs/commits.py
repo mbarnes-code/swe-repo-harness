@@ -57,6 +57,7 @@ __all__ = [
     "GuardOutcome",
     "PatchApplyError",
     "PatchLike",
+    "RevertOutcome",
     "RollbackAnchorError",
     "RollbackIndeterminateError",
     "apply_and_commit",
@@ -66,6 +67,7 @@ __all__ = [
     "guard",
     "patch_id",
     "record_task_anchor",
+    "revert_and_commit",
     "rollback_phase",
     "scoped_range",
 ]
@@ -207,6 +209,22 @@ class CommitOutcome:
         return self.commit_sha is not None and not self.skipped
 
 
+@dataclass(frozen=True, slots=True)
+class RevertOutcome:
+    """What `revert_and_commit` produced: a new commit SHA, or a conflict the caller must handle.
+
+    Deliberately not `CommitOutcome` — a revert has no `already_applied` idempotency guard of its
+    own the way `apply_and_commit` does (that guard reads the `Fleet-Patch-Id` of the PATCH about
+    to be applied; a revert has no such patch). Whether "this rollback already landed" holds is a
+    question for whatever calls this (SPEC §3.1's Leg C2/D, not yet built) to answer by reading
+    ITS OWN trailer of interest (e.g. the failed contract's id) over `commits_in_range` — this
+    primitive does not know what that trailer is. `commit_sha` is None exactly when `conflicted`.
+    """
+
+    commit_sha: str | None
+    conflicted: bool
+
+
 def scoped_range(pre_commit_sha: str, branch: str) -> str:
     """`<phases.pre_commit_sha>..<branch>` — the ONLY range the trailer guard may search.
 
@@ -293,6 +311,33 @@ async def apply_and_commit(
     await git.apply(patch, index=True)
     sha = await git.commit(subject, trailers=trailers.as_mapping(), body=body)
     return CommitOutcome(commit_sha=sha, skipped=False, guard=outcome)
+
+
+async def revert_and_commit(
+    git: Git,
+    *,
+    sha: str,
+    subject: str,
+    trailers: FleetTrailers,
+    mainline: int = 1,
+    body: str | None = None,
+) -> RevertOutcome:
+    """`git revert -m <mainline> --no-commit <sha>` staged, then stamped with the standard six
+    `Fleet-*` trailers exactly like any other mutation (SPEC §3.1's hoist rollback, §3.2 step 6)
+    — one call so no caller re-implements the stage/commit split.
+
+    On a CONFLICT (`Git.revert` returns `False`), this makes NO commit and leaves the conflict
+    staged for the caller to resolve or discard (`git.abort_revert()`) — the same contract as
+    `Git.rebase()`/`abort_rebase()`. Deliberately not resolved here: reacting to a revert conflict
+    (e.g. the "merged case" of an un-hoist reaching a repo whose own history has since moved on)
+    is SPEC §3.1's Leg D, not yet built — this primitive only proves the mechanical stage-then-
+    stamp step standalone.
+    """
+    staged = await git.revert(sha, mainline=mainline)
+    if not staged:
+        return RevertOutcome(commit_sha=None, conflicted=True)
+    new_sha = await git.commit(subject, trailers=trailers.as_mapping(), body=body)
+    return RevertOutcome(commit_sha=new_sha, conflicted=False)
 
 
 async def find_task_commit(

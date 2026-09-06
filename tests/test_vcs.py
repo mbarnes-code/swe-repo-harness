@@ -567,6 +567,179 @@ async def test_abort_rebase_with_nothing_in_progress_raises(git: Git) -> None:
         await git.abort_rebase()
 
 
+# --------------------------------------------------------------------------------------
+# D111 Leg B: the `git revert -m 1` + `Fleet-*`-trailer primitive (SPEC §3.1's hoist rollback,
+# §3.2 step 6). Standalone: nothing wires this into the cycle-breaking machinery yet (Legs C/D).
+# --------------------------------------------------------------------------------------
+async def _merge_feature_branch(git_: Git, *, branch: str, file_name: str, feature_text: str,
+                                 subject: str = "merge feature") -> str:
+    """Build the `-m 1` shape: a real merge commit with two parents, on `branch`.
+
+    `branch`'s own tip becomes parent 1 (mainline) and the new feature branch's tip becomes
+    parent 2 — exactly the shape SPEC's rollback reverts ("a hoist … merged … `git revert -m 1`",
+    where the integration branch is always parent 1). Returns the merge commit's SHA.
+    """
+    await git_.exec(["checkout", "-b", "hoist-feature"])
+    await _write_and_commit(git_.path, file_name, feature_text, "feature commit")
+    await git_.exec(["checkout", branch])
+    await git_.exec(["merge", "--no-ff", "-m", subject, "hoist-feature"])
+    return await git_.rev_parse(branch)
+
+
+async def test_git_revert_stages_a_clean_revert_without_committing(git: Git) -> None:
+    """The low-level primitive: `-m 1` on a real merge commit stages the reverted tree into the
+    index and returns `True`, WITHOUT creating a commit — proving the `--no-commit` split from
+    `commit()` actually holds (a caller gets a chance to stamp trailers before anything lands)."""
+    tip_before_revert = await git.rev_parse(BRANCH)
+    merge_sha = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="feature.txt", feature_text="from the hoist\n"
+    )
+    assert (git.path / "feature.txt").exists()
+
+    assert await git.revert(merge_sha, mainline=1) is True
+
+    assert await git.rev_parse(BRANCH) == merge_sha, "no commit was made by revert() itself"
+    assert not (git.path / "feature.txt").exists(), "the revert IS staged into the worktree/index"
+    assert await git.resolve("REVERT_HEAD") is not None, (
+        "git leaves the sequencer state around after a clean --no-commit revert; only a "
+        "subsequent commit() (or abort_revert()) clears it"
+    )
+    assert tip_before_revert != merge_sha  # sanity: the merge really did move the branch
+
+
+async def test_git_revert_on_a_conflicting_target_leaves_it_mid_flight_and_abort_restores_the_tip(
+    git: Git,
+) -> None:
+    """A conflict is a settled, meaningful `False`, not an exception — mirrors `rebase()`'s own
+    conflict contract exactly. `abort_revert()` returns the branch to EXACTLY its pre-revert tip,
+    with `REVERT_HEAD` cleared, same as `abort_rebase()`."""
+    merge_sha = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="a.txt", feature_text="feature-edit\n"
+    )
+    # A later commit on `branch` that touches the SAME lines the merge changed: reverting the
+    # merge must now conflict with this commit, which is exactly the "un-hoist reaches a repo
+    # whose history has since moved on" shape SPEC's rollback has to detect.
+    await _write_and_commit(
+        git.path, "a.txt", "feature-edit\nmain-edit-after-merge\n", "edits a.txt after the merge"
+    )
+    branch_tip = await git.rev_parse(BRANCH)
+
+    assert await git.revert(merge_sha, mainline=1) is False
+    assert await git.resolve("REVERT_HEAD") is not None, "revert must be genuinely mid-flight"
+
+    await git.abort_revert()
+
+    assert await git.rev_parse(BRANCH) == branch_tip
+    assert await git.resolve("REVERT_HEAD") is None
+    assert await git.is_dirty() is False
+
+
+async def test_git_revert_accepts_mainline_1_on_an_ordinary_non_merge_commit(git: Git) -> None:
+    """Verified empirically (not assumed): git 2.43 treats `-m 1` on a plain single-parent commit
+    as valid — parent 1 is simply the only parent — and only refuses a mainline number the commit
+    does not actually have. `Git.revert` deliberately does not pre-validate `mainline` against
+    parent count; this documents that git's own behaviour is what this method relies on."""
+    await _write_and_commit(git.path, "a.txt", "v2\n", "ordinary commit")
+    head = await git.rev_parse(BRANCH)
+
+    assert await git.revert(head, mainline=1) is True
+    assert (git.path / "a.txt").read_text() == "v1\n"  # back to what it was before "v2"
+
+
+async def test_git_revert_on_an_unknown_mainline_raises_rather_than_reporting_a_conflict(
+    git: Git,
+) -> None:
+    """The discriminating case between the `raise` and `return False` branches: a mainline number
+    the commit does not have ("does not have parent 2") must not be silently read as "a conflict
+    happened" just because both are non-zero exits — `REVERT_HEAD` never gets written for this
+    failure, exactly the way `rebase()`'s unknown-`onto` test proves for `REBASE_HEAD`."""
+    await _write_and_commit(git.path, "a.txt", "v2\n", "ordinary commit")
+    head = await git.rev_parse(BRANCH)  # exactly one parent — `-m 2` names a parent it lacks
+    with pytest.raises(GitCommandError) as caught:
+        await git.revert(head, mainline=2)
+    assert "parent 2" in caught.value.stderr
+    assert await git.resolve("REVERT_HEAD") is None
+
+
+async def test_abort_revert_with_nothing_in_progress_raises(git: Git) -> None:
+    with pytest.raises(GitCommandError):
+        await git.abort_revert()
+
+
+async def test_revert_and_commit_stages_and_stamps_fleet_trailers_without_rewriting_history(
+    git: Git,
+) -> None:
+    """The full Leg B primitive: stage the `-m 1` revert, then commit it with the standard six
+    `Fleet-*` trailers — round-trippable by `find_trailer_commit` exactly like a normal patch
+    commit (`test_commit_trailer_round_trips_and_is_found_by_the_scoped_search` above). The merge
+    commit itself must still be present, unmodified, in history: this is a REVERT (a new commit
+    undoing the change), never a `reset`/rewrite (CLAUDE.md guardrail 4 — git is the sole record,
+    and `docs/SPEC.md`'s own text is explicit that "the revert *is* the record")."""
+    anchor = await C.record_task_anchor(git, BRANCH)
+    merge_sha = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="feature.txt", feature_text="from the hoist\n"
+    )
+    pid = "0" * 64  # this primitive does not derive a patch id of its own — see RevertOutcome
+    task_id = "33333333-3333-4333-8333-333333333333"
+
+    outcome = await C.revert_and_commit(
+        git,
+        sha=merge_sha,
+        subject="fleet: revert hoist merge (D111 leg B)",
+        trailers=trailers_for(pid, task_id=task_id),
+        mainline=1,
+    )
+
+    assert outcome.conflicted is False
+    assert outcome.commit_sha is not None
+    assert not (git.path / "feature.txt").exists(), "the revert's effect landed in the worktree"
+
+    # a plain, single-parent commit was made ON TOP — not a rewrite of the merge commit itself
+    parents = (await git.text(["log", "-1", "--format=%P", outcome.commit_sha])).split()
+    assert parents == [merge_sha]
+    still_present = await git.text(["log", "-1", "--format=%H", merge_sha])
+    assert still_present == merge_sha, "the merge commit was reverted, not erased from history"
+
+    found = await git.find_trailer_commit(
+        C.scoped_range(anchor, BRANCH), C.TASK_ID_TRAILER, task_id
+    )
+    assert found == outcome.commit_sha
+    rows = await C.commits_in_range(git, branch=BRANCH, pre_commit_sha=anchor)
+    assert rows[0]["sha"] == outcome.commit_sha, "git log lists newest first"
+    assert rows[0]["task_id"] == task_id
+
+
+async def test_revert_and_commit_on_a_conflict_makes_no_commit_and_leaves_it_for_the_caller(
+    git: Git,
+) -> None:
+    """The conflict path stamps NOTHING — `RevertOutcome.commit_sha` is `None`, the branch tip is
+    unmoved, and the repo is left exactly as `Git.revert()` alone would leave it (mid-flight),
+    ready for `git.abort_revert()`. Reacting to this (SPEC §3.1's Leg D) is deliberately out of
+    scope for this primitive."""
+    merge_sha = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="a.txt", feature_text="feature-edit\n"
+    )
+    await _write_and_commit(
+        git.path, "a.txt", "feature-edit\nmain-edit-after-merge\n", "edits a.txt after the merge"
+    )
+    branch_tip = await git.rev_parse(BRANCH)
+
+    outcome = await C.revert_and_commit(
+        git,
+        sha=merge_sha,
+        subject="fleet: revert hoist merge (D111 leg B)",
+        trailers=trailers_for("1" * 64),
+        mainline=1,
+    )
+
+    assert outcome == C.RevertOutcome(commit_sha=None, conflicted=True)
+    assert await git.rev_parse(BRANCH) == branch_tip
+
+    await git.abort_revert()
+    assert await git.rev_parse(BRANCH) == branch_tip
+    assert await git.is_dirty() is False
+
+
 async def test_push_force_with_lease_with_the_correct_expected_sha_succeeds(
     remote_and_clone: tuple[Path, Path], tmp_path: Path
 ) -> None:

@@ -6,8 +6,10 @@ single writer (§11.5) persists — and nothing here builds a command as a strin
 an argv list handed to `util.proc.run`, so there is no shell anywhere in this package.
 
 * `git.py` — the typed git surface (`Git`), structured results, redacted errors.
-* `commits.py` — one commit per task, the `Fleet-Patch-Id` trailer, the two-condition guard, and
-  the two distinct rollback anchors (§3.2 step 6).
+* `commits.py` — one commit per task, the `Fleet-Patch-Id` trailer, the two-condition guard, the
+  two distinct rollback anchors (§3.2 step 6), and `revert_and_commit` — the `git revert -m 1` +
+  `Fleet-*`-trailer primitive SPEC §3.1's hoist rollback needs (D111 Leg B; not yet wired into any
+  caller).
 * `filter_repo.py` — history-rewriting ingest, the integration mutex, immutable snapshot refs
   (§3.3 step 1).
 * `forge.py` — the `Forge` Protocol the PR path depends on, and the PR types both drivers share.
@@ -30,12 +32,14 @@ from fleet.vcs.commits import (
     CommitOutcome,
     FleetTrailers,
     GuardOutcome,
+    RevertOutcome,
     apply_and_commit,
     discard_task,
     find_task_commit,
     guard,
     patch_id,
     record_task_anchor,
+    revert_and_commit,
     rollback_phase,
 )
 from fleet.vcs.filter_repo import (
@@ -95,6 +99,7 @@ __all__ = [
     "PrStatus",
     "PrSyncItem",
     "RelocationSpec",
+    "RevertOutcome",
     "SnapshotRef",
     "SourceProvenance",
     "apply_and_commit",
@@ -108,6 +113,7 @@ __all__ = [
     "patch_id",
     "record_task_anchor",
     "relocate",
+    "revert_and_commit",
     "rollback_phase",
 ]
 
