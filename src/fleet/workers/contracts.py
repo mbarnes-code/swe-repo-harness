@@ -404,18 +404,25 @@ def discover_contracts(
 def carry_over_committed(
     fresh: Iterable[ContractNode], committed: Iterable[ContractNode]
 ) -> tuple[ContractNode, ...]:
-    """Re-apply `HOISTED`/`MIGRATED` (and `hoist_target_path`) onto a rebuilt row set.
+    """Re-apply `HOISTED`/`MIGRATED`/`FORBIDDEN` (and `hoist_target_path`) onto a rebuilt row set.
 
     §3.1: a hoist is already committed in git and named by an open PR, so it "MUST survive that
     cycle" — 6c-H treats an already-`HOISTED` contract as pre-committed and never re-ranks it. A
     committed contract that the rebuild no longer discovers is kept as its own row rather than
     dropped: the files are in the monorepo either way, and a vanished row would make
     `COUNT(contracts WHERE status IN ('HOISTED','MIGRATED')) == COUNT(wave_members …)` a lie.
+
+    `FORBIDDEN` joined this set in §12.31 Leg E (round VI task 58): `docs/SPEC.md:6746-6753` calls
+    the operator's `--forbid-hoist` veto "sticky across re-sequencing", and unlike `REJECTED`
+    (6c-H's own automatic not-shared-after-retarget rejection, deliberately re-tried against fresh
+    data on every rebuild — `cli.py::_rejected_contract_rows`' own docstring), a `FORBIDDEN` row is
+    an explicit, durable operator decision that a whole-run rebuild must not silently discard.
     """
     survivors = {
         node.contract_id: node
         for node in committed
-        if node.status in (ContractStatus.HOISTED, ContractStatus.MIGRATED)
+        if node.status
+        in (ContractStatus.HOISTED, ContractStatus.MIGRATED, ContractStatus.FORBIDDEN)
     }
     out: dict[str, ContractNode] = {}
     for node in fresh:

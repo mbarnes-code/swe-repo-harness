@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 57 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 56 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -575,16 +575,16 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
         "_prepare_repo",
         "cli.py:3858",
     ),  # L6242 defined at [(3873, 3978), (3873, 3978)], cited 3858-3858
-    (
-        "_run_verify_wave",
-        "cli.py:9236",
-    ),  # round-EE re-pin, corrected a second time (2026-09-02, final review): the prior re-pin's
-    #    own `cli.py:9206` was itself wrong -- re-measured directly against source rather than
-    #    trusted from the gate (which only checks containment in `_run_verify_wave`'s own span
-    #    and cannot tell a wrong-but-outside-the-span citation from a right one). The real call
-    #    site inside `_verify_impl` is `cli.py:9236`; `_run_verify_wave`'s own definition starts
-    #    at `cli.py:8401`. Re-pinned rather than left to coincidentally resolve, matching D84's
-    #    own standing "usage sites are reported, not repointed to resolve" convention above.
+    # `_run_verify_wave` / `cli.py:9236` RETIRED 2026-09-06 (round VI task 58) under the stated
+    # exception above: this citation names the call site inside `_verify_impl` (round-EE re-pin,
+    # 2026-09-02), not `_run_verify_wave`'s own definition -- and task 58's `cli.py` insertions
+    # (two new writer functions in the `_sequence_impl` region) shifted the definition's span to
+    # `[(9201, 9296)]`, which now happens to CONTAIN the cited `9236` by coincidence, not because
+    # the citation was repointed. Per D84's own standing "usage sites are reported, not
+    # repointed to resolve" convention, this is not repaired to point at the real call site
+    # either -- it stays an anchored citation, now resolving and UNPINNED: still covered by
+    # `test_no_unpinned_anchored_citation_fails_to_resolve` if drift ever moves the span back
+    # off the cited line, no longer covered against a silent repoint. One direction, not both.
     (
         "_wave_snapshot",
         "cli.py:8237-8239",

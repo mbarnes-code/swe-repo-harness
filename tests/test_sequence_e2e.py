@@ -463,6 +463,76 @@ def test_an_already_hoisted_contract_is_not_re_ranked_by_a_second_sequence(
 
 
 # =======================================================================================
+# §12.31 Leg E (round VI task 58): `--forbid-hoist` -- real wiring, not the exit-2 stub
+# =======================================================================================
+
+
+def test_a_forbid_hoist_veto_survives_a_real_re_scan_and_re_sequence(cycle_fleet: Path) -> None:
+    """`--forbid-hoist PROTO_ID` on the SAME real cycle the payoff test hoists: exit 0, the
+    contract `FORBIDDEN` rather than `HOISTED`, the SCC falls through to 6d/6e instead, a
+    `ContractHoistOverride` finding is written, and the veto survives a REAL second `fleet scan`
+    (not merely a second `fleet sequence`) -- the "sticky across re-sequencing" claim
+    `docs/SPEC.md:6746-6753` makes, proved end to end rather than by inspecting the code and
+    asserting it should work (CLAUDE.md Rule 12).
+
+    `test_sequence_refuses_the_cycle_flags_it_cannot_thread` in `tests/test_scan_e2e.py` is the
+    old-passes/new-fails discriminator for the refusal itself (this task genuinely displaced the
+    `exit 2` assertion on THAT fixture); this test is the substantive proof the flag now DOES
+    something, which needs a fixture with a real hoistable contract -- `test_scan_e2e.py`'s does
+    not have one.
+    """
+    assert _scan(cycle_fleet).exit_code == ExitCode.SUCCESS
+    assert _query(
+        cycle_fleet, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [(ContractStatus.EXTRACTABLE.value,)], "must genuinely be a live hoist candidate first"
+
+    forbidden = _sequence(cycle_fleet, "--forbid-hoist", PROTO_ID)
+    assert forbidden.exit_code == ExitCode.SUCCESS, forbidden.output
+    payload = json.loads(forbidden.stdout)
+    assert payload["hoisted"] == [], "a forbidden contract must never be hoisted"
+    (finding,) = payload["cycles"]
+    assert finding["break_strategy"] != BreakStrategy.CONTRACT_HOIST.value, finding
+    assert finding["hoisted_contract_ids"] == []
+    assert finding["broken_edge_keys"], (
+        "with hoisting forbidden the ladder must fall through to 6d, same as "
+        "test_the_same_fleet_stays_cyclic_when_contracts_are_skipped above"
+    )
+
+    assert _query(
+        cycle_fleet,
+        "SELECT status, status_detail FROM contracts WHERE contract_id = ?",
+        (PROTO_ID,),
+    ) == [(ContractStatus.FORBIDDEN.value, "operator_forbid_hoist")]
+
+    override_findings = _query(
+        cycle_fleet,
+        "SELECT kind, severity, repo_id FROM findings WHERE kind = ? ORDER BY finding_id",
+        ("ContractHoistOverride",),
+    )
+    assert override_findings == [("ContractHoistOverride", "warn", OWNER)], (
+        "the finding is the authority (docs/SPEC.md:6762-6768), repo_id the contract's owner"
+    )
+
+    # THE proof this task exists for: a real second `fleet scan` rebuilds `contracts` from
+    # scratch (DELETE-then-INSERT, §3.1 "re-runnable by construction") and must not reset the
+    # veto -- `workers/contracts.py::carry_over_committed` now carries `FORBIDDEN` across that
+    # rebuild the same way it always carried `HOISTED`/`MIGRATED`.
+    rescanned = _scan(cycle_fleet)
+    assert rescanned.exit_code == ExitCode.SUCCESS, rescanned.output
+    assert _query(
+        cycle_fleet, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [(ContractStatus.FORBIDDEN.value,)], "the veto must survive the whole-run rebuild"
+
+    # and sticky within a re-sequence too, with the flag NOT repeated -- `_hoist_contracts`'
+    # `status is ContractStatus.EXTRACTABLE` filter alone keeps a FORBIDDEN row out of candidacy.
+    resequenced = _sequence(cycle_fleet)
+    assert resequenced.exit_code == ExitCode.SUCCESS, resequenced.output
+    assert json.loads(resequenced.stdout)["hoisted"] == [], (
+        "never re-proposed once FORBIDDEN, even with --forbid-hoist not repeated"
+    )
+
+
+# =======================================================================================
 # §12.31 case (i), Leg A (round VI task 55): not-shared-after-retarget rollback
 # =======================================================================================
 

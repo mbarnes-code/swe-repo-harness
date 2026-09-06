@@ -446,6 +446,13 @@ class GraphSection(Section):
     scc_atomic_threshold: int = Field(default=8, ge=1)
     scc_hard_max: int = Field(default=40, ge=1)
     max_edges: int = Field(default=250_000, gt=0)
+    forbidden_contract_ids: tuple[str, ...] = Field(
+        default=(),
+        description="§12.31 Leg E (round VI task 58): threaded from `--forbid-hoist CONTRACT_ID` "
+        "(repeatable) by `cli._sequence_graph_config`, never hand-authored in `config/fleet.yaml` "
+        "-- an operator override, not a static policy. `_hoist_contracts`'s candidate filter "
+        "(`graph/cycles.py`) excludes any contract whose id is a member.",
+    )
 
 
 class LadderRung(Section):

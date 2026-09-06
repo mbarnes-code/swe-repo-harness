@@ -2529,14 +2529,16 @@ async def _contract_symbols(
 async def _committed_contracts(
     conn: aiosqlite.Connection, run_id: str
 ) -> tuple[ContractNode, ...]:
-    """The `HOISTED`/`MIGRATED` rows the rebuild must not lose (§3.1 "re-runnable by
-    construction"). Only the three fields that survive are read back: everything else is
-    re-derived, which is the point of a rebuild."""
+    """The `HOISTED`/`MIGRATED`/`FORBIDDEN` rows the rebuild must not lose (§3.1 "re-runnable by
+    construction"; `FORBIDDEN` joined this set in §12.31 Leg E, round VI task 58 — see
+    `workers/contracts.py::carry_over_committed`, which is what actually re-applies these).
+    Only the three fields that survive are read back: everything else is re-derived, which is
+    the point of a rebuild."""
     rows = await _rows(
         conn,
         "SELECT contract_id, kind, identifier, owning_repo_id, status, status_detail, "
         "       hoist_target_path FROM contracts "
-        " WHERE run_id = ? AND status IN ('HOISTED','MIGRATED') ORDER BY contract_id",
+        " WHERE run_id = ? AND status IN ('HOISTED','MIGRATED','FORBIDDEN') ORDER BY contract_id",
         (run_id,),
     )
     return tuple(
@@ -2548,7 +2550,7 @@ async def _committed_contracts(
             status=ContractStatus(str(row[4])),
             status_detail=str(row[5] or ""),
             hoist_target_path=None if row[6] is None else str(row[6]),
-            extractable=True,  # §6's CHECK: a HOISTED row already satisfied it
+            extractable=True,  # §6's CHECK: a HOISTED/FORBIDDEN row already satisfied it
         )
         for row in rows
     )
@@ -3032,10 +3034,12 @@ def _sequence_graph_config(
     site (the SAME field `workers/contracts.py:797`'s 5b (vi) check reads), and neither this
     function nor any of §10's cycle flags below thread an operator-typed value to it — there is
     no `--min-consumers` flag. So the argument below is unchanged: the only honest way to thread a
-    FLAG is through the config object it is handed. Four of the six have a key there and are
-    threaded. The other three do not, and they are REFUSED with exit 2
-    rather than accepted and dropped: an operator who typed `--forbid-hoist acme/billing` and got
-    a run that hoisted it anyway has been told a lie by the exit code.
+    FLAG is through the config object it is handed. Four of the seven have a key there and are
+    threaded (round VI task 58, §12.31 Leg E, added `--forbid-hoist` to that set via
+    `GraphSection.forbidden_contract_ids` — it was one of the three refused before). The other
+    three do not, and they are REFUSED with exit 2
+    rather than accepted and dropped: an operator who typed `--force-hoist acme/billing` and got
+    a run that dropped it anyway has been told a lie by the exit code.
 
     `--break-cycles manual` is refused for a sharper reason: `GraphSection.break_cycles` exists as
     a key but `cycles.py` never reads it, so threading it would produce exactly the silent no-op
@@ -3056,8 +3060,6 @@ def _sequence_graph_config(
         )
     if force_hoist:
         refused.append("--force-hoist (break_cycles() takes no forced-contract set)")
-    if forbid_hoist:
-        refused.append("--forbid-hoist (break_cycles() takes no forbidden-contract set)")
     if refused:
         raise UsageError(
             "these flags parse but nothing downstream can honour them, so this run is refused "
@@ -3065,6 +3067,8 @@ def _sequence_graph_config(
         )
 
     overrides: dict[str, object] = {"hoist_contracts": hoist_contracts}
+    if forbid_hoist:
+        overrides["forbidden_contract_ids"] = tuple(forbid_hoist)
     if max_hoists_per_scc is not None:
         overrides["max_hoists_per_scc"] = max_hoists_per_scc
     if scc_atomic_threshold is not None:
@@ -3298,6 +3302,26 @@ async def _sequence_impl(
     # every run and needs the `pre_committed` filter to find only the NEW ones.
     newly_rejected = report.rejected_contracts
 
+    # §12.31 Leg E (round VI task 58): the full CURRENT forbidden set, not just what this
+    # invocation typed. `contracts` (loaded before break_cycles ran) already carries an earlier
+    # run's `FORBIDDEN` rows sticky from `workers/contracts.py::carry_over_committed`, so the
+    # first half below is that survivorship and the second half is this run's own
+    # `--forbid-hoist`, whether or not the pre-write snapshot had caught up to it yet. A contract
+    # id named on `--forbid-hoist` that this run's `contracts` snapshot has no row for (hoisting
+    # disabled this run, or a typo) still gets the status write below, with no owner to attribute
+    # the finding to.
+    by_contract_id = {contract.contract_id: contract for contract in contracts}
+    forbidden_owner: dict[str, str | None] = {
+        contract.contract_id: contract.owning_repo_id
+        for contract in contracts
+        if contract.status is ContractStatus.FORBIDDEN
+    }
+    for contract_id in graph_config.forbidden_contract_ids:
+        forbidden_owner.setdefault(
+            contract_id,
+            by_contract_id[contract_id].owning_repo_id if contract_id in by_contract_id else None,
+        )
+
     async with StateWriter(path, owner="fleet-sequence") as writer:
         conn_ro = await connect_ro(path)
         try:
@@ -3305,6 +3329,11 @@ async def _sequence_impl(
                 await writer.submit(_hoisted_contract_rows(run_id, newly_hoisted))
             if newly_rejected:
                 await writer.submit(_rejected_contract_rows(run_id, newly_rejected))
+            if forbidden_owner:
+                await writer.submit(_forbidden_contract_rows(run_id, tuple(forbidden_owner)))
+            await _persist_contract_hoist_override_findings(
+                writer, run_id, forbidden_owner, now=_now()
+            )
             from fleet.orchestrator.scheduler import SqliteSchedulerStore
 
             store = SqliteSchedulerStore(writer=writer, read_conn=conn_ro)
@@ -3724,6 +3753,104 @@ def _rejected_contract_rows(
         )
 
     return unit
+
+
+def _forbidden_contract_rows(
+    run_id: str, forbidden: Sequence[str]
+) -> Callable[[aiosqlite.Connection], Coroutine[Any, Any, None]]:
+    """Record the operator's `--forbid-hoist` veto (§12.31 Leg E, round VI task 58).
+
+    Mirrors `_rejected_contract_rows` above in shape, and differs from it in the one way SPEC
+    requires: `docs/SPEC.md:6746-6753` calls `FORBIDDEN` "sticky across re-sequencing" the same
+    way a `HOISTED`/`MIGRATED` row is, not permanent-but-forgotten the way `REJECTED` is —
+    `workers/contracts.py::carry_over_committed` is widened (this task) to carry `FORBIDDEN`
+    across a `fleet scan` rebuild too, exactly like `HOISTED`/`MIGRATED`, which is what a
+    `REJECTED` row deliberately does NOT get (§12.31 case (i)'s automatic rejection is meant to be
+    re-tried against fresh data; an operator's explicit veto is not).
+
+    An id with no matching `contracts` row this run is a silent no-op, same as
+    `_hoisted_contract_rows`/`_rejected_contract_rows` above — `WHERE run_id = ? AND
+    contract_id = ?` UPDATEs zero rows rather than raising. `AND extractable = 1` is a second,
+    deliberate guard: §6's CHECK requires `hoist_target_path`/`owning_repo_id` non-null whenever
+    `extractable = 1`, and `carry_over_committed` (below, `workers/contracts.py`) hardcodes
+    `extractable: True` onto whatever it carries forward — so admitting a non-extractable row here
+    would let a later `fleet scan` rebuild force `extractable=1` onto a row with `hoist_target_path
+    IS NULL` and violate that CHECK on the next INSERT. Every genuinely hoistable contract is
+    `extractable = 1` by construction (`_hoist_contracts`'s own candidate filter requires it), so
+    this excludes only an operator-typed id that was never a real hoist candidate to begin with.
+    """
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.executemany(
+            "UPDATE contracts SET status = 'FORBIDDEN', status_detail = 'operator_forbid_hoist' "
+            "WHERE run_id = ? AND contract_id = ? AND extractable = 1",
+            [(run_id, contract_id) for contract_id in forbidden],
+        )
+
+    return unit
+
+
+CONTRACT_HOIST_OVERRIDE_FINDING_KIND: Final = "ContractHoistOverride"
+"""§12.31 Leg E (round VI task 58): the authority for `--forbid-hoist` (`docs/SPEC.md:6762-6768`
+— "the same 'the finding is the authority' mechanism `--accept-breaks` already uses"). Unlike
+`CYCLE_FINDING_KIND`/`CONTRACT_NOT_SHARED_FINDING_KIND` above, this is not recomputed from a
+`break_cycles` return value: it is a live reflection of `contracts.status = 'FORBIDDEN'` itself,
+re-derived from `forbidden_owner` (built in `_sequence_impl` from the CURRENT set — this run's
+`--forbid-hoist` plus whatever survived from an earlier one via `carry_over_committed`), so a
+`fleet sequence` that never repeats the flag still re-asserts the finding for a contract that
+stayed `FORBIDDEN` on its own.
+"""
+
+
+async def _persist_contract_hoist_override_findings(
+    writer: StateWriter,
+    run_id: str,
+    forbidden_owner: Mapping[str, str | None],
+    *,
+    now: datetime,
+) -> None:
+    """Write one `ContractHoistOverride` finding per currently-`FORBIDDEN` contract.
+
+    DELETE-then-INSERT keyed on `(run_id, kind)`, exactly like `_persist_cycle_findings` and
+    `_persist_contract_not_shared_findings` above — called on every `fleet sequence`, not only
+    when `--forbid-hoist` is typed, so the finding set always matches the CURRENT `contracts.status
+    = 'FORBIDDEN'` rows rather than only the ones named on this one invocation.
+    """
+    findings = [
+        GraphFinding(
+            kind=CONTRACT_HOIST_OVERRIDE_FINDING_KIND,
+            severity="warn",
+            repo_id=owner,
+            payload={"contract_id": contract_id, "override": "forbid_hoist"},
+        )
+        for contract_id, owner in sorted(forbidden_owner.items())
+    ]
+    rows = [
+        (
+            run_id,
+            finding.repo_id,
+            CONTRACT_HOIST_OVERRIDE_FINDING_KIND,
+            finding.severity,
+            finding.fingerprint,
+            redact_text(json.dumps(asdict(finding), sort_keys=True, default=str)),
+            _iso(now),
+        )
+        for finding in findings
+    ]
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "DELETE FROM findings WHERE run_id = ? AND kind = ?",
+            (run_id, CONTRACT_HOIST_OVERRIDE_FINDING_KIND),
+        )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+                "                      created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    await writer.submit(unit)
 
 
 async def _graph_edges(conn: aiosqlite.Connection, run_id: str) -> list[DependencyEdge]:

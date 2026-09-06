@@ -4207,11 +4207,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- CAVEAT. "Shipped" above means DECLARED, not
                                                   --   emitted. Several names are READ by Python
                                                   --   that nothing writes ('BaselineRed',
-                                                  --   'PreflightFailed', 'RuleConflict') and four
-                                                  --   have no Python at all ('WeakEdge' and three
+                                                  --   'PreflightFailed', 'RuleConflict') and three
+                                                  --   have no Python at all ('WeakEdge' and two
                                                   --   of the four Contract/Hoist kinds:
-                                                  --   'ContractHoistOverride', 'HoistBrokeOwner',
-                                                  --   'HoistRollbackDemotion'). The two
+                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion').
+                                                  --   The two
                                                   --   annotated above each have a live INSERT in
                                                   --   orchestrator/findings.py. THREE more are
                                                   --   built only as in-process dataclasses that
@@ -4234,9 +4234,16 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   INSERT in cli.py's
                                                   --   _persist_contract_not_shared_findings, one
                                                   --   per not-shared-after-retarget contract
-                                                  --   6c-H rejects, repo_id the owner's. The
-                                                  --   other three Contract/Hoist kinds (Legs
-                                                  --   B/C/D/E) remain no-Python.
+                                                  --   6c-H rejects, repo_id the owner's.
+                                                  --   'ContractHoistOverride' left that group the
+                                                  --   same day (§12.31 Leg E, round VI task 58):
+                                                  --   it now has a live INSERT in cli.py's
+                                                  --   _persist_contract_hoist_override_findings,
+                                                  --   one per currently-FORBIDDEN contract,
+                                                  --   repo_id the owner's. The other two
+                                                  --   Contract/Hoist kinds (Legs C/D:
+                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion')
+                                                  --   remain no-Python.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',
