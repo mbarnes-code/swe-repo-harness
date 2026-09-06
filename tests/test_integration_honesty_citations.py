@@ -51,7 +51,7 @@ definition tolerates drift up to that definition's extent.
 
 Two nearby quantities are useless here and are not what this module keys on: "the file exists" and
 "the file still has that many lines" are both **invariant under drift** -- every resolvable
-citation is in range and 56 anchored citations are nonetheless unresolved -- and a whole-file
+citation is in range and 57 anchored citations are nonetheless unresolved -- and a whole-file
 digest would move under any edit at all. That count is **not** hand-maintained: every census
 number this module states outside a ``Measured at <sha>:`` record is parsed back out of this
 prose and checked against the live survey by
@@ -458,7 +458,20 @@ _PINNED_UNRESOLVED: tuple[tuple[str, str], ...] = (
     (
         "TransformInput",
         "cli.py:4025",
-    ),  # L2728 defined at [(3312, 3339), (3312, 3339)], cited 4025-4025
+    ),  # RE-PINNED 2026-09-06 (round VI task 55, controller-review fix wave). Briefly retired
+    # earlier this task after drifting into accidental resolution (task 55's own first-wave
+    # `cli.py` edits moved `TransformInput`'s span to cover the cited line) -- then this
+    # task's SECOND wave (the controller-review fixes: threading `min_consumers` through
+    # `cli.py`'s `break_cycles(...)` call site, plus the findings-writer filter) inserted
+    # more lines before it and the citation drifted BACK to unresolved, exactly as the
+    # retirement comment predicted ("repointed again if it drifts unresolved in the
+    # future"). Measured fresh: `TransformInput`'s class span is now cli.py:4036-4091 and
+    # the cited 4025 falls 11 lines before it, outside any span. Per D49's own citation
+    # (`docs/INTEGRATION_HONESTY.md:2780`), this still names a USAGE site inside
+    # `_transform_payloads` (now `cli.py:5193`, reading `settings.config.transform.
+    # max_patch_bytes` at `cli.py:5211` and setting it on the built `TransformInput` at
+    # `cli.py:5249`), not the class definition -- so re-pinning here is correct, not merely
+    # convenient.
     (
         "RunContext.llm_policy",
         "orchestrator/context.py:140",

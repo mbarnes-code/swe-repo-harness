@@ -159,23 +159,46 @@ def multi_chord_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[Con
     Hoisting either contract alone retargets one of the two `a → b` rows and leaves the other, so
     the arc — and therefore the cycle — survives and `repos_freed` is 0 for each contract taken
     by itself. Hoisting both retargets both rows and the SCC is gone.
+
+    **`acme-c` is a second, non-SCC consumer of each contract (round VI task 55, §12.31 Leg A).**
+    Without it each contract's post-retarget `CONTRACT_CONSUME` count is 1 (only `acme-a`) —
+    below `scan.contracts.min_consumers=2` — and the new not-shared-after-retarget check in
+    `graph/cycles.py::_hoist_contracts` would reject both, which is not what THIS fixture exists
+    to prove (that shape has its own fixture, `not_shared_fleet` below). `acme-c` has one edge
+    INTO `acme-b` and none back out, so it joins neither the `{acme-a, acme-b}` 2-cycle nor either
+    contract's ranking differently from before — `repos_freed`/`blast_radius` are computed against
+    `member_ids = ("acme-a", "acme-b")` and `len(contract.consumer_repo_ids)` respectively, and
+    `acme-c` is added identically to both contracts, so the tie-break on `contract_id` this
+    fixture's tests rely on is unchanged. Measured (not asserted) against real
+    `break_cycles`/`assign_waves` before landing: `res.members == ("acme-a", "acme-b")` unchanged,
+    `{e.retargeted_from_repo_id for e in retargeted} == {"acme-b"}` unchanged,
+    `min(plan.repo_wave_index.values()) == 1` (was asserted `> 0`, still holds), and
+    `plan.repo_wave_index["acme-a"] < plan.repo_wave_index["acme-b"]` unchanged (1 < 2). The one
+    assertion this DID move:
+    `tests/test_graph_sequence.py::test_criterion_c_counts_only_ungated_repos` asserted
+    `plan.repo_members == ("acme-a", "acme-b")`, which is now genuinely 3 repos — fixed there by
+    adding `acme-c` (and its `RepoStatus`) rather than by weakening the assertion.
     """
-    graph_nodes = nodes("acme-a", "acme-b")
+    graph_nodes = nodes("acme-a", "acme-b", "acme-c")
     edges = [
         edge("acme-a", "acme-b", kind=EdgeKind.API_CONTRACT, confidence=0.7,
              path="vendor/k1.proto"),
         edge("acme-a", "acme-b", kind=EdgeKind.API_CONTRACT, confidence=0.7,
              path="vendor/k2.proto"),
         edge("acme-b", "acme-a", kind=EdgeKind.DECLARED_DEP, confidence=1.0, path="pom.xml"),
+        edge("acme-c", "acme-b", kind=EdgeKind.API_CONTRACT, confidence=0.7,
+             path="vendor/k1-c.proto"),
+        edge("acme-c", "acme-b", kind=EdgeKind.API_CONTRACT, confidence=0.7,
+             path="vendor/k2-c.proto"),
     ]
     contracts = [
         contract(
             K1, owner="acme-b", owner_path="proto/k1.proto",
-            consumers={"acme-a": "vendor/k1.proto"},
+            consumers={"acme-a": "vendor/k1.proto", "acme-c": "vendor/k1-c.proto"},
         ),
         contract(
             K2, owner="acme-b", owner_path="proto/k2.proto",
-            consumers={"acme-a": "vendor/k2.proto"},
+            consumers={"acme-a": "vendor/k2.proto", "acme-c": "vendor/k2-c.proto"},
         ),
     ]
     return graph_nodes, edges, contracts
@@ -224,6 +247,42 @@ def six_repo_hub_cycle() -> tuple[list[GraphNode], list[DependencyEdge], list[Co
         ),
     ]
     return graph_nodes, edges, contracts, K
+
+
+def not_shared_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[ContractNode], str]:
+    """§12.31 case (i), Leg A (round VI task 55): a contract *declared* with 2 consumers — passes
+    5b (vi) detection, genuinely `EXTRACTABLE` — where one of the two is the owner's own vendored
+    copy of its own interface, so after retargeting only 1 distinct repo remains on the contract's
+    inbound `CONTRACT_CONSUME` edges: below `scan.contracts.min_consumers=2`.
+
+    **The literal extreme — every declared consumer IS the owner — is NOT expressible**, and this
+    fixture deliberately does not reach for it: `_materialize` (`cycles.py:706`, `repo_id !=
+    owner`) and `infer_contract_edges` (`graph/infer.py:562-563`, `if consumer == owner:
+    continue`) both skip the owner's own vendored copy when building retarget/consume edges, so
+    with ZERO non-owner consumers no consume edge would exist at all, no retarget would happen,
+    the saturating trial would find the 2-cycle still live, and `_hoist_contracts` would return
+    early having committed nothing — there is no hoist to roll back, and a fixture built that way
+    would pass while testing nothing (measured directly against real `_materialize`/`break_cycles`
+    before landing, not asserted). Keeping ONE real non-owner consumer (`acme-spoke-0`) is what
+    makes the hoist genuinely dissolve the 2-cycle so the rollback is reached and observable — the
+    real-world shape SPEC.md's 6c-H "When the extraction was wrong" describes: "vendored copies of
+    one repo's own interface."
+    """
+    contract_id = "proto:acme.hub.v1"
+    graph_nodes = nodes("acme-hub", "acme-spoke-0")
+    edges = [
+        edge("acme-hub", "acme-spoke-0", kind=EdgeKind.DECLARED_DEP, confidence=1.0,
+             path="package.json"),
+        edge("acme-spoke-0", "acme-hub", kind=EdgeKind.API_CONTRACT, confidence=0.7,
+             path="src/gen/spoke_pb.ts"),
+    ]
+    contracts = [
+        contract(
+            contract_id, owner="acme-hub", owner_path="proto/hub.proto",
+            consumers={"acme-hub": "vendor/gen/hub_pb.ts", "acme-spoke-0": "src/gen/spoke_pb.ts"},
+        ),
+    ]
+    return graph_nodes, edges, contracts, contract_id
 
 
 def ring_cycle(n: int) -> tuple[list[GraphNode], list[DependencyEdge], tuple[str, ...]]:
@@ -343,6 +402,65 @@ def test_hoisting_is_skipped_when_disabled() -> None:
     assert report.hoisted_contracts == ()
 
 
+def test_a_not_shared_after_retarget_contract_is_rejected_with_an_exact_rollback() -> None:
+    """§12.31 case (i), Leg A (round VI task 55, ADR-0120): the not-shared-after-retarget check.
+
+    `not_shared_fleet`'s contract is genuinely `EXTRACTABLE` with 2 *declared* consumers, but one
+    is the owner's own vendored copy — both edge producers skip it, so only `acme-spoke-0` survives
+    retargeting, below `min_consumers=2`. The hoist must be rejected and rolled back in memory
+    BEFORE it enters `committed`/`nodes` (this brief's placement decision, ADR-0120) — never
+    hoisted, never in `wave_members`, and the rolled-back edges byte-identical to their pre-hoist
+    rows (the "restore is exact" property `_hoist_contracts` gets for free by never reassigning
+    `edges` to the rejected candidate's materialized result).
+    """
+    graph_nodes, edges, contracts, contract_id = not_shared_fleet()
+    pre_hoist_edges = {e.edge_key: e for e in edges}
+
+    report = break_cycles(build_graph(graph_nodes, edges), contracts=contracts)
+
+    # rejected, not hoisted
+    assert report.hoisted_contracts == ()
+    assert len(report.rejected_contracts) == 1
+    rejected = report.rejected_contracts[0]
+    assert rejected.contract_id == contract_id
+    assert rejected.status is ContractStatus.REJECTED
+    assert rejected.status_detail == "not_shared_after_retarget", (
+        "must be distinguishable from the 5b (vi) detection-time rejection's "
+        "status_detail='min_consumers' (tests/test_workers_contracts.py:759)"
+    )
+
+    # the finding
+    assert len(report.findings) == 1
+    finding = report.findings[0]
+    assert finding.kind == "ContractNotShared"
+    assert finding.severity == "warn"
+    assert finding.repo_id == "acme-hub"
+    assert finding.payload["contract_id"] == contract_id
+    assert finding.payload["declared_consumers"] == "2"
+    assert finding.payload["post_retarget_consumers"] == "1"
+    assert finding.payload["min_consumers"] == "2"
+
+    # never entered the ordering subgraph: no contract wave, no CONTRACT wave_members row
+    res = report.resolutions[0]
+    assert res.hoisted_contract_ids == ()
+    assert res.break_strategy in (BreakStrategy.EDGE_BREAK, BreakStrategy.ATOMIC_WAVE), (
+        "the SCC must still be live after the rejection and fall through to 6d/6e unchanged"
+    )
+    plan = assign_waves(report)
+    assert plan.contract_members == ()
+    assert all(node_kind != NodeKind.CONTRACT.value for node_kind, _ in plan.wave_index_by_node)
+
+    # the restore is exact: every repo<->repo edge is byte-identical to its pre-hoist row, modulo
+    # `ordering_suppressed` -- which 6d legitimately flips AFTER the rollback falls through to it.
+    final_by_key = {e.edge_key: e for e in report.edges}
+    for key, pre in pre_hoist_edges.items():
+        post = final_by_key[key]
+        assert post.retargeted_from_repo_id is None, f"{key}: must not have been retargeted"
+        assert post.model_copy(update={"ordering_suppressed": False}) == pre.model_copy(
+            update={"ordering_suppressed": False}
+        ), f"{key}: edge must be byte-identical to its pre-hoist row"
+
+
 def test_a_planted_6_repo_contract_cycle_is_dissolved_by_hoisting_alone() -> None:
     """§12.30 / SPEC.md:7462, the payoff clause: a 6-repo hub-and-spoke cycle whose every
     feedback edge runs through one shared proto package is dissolved by `CONTRACT_HOIST` alone —
@@ -360,7 +478,7 @@ def test_a_planted_6_repo_contract_cycle_is_dissolved_by_hoisting_alone() -> Non
     proven end-to-end, over the real git/CLI `cycle_fleet` fixture, by
     `tests/test_sequence_e2e.py::test_the_retargeted_contract_consume_edge_persists_its_pre_hoist_owner`
     (round VI task 31/32, D23). That test drives 2 repos / 1 retarget, not 6/5 — but
-    `_persist_contract_edges` (`src/fleet/cli.py:3363-3410`) is a plain list comprehension with no
+    `_persist_contract_edges` (`src/fleet/cli.py:3515-3563`) is a plain list comprehension with no
     repo- or edge-count-specific branching (`[EdgeRow(..., retargeted_from_repo_id=edge.
     retargeted_from_repo_id) for edge in edges if edge.kind in _CONTRACT_EDGE_KINDS]`, one bulk
     `insert_edges` call), so its 2-repo/1-retarget proof is legitimate evidence the same write path

@@ -242,6 +242,11 @@ def test_criterion_c_counts_only_ungated_repos() -> None:
     Both gated statuses are present here on purpose: a preflight-gated repo is never assigned a
     wave, so a check that counted every `repos` row could never pass on a real fleet, and a check
     that silently dropped absentees would let a repo vanish from the migration unrecorded.
+
+    `acme-c` (round VI task 55's addition to `multi_chord_fleet`, a second non-SCC consumer of
+    each contract) is a genuine third repo member here — it needs its own `statuses` entry and is
+    included in the `plan.repo_members` assertion, not stripped out to keep this test's numbers
+    matching a fixture shape that no longer exists.
     """
     graph_nodes, edges, contracts = multi_chord_fleet()
     report = break_cycles(build_graph(graph_nodes, edges), contracts=contracts)
@@ -250,6 +255,7 @@ def test_criterion_c_counts_only_ungated_repos() -> None:
     statuses = {
         "acme-a": RepoStatus.PENDING,
         "acme-b": RepoStatus.PENDING,
+        "acme-c": RepoStatus.PENDING,
         "acme-skip": RepoStatus.SKIPPED,
         "acme-gated": RepoStatus.REQUIRES_HUMAN_INTERVENTION,
     }
@@ -263,7 +269,7 @@ def test_criterion_c_counts_only_ungated_repos() -> None:
         contract_statuses=contract_statuses,
     )
     assert result.ok, result.detail
-    assert plan.repo_members == ("acme-a", "acme-b")
+    assert plan.repo_members == ("acme-a", "acme-b", "acme-c")
 
     # Strip the finding and the same fleet fails: an absent repo must always be explained.
     unexplained = check_criterion_c(

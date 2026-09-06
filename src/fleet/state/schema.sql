@@ -308,9 +308,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   emitted. Several names in this list are
                                                   --   READ by Python that nothing writes
                                                   --   ('BaselineRed', 'PreflightFailed',
-                                                  --   'RuleConflict') and five have no Python at
-                                                  --   all ('WeakEdge' and the four Contract/Hoist
-                                                  --   kinds). The two annotated above each have a
+                                                  --   'RuleConflict') and four have no Python at
+                                                  --   all ('WeakEdge' and three of the four
+                                                  --   Contract/Hoist kinds: 'ContractHoistOverride',
+                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion').
+                                                  --   The two annotated above each have a
                                                   --   live INSERT behind them, in
                                                   --   orchestrator/findings.py. THREE more are
                                                   --   built only as in-process dataclasses that
@@ -327,6 +329,15 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   _apply_stub_reconcile, one per §13 row 45
                                                   --   held-for-merge consumer, repo_id the
                                                   --   consumer's.
+                                                  --   'ContractNotShared' left that group
+                                                  --   2026-09-06 (§12.31 case (i) Leg A, round VI
+                                                  --   task 55, ADR-0120): it now has a live
+                                                  --   INSERT in cli.py's
+                                                  --   _persist_contract_not_shared_findings, one
+                                                  --   per not-shared-after-retarget contract
+                                                  --   6c-H rejects, repo_id the owner's. The
+                                                  --   other three Contract/Hoist kinds (Legs
+                                                  --   B/C/D/E) remain no-Python.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',

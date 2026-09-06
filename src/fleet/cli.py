@@ -42,7 +42,7 @@ import time
 from collections.abc import Callable, Coroutine, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum, StrEnum
 from fnmatch import fnmatch
@@ -72,7 +72,7 @@ from fleet.bazel.query import DEFAULT_RDEPS_LIMIT, DEFAULT_SAMPLE_N
 from fleet.ecosystems.base import EcosystemAdapter, path_segment
 from fleet.graph.build import GraphError, build_graph
 from fleet.graph.collisions import CollisionInput, CoordinateClaim, audit_collisions
-from fleet.graph.cycles import CycleReport, break_cycles
+from fleet.graph.cycles import CycleReport, GraphFinding, break_cycles
 from fleet.graph.infer import InferenceInput, OwnerIndex, infer_edges
 from fleet.graph.infer import ManifestDependency as InferredDependency
 from fleet.graph.query import blast_radii as graph_blast_radii
@@ -3025,9 +3025,15 @@ def _sequence_graph_config(
     """§10's cycle flags: each one is either an override on the `GraphSection` `break_cycles()`
     reads, or a refusal naming the parameter it would need.
 
-    `break_cycles(graph, *, contracts, config)` takes no per-invocation overrides at all, so the
-    only honest way to thread a flag is through the config object it is handed. Four of the six
-    have a key there and are threaded. The other three do not, and they are REFUSED with exit 2
+    `break_cycles(graph, *, contracts, config)` takes no per-invocation overrides driven by any
+    CLI flag — round VI task 55 (§12.31 case (i), ADR-0120) added a fourth keyword-only parameter,
+    `min_consumers`, but it is a config value, not an operator flag: `_sequence_impl` passes
+    `settings.config.scan.contracts.min_consumers` explicitly at its `break_cycles(...)` call
+    site (the SAME field `workers/contracts.py:797`'s 5b (vi) check reads), and neither this
+    function nor any of §10's cycle flags below thread an operator-typed value to it — there is
+    no `--min-consumers` flag. So the argument below is unchanged: the only honest way to thread a
+    FLAG is through the config object it is handed. Four of the six have a key there and are
+    threaded. The other three do not, and they are REFUSED with exit 2
     rather than accepted and dropped: an operator who typed `--forbid-hoist acme/billing` and got
     a run that hoisted it anyway has been told a lie by the exit code.
 
@@ -3250,7 +3256,12 @@ async def _sequence_impl(
             ),
             hoist_contracts=hoist_contracts,
         )
-        report = break_cycles(graph, contracts=contracts, config=graph_config)
+        report = break_cycles(
+            graph,
+            contracts=contracts,
+            config=graph_config,
+            min_consumers=settings.config.scan.contracts.min_consumers,
+        )
         manual = tuple(
             res.scc_id for res in report.resolutions if res.break_strategy is BreakStrategy.MANUAL
         )
@@ -3280,12 +3291,20 @@ async def _sequence_impl(
         for contract in report.hoisted_contracts
         if contract.contract_id not in pre_committed
     )
+    # §12.31 case (i), Leg A: every entry here is necessarily new this run — a REJECTED contract
+    # fails `_hoist_contracts`' `status is ContractStatus.EXTRACTABLE` candidate filter (`graph/
+    # cycles.py:604-612`), so it can never re-enter `report.rejected_contracts` on a later
+    # `fleet sequence`, unlike `hoisted_contracts` above which re-materializes pre-committed rows
+    # every run and needs the `pre_committed` filter to find only the NEW ones.
+    newly_rejected = report.rejected_contracts
 
     async with StateWriter(path, owner="fleet-sequence") as writer:
         conn_ro = await connect_ro(path)
         try:
             if newly_hoisted:
                 await writer.submit(_hoisted_contract_rows(run_id, newly_hoisted))
+            if newly_rejected:
+                await writer.submit(_rejected_contract_rows(run_id, newly_rejected))
             from fleet.orchestrator.scheduler import SqliteSchedulerStore
 
             store = SqliteSchedulerStore(writer=writer, read_conn=conn_ro)
@@ -3296,6 +3315,9 @@ async def _sequence_impl(
                 max_usd_per_repo=settings.config.budgets.wave_max_cost_usd_per_repo,
             )
             await _persist_cycle_findings(writer, run_id, wave_plan.cycle_findings, now=_now())
+            await _persist_contract_not_shared_findings(
+                writer, run_id, report.findings, now=_now()
+            )
             await _persist_contract_edges(
                 report.edges, writer=writer, read_conn=conn_ro, run_id=run_id
             )
@@ -3439,6 +3461,71 @@ async def _persist_cycle_findings(
             await conn.executemany(
                 "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
                 "                      created_at) VALUES (?, NULL, ?, ?, ?, ?, ?)",
+                rows,
+            )
+
+    await writer.submit(unit)
+
+
+CONTRACT_NOT_SHARED_FINDING_KIND: Final = "ContractNotShared"
+"""§12.31 case (i), Leg A (round VI task 55, ADR-0120): the not-shared-after-retarget finding
+`graph/cycles.py::_hoist_contracts` raises into `CycleReport.findings`. Scoped to this one kind,
+exactly like `CYCLE_FINDING_KIND` above — `report.findings` carries only `ContractNotShared` rows
+today; a future leg adding a second finding kind to `CycleReport.findings` gets its own writer
+rather than this one's DELETE scope silently widening to cover a kind it was not measured against.
+"""
+
+
+async def _persist_contract_not_shared_findings(
+    writer: StateWriter,
+    run_id: str,
+    findings: Sequence[GraphFinding],
+    *,
+    now: datetime,
+) -> None:
+    """Write 6c-H's not-shared-after-retarget rejections as `ContractNotShared` rows.
+
+    Mirrors `_persist_cycle_findings` exactly: DELETE-then-INSERT in one unit under the writer's
+    `BEGIN IMMEDIATE`, keyed on `(run_id, kind)`, `finding.fingerprint` as the fingerprint,
+    `redact_text(...)` on the payload. Unlike `CycleDetected`, `repo_id` here is **non-NULL**: an
+    SCC spans repos by definition and has no single owner, but a rejected contract has exactly one
+    (`ContractNode.owning_repo_id`), and the finding is a claim about that repo's contract, not
+    about the SCC it sat in.
+
+    `findings` is filtered to `kind == CONTRACT_NOT_SHARED_FINDING_KIND` before a row is built —
+    `CycleReport.findings` carries only this one kind today, but the filter is what actually makes
+    the module docstring's claim true ("a future leg adding a second finding kind gets its own
+    writer rather than this one's DELETE scope silently widening"): without it, a second kind
+    sharing this field would be silently mislabelled in the `kind` column by this function, not
+    merely by an absent writer.
+    """
+    own_kind = [f for f in findings if f.kind == CONTRACT_NOT_SHARED_FINDING_KIND]
+    rows = [
+        (
+            run_id,
+            finding.repo_id,
+            # The literal constant, not `finding.kind` — the filter above already guarantees
+            # equality, and `tests/test_findings_kinds.py`'s static resolver needs the `kind`
+            # VALUES slot to be a source-level string literal, matching `_persist_cycle_findings`'
+            # `CYCLE_FINDING_KIND` above; a dynamic attribute read here reports `unresolved kind`.
+            CONTRACT_NOT_SHARED_FINDING_KIND,
+            finding.severity,
+            finding.fingerprint,
+            redact_text(json.dumps(asdict(finding), sort_keys=True, default=str)),
+            _iso(now),
+        )
+        for finding in own_kind
+    ]
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "DELETE FROM findings WHERE run_id = ? AND kind = ?",
+            (run_id, CONTRACT_NOT_SHARED_FINDING_KIND),
+        )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+                "                      created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 rows,
             )
 
@@ -3610,6 +3697,30 @@ def _hoisted_contract_rows(
         await conn.executemany(
             "UPDATE contracts SET status = 'HOISTED' WHERE run_id = ? AND contract_id = ?",
             [(run_id, contract_id) for contract_id in hoisted],
+        )
+
+    return unit
+
+
+def _rejected_contract_rows(
+    run_id: str, rejected: Sequence[ContractNode]
+) -> Callable[[aiosqlite.Connection], Coroutine[Any, Any, None]]:
+    """Record 6c-H's not-shared-after-retarget rollback (§12.31 case (i), Leg A, round VI task 55,
+    ADR-0120).
+
+    Mirrors `_hoisted_contract_rows` above: only `status` and `status_detail` move, and a
+    subsequent `fleet sequence` never re-proposes the contract — `_hoist_contracts`' candidate
+    filter requires `status is ContractStatus.EXTRACTABLE` (`graph/cycles.py:604-612`), so
+    `REJECTED` removes it from candidacy exactly as `HOISTED` does, just permanently rather than
+    by promotion. `status_detail` is read off each `ContractNode` rather than hardcoded, so a
+    future rejection reason threads through this same writer unchanged.
+    """
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.executemany(
+            "UPDATE contracts SET status = 'REJECTED', status_detail = ? "
+            "WHERE run_id = ? AND contract_id = ?",
+            [(contract.status_detail, run_id, contract.contract_id) for contract in rejected],
         )
 
     return unit
@@ -9425,12 +9536,15 @@ async def _build_impl(
                         # HOISTED/MIGRATED implies `extractable`, which ContractNode's own
                         # validator (`models/graph.py::_hoistable_is_substantiated`) already
                         # requires to carry a non-null `hoist_target_path` — unreachable in
-                        # practice, asserted here only to narrow the type; a violation raises
-                        # unhandled, exactly as ADR-0119 requires for this invariant.
-                        assert cnode.hoist_target_path is not None, (
-                            f"{cnode.contract_id}: {cnode.status.value} with no "
-                            "hoist_target_path"
-                        )
+                        # practice, checked here only to narrow the type for the type checker; a
+                        # violation raises unhandled, exactly as ADR-0119 requires for this
+                        # invariant. An explicit `raise`, not a bare `assert` (S101) — a stray
+                        # `python -O` run must not silently strip this check.
+                        if cnode.hoist_target_path is None:
+                            raise ValueError(
+                                f"{cnode.contract_id}: {cnode.status.value} with no "
+                                "hoist_target_path"
+                            )
                         cadapter = ecosystems_contracts.for_kind(cnode.kind)
                         targets = cadapter.neutral_targets(cnode)
                         unbound: list[tuple[str, Ecosystem]] = []
