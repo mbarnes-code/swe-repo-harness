@@ -8928,7 +8928,7 @@ rollback record: restoring it un-hoists the edge exactly."
 carries). `dst_coordinate` becomes `None` (unrecoverable) and `kind` becomes `CONTRACT_CONSUME`
 (unrecoverable — the original `DECLARED_DEP`/`INTERNAL_IMPORT`/`API_CONTRACT`/etc. value is not
 stored anywhere). The loss is structurally fatal, not merely lossy:
-`DependencyEdge._node_shape` (`models/graph.py:197-210`) raises `"a REPO dst edge must carry
+`DependencyEdge._node_shape` (`models/graph.py:198-210`) raises `"a REPO dst edge must carry
 dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted retargeted row
 alone — a `ValidationError`, not a wrong-but-valid edge.
 

@@ -13483,7 +13483,7 @@ by tracing primary sources rather than by controller value judgment.
 **Decision 1 — D117's resolution: exclude, never reconstruct, and never delete.** D117
 (`docs/INTEGRATION_HONESTY.md`) is confirmed as written: `retargeted_from_repo_id`-based
 reconstruction is structurally impossible for a REPO-dst edge (`DependencyEdge._node_shape`,
-`models/graph.py:197-210`, raises on a missing `dst_coordinate`; `_materialize`,
+`models/graph.py:198-210`, raises on a missing `dst_coordinate`; `_materialize`,
 `cycles.py:794-852`, is what discards it — the retarget's `model_copy(update=...)` at
 `cycles.py:831-848`). But D117's own proposed remedy (a) — delete/supersede
 the contract-kind edge rows — is under-specified: `_graph_nodes` (`cli.py:3646-3665`) already
@@ -13575,7 +13575,7 @@ original sha it reverts (`"This reverts commit <sha>."`). Resume query: extend
 `Fleet-Contract-Rollback-Id == contract_id`, checking each ordered sha's revert body.
 
 **Decision 6 — downstream-merge-refusal traversal: transitive, not single-hop.** `cli.py`'s
-existing `fleet pr` refusal (`cli.py:11502-11512`) checks exactly one hop and is safe as
+existing `fleet pr` refusal (`cli.py:11502-11510`) checks exactly one hop and is safe as
 single-hop only because it re-runs on every `fleet pr` invocation. Leg D's refusal decision is
 made once, irrevocably, so it needs the full transitive closure. **Mechanism:** reuse
 `graph/query.py::descendants(graph, node)` (`graph/query.py:26-34`) — the same `nx.descendants`
