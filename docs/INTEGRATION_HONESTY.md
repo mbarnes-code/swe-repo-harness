@@ -2807,9 +2807,9 @@ retired from the pin list once, then a second wave of edits in the SAME task (th
 review fixes: threading `min_consumers` through `break_cycles`'s call site, and the
 `ContractNotShared` findings-writer filter) drifted it back to genuinely unresolved, and it was
 re-pinned. This is normal churn for a citation into a large, actively-edited function, not a
-correction to the finding it sits beside. `_transform_payloads` (now `cli.py:5326`, round VI task
-58's `cli.py` insertions having since moved it again, twice within the same task's own fix wave)
-still reads `settings.config.transform.max_patch_bytes` at `cli.py:5342` and sets it on the built
+correction to the finding it sits beside. `_transform_payloads` (now `cli.py:5642`, round VI task
+65's `cli.py` insertions having since moved it again) still reads
+`settings.config.transform.max_patch_bytes` at `cli.py:5342` and sets it on the built
 `TransformInput` at `cli.py:5380` — the two threading sites this paragraph's claim is actually
 about are unmoved in substance, only in line number.
 
@@ -6766,7 +6766,7 @@ already impossible before the loop began.
 calls `_prepare_verify` for every member (`cli.py:9216-9223` — **corrected 2026-09-02, round EE
 final review: the citations here had rotted to the point of naming the wrong function entirely**,
 `8430-8449` now falls inside `_run_verify_wave`'s own definition, a different function) before
-`_run_verify_wave` (`cli.py:9236`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
+`_run_verify_wave` (`cli.py:9524`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
 mutex it takes a fresh snapshot ref, then per member runs `worktree remove --force`, a `shutil.rmtree`
 fallback, `worktree prune`, and `worktree add --detach --force`. So **2 of the 3 wave-driving phase
 impls** put per-member git mutation ahead of admission. `_build_impl` is **not** in this class as
@@ -7406,7 +7406,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2365-2433`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:7343-7415`, moved by round VI task 58's
+   Production caller `_AttemptWriter.record` (`cli.py:7658-7729`, moved by round VI task 65's
    `cli.py` insertions) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
@@ -7504,15 +7504,16 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:14084-14321`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-06, round VI, SIXTEEN separate times now as this round's own successive `cli.py`
+(`cli.py:14398-14635`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-06, round VI, SEVENTEEN separate times now as this round's own successive `cli.py`
 additions keep shifting it — this repointing follows, in order: round VI task 53's merge (added
 `_partition_test_srcs`/`_is_python_test_src`), task 56's merge (added the §12.34 Clause B PASS 2b),
 task 55's fix waves (threaded `min_consumers` through `break_cycles`'s call site, filtered the
-`ContractNotShared` findings writer, and added the Leg A hoist-rejection writers themselves), and
-task 58 in two waves (§12.31 Leg E's own commit adding `_forbidden_contract_rows` and
+`ContractNotShared` findings writer, and added the Leg A hoist-rejection writers themselves), task
+58 in two waves (§12.31 Leg E's own commit adding `_forbidden_contract_rows` and
 `_persist_contract_hoist_override_findings`, then this same task's controller-review fix wave
-growing `_sequence_graph_config`'s corrected docstring by two more lines) — all merged in sequence
+growing `_sequence_graph_config`'s corrected docstring by two more lines), and task 65 (added the
+`_graph_edges` crash-fix predicate, `unhoist_contract` and its helpers) — all merged in sequence
 onto `main`, each shifting this citation in turn. Correction to this
 paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
 functional exemption — `test_no_unpinned_anchored_citation_
@@ -7531,7 +7532,7 @@ Task B's `if units and not missing_units:` DONE branch (`:12335-12343`) and its 
 partially-landed branch (`:12360-12376`) never read `task_anchor` at all — neither is gated by
 this guard, and both are production-reachable: `phases.pre_commit_sha` (a *different* column,
 read into `anchor`/`phase_anchor` above, not `task_anchor`) DOES have a real production writer
-(moved by round VI task 58's `cli.py` insertions: `cli.py:4734-4942`, `_TransformSink`'s
+(moved by round VI task 65's `cli.py` insertions: `cli.py:5048-5256`, `_TransformSink`'s
 `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
 `find_task_commit` can genuinely locate a landed unit's commit and route into DONE or
 partially-landed with `task_anchor` still `NULL` throughout. The heading's claim stays true as far
@@ -7984,11 +7985,11 @@ directly by SQL.
 
 **The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2491`)
 has exactly ONE production call site anywhere in `src/`: `cli.py:2232`, inside
-`_persist_scan_edges` (`cli.py:2291-2355`), itself reachable only from the scan path (`cli.py:1876`).
+`_persist_scan_edges` (`cli.py:2294-2356`), itself reachable only from the scan path (`cli.py:1876`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
 (`cli.py:2222`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
 time because no contract has been hoisted yet. Separately, `_sequence_impl`
-(`cli.py:3225-3434`, moved by round VI task 58's `cli.py` insertions) does reach a real hoist via
+(`cli.py:3228-3435`, moved by round VI task 65's `cli.py` insertions) does reach a real hoist via
 `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -8054,7 +8055,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:10427-10540`, moved by round VI task 58's `cli.py`
+`_continue_impl` (`src/fleet/cli.py:10743-10854`, moved by round VI task 65's `cli.py`
 insertions) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
@@ -8799,6 +8800,40 @@ phase demotion, the downstream-merge refusal), and `--force-hoist`'s own wiring.
 `ContractStatus.FAILED` is still never assigned anywhere in `src/fleet/`, and zero `git revert`
 call sites still exist. Full details: `.superpowers/sdd/round-VI-criteria-closure/task-58-report.md`.
 
+**Update, 2026-09-06 (round VI task 65) — Leg D slice 1 landed: persisted un-hoist, blast-set
+demotion, and the downstream-merge refusal check (ADR-0122 Decisions 1/2/3/6); the heading stays
+`OPEN`.** `cli._graph_edges` now carries the `contracts.status IN ('HOISTED','MIGRATED')` filter
+ADR-0122 Decision 1 designed — the crash it closes (`GraphError` on any edge naming a vanished
+contract node) is reproduced-then-closed by
+`tests/test_unhoist_rollback.py::test_a_failed_contracts_edges_crash_the_pre_fix_query_and_the_fix_closes_it`.
+A new `cli.unhoist_contract(read_conn, settings, *, writer, run_id, contract_id, now)` builds the
+graph, runs the transitive downstream-merge-refusal check (`graph/query.py::descendants` over
+`G_order`, seeded at every blast-set member with a `MERGED` PR — proven to catch a two-hop merged
+descendant a single-hop check would miss), and on the non-refused path writes
+`contracts.status = 'FAILED'`, demotes each qualifying blast-set member via
+`SqliteStateRepository.demote_to_floor(floor=Phase.TRANSFORM)` directly (never
+`phase_floor`/`evidence_holds`/`resume_floor`/`cli._demote_to_floors`), and writes one new
+`HoistRollbackDemotion` finding per demoted repo plus a new `HoistRollbackRefused` finding on the
+refused path. **Disclosed deviation from the brief's own "one `StateWriter` unit" instruction**:
+`demote_to_floor` manages its own `writer.submit()` transaction internally, so nesting it inside
+another already-running unit is a real single-pump-queue deadlock, not a style question — the
+function instead runs three write phases (status flip, N per-repo `demote_to_floor` calls, one
+findings batch), documented in `unhoist_contract`'s own docstring. **Disclosed SPEC-vs-ADR wording
+divergence, not resolved here**: `docs/SPEC.md`'s own §3.1 6c-H prose (as corrected by this same
+ADR-0122) reads "SUCCEEDED beyond `PHASE_SCAN`" for the demotion-eligibility gate, while ADR-0122
+Decision 3's own text (landed in `docs/DECISIONS.md`) reads "SUCCEEDED beyond `Phase.TRANSFORM`" —
+a strictly narrower predicate. This task followed Decision 3's text verbatim, per the brief's own
+instruction not to re-litigate Decision 3; the two documents disagree with each other and neither
+is corrected by this task. **This is the DB/graph half only** — legs C1/C2 (the trigger), the
+`git revert -m 1` revert-series execution (ADR-0122 Decisions 4/5), and the production wiring
+that would ever call `unhoist_contract` are all still unbuilt; nothing outside its own tests calls
+it. Mutation-proven: the `_graph_edges` filter (`IN` → `NOT IN`) reddens the crash-reproduction
+test while an unrelated, DB-free §12.31 Leg E test
+(`tests/test_graph_cycles.py::test_a_forbidden_contract_is_excluded_from_hoisting_alongside_the_extractable_filter`)
+stays green; the `descendants` traversal (narrowed to direct successors only) reddens the two-hop
+refusal test while the direct-hop sanity test stays correctly refused. Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-65-report.md`.
+
 ## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
 adapter — no adapter can ever emit a real nonzero test target
 
@@ -8933,7 +8968,7 @@ dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted 
 alone — a `ValidationError`, not a wrong-but-valid edge.
 
 **Why nothing is broken today.** `grep -rn "DELETE FROM edges" src/fleet/` returns zero hits in the
-whole codebase; `_persist_contract_edges` (`cli.py:3571-3619`, moved by round VI task 58's
+whole codebase; `_persist_contract_edges` (`cli.py:3574-3620`, moved by round VI task 65's
 `cli.py` insertions) only INSERTs. The pre-hoist repo→repo
 row is therefore still present in the `edges` table, untouched, alongside the new contract row. A
 durable, exact un-hoist IS achievable today — by deleting the contract-kind rows and letting the
@@ -8954,11 +8989,13 @@ the Leg C/D design pass to correct alongside its own build. No design choice is 
 **Update, 2026-09-06 (round VI, D111 Leg D design pass, ADR-0122): the remedy choice above is now
 decided.** Neither of D117's own two named remedy options is what got chosen: the mechanism is
 **exclusion at graph-build read time**, not a preserved-row-plus-`DELETE` and not reconstruction.
-`_graph_edges` (`cli.py:3860-3906`) is widened with the identical `contracts.status IN
-('HOISTED','MIGRATED')` predicate `_graph_nodes` already applies, so a `FAILED`/`REJECTED`
-contract's edge rows are simply never read into the next graph build — the untouched pre-hoist
-repo→repo row stands in their place, and nothing is ever deleted or reconstructed. This also
-surfaced a previously-unknown correctness gap this entry's own investigation did not find:
+`_graph_edges` (`cli.py:3863-3922`, moved by round VI task 65's `cli.py` insertions — the SAME
+task that landed this widening in code, see D111's own dated update above) is widened with the
+identical `contracts.status IN ('HOISTED','MIGRATED')` predicate `_graph_nodes` already applies,
+so a `FAILED`/`REJECTED` contract's edge rows are simply never read into the next graph build —
+the untouched pre-hoist repo→repo row stands in their place, and nothing is ever deleted or
+reconstructed. This also surfaced a previously-unknown correctness gap this entry's own
+investigation did not find:
 `_graph_edges` had **no** filter symmetric to `_graph_nodes`'s, so setting `contracts.status =
 'FAILED'` and leaving edges alone (D117's own remedy option (a), taken literally, minus the
 `DELETE`) would crash the very next `fleet sequence` with a `GraphError` on the vanished contract

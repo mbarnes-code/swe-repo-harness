@@ -4227,6 +4227,8 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   --force-hoist/--forbid-hoist, §3.1)
                                                   -- | 'ContractNotShared' | 'HoistBrokeOwner'
                                                   -- | 'HoistRollbackDemotion' (§3.5)
+                                                  -- | 'HoistRollbackRefused' (§3.1 6c-H refusal,
+                                                  --   ADR-0122 Decision 6; repo_id NULL)
                                                   -- | 'BaselineRed' (baseline_build red, §9)
                                                   -- | 'RuleConflict' | 'RuleOscillation' (§7.4)
                                                   -- | 'UnmergedDependency' (§3.4 step 5)
@@ -4240,10 +4242,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- CAVEAT. "Shipped" above means DECLARED, not
                                                   --   emitted. Several names are READ by Python
                                                   --   that nothing writes ('BaselineRed',
-                                                  --   'PreflightFailed', 'RuleConflict') and three
-                                                  --   have no Python at all ('WeakEdge' and two
+                                                  --   'PreflightFailed', 'RuleConflict') and two
+                                                  --   have no Python at all ('WeakEdge' and one
                                                   --   of the four Contract/Hoist kinds:
-                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion').
+                                                  --   'HoistBrokeOwner' -- 'HoistRollbackDemotion'
+                                                  --   left this group 2026-09-06, see below).
                                                   --   The two
                                                   --   annotated above each have a live INSERT in
                                                   --   orchestrator/findings.py. THREE more are
@@ -4273,10 +4276,24 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   it now has a live INSERT in cli.py's
                                                   --   _persist_contract_hoist_override_findings,
                                                   --   one per currently-FORBIDDEN contract,
-                                                  --   repo_id the owner's. The other two
-                                                  --   Contract/Hoist kinds (Legs C/D:
-                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion')
-                                                  --   remain no-Python.
+                                                  --   repo_id the owner's. 'HoistRollbackDemotion'
+                                                  --   left that group 2026-09-06 (§12.31/D111 Leg
+                                                  --   D slice 1, round VI task 65, ADR-0122): it
+                                                  --   now has a live upsert in cli.py, function
+                                                  --   _write_hoist_rollback_demotion_findings, one
+                                                  --   per blast-set repo `demote_to_floor`
+                                                  --   actually demoted, repo_id that demoted repo.
+                                                  --   The remaining Contract/Hoist kind
+                                                  --   ('HoistBrokeOwner', Legs C1/C2) remains
+                                                  --   no-Python. The SAME task also introduced a
+                                                  --   NEW kind, 'HoistRollbackRefused' (ADR-0122
+                                                  --   Decision 6, the downstream-merge refusal;
+                                                  --   repo_id NULL, since the refusal is a
+                                                  --   property of the whole blast set, not one
+                                                  --   repo), emitted from cli.py, function
+                                                  --   _write_hoist_rollback_refused_finding -- see
+                                                  --   the DECLARED list above, where it is added
+                                                  --   alongside 'HoistRollbackDemotion'.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',
