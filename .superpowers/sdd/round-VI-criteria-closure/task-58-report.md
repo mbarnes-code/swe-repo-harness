@@ -197,3 +197,121 @@ I have not seen it.
 - `--force-hoist`'s wiring (refusal untouched, by this task's own scoping judgment call).
 - Leg A's own logic (`_hoist_contracts`'s not-shared branch) — untouched, confirmed by diff.
 - Legs B, C, D.
+
+---
+
+## Fix report (controller-review fix wave, 2026-09-06)
+
+Review of commit `e3b1a86` returned NEEDS FIXES on two load-bearing findings. Both fixed below;
+same branch (`agent/roundvi-task58`), no merge to `main`.
+
+### Finding 1 — SPEC.md mechanism divergence, now disclosed + ADR-0121
+
+**Confirmed:** the implementation makes `--forbid-hoist` survive a `fleet scan` rebuild via
+`contracts.status` carry-over (`workers/contracts.py::carry_over_committed`), not via a `findings`
+read-back, while `docs/SPEC.md` described the latter at three sites. Fixed:
+
+- **`docs/SPEC.md:737-739`** (the "Contract extraction is re-runnable by construction" paragraph)
+  — dated marker appended at `:745-752`.
+- **`docs/SPEC.md:6777-6780`** (the `--force-hoist`/`--forbid-hoist` CLI-surface paragraph) —
+  dated marker inserted at `:6780-6785`, before `--force-hoist`'s own (unchanged, still-refused)
+  sentence.
+- **`docs/SPEC.md:7355-7360`** (§11.7 idempotency rule 2) — dated marker inline at `:7358-7360`.
+
+Each marker: (1) states plainly that the cited sentence describes the audit record, not the
+survival mechanism, for `--forbid-hoist` specifically (the only one of the two overrides built so
+far); (2) names the real mechanism (`carry_over_committed` widened to carry `FORBIDDEN` forward,
+the same way it already carries `HOISTED`/`MIGRATED`); (3) confirms the `ContractHoistOverride`
+finding is still written every invocation, as a durable audit trail, just not what the survival
+mechanism reads; (4) notes `--force-hoist`'s own mechanism is unbuilt and unaffected by this
+correction.
+
+**`docs/DECISIONS.md`: added `ADR-0121`** (verified free — `docs/DECISIONS.md`'s max was
+`ADR-0120`, task 55's; appended immediately after that entry, no collision). Records, from this
+task's own design reasoning (not the controller's guessed rationale, though it turned out
+directionally correct): `contracts.status` is already the single, durable, queried source of
+truth every real reader of contract lifecycle state consults directly (`_hoist_contracts`'s
+candidate filter, `fleet contracts list`, `_committed_contracts` itself) — a `findings` read-back
+would be a *second* source of truth for the identical fact, kept in sync by convention rather
+than by construction, for zero behavioural gain; it would also require new coupling
+(`workers/contracts.py`'s `ContractsInput`/`discover_contracts` has no `findings` in its input
+surface today, so a read-back means wiring a table that worker has never read); `committed`/
+`carry_over_committed` already solves exactly this "must survive a whole-run rebuild" problem for
+`HOISTED`/`MIGRATED`, so extending it to a third status is the smaller, more consistent change
+(Rule 2). The ADR also records why the `findings` row is kept anyway (disclosure/audit, not
+survival — SPEC's "the finding is the authority" framing is about an operator being able to find
+the override later, independent of the internal durability mechanism) and states explicitly that
+SPEC's three sites are corrected to match the code, not the reverse, per Guardrail 7 and this
+project's standing rule that building-to-match-a-criterion is the only legitimate closure
+direction.
+
+**Collateral, caught immediately by re-running the citation suite:** growing `docs/SPEC.md`
+shifted nothing in `src/`, but my own earlier code-docstring citations into `docs/SPEC.md`
+(`workers/contracts.py:415`, `cli.py:3766`, `cli.py:3796`) were pointing at the pre-marker line
+numbers (`:6746-6753`, `:6762-6768`); repointed to the post-marker locations (`:6777-6790`,
+`:6777-6780`). These are prose citations in code docstrings, not mechanically checked by
+`tests/test_integration_honesty_citations.py` (which only scans `docs/INTEGRATION_HONESTY.md` and
+`docs/CRITERIA_PLAN.md`), so this was a manual sweep, not a test-driven one — disclosed as such.
+
+### Finding 2 — `_sequence_graph_config` docstring count, re-derived and corrected
+
+**Re-derived directly from the code** (not from the reviewer's stated guess, not from the old
+sentence): the function has 8 flag-shaped parameters. Threaded (have a `GraphSection` key and
+reach `overrides`): `hoist_contracts` (unconditional), `forbid_hoist` → `forbidden_contract_ids`,
+`max_hoists_per_scc`, `scc_atomic_threshold`, `min_confidence` — **5**. Refused (raise
+`UsageError`, never reach `overrides`): `break_cycles_mode`, `accept_breaks`, `force_hoist` — **3**.
+5 + 3 = 8, matching the reviewer's count exactly. Corrected the docstring from "Four of the
+seven... other three" to **"Five of the eight... other three"**, naming every flag in each group
+explicitly rather than just the count, so a future re-derivation has less to re-verify by hand.
+
+### Collateral fallout from these two fixes, repaired in the same commit
+
+Growing `_sequence_graph_config`'s docstring by 2 net lines re-shifted `cli.py` again, which
+re-broke the SAME 9 citations this task's first commit had already repointed (6 in
+`docs/INTEGRATION_HONESTY.md`, 3 in `docs/CRITERIA_PLAN.md` — `_AttemptWriter.record`,
+`_reconcile_tasks_with_git`, `_sequence_impl`, `_continue_impl`, `_persist_contract_edges`,
+`_TransformSink`, `_repo_facts`, `_unit_deps`, `_eligible_build_units`), each by exactly +2 lines.
+Re-repointed all 9 (verified via `tests/test_integration_honesty_citations.py`'s own reported
+`defined at [...]` spans, same method as the first wave). Also updated the `_transform_payloads`
+prose citation (def `:5322`→`:5324`, the two internal line mentions `:5340`/`:5378`→`:5342`/
+`:5380`) and bumped the `_reconcile_tasks_with_git` "repointed N times" counter from FIFTEEN to
+SIXTEEN, naming this fix wave as the sixteenth cause. `tests/test_integration_honesty_citations.py`:
+**70 passed** after these repairs (same count as after the first commit — the citation population
+is unchanged, only line numbers moved).
+
+### Tests re-run after both fixes
+
+- `python -m ruff check .` — clean.
+- `python -m mypy` (no path args) — clean, 129 files.
+- `tests/test_graph_cycles.py`, `tests/test_findings_kinds.py`, `tests/test_sequence_e2e.py`,
+  `tests/test_scan_e2e.py`, `tests/test_integration_honesty_citations.py`,
+  `tests/test_config_keys_are_read.py`, `tests/test_cli.py` — **375 passed**, run together, whole
+  files, no `-k`.
+
+### Deferrable notes (not required, checked anyway)
+
+1. **The 4 full-suite failures my original report's accounting missed.** Re-derived the complete
+   32-failure breakdown by file and root cause: 14 `ast-grep`-missing (`test_rewrite.py`'s 13 +
+   `test_workers_transform.py::test_a_model_patch_outside_dest_path_is_rejected_before_it_is_ever_landed`,
+   which my first report had folded into a coarser "24" bucket that actually mixed two different
+   root causes); 11 `uv`/`gazelle`/`go`-tooling-missing (`test_build_e2e.py`, unchanged from before);
+   3 pre-existing `test_ecosystems.py` (unchanged, still reproduces on clean HEAD); 1 dirty-tree
+   precondition (`test_llm_backend_fixture_e2e.py`, unchanged); 1 cross-test registry-pollution
+   (`test_new_language_touchpoints_e2e.py::test_contract_binding_unavailable_finding_and_unbound_contract_kinds_end_to_end`
+   — re-verified: **passes in isolation** (`1 passed` standalone), fails only under the full-suite
+   run, so it is order-dependent global state in `fleet.ecosystems.contracts.discover()`'s module
+   cache, not this task); and **2 previously unaccounted, now identified**:
+   `test_rewrite_approach.py::test_a_genuinely_different_fix_does_not_collide` and
+   `test_workers_transform.py::test_the_anchoring_guard_rejects_a_repeated_approach_before_any_probe_reasks_once_and_lands_a_genuinely_different_fix`
+   — both fail on a genuine signature collision (`compute_approach_signature`/`_sig` hashing two
+   different diffs to the identical value). Re-ran the first standalone against a fully stashed
+   (true clean HEAD) tree: **reproduces identically**, same hash collision, same two values. 14 +
+   11 + 3 + 1 + 1 + 2 = 32, matches the full-suite total exactly. Consistent with the coordinator's
+   D119 hypothesis (a real, pre-existing, already-flagged defect unrelated to §12.31/Leg E); not
+   this task's to fix, and none of the 32 touch a file this task modified for a reason connected to
+   this task's own logic.
+2. **The silent-no-op shape for a nonexistent/non-extractable `--forbid-hoist` id** — noted, not
+   changed, per the coordinator's explicit "not required for this task."
+
+**Status: DONE.** Both load-bearing findings fixed and verified; branch `agent/roundvi-task58`,
+not merged.

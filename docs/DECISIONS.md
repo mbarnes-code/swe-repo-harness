@@ -13411,3 +13411,60 @@ untouched), or the Phase 4 `bazel query rdeps` second detection point — all Le
 separately. It does not adjudicate `SPEC.md:598-600` / `models/graph.py:172-176`'s "exact
 reconstruction from `retargeted_from_repo_id`" claim, which research-32 flagged for the controller
 and which this task's placement decision routes around rather than resolves.
+
+## ADR-0121 — §12.31 / D111 Leg E: `--forbid-hoist` survives a `fleet scan` rebuild via
+`contracts.status` carry-over, not a `findings` read-back
+
+**Decision (2026-09-06, round VI, task 58, controller-review fix wave).** `docs/SPEC.md` describes
+`--forbid-hoist`'s durability across the whole-run `contracts` rebuild (§3.1 "Contract extraction
+is re-runnable by construction") as living in the `ContractHoistOverride` `findings` row — "the
+same 'findings row is the authority' mechanism `--accept-breaks` already uses" (three sites:
+`SPEC.md:737-739` (marker `:745-752`), `:6777-6780` (marker `:6780-6785`), `:7355-7360`
+(marker inline within that span) — each now carrying a dated marker pointing here).
+The shipped implementation makes the veto survive by a different route: `contracts.status =
+'FORBIDDEN'` is carried forward directly by `workers/contracts.py::carry_over_committed`, widened
+this task to include `FORBIDDEN` alongside the `HOISTED`/`MIGRATED` rows it already carries. The
+`ContractHoistOverride` finding is still written every `--forbid-hoist` invocation
+(`cli._persist_contract_hoist_override_findings`) — it is a durable audit record, not the thing
+`carry_over_committed` reads to decide the status.
+
+**Why status carry-over, not a `findings` read-back.** `contracts.status` is already the single,
+durable, queried source of truth for a contract's lifecycle state — every real reader of "is this
+contract forbidden" (`_hoist_contracts`'s `status is ContractStatus.EXTRACTABLE` candidate filter,
+`fleet contracts list`, `_committed_contracts` itself) already reads that column directly, never a
+`findings` row. A read-back path would introduce a *second* source of truth for the same fact
+(current status derived from the latest matching `findings` row, kept in sync with the column by
+convention rather than by construction) for zero behavioural gain — the observable SPEC actually
+requires, "the veto survives a rebuild," is satisfied identically either way, and every one of
+this task's end-to-end proofs (`tests/test_sequence_e2e.py::
+test_a_forbid_hoist_veto_survives_a_real_re_scan_and_re_sequence`) checks exactly that observable,
+not the mechanism. Concretely, a read-back implementation would also need new machinery that does
+not exist today: `ContractsInput`/`discover_contracts` (`workers/contracts.py`) has no `findings`
+in its input surface at all, so wiring one in would be a second, larger change purely to re-derive
+a fact `contracts.status` already durably holds — coupling the 5b worker to a table it has never
+read, to reconstruct a value from its own history instead of reading it directly. `committed`/
+`carry_over_committed` already solves "which terminal decisions must survive a whole-run rebuild"
+for `HOISTED`/`MIGRATED`; extending that one proven mechanism to a third status is the smaller,
+more consistent change (Rule 2 — simplicity first), not a new pattern.
+
+**Why the `findings` row is kept anyway, not dropped.** SPEC's own framing — "the same 'the finding
+is the authority' mechanism `--accept-breaks` already uses" — is about *disclosure*, not survival:
+an operator override should leave an audited trace an operator can find later (`fleet status`,
+a `findings` query), independent of whatever internal mechanism keeps the status itself durable.
+`_persist_contract_hoist_override_findings` still writes one `ContractHoistOverride` row per
+currently-`FORBIDDEN` contract on every `fleet sequence`, DELETE-then-INSERT keyed on
+`(run_id, kind)` so it always reflects the CURRENT set rather than drifting from `contracts.status`
+— this task's own item 6 requirement — it just is not what `carry_over_committed` consults.
+
+**Correction, not a code change: the three `docs/SPEC.md` sites are wrong about the mechanism, and
+are corrected in place (dated markers, this commit) rather than the code changed to match them.**
+Per Guardrail 7 ("the SPEC says X but the code cannot do X is two edits, not one") and CLAUDE.md's
+standing rule that building to match a criterion is the only legitimate closure direction (never
+the reverse) — the code's actual behavior is what this task's end-to-end tests proved directly
+against a real re-scan; SPEC's prose was describing an unbuilt mechanism as though it were the
+one shipped, and now says so.
+
+**What this ADR does NOT decide.** It does not build a `findings`-read-back path for `--force-hoist`
+(unbuilt) or for any future leg; if a later leg needs one, that is a fresh decision, not an
+extension of this one. It does not change the shape of the `ContractHoistOverride` finding itself,
+nor `carry_over_committed`'s existing `HOISTED`/`MIGRATED` handling.

@@ -412,7 +412,7 @@ def carry_over_committed(
     dropped: the files are in the monorepo either way, and a vanished row would make
     `COUNT(contracts WHERE status IN ('HOISTED','MIGRATED')) == COUNT(wave_members …)` a lie.
 
-    `FORBIDDEN` joined this set in §12.31 Leg E (round VI task 58): `docs/SPEC.md:6746-6753` calls
+    `FORBIDDEN` joined this set in §12.31 Leg E (round VI task 58): `docs/SPEC.md:6777-6790` calls
     the operator's `--forbid-hoist` veto "sticky across re-sequencing", and unlike `REJECTED`
     (6c-H's own automatic not-shared-after-retarget rejection, deliberately re-tried against fresh
     data on every rebuild — `cli.py::_rejected_contract_rows`' own docstring), a `FORBIDDEN` row is

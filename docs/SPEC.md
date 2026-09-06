@@ -742,7 +742,15 @@ already-`HOISTED` contract as **pre-committed** and never re-ranks or re-propose
 `status='MIGRATED'`, which is re-read from the integration branch rather than recomputed.
 Retargeted edges are restored from `edges.retargeted_from_repo_id` before the rebuild and
 re-applied after it, so `fleet scan && fleet sequence && fleet sequence` leaves `contracts` and
-`edges` row counts unchanged.
+`edges` row counts unchanged. *(2026-09-06, round VI task 58 fix wave, ADR-0121: this sentence
+describes the audit record, not the survival mechanism, for `--forbid-hoist` — the only one of
+the two operator overrides built so far. What actually carries a `FORBIDDEN` contract across this
+rebuild is `contracts.status` itself: `workers/contracts.py::carry_over_committed` was widened to
+carry a `FORBIDDEN` row forward directly, the same way it already carries `HOISTED`/`MIGRATED`,
+never reading `findings` back to re-derive it. The `ContractHoistOverride` finding is still
+written on every `--forbid-hoist` invocation, as a durable audit trail — just not the read-back
+source of truth. `--force-hoist`'s own mechanism is unbuilt and this sentence's description of it
+is unchanged.)*
 
 Re-sequencing is nevertheless refused while the fleet is in flight: `fleet sequence` exits **11**
 when any `phases` row for this `run_id` is `RUNNING` or `SUCCEEDED` beyond `PHASE_SCAN`, unless
@@ -6769,7 +6777,13 @@ anchoring loop, and the run's `findings` record that the guard was off.
 `--force-hoist` and `--forbid-hoist` are the operator's two overrides on step 5b, and both are
 recorded as `findings` rows of kind `ContractHoistOverride` — the same "the finding is the
 authority" mechanism `--accept-breaks` already uses, so they survive the whole-run rebuild of
-`contracts` (§3.1). `--force-hoist` sets `extractable = 1` and admits the contract to 6c-H even
+`contracts` (§3.1). *(2026-09-06, round VI task 58 fix wave, ADR-0121: for `--forbid-hoist`, "they
+survive... via the finding" is the audit story, not the mechanism — the actual carry-forward is
+`contracts.status = 'FORBIDDEN'` itself, widened into `workers/contracts.py::carry_over_committed`
+directly, not a `findings` read-back. The finding is still written every invocation, as a durable
+audit trail. `--force-hoist` itself is still unbuilt — refused with exit 2 — so its own survival
+mechanism is not yet decided.)*
+`--force-hoist` sets `extractable = 1` and admits the contract to 6c-H even
 when a §3.1 5b (vi) predicate failed, recording the overridden predicate; it is refused, with exit
 code 2, for a contract whose identifier is an `_unpackaged.*` fallback, because there is no
 hoistable subtree to name. `--forbid-hoist` sets `status = FORBIDDEN`, which is sticky across
@@ -7340,7 +7354,10 @@ four rules:
 2. **Re-sequencing is delete-then-insert over `waves`/`wave_members`/`collisions`** for the run,
    in one transaction. Wave membership is never mutated in place. `contracts` is re-derived over
    the **whole run** in the same transaction (a contract spans repos, so per-repo scoping would be
-   wrong); operator overrides survive it as `findings` rows of kind `ContractHoistOverride`,
+   wrong); operator overrides survive it as `findings` rows of kind `ContractHoistOverride`
+   (2026-09-06, round VI task 58 fix wave, ADR-0121: for `--forbid-hoist`, the built one of the
+   two, the actual carry-forward is `contracts.status` itself — `carry_over_committed`, not a
+   `findings` read-back; the finding is a durable audit record, not the survival mechanism),
    `status='MIGRATED'` is re-read from the integration branch rather than recomputed, and
    `edges.retargeted_from_repo_id` is restored before the rebuild and re-applied after it, so
    edge and contract row counts are unchanged by a second `fleet sequence` (§3.1, §12.23).

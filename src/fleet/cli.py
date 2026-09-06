@@ -3034,10 +3034,12 @@ def _sequence_graph_config(
     site (the SAME field `workers/contracts.py:797`'s 5b (vi) check reads), and neither this
     function nor any of §10's cycle flags below thread an operator-typed value to it — there is
     no `--min-consumers` flag. So the argument below is unchanged: the only honest way to thread a
-    FLAG is through the config object it is handed. Four of the seven have a key there and are
-    threaded (round VI task 58, §12.31 Leg E, added `--forbid-hoist` to that set via
-    `GraphSection.forbidden_contract_ids` — it was one of the three refused before). The other
-    three do not, and they are REFUSED with exit 2
+    FLAG is through the config object it is handed. Five of the eight have a key there and are
+    threaded — `hoist_contracts` (unconditionally), `forbid_hoist` → `forbidden_contract_ids`
+    (round VI task 58, §12.31 Leg E — it was one of the four refused before), `max_hoists_per_scc`,
+    `scc_atomic_threshold`, and `min_confidence` (all three conditionally, only when the operator
+    actually passed a value). The other three — `break_cycles_mode`, `accept_breaks`,
+    `force_hoist` — do not, and they are REFUSED with exit 2
     rather than accepted and dropped: an operator who typed `--force-hoist acme/billing` and got
     a run that dropped it anyway has been told a lie by the exit code.
 
@@ -3761,7 +3763,7 @@ def _forbidden_contract_rows(
     """Record the operator's `--forbid-hoist` veto (§12.31 Leg E, round VI task 58).
 
     Mirrors `_rejected_contract_rows` above in shape, and differs from it in the one way SPEC
-    requires: `docs/SPEC.md:6746-6753` calls `FORBIDDEN` "sticky across re-sequencing" the same
+    requires: `docs/SPEC.md:6777-6790` calls `FORBIDDEN` "sticky across re-sequencing" the same
     way a `HOISTED`/`MIGRATED` row is, not permanent-but-forgotten the way `REJECTED` is —
     `workers/contracts.py::carry_over_committed` is widened (this task) to carry `FORBIDDEN`
     across a `fleet scan` rebuild too, exactly like `HOISTED`/`MIGRATED`, which is what a
@@ -3791,7 +3793,7 @@ def _forbidden_contract_rows(
 
 
 CONTRACT_HOIST_OVERRIDE_FINDING_KIND: Final = "ContractHoistOverride"
-"""§12.31 Leg E (round VI task 58): the authority for `--forbid-hoist` (`docs/SPEC.md:6762-6768`
+"""§12.31 Leg E (round VI task 58): the authority for `--forbid-hoist` (`docs/SPEC.md:6777-6780`
 — "the same 'the finding is the authority' mechanism `--accept-breaks` already uses"). Unlike
 `CYCLE_FINDING_KIND`/`CONTRACT_NOT_SHARED_FINDING_KIND` above, this is not recomputed from a
 `break_cycles` return value: it is a live reflection of `contracts.status = 'FORBIDDEN'` itself,
