@@ -2798,17 +2798,18 @@ corrections layered on the original text per this file's convention; a future pa
 all three before citing this entry's status.
 
 *(Citation note, 2026-09-06, round VI task 55 — not a correction to the finding above.)* The
-`TransformInput` (`cli.py:4025`) citation two paragraphs up was pinned in
+`TransformInput` (`cli.py:4025`) citation two paragraphs up is pinned in
 `tests/test_integration_honesty_citations.py` as a known-unresolved usage-site citation (line
 4025 sits outside `TransformInput`'s own class body, correctly, since it names a USAGE of the
 class inside `_transform_payloads`, not the class definition). Task 55's own `cli.py` edits
-(§12.31 Leg A) inserted lines well before line 4025 and coincidentally moved `TransformInput`'s
-class span to cover it, so the citation now resolves — through unrelated drift, not through any
-change to this paragraph's claim, which is unaffected. Retired from the pin list per that file's
-own stated policy; the citation stays live in the anchored survey and is repointed again if it
-drifts unresolved in the future. `_transform_payloads` (now `cli.py:5174`) still reads
-`settings.config.transform.max_patch_bytes` at `cli.py:5192` and sets it on the built
-`TransformInput` at `cli.py:5230` — the two threading sites this paragraph's claim is actually
+(§12.31 Leg A, first wave) briefly moved `TransformInput`'s span to cover the cited line —
+retired from the pin list once, then a second wave of edits in the SAME task (the controller-
+review fixes: threading `min_consumers` through `break_cycles`'s call site, and the
+`ContractNotShared` findings-writer filter) drifted it back to genuinely unresolved, and it was
+re-pinned. This is normal churn for a citation into a large, actively-edited function, not a
+correction to the finding it sits beside. `_transform_payloads` (now `cli.py:5193`) still reads
+`settings.config.transform.max_patch_bytes` at `cli.py:5211` and sets it on the built
+`TransformInput` at `cli.py:5249` — the two threading sites this paragraph's claim is actually
 about are unmoved in substance, only in line number.
 
 **Two deferred minors, both against the leg-1 fix specifically.** No accept-at-boundary test
@@ -7404,7 +7405,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2365-2433`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:7189-7261`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:7208-7280`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7501,12 +7502,14 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:13786-14023`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-06, round VI, TWELVE separate times now as this round's own successive `cli.py` additions
-keep shifting it — this repointing follows round VI task 55's working tree, which added the
-§12.31 Leg A hoist-rejection writers (`_rejected_contract_rows`, `_persist_contract_not_shared_
-findings`) above this function; the prior repointing followed task 53's `_partition_test_srcs`/
-`_is_python_test_src`. Correction to this
+(`cli.py:13805-14042`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+2026-09-06, round VI, THIRTEEN separate times now as this round's own successive `cli.py`
+additions keep shifting it — this repointing follows round VI task 55's controller-review fix
+wave, which threaded `min_consumers` through `break_cycles`'s `cli.py` call site and filtered the
+`ContractNotShared` findings writer, both above this function; the prior repointing followed the
+same task's first wave (the §12.31 Leg A hoist-rejection writers,
+`_rejected_contract_rows`/`_persist_contract_not_shared_findings`), and before that, task 53's
+`_partition_test_srcs`/`_is_python_test_src`. Correction to this
 paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
 functional exemption — `test_no_unpinned_anchored_citation_
 fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
@@ -7979,7 +7982,7 @@ has exactly ONE production call site anywhere in `src/`: `cli.py:2232`, inside
 `_persist_scan_edges` (`cli.py:2285-2349`), itself reachable only from the scan path (`cli.py:1876`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
 (`cli.py:2222`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3211-3390`)
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3213-3397`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -8045,7 +8048,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:10129-10242`) returns early at `if not servable: return result`
+`_continue_impl` (`src/fleet/cli.py:10148-10261`) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
@@ -8873,7 +8876,7 @@ dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted 
 alone — a `ValidationError`, not a wrong-but-valid edge.
 
 **Why nothing is broken today.** `grep -rn "DELETE FROM edges" src/fleet/` returns zero hits in the
-whole codebase; `_persist_contract_edges` (`cli.py:3515-3563`) only INSERTs. The pre-hoist repo→repo
+whole codebase; `_persist_contract_edges` (`cli.py:3534-3582`) only INSERTs. The pre-hoist repo→repo
 row is therefore still present in the `edges` table, untouched, alongside the new contract row. A
 durable, exact un-hoist IS achievable today — by deleting the contract-kind rows and letting the
 pre-existing repo→repo row stand — just not by the mechanism SPEC's own prose describes.

@@ -1,4 +1,4 @@
-# Task 55 report — DONE
+# Task 55 report — DONE (fix wave applied, see bottom section)
 
 §12.31 case (i), Leg A: not-shared-after-retarget detection + in-memory rollback, landed.
 ADR-0120 (supplied by the controller mid-task) records the placement decision.
@@ -222,3 +222,130 @@ which is proven by construction (the writer functions are trivial pass-throughs 
 - [x] `docs/CRITERIA_PLAN.md` criterion 31 — Leg A recorded done, case (ii) open. §12.31's
   `docs/SPEC.md` criterion text itself untouched (Rule 14).
 - [x] `docs/INTEGRATION_HONESTY.md` D111 — dated in-body marker; heading left `OPEN`.
+
+---
+
+## Fix wave (controller review of `d84c780`) — status: DONE
+
+Two load-bearing findings, one important finding, one deferred non-blocking observation. All
+three actionable findings verified against current source before fixing, then fixed.
+
+### 1. Critical — `min_consumers` was never threaded from settings (confirmed exactly as reported)
+
+Re-measured before touching anything: `cli.py`'s `_sequence_impl` called
+`break_cycles(graph, contracts=contracts, config=graph_config)` with no `min_consumers=` argument,
+so `graph/cycles.py::break_cycles`'s own resolution (`ContractsSection().min_consumers if
+min_consumers is None else min_consumers`) always fell to the field default (`2`), regardless of
+an operator's `scan.contracts.min_consumers` setting — exactly the second source of truth the
+brief forbade, arriving through an unthreaded parameter rather than a duplicated field.
+
+**Fix:** `cli.py`'s `break_cycles(...)` call site now passes
+`min_consumers=settings.config.scan.contracts.min_consumers` explicitly — the same field
+`workers/contracts.py:797`'s 5b (vi) check reads.
+
+**New test proving the threaded value changes the outcome** (not merely that a parameter is
+passed): `tests/test_sequence_e2e.py::test_the_configured_min_consumers_value_actually_reaches_the_6c_h_check`.
+Same fixture and seeding as the sibling not-shared test (1 real post-retarget consumer), but
+`fleet.yaml` sets `scan.contracts.min_consumers: 1`. Under the hardcoded default this contract is
+rejected; under the operator's real `min_consumers: 1` the SAME fixture must be **hoisted**
+instead — the two outcomes are mutually exclusive over an unchanged fixture, so only the
+configured value actually reaching the check explains a flip. **Mutation-tested by literally
+reverting the fix** (removing the `min_consumers=` argument, restoring the exact pre-fix call):
+gate confirmed a real 1-line change; `pytest tests/test_sequence_e2e.py -q` → **1 failed / 7
+passed** — the new test fails uniquely, every other test (including the sibling that uses the
+default config, where the bug and the fix are indistinguishable) stays green. Runtime 8.25s wall.
+Restored and re-verified 8/8 green (now 9/9 after finding 3's own test, below).
+
+### 2. Important — three documents corrected to state what the code now actually does
+
+- `docs/DECISIONS.md`'s ADR-0120 "Config" paragraph: replaced "`cli._sequence_impl` never passes
+  it explicitly, so every production call resolves from settings" (a design-intent claim that
+  predated the threading actually being wired) with a dated correction explaining the original
+  claim was false and pointing at the fix.
+- `src/fleet/graph/cycles.py::break_cycles`'s docstring: replaced "`None` (the default, and every
+  production call site) resolves to `ContractsSection().min_consumers`" with an accurate
+  description — the production call site now passes the real value explicitly; `None` is a
+  fallback for callers with no `FleetSettings` in hand (tests, future call sites), never a
+  substitute for reading real settings when they exist.
+- `src/fleet/cli.py::_sequence_graph_config`'s docstring: corrected to state `_sequence_impl`
+  passes `settings.config.scan.contracts.min_consumers` explicitly at its call site, while
+  preserving the paragraph's actual claim (no CLI *flag* threads to it — still true).
+
+### 3. Important — the findings writer now actually filters by kind, not just claims to
+
+Confirmed: `_persist_contract_not_shared_findings` built a row for **every** `GraphFinding` in
+`report.findings` and stamped `CONTRACT_NOT_SHARED_FINDING_KIND` on all of them unconditionally,
+while its own docstring claimed a future second kind "gets its own writer." No protection existed
+in code.
+
+**Fix:** filter to `finding.kind == CONTRACT_NOT_SHARED_FINDING_KIND` before building rows.
+**A genuine second bug surfaced while fixing this, caught by the covering set, not by the review:**
+my first attempt also switched the `kind` VALUES slot from the module-level `CONTRACT_NOT_SHARED_
+FINDING_KIND` literal to `finding.kind` (a dynamic attribute read) "for extra safety" — this broke
+`tests/test_findings_kinds.py`'s static resolver (`_persist_cycle_findings`'s sibling writer uses
+the literal constant `CYCLE_FINDING_KIND` in its row tuple for exactly this reason: the `kind`
+VALUES slot must be a source-level string literal for that file's `INSERT INTO findings` resolver
+to recognize it). Reverted to the literal constant in the row tuple; the filter condition alone
+(which is genuinely dynamic, on `finding.kind`, and does not need static resolution) is what fixes
+the bug. `pytest tests/test_findings_kinds.py -q` → 4/4 passed after the correction (2 errors + 1
+failure before it).
+
+**Re-assessed the "trivial pass-through" claim from my original report, per the controller's
+prompt — it did not hold, and the fix needed its own mutation proof.** New unit-level test:
+`tests/test_sequence_e2e.py::test_the_findings_writer_never_mislabels_a_different_kind_in_report_findings`,
+calling `_persist_contract_not_shared_findings` directly (via `StateWriter`) with a mixed-kind
+`[own_kind_finding, foreign_kind_finding]` list — not expressible through the real CLI today,
+since `CycleReport.findings` carries only `ContractNotShared` rows in production (mirrors
+`test_workers_contracts.py`'s own precedent for testing a rule ahead of its real producer).
+Asserts the DB ends up with exactly one row, the own-kind one. **Mutation-tested**: reverted the
+filter to `own_kind = list(findings)` (unfiltered); gate confirmed a real 1-line change;
+`pytest tests/test_sequence_e2e.py -q` → **1 failed / 8 passed** — the new test fails uniquely,
+every other test stays green (none of them construct a mixed-kind findings list, so none could
+have caught this before). Runtime 8.2s wall. Restored and re-verified.
+
+### Deferred, non-blocking (per the controller's instruction, not fixed)
+
+`cycles.py`'s saturating trial is not `min_consumers`-aware — noted, not touched, matches
+`max_hoists_per_scc`'s pre-existing shape and is out of scope for this fix wave.
+
+### Citation-drift fallout from this fix wave (found and repointed, same discipline as the first wave)
+
+The fix wave's `cli.py` edits (net insertions before line ~3600, further insertions from the
+findings-writer filter comment) drifted the same class of citations again: 8 sites in
+`docs/INTEGRATION_HONESTY.md` (`_AttemptWriter.record`, `_reconcile_tasks_with_git`,
+`_sequence_impl`, `_continue_impl`, `_persist_contract_edges`, plus the "Repointed... N separate
+times" counter bumped 12→13) and 3 in `docs/CRITERIA_PLAN.md` (`_repo_facts`, `_unit_deps`,
+`_eligible_build_units`), all repointed to their current spans. The `TransformInput`/`cli.py:4025`
+pin — retired in the first wave after drifting into accidental resolution — drifted back to
+genuinely unresolved once this wave's edits added more lines above it, exactly as the retirement
+comment predicted ("repointed again if it drifts unresolved in the future"); re-pinned rather than
+repointed, per the file's own established precedent for a usage-site citation (mirroring the
+`_run_transform_wave` re-pin pattern already in that file). The module's own stated census number
+corrected again (55 → 57, re-derived, not computed by hand) to match
+`test_every_census_number_this_module_states_is_the_number_it_derives`.
+
+### Tests run, whole, no `-k`, after the fix wave
+
+- `pytest tests/test_graph_cycles.py tests/test_graph_sequence.py tests/test_workers_contracts.py
+  tests/test_findings_kinds.py tests/test_sequence_e2e.py tests/test_integration_honesty_citations.py
+  -q` → **172 passed** (up from 169: +1 `test_the_configured_min_consumers_value_actually_
+  reaches_the_6c_h_check`, +1 `test_the_findings_writer_never_mislabels_a_different_kind_in_
+  report_findings`, +1 parametrized pin case from the `TransformInput` re-pin).
+- `pytest tests/test_bazel.py tests/test_scan_e2e.py tests/test_contracts_criterion_scale.py -q`
+  → **87 passed, 16 skipped** (same pre-existing `bazel` env gap, unaffected by this wave).
+- `python -m mypy` (no path arguments) → **Success: no issues found in 129 source files.**
+
+### Concerns (fix wave)
+
+1. Both load-bearing fixes had real, mutation-confirmed regressions that no prior test in the
+   covering set caught — the first wave's own tests could not have caught either, since the
+   default-config path and the single-kind-findings path both make the bug and the fix behave
+   identically. This is disclosed as a gap in my own original test design, not blamed on the
+   review process that caught it.
+2. Fixing finding 3 introduced a second, self-inflicted regression (`finding.kind` breaking static
+   resolution in `test_findings_kinds.py`) — caught immediately by re-running the covering set
+   before committing, not by a second review pass. Recorded here per CLAUDE.md's discipline that a
+   fix is a new artefact needing its own measurement, not an assumption of correctness.
+3. Citation drift is now a recurring, mechanical cost of any edit to `cli.py`'s hoist/sequence
+   region (this is the third repointing wave across two review rounds on this one task). Noted for
+   the controller's awareness, not something to fix here.

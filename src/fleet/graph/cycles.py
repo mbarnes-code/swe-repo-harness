@@ -399,10 +399,15 @@ def break_cycles(
 
     `min_consumers` is §12.31 case (i)'s not-shared-after-retarget threshold — the same question
     `scan.contracts.min_consumers` already answered once at 5b (vi) detection time, re-asked here
-    of the retargeted edges. `None` (the default, and every production call site) resolves to
-    `ContractsSection().min_consumers` — the single source of truth `workers/contracts.py` also
-    reads — rather than a literal default, so the two checks can never drift apart. It is a config
-    value, not an operator-facing override: nothing in `cli.py` threads a flag to it.
+    of the retargeted edges. The production call site (`cli._sequence_impl`) passes
+    `settings.config.scan.contracts.min_consumers` explicitly — the same field
+    `workers/contracts.py:797` reads — so the two checks read one live, operator-configured value
+    rather than two independent sources that happen to share a name. `None` is a **fallback for
+    every other caller** (tests, and any future call site that has no `FleetSettings` in hand):
+    it resolves to `ContractsSection().min_consumers`, the field's own declared default — correct
+    only in the absence of a real settings object, never a substitute for reading one when it
+    exists. It is a config value, not an operator-facing override: nothing in `cli.py` threads a
+    flag to it.
     """
     cfg = config or GraphSection()
     resolved_min_consumers = (

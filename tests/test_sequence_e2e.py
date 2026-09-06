@@ -46,10 +46,18 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from fleet.cli import ExitCode, app
+from fleet.cli import (
+    CONTRACT_NOT_SHARED_FINDING_KIND,
+    ExitCode,
+    _now,
+    _persist_contract_not_shared_findings,
+    app,
+)
+from fleet.graph.cycles import GraphFinding
 from fleet.graph.infer import EDGE_BASE_CONFIDENCE
 from fleet.models.enums import BreakStrategy, ContractStatus, EdgeKind
-from tests.test_cli import MODELS_YAML
+from fleet.state.db import StateWriter
+from tests.test_cli import RUN_ID, MODELS_YAML, fresh_db, seed_run
 from tests.test_scan_e2e import _fresh_db, _make_repo
 from tests.test_workers_contracts import (
     CYCLE_FLEET,
@@ -629,3 +637,154 @@ def test_a_not_shared_after_retarget_contract_is_rejected_through_the_real_cli(
     # the command exited 0 -- `_phase1_exit_report` still passes (fact 3 of the brief: a
     # REJECTED contract is in neither the HOISTED/MIGRATED count nor the CONTRACT wave_members
     # count, so criterion (c) still holds).
+
+
+# =======================================================================================
+# min_consumers is actually threaded from settings, not a hardcoded default
+# (round VI task 55, controller-review fix wave)
+# =======================================================================================
+
+LOWERED_MIN_CONSUMERS_FLEET_YAML = FLEET_YAML + """\
+scan:
+  contracts:
+    min_consumers: 1
+"""
+"""Same bundle as `FLEET_YAML`, plus `scan.contracts.min_consumers: 1` -- the operator-configured
+value `cli._sequence_impl` must pass to `break_cycles(...)`. If it silently fell back to
+`ContractsSection()`'s hardcoded field default (`2`) instead of this value, the fixture below
+(1 real post-retarget consumer) would still be rejected under this config, exactly as it is under
+the default -- this test would then pass for the wrong reason. Proving the THREADED value changes
+the outcome needs an operator setting that disagrees with the hardcoded default and flips the
+result; `1` is the smallest legal value (`Field(ge=1)`) and is exactly what a real not-shared
+contract's actual single consumer needs to pass the check.
+"""
+
+
+@pytest.fixture
+def not_shared_fleet_min_consumers_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Identical to `not_shared_fleet` except `fleet.yaml` sets `scan.contracts.min_consumers: 1`."""
+    sources = {
+        name: _make_repo(tmp_path / "sources", name, dict(files))
+        for name, files in NOT_SHARED_FLEET.items()
+    }
+    workspace = tmp_path / "workspace"
+    config = workspace / "config"
+    config.mkdir(parents=True)
+    (config / "fleet.yaml").write_text(LOWERED_MIN_CONSUMERS_FLEET_YAML, encoding="utf-8")
+    (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    entries = "".join(f"  - name: {name}\n    url: {path}\n" for name, path in sources.items())
+    (config / "repos.yaml").write_text(
+        f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
+    )
+    _fresh_db(workspace / "state" / "fleet.db")
+    monkeypatch.chdir(workspace)
+    return workspace
+
+
+def test_the_configured_min_consumers_value_actually_reaches_the_6c_h_check(
+    not_shared_fleet_min_consumers_1: Path,
+) -> None:
+    """The load-bearing regression this fix closes: `cli._sequence_impl` must pass
+    `settings.config.scan.contracts.min_consumers` to `break_cycles(...)`, not leave the
+    parameter to default to a bare `ContractsSection()` instantiation (which would silently use
+    the field default, `2`, regardless of what an operator configured).
+
+    Identical fixture and seeding to
+    `test_a_not_shared_after_retarget_contract_is_rejected_through_the_real_cli` (1 real
+    post-retarget consumer after a seeded second declared one with no edge evidence) — the ONLY
+    difference is `scan.contracts.min_consumers: 1` in `fleet.yaml`. Under the hardcoded default
+    (`2`) this contract is rejected (proven by the sibling test above); under an operator's real
+    `min_consumers: 1`, its one real consumer is enough, and the SAME fixture must be HOISTED
+    instead. A test that could pass under either the threaded value or the hardcoded default
+    would prove nothing about the threading — this one cannot: the two outcomes are mutually
+    exclusive and the fixture is unchanged, so only the configured value being read explains a
+    flip.
+    """
+    assert _scan(not_shared_fleet_min_consumers_1).exit_code == ExitCode.SUCCESS
+    # premise: real 5b detection also uses this config (`workers/contracts.py:797`'s
+    # `len(consumers) < payload.config.min_consumers`), so with min_consumers=1 and 1 real
+    # consumer, 5b itself passes the contract too -- it is EXTRACTABLE here, not REJECTED, which
+    # is the opposite of the sibling test's premise at the default of 2 (documented, not asserted
+    # away: this confirms the two tests' premises genuinely differ, not just their fleet.yaml).
+    assert _query(
+        not_shared_fleet_min_consumers_1, "SELECT extractable, status, status_detail FROM contracts"
+    ) == [(1, ContractStatus.EXTRACTABLE.value, "")]
+
+    _seed_second_consumer_with_no_edge_evidence(not_shared_fleet_min_consumers_1)
+
+    result = _sequence(not_shared_fleet_min_consumers_1)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+
+    assert payload["hoisted"] == [NOT_SHARED_ID], (
+        "with the operator's configured min_consumers=1, the contract's one real post-retarget "
+        "consumer is enough -- the hoist must be COMMITTED, the opposite of the sibling test's "
+        "outcome under the hardcoded default of 2, over the identically-shaped fixture"
+    )
+    (finding,) = payload["cycles"]
+    assert finding["break_strategy"] == BreakStrategy.CONTRACT_HOIST.value
+    assert finding["hoisted_contract_ids"] == [NOT_SHARED_ID]
+
+    assert _query(
+        not_shared_fleet_min_consumers_1,
+        "SELECT status, status_detail FROM contracts WHERE contract_id = ?",
+        (NOT_SHARED_ID,),
+    ) == [(ContractStatus.HOISTED.value, "")], (
+        "status flips to HOISTED; the hoisted-contract writer only moves `status`, never "
+        "`status_detail` (`_hoisted_contract_rows`), so it stays the empty string 5b left it at"
+    )
+    assert _query(
+        not_shared_fleet_min_consumers_1, "SELECT COUNT(*) FROM findings WHERE kind = ?",
+        ("ContractNotShared",),
+    ) == [(0,)], "no rejection finding when the hoist is actually committed"
+
+
+# =======================================================================================
+# the findings writer only writes its own kind (round VI task 55, controller-review fix)
+# =======================================================================================
+
+
+async def test_the_findings_writer_never_mislabels_a_different_kind_in_report_findings(
+    tmp_path: Path,
+) -> None:
+    """Unit-level, against `_persist_contract_not_shared_findings` directly: not expressible
+    through the real CLI today, because `CycleReport.findings` carries only `ContractNotShared`
+    rows in production (Leg A is the only producer). Mirrors `test_workers_contracts.py`'s own
+    precedent for testing a rule the worker implements ahead of the input its real producer can
+    supply — here a *second* `GraphFinding` kind, which no `src/` code emits into
+    `CycleReport.findings` yet, but which the writer's own docstring claims is already handled
+    safely ("a future leg adding a second finding kind gets its own writer rather than this one's
+    DELETE scope silently widening").
+
+    Without the `kind == CONTRACT_NOT_SHARED_FINDING_KIND` filter, every row in `findings` would
+    be stamped with the literal `CONTRACT_NOT_SHARED_FINDING_KIND` in the `kind` column
+    regardless of the `GraphFinding`'s own `.kind` — a foreign kind would be silently mislabelled
+    as `ContractNotShared` (its true kind would still be visible inside the JSON `payload` via
+    `asdict(finding)`, but the `kind` column itself, and every reader keyed on it, would be wrong).
+    """
+    db_path = fresh_db(tmp_path / "state" / "fleet.db")
+    seed_run(db_path, repos=("acme-owner",))
+
+    own_kind_finding = GraphFinding(
+        kind=CONTRACT_NOT_SHARED_FINDING_KIND,
+        severity="warn",
+        repo_id="acme-owner",
+        payload={"contract_id": "proto:acme.owned.v1"},
+    )
+    foreign_kind_finding = GraphFinding(
+        kind="SomeFutureLegKind",
+        severity="warn",
+        repo_id="acme-owner",
+        payload={"contract_id": "proto:acme.other.v1"},
+    )
+
+    async with StateWriter(db_path, owner="test-findings-writer-filter") as writer:
+        await _persist_contract_not_shared_findings(
+            writer, RUN_ID, [own_kind_finding, foreign_kind_finding], now=_now()
+        )
+
+    rows = _query(tmp_path, "SELECT kind, fingerprint FROM findings ORDER BY kind")
+    assert rows == [(CONTRACT_NOT_SHARED_FINDING_KIND, own_kind_finding.fingerprint)], (
+        "the foreign-kind finding must be dropped by this writer entirely, not written under "
+        "the wrong kind — a second writer (not built here) owns persisting it"
+    )

@@ -13384,8 +13384,17 @@ new keyword-only parameter, defaulted from `ContractsSection().min_consumers` wh
 added to `GraphSection` (`settings.py:431-448`, all `_hoist_contracts` otherwise receives) — that
 would create a second source of truth for one number sitting five lines away in the same file
 (`settings.py:343`), the same field `workers/contracts.py:797`'s 5b (vi) detection-time check
-already reads. `cli._sequence_impl` never passes it explicitly, so every production call resolves
-from settings; no `--min-consumers` CLI flag exists or is implied by this decision.
+already reads. `cli._sequence_impl` passes `settings.config.scan.contracts.min_consumers`
+explicitly at its `break_cycles(...)` call site — the `None` fallback exists for every OTHER
+caller (tests, and any future call site with no `FleetSettings` in hand), not for the production
+path, which reads the operator's real configured value rather than the field default. **Corrected
+2026-09-06 (round VI, controller review of this task): the original text of this paragraph said
+"`cli._sequence_impl` never passes it explicitly, so every production call resolves from
+settings" — that was the design intent stated as fact before the threading was actually wired at
+the call site, so the `None` path silently carried the field default (`2`) regardless of an
+operator's `scan.contracts.min_consumers` setting. Fixed in the same commit as this correction;
+`src/fleet/cli.py`'s call site now passes the value explicitly.** No `--min-consumers` CLI flag
+exists or is implied by this decision.
 
 **Why the loop's own state is a legitimate rollback mechanism and not a hack.** `_hoist_contracts`
 already threads `nodes`/`edges`/`graph`/`committed` by value through the ladder rather than

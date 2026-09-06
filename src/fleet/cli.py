@@ -3025,11 +3025,13 @@ def _sequence_graph_config(
 
     `break_cycles(graph, *, contracts, config)` takes no per-invocation overrides driven by any
     CLI flag — round VI task 55 (§12.31 case (i), ADR-0120) added a fourth keyword-only parameter,
-    `min_consumers`, but it is a config value, not an operator flag: it defaults to
-    `ContractsSection().min_consumers` and nothing in this function or `_sequence_impl` threads
-    any flag to it. So the argument below is unchanged: the only honest way to thread a FLAG is
-    through the config object it is handed. Four of the six have a key there and are threaded. The
-    other three do not, and they are REFUSED with exit 2
+    `min_consumers`, but it is a config value, not an operator flag: `_sequence_impl` passes
+    `settings.config.scan.contracts.min_consumers` explicitly at its `break_cycles(...)` call
+    site (the SAME field `workers/contracts.py:797`'s 5b (vi) check reads), and neither this
+    function nor any of §10's cycle flags below thread an operator-typed value to it — there is
+    no `--min-consumers` flag. So the argument below is unchanged: the only honest way to thread a
+    FLAG is through the config object it is handed. Four of the six have a key there and are
+    threaded. The other three do not, and they are REFUSED with exit 2
     rather than accepted and dropped: an operator who typed `--forbid-hoist acme/billing` and got
     a run that hoisted it anyway has been told a lie by the exit code.
 
@@ -3252,7 +3254,12 @@ async def _sequence_impl(
             ),
             hoist_contracts=hoist_contracts,
         )
-        report = break_cycles(graph, contracts=contracts, config=graph_config)
+        report = break_cycles(
+            graph,
+            contracts=contracts,
+            config=graph_config,
+            min_consumers=settings.config.scan.contracts.min_consumers,
+        )
         manual = tuple(
             res.scc_id for res in report.resolutions if res.break_strategy is BreakStrategy.MANUAL
         )
@@ -3482,18 +3489,30 @@ async def _persist_contract_not_shared_findings(
     SCC spans repos by definition and has no single owner, but a rejected contract has exactly one
     (`ContractNode.owning_repo_id`), and the finding is a claim about that repo's contract, not
     about the SCC it sat in.
+
+    `findings` is filtered to `kind == CONTRACT_NOT_SHARED_FINDING_KIND` before a row is built —
+    `CycleReport.findings` carries only this one kind today, but the filter is what actually makes
+    the module docstring's claim true ("a future leg adding a second finding kind gets its own
+    writer rather than this one's DELETE scope silently widening"): without it, a second kind
+    sharing this field would be silently mislabelled in the `kind` column by this function, not
+    merely by an absent writer.
     """
+    own_kind = [f for f in findings if f.kind == CONTRACT_NOT_SHARED_FINDING_KIND]
     rows = [
         (
             run_id,
             finding.repo_id,
+            # The literal constant, not `finding.kind` — the filter above already guarantees
+            # equality, and `tests/test_findings_kinds.py`'s static resolver needs the `kind`
+            # VALUES slot to be a source-level string literal, matching `_persist_cycle_findings`'
+            # `CYCLE_FINDING_KIND` above; a dynamic attribute read here reports `unresolved kind`.
             CONTRACT_NOT_SHARED_FINDING_KIND,
             finding.severity,
             finding.fingerprint,
             redact_text(json.dumps(asdict(finding), sort_keys=True, default=str)),
             _iso(now),
         )
-        for finding in findings
+        for finding in own_kind
     ]
 
     async def unit(conn: aiosqlite.Connection) -> None:
