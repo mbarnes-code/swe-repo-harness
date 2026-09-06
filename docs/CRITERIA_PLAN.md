@@ -660,6 +660,52 @@ gaps: Task B still pending; gap 1 open for JS/Rust/JVM (Python closed, round VI 
 open (`D116`, round VI task 54).** Do not round up the `<n> of 48` count for §12.11 — none of the
 three gaps are fully closed.
 
+**Task B built and proven end to end (round VI task 57, 2026-09-06)**, on branch
+`agent/roundvi-task57`, pending review/merge. `tests/test_build_e2e.py::
+test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`: Phase A
+(unsandboxed, real `tools/bin/bazel`) warms `verify.repository_cache` and, for the first time,
+proves `_publish_module_lock` capturing and publishing a REAL `MODULE.bazel.lock` (every prior
+test of that mechanism drove `LockWritingBazel`, a `FakeBazel`); Phase B (sandboxed, real Docker,
+`--network=none`) reuses that warm cache + published lock for two further same-ecosystem Python
+repos, asserting against the real `attempts`-equivalent evidence (real `docker run` argv +
+`0` exit codes) rather than only the CLI's summary status — one repo proves the happy path
+(`migrated_test_count = 1 >= baseline_test_count = 1`), the other reproduces Task A's
+old-passes/new-fails discriminator for real (`baseline_test_count = 99` seeded, real
+`migrated_test_count = 1`, `test_count_regressed` correctly fires `TEST_FAILURE`/RHI while both
+real Docker build/test steps exit 0 — the exact shrinkage `no_test_targets`/`tests_lost` cannot
+see). D116's seeding is done directly per this task's own brief (disclosed, not silent) since
+gap 3 above makes the shipped pipeline unable to produce `baseline_ok = 1` any other way.
+
+**Task B's own build surfaced two further, previously-undiscovered defects, both found and fixed
+in the same task** (see `docs/INTEGRATION_HONESTY.md`'s `## D118` and
+`docker/fleet-build.Dockerfile`'s own comments for the full account): (a) `_test_query_argv`
+(`buildverify.py`) passed the SANDBOXED cache-flag paths to a query that always runs on the HOST,
+so §12.11's real test-count comparison silently `BUILD_ERROR`'d on every sandboxed build with
+`baseline_ok = 1` — `D118`, fixed (`sandboxed=False` unconditionally); (b) the sandbox image had
+never shipped ANY `python3`, so no real `py_test` had ever run under it before this task —
+`rules_python`'s bootstrap stub needs the full `python3` package (not `-minimal`, measurably
+missing the stdlib `uuid` its stub imports) just to start, before ever reaching the hermetic
+interpreter it hands off to; fixed in the Dockerfile.
+
+**Corrected on task-scoped review (round VI task 57 fix round, 2026-09-06): the query's host-side
+location is SPEC-compliant, not an open adjudication.** An earlier version of this entry (and of
+the covering test's own docstring) claimed SPEC §12.11's sentence "ties `bazel query
+'tests(//<dest>/...)'` to inside a `--network=none` container in the same breath as the
+build/test exit codes." Re-read against `docs/SPEC.md:7450` directly: the criterion is TWO
+sentences, not one. The FIRST — "`bazel build //<dest>/...` and `bazel test //<dest>/...` both
+exit 0 inside a `--network=none` container, with each invocation recorded as an `attempts` row
+carrying its exit code" — is the only sentence carrying a container clause, and it names only
+`bazel build`/`bazel test`. The SECOND — "And the tests survived the move: for every repo whose
+`repos.baseline_ok = 1`, `bazel query 'tests(//<dest>/...)' | wc -l` is `>=
+repos.baseline_test_count`..." — starts a new sentence with "And" and names no container of its
+own. `_test_query_argv`'s own docstring ("Host-only, deliberately") was therefore already a
+correct reading of what the criterion requires, not a deferred obligation; `D118`'s fix (making
+that host-side query use host-side cache paths under a sandboxed payload, rather than the
+container-side paths it was wrongly copying from `_bazel_argv`) is what closes the sentence's own
+literal `>= repos.baseline_test_count` clause for a sandboxed build, with no further container
+wiring owed. **Do not round up the `<n> of 48` count for §12.11 on this account alone** — Task B
+is built and proven, but gap 1 (JS/Rust/JVM slice) and gap 3 (`D116`) remain open regardless.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
