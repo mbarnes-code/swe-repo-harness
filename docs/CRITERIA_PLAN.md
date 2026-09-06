@@ -630,6 +630,26 @@ tests independently re-run by review. **Gaps 1 (`D112`) and 3 (exclusion-set ass
 open** — this closes gap 2 only. Do not round up the `<n> of 48` count for §12.11 — Task B plus
 gaps 1 and 3 still remain.
 
+**Gap 3 measured, not closed (round VI task 54, 2026-09-06).** The "exclusion set is empty under
+shipped config" prose above understated the finding: it isn't merely "unbuilt", it's
+**measurably false** under the shipped default config as this codebase stands today.
+`tests/test_baseline_ok_exclusion.py` drives the real CLI (`scan -> sequence -> transform ->
+build`, five-repo fixture, no `preflight.baseline_build.enabled: false` override anywhere) and
+reads `repos.baseline_ok` back from the real database: every fixture repo's `baseline_ok` is NULL
+after a real build — the exclusion set is the WHOLE fleet, not empty. Root cause: zero sites in
+`src/fleet/` ever write `repos.baseline_ok`/`repos.baseline_test_count`, and `BaselineBuild.
+enabled` (`settings.py:282`) is read nowhere outside `settings.py` — no production code path ever
+runs the native baseline build at all, gated or not. Filed as `D116`
+(`docs/INTEGRATION_HONESTY.md`), a strictly larger gap than gaps 1/2 above (those assume the
+columns get written; this shows they never do). `test_the_baseline_ok_exclusion_set_is_empty_
+under_the_shipped_config` is a `strict=True` xfail pinning the target state — an eventual fix
+turns it into an unexpected-pass CI failure, forcing the marker's own deletion, matching the D97
+precedent (`CLAUDE.md` §6). Mutation-proven (a second, non-xfail test in the same file drives the
+same real DB in both directions to show the assertion is a genuine `baseline_ok IS NULL` read,
+not a tautology). **Gap 1 (`D112`) is the only gap left with no fixture-driven test proving its
+current state** — Task B plus gap 1 remain before this criterion counts DONE; gap 3 is now
+PROVEN OPEN (not merely disclosed) via `D116`.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
