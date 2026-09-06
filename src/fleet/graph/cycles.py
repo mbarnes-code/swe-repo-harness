@@ -672,6 +672,12 @@ def _hoist_contracts(
         and contract.status is ContractStatus.EXTRACTABLE
         and contract.contract_id not in committed
         and contract.extraction_confidence >= cfg.min_extraction_confidence
+        # §12.31 Leg E (round VI task 58): the operator's `--forbid-hoist` veto, threaded onto
+        # `cfg.forbidden_contract_ids` by `cli._sequence_graph_config`. Same shape as the
+        # `EXTRACTABLE`-only filter above -- excluded from candidacy outright, never trialed and
+        # never rejected -- and additive alongside Leg A's not-shared rollback branch below, not a
+        # replacement for it: a forbidden contract never reaches that branch at all.
+        and contract.contract_id not in cfg.forbidden_contract_ids
     )
     if not candidates:
         return (), nodes, edges, graph, committed, (), ()

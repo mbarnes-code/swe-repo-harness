@@ -733,9 +733,10 @@ def test_every_name_under_the_emitted_heading_still_has_a_writer(listings, emitt
     """The other direction, bound only where the listing actually claims emission.
 
     The `Shipped:`/DECLARED half is exempt by its own CAVEAT — `BaselineRed`, `PreflightFailed`,
-    `RuleConflict` are read by Python that nothing writes, and four names have no Python at all
-    (round VI task 55 gave `ContractNotShared` a live writer, narrowing this from five). That is a
-    stated property of that half. The EMITTED heading makes the stronger claim ("each of these has
+    `RuleConflict` are read by Python that nothing writes, and three names have no Python at all
+    (round VI task 55 gave `ContractNotShared` a live writer, narrowing this from five; round VI
+    task 58 gave `ContractHoistOverride` one too, narrowing it again to three). That is a stated
+    property of that half. The EMITTED heading makes the stronger claim ("each of these has
     a live writer in src/"), so deleting the last writer of one of its names fails here.
     """
     for name, (_, emitted_section) in listings.items():

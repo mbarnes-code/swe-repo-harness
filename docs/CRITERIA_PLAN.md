@@ -1108,7 +1108,8 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1308-1320`) already had the complete, correct arithmetic
+`validate_memory_budget` (`settings.py:1315-1327`, moved by round VI task 58's
+`GraphSection.forbidden_contract_ids` addition) already had the complete, correct arithmetic
 with zero callers — wired into `cli.py::_load_settings` via a new injectable
 `_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.
 resource_guard`). Closed a real scope surprise along the way: the shipped memory-budget defaults
@@ -1501,6 +1502,26 @@ logic (Legs C, D, E) remain exactly as sized in research-32/task-55's update abo
 mechanics they will call now exist. `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN` (a
 dated in-body marker records Leg B there); this criterion is still not marked DONE. Full account:
 `.superpowers/sdd/round-VI-criteria-closure/task-59-report.md`.
+
+**Update, round VI task 58 (2026-09-06) — Leg E landed; `--forbid-hoist` now real.**
+`GraphSection.forbidden_contract_ids` threads `--forbid-hoist CONTRACT_ID` (repeatable) into
+`_hoist_contracts`'s candidate filter, additive alongside Leg A's own branch; the exit-2 stub is
+deleted for `--forbid-hoist` specifically (`--force-hoist` keeps its own refusal, out of scope by
+this task's own judgment call). `cli._sequence_impl` sets `contracts.status = 'FORBIDDEN'` and
+writes a `ContractHoistOverride` finding — SPEC's "the finding is the authority" mechanism
+(`docs/SPEC.md:6746-6753`, `6762-6768`) — and `workers/contracts.py::carry_over_committed` now
+carries `FORBIDDEN` across a `fleet scan` rebuild the same way it already carried
+`HOISTED`/`MIGRATED`, which is what makes the veto genuinely sticky rather than reset on the next
+scan (a `REJECTED` row from Leg A is deliberately NOT carried, by contrast — it is meant to be
+re-tried against fresh data). Proven end to end: `tests/test_sequence_e2e.py::
+test_a_forbid_hoist_veto_survives_a_real_re_scan_and_re_sequence` runs a REAL second `fleet scan`,
+not merely a second `fleet sequence`, and asserts the row is still `FORBIDDEN`; mutation-proven at
+the unit level (`tests/test_graph_cycles.py`). **This closes criterion 31's `--forbid-hoist`
+clause only** — `ContractStatus.FAILED` is still never assigned, `git revert` still has zero call
+sites, `--force-hoist` is still stubbed, and case (ii) plus Legs B–D remain exactly as sized above.
+`docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN` (a dated in-body marker records Leg E
+there, and corrects Leg A's paragraph's now-stale "still open" list); this criterion is not marked
+DONE. Full account: `.superpowers/sdd/round-VI-criteria-closure/task-58-report.md`.
 
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
@@ -1923,13 +1944,16 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7468-7508`) always constructs `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
+  (`cli.py:7597-7637`, moved by round VI task 58's `cli.py` insertions) always constructs
+  `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
   history kept as the record of what was true when this paragraph was written, not repointed to
-  the post-fix state.**
+  the post-fix state (the citation's line number is repointed for the drift check above; the
+  narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7578-7671`) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7707-7800`, moved by round VI
+  task 58's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
 
@@ -1961,7 +1985,8 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9200-9235`) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
+blockers above**: `_eligible_build_units` (`cli.py:9329-9364`, moved by round VI task 58's
+`cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
 in production yet); does not need its own ADR (a mechanical domain-widening, not a guarded-

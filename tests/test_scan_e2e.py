@@ -746,23 +746,36 @@ def test_preflight_only_is_refused_rather_than_completing_a_phase_it_did_not_fin
 
 
 def test_sequence_refuses_the_cycle_flags_it_cannot_thread(fleet: Path) -> None:
-    """`--accept-breaks` / `--force-hoist` / `--forbid-hoist` / `--break-cycles manual` exit 2.
+    """`--accept-breaks` / `--force-hoist` / `--break-cycles manual` exit 2.
 
     Why: `break_cycles()` takes a `GraphSection` and nothing else, so there is no parameter for
-    any of them. They were parsed and dropped, which is the worst of the three options — an
-    operator who forbade a hoist and got one has been told by exit 0 that the harness agreed.
-    `--max-hoists-per-scc` and `--scc-atomic-threshold` DO have keys on that section, so they are
-    threaded rather than refused, and the run succeeds.
+    `--accept-breaks`/`--force-hoist`, and `GraphSection.break_cycles` exists as a key but
+    `cycles.py` never reads it. They were parsed and dropped, which is the worst of the three
+    options — an operator who typed one of them and got a run that ignored it has been told by
+    exit 0 that the harness agreed. `--max-hoists-per-scc` and `--scc-atomic-threshold` DO have
+    keys on that section, so they are threaded rather than refused, and the run succeeds.
+
+    `--forbid-hoist` is deliberately NOT in this list any more (§12.31 Leg E, round VI task 58):
+    it used to be refused by the exact same two lines as `--force-hoist`, and this is the
+    old-passes/new-fails discriminator that proves the displacement — the pre-task-58 assertion
+    `sequence(fleet, "--forbid-hoist", "proto:acme").exit_code == ExitCode.USAGE` genuinely passed
+    on old code and genuinely fails on the code below (it now exits `SUCCESS`, since `proto:acme`
+    names no real contract in this fixture and the write is a documented no-op — see
+    `test_sequence_e2e.py`'s `test_a_forbid_hoist_veto_survives_a_real_re_scan_and_re_sequence`
+    for the substantive exit-0/FORBIDDEN/sticky-across-a-real-rescan proof, which needs a real
+    hoistable contract this fixture does not have).
     """
     assert scan(fleet).exit_code == ExitCode.SUCCESS
     for flag in (
         ["--accept-breaks", "abc"],
         ["--force-hoist", "proto:acme"],
-        ["--forbid-hoist", "proto:acme"],
         ["--break-cycles", "manual"],
     ):
         refused = sequence(fleet, *flag)
         assert refused.exit_code == ExitCode.USAGE, f"{flag} was silently accepted"
+
+    no_longer_refused = sequence(fleet, "--forbid-hoist", "proto:acme")
+    assert no_longer_refused.exit_code == ExitCode.SUCCESS, no_longer_refused.output
 
     honoured = sequence(fleet, "--max-hoists-per-scc", "1", "--scc-atomic-threshold", "3")
     assert honoured.exit_code == ExitCode.SUCCESS, honoured.output

@@ -461,6 +461,42 @@ def test_a_not_shared_after_retarget_contract_is_rejected_with_an_exact_rollback
         ), f"{key}: edge must be byte-identical to its pre-hoist row"
 
 
+def test_a_forbidden_contract_is_excluded_from_hoisting_alongside_the_extractable_filter() -> None:
+    """§12.31 Leg E (round VI task 58): `GraphSection.forbidden_contract_ids` -- threaded from
+    `--forbid-hoist` by `cli._sequence_graph_config` -- excludes a contract from `_hoist_contracts`'
+    candidate set outright.
+
+    Baseline first, over the SAME fixture and SAME graph: with an empty forbidden set, `K` really
+    does dissolve the hub SCC (this is what makes the exclusion below attributable to
+    `forbidden_contract_ids`, not to some other property of the fixture -- the same "baseline
+    first" discipline `test_the_same_6_repo_cycle_flips_to_atomic_wave_under_no_hoist_contracts`
+    below uses for `hoist_contracts=False`). Forbidding `K` must reproduce the identical
+    `--no-hoist-contracts` outcome -- `ATOMIC_WAVE`, nothing hoisted -- via a DIFFERENT knob: the
+    filter is additive alongside Leg A's not-shared rollback branch, not a replacement for it, so a
+    forbidden contract is never even trialed and therefore never REJECTED either (unlike
+    `test_a_not_shared_after_retarget_contract_is_rejected_with_an_exact_rollback` above, forbidding
+    leaves `rejected_contracts` empty -- it was excluded from candidacy before the saturating trial
+    ever ran, not tried and found wanting).
+    """
+    graph_nodes, edges, contracts, contract_id = six_repo_hub_cycle()
+    graph = build_graph(graph_nodes, edges)
+
+    baseline = break_cycles(graph, contracts=contracts)
+    assert baseline.hoisted_contracts != (), "the fixture must really dissolve by hoisting alone"
+    assert baseline.resolutions[0].break_strategy is BreakStrategy.CONTRACT_HOIST
+
+    forbidden = break_cycles(
+        graph, contracts=contracts, config=GraphSection(forbidden_contract_ids=(contract_id,))
+    )
+    assert forbidden.hoisted_contracts == ()
+    assert forbidden.rejected_contracts == (), (
+        "excluded from candidacy, never trialed -- distinct from Leg A's REJECTED outcome"
+    )
+    res = forbidden.resolutions[0]
+    assert res.hoisted_contract_ids == ()
+    assert res.break_strategy is BreakStrategy.ATOMIC_WAVE
+
+
 def test_a_planted_6_repo_contract_cycle_is_dissolved_by_hoisting_alone() -> None:
     """§12.30 / SPEC.md:7462, the payoff clause: a 6-repo hub-and-spoke cycle whose every
     feedback edge runs through one shared proto package is dissolved by `CONTRACT_HOIST` alone —

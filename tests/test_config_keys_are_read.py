@@ -614,14 +614,14 @@ def _inert_keys() -> frozenset[str]:
 def test_the_scan_sees_a_real_config_surface() -> None:
     """Guard the guard: a walk that silently yields nothing would pass every other test here.
 
-    The exact count (181, at time of writing) is a tripwire on its own: `len(keys) > 100` would
+    The exact count (182, at time of writing) is a tripwire on its own: `len(keys) > 100` would
     still pass if an entire section vanished from the walk (`verify` alone is 8 keys), so the
     per-section coverage loop below is the one that actually catches that regression — the exact
     count just makes any drift, section-sized or not, visible instead of silently tolerated.
     """
     keys = _config_keys()
-    assert len(keys) == 181, (
-        f"walked {len(keys)} keys, expected 181 — recount deliberately (a key was added/removed, "
+    assert len(keys) == 182, (
+        f"walked {len(keys)} keys, expected 182 — recount deliberately (a key was added/removed, "
         "or a whole section was silently dropped from the walk) and update this number"
     )
     for filename, root in ROOTS:
