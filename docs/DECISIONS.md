@@ -13483,8 +13483,9 @@ by tracing primary sources rather than by controller value judgment.
 **Decision 1 — D117's resolution: exclude, never reconstruct, and never delete.** D117
 (`docs/INTEGRATION_HONESTY.md`) is confirmed as written: `retargeted_from_repo_id`-based
 reconstruction is structurally impossible for a REPO-dst edge (`DependencyEdge._node_shape`,
-`models/graph.py:194-206`, raises on a missing `dst_coordinate`; `_materialize`,
-`cycles.py:729-739`, is what discards it). But D117's own proposed remedy (a) — delete/supersede
+`models/graph.py:197-210`, raises on a missing `dst_coordinate`; `_materialize`,
+`cycles.py:794-852`, is what discards it — the retarget's `model_copy(update=...)` at
+`cycles.py:831-848`). But D117's own proposed remedy (a) — delete/supersede
 the contract-kind edge rows — is under-specified: `_graph_nodes` (`cli.py:3646-3665`) already
 filters contracts to `status IN ('HOISTED', 'MIGRATED')`, but `_graph_edges`
 (`cli.py:3858-3902`) applies no such filter, so setting `contracts.status='FAILED'` and leaving
@@ -13546,7 +13547,7 @@ entirely (the floor is decided, not computed). This reuse makes two required gua
 contract, `state/repository.py:1685-1686`). **Leg D additionally writes its own
 `HoistRollbackDemotion` finding**, distinct from the automatic `PhaseDemoted` rows, mirroring the
 existing writer pattern (`_persist_cycle_findings`/`ContractNotShared`'s
-DELETE-then-INSERT-keyed-on-`(run_id, kind)` shape, `cli.py:3394-3447`).
+DELETE-then-INSERT-keyed-on-`(run_id, kind)` shape, `cli.py:3449-3498`).
 
 **Decision 4 — revert-series atomicity across multiple merges.** Design: pre-check, then commit —
 validate the whole series before any of it touches the real integration branch. (1) Compute the
@@ -13574,11 +13575,12 @@ original sha it reverts (`"This reverts commit <sha>."`). Resume query: extend
 `Fleet-Contract-Rollback-Id == contract_id`, checking each ordered sha's revert body.
 
 **Decision 6 — downstream-merge-refusal traversal: transitive, not single-hop.** `cli.py`'s
-existing `fleet pr` refusal (`cli.py:11502-11514`) checks exactly one hop and is safe as
+existing `fleet pr` refusal (`cli.py:11502-11512`) checks exactly one hop and is safe as
 single-hop only because it re-runs on every `fleet pr` invocation. Leg D's refusal decision is
 made once, irrevocably, so it needs the full transitive closure. **Mechanism:** reuse
-`graph/query.py::descendants(graph, node)` exactly as `blast_radius` already does
-(`graph/query.py:43-50`), seeded at each blast-set member whose PR is `MERGED`. If that descendant
+`graph/query.py::descendants(graph, node)` (`graph/query.py:26-34`) — the same `nx.descendants`
+call `blast_radius` (`graph/query.py:43-50`) already makes over the same `G_order` orientation —
+seeded at each blast-set member whose PR is `MERGED`. If that descendant
 set (excluding the blast set itself) contains any repo whose PR is also `MERGED`, refuse:
 `RepoStatus.REQUIRES_HUMAN_INTERVENTION`, `FailureClass.CYCLE`, for the whole blast set.
 
@@ -13586,7 +13588,7 @@ set (excluding the blast set itself) contains any repo whose PR is also `MERGED`
 consumes "a `HoistBrokeOwner` finding + `contracts.status = 'FAILED'` for contract X exists" as
 its complete input contract. It does not need to know whether Leg C1 (FILE_PATH collision) or Leg
 C2 (build-failure attribution) produced that finding — SPEC's own text treats both disjuncts as
-routing to the identical rollback procedure (`docs/SPEC.md:604-621`). Leg D's design and
+routing to the identical rollback procedure (`docs/SPEC.md:610-624`). Leg D's design and
 implementation may proceed without waiting on either C1 or C2's own scoping to finish.
 
 **Consequences.** Positive: D117 closes with a mechanism simpler than any of its three

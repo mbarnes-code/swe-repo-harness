@@ -613,21 +613,28 @@ paths).
    build — `_graph_edges` filters them to `contracts.status IN ('HOISTED','MIGRATED')`, the same
    predicate `_graph_nodes` already applies, so the never-deleted pre-hoist repo→repo row is what
    the DAG sees again; nothing is reconstructed and nothing is deleted (D117, ADR-0122); drop the
-   contract node from `wave_members`; if the contract had already been merged, revert its merge commit on the
-   integration branch with `git revert -m 1`, carrying the standard `Fleet-*` commit trailers like
-   any other mutation (§3.2 step 6) — the revert *is* the record, so there is nothing to unwind on
-   a crash beyond re-asking Git whether it landed; then re-run steps 6–8 for the affected SCC only, which now falls through to 6d and, if
-   needed, 6e. **The attempt is recorded in `attempts` but does not increment `phases.attempts`**,
+   contract node from `wave_members`; if the contract had already been merged, revert its merge
+   commit on the integration branch with `git revert -m 1`, carrying the standard `Fleet-*` commit
+   trailers like any other mutation (§3.2 step 6) — the revert *is* the record, so there is nothing
+   to unwind on a crash beyond re-asking Git whether it landed; then re-run steps 6–8 for the
+   affected SCC only, which now falls through to 6d and, if needed, 6e. **The attempt is recorded
+   in `attempts` but does not increment `phases.attempts`**,
    on the same principle as `TRANSIENT_INFRA` (ADR-0014): the harness's own bad hypothesis must not
    consume a repo's three chances. `fleet sequence --forbid-hoist <contract_id>` makes the veto
    sticky so the next run does not re-propose it.
 
-   **Un-hoisting must reach the repos the hoist already changed.** Restoring the edges is not
-   enough: a consumer whose imports were rewritten to `hoist_target_path` and whose phases are
-   already `SUCCEEDED` would, under the idempotency rule of §3, never re-enter and would leave the
-   integration branch importing a deleted path. Rollback therefore computes the **unhoist blast
-   set** — every repo holding a `CONTRACT_CONSUME` or `CONTRACT_IMPL` edge to the contract, taken
-   before the edges are restored. For each blast-set member whose `phases` row is `SUCCEEDED` beyond
+   **Un-hoisting must reach the repos the hoist already changed.** Excluding the failed contract's
+   edges from the next graph build is not enough (**corrected 2026-09-06, D117/ADR-0122**; this
+   read "Restoring the edges is not enough" until then — nothing is restored, see the 6c-H
+   rollback paragraph above): a consumer whose imports were rewritten to `hoist_target_path` and
+   whose phases are already `SUCCEEDED` would, under the idempotency rule of §3, never re-enter
+   and would leave the integration branch importing a deleted path. Rollback therefore computes
+   the **unhoist blast set** — every repo holding a `CONTRACT_CONSUME` or `CONTRACT_IMPL` edge to
+   the contract, read fresh from `edges`, inside the same transaction that writes
+   `contracts.status = 'FAILED'` (**corrected 2026-09-06, D117/ADR-0122**; this read "taken before
+   the edges are restored" until then — nothing is ever restored or mutated on these rows, so the
+   blast set is stable and re-derivable at any later point by the same query). For each blast-set
+   member whose `phases` row is `SUCCEEDED` beyond
    `PHASE_SCAN`, the runner demotes it to `PENDING` at `PHASE_TRANSFORM` with `attempts` retained,
    records a `HoistRollbackDemotion` finding, and — if that repo's PR was already merged — reverts
    that merge in the **same** revert series as the contract's own merge, so the integration branch
@@ -1692,11 +1699,14 @@ placeholder instead of waiting for a human:
 
 **Contract nodes are never stubbed** (ADR-0019). A hoisted contract has no `phases` row (§3.3),
 so it can never reach `REQUIRES_HUMAN_INTERVENTION` and can never become a `stubs.provider`. A
-hoist that fails is handled by the ADR-0019 rollback — `contracts.status='FAILED'`, edges restored
-from `retargeted_from_repo_id`, the SCC re-sequenced through 6d/6e — which *restores the true
-graph* instead of leaving consumers building against a placeholder, and is strictly better.
-`stubs.provider_repo_id` therefore carries a `REFERENCES repos(repo_id)` FK and no
-`provider_kind` discriminator exists.
+hoist that fails is handled by the ADR-0019 rollback — `contracts.status='FAILED'`, its edges
+excluded from the next graph build so the never-deleted pre-hoist row stands, the SCC re-sequenced
+through 6d/6e — which *restores the true graph* instead of leaving consumers building against a
+placeholder, and is strictly better. **Corrected 2026-09-06 (D117/ADR-0122):** this read "edges
+restored from `retargeted_from_repo_id`" until then — that reconstruction is structurally
+impossible for a REPO-dst edge (D117); the real mechanism excludes the contract-kind row from the
+graph read rather than restoring anything. `stubs.provider_repo_id` therefore carries a
+`REFERENCES repos(repo_id)` FK and no `provider_kind` discriminator exists.
 
 **A failed contract propagates like a failed repo.** Having no `phases` row would otherwise let a
 contract escape *both* mechanisms — it cannot reach `REQUIRES_HUMAN_INTERVENTION`, so the
@@ -1706,8 +1716,11 @@ they used to build against. So the rule is stated for contracts explicitly: **on
 `contracts.status='FAILED'` the scheduler applies the same propagation rule with
 `D = descendants(G_order, contract_node)`**, setting every non-terminal `d ∈ D` to `BLOCKED` with
 the `contract_id` appended to `phases.blocked_by`, in the same transaction as the status write. The
-rollback then restores the edges and re-sequences the SCC, and there are exactly two outcomes:
-either the restored component is acyclic or a 6d edge break makes it so, in which case propagation
+rollback then excludes the failed contract's edges from the next graph build and re-sequences the
+SCC (**corrected 2026-09-06, D117/ADR-0122**; this read "restores the edges" until then — nothing
+is restored, the never-deleted pre-hoist row simply becomes visible again once the contract-kind
+row is excluded), and there are exactly two outcomes: either the restored component is acyclic or
+a 6d edge break makes it so, in which case propagation
 is reversed by the ordinary `blocked_by` rule and the members proceed through synthetic waves; or
 **the restored SCC is still cyclic, and every member is marked `REQUIRES_HUMAN_INTERVENTION`**
 with `FailureClass.CYCLE` and a `HoistBrokeOwner` finding. "Re-sequenced through 6d/6e" is not a
@@ -2691,7 +2704,11 @@ class DependencyEdge(FleetModel):
     retargeted_from_repo_id: RepoId | None = Field(
         default=None,
         description="Pre-hoist dst repo when this row was retargeted to a contract node "
-        "(§3.1 5b viii). The rollback record: restoring it un-hoists the edge exactly.",
+        "(§3.1 5b viii). Audit record of what a hoist retargeted — NOT a reconstruction "
+        "recipe (D117/ADR-0122). The un-hoist mechanism excludes this row from the graph "
+        "read (`contracts.status` leaving `HOISTED`/`MIGRATED`) and lets the never-deleted "
+        "original repo→repo row stand; this field is never read back into a reconstructed "
+        "edge.",
     )
     kind: EdgeKind
     version_spec: str | None = None
@@ -7577,7 +7594,7 @@ a CLI flag. A row whose "Where enforced" column reads only as prose is a defect 
 | 25 | **Silent truncation of the rdeps closure** | `rdeps_target_count > rdeps_limit` | Never silent: seeded sample, `rdeps_truncated = true`, the seed recorded so the sample is reproducible and auditable | `VerificationReport.rdeps_truncated`; `verify.rdeps_sample_n`; §3.4 step 2 |
 | 26 | **A model grading its own homework** | — (structural) | Verdicts are exit codes; the model may write `CycleFinding.rationale`, PR prose, and patch proposals, and may move `confidence` only within `[0.3, 0.95]`. It may never set `EdgeKind`, delete an edge, order waves, choose or hoist a contract, or declare a build green | ADR-0008; `VerificationReport` assembled from `attempts` only; §3.1 "forbidden to the model" |
 | 27 | **Cycle caused by a shared contract** — the dominant SCC cause at fleet scale: a proto/OpenAPI/IDL package or a "commons" module that its owner and its consumers all depend on | A non-trivial SCC at least one of whose members owns an `extractable` contract with ≥ `min_consumers` consumers | Make the contract a **DAG node of its own** and migrate it first: 6c-H hoists greedily by `(repos_freed desc, extraction_confidence desc, blast_radius asc)`, recomputes SCCs, repeats. A contract node has no outbound edge into any repo, so it is always schedulable first and the cycle through the owner is severed — without bundling 40 repos into one PR and without a `MANUAL` refusal | `contracts` table; `ContractNode`; `NodeKind.CONTRACT`; `EdgeKind.CONTRACT_IMPL` / `CONTRACT_CONSUME`; `BreakStrategy.CONTRACT_HOIST`; `CycleFinding.hoisted_contract_ids`; `graph.hoist_contracts` / `max_hoists_per_scc`; `graph/contracts.py`; §12.30 |
-| 28 | **The extraction was wrong** — the contract is not actually shared, or hoisting it breaks its owner | `< min_consumers` distinct repos on the contract's `CONTRACT_CONSUME` edges after retargeting, or Phase 4 rdeps hitting one `dest_path`; owner's `bazel build` unresolved under `hoist_target_path`, or a divergent-SHA `FILE_PATH` collision on a hoist-claimed path | `ContractNotShared` / `HoistBrokeOwner` finding → `contracts.status` `REJECTED`/`FAILED` → the failed contract's edges excluded from the next graph build (never reconstructed — the untouched pre-hoist row stands; D117, ADR-0122) → contract dropped from `wave_members` → merged hoist reverted via `git revert -m 1`, itself a trailered commit and therefore its own record (ADR-0024) → SCC re-sequenced, falling through to 6d/6e. The attempt is recorded but does **not** increment `phases.attempts`: the harness's own bad hypothesis may not consume a repo's three chances | `edges.retargeted_from_repo_id`; `contracts.status`; `ContractStatus.FAILED`/`REJECTED`; `--forbid-hoist`; `Fleet-*` trailers; §3.1 6c-H "When the extraction was wrong"; §12.31 |
+| 28 | **The extraction was wrong** — the contract is not actually shared, or hoisting it breaks its owner | `< min_consumers` distinct repos on the contract's `CONTRACT_CONSUME` edges after retargeting, or Phase 4 rdeps hitting one `dest_path`; owner's `bazel build` unresolved under `hoist_target_path`, or a divergent-SHA `FILE_PATH` collision on a hoist-claimed path | `ContractNotShared` / `HoistBrokeOwner` finding → `contracts.status` `REJECTED`/`FAILED` → the failed contract's edges excluded from the next graph build (never reconstructed — the untouched pre-hoist row stands; D117, ADR-0122) → contract dropped from `wave_members` → merged hoist reverted via `git revert -m 1`, itself a trailered commit and therefore its own record (ADR-0024) → SCC re-sequenced, falling through to 6d/6e. The attempt is recorded but does **not** increment `phases.attempts`: the harness's own bad hypothesis may not consume a repo's three chances | `edges.retargeted_from_repo_id` (audit record only, never read back — D117/ADR-0122); `cli._graph_edges`'s `contracts.status IN ('HOISTED','MIGRATED')` filter, symmetric to `_graph_nodes`'s (the actual un-hoist mechanism); `contracts.status`; `ContractStatus.FAILED`/`REJECTED`; `--forbid-hoist`; `Fleet-*` trailers; §3.1 6c-H "When the extraction was wrong"; §12.31 |
 | 29 | **Stale generated code duplicated across the fleet** — twelve repos each carrying their own checked-in `*_pb2.py` for the same proto, quietly divergent | A generated-marker or `generated_globs` hit whose emitted package resolves to a known contract `identifier` | Generated files are **consumption evidence, never ownership evidence** (§3.1 5b ii), are excluded from `contracts.source_paths`, are **deleted rather than migrated** by the consumer's relocation plan, and are replaced by a dep on the contract's single in-monorepo `proto_library`/`*_proto_library` target — one generator invocation per contract per language, so drift becomes structurally impossible rather than merely discouraged | `contracts.generated_paths`; `scan.contracts.generated_markers`; `scan.generated_globs`; `ecosystems/contracts/proto.py`; `ContractAdapter.neutral_targets`; §3.3 step 2 |
 | 30 | **An ecosystem reaches Phase 3 with no `EcosystemAdapter`** — a new `Ecosystem` member was added to the enum and its adapter file was forgotten, or an operator's `monorepo_dir_overrides` names an ecosystem nothing claims | `ecosystems.discover()`'s bijection check: `set(_BY_ECOSYSTEM) != set(Ecosystem)` | **Fails at startup, not in Phase 3.** `discover()` runs during `RunContext` construction — before any clone, any LLM call, and any cost — and raises with the missing member named, so the failure is a five-second config error rather than a five-hour run that dies at the first BUILD generation. Repos are never silently skipped: with `build.fail_on_missing_adapter: false` the unit is routed to `ecosystems/unknown.py` (`misc/<repo_id>`, `filegroup`) and carries a `NoEcosystemAdapter` finding plus `RepoStatus.DEGRADED`, so it still appears in `migration_state.json` and `COUNT(repos) == COUNT(wave_members WHERE node_kind='REPO')` still holds. `layout()` therefore never needs a null branch — the registry's totality is the guarantee, checked once | `ecosystems/base.py` `discover()`; `build.fail_on_missing_adapter`; `ecosystems/unknown.py`; `NoEcosystemAdapter` finding; §1; §12.32 |
 | 31 | **A hoisted contract has no adapter, or no binding for a consuming language** (ADR-0019) — a `ContractKind` with no `ContractAdapter`, or a `PROTO` consumed by an ecosystem whose `contract_bindings` has no `PROTO` entry | `contracts.discover()`'s `set(_BY_KIND) != set(ContractKind)` at startup; at emission, `for_ecosystem(eco).contract_bindings.get(kind) is None` | Missing **adapter** is a startup error, same as row 30 — a `ContractKind` is only ever created by our own step 5b, so an unbacked one is a code defect and is treated as one. Missing **binding** is not: "Rust does not consume this Avro schema" is a legitimate state of the world, so the neutral target is still emitted, the consumer's binding is skipped with a `ContractBindingUnavailable` finding and a `BuildPlan.unbound_contract_kinds` entry, and the *consumer* — not the contract — fails its own `bazel build` with an unresolved label if it genuinely needed it. The contract node itself still reaches `MIGRATED`, because a partially-bound IDL is strictly better than an un-hoisted one, and the finding names exactly which language to teach | `ecosystems/contracts/base.py` `discover()`; `EcosystemAdapter.contract_bindings`; `BuildPlan.unbound_contract_kinds`; `ContractBindingUnavailable` finding; §3.3 step 2; §12.34 |
