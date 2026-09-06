@@ -200,10 +200,14 @@ from fleet.orchestrator.stubs import (
     RevalidationPolicy,
     StubDecision,
     StubTransition,
+    StubTrigger,
 )
 from fleet.orchestrator.stubs import apply as apply_stub_decision
+from fleet.orchestrator.stubs import build_stub_record as _build_stub_record
+from fleet.orchestrator.stubs import detect_stub_triggers as _detect_stub_triggers
 from fleet.orchestrator.stubs import plan_revalidation as plan_stub_revalidation
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
+from fleet.orchestrator.stubs import stub_completion_correction as _stub_completion_correction
 from fleet.orchestrator.stubs import supersede as supersede_stub
 from fleet.rewrite.rules import (
     EngineRegistry,
@@ -7802,6 +7806,193 @@ async def _unit_deps(
         repo_id: tuple(deps[label] for label in sorted(deps))
         for repo_id, deps in ((key, internal.get(key, {})) for key in facts)
     }
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — the `--stub-blocked` TRANSFORM-phase stub-creation DECISION:
+# trigger detection, `StubRecord` construction + the `stubs` INSERT, and the `RUNNING ->
+# DEGRADED` correction. The pure decision half of each lives in `orchestrator.stubs`
+# (`detect_stub_triggers`, `build_stub_record`, `stub_completion_correction`); these three
+# functions are the DB-touching callers, in the same split `_read_blocker_states`/
+# `_apply_stub_decisions` already use for that module's other five decisions.
+#
+# NOT wired into `_transform_impl`/`_run_transform_wave` this round. `_validate_transform_flags`
+# still refuses `--stub-blocked` unconditionally (ADR-0113 condition 2: the CLI surface stays
+# refused until this leg AND task-68's BUILD-phase render leg both exist and are wired together
+# end to end) — so a live call site here would be unreachable in production and untestable end
+# to end before that wiring exists. Built and unit-tested directly instead, exactly as Blockers
+# A/B/C's own predicates were before their CLI surface existed.
+# --------------------------------------------------------------------------------------
+
+
+async def _detect_transform_stub_triggers(
+    conn: aiosqlite.Connection,
+    settings: FleetSettings,
+    run_id: str,
+    dispatched_repo_ids: Sequence[str],
+) -> tuple[StubTrigger, ...]:
+    """Step 1: which of `dispatched_repo_ids` (this TRANSFORM wave's members) need a stub.
+
+    Reuses `_ordering_pairs` itself — not a re-derived copy of its filter — so this can never
+    silently drift from the ordering subgraph `_unit_deps` shares. `_read_blocker_states` is the
+    existing per-repo `phases`-status query (there is no `repos.status` column); the decision
+    itself is `orchestrator.stubs.detect_stub_triggers`.
+    """
+    pairs = await _ordering_pairs(conn, settings, run_id)
+    provider_ids = {provider_id for provider_id, _ in pairs}
+    states = await _read_blocker_states(conn, run_id, provider_ids)
+    return _detect_stub_triggers(dispatched_repo_ids, pairs, states)
+
+
+async def _create_stub_records(
+    conn: aiosqlite.Connection,
+    writer: StateWriter,
+    *,
+    run_id: str,
+    triggers: Sequence[StubTrigger],
+    facts: Mapping[str, _RepoFacts],
+    max_revalidation_rounds: int,
+    now: datetime,
+) -> tuple[StubRecord, ...]:
+    """Step 2: `StubRecord` + the FIRST `stubs` row (`revalidation_round=0`, `state='ACTIVE'`)
+    for every trigger step 1 found.
+
+    **Idempotent by check-then-skip**, at the schema's own idempotency key (`PRIMARY KEY (run_id,
+    repo_id, stub_coord_key, revalidation_round)`): a repeat call over an unchanged database (a
+    retry, a resumed wave re-detecting the same trigger) inserts nothing a second time, mirroring
+    `orchestrator.stubs.next_round_record`'s own "a re-run never resurrects/duplicates row 0"
+    precedent, applied here at creation rather than at re-emission.
+
+    `bazel_label` is computed exactly as `_unit_deps`'s own stub-redirect branch expects to read
+    it back: `_internal_label(stub_dest(coord_key))`, never an ad-hoc string.
+
+    A trigger whose provider carries no published `Coordinate` at all (`facts[...].published is
+    None`) is silently skipped — `StubRecord.coord_key` requires `min_length=1` and there is
+    nothing to build a label from. Not expected in practice: `_unit_deps`'s own resolution means
+    an edge's destination already names a repo the graph resolved to an owned coordinate, so this
+    is a defensive guard (§3.5 names no such scenario), not a modelled case.
+    """
+    created: list[StubRecord] = []
+    stamp = _iso(now)
+    for trigger in triggers:
+        fact = facts.get(trigger.provider_repo_id)
+        published = fact.published if fact is not None else None
+        if published is None:
+            continue
+        coord_key = published.key
+        pinned_version = published.version_spec
+        existing = await _rows(
+            conn,
+            "SELECT 1 FROM stubs WHERE run_id = ? AND repo_id = ? AND stub_coord_key = ? "
+            "  AND revalidation_round = 0",
+            (run_id, trigger.consumer_repo_id, coord_key),
+        )
+        if existing:
+            continue
+        bazel_label = _internal_label(stub_dest(coord_key))
+        record = _build_stub_record(
+            run_id=UUID(run_id),
+            consumer_repo_id=trigger.consumer_repo_id,
+            provider_repo_id=trigger.provider_repo_id,
+            coord_key=coord_key,
+            pinned_version=pinned_version,
+            max_revalidation_rounds=max_revalidation_rounds,
+            now=now,
+        )
+
+        async def unit(
+            conn: aiosqlite.Connection,
+            record: StubRecord = record,
+            coord_key: str = coord_key,
+            bazel_label: str = bazel_label,
+        ) -> None:
+            await conn.execute(
+                "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+                "  provider_repo_id, pinned_version, bazel_label, state, stub_fidelity, "
+                "  revalidation_round, max_revalidation_rounds, state_changed_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(record.stub_id),
+                    run_id,
+                    record.consumer_repo_ids[0],
+                    coord_key,
+                    record.consumer_repo_ids[0],
+                    record.provider_repo_id,
+                    record.pinned_version,
+                    bazel_label,
+                    record.state.value,
+                    record.fidelity.value,
+                    0,
+                    record.max_revalidation_rounds,
+                    stamp,
+                    stamp,
+                ),
+            )
+
+        await writer.submit(unit)
+        created.append(record)
+    return tuple(created)
+
+
+async def _correct_transform_status_for_stubs(
+    conn: aiosqlite.Connection,
+    writer: StateWriter,
+    *,
+    run_id: str,
+    repo_id: str,
+    now: datetime,
+) -> bool:
+    """Step 3: `RUNNING -> DEGRADED` (in effect — see below), fired once this wave's stub set is
+    known, for a repo whose TRANSFORM phase the generic completion loop just wrote `SUCCEEDED`.
+
+    **Chosen site, and why (research-7 flagged this as genuinely open):** a FOLLOW-UP write,
+    called after `_run_transform_wave` returns for the wave and `_create_stub_records` has run —
+    never an edit to `workers.base.WorkerBase.execute` or `orchestrator.runner.PhaseRunner.
+    _dispatch`, both generic and shared by every phase/worker type (out of this leg's scope, and
+    the brief says so explicitly). No other site is reachable: `WorkerResult` has no status that
+    the generic dispatch loop maps to `DEGRADED` at all today, and a within-fence write racing
+    the generic one would be overwritten by it (`DEGRADED -> SUCCEEDED` is itself a legal
+    `ALLOWED_TRANSITIONS` edge, so the generic completion firing afterward would silently win).
+
+    **Disclosed rather than hidden: this UPDATE bypasses `models.enums.transition()`.**
+    `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` is the empty set (terminal), so there is no legal
+    CAS this can go through once the row already reads `SUCCEEDED` — `orchestrator.stubs.
+    stub_completion_correction`'s own docstring records the same finding. `cli._quarantine_impl`
+    already writes `phases.status` via raw SQL outside `transition()`'s CAS for its own,
+    different reason (an operator action against a phase no worker currently leases); this
+    follows the same shape. Whether `SUCCEEDED -> DEGRADED` should instead become a modelled
+    `ALLOWED_TRANSITIONS` edge is a state-machine question left open here, per the brief's own
+    "report which site you chose and why" — not decided or self-adjudicated by this function.
+
+    Returns whether the write fired.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+        (run_id, repo_id, int(Phase.TRANSFORM)),
+    )
+    if not rows:
+        return False
+    current = RepoStatus(str(rows[0][0]))
+    active = await _rows(
+        conn,
+        "SELECT 1 FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND state = 'ACTIVE'",
+        (run_id, repo_id),
+    )
+    target = _stub_completion_correction(current_status=current, has_active_stub=bool(active))
+    if target is None:
+        return False
+    stamp = _iso(now)
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "UPDATE phases SET status = ?, updated_at = ? "
+            " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status = ?",
+            (target.value, stamp, run_id, repo_id, int(Phase.TRANSFORM), current.value),
+        )
+
+    await writer.submit(unit)
+    return True
 
 
 async def _owned_coordinate_keys(conn: aiosqlite.Connection) -> frozenset[str]:

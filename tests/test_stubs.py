@@ -39,6 +39,7 @@ from fleet.models.enums import (
 )
 from fleet.models.tasks import StubRecord, VerificationReport
 from fleet.orchestrator.budgets import RevalidationBudgetExhausted
+from fleet.orchestrator.reentry import BlockerState
 from fleet.orchestrator.stubs import (
     AbandonReason,
     HeldStub,
@@ -47,13 +48,17 @@ from fleet.orchestrator.stubs import (
     RevalidationPolicy,
     StubFinding,
     StubTransition,
+    StubTrigger,
     abandon_by_operator,
     apply,
+    build_stub_record,
+    detect_stub_triggers,
     next_round_record,
     plan_revalidation,
     reconcile,
     revalidation_key,
     settle_revalidation,
+    stub_completion_correction,
     supersede,
 )
 
@@ -524,4 +529,114 @@ def test_the_carve_out_is_bounded_by_the_merge_wait_window() -> None:
             [_stub()], {"acme-widget": unknown_age}, now=NOW, open_pr_max_age_s=timeout
         ).decisions
         == ()
+    )
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — TRANSFORM-phase stub-creation DECISION: trigger detection,
+# `StubRecord` construction, and the `RUNNING -> DEGRADED` correction predicate.
+# --------------------------------------------------------------------------------------
+
+
+def _rhi_state() -> BlockerState:
+    return BlockerState(phase_statuses=frozenset({RepoStatus.REQUIRES_HUMAN_INTERVENTION}))
+
+
+def test_detect_stub_triggers_fires_on_a_dispatched_consumer_of_an_rhi_provider() -> None:
+    """The positive case: consumer `C` is dispatched this wave, has an edge to provider `P`
+    (`_ordering_pairs`'s own `(provider, dependent)` pair shape), and `P` is terminally RHI."""
+    pairs = [("acme-provider", "acme-consumer")]
+    states = {"acme-provider": _rhi_state()}
+    found = detect_stub_triggers(["acme-consumer"], pairs, states)
+    assert found == (
+        StubTrigger(consumer_repo_id="acme-consumer", provider_repo_id="acme-provider"),
+    )
+
+
+def test_detect_stub_triggers_does_not_fire_when_the_provider_is_not_rhi() -> None:
+    """Discriminating mutation 1: same edge, same dispatch, provider status changed away from
+    REQUIRES_HUMAN_INTERVENTION -> no longer a candidate (old-passes/new-fails against the test
+    above)."""
+    pairs = [("acme-provider", "acme-consumer")]
+    states = {"acme-provider": BlockerState(phase_statuses=frozenset({RepoStatus.SUCCEEDED}))}
+    assert detect_stub_triggers(["acme-consumer"], pairs, states) == ()
+
+
+def test_detect_stub_triggers_does_not_fire_without_the_edge() -> None:
+    """Discriminating mutation 2: the qualifying edge is removed -> no longer a candidate."""
+    states = {"acme-provider": _rhi_state()}
+    assert detect_stub_triggers(["acme-consumer"], [], states) == ()
+
+
+def test_detect_stub_triggers_does_not_fire_for_an_undispatched_consumer() -> None:
+    """Discriminating mutation 3 (this wave's own admission gate): the edge and the RHI status
+    both hold, but `C` is not among this wave's dispatched repos -> no longer a candidate. This
+    is the wave-scoping half; confidence/ordering-suppression are `_ordering_pairs`'s own filter
+    and are proven at the `cli._detect_transform_stub_triggers` layer that actually runs the
+    query (`tests/test_cli.py`), not re-derived here."""
+    pairs = [("acme-provider", "acme-consumer")]
+    states = {"acme-provider": _rhi_state()}
+    assert detect_stub_triggers([], pairs, states) == ()
+
+
+def test_detect_stub_triggers_ignores_a_provider_absent_from_provider_states() -> None:
+    """A provider with no `BlockerState` at all (no `phases` rows) is not a trigger — mirrors
+    `stub_permits_removal`'s own fail-closed default for an unresolvable name."""
+    pairs = [("acme-provider", "acme-consumer")]
+    assert detect_stub_triggers(["acme-consumer"], pairs, {}) == ()
+
+
+def test_build_stub_record_published_artifact() -> None:
+    record = build_stub_record(
+        run_id=uuid4(),
+        consumer_repo_id="acme-consumer",
+        provider_repo_id="acme-provider",
+        coord_key="maven:com.acme:provider",
+        pinned_version="1.2.3",
+        now=NOW,
+    )
+    assert record.fidelity is StubFidelity.PUBLISHED_ARTIFACT
+    assert record.pinned_version == "1.2.3"
+    assert record.state is StubState.ACTIVE
+    assert record.consumer_repo_ids == ["acme-consumer"]
+    assert record.provider_repo_id == "acme-provider"
+
+
+def test_build_stub_record_empty_failing_when_no_pinned_version() -> None:
+    """§3.5 item 2: no published artifact -> `EMPTY_FAILING`, never a silent `PUBLISHED_ARTIFACT`
+    claim with nothing pinned. Discriminates against the test above (fidelity flips when the one
+    input — `pinned_version` — flips)."""
+    record = build_stub_record(
+        run_id=uuid4(),
+        consumer_repo_id="acme-consumer",
+        provider_repo_id="acme-provider",
+        coord_key="maven:com.acme:provider",
+        pinned_version=None,
+        now=NOW,
+    )
+    assert record.fidelity is StubFidelity.EMPTY_FAILING
+    assert record.pinned_version is None
+
+
+def test_stub_completion_correction_fires_only_on_succeeded_with_an_active_stub() -> None:
+    """The `(current_status, has_active_stub)` truth table: `DEGRADED` iff BOTH `SUCCEEDED` and
+    an active stub exist; every other combination is a no-op (`None`) — the old-passes/new-fails
+    shape lives in flipping either input alone."""
+    assert (
+        stub_completion_correction(current_status=RepoStatus.SUCCEEDED, has_active_stub=True)
+        is RepoStatus.DEGRADED
+    )
+    # Flip `has_active_stub` alone -> no correction.
+    assert (
+        stub_completion_correction(current_status=RepoStatus.SUCCEEDED, has_active_stub=False)
+        is None
+    )
+    # Flip `current_status` alone -> no correction, even with an active stub.
+    assert (
+        stub_completion_correction(current_status=RepoStatus.RUNNING, has_active_stub=True)
+        is None
+    )
+    assert (
+        stub_completion_correction(current_status=RepoStatus.DEGRADED, has_active_stub=True)
+        is None
     )

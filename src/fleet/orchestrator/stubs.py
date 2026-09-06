@@ -64,12 +64,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 from typing import Final
-from uuid import uuid4
+from uuid import UUID, uuid4
 
-from fleet.models.enums import FailureClass, PrState, RepoStatus, StubState
+from fleet.models.enums import FailureClass, PrState, RepoStatus, StubFidelity, StubState
 from fleet.models.repo import RepoId
 from fleet.models.tasks import StubRecord, VerificationReport
 from fleet.orchestrator.budgets import RevalidationBudgetExhausted
+from fleet.orchestrator.reentry import BlockerState
 
 __all__ = [
     "ALLOWED_TRANSITIONS",
@@ -85,13 +86,17 @@ __all__ = [
     "StubDecision",
     "StubFinding",
     "StubTransition",
+    "StubTrigger",
     "abandon_by_operator",
     "apply",
+    "build_stub_record",
+    "detect_stub_triggers",
     "next_round_record",
     "plan_revalidation",
     "reconcile",
     "revalidation_key",
     "settle_revalidation",
+    "stub_completion_correction",
     "supersede",
 ]
 
@@ -767,6 +772,143 @@ def next_round_record(stub: StubRecord, *, now: datetime) -> StubRecord:
         },
         deep=True,
     )
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — the TRANSFORM-phase stub-creation DECISION. Trigger
+# detection, `StubRecord` construction, and the `RUNNING -> DEGRADED` correction, all as pure
+# functions in the same "the caller persists" shape as the four transitions above (`apply()`'s
+# own docstring: "Persistence is still the caller's: this returns the row the single writer
+# should write"). No connection, no SQL: the async query/INSERT/UPDATE glue this leg also needs
+# lives in `cli.py` (`_detect_transform_stub_triggers`, `_create_stub_records`,
+# `_correct_transform_status_for_stubs`), the same split `orchestrator.reentry.
+# stub_permits_removal` (a pure predicate) and `cli._read_blocker_states`/`cli._apply_stub_
+# decisions` (the DB-touching callers) already use.
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class StubTrigger:
+    """One `(consumer, provider)` pair `detect_stub_triggers` found for THIS TRANSFORM wave:
+    `consumer_repo_id` is dispatched this wave, it has a live dependency edge (over the ordering
+    subgraph — `_ordering_pairs`'s own filter) to `provider_repo_id`, and the provider is
+    mechanically terminal at `REQUIRES_HUMAN_INTERVENTION` (§3.5.1's stub-creation trigger)."""
+
+    consumer_repo_id: RepoId
+    provider_repo_id: RepoId
+
+
+def detect_stub_triggers(
+    dispatched_repo_ids: Iterable[str],
+    ordering_pairs: Iterable[tuple[str, str]],
+    provider_states: Mapping[str, BlockerState],
+) -> tuple[StubTrigger, ...]:
+    """§37 Leg 1 step 1: which of `dispatched_repo_ids` need a stub this wave.
+
+    `ordering_pairs` is `_ordering_pairs`'s own return shape verbatim — `(provider_id,
+    dependent_id)`, i.e. `(dependency, dependent)` per that function's docstring — over the SAME
+    filter `_unit_deps` shares (`graph.dag_edge_kinds`, `confidence >= graph.min_confidence`,
+    `ordering_suppressed = 0`); this function does not re-derive that filter, it only consumes
+    its output, so reusing the real `_ordering_pairs` call is what makes the reuse real rather
+    than a restated SQL string that can drift from it.
+
+    There is no `repos.status` column (`schema.sql`'s `repos` table carries none) — a repo's
+    status is a `phases`-table fact, so "the provider's status is `REQUIRES_HUMAN_INTERVENTION`"
+    is read the same way `stub_permits_removal` already reads it: ANY of the provider's `phases`
+    rows, not ALL (RHI is mechanically terminal — once one phase is abandoned there, the whole
+    repo can never again produce landed work). `provider_states` is keyed by repo id, the exact
+    shape `cli._read_blocker_states` already returns.
+
+    A provider absent from `provider_states` (no `phases` row at all, or never resolved) is not a
+    trigger — there is no RHI to find, mirroring `stub_permits_removal`'s own fail-closed default
+    for an unresolvable name.
+    """
+    dispatched = set(dispatched_repo_ids)
+    seen: set[tuple[str, str]] = set()
+    found: list[StubTrigger] = []
+    for provider_id, consumer_id in ordering_pairs:
+        if consumer_id not in dispatched:
+            continue
+        state = provider_states.get(provider_id)
+        if state is None or RepoStatus.REQUIRES_HUMAN_INTERVENTION not in state.phase_statuses:
+            continue
+        key = (consumer_id, provider_id)
+        if key in seen:
+            continue
+        seen.add(key)
+        found.append(StubTrigger(consumer_repo_id=consumer_id, provider_repo_id=provider_id))
+    return tuple(sorted(found, key=lambda t: (t.consumer_repo_id, t.provider_repo_id)))
+
+
+def build_stub_record(
+    *,
+    run_id: UUID,
+    consumer_repo_id: RepoId,
+    provider_repo_id: RepoId,
+    coord_key: str,
+    pinned_version: str | None,
+    max_revalidation_rounds: int = 2,
+    now: datetime,
+) -> StubRecord:
+    """§37 Leg 1 step 2: the FIRST `StubRecord` of a stub's lifecycle (`state=ACTIVE`,
+    `revalidation_round=0` implicitly — that column is not a `StubRecord` field; the caller's
+    INSERT supplies it, per `schema.sql`'s own comment: "0 while ACTIVE").
+
+    `pinned_version is None` is the ENTIRE fidelity decision (§3.5 item 2: "If no published
+    artifact exists... the stub is an empty target that fails at build time") — `EMPTY_FAILING`
+    exactly then, `PUBLISHED_ARTIFACT` otherwise. `StubRecord._fidelity_matches_pin` re-validates
+    this at construction, so a caller cannot pass a contradictory pair and have it silently
+    accepted.
+    """
+    fidelity = (
+        StubFidelity.EMPTY_FAILING if pinned_version is None else StubFidelity.PUBLISHED_ARTIFACT
+    )
+    return StubRecord(
+        run_id=run_id,
+        coord_key=coord_key,
+        provider_repo_id=provider_repo_id,
+        consumer_repo_ids=[consumer_repo_id],
+        fidelity=fidelity,
+        pinned_version=pinned_version,
+        max_revalidation_rounds=max_revalidation_rounds,
+        created_at=now,
+        state_changed_at=now,
+    )
+
+
+def stub_completion_correction(
+    *, current_status: RepoStatus, has_active_stub: bool
+) -> RepoStatus | None:
+    """§37 Leg 1 step 3: does a TRANSFORM dispatch that just completed `SUCCEEDED` actually earn
+    `DEGRADED` instead (§3.5 item 3: "Each stubbed dependent goes to `RepoStatus.DEGRADED`, not
+    `SUCCEEDED`")?
+
+    Pure decision, same split as every function above: `None` means "no correction", never "no
+    stub" — a caller with `has_active_stub=False` gets `None` regardless of `current_status`, and
+    a caller whose repo is not `SUCCEEDED` (still `RUNNING`, already `DEGRADED`, ...) also gets
+    `None`, because there is nothing this decision needs to do to it.
+
+    **Disclosed, not silently patched around: writing the returned `DEGRADED` requires bypassing
+    `models.enums.transition()`.** `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` is the empty
+    set — `SUCCEEDED` is modeled as terminal, and the generic completion path that reaches it
+    (`orchestrator.runner.PhaseRunner._dispatch`'s `execution.status is RepoStatus.SUCCEEDED`
+    branch, itself downstream of `workers.base.WorkerBase.execute`'s `status =
+    RepoStatus.SUCCEEDED` on `result.status == "ok"`) is shared by every phase and every worker
+    type and is out of this leg's scope to edit. There is no WorkerResult status that reaches
+    `DEGRADED` through that generic path at all today — matching `docs/CRITERIA_PLAN.md` §37's
+    own "nothing writes a real DEGRADED TRANSFORM-phase row in production yet". A caller applying
+    this decision (`cli._correct_transform_status_for_stubs`) therefore writes `phases.status`
+    directly, the same way `cli._quarantine_impl` already writes `status = 'SKIPPED'` via raw SQL
+    for its own, different reason (an operator action outside any worker's lease) — precedent for
+    a caller correcting `phases.status` outside `transition()`'s ordinary graph, not a novel
+    pattern this function invents. Whether this should instead be modeled as a new
+    `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` edge (a state-machine change, ADR-shaped per the
+    ADR-0113 precedent) is left to whichever round wires this leg's write for real — flagged, not
+    decided, here.
+    """
+    if current_status is RepoStatus.SUCCEEDED and has_active_stub:
+        return RepoStatus.DEGRADED
+    return None
 
 
 # --------------------------------------------------------------------------------------

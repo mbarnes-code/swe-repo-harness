@@ -2195,6 +2195,15 @@ hits, 682 lines). Both facts are independently true and unreconciled. This is na
 unresolved and needing adjudication by whichever task/round eventually scopes the
 stub-creation-logic bundle's dispatch — it is not adjudicated by this update.
 
+**Update, round VI task 67 (2026-09-06) — resolved.** `docs/SPEC.md` §3.5 item 1 now names the
+TRANSFORM-phase decision site explicitly, immediately before the `workers/buildgen.py` emission
+sentence quoted above (which stays correct, unchanged, describing the render step only). See that
+task's commit for the SPEC wording and the landed decision-half functions
+(`orchestrator.stubs.detect_stub_triggers`/`build_stub_record`/`stub_completion_correction`,
+`cli._detect_transform_stub_triggers`/`_create_stub_records`/`_correct_transform_status_for_stubs`
+— Leg 1 of the bundle scoped above; the BUILD-phase render half is Leg 2, separately dispatched).
+This paragraph is kept intact per CLAUDE.md's "annotate, never rewrite" ledger discipline.
+
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
 this entry for the final piece (all 20 sub-clauses COVERED); everything below is kept as history.**

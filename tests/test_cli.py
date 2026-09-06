@@ -8373,3 +8373,348 @@ def test_promote_one_pr_reports_a_failed_body_edit_and_never_pushes_or_marks_rea
     assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip, (
         "a failed body edit must not leave the branch force-pushed anyway"
     )
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — TRANSFORM-phase stub-creation DECISION, the DB-touching half:
+# `_detect_transform_stub_triggers`, `_create_stub_records`, `_correct_transform_status_for_stubs`.
+# --------------------------------------------------------------------------------------
+
+
+async def _seed_stub_trigger_fixture(
+    db_path: Path,
+    *,
+    now: datetime,
+    confidence: float = 0.9,
+    provider_status: str = "REQUIRES_HUMAN_INTERVENTION",
+    with_edge: bool = True,
+    published_version: str | None = "2.0.0",
+) -> None:
+    """One `run`, two `repos` (`acme-provider`/`acme-consumer`), one qualifying edge (unless
+    `with_edge=False`), a `coordinates` row `acme-provider` owns, and `acme-provider`'s TRANSFORM
+    `phases` row forced to `provider_status` via raw SQL (the same test-setup shape round VI
+    task 13's own fixture used: `propagate_blocked` has no stub-awareness, so a raw write is how
+    the fixture reaches a state the ordinary write paths cannot produce standalone)."""
+    import aiosqlite
+
+    from fleet.models.enums import EdgeKind, NodeKind
+    from fleet.models.graph import edge_key_for
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import EdgeRow, SqliteStateRepository
+
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t67-stub-trigger-fixture") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer"):
+                await repo.upsert_repo(
+                    repo_id,
+                    name=repo_id,
+                    url=f"https://example.invalid/{repo_id}.git",
+                    now=now,
+                )
+            await repo.upsert_phase(
+                RUN_ID, "acme-provider", Phase.TRANSFORM, now=now, max_attempts=3
+            )
+            if with_edge:
+                key = edge_key_for(
+                    src_kind=NodeKind.REPO,
+                    src_id="acme-consumer",
+                    dst_kind=NodeKind.REPO,
+                    dst_ref="maven:com.acme:provider",
+                    kind=EdgeKind.DECLARED_DEP,
+                    evidence_path="pom.xml",
+                    evidence_line=1,
+                )
+                await repo.insert_edges(
+                    [
+                        EdgeRow(
+                            edge_key=key,
+                            run_id=RUN_ID,
+                            src_id="acme-consumer",
+                            dst_id="acme-provider",
+                            dst_coord_key="maven:com.acme:provider",
+                            kind=EdgeKind.DECLARED_DEP,
+                            base_confidence=1.0,
+                            confidence=confidence,
+                            evidence_path="pom.xml",
+                            evidence_line=1,
+                            detected_at=now.isoformat(),
+                        )
+                    ]
+                )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                    "  owner_repo_id, first_seen_at) "
+                    "VALUES (?, 'maven', 'com.acme', 'provider', ?, ?, ?)",
+                    (
+                        "maven:com.acme:provider",
+                        published_version,
+                        "acme-provider",
+                        now.isoformat(),
+                    ),
+                )
+                await conn.execute(
+                    "UPDATE repos SET primary_coord_key = ? WHERE repo_id = ?",
+                    ("maven:com.acme:provider", "acme-provider"),
+                )
+                await conn.execute(
+                    "UPDATE phases SET status = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    (provider_status, RUN_ID, "acme-provider", int(Phase.TRANSFORM)),
+                )
+
+            await writer.submit(unit)
+        finally:
+            await read_conn.close()
+
+
+async def test_detect_transform_stub_triggers_finds_a_dispatched_consumer_of_an_rhi_provider(
+    tmp_path: Path,
+) -> None:
+    """§37 Leg 1 step 1: the positive case, run through the REAL `_ordering_pairs` query and the
+    REAL `_read_blocker_states` query — not the pure `detect_stub_triggers` predicate alone
+    (`tests/test_stubs.py` already proves that in isolation). This is what actually proves
+    `_ordering_pairs`'s filter (confidence, edge kind) is reused rather than re-derived.
+    """
+    from fleet.cli import _detect_transform_stub_triggers
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "base" / "fleet.db"
+    await _seed_stub_trigger_fixture(db_path, now=now)
+    read_conn = await connect_ro(db_path)
+    try:
+        found = await _detect_transform_stub_triggers(
+            read_conn, settings, RUN_ID, ["acme-consumer"]
+        )
+    finally:
+        await read_conn.close()
+    assert found == (
+        StubTrigger(consumer_repo_id="acme-consumer", provider_repo_id="acme-provider"),
+    )
+
+
+async def test_detect_transform_stub_triggers_respects_the_ordering_subgraph_filter(
+    tmp_path: Path,
+) -> None:
+    """Discriminating mutations run through the REAL query: a non-RHI provider, no edge, and
+    confidence dropped below `graph.min_confidence` (default 0.5) each make the same fixture
+    produce no trigger — the half `tests/test_stubs.py`'s pure-function tests cannot reach,
+    because `detect_stub_triggers` itself takes an already-filtered edge set."""
+    from fleet.cli import _detect_transform_stub_triggers
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+    assert settings.config.graph.min_confidence == 0.5
+
+    cases = {
+        "not-rhi": {"provider_status": "SUCCEEDED"},
+        "no-edge": {"with_edge": False},
+        "low-confidence": {"confidence": 0.1},
+    }
+    for name, kwargs in cases.items():
+        db_path = tmp_path / name / "fleet.db"
+        await _seed_stub_trigger_fixture(db_path, now=now, **kwargs)  # type: ignore[arg-type]
+        read_conn = await connect_ro(db_path)
+        try:
+            found = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-consumer"]
+            )
+        finally:
+            await read_conn.close()
+        assert found == (), f"{name}: expected no trigger, got {found}"
+
+
+async def test_create_stub_records_inserts_a_valid_row_for_both_fidelities(
+    tmp_path: Path,
+) -> None:
+    """§37 Leg 1 step 2: a real `stubs` INSERT via real SQLite for `PUBLISHED_ARTIFACT` (pinned
+    version present) and `EMPTY_FAILING` (`pinned_version IS NULL`) — the schema CHECK
+    constraints are the proof, not a mock."""
+    from fleet.cli import _create_stub_records, _RepoFacts
+    from fleet.models.repo import Coordinate
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    for name, version in (("published", "2.0.0"), ("empty-failing", None)):
+        db_path = tmp_path / name / "fleet.db"
+        await initialize_database(db_path)
+        async with StateWriter(db_path, owner=f"test-t67-create-{name}") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                await repo.upsert_run(
+                    RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+                )
+                for repo_id in ("acme-provider", "acme-consumer"):
+                    await repo.upsert_repo(
+                        repo_id,
+                        name=repo_id,
+                        url=f"https://example.invalid/{repo_id}.git",
+                        now=now,
+                    )
+                facts = {
+                    "acme-provider": _RepoFacts(
+                        dest_path=None,
+                        ecosystem=Ecosystem.MAVEN,
+                        published=Coordinate(
+                            ecosystem=Ecosystem.MAVEN,
+                            group="com.acme",
+                            name="provider",
+                            version_spec=version,
+                        ),
+                    )
+                }
+                trigger = StubTrigger(
+                    consumer_repo_id="acme-consumer", provider_repo_id="acme-provider"
+                )
+                created = await _create_stub_records(
+                    read_conn,
+                    writer,
+                    run_id=RUN_ID,
+                    triggers=[trigger],
+                    facts=facts,
+                    max_revalidation_rounds=2,
+                    now=now,
+                )
+                assert len(created) == 1
+                assert created[0].fidelity is (
+                    StubFidelity.PUBLISHED_ARTIFACT if version else StubFidelity.EMPTY_FAILING
+                )
+
+                # Idempotency: re-running against the unchanged database inserts no second row
+                # at revalidation_round=0 for the same (run_id, repo_id, stub_coord_key).
+                created_again = await _create_stub_records(
+                    read_conn,
+                    writer,
+                    run_id=RUN_ID,
+                    triggers=[trigger],
+                    facts=facts,
+                    max_revalidation_rounds=2,
+                    now=now,
+                )
+                assert created_again == (), (
+                    "a second call over an unchanged database must not insert a duplicate row"
+                )
+            finally:
+                await read_conn.close()
+
+        plain = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            rows = plain.execute(
+                "SELECT state, stub_fidelity, pinned_version, consumer_repo_id, "
+                "  provider_repo_id, revalidation_round FROM stubs WHERE run_id = ?",
+                (RUN_ID,),
+            ).fetchall()
+        finally:
+            plain.close()
+        assert rows == [
+            (
+                "ACTIVE",
+                "PUBLISHED_ARTIFACT" if version else "EMPTY_FAILING",
+                version,
+                "acme-consumer",
+                "acme-provider",
+                0,
+            )
+        ], f"{name}: exactly one CHECK-satisfying row expected, got {rows}"
+
+
+async def test_correct_transform_status_for_stubs_flips_succeeded_to_degraded(
+    tmp_path: Path,
+) -> None:
+    """§37 Leg 1 step 3: fires (`SUCCEEDED` -> `DEGRADED`) iff the dispatched repo's TRANSFORM
+    phase already reads `SUCCEEDED` AND it has an `ACTIVE` `stubs` row naming it as consumer.
+    Mutating the "has an active stub" condition alone flips the outcome (old-passes/new-fails)."""
+    import aiosqlite
+
+    from fleet.cli import _correct_transform_status_for_stubs
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+
+    async def seed(db_path: Path, *, with_active_stub: bool) -> None:
+        await initialize_database(db_path)
+        async with StateWriter(db_path, owner="test-t67-degraded-fixture") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                await repo.upsert_run(
+                    RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+                )
+                for repo_id in ("acme-consumer", "acme-provider"):
+                    await repo.upsert_repo(
+                        repo_id,
+                        name=repo_id,
+                        url=f"https://example.invalid/{repo_id}.git",
+                        now=now,
+                    )
+                await repo.upsert_phase(
+                    RUN_ID, "acme-consumer", Phase.TRANSFORM, now=now, max_attempts=3
+                )
+
+                async def unit(conn: aiosqlite.Connection) -> None:
+                    await conn.execute(
+                        "UPDATE phases SET status = 'SUCCEEDED' "
+                        " WHERE run_id = ? AND repo_id = 'acme-consumer' AND phase = ?",
+                        (RUN_ID, int(Phase.TRANSFORM)),
+                    )
+                    if with_active_stub:
+                        await conn.execute(
+                            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, "
+                            "  consumer_repo_id, provider_repo_id, pinned_version, bazel_label, "
+                            "  state, stub_fidelity, revalidation_round, "
+                            "  max_revalidation_rounds, state_changed_at, created_at) "
+                            "VALUES ('stub-1', ?, 'acme-consumer', "
+                            "  'maven:com.acme:provider', 'acme-consumer', 'acme-provider', "
+                            "  '2.0.0', '//third_party/stubs/maven/com/acme/provider:provider', "
+                            "  'ACTIVE', 'PUBLISHED_ARTIFACT', 0, 2, ?, ?)",
+                            (RUN_ID, now.isoformat(), now.isoformat()),
+                        )
+
+                await writer.submit(unit)
+            finally:
+                await read_conn.close()
+
+    for with_active_stub, expect_fired in ((True, True), (False, False)):
+        db_path = tmp_path / f"stub-{with_active_stub}" / "fleet.db"
+        await seed(db_path, with_active_stub=with_active_stub)
+        async with StateWriter(db_path, owner="test-t67-degraded-correct") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                fired = await _correct_transform_status_for_stubs(
+                    read_conn, writer, run_id=RUN_ID, repo_id="acme-consumer", now=now
+                )
+            finally:
+                await read_conn.close()
+        assert fired is expect_fired, f"with_active_stub={with_active_stub}"
+
+        plain = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            row = plain.execute(
+                "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-consumer'"
+                "  AND phase = ?",
+                (RUN_ID, int(Phase.TRANSFORM)),
+            ).fetchone()
+        finally:
+            plain.close()
+        expected_status = "DEGRADED" if expect_fired else "SUCCEEDED"
+        assert row == (expected_status,), f"with_active_stub={with_active_stub}: {row}"

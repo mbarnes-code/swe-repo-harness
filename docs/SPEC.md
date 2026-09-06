@@ -1660,7 +1660,12 @@ carrying no wave index, and every repo a resume demotes already has one).
 under `fleet transform|build --stub-blocked`) lets a dependent migrate against a generated
 placeholder instead of waiting for a human:
 
-1. For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
+1. **The decision to stub `r` for a given dependent is made in the TRANSFORM phase**
+   (`cli.py`'s `_detect_transform_stub_triggers`/`_create_stub_records`, round VI task 67 —
+   trigger detection against `r`'s terminal `REQUIRES_HUMAN_INTERVENTION` status, `StubRecord`
+   construction, and the `stubs` INSERT), **not** in `workers/buildgen.py`, which stays a pure
+   renderer with zero stub-awareness and only emits what the render step below describes.
+   For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
    `third_party/stubs/<coord_key_path>/` from `r`'s **published `Coordinate` alone** — no source
    from `r` is needed, which is the point. The stub is an external-registry dependency pinned to
    `r`'s last published version, produced by
