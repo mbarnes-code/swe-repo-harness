@@ -1444,6 +1444,32 @@ exactly as sized above, undiminished. `docs/INTEGRATION_HONESTY.md` D111's headi
 (a dated in-body marker records Leg A there); this criterion is not marked DONE. Full account:
 `.superpowers/sdd/round-VI-criteria-closure/task-55-report.md`.
 
+**Correction, round VI task 60 (2026-09-06) — "Leg C1 collision-join is briefable now" (research-32's
+own framing above, inherited into this file uncritically) was wrong; C1 needs a scoping pass, same
+as C2 already did.** Dispatched as a build task assuming the raw `FILE_PATH`-collision signal was
+already computed and just needed connecting to hoisted-contract data. Task 60's own investigation
+(from primary sources, since it could not read `task-60-brief.md`/`research-32-report.md` — an
+unrelated worktree-provisioning gap, not a finding about this criterion) found that premise false:
+`cli.py::_sequence_impl`'s `audit_collisions(...)` call passes no `files=` argument at all today —
+`graph/collisions.py::_file_collisions` never receives real data in production, because `D114`
+piece (c) (the whole-fleet post-relocation path computation that would feed it) was explicitly
+**retired**, not deferred (see `D114`'s own entry above). That retirement was for an unrelated
+reason (§12.27's `_file_collisions` can never satisfy an exit-6 `blocking` clause regardless of
+data) and does not, by itself, retire Leg C1's different use of the same signal — but it does mean
+the join's *other side* (which repos, at which post-relocation paths, could ever land on a
+`hoist_target_path`) has no real data source today, and building one is exactly D114(c)'s retired
+scope: a real, multi-hundred-line feature, not a small join. The narrower alternative (checking
+only a contract's own already-known carriers) is smaller but does not detect what SPEC's own case
+(ii) text describes (an *unrelated* repo's file colliding with the hoist-claimed path) — building
+that and calling it "Leg C1" would be a scope-narrowing overclaim (CLAUDE.md Guardrail 6).
+**Leg C1 is reclassified: NOT briefable as a small join. Needs its own scoping research pass
+(same shape as C2's, which this file already correctly flagged) before any brief is written** —
+resolving whether to resurrect D114(c)'s whole-fleet join (for Leg C1's own purpose, not §12.27's
+retired one) or find a smaller sound design neither task 60 nor this file's prior framing found.
+Task 60 correctly reported NEEDS_CONTEXT rather than guessing between the two — no code was
+written, nothing to review or merge. Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-60-report-attempt1.md`.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (landed round N task 3, `7cf3147`, reviewed Approved).** SPEC.md item 32's text has three
 checkable parts plus one explicit carve-out: (1) `discover()` key set equals `set(Ecosystem)`
