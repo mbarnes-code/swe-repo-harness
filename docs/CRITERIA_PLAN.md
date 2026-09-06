@@ -1470,6 +1470,21 @@ Task 60 correctly reported NEEDS_CONTEXT rather than guessing between the two �
 written, nothing to review or merge. Full account:
 `.superpowers/sdd/round-VI-criteria-closure/task-60-report-attempt1.md`.
 
+**Update, round VI task 59 (2026-09-06) — Leg B landed: the `git revert -m 1`/`Fleet-*`-trailer
+primitive, standalone.** `Git.revert`/`Git.abort_revert` (`src/fleet/vcs/git.py`) and
+`commits.revert_and_commit` (`src/fleet/vcs/commits.py`) give a future Leg C2/D everything SPEC
+§3.1's rollback procedure asks for: stage a `-m 1` revert of a merged hoist without committing,
+detect a genuine conflict as a settled `False` (mirroring `Git.rebase`'s own contract) rather than
+an exception, and stamp the resulting commit with the standard six `Fleet-*` trailers in the same
+call — proven against a real git repo (a genuine two-parent merge commit, a genuine revert
+conflict) with 7 new tests, 2 of which are mutation-verified discriminators. **This leg has zero
+call sites anywhere outside its own tests — nothing is wired.** `ContractStatus.FAILED` is still
+never assigned, `--forbid-hoist` is still stubbed, and cases (ii)'s detection/rollback-trigger
+logic (Legs C, D, E) remain exactly as sized in research-32/task-55's update above; only the git
+mechanics they will call now exist. `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN` (a
+dated in-body marker records Leg B there); this criterion is still not marked DONE. Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-59-report.md`.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (landed round N task 3, `7cf3147`, reviewed Approved).** SPEC.md item 32's text has three
 checkable parts plus one explicit carve-out: (1) `discover()` key set equals `set(Ecosystem)`

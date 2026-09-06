@@ -8740,6 +8740,26 @@ measured" paragraph above about `FAILED`/`git revert` remain true of everything 
 `docs/CRITERIA_PLAN.md`'s §31 entry records the same split. Full details:
 `.superpowers/sdd/round-VI-criteria-closure/task-55-report.md`.
 
+**Leg B landed 2026-09-06 (round VI task 59) — the `git revert -m 1` + `Fleet-*`-trailer primitive
+built and proven standalone; still not wired into anything.** `Git.revert(sha, *, mainline=1)`
+(`src/fleet/vcs/git.py`) runs `git revert --no-commit -m <mainline> <sha>`: `True` on a clean
+stage, `False` on a settled conflict (`REVERT_HEAD` resolves — caller must `abort_revert()`),
+`GitCommandError` for anything else (verified empirically that git 2.43 accepts `-m 1` on an
+ordinary single-parent commit, and only refuses a mainline the commit lacks — this method does
+not itself validate merge-vs-non-merge). `commits.revert_and_commit` stages then stamps the
+standard six `Fleet-*` trailers via the existing `commit()` call, returning `RevertOutcome`
+(`commit_sha`, `conflicted`) — mirrors `apply_and_commit`'s stage/commit split, deliberately
+without an `already_applied` idempotency guard of its own (a revert has no `Fleet-Patch-Id` to
+check against; that question belongs to whichever future leg wires this up and knows what
+trailer to look for). Proof: 7 new tests in `tests/test_vcs.py` against a real git repo,
+including a genuine two-parent merge commit and a genuine `-m 1` revert conflict; mutation-tested
+(dropping `--no-commit`, and hardcoding `mainline`) — both mutations independently reddened the
+tests built to catch them, confirmed via a backup-diff zero-change gate before and after. **This
+is Leg B only.** `ContractStatus.FAILED` is still never assigned anywhere in `src/fleet/`, and
+this primitive has **zero call sites** outside its own tests — legs A (landed) and B (this leg)
+are the only two of the five built; C, D, and E remain exactly as sized in research-32. Full
+details: `.superpowers/sdd/round-VI-criteria-closure/task-59-report.md`.
+
 ## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
 adapter — no adapter can ever emit a real nonzero test target
 
