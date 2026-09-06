@@ -8963,3 +8963,66 @@ helper is a genuine, non-tautological `repos.baseline_ok IS NULL` read against r
 **Not yet built:** the native baseline build measurement itself — what repo kinds it can run
 against, how it maps to `baseline_ok`/`baseline_test_count`, and where in Phase 1/Phase 3 it
 belongs. No design choice is made here.
+
+## D118 — OPEN (fix included on this branch, pending review/merge). `BuildverifyWorker.
+_test_query_argv` passed the SANDBOXED `--repository_cache`/`--disk_cache` flag values to a query
+that always runs on the HOST, breaking §12.11's real test-count comparison for every sandboxed
+build
+
+**Found by round VI task 57 (2026-09-06), while building §12.11 Task B's sandboxed combination
+fixture** (`docs/CRITERIA_PLAN.md` §11, `research-24-report.md`) — the first time this codebase
+ever drove a real `--network=none` `bazel test` of a genuinely non-vacuous Python target (D112,
+round VI task 53) with `repos.baseline_ok = 1` seeded (D116 is why that seeding is direct rather
+than through the shipped pipeline; disclosed in this task's own report, not this entry's concern).
+Verified free before allocating: form-agnostic sweep (`grep -oE '\bD[0-9]+\b' docs/*.md`) found
+`D117` as the highest allocated number.
+
+**The bug, as measured.** `_test_query_argv`'s own docstring states the query is "Host-only,
+deliberately" — it is never wrapped in `docker_run_argv`, always `payload.bazel_bin` invoked
+directly by the worker's `runner()`. But its cache-flag construction read
+`cache.flag(sandboxed=payload.image is not None)` — the SAME expression `_bazel_argv` correctly
+uses for the build/test steps, which genuinely do run inside the container when `payload.image`
+is set. Copied without adjusting for the one caller that must always answer `sandboxed=False`.
+Under a sandboxed `payload` (`image` set, exactly this criterion's own scenario), this emitted
+`--repository_cache=/cache/repos`/`--disk_cache=/cache/disk` — the CONTAINER-side mount targets —
+for a `bazel query` process running on the HOST filesystem, where `/cache` does not exist.
+Measured directly, twice, against the real fixture before the fix (`docker` daemon on host,
+`fleet-build:9.2.0-bookworm` image, `--network=none` build+test steps both real and both exit 0):
+`bazel query` failed with `ERROR: [unix_jni.cc:471] /cache (Permission denied)` /
+`ERROR: could not acquire lock on repo contents cache`, taking the whole `buildverify` step down
+as a `BUILD_ERROR` before `migrated_test_count` was ever measured — silently, since neither the
+build nor the test step (the ones an operator's first instinct is to inspect) show any failure.
+`CacheMount.flag`'s own docstring (`src/fleet/workers/buildverify.py`) names this exact class of
+bug ahead of time ("Sandboxed and unsandboxed are different paths and getting it backwards is
+silent... Neither fails loudly"); this was that bug, on the one caller whose answer is always
+`False`.
+
+**Consequence.** Every sandboxed `fleet build` of a repo with `repos.baseline_ok = 1` hit this —
+not a narrow fixture-only case. §12.11's test-count comparison (the sentence D116 already showed
+was structurally unreachable under the shipped default config for a DIFFERENT reason) was ALSO
+broken on the one path — sandboxed, `baseline_ok` seeded or otherwise made `True` — where D116's
+gap does not apply. The two gaps are independent and this task found the second one only because
+fixing/seeding around D116 for one fixture repo was enough to reach it for the first time.
+
+**The fix, on this branch.** `_test_query_argv` now calls `cache.flag(sandboxed=False)`
+unconditionally, matching its own docstring's stated intent — the query always runs host-side
+regardless of whether the payload's build/test steps are sandboxed. Verified end to end, real
+Docker/Bazel, `tests/test_build_e2e.py::
+test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`: PRE-fix, the
+exact `/cache (Permission denied)` error above, reproduced twice; POST-fix, the same fixture's
+sandboxed build of `task57-happy-py` (`baseline_test_count = 1`, real migrated count 1) succeeds
+end to end, and a second, deliberately-shrunk fixture (`task57-shrink-py`, `baseline_test_count =
+99`, real migrated count 1) correctly reaches `TEST_FAILURE`/`REQUIRES_HUMAN_INTERVENTION` via the
+real `test_count_regressed` comparison — not via `no_test_targets`/`tests_lost`, which stays green
+throughout (both real `docker run --network=none` build/test steps exit 0), exactly the
+discriminator this criterion's own `tests_query` mechanism (Task A, round VI task 38/53) exists to
+prove. Test passed 3/3 consecutive real runs. `mypy`/`ruff` clean; `tests/test_workers_build.py`
+(87/87) and `tests/test_build_e2e.py -m "not integration"` (51/51) show no regression from the
+`sandboxed=False` change.
+
+**Also touched, same task:** `docker/fleet-build.Dockerfile` now installs the full `python3`
+package (not `-minimal`, which measurably lacked the stdlib `uuid` module `rules_python`'s own
+`py_test`/`py_binary` bootstrap stub imports) — a separate, pre-existing infrastructure gap this
+task's fixture surfaced first (the image never had ANY `python3`, so this codebase had never
+before run a real `py_test` under this sandbox at all), fixed and disclosed in the Dockerfile's
+own comments rather than in this entry, since it is not a `src/fleet/` defect.

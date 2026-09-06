@@ -1271,23 +1271,36 @@ class BuildverifyWorker(BaseWorker[BuildverifyInput, BuildverifyOutput]):
     def _test_query_argv(self, payload: BuildverifyInput) -> tuple[str, ...]:
         """`bazel query --output=label 'tests(//<dest>/...)'` — §12.11's real count.
 
-        Host-only, deliberately, for the reason `BuildverifyInput.image` is not consulted here:
-        wiring this to run INSIDE the `--network=none` sandbox is a separate, later task (this
-        one proves the count-comparison mechanism against the existing unsandboxed real-bazel
-        path — see that task's brief). A query needs no `--build_event_json_file` (nothing
-        executes) and no `--jobs` (nothing to parallelize), so it borrows only the two flags
-        `_bazel_argv` shares with every bazel invocation this worker makes: `--keep_going`, so
-        one unparseable package cannot hide the rest of the closure, and the cache flags, which
-        loading-phase resolution needs exactly as much as build does (the same `CacheMount`
-        objects, on purpose — see `_bazel_argv`'s docstring on why a mount and its flag must
-        never name different directories).
+        Host-only, deliberately, for the reason `BuildverifyInput.image` is not consulted for
+        WHICH BINARY runs this query — always `payload.bazel_bin` on the host, never wrapped in
+        `docker_run_argv`: wiring this to run INSIDE the `--network=none` sandbox is a separate,
+        later task (this one proves the count-comparison mechanism against the existing
+        unsandboxed real-bazel path — see that task's brief). A query needs no
+        `--build_event_json_file` (nothing executes) and no `--jobs` (nothing to parallelize), so
+        it borrows only the two flags `_bazel_argv` shares with every bazel invocation this
+        worker makes: `--keep_going`, so one unparseable package cannot hide the rest of the
+        closure, and the cache flags, which loading-phase resolution needs exactly as much as
+        build does (the same `CacheMount` objects, on purpose — see `_bazel_argv`'s docstring on
+        why a mount and its flag must never name different directories).
+
+        **The cache flags ARE unconditionally host-side (`sandboxed=False`), unlike
+        `_bazel_argv`'s.** D118 (`docs/INTEGRATION_HONESTY.md`, round VI task 57): this method
+        used to pass `sandboxed=payload.image is not None` here too — copied from `_bazel_argv`
+        without noticing this method's own process never runs inside a container, so a sandboxed
+        `payload` produced `--repository_cache=/cache/repos`, the CONTAINER-side mount target,
+        for a query executed on the HOST, where `/cache` does not exist. Measured directly: `bazel
+        query` failed with `ERROR: [unix_jni.cc:471] /cache (Permission denied)` /
+        `could not acquire lock on repo contents cache`, silently taking down the whole
+        `buildverify` step (a `BUILD_ERROR`, §12.11's own count check never running) for every
+        sandboxed build whose repo has `baseline_ok = True` — exactly the case this criterion
+        exists to prove. `CacheMount.flag`'s own docstring names this exact class of bug
+        ("Sandboxed and unsandboxed are different paths and getting it backwards is silent");
+        this was that bug, on the one caller that must always answer `False`.
         """
         argv = [payload.bazel_bin, "query", "--output=label"]
         if payload.keep_going:
             argv.append("--keep_going")
-        argv.extend(
-            cache.flag(sandboxed=payload.image is not None) for cache in payload.cache_mounts
-        )
+        argv.extend(cache.flag(sandboxed=False) for cache in payload.cache_mounts)
         argv.append(tests_query(payload.dest))
         return tuple(argv)
 

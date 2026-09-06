@@ -8,12 +8,33 @@
 # be baked in here or arrive through a bind-mounted cache. Every line below is load-bearing;
 # the comments say why, because several of them look removable and are not.
 #
-# What this image deliberately does NOT contain: `git`, `patch`, `unzip`/`xz-utils`, `python3`,
-# and any Go/Node/Rust toolchain. Those are supposed to arrive through the mounted Bazel
-# repository cache, and baking them in would mask an empty cache instead of surfacing it.
+# What this image deliberately does NOT contain: `git`, `patch`, `unzip`/`xz-utils`, and any
+# Go/Node/Rust toolchain. Those are supposed to arrive through the mounted Bazel repository
+# cache, and baking them in would mask an empty cache instead of surfacing it.
 # Named triggers to revisit: a build whose stderr names the missing binary (e.g. `git` for a
 # `git_repository`, `patch` for a `bazel_dep` with `patches = [...]`), or a cgo repo whose
 # linker error names a system library (`-lsqlite3` ⇒ add `libsqlite3-dev`).
+#
+# `python3` is the ONE exception to the paragraph above, added by round VI task 57 (§12.11 Task
+# B, the first time this codebase ever ran a real, non-vacuous `py_test` target inside this
+# sandbox). `rules_python`'s hermetic interpreter is real and IS what actually runs the test
+# body, but its `py_test`/`py_binary` bootstrap STUB SCRIPT is itself a `.py` file with a
+# `#!/usr/bin/env python3` shebang — a `PATH` lookup is needed just to START that stub, which
+# then locates and re-execs the real hermetic interpreter. With no `python3` anywhere on `PATH`,
+# `/usr/bin/env` fails before the hermetic toolchain is ever consulted: `bazel test` exits 0 at
+# the BUILD step (nothing about resolving the hermetic interpreter needs a fetch) and every real
+# Python test target fails at the TEST step with `Exit 127` / `/usr/bin/env: 'python3': No such
+# file or directory` — measured directly against this exact image, `docker run --network=none`,
+# before this line existed. This is the identical shape as the `gcc`/`libc6-dev` layer above:
+# a binary Bazel needs to BOOTSTRAP a toolchain, not the toolchain a build actually links
+# against, so baking it in does not mask an empty repository cache the way a full non-hermetic
+# `git`/`patch`/language-toolchain substitute would.
+#
+# **`python3-minimal` was tried first and measured insufficient**, not assumed so: the bootstrap
+# stub itself (not the test body) does `import uuid`, which `python3-minimal`'s pared-down
+# stdlib does not ship — `ModuleNotFoundError: No module named 'uuid'` at the stub's own line 23,
+# measured against this exact image before this comment existed. The full `python3` metapackage
+# is what the bootstrap stub's own imports need, so it is what is installed below.
 
 # ======================================================================================
 # Stage 1 — fetch. Isolated so that `curl` and its CA bundle never reach the final image:
@@ -71,6 +92,17 @@ FROM debian:bookworm-slim
 # time a build's stderr names a C++ source or `cc_binary` failing to link.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends gcc libc6-dev \
+ && rm -rf /var/lib/apt/lists/*
+
+# `python3`: see the module-level comment block above ("`python3` is the ONE exception...").
+# `rules_python` needs SOME `python3` resolvable via `/usr/bin/env` on `PATH` just to start its
+# `py_test`/`py_binary` bootstrap stub — the stub then locates and re-execs the real, hermetic,
+# `--repository_cache`-resolved interpreter itself. The FULL metapackage, not `-minimal`: the
+# bootstrap stub's own code (not the test body it hands off to) does `import uuid`, which
+# `python3-minimal` does not ship — measured directly against this image before this line was
+# the full package.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 \
  && rm -rf /var/lib/apt/lists/*
 
 # No JDK layer: the Bazel release binary is a self-extracting archive that EMBEDS a JRE

@@ -7197,3 +7197,267 @@ def test_a_go_module_with_no_sum_anywhere_in_the_graph_is_refused_rather_than_fe
 
     reap_bazel_state(bazel_output_user_root)
     bazel_output_user_root.mkdir(parents=True, exist_ok=True)
+
+
+
+
+# ---------------------------------------------------------------------------------------
+# 8. §12.11 Task B — real Bazel and real sandboxed Docker, TOGETHER (round VI task 57)
+# ---------------------------------------------------------------------------------------
+# `research-24-report.md` (round V criteria closure) sized this: real-lock-publish and
+# real-sandbox proof each existed separately, but never in the SAME run. Phase A below warms
+# `verify.repository_cache` and lets `cli._publish_module_lock` capture a REAL `MODULE.bazel.lock`
+# for the first time (every existing test of that mechanism drives `LockWritingBazel`, a
+# `FakeBazel` subclass) — AND it runs a real `bazel test` unsandboxed too, over `acme-widgets-py`
+# (D112's own fixture): the first live measurement in this file found that a `bazel build`-only
+# Phase A leaves the hermetic Python interpreter's RUNTIME (as opposed to its build-time stub)
+# never fetched into `verify.repository_cache`, which a `--network=none` Phase B cannot then
+# retrieve — `bazel test` under Docker failed every real target with `Exit 127` ("interpreter not
+# found") even though the SAME build step succeeded, until Phase A itself ran a real `bazel test`
+# once, unsandboxed, so the interpreter runtime the sandboxed runs need is already warm in the
+# cache before `--network=none` ever applies. This is reported in full in this task's report.
+#
+# Phase B reuses that warm cache and that published lock for TWO real `docker run --network=none`
+# builds of further, same-ecosystem (Python) repos, and asserts against the container's own
+# `attempts.exit_code` and its recorded `--network=none` argv — not merely the harness's summary
+# status (the ADR-0053/D13-style lesson this file repeats elsewhere).
+
+#: Two repos deliberately NOT added to the shared `POLYGLOT_REPOS` dict above: they exist only
+#: for this task's own fixture, and touching the shared dict for task-scoped repos would risk
+#: every other test that keys off it. Same shape as `acme-widgets-py`'s `test_widgets.py` (D112):
+#: a bare top-level `assert`, not a `def test_…():` `pytest` would collect but `py_test`'s
+#: `main=` (no test-framework `deps`) never calls — the real `bazel test` executes each file as a
+#: plain script, so a vacuous "pass" is not available here either.
+_TASK57_HAPPY_REPO: Final[dict[str, str]] = {
+    "pyproject.toml": (
+        '[project]\nname = "task57-happy-py"\nversion = "0.1.0"\ndependencies = []\n'
+    ),
+    "task57_happy_py/__init__.py": "def double(value: int) -> int:\n    return value * 2\n",
+    "task57_happy_py/test_happy.py": (
+        "def _double(value: int) -> int:\n"
+        "    return value * 2\n"
+        "\n"
+        "\n"
+        "assert _double(9) == 18\n"
+    ),
+}
+
+_TASK57_SHRINK_REPO: Final[dict[str, str]] = {
+    "pyproject.toml": (
+        '[project]\nname = "task57-shrink-py"\nversion = "0.1.0"\ndependencies = []\n'
+    ),
+    "task57_shrink_py/__init__.py": "def triple(value: int) -> int:\n    return value * 3\n",
+    "task57_shrink_py/test_shrink.py": (
+        "def _triple(value: int) -> int:\n"
+        "    return value * 3\n"
+        "\n"
+        "\n"
+        "assert _triple(7) == 21\n"
+    ),
+}
+
+
+def _add_local_repo(root: Path, name: str, files: dict[str, str]) -> None:
+    """`add_repos`'s own shape, for a repo dict that is NOT `POLYGLOT_REPOS` — called before
+    `fleet scan`, same as `add_repos`."""
+    sources = root.parent / "sources"
+    url = _make_repo(sources, name, files)
+    manifest = root / "config" / "repos.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8") + f"  - name: {name}\n    url: {url}\n",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("bazel") is None,
+    reason="bazel is not installed on this host; §12.11 Task B needs a real bazel end to end",
+)
+@pytest.mark.skipif(
+    shutil.which("docker") is None,
+    reason="docker is not installed on this host; §12.11 Task B needs a real sandboxed run",
+)
+def test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    tmp_path: Path,
+    bazel_cache_home: Path,
+    bazel_registry: str,
+    bazel_fetch_bazelrc: str,
+) -> None:
+    """§12.11 Task B (`docs/CRITERIA_PLAN.md` §11, `research-24-report.md`): the sandboxed path
+    proven end to end, reusing a lock a real Bazel actually wrote.
+
+    **Phase A — unsandboxed, over `acme-widgets-py` (D112's own fixture, zero external deps,
+    PyPI, a real `test_widgets.py`).** `real_build`'s own seam assertions
+    (`cli.BAZEL_RUNNER`/`FILTER_REPO_RUNNER`/`RESOLVER_RUNNER` all `None`) mean this really is
+    `tools/bin/bazel`, and its Phase 3 publish step really does write `MODULE.bazel.lock` onto
+    `integration` for the first time this mechanism has ever run against a real Bazel result.
+    `verify.repository_cache` is warmed the same way `real_build` always warms it. Building AND
+    testing `acme-widgets-py` here (rather than a test-less repo) is load-bearing, not
+    incidental — see the module docstring above.
+
+    **Phase B — sandboxed (the default), over TWO further same-ecosystem Python repos**
+    (`task57-happy-py`, `task57-shrink-py`), each cut from `integration`'s tip AFTER Phase A's
+    commit — so each build worktree already carries Phase A's lock before Bazel ever runs, and
+    `verify.repository_cache` is the SAME now-warm directory (`bazel_cache_home`'s
+    `XDG_CACHE_HOME` never changes mid-test; the repository cache path is a `fleet.yaml` setting
+    Phase A wrote once).
+
+    **D116, disclosed.** `docs/INTEGRATION_HONESTY.md`'s `## D116` entry (round VI task 54):
+    nothing in `src/fleet/` ever writes `repos.baseline_ok`, so the shipped preflight pipeline
+    can never itself produce `baseline_ok = 1` — this task's own brief anticipated exactly that
+    and sanctioned seeding it directly for this fixture, which is what the `UPDATE repos`
+    statements below do; the brief also said to disclose it rather than build a silent
+    workaround, so it is disclosed here and in the round's report.
+
+    **The Rule-12 discriminator, over `task57-shrink-py`.** Seeded with `baseline_test_count =
+    99`, far above its real (and correct) test count of 1. The OLD boolean check
+    (`no_test_targets`/`tests_lost`) stays green here — a real test target ran, under real
+    Docker, and passed, so `bazel test`'s own exit code is 0 — while the NEW
+    `test_count_regressed` check (`migrated_test_count < baseline_test_count`, over a REAL `bazel
+    query 'tests(//<dest>/...)'` count, not `FakeBazel`'s canned table) is what actually catches
+    the shrink. This is Task A's own precedent (`tests/test_workers_build.py::
+    test_real_bazel_catches_a_test_count_shrink_the_boolean_check_cannot_see`), reproduced here
+    reached through the full two-phase, sandboxed `fleet build` CLI path rather than at the
+    worker layer directly — proving the wiring discriminates in THIS fixture, not only that the
+    underlying property once did in a different one.
+
+    **A disclosed residual gap, found while building this fixture and NOT this task's to close.**
+    `BuildverifyWorker._test_query_argv` (`src/fleet/workers/buildverify.py`) runs `bazel query
+    'tests(//<dest>/...)'` HOST-ONLY, deliberately, by its own docstring: "wiring this to run
+    INSIDE the `--network=none` sandbox is a separate, later task." So while this test proves the
+    query is genuinely exercised as PART OF a sandboxed `fleet build` invocation (same payload,
+    same repo, same worker, real Docker for the build/test steps either side of it), the query
+    process itself is a HOST subprocess, not one recorded inside the container's own network
+    namespace — SPEC §12.11's literal sentence ties the count comparison to "inside a
+    `--network=none` container" in the same breath as the build/test exit codes, and that
+    specific sub-clause is not what this fixture proves. Left as found, not silently assumed
+    closed; see this task's report for the full disclosure.
+    """
+    add_repos(fleet, ["acme-widgets-py"])
+    _add_local_repo(fleet, "task57-happy-py", _TASK57_HAPPY_REPO)
+    _add_local_repo(fleet, "task57-shrink-py", _TASK57_SHRINK_REPO)
+
+    # -- Phase A: unsandboxed, warms the cache (build AND test) and publishes a REAL lock. --
+    phase_a = real_build(
+        fleet,
+        monorepo,
+        bazel_cache_home,
+        bazel_registry,
+        bazel_fetch_bazelrc,
+        "--repo",
+        "acme-widgets-py",
+    )
+    assert phase_a.exit_code == ExitCode.SUCCESS, phase_a.output
+
+    lock_on_integration = git(monorepo, "show", f"integration:{MODULE_LOCK_PATH}")
+    assert lock_on_integration.strip(), (
+        "Phase A published no MODULE.bazel.lock onto `integration` — `_publish_module_lock` "
+        "never captured a real Bazel-written lock, which is the leg this task exists to prove"
+    )
+    registry_findings = query(
+        fleet,
+        "SELECT kind, payload FROM findings WHERE kind = 'ModuleLockForeignRegistry'",
+    )
+    assert not registry_findings, (
+        f"Phase A's lock was rejected as foreign-registry-keyed: {registry_findings}"
+    )
+
+    # -- D116, seeded and disclosed (see docstring). --
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE repos SET baseline_ok = 1, baseline_test_count = 1 "
+            "WHERE repo_id = 'task57-happy-py'"
+        )
+        conn.execute(
+            "UPDATE repos SET baseline_ok = 1, baseline_test_count = 99 "
+            "WHERE repo_id = 'task57-shrink-py'"
+        )
+    finally:
+        conn.close()
+
+    # -- Phase B, happy path: sandboxed, real docker, over `task57-happy-py`. --
+    phase_b_happy = build(fleet, "--repo", "task57-happy-py")
+    assert phase_b_happy.exit_code == ExitCode.SUCCESS, phase_b_happy.output
+
+    happy_attempts = [row for row in attempts(fleet, 3) if row["repo_id"] == "task57-happy-py"]
+    happy_docker_rows = [
+        row for row in happy_attempts if row["command"] and row["command"][0] == "docker"
+    ]
+    assert happy_docker_rows, f"no docker invocation recorded for task57-happy-py: {happy_attempts}"
+    for row in happy_docker_rows:
+        assert row["exit_code"] == 0, row
+        assert "--network=none" in row["command"], row["command"]
+
+    happy_row = query(
+        fleet,
+        "SELECT baseline_test_count, baseline_ok, migrated_test_count FROM repos "
+        "WHERE repo_id = 'task57-happy-py'",
+    )[0]
+    happy_baseline, happy_baseline_ok, happy_migrated = happy_row
+    assert happy_baseline_ok == 1, happy_row
+    assert happy_migrated is not None and happy_migrated >= 1, (
+        f"§12.11's whole point: a real `bazel query 'tests(//...)'` over a real sandboxed build "
+        f"must find a genuinely non-vacuous count, not 0: {happy_row}"
+    )
+    assert happy_migrated >= happy_baseline, happy_row
+
+    # -- Phase B, the discriminator: sandboxed, real docker, over `task57-shrink-py`. --
+    phase_b_shrink = build(fleet, "--repo", "task57-shrink-py")
+    assert phase_b_shrink.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION == 7, (
+        phase_b_shrink.output
+    )
+
+    shrink_attempts = [
+        row for row in attempts(fleet, 3) if row["repo_id"] == "task57-shrink-py"
+    ]
+    shrink_docker_rows = [
+        row for row in shrink_attempts if row["command"] and row["command"][0] == "docker"
+    ]
+    assert shrink_docker_rows, (
+        f"no docker invocation recorded for task57-shrink-py: {shrink_attempts}"
+    )
+    for row in shrink_docker_rows:
+        assert "--network=none" in row["command"], row["command"]
+    # The OLD boolean check's own evidence: `bazel build` AND `bazel test` both really exited 0
+    # under real Docker — a real test target ran and passed — so `no_test_targets`/`tests_lost`
+    # stays green throughout. If every docker row here were NOT exit 0, this discriminator would
+    # be proving nothing (a build/test failure, not a shrink, would be the reason for RHI).
+    assert all(row["exit_code"] == 0 for row in shrink_docker_rows), (
+        f"a real build/test failure, not the count-shrink discriminator, is what failed this "
+        f"repo — the mutation-proof shape requires the OLD check to stay green: "
+        f"{shrink_docker_rows}"
+    )
+    shrink_row = query(
+        fleet,
+        "SELECT baseline_test_count, baseline_ok, migrated_test_count FROM repos "
+        "WHERE repo_id = 'task57-shrink-py'",
+    )[0]
+    shrink_baseline, shrink_baseline_ok, shrink_migrated = shrink_row
+    assert shrink_baseline_ok == 1, shrink_row
+    assert shrink_migrated == 1, (
+        f"the real `bazel query` must find exactly the one real test target this fixture "
+        f"declares, over a real sandboxed build: {shrink_row}"
+    )
+    assert shrink_migrated < shrink_baseline, (
+        f"the discriminator requires migrated < baseline, over REAL numbers: {shrink_row}"
+    )
+    # The `test_count_regressed` refusal is a WORKER-level comparison failure, not a subprocess
+    # step — it never produces its own `attempts` row (the two rows above, both real `docker`
+    # invocations, are the build and test steps, and both genuinely exited 0). Its record is
+    # `phases.failure_class`/`phases.last_error`, written by the driver from the same
+    # `WorkerError` `buildverify.py`'s `test_count_regressed` branch returns.
+    shrink_phase = query(
+        fleet,
+        "SELECT failure_class, last_error FROM phases "
+        "WHERE repo_id = 'task57-shrink-py' AND phase = 3",
+    )[0]
+    shrink_failure_class, shrink_last_error = shrink_phase
+    assert shrink_failure_class == "TEST_FAILURE", shrink_phase
+    assert "fewer than" in str(shrink_last_error), (
+        f"the failure's own recorded reason must name the shrink, not just fail silently: "
+        f"{shrink_phase}"
+    )
