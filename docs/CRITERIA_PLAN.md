@@ -1523,6 +1523,38 @@ sites, `--force-hoist` is still stubbed, and case (ii) plus Legs B–D remain ex
 there, and corrects Leg A's paragraph's now-stale "still open" list); this criterion is not marked
 DONE. Full account: `.superpowers/sdd/round-VI-criteria-closure/task-58-report.md`.
 
+**Correction, round VI research-35 (2026-09-06) — "Leg C1 (FILE_PATH collision)" is NOT what
+closes case (ii); Leg C2 (build-failure attribution) is, and this file's own framing (inherited
+from task-60's report, never checked against SPEC's literal text) was wrong.** §12.31's literal
+criterion text (`docs/SPEC.md:7520`) reads: "a hoist whose contract wave **fails `bazel build`**
+produces a `HoistBrokeOwner` finding..." — no FILE_PATH/collision language at all. SPEC's own §3.1
+design prose says the build-failure branch "is the same case and takes the same path" as the
+FILE_PATH-collision branch, and both of SPEC's FILE_PATH disjuncts are scoped to the contract's
+**own owner's** relocation plan (never "an unrelated repo," a phrase that appears nowhere in
+`docs/SPEC.md` — that framing was task-60's own unchecked paraphrase, propagated into this file and
+into research-35's own dispatch brief before research-35 caught it). Net effect: **Leg C2, not
+C1, is what actually gates case (ii)** — CRITERIA_PLAN's own prior "C2 needs its own scoping pass"
+flag was the real blocker all along. A smaller, sound, owner-scoped FILE_PATH-collision design DOES
+exist (reusing landed `file_blobs`/D114(a) + `relocate.py::relocated_path`, no whole-fleet join) and
+is one-shot-sized, but building it would NOT move this criterion from unmet to met (Rule 13) — it
+is recorded as a disclosed-optional future task, not dispatched under the "Leg C1" name. Full
+account: `.superpowers/sdd/round-VI-criteria-closure/research-35-report.md`. **Next dispatch on
+this axis: scope Leg C2 (build-failure attribution), not Leg C1.**
+
+**Update, round VI research-35 (2026-09-06) — Leg D scoped, ready for an ADR + design dispatch.**
+Prerequisites (Legs A, B, E) are all landed. Research-35 named seven judgment calls a Leg D design
+must settle, load-bearing among them: `D117`'s resolution (the "exact" un-hoist-via-
+`retargeted_from_repo_id` claim is structurally broken for a REPO-dst edge — the sound fix is
+superseding/expiring the contract-kind rows and letting the never-deleted pre-hoist repo→repo row
+stand, not "reconstructing" anything), the unhoist blast-set query and timing, the demotion
+mechanism (not evidence-based like `_demote_to_floors` — a deliberate unconditional consequence of
+rollback), revert-series atomicity across multiple merges, the idempotency trailer `RevertOutcome`
+itself defers to this leg, and the downstream-merge-refusal traversal (single-hop vs. transitive).
+**Leg D's real dependency is on whichever leg produces the `HoistBrokeOwner` finding (Leg C2, not
+C1) — its design does not need to wait on C1/C2's own scoping, only on treating that finding's
+existence as an input contract.** Full account (all seven calls in detail):
+`.superpowers/sdd/round-VI-criteria-closure/research-35-report.md`.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
@@ -2098,6 +2130,51 @@ question was found — not yet a worker-ready task.** Two research passes (full 
   OLD-import-text question needs its own resolution first, and that resolution is scoped wider
   than §37 alone. Deferred pending a future round's investigation of the underlying rewrite-rule
   construction gap; not attempted further this round.
+
+**Update, round VI research-36 (2026-09-06) — the "genuinely deeper, newly-found open question"
+bullet directly above is RETRACTED. No dynamic `RewriteRule` construction is needed for stub
+redirect at all; the question dissolves once SPEC's own §3.5 scenario text is read directly.**
+Full derivation: `.superpowers/sdd/round-VI-criteria-closure/research-36-report.md`. The bullet's
+premise — that a stub redirect needs to derive "the OLD import text a consumer currently writes"
+so a `RewriteRule` can bridge it to a new value — is false: there is no old-vs-new text to bridge,
+because the two values are byte-identical by construction. Four facts, each re-verified fresh at
+this update's own `HEAD` (not carried forward from the prior paragraph's citations):
+1. SPEC's own `--stub-blocked` walkthrough states the consumer's import text is UNCHANGED by
+   stub redirect, verbatim: "Dependents keep consuming the *pre-migration artifact* they consume
+   today." (`docs/SPEC.md:1663`).
+2. The stub publishes the SAME `Coordinate` identity as the real provider, not a distinct one —
+   the `stubs` table's own column comment: "StubRecord.coord_key: the abandoned repo's published
+   coordinate" (`src/fleet/state/schema.sql:418-419`).
+3. Every ecosystem adapter's `import_specifier(coordinate, dest)` is a pure function of
+   `coordinate` alone and ignores `dest` (`_ = dest` as its first statement): confirmed unchanged
+   in all five at `src/fleet/ecosystems/js.py:421-440`, `src/fleet/ecosystems/jvm.py:77-89`,
+   `src/fleet/ecosystems/go.py:207-218`, `src/fleet/ecosystems/rust.py:83-92`,
+   `src/fleet/ecosystems/py.py:123-135`. Only `src/fleet/ecosystems/unknown.py:56-67` reads
+   `dest`, and its own docstring says why: no language-level import mechanism exists there to
+   redirect at all.
+4. Given 2 and 3, `import_specifier` computed for the real provider and for its stub is the
+   byte-identical string for every ecosystem with a real import mechanism, so the BUILD-graph
+   label swap is the entire redirect SPEC requires — and it already landed as Blocker C
+   (round VI task 13): `src/fleet/cli.py:7709-7800` (`_unit_deps`) substitutes an `ACTIVE` stub's
+   `bazel_label` for the provider's own internal label at the BUILD-graph level, never touching a
+   consumer's TRANSFORM-phase source text.
+
+**Consequence:** with the rewrite-rule question dissolved, the stub-creation-logic bundle this
+entry scopes above (`a′` trigger detection, `c` `BuildUnit`/`workspace_deps()`, `e`
+`StubRecord`+INSERT, `g` `EMPTY_FAILING`, `h` the `RUNNING→DEGRADED` write, the
+`_eligible_build_units` widening, and the three `--stub-blocked` refusal-site removals) has **no
+remaining open design question blocking it** and is ready for direct dispatch as its own
+(NEW-MECHANISM-sized, likely multi-task) round. Scoping and dispatching that bundle is **not**
+this update's job and is not attempted here.
+
+**Disclosed, not resolved, by this same pass:** a separate SPEC-vs-code site tension.
+`docs/SPEC.md:1654` attributes the stub package's *emission* to `workers/buildgen.py` ("For each
+abandoned repo `r`, `workers/buildgen.py` emits a stub package..."), while research-7 concluded
+the creation-*decision* site is TRANSFORM's `_transform_payloads` (`cli.py`) — `buildgen.py` is
+confirmed to have zero stub-awareness (`grep -n -i "stub" src/fleet/workers/buildgen.py` → 0
+hits, 682 lines). Both facts are independently true and unreconciled. This is named here as
+unresolved and needing adjudication by whichever task/round eventually scopes the
+stub-creation-logic bundle's dispatch — it is not adjudicated by this update.
 
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
