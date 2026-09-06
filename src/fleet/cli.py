@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import shutil
 import sqlite3
 import time
@@ -106,6 +107,7 @@ from fleet.migrations import (
     current_version,
     migrate,
 )
+from fleet.models.base import FleetModel, TruncatedStr
 from fleet.models.build import (
     BuildPlan,
     BuildTarget,
@@ -141,6 +143,7 @@ from fleet.models.enums import (
 )
 from fleet.models.graph import (
     CollisionFinding,
+    ContractId,
     ContractNode,
     CycleFinding,
     DependencyEdge,
@@ -6245,6 +6248,24 @@ def _validate_verify_flags(*, rdeps: bool, rdeps_limit: int, rdeps_sample_n: int
 # --------------------------------------------------------------------------------------
 
 
+class HoistWatch(FleetModel):
+    """One `HOISTED`/`MIGRATED` contract this dispatch's build failure should be checked against
+    (§12.31 case (ii), Leg C2, round VI task 66).
+
+    `BuildPipelineWorker` holds no DB handle (Guardrail 3 — a worker takes its facts from its
+    input, the same reason `BuildInput.baseline_test_count`/`baseline_ok` are precomputed rather
+    than queried), so this pair is the whole fact it needs to attribute a failing `bazel build`'s
+    stderr to a broken hoist: a contract never gets its own build attempt
+    (`_eligible_contract_units`'s own docstring), so attribution is a plain string match of the
+    failure's stderr against `hoist_target_path`, never an edge or wave-membership join
+    (research-38-report.md Question 1 — the owner is structurally excluded from ever holding a
+    `CONTRACT_CONSUME` edge to its own contract, so a join-based check would silently miss the
+    disjunct SPEC names first)."""
+
+    contract_id: ContractId
+    hoist_target_path: str = Field(min_length=1)
+
+
 class BuildInput(WorkerInput):
     """One repo's whole Phase 3 dispatch, downstream of the ingest the driver already did.
 
@@ -6292,6 +6313,14 @@ class BuildInput(WorkerInput):
         description="`repos.baseline_ok`, passed to `buildverify` so §12.11's real "
         "`bazel query 'tests(//<dest>/...)'` count comparison runs only for a repo whose native "
         "baseline was actually measured.",
+    )
+    hoist_watch: tuple[HoistWatch, ...] = Field(
+        default_factory=tuple,
+        description="Every `HOISTED`/`MIGRATED` contract for the RUN (§12.31 case (ii), Leg C2, "
+        "round VI task 66) — unscoped to this repo's wave or declared consumers, because "
+        "attribution is a plain string match against `hoist_target_path`, never a membership "
+        "check (research-38-report.md Question 1). Precomputed once per run, the same "
+        "DB-agnostic-worker shape `baseline_test_count`/`baseline_ok` above already use.",
     )
     requirements: list[ExternalRequirement] = Field(default_factory=list)
     ruleset_versions: dict[str, str] = Field(default_factory=dict)
@@ -6360,6 +6389,20 @@ class BuildOutput(WorkerOutput):
     baseline to compare against — the same NULL-means-unmeasured distinction `repos.
     baseline_test_count`/`baseline_ok` already draw, so `0` is never written here as a stand-in
     for "not measured" (`docs/CRITERIA_PLAN.md` §11 gap 2, round VI task 47)."""
+    hoist_broke_contract_id: str | None = None
+    """The `contract_id` this dispatch's build failure attributes to (§12.31 case (ii), Leg C2,
+    round VI task 66), or `None` for every ordinary outcome. Carried here rather than on
+    `WorkerError` because it must survive from `BuildPipelineWorker.run` (no DB handle) to
+    `_BuildSink` (which writes `contracts.status = 'FAILED'` and the `HoistBrokeOwner` finding) —
+    `WorkerResult`/`BuildOutput`, not `WorkerError`, is the shape both ends of that hop share."""
+    hoist_broke_target_path: str | None = None
+    """The matched contract's `hoist_target_path`, carried alongside the id so `_BuildSink` need
+    not re-query `contracts` for a fact this dispatch already read off its own `hoist_watch`."""
+    hoist_broke_matched_line: TruncatedStr = ""
+    """The bazel label-resolution fragment (e.g. `no such target '//proto/x:y'`) that matched —
+    captured build output, hence `TruncatedStr` (`models/base.py`'s "the ONLY type any captured
+    tool/probe/build output may be persisted under"). Included in the `HoistBrokeOwner` finding
+    payload so Leg D's rollback trigger can read what actually broke without re-reading the log."""
     published_sha: str = ""
     already_published: bool = False
     module_lock_published: bool = False
@@ -6413,6 +6456,66 @@ def _captured_module_lock(worktree: Path) -> SupportFile | None:
     """
     text = _read_text_or_none(worktree / MODULE_LOCK_PATH)
     return None if text is None else SupportFile(path=MODULE_LOCK_PATH, content=text)
+
+
+_HOIST_BROKEN_LABEL_RE: Final = re.compile(r"no such (?:target|package) '([^']+)'")
+"""Bazel's own label-resolution error forms (§12.31 case (ii), Leg C2, round VI task 66). Real
+quoted fixtures already in this codebase's own adapter docstrings — three external
+(`@@ruleset+...+...//...`) and two in-tree: `src/fleet/ecosystems/py.py:143-144`, `base.py:
+460-461`, `base.py:486-488`, `js.py:47-48`, `js.py:61-63`. Deliberately loose (one capture group,
+either verb) because attribution only needs the quoted LABEL text; `_hoist_break_package` below
+does the `@`-rejection and `//`/`:name`-stripping the research (research-38-report.md Question 2)
+found necessary."""
+
+
+def _hoist_break_package(label: str) -> str | None:
+    """The package half of a bazel label, or `None` for a label naming an external repo.
+
+    `hoist_target_path` is always an in-tree path (`research-35-report.md`'s own table) — a label
+    starting with `@` (`@repo//pkg` or `@@ruleset+...+...//pkg`) is a different namespace entirely
+    and is rejected outright, never compared. An in-tree label is `//<pkg>:<name>`, a bare
+    `//<pkg>`, or (the plain "no such package" form) `<pkg>` with no `//` at all; this strips the
+    leading `//` when present and the `:<name>` suffix when present, leaving exactly the package
+    directory `hoist_target_path` values are shaped as.
+    """
+    if label.startswith("@"):
+        return None
+    stripped = label[2:] if label.startswith("//") else label
+    return stripped.split(":", 1)[0]
+
+
+def _hoist_break_match(
+    log_text: str, hoist_watch: Sequence[HoistWatch]
+) -> tuple[str, str] | None:
+    """`(contract_id, matched label text)` for the first in-tree bazel label in `log_text` that
+    resolves under a watched hoist's `hoist_target_path`, or `None`.
+
+    Exact match or a `/`-bounded prefix — `path == watched or path.startswith(watched + "/")` — so
+    `proto/acme.hub.v1x` cannot false-positive against a watched `proto/acme.hub.v1`. A plain
+    string match and never an edge or wave-membership join (research-38-report.md Question 1: the
+    owner is structurally excluded from ever holding a `CONTRACT_CONSUME` edge to its own hoisted
+    contract, so a join-based check would silently miss the disjunct SPEC names first).
+    """
+    for m in _HOIST_BROKEN_LABEL_RE.finditer(log_text):
+        package = _hoist_break_package(m.group(1))
+        if package is None:
+            continue
+        for watch in hoist_watch:
+            watched = watch.hoist_target_path
+            if package == watched or package.startswith(f"{watched}/"):
+                return watch.contract_id, m.group(0)
+    return None
+
+
+def _match_hoist_broke_owner(log_text: str, hoist_watch: Sequence[HoistWatch]) -> str | None:
+    """The `contract_id` `log_text` attributes a `bazel build` failure to, or `None`.
+
+    The entry point §12.31 case (ii)'s unit tests exercise directly. See `_hoist_break_match`
+    above for the matched-label text a caller that persists a `HoistBrokeOwner` finding also
+    needs — this function is the thin `contract_id`-only projection of it.
+    """
+    match = _hoist_break_match(log_text, hoist_watch)
+    return None if match is None else match[0]
 
 
 class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
@@ -6501,6 +6604,7 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
                 if verified.migrated_test_count_measured:
                     output.migrated_test_count = verified.migrated_test_count
             if result.status != "ok":
+                result = await self._attribute_hoist_break(payload, result, output)
                 return self._handoff(result, units, landed, output)
             landed.append(VERIFY_UNIT)
 
@@ -6870,6 +6974,46 @@ class BuildPipelineWorker(BaseWorker[BuildInput, BuildOutput]):
                 "Fleet-Integration-Ref": payload.integration_ref,
             },
         )
+
+    async def _attribute_hoist_break(
+        self, payload: BuildInput, result: WorkerResult[BuildOutput], output: BuildOutput
+    ) -> WorkerResult[BuildOutput]:
+        """§12.31 case (ii), Leg C2 (round VI task 66): DETECTION only.
+
+        On a `BUILD_ERROR` whose full log (`WorkerError.artifact_ref` — never `stderr_tail`,
+        which is bounded and could have truncated away exactly the "no such target" line) names a
+        watched hoist's package, mark the error `retryable=False` and stamp `output` with the
+        matched contract so `_BuildSink` can write `contracts.status = 'FAILED'` and the
+        `HoistBrokeOwner` finding once this `WorkerResult` reaches it (§11.5's fenced-write
+        boundary — this method never touches the DB itself; `BuildPipelineWorker` holds no DB
+        handle, Guardrail 3).
+
+        `retryable=False` is the ENTIRE integration with the retry ladder: `RetryPolicy.decide`'s
+        first branch (`orchestrator/retry.py:166-176`) already TERMINATEs a non-retryable error
+        with no attempt charged (`PhaseRunner._terminate_uncharged`, `orchestrator/runner.py:
+        1013-1029`) — zero changes needed here, or anywhere in `retry.py`/`runner.py`, to make
+        `phases.attempts` stay unspent on this path.
+        """
+        error = result.error
+        if (
+            not payload.hoist_watch
+            or error is None
+            or error.failure_class is not FailureClass.BUILD_ERROR
+            or error.artifact_ref is None
+        ):
+            return result
+        log_text = await asyncio.to_thread(_read_text_or_none, Path(error.artifact_ref))
+        if log_text is None:
+            return result
+        match = _hoist_break_match(log_text, payload.hoist_watch)
+        if match is None:
+            return result
+        contract_id, matched_line = match
+        watched = next(w for w in payload.hoist_watch if w.contract_id == contract_id)
+        output.hoist_broke_contract_id = contract_id
+        output.hoist_broke_target_path = watched.hoist_target_path
+        output.hoist_broke_matched_line = matched_line
+        return result.model_copy(update={"error": error.model_copy(update={"retryable": False})})
 
     @staticmethod
     def _evidence(payload: BuildInput, output: BuildOutput) -> list[str]:
@@ -7520,6 +7664,39 @@ class _BuildSink:
                 )
 
             await self._writer.submit(write_migrated_test_count)
+        if output.hoist_broke_contract_id is not None:
+            # §12.31 case (ii), Leg C2 (round VI task 66): DETECTION half only. Leg D (not yet
+            # designed) owns the `git revert -m 1`, the unhoist blast set, phase demotion, and the
+            # downstream-merge refusal — this write's whole job is to give that future leg a
+            # complete, self-sufficient input contract: a `HoistBrokeOwner` finding plus
+            # `contracts.status = 'FAILED'` (research-38-report.md, "What Leg D's design should
+            # know"). Same shape as Leg A's `_hoisted_contract_rows`/`_rejected_contract_rows`
+            # (`cli.py:3718-3761`), at a different time and in a different transaction — Phase-3
+            # runtime, not `_sequence_impl`'s sequencing-time `StateWriter` block.
+            contract_id = output.hoist_broke_contract_id
+            fail_params = (self._run_id, contract_id)
+
+            async def mark_contract_failed(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "UPDATE contracts SET status = 'FAILED' WHERE run_id = ? AND contract_id = ?",
+                    fail_params,
+                )
+
+            await self._writer.submit(mark_contract_failed)
+            await _note_finding(
+                self._writer,
+                self._run_id,
+                repo_id,
+                kind="HoistBrokeOwner",
+                payload={
+                    "contract_id": contract_id,
+                    "hoist_target_path": output.hoist_broke_target_path or "",
+                    "repo_id": repo_id,
+                    "matched_line": output.hoist_broke_matched_line,
+                },
+                severity="error",
+                now=self._clock(),
+            )
         if not output.published_sha:
             return
         params = (output.published_sha, _iso(self._clock()), self._run_id, repo_id, int(phase),
@@ -9016,6 +9193,35 @@ def _cache_mounts(settings: FleetSettings) -> list[CacheMount]:
     return mounts
 
 
+async def _hoist_watch_for_run(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[HoistWatch, ...]:
+    """Every `HOISTED`/`MIGRATED` contract for the RUN (§12.31 case (ii), Leg C2, round VI task
+    66) — every repo's `BuildInput` gets the SAME, full, run-wide set.
+
+    Reuses `_sequence_contracts` (Rule 8), not `_eligible_contract_units`: the latter restricts to
+    THIS run's wave-member contract ids, which is the wrong scope here — attribution is a plain
+    string match of a failing build's stderr against `hoist_target_path`, never a membership or
+    edge check (research-38-report.md Question 1), so a repo can trip `HoistBrokeOwner` against a
+    contract it holds no wave membership or `CONTRACT_CONSUME` edge to. That is in fact the FIRST
+    disjunct SPEC names (the owner's own build): `graph/cycles.py::_materialize` skips the owner
+    when inferring consume edges (`repo_id != owner`), so the owner structurally never holds such
+    an edge to its own contract, and a wave-scoped or edge-based set would silently miss it.
+
+    `hoist_target_path` is filtered non-`None` defensively for typing only — every `HOISTED`/
+    `MIGRATED` row is `extractable = 1` by construction (only an `EXTRACTABLE` candidate is ever
+    hoisted), and `schema.sql`'s own CHECK requires `hoist_target_path IS NOT NULL` whenever
+    `extractable = 1`.
+    """
+    nodes = await _sequence_contracts(conn, run_id)
+    return tuple(
+        HoistWatch(contract_id=node.contract_id, hoist_target_path=node.hoist_target_path)
+        for node in nodes
+        if node.status in (ContractStatus.HOISTED, ContractStatus.MIGRATED)
+        and node.hoist_target_path is not None
+    )
+
+
 def _build_payloads(
     settings: FleetSettings,
     plans: Mapping[str, _BuildPlan],
@@ -9023,8 +9229,15 @@ def _build_payloads(
     monorepo: Path,
     lock_dir: Path,
     sandboxed: bool,
+    hoist_watch: tuple[HoistWatch, ...] = (),
 ) -> PayloadFactory[BuildInput]:
-    """One repo's Phase 3 dispatch payload, built from its plan. Injected (Guardrail 3)."""
+    """One repo's Phase 3 dispatch payload, built from its plan. Injected (Guardrail 3).
+
+    `hoist_watch` is computed ONCE by the caller (`_run_build_wave`, which has the DB connection
+    this function does not) and handed to every repo's `BuildInput` unchanged — the same closed-
+    over-once, reused-per-repo shape `mounts` below already uses (§12.31 case (ii), Leg C2, round
+    VI task 66; see `_hoist_watch_for_run`'s own docstring for why this is unscoped per repo).
+    """
     log_dir = str((settings.root / "artifacts/logs").resolve())
     mounts = _cache_mounts(settings)
 
@@ -9056,6 +9269,7 @@ def _build_payloads(
             support_files=[*root_files, *plan.package_files, *plan.gazelle_files],
             baseline_test_count=plan.baseline_test_count,
             baseline_ok=plan.baseline_ok,
+            hoist_watch=hoist_watch,
             requirements=requirements,
             ruleset_versions=dict(settings.config.build.ruleset_versions),
             integration_ref=plan.integration_ref,
@@ -9181,12 +9395,18 @@ async def _run_build_wave(
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
         rss_reader=RSS_READER or read_own_rss_bytes,
     )
+    hoist_watch = await _hoist_watch_for_run(read_conn, run_id)
     runner = PhaseRunner(
         ctx,
         BuildPipelineWorker(bazel_runner=BAZEL_RUNNER),
         scheduler,
         payloads=_build_payloads(
-            settings, plans, monorepo=monorepo, lock_dir=lock_dir, sandboxed=sandboxed
+            settings,
+            plans,
+            monorepo=monorepo,
+            lock_dir=lock_dir,
+            sandboxed=sandboxed,
+            hoist_watch=hoist_watch,
         ),
         sink=_BuildSink(
             attempts=_AttemptWriter(

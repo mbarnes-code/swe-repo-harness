@@ -40,9 +40,14 @@ from fleet import ecosystems
 from fleet.bazel.query import rdeps_query, sample_seed_for
 from fleet.cli import (
     BuildInput,
+    BuildOutput,
     BuildPipelineWorker,
+    HoistWatch,
     RootFileConflictError,
     _BuildPlan,
+    _hoist_break_match,
+    _hoist_break_package,
+    _match_hoist_broke_owner,
     _module_inputs,
     _resolve_support_files,
 )
@@ -72,7 +77,7 @@ from fleet.util.proc import ProcResult
 from fleet.vcs import build_forge
 from fleet.vcs.forge import Forge
 from fleet.vcs.github import GitHubCli
-from fleet.workers.base import WorkerContext, implements_preconditions
+from fleet.workers.base import WorkerContext, WorkerError, WorkerResult, implements_preconditions
 from fleet.workers.buildgen import (
     BuildgenInput,
     BuildgenWorker,
@@ -985,6 +990,183 @@ async def test_a_test_failure_and_an_oom_are_not_the_same_failure(tmp_path) -> N
     oomed = await BuildverifyWorker(runner=runner_for(137)).run(make_ctx(tmp_path), payload)
     assert oomed.error is not None
     assert oomed.error.failure_class is FailureClass.TRANSIENT_INFRA
+
+
+# =======================================================================================
+# §12.31 case (ii), Leg C2 (round VI task 66) -- attributing a build failure to a broken hoist
+# =======================================================================================
+
+
+def test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms() -> None:
+    """The matcher against the FIVE real quoted bazel error strings already in this codebase's
+    own adapter docstrings (`ecosystems/py.py:143-144`, `ecosystems/base.py:460-461`,
+    `ecosystems/base.py:486-488`, `ecosystems/js.py:47-48`, `ecosystems/js.py:61-63`), plus three
+    constructed cases exercising the forms the five real strings happen not to cover (an
+    unprefixed "no such package" in-tree form, and a sub-path match). Each case is asserted
+    individually (CLAUDE.md Rule 12: "not an aggregate pass count").
+
+    All five real strings are negative cases here, and that is itself informative: three are the
+    `@@ruleset+...+...//...` external form and must NOT match even though two of them name a
+    package/target that LOOKS plausible; the other two are genuinely in-tree but name paths no
+    real `hoist_target_path` would ever equal (an empty root package, and an unrelated
+    `ts/acme/lib` path) — `hoist_target_path` values are always in-tree, kind-derived paths
+    (`research-35-report.md`'s own table), so most real bazel label errors a run ever sees are
+    irrelevant to any given watched set, which is exactly why the match is exact-or-`/`-bounded
+    rather than a bare substring test (a bare substring test on `proto/acme.hub.v1` would
+    false-positive against an unrelated `proto/acme.hub.v1x`).
+    """
+    watch = (HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="proto/acme.hub.v1"),)
+    cases: list[tuple[str, str, str | None]] = [
+        (
+            "py.py:143-144 -- external, rules_python pip hub",
+            "no such target '@@rules_python++pip+pypi//:requests': target 'requests' not "
+            "declared in package ''; however, a source directory of this name exists",
+            None,
+        ),
+        (
+            "base.py:460-461 -- in-tree but root package, empty pkg",
+            "no such target '//:.aspect_rules_js/node_modules/left-pad@1.3.0'",
+            None,
+        ),
+        (
+            "base.py:486-488 -- external, referenced-by form",
+            "no such package '@@rules_python++pip+pypi//certifi' ... referenced by "
+            "'@@rules_python++pip+pypi_312_requests//:pkg'",
+            None,
+        ),
+        (
+            "js.py:47-48 -- in-tree, unrelated package",
+            "no such target '//ts/acme/lib:pkg'",
+            None,
+        ),
+        (
+            "js.py:61-63 -- external, aspect_rules_js npm hub",
+            "no such target '@@aspect_rules_js++npm+npm//:left-pad': target 'left-pad' not "
+            "declared in package ''",
+            None,
+        ),
+        (
+            "true positive -- exact package, //<pkg>:<name> form",
+            "ERROR: /work/BUILD.bazel:3:1: no such target '//proto/acme.hub.v1:acme_hub_v1_proto'"
+            ": target 'acme_hub_v1_proto' not declared in package 'proto/acme.hub.v1'",
+            "proto:acme.hub.v1",
+        ),
+        (
+            "true positive -- unprefixed 'no such package' in-tree form",
+            "no such package 'proto/acme.hub.v1': BUILD file not found in any of the following "
+            "directories.",
+            "proto:acme.hub.v1",
+        ),
+        (
+            "true positive -- sub-path under the watched target",
+            "no such target '//proto/acme.hub.v1/v2:widget'",
+            "proto:acme.hub.v1",
+        ),
+        (
+            "negative -- a longer sibling path must NOT match on a bare prefix",
+            "no such target '//proto/acme.hub.v1x:pkg'",
+            None,
+        ),
+    ]
+    for name, text, expected in cases:
+        assert _match_hoist_broke_owner(text, watch) == expected, name
+
+    true_positive_text = cases[5][1]
+    assert _match_hoist_broke_owner(true_positive_text, ()) is None, (
+        "an empty watch set matches nothing, even text that would otherwise match"
+    )
+
+
+def _a_hoist_watch_build_input(*, hoist_watch: tuple[HoistWatch, ...]) -> BuildInput:
+    return BuildInput(
+        repo_id=REPO,
+        dest="java/com/acme/widget",
+        unit=_unit(),
+        integration_ref=SNAPSHOT,
+        integration_worktree="/nonexistent",
+        lock_dir="/nonexistent",
+        hoist_watch=hoist_watch,
+    )
+
+
+async def test_attribute_hoist_break_flips_retryable_and_records_the_match(tmp_path) -> None:
+    """§12.31 case (ii): a `BUILD_ERROR` whose FULL log (`artifact_ref`, never `stderr_tail`)
+    names a watched hoist's package comes back `retryable=False` with the match recorded on
+    `output` -- the shape `_BuildSink` reads to write `contracts.status='FAILED'` and the
+    `HoistBrokeOwner` finding (proven end to end in `tests/test_build_e2e.py::
+    test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_and_terminal`).
+    """
+    log = tmp_path / "build.stderr.log"
+    log.write_text(
+        "ERROR: /work/BUILD.bazel:3:1: no such target '//proto/acme.hub.v1:acme_hub_v1_proto': "
+        "target 'acme_hub_v1_proto' not declared in package 'proto/acme.hub.v1'\n",
+        encoding="utf-8",
+    )
+    payload = _a_hoist_watch_build_input(
+        hoist_watch=(HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="proto/acme.hub.v1"),)
+    )
+    error = WorkerError(
+        failure_class=FailureClass.BUILD_ERROR, retryable=True, artifact_ref=str(log)
+    )
+    result = WorkerResult[BuildOutput](status="failed", error=error)
+    output = BuildOutput(repo_id=REPO)
+
+    updated = await BuildPipelineWorker()._attribute_hoist_break(payload, result, output)
+
+    assert updated.error is not None
+    assert updated.error.retryable is False, "this IS the whole ladder integration (retry.py)"
+    assert updated.error.failure_class is FailureClass.BUILD_ERROR, "the class is unchanged"
+    assert output.hoist_broke_contract_id == "proto:acme.hub.v1"
+    assert output.hoist_broke_target_path == "proto/acme.hub.v1"
+    assert "no such target" in output.hoist_broke_matched_line
+
+
+async def test_attribute_hoist_break_is_a_noop_when_nothing_matches(tmp_path) -> None:
+    """Four ways this must be a pure no-op, each independently asserted: no `hoist_watch` at all,
+    no `error`, a `TEST_FAILURE` rather than `BUILD_ERROR`, and a `BUILD_ERROR` whose log names no
+    watched package. Every one must leave `result`'s error object identically `retryable=True` and
+    `output`'s three new fields at their honest bootstrap default (`None`/`None`/`""`)."""
+    log = tmp_path / "build.stderr.log"
+    log.write_text("ERROR: unrelated failure, nothing quoted here\n", encoding="utf-8")
+    watch = (HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="proto/acme.hub.v1"),)
+    worker = BuildPipelineWorker()
+
+    no_watch_payload = _a_hoist_watch_build_input(hoist_watch=())
+    build_error = WorkerError(
+        failure_class=FailureClass.BUILD_ERROR, retryable=True, artifact_ref=str(log)
+    )
+
+    cases = [
+        ("no hoist_watch", no_watch_payload, WorkerResult[BuildOutput](status="failed", error=build_error)),
+        (
+            "no error",
+            _a_hoist_watch_build_input(hoist_watch=watch),
+            WorkerResult[BuildOutput](status="ok", error=None),
+        ),
+        (
+            "wrong failure class",
+            _a_hoist_watch_build_input(hoist_watch=watch),
+            WorkerResult[BuildOutput](
+                status="failed",
+                error=WorkerError(
+                    failure_class=FailureClass.TEST_FAILURE, retryable=True, artifact_ref=str(log)
+                ),
+            ),
+        ),
+        (
+            "log names no watched package",
+            _a_hoist_watch_build_input(hoist_watch=watch),
+            WorkerResult[BuildOutput](status="failed", error=build_error),
+        ),
+    ]
+    for name, payload, result in cases:
+        output = BuildOutput(repo_id=REPO)
+        updated = await worker._attribute_hoist_break(payload, result, output)
+        assert updated is result, name
+        assert updated.error is None or updated.error.retryable is True, name
+        assert output.hoist_broke_contract_id is None, name
+        assert output.hoist_broke_target_path is None, name
+        assert output.hoist_broke_matched_line == "", name
 
 
 async def test_the_sandboxed_command_is_network_none_and_named_after_the_attempt(

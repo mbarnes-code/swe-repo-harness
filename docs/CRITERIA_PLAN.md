@@ -1574,6 +1574,47 @@ name): the git-mechanics revert-series execution (Decisions 4/5) and the product
 whichever leg (C1/C2) produces the triggering `HoistBrokeOwner` finding. No code has landed for Leg
 D; this criterion is not marked DONE.
 
+**Update, round VI task 66 (2026-09-06) — Leg C2's DETECTION half landed (ADR-0123); case (ii) is
+still not closed, and research-38's own "C2 needs its own scoping pass" flag is now resolved by
+having been built, not merely re-scoped.** `ContractStatus.FAILED` is assigned for the first time
+anywhere in `src/fleet/`: `BuildInput.hoist_watch` (a new field, precomputed once per run from the
+run's `HOISTED`/`MIGRATED` contracts, unscoped to any one repo's wave — attribution is a plain
+string match against `hoist_target_path`, never an edge/wave-membership join, since the owner is
+structurally excluded from ever holding a `CONTRACT_CONSUME` edge to its own contract) is checked
+inside `BuildPipelineWorker.run`'s VERIFY_UNIT handling against the FULL build log whenever a step
+fails with `FailureClass.BUILD_ERROR`; a match flips that error's `retryable` to `False` (the
+entire retry-ladder integration — zero changes to `retry.py`/`orchestrator/runner.py`, per the
+brief's own explicit prohibition) and, via `_BuildSink`, writes `contracts.status = 'FAILED'` plus
+a `HoistBrokeOwner` finding (`severity='error'`). `workers/contracts.py::carry_over_committed` is
+widened a third time (after `FORBIDDEN`, task 58) to carry `FAILED` across a `fleet scan` rebuild
+the same way it carries `HOISTED`/`MIGRATED` — NOT dropped like `REJECTED` — a measured judgment
+call recorded as `docs/DECISIONS.md` ADR-0123: unlike `REJECTED` (never committed, so a fresh scan
+naturally re-derives it), a `FAILED` contract's hoist commit is not reverted by anything today
+(Leg D does not exist), so the code is physically in the monorepo exactly like a `HOISTED` row's,
+and dropping it would silently lose the row on the next rebuild with no compensating rediscovery.
+Proven at the unit level against all five REAL quoted bazel error strings already in this
+codebase's own adapter docstrings (`tests/test_workers_build.py::
+test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`, each case asserted
+individually), the carry-over decision (`tests/test_workers_contracts.py::
+test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`), and end to end through the real
+CLI (`tests/test_build_e2e.py::
+test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_and_terminal`: real
+`scan → sequence → transform → build`, a directly-seeded `HOISTED` row — no production code
+populates `BuildUnit.contract_deps` yet, D113/ADR-0119's own disclosed narrow-PASS-2b scoping, so
+no organically-triggered real dependency on a hoisted package exists to fail against — a crafted
+`bazel build` failure through the existing `cli.BAZEL_RUNNER` seam, and a real database left with
+`contracts.status='FAILED'`, one finding, and `phases.attempts` UNCHANGED at 0 for the failing
+repo, which is the assertion that actually proves the ladder integration worked). **This closes
+ONLY Leg C2's detection half — case (ii) as a whole, and this criterion, are still NOT DONE.** The
+`git revert -m 1` call site, the unhoist blast set, `HoistRollbackDemotion`, phase demotion, and
+the downstream-merge refusal remain entirely Leg D's job (`task-65-brief.md`'s slice 1 is
+concurrent with this task and unrelated to it; two further Leg D slices remain unbriefed as
+recorded above) — a `FAILED` contract's own failing repo is left at whatever the pre-existing
+non-retryable-`BUILD_ERROR` terminal status already does (`REQUIRES_HUMAN_INTERVENTION`), a
+disclosed placeholder until Leg D exists to re-route it. `docs/INTEGRATION_HONESTY.md` D111's
+heading stays `OPEN` (a dated in-body marker records Leg C2 there). Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the

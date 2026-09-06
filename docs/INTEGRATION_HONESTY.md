@@ -8799,6 +8799,62 @@ phase demotion, the downstream-merge refusal), and `--force-hoist`'s own wiring.
 `ContractStatus.FAILED` is still never assigned anywhere in `src/fleet/`, and zero `git revert`
 call sites still exist. Full details: `.superpowers/sdd/round-VI-criteria-closure/task-58-report.md`.
 
+**Leg C2 (detection half) landed 2026-09-06 (round VI task 66, ADR-0123) — case (ii)'s
+`HoistBrokeOwner`/`contracts.status='FAILED'` now real; the heading stays OPEN.**
+`ContractStatus.FAILED` is now assigned for real, for the first time in this codebase's history:
+`BuildInput.hoist_watch` (a new `tuple[HoistWatch, ...]`, precomputed once per run in
+`_run_build_wave`/`_hoist_watch_for_run` from the same `HOISTED`/`MIGRATED` contract set
+`_eligible_contract_units`/`_sequence_contracts` already rehydrate, unscoped to any one repo's
+wave — attribution is a plain string match, never an edge/wave-membership join, per
+research-38-report.md Question 1) is checked inside `BuildPipelineWorker.run`'s VERIFY_UNIT
+handling by a new `_attribute_hoist_break`/`_hoist_break_match` pair against the FULL build log
+(`WorkerError.artifact_ref`, never the bounded `stderr_tail`) whenever a step's error is a
+`FailureClass.BUILD_ERROR`. A match flips that error's `retryable` to `False` — the entire
+integration with the shared retry ladder (`RetryPolicy.decide`'s first branch, `retry.py:
+166-176`, already TERMINATEs with no attempt charged; zero changes to `retry.py`/
+`orchestrator/runner.py`, per the brief's own explicit prohibition) — and records the match on
+`BuildOutput`, which `_BuildSink.__call__` reads to write `UPDATE contracts SET status = 'FAILED'`
+and a `HoistBrokeOwner` `findings` row (`severity='error'`, payload carrying `contract_id`,
+`hoist_target_path`, `repo_id`, and the matched bazel label line). `workers/contracts.py::
+carry_over_committed` is widened a THIRD time (after `FORBIDDEN`, Leg E above) to carry `FAILED`
+across a `fleet scan` rebuild — sticky like `HOISTED`/`MIGRATED`, not dropped like `REJECTED` — a
+measured judgment call recorded as ADR-0123 (the reasoning: unlike `REJECTED`, whose hoist was
+never committed, a `FAILED` contract's hoist commit is NOT reverted by anything today, since Leg D
+does not exist, so the code is physically in the monorepo exactly like a `HOISTED` row's).
+Proof: `tests/test_workers_build.py::test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`
+(unit, the five REAL quoted bazel error strings already in this codebase's own adapter docstrings
+plus three constructed cases, each asserted individually) and two more unit tests proving the
+`BuildPipelineWorker._attribute_hoist_break` wiring itself (retryable flip + no-op cases);
+`tests/test_workers_contracts.py::test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`
+(the ADR-0123 carry-over proof, mirroring the pre-existing `HOISTED` test); and
+`tests/test_build_e2e.py::
+test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_and_terminal`
+(end-to-end through the real CLI: a real `scan → sequence → transform → build`, a directly-seeded
+`HOISTED` contract row — the organic path is a separate, larger, disclosed pre-existing gap, see
+below — a crafted-but-realistically-shaped `bazel build` failure through the `cli.BAZEL_RUNNER`
+seam, and a real database left with `contracts.status='FAILED'`, one `HoistBrokeOwner` finding,
+and `phases.attempts` unchanged at 0 for the failing repo — the assertion that actually proves the
+`retryable=False` wiring worked, not merely that the string match fired). **This closes only
+Leg C2's DETECTION half.** The `git revert -m 1` primitive's call site (Leg B exists standalone,
+still unwired), the unhoist blast set, `HoistRollbackDemotion`, phase demotion, and the
+downstream-merge refusal are ALL still Leg D's job, not designed here — a `FAILED` contract's
+failing repo is left at whatever `RetryPolicy._terminal_status` already does today
+(`REQUIRES_HUMAN_INTERVENTION`), a disclosed, deliberately incomplete placeholder until Leg D
+exists to re-route it, exactly as research-38-report.md's own "what Leg D's design should know"
+section anticipated. **Disclosed, pre-existing scope boundary the e2e proof works around rather
+than closes:** no production code populates `BuildUnit.contract_deps` (D113/ADR-0119's own
+narrow-read-only-PASS-2b scoping — "nothing in `src/` commits hoisted contract content"), so no
+real manifest-driven dependency on a hoisted contract's package exists for a REAL, organically-
+triggered `bazel build` to fail against; the e2e proof's `contracts` row is seeded directly
+(this file's own established convention for state an earlier phase does not itself organically
+produce), and the "does real bazel actually spell its errors this way" question is answered
+independently at the unit level against five real quoted strings, never invented for this task.
+`ContractStatus.FAILED` is no longer "declared but never assigned" — that sentence in this entry's
+opening "gap, as measured" paragraph is now stale for case (ii) specifically and is left
+unedited per this file's own annotate-don't-rewrite convention; it remains literally true only of
+whatever Leg C1 would additionally need. Full details:
+`.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`.
+
 ## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
 adapter — no adapter can ever emit a real nonzero test target
 
