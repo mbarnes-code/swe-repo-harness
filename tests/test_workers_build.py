@@ -2955,6 +2955,55 @@ async def test_migrated_test_count_measured_is_true_only_when_the_query_actually
     )
 
 
+async def test_the_test_query_uses_host_side_cache_paths_even_under_a_sandboxed_payload(
+    tmp_path,
+) -> None:
+    """D118 (`docs/INTEGRATION_HONESTY.md`, round VI task 57): `_test_query_argv` runs `bazel
+    query 'tests(//<dest>/...)'` HOST-ONLY, always — never wrapped in `docker_run_argv` — but its
+    cache-flag construction used to read `cache.flag(sandboxed=payload.image is not None)`,
+    copied from `_bazel_argv` (where that expression is correct: the build/test steps genuinely
+    run in the container when `image` is set) without adjusting for the one caller whose own
+    process never does. Under a sandboxed `payload` (`image` set) this silently emitted the
+    CONTAINER-side `/cache/...` mount targets for a query that runs on the HOST, where they don't
+    exist — measured against the real toolchain as `ERROR: ... /cache (Permission denied)` in
+    this task's own real-Docker e2e test (`tests/test_build_e2e.py::
+    test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`). That
+    reproduction needs real Docker+Bazel; this is the argv-construction proof, unit-level and
+    Docker-free, so a regression here is caught on a host with neither — the gap the reviewer of
+    this task's first fix round flagged.
+    """
+    dest = a_package(tmp_path)
+    disk, repo = a_cache(tmp_path, "disk"), a_cache(tmp_path, "repo")
+    runner = _query_ok("//pkg:a_test")
+    await BuildverifyWorker(runner=runner).run(
+        make_ctx(tmp_path),
+        BuildverifyInput(
+            dest=dest,
+            integration_ref=SNAPSHOT,
+            image="fleet/build:latest",  # sandboxed -- the exact case D118 broke
+            log_dir=str(tmp_path / "logs"),
+            baseline_test_count=1,
+            baseline_ok=True,  # gates the query step running at all
+            cache_mounts=[
+                CacheMount(role="disk", path=str(disk)),
+                CacheMount(role="repository", path=str(repo)),
+            ],
+        ),
+    )
+
+    query_argv = runner.argv_for("query")
+    assert query_argv is not None, "the query step never ran"
+    assert query_argv[0:2] == ("bazel", "query"), (
+        "the query must be a bare bazel invocation, never docker-wrapped, even under a "
+        f"sandboxed payload: {query_argv}"
+    )
+    assert cache_flags(query_argv) == [f"--disk_cache={disk}", f"--repository_cache={repo}"], (
+        "the query runs on the HOST, so its cache flags must be the HOST paths -- D118's "
+        f"regression emitted the container-side /cache/... targets here instead: {query_argv}"
+    )
+    assert not any(f"={CACHE_MOUNT_ROOT}/" in a for a in query_argv), query_argv
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     shutil.which("bazel") is None,

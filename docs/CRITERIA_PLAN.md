@@ -687,19 +687,24 @@ never shipped ANY `python3`, so no real `py_test` had ever run under it before t
 missing the stdlib `uuid` its stub imports) just to start, before ever reaching the hermetic
 interpreter it hands off to; fixed in the Dockerfile.
 
-**One disclosed residual open question this task does NOT adjudicate.** SPEC §12.11's sentence
-ties `bazel query 'tests(//<dest>/...)'` to "inside a `--network=none` container" in the same
-breath as the build/test exit codes; `_test_query_argv`'s own docstring calls the query
-"Host-only, deliberately... a separate, later task" and this task's fix (`D118`) makes that
-existing, disclosed design work correctly rather than changing it — the query genuinely runs as
-part of a sandboxed `fleet build` invocation (same payload, same repo, real Docker for the
-build/test steps either side of it) but the query PROCESS itself is a host subprocess, not one
-recorded inside the container's own network namespace. Whether that satisfies SPEC's literal
-sentence, or whether wiring the query itself inside `--network=none` is a further prerequisite
-before this criterion counts DONE, is left for review/adjudication rather than decided here.
-**Do not round up the `<n> of 48` count for §12.11 on this account alone** — Task B is built and
-proven, but gap 1 (JS/Rust/JVM slice) and gap 3 (`D116`) remain open regardless, and the
-query-location question above is unresolved.
+**Corrected on task-scoped review (round VI task 57 fix round, 2026-09-06): the query's host-side
+location is SPEC-compliant, not an open adjudication.** An earlier version of this entry (and of
+the covering test's own docstring) claimed SPEC §12.11's sentence "ties `bazel query
+'tests(//<dest>/...)'` to inside a `--network=none` container in the same breath as the
+build/test exit codes." Re-read against `docs/SPEC.md:7450` directly: the criterion is TWO
+sentences, not one. The FIRST — "`bazel build //<dest>/...` and `bazel test //<dest>/...` both
+exit 0 inside a `--network=none` container, with each invocation recorded as an `attempts` row
+carrying its exit code" — is the only sentence carrying a container clause, and it names only
+`bazel build`/`bazel test`. The SECOND — "And the tests survived the move: for every repo whose
+`repos.baseline_ok = 1`, `bazel query 'tests(//<dest>/...)' | wc -l` is `>=
+repos.baseline_test_count`..." — starts a new sentence with "And" and names no container of its
+own. `_test_query_argv`'s own docstring ("Host-only, deliberately") was therefore already a
+correct reading of what the criterion requires, not a deferred obligation; `D118`'s fix (making
+that host-side query use host-side cache paths under a sandboxed payload, rather than the
+container-side paths it was wrongly copying from `_bazel_argv`) is what closes the sentence's own
+literal `>= repos.baseline_test_count` clause for a sandboxed build, with no further container
+wiring owed. **Do not round up the `<n> of 48` count for §12.11 on this account alone** — Task B
+is built and proven, but gap 1 (JS/Rust/JVM slice) and gap 3 (`D116`) remain open regardless.
 
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
