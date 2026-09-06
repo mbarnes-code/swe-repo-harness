@@ -9190,7 +9190,8 @@ paper over a test hook's own misuse (Rule 2/3), not recommended.
 `.superpowers/sdd/round-VI-criteria-closure/task-61-brief.md`, bundled with the still-missing
 §12.32 bijection test and one stale docstring in the same file.
 
-## D120 — OPEN. §12.6(a)'s "no branch outside the adapter packages" invariant is violated by two
+## D120 — FIXED, LANDED (round VI task 62, `1996e44`, task-scoped review Approved zero blocking
+findings). §12.6(a)'s "no branch outside the adapter packages" invariant is violated by two
 already-landed, deliberate changes this same session — `tests/test_ecosystems.py` has 3 live,
 deterministic reds on `main`
 
@@ -9231,3 +9232,16 @@ equivalent named table for the `SHARED_LIB` skip — but no design choice is mad
 site should be patched without also re-confirming the fix doesn't reintroduce a second source of
 truth (the same class of defect task 55's fix round caught in a different location this session).
 No task briefed yet; this is the controller's next dispatch.
+
+**Fixed (2026-09-06, round VI task 62, `1996e44`).** Both sites now match ADR-0100's own precedent
+exactly: `_partition_test_srcs`'s `Ecosystem.PYPI` branch became `ecosystem not in
+TEST_SRC_PARTITIONED_ECOSYSTEMS` (a new `Final[frozenset[Ecosystem]]` table in
+`src/fleet/ecosystems/base.py` — an adapter package, required because a separate textual regex
+test bans any `Ecosystem.<member>` mention anywhere outside the adapter packages, even inside a
+table/docstring, with no equivalent regex for `ContractKind`); PASS 2b's `ContractKind.SHARED_LIB`
+skip became `cnode.kind in _BUILD_PASS_2B_SKIPPED_KINDS` (a new `Final[frozenset[ContractKind]]`
+table defined in `cli.py` itself, permissible since no such regex constrains `ContractKind`).
+Behavior preservation proven by an exhaustive equivalence check over both enums' full membership
+(7 `Ecosystem` + 5 `ContractKind` members), independently re-derived by task-scoped review plus a
+genuine mutation test (emptying each table at runtime and confirming membership behavior actually
+changes). `tests/test_ecosystems.py` — 90/90 passing (was 87 pass / 3 fail).
