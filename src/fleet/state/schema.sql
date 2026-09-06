@@ -356,7 +356,9 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --     each with REQUIRES_HUMAN_INTERVENTION
                                                   -- | 'EcosystemAdapterUnavailable'
                                                   -- | 'ModuleLockForeignRegistry'
-                                                  --     -- cli.py `_note_finding`
+                                                  -- | 'ContractBindingUnavailable'
+                                                  --     -- cli.py `_note_finding`; §13 row 31,
+                                                  --     §12.34 Clause B (ADR-0119)
                                                   -- | 'PullRequest' | 'VerificationReport'
                                                   -- | 'OperatorAbort' | 'StubAbandoned'
                                                   -- | 'WaveBudgetRaised' | 'RunBudgetRaised'

@@ -7390,7 +7390,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2365-2433`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:7097-7169`) sets
+   Production caller `_AttemptWriter.record` (`cli.py:7099-7171`) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7487,7 +7487,7 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:13694-13931`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
+(`cli.py:13828-14065`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
 2026-09-06, round VI, ELEVEN separate times now as this round's own successive `cli.py` additions
 keep shifting it — this repointing follows round VI task 53's merge, which added
 `_partition_test_srcs`/`_is_python_test_src` above this function. Correction to this
@@ -7960,10 +7960,10 @@ directly by SQL.
 
 **The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2491`)
 has exactly ONE production call site anywhere in `src/`: `cli.py:2232`, inside
-`_persist_scan_edges` (`cli.py:2285-2349`), itself reachable only from the scan path (`cli.py:1876`).
+`_persist_scan_edges` (`cli.py:2287-2351`), itself reachable only from the scan path (`cli.py:1876`).
 `_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
 (`cli.py:2222`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3207-3375`)
+time because no contract has been hoisted yet. Separately, `_sequence_impl` (`cli.py:3209-3377`)
 does reach a real hoist via `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -8029,7 +8029,7 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:10037-10150`) returns early at `if not servable: return result`
+`_continue_impl` (`src/fleet/cli.py:10171-10284`) returns early at `if not servable: return result`
 (`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
