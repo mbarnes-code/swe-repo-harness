@@ -1995,7 +1995,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7597-7637`, moved by round VI task 58's `cli.py` insertions) always constructs
+  (`cli.py:7601-7641`, moved by round VI task 58's `cli.py` insertions) always constructs
   `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
@@ -2003,7 +2003,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   the post-fix state (the citation's line number is repointed for the drift check above; the
   narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7707-7800`, moved by round VI
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7711-7804`, moved by round VI
   task 58's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -2036,7 +2036,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9329-9364`, moved by round VI task 58's
+blockers above**: `_eligible_build_units` (`cli.py:9336-9371`, moved by round VI task 58's
 `cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
