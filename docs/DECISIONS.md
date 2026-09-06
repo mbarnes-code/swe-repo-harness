@@ -13248,3 +13248,86 @@ already-correct promotion mechanics have something to operate on* — not a new 
 is where every other per-repo ref this pipeline produces already gets created, under the same
 lock, from the same data; adding one more ref there is the smallest surface change that closes the
 gap for both existing callers at once.
+
+## ADR-0119 — §12.34 Clause B / D113: contract-binding emission is a read-only `fleet build` post-pass, and `contracts.discover()` needs no bypass
+
+**Decision (2026-09-06, round VI controller, research-33).** `D113`
+(`docs/INTEGRATION_HONESTY.md`) blocked §12.34 Clause B on three judgment calls. All three are
+decided here, against `41929a2`.
+
+**1. `contracts.discover()` is called the documented way — the blocker is gone.** D113 and
+`docs/CRITERIA_PLAN.md` both record that `ecosystems/contracts/base.py::discover()` raises
+unconditionally because `avro.py`/`thrift.py` are unshipped, making eager discovery fatal to any run
+with a hoisted contract. That was true on 2026-09-03 and was closed by round VI task 40
+(`f3c0200`), which shipped both adapters; §12.47 is marked DONE on the strength of the same commit.
+Re-measured in the interpreter that runs the code: `discover()` returns all five kinds and
+`set(_BY_KIND) == set(ContractKind)`. So Clause B calls `discover()` once, **lazily — only when the
+run actually has a contract build unit** — and then `for_kind()` freely. Research-25's own Agent
+Recommendation (a scoped direct import bypassing `discover()`) is **rejected**: it would break the
+module's documented totality invariant to buy a robustness the tree already has. The stale premise
+is annotated in D113 and `docs/CRITERIA_PLAN.md`, not rewritten.
+
+**2. Phase 3 admits a contract through a read-only post-pass, not through ingest.** A new PASS 2b
+in `cli.py::_build_impl`, after the per-repo plan loop and before the fleet-wide root-file
+resolution, over `wave_members` rows with `node_kind='CONTRACT'` whose `contracts.status` is
+`HOISTED`/`MIGRATED`. **The eligibility predicate is the contract's `status`, never a phase
+status**: `ContractStatus`'s own docstring (`src/fleet/models/enums.py:244`) records that a contract
+has no `phases` row, so there is nothing to gate on. The pass computes
+`ContractAdapter.neutral_targets` plus one `binding_target` per consuming ecosystem, records the
+unbound pairs, emits the findings, and persists the resulting `BuildPlan` to
+`artifacts/build/<run_id>/<slug(contract_id)>.plan.json` — the path `BuildPlan`'s own docstring
+already declares. It creates no `phases` row, cuts no worktree, takes no lease, dispatches no
+worker, and publishes no `BUILD.bazel`.
+
+Full contract ingest was **rejected on a measurement, not a preference**: nothing in `src/` ever
+commits hoisted contract content into the monorepo — 6c-H moves `status` and retargets edges, and
+`filter_repo.py`'s `HOISTED_CONTRACT_TRAILER` has no production caller — so the directory a
+contract's `hoist_target_path` names does not exist in any integration worktree, and a published
+`proto_library` would name sources that are not there. Publishing a contract's `BUILD.bazel` is
+blocked on content hoisting, which is an independent feature and stays out of Clause B.
+
+This is safe to add beside the existing passes because every wave query in the tree already filters
+`node_kind = 'REPO'` (`_open_phase_waves`, `_gated_members`, `_wave_repos`, the ledger rollups,
+`state/projection.py`): a CONTRACT wave member is invisible to `fleet transform`/`fleet build`
+scheduling today, so the new pass changes no scheduling invariant and can neither hang nor gate a
+wave.
+
+**One disclosed carve-out.** `SHARED_LIB` contracts are excluded from the pass. SPEC §7.6's own
+adapter table delegates `SHARED_LIB` emission wholesale to `EcosystemAdapter.generate_targets`, so
+its `neutral_targets` returns `[]`, and `BuildPlan`'s `_delegation_is_explicit` validator rejects an
+`adapter`-generated plan with no targets — constructing one would raise and break the criterion's
+own "the run still completes" clause. **Residual, stated rather than implied:** a `SHARED_LIB`
+contract consumed by an ecosystem lacking a `SHARED_LIB` binding produces no finding. All five
+shipped `EcosystemAdapter`s bind `SHARED_LIB`, so this is unreachable from any real fleet and
+reachable only from a fixture adapter.
+
+**3. A legitimate state of the world becomes a finding; a violated internal invariant raises.**
+Missing **binding** (`contract_bindings.get(kind) is None`, including an `UNKNOWN`-ecosystem
+consumer, whose `contract_bindings` is empty) → one `ContractBindingUnavailable` row,
+`severity='warn'`, `repo_id IS NULL`, and the run continues. Missing **adapter** (`discover()`'s
+bijection or statefulness assert, or `for_kind`'s `ContractRegistryNotDiscoveredError`), a
+`HOISTED` row with no `hoist_target_path`, or a `consumer_repo_ids` entry that resolves to no
+`repos` row → **raise, unhandled**. There is **no `try`/`except` around any registry call** — this
+is `docs/SPEC.md:7526` (§13 row 31) read literally, which draws that exact line, and swallowing a
+registry failure to make a fixture green is the specific softening D113's third judgment call was
+posed to forbid. Defaulting an unresolvable consumer to `Ecosystem.UNKNOWN` is refused for the same
+reason: it would fabricate a finding about a repository that does not exist.
+
+**Two mechanical consequences of decision 3, both in the same commit as the emitter.**
+(a) `cli.py::_note_finding` gains an optional `fingerprint_parts` argument. Its hardcoded
+`_fingerprint(run_id, repo_id or "", kind)`, against the idempotency index
+`(run_id, IFNULL(repo_id,''), kind, fingerprint)`, would collapse every `ContractBindingUnavailable`
+row of a run onto one — one contract × N unbound ecosystems becoming a single row with the last
+payload winning. The precedent for a discriminating fingerprint is `cli.py:13347`. Three call sites
+exist; the default preserves their behaviour exactly. (b) `'ContractBindingUnavailable'` is added to
+the `findings.kind` vocabulary listing in **both** `src/fleet/state/schema.sql` and its verbatim
+copy in `docs/SPEC.md`, which `tests/test_findings_kinds.py` binds in both directions. That is a
+listing edit, not §12 criterion substance; Rule 14 does not apply to it.
+
+**What this ADR does NOT decide.** It does not hoist contract content, publish a contract's
+`BUILD.bazel`, give a contract a `phases` row, or admit CONTRACT nodes to any wave query. It does
+not close the §12.32 question this research surfaced: `docs/SPEC.md:7471`'s carve-out — "`src/fleet/
+ecosystems/contracts/` does not exist, so there is no `discover()` to call" — is false at
+`41929a2`, and §12.32 is marked DONE partly on that carve-out. That is a Rule 14 adjudication for
+the controller (now flagged in place at `docs/SPEC.md:7471` and in `docs/CRITERIA_PLAN.md`'s §32
+entry), tracked separately from this decision.

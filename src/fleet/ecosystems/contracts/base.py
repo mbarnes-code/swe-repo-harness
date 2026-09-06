@@ -125,10 +125,13 @@ def discover(*, force: bool = False) -> dict[ContractKind, ContractAdapter]:
     """Import every module in `fleet.ecosystems.contracts`, then assert the registry is TOTAL
     over `ContractKind` and every registered singleton is stateless (§7.6, §13 row 31).
 
-    Mirrors `ecosystems.base.discover()`'s structure exactly, keyed by `ContractKind`. **Today
-    (ADR-0065, round VI task 19) this always raises**: only `proto.py` is shipped, so four of
-    five kinds are unregistered. That failure is correct and expected until the remaining four
-    adapters land — see this module's docstring and SPEC §7.6's marker.
+    Mirrors `ecosystems.base.discover()`'s structure exactly, keyed by `ContractKind`. **Round VI
+    task 40 (`f3c0200`) shipped all five adapters** (`proto`/`openapi`/`avro`/`thrift`/
+    `shared_lib`); the bijection over `ContractKind` is total and `discover()` no longer raises on
+    an ordinary call. It still raises if a future adapter module is added without registering, or
+    on a genuine statefulness violation — see this module's docstring and SPEC §7.6's marker.
+    [2026-09-06, round VI research-33: corrected — the prior text describing an unconditional
+    raise was true 2026-09-03 through round VI task 19, falsified by task 40.]
     """
     global _DISCOVERED
     if _DISCOVERED and not force:

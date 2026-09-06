@@ -1328,6 +1328,29 @@ one-shot task.
 **D-number:** `D111` — see `docs/INTEGRATION_HONESTY.md`. Do not file a second D-number for this
 gap.
 
+**Update, round VI research-32 (2026-09-06) — legs re-verified at `HEAD`, ordering corrected, Leg
+A ready for direct dispatch.** Research-22's leg-A-B-C-D-E ordering is wrong: measured dependency
+order is A, B, E each root-level (no prerequisites); C depends on A (+B for the merged case); D
+depends on A, B, and C. Research-22's placement of E last — "the veto only matters once hoisting
+can be re-attempted after a rollback" — is falsified by `docs/SPEC.md:6746-6753`, which specifies
+`--forbid-hoist` as a step-5b override independent of any rollback mechanism. **Leg A is the
+correct first dispatch**: the only leg with zero undone prerequisites AND the only one that moves
+this criterion's literal text from unmet to met by itself (Rule 13) — B and E are also
+prerequisite-free but close no clause alone. Estimated one-shot (~35 lines `graph/cycles.py`, ~50
+`cli.py`, ~150-200 test lines, comparable to round VI tasks 33/52). Full account, including three
+findings that shrink Leg A's scope (in-memory rollback needs no SQL DELETE; a contract never added
+to `nodes` can't reach `wave_members` by construction; `CycleReport.findings` already exists,
+unpopulated) and a measured hazard (6 pre-existing tests in `tests/test_graph_cycles.py` go red
+under the new check, 1 fixture serves as a silent control):
+`.superpowers/sdd/round-VI-criteria-closure/research-32-report.md`. **Worker-ready brief for Leg A
+written:** `.superpowers/sdd/round-VI-criteria-closure/task-55-brief.md`. Also surfaced: SPEC's own
+claim that `edges.retargeted_from_repo_id` makes an un-hoist "exact" is false as measured against
+`_materialize` — allocated `D117`, matters for the future Legs C/D design pass, does not block Leg
+A. Legs B and E remain independently one-shot-sized per research-22's original scoping (re-verify
+before dispatch, not assumed); Leg C needs splitting (C1 collision-join is briefable now, C2
+build-attribution needs its own scoping pass); Leg D needs a design ADR before any build task,
+same shape as this criterion's own D111 deferral pattern.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (landed round N task 3, `7cf3147`, reviewed Approved).** SPEC.md item 32's text has three
 checkable parts plus one explicit carve-out: (1) `discover()` key set equals `set(Ecosystem)`
@@ -1340,6 +1363,21 @@ equality against `set(ContractKind)`, is **self-declared "UNSATISFIABLE AS WRITT
 passing gate" in the SPEC's own text**, pre-adjudicated by ADR-0065 — the criterion does not
 require it, so its absence doesn't block DONE. Fifth criterion (after §12.7, §12.12, §12.16,
 §12.18) to reach this file's strict DONE bar.
+
+**Flagged, 2026-09-06 (round VI research-33/controller) — the carve-out this DONE marking rests on
+is now FALSE; ADJUDICATION PENDING, not re-derived here.** Round VI task 40 (`f3c0200`, 2026-09-05)
+shipped the remaining four `ContractAdapter`s; `contracts.discover()`'s bijection over
+`ContractKind` is measured total at `HEAD`, so `docs/SPEC.md:7471`'s "UNSATISFIABLE AS WRITTEN...
+`src/fleet/ecosystems/contracts/` does not exist" premise no longer holds (dated marker added
+in place at that line, per Rule 14). Whether the second half of this criterion now counts as
+satisfied FOR REAL (a live `discover()` equality test against `set(ContractKind)`, not a carve-out)
+— and whether that changes this entry's DONE status — has not been re-audited. **Next dispatch: a
+short re-audit task, same shape as §12.38's research-31 (`docs/PROGRESS.md`, twenty-fourth wave)**
+— check whether a test already asserts the real bijection (none is known to; `f3c0200`'s own task
+was scoped to shipping adapters, not to this criterion), and if not, whether adding one is TEST-ONLY
+(likely, since the mechanism already exists and is proven working by research-33's own live probe).
+Do not round the count based on this flag alone — DONE stays DONE until the re-audit either
+confirms it or the controller adjudicates otherwise.
 
 ## 33. Layout is adapter-derived, not hardcoded
 **DONE (round U, 2026-09-01) — SCALE-FIXTURE.** The hardcoded-dir grep was already covered. Round
@@ -1390,6 +1428,28 @@ fixture with a fixture contract Ruby's `contract_bindings` omits, asserting the 
 `BuildPlan` field.
 **D-number:** `D113` — see `docs/INTEGRATION_HONESTY.md`. Do not file a second D-number for this
 gap.
+
+**Update, round VI research-33 (2026-09-06) — all three judgment calls DECIDED via `ADR-0119`;
+Clause B is now worker-ready, one-shot-sized.** (1) Bypass-`discover()` judgment call is moot — its
+premise (an unconditional raise) was closed by round VI task 40 (`f3c0200`), verified by a live
+probe at `HEAD` (`discover()` returns all 5 kinds, bijection total); call it the documented way,
+lazily. (2) Phase 3 admits a contract via a narrow read-only PASS 2b in `cli.py::_build_impl`
+(~line 9325), gated on `contracts.status` (a contract has no `phases` row by design,
+`models/enums.py:244`) — not full ingest, which is rejected on a measurement (nothing in `src/`
+ever commits hoisted contract content, so a published `BUILD.bazel` would name sources absent from
+every worktree). One disclosed carve-out: `SHARED_LIB` contracts are excluded (their
+`neutral_targets` is `[]` by SPEC's own adapter table, and `BuildPlan._delegation_is_explicit`
+rejects a zero-target adapter plan). (3) A missing binding is a finding
+(`severity='warn'`, continue); a missing adapter/unresolvable node/NULL `hoist_target_path` raises
+unhandled, no `try`/`except` softening. Estimated change surface: `cli.py` ~+95 lines, `schema.sql`
++2, `docs/SPEC.md` +2 (listing copy), one new test + fixture builder. **Worker-ready brief
+written:** `.superpowers/sdd/round-VI-criteria-closure/task-56-brief.md`. Full account, including
+a named split seam if the worker finds it's not one-shot after all (stop after the production pass
++ a driver-level test, report NEEDS_CONTEXT, let the e2e fixture be a follow-on task):
+`.superpowers/sdd/round-VI-criteria-closure/research-33-report.md`. Also surfaced, NOT part of this
+decision: `docs/SPEC.md`'s own §12.34 citation had drifted `:7466` → `:7470` (corrected in this
+file's own citations below where present); and a separate Rule-14 flag on §12.32's DONE marking —
+see this file's own §32 entry.
 
 ## 35. No raw prior diff reaches a prompt
 **DONE (round GG task 4, 2026-09-02, `2657ec4`/`a5253ab`, ADR-0110) — see the closure paragraph

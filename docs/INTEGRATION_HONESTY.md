@@ -8770,6 +8770,77 @@ Full findings: `.superpowers/sdd/round-V-criteria-closure/research-23-report.md`
 **Not yet built:** any resolution to the three judgment calls above, the Phase 3 domain expansion,
 or the emission wiring itself. No design choice among them is made here.
 
+**Update, round VI research-33 (2026-09-06) — all three judgment calls decided (`ADR-0119`); this
+entry's "live, currently-blocking defect" paragraph above is STALE, not rewritten (annotated in
+place per this project's "annotate, never rewrite" discipline).** `contracts.base.discover()` does
+**not** unconditionally raise at `HEAD` (`41929a2`) — round VI task 40 (`f3c0200`), landed after
+this entry was written, shipped `avro.py`/`thrift.py`, and `discover()`'s bijection over
+`ContractKind` is measured total (all five kinds, `set(_BY_KIND) == set(ContractKind)`). Judgment
+call 1 has no live premise: call `discover()` the documented way, lazily, only when the run has a
+contract build unit. Judgment call 2 is decided as a narrow read-only PASS 2b in
+`cli.py::_build_impl` (not full ingest — nothing in `src/` commits hoisted contract content, so a
+published `BUILD.bazel` would name sources that don't exist in any worktree). Judgment call 3 is
+decided as: a missing binding is a finding (`severity='warn'`, run continues); a missing adapter,
+an unresolvable node, or a `HOISTED` row with no `hoist_target_path` raises unhandled, with no
+`try`/`except` softening. Full account and the decided design: `ADR-0119`
+(`docs/DECISIONS.md`). The build is sized one-shot; task brief at
+`.superpowers/sdd/round-VI-criteria-closure/task-56-brief.md`. **D113 stays OPEN — decided is not
+built** — this update records the design decision only; §12.34 does not move toward DONE until
+the pass in `ADR-0119` actually lands and is reviewed.
+
+## D116 — see `docs/CRITERIA_PLAN.md`'s §11 entry and this D-ledger's own D116 heading below,
+landed by round VI task 54's worktree (not yet merged at the time this entry was written) —
+`repos.baseline_ok`/`repos.baseline_test_count` are never written by any production code path, so
+§12.11's literal "the fixture run asserts the exclusion set is empty under the shipped config"
+cannot pass: the exclusion set is the whole fleet, not empty. Full entry lands with that task's
+merge; not re-derived here to avoid a second, possibly-divergent account — see the task's own
+report (`.superpowers/sdd/round-VI-criteria-closure/task-54-report.md`) for the primary account.
+
+## D117 — OPEN. SPEC's and the `DependencyEdge` model's own claim that `edges.retargeted_from_repo_id`
+makes a contract un-hoist "exact" is false as written — the column cannot reconstruct a REPO-dst
+edge
+
+**Found by round VI research-32 (2026-09-06), while decomposing §12.31/D111 into worker-ready
+legs.** Verified free before allocating: form-agnostic sweep found `D115` as the highest allocated
+number on `main` at dispatch time; `D116` was independently and concurrently allocated by round VI
+task 54's own worktree for an unrelated §12.11 finding — both numbers stand, this is `D117`, next
+free after reconciling both lanes' claims at merge time (CLAUDE.md's Central Number Allocation
+guardrail: the orchestrator reconciles a collision at the moment it's discovered, not by
+re-deriving from a stale prose count).
+
+**The claim, as written.** `docs/SPEC.md:598-600`: "restore every affected edge from
+`edges.retargeted_from_repo_id` — that column exists for exactly this and makes the un-hoist
+**exact** rather than a re-inference." `src/fleet/models/graph.py:172-176` repeats it: "The
+rollback record: restoring it un-hoists the edge exactly."
+
+**Measured against `_materialize`** (`src/fleet/graph/cycles.py:684-742`): the retarget's
+`model_copy(update=…)` (`:729-739`) overwrites six fields on the pre-hoist edge and the
+`retargeted_from_repo_id` column recovers only one of them (`dst_id`, via the owner repo_id it
+carries). `dst_coordinate` becomes `None` (unrecoverable) and `kind` becomes `CONTRACT_CONSUME`
+(unrecoverable — the original `DECLARED_DEP`/`INTERNAL_IMPORT`/`API_CONTRACT`/etc. value is not
+stored anywhere). The loss is structurally fatal, not merely lossy:
+`DependencyEdge._node_shape` (`models/graph.py:194-206`) raises `"a REPO dst edge must carry
+dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted retargeted row
+alone — a `ValidationError`, not a wrong-but-valid edge.
+
+**Why nothing is broken today.** `grep -rn "DELETE FROM edges" src/fleet/` returns zero hits in the
+whole codebase; `_persist_contract_edges` (`cli.py:3467-3495`) only INSERTs. The pre-hoist repo→repo
+row is therefore still present in the `edges` table, untouched, alongside the new contract row. A
+durable, exact un-hoist IS achievable today — by deleting the contract-kind rows and letting the
+pre-existing repo→repo row stand — just not by the mechanism SPEC's own prose describes.
+`retargeted_from_repo_id` is a record of what was retargeted, not a recipe for undoing it.
+
+**Consequence, scoped.** Does not block §12.31/D111 Leg A (in-memory 6c-H rollback, never persists
+the edge in the first place, so this gap is moot for it — see `task-55-brief.md`). It DOES matter
+for Legs C/D (which un-hoist across process boundaries, from a DB, per D111's own leg breakdown)
+and for SPEC's own narrative accuracy — a future Leg C/D worker who trusts `SPEC.md:598-600`
+literally will build a reconstruction path that raises `ValidationError` on first real use.
+
+**Not yet built/decided:** whether Leg C/D should un-hoist via a preserved repo→repo row (delete
+contract rows, no reconstruction — matches what already works) or via some other mechanism; whether
+`SPEC.md:598-600`/`models/graph.py:172-176`'s "exact" language should be corrected now or left for
+the Leg C/D design pass to correct alongside its own build. No design choice is made here.
+
 ## D114 — FIXED, LANDED (round VI task 42, `79024e6`) for §9(d). No path/blob-SHA `ls-tree`
 listing is ever captured or persisted at scan time — blocked §9(d); did NOT block §12.27 as
 originally framed below (correction dated 2026-09-03, see end of entry)
