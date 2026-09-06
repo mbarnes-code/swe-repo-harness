@@ -9819,3 +9819,57 @@ forward). §12 count: 42 of 48, up from 41 — §12.34 closed. **§32's DONE sta
 settled** — a future wave's short re-audit (same shape as §12.38's research-31) is the natural
 next dispatch to resolve it, alongside task 55 (§12.31 Leg A, resumed with ADR-0120) and task 57
 (§12.11 Task B) both still in flight at this checkpoint.
+
+## Round VI, twenty-fifth wave, close-out (2026-09-06) — tasks 55 and 57 both landed after fix
+rounds; §12 count unchanged at 42 of 48 (neither closes a full criterion, both advance real
+ground within already-partial ones), but this close-out is where the wave's own process lesson
+paid off.
+
+**Task 55 (§12.31 case (i), Leg A) — landed after 2 fix rounds, opus-tier review given the
+criterion's architectural weight.** Round 1 (Critical + Important): `min_consumers` was not
+threaded from `settings.config.scan.contracts.min_consumers` — `_sequence_impl` passed no value,
+so the check silently used `ContractsSection`'s hardcoded default regardless of what an operator
+configured, a second source of truth arriving by exactly the door the task's own brief had named
+and forbidden. Fixed, proven by a test that varies the *configured* value and asserts a different
+outcome, not just parameter presence. Round 2 (mechanical): the scoped re-review of round 1's fix
+surfaced a NEW `ruff` lint-gate failure — 2 violations pre-existing from the original commit that
+round 1's own review had missed, plus 2 from the fix itself. Verified and fixed by the controller
+reading the diff directly (pure whitespace/import-order) rather than a third subagent dispatch —
+proportionate to a trivial mechanical round. §12.31 stays OPEN — case (i) alone does not close it;
+4 legs (B/C/D/E) remain, tracked in `D111`.
+
+**Task 57 (§12.11 Task B) — landed after 1 fix round.** Proves real Bazel + real sandboxed Docker
+together for the first time in this codebase's history, and found two genuine, previously-
+undiscovered production defects along the way — a sandbox image missing `python3` entirely (no
+real `py_test` had ever run under this sandbox before), and a real bug in
+`BuildverifyWorker._test_query_argv` passing container-side cache paths to a host-side query,
+silently breaking every sandboxed build's test-count comparison. Both fixed, both independently
+re-verified. Fix round (2 Important): a phantom SPEC ambiguity in the task's own prose (corrected
+after independent re-reading by both implementer and reviewer confirmed SPEC's two-sentence
+structure settles it) and a missing offline regression test for the D118 fix (added, mutation-
+proven). `D118` flipped to `FIXED, LANDED`. §12.11 stays OPEN — the JS/Rust/JVM slice of `D112`
+and `D116` (nothing writes `baseline_ok` under the shipped config) both remain.
+
+**The wave's own process lesson, stated plainly rather than left implicit.** After task 56's
+merge, this session ran citation-hygiene and findings-kinds but not the full lint gate — a real
+gap, not a hypothetical one: task 56's own new code contained a bare `assert` (S101) that its own
+review missed, and it sat undetected on `main` through the next merge until task 55's post-merge
+lint run caught it. Ruling, now standing for the rest of this session: **run the full lint gate
+(`ruff check` + `mypy --strict`), not just citation-hygiene, after every merge** — the narrower
+check was insufficient, demonstrated directly rather than argued.
+
+**Status: main green.** Citation-hygiene, findings-kinds, and lint-gate re-verified clean at both
+merges this close-out (82/82 citation+findings, mypy clean across 129 files, 136/136 plus 97/97
+covering-set tests). §12 count: 42 of 48, unchanged from the wave's own checkpoint above — no
+criterion closed by tasks 55 or 57 alone, both real, disclosed, reviewed progress within already-
+partial criteria. Five tasks landed this single wave (53, 54, 55, 56, 57), two research passes,
+one full criterion closed (§12.34), two real production defects found and fixed as a byproduct of
+test-writing (D118) rather than dedicated bug hunts — worth naming as this wave's own recurring
+shape, not a one-off. Remaining 6 open criteria: 11 (2 gaps: `D112` non-Python, `D116`), 14, 31
+(4 legs: B/C/D/E), 32 (Rule-14 re-audit flagged, not resolved), 37, 39, 43 (case ii) — one fewer
+than session start (`D116` and Leg A both narrowed §11/§31 without closing either; §34 is the one
+full closure). Natural next dispatches, cheapest-and-highest-leverage first: §32's short re-audit
+(same shape as §12.38's research-31 — likely TEST-ONLY once the bijection is proven live), Leg B
+or Leg E of §12.31/D111 (both root-level per research-32's corrected ordering, no undone
+prerequisites), or the D112 JS/Rust/JVM slice (mechanically similar to the already-landed Python
+leg, no new design needed).
