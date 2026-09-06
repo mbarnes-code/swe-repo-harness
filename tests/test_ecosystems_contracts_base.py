@@ -4,11 +4,17 @@ Mirrors `tests/test_ecosystems.py`'s registry-mechanism tests (`test_duplicate_*
 `test_for_ecosystem_before_discovery_fails_loud`), adapted for `ContractKind` instead of
 `Ecosystem`.
 
-**Why fake, test-local adapters rather than the real registry:** the real
+**Why fake, test-local adapters rather than the real registry:** these tests exercise the
+`register()`/`for_kind()` **mechanism** in isolation — duplicate-claim detection, the
+no-declared-`kind` guard, pre-discovery lookup failure — independently of whatever the real
+`fleet.ecosystems.contracts` package happens to contain, the same way `_FakeProtoAdapter` et al.
+let each mechanism test control exactly the registrations it needs.
+[2026-09-06, round VI task 61: corrected — the prior text here read "the real
 `fleet.ecosystems.contracts` package ships only `proto.py` today (ADR-0065) — four of the five
 `ContractKind` members have no adapter yet, so the real `discover()` always raises its own
-missing-members check, correctly. Exercising `register()`/`for_kind()` therefore needs adapters
-this test controls, not the real (deliberately incomplete) package walk.
+missing-members check, correctly." That was true through round VI task 19 and was falsified by
+task 40 (`f3c0200`), which shipped the remaining four adapters; the real `discover()` bijection is
+now total (see `test_the_real_contracts_registry_is_a_total_bijection_over_contractkind` below).]
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import pytest
 from fleet.ecosystems.contracts.base import (
     ContractAdapter,
     ContractRegistryNotDiscoveredError,
+    discover,
     for_kind,
     register,
     reset_adapters,
@@ -34,10 +41,25 @@ from fleet.models.graph import ContractNode
 @pytest.fixture(autouse=True)
 def _clean_registry() -> Iterator[None]:
     """`_BY_KIND` module state must not leak between tests: several tests below deliberately
-    register fake adapters or provoke a duplicate-registration error."""
+    register fake adapters or provoke a duplicate-registration error.
+
+    Teardown restores the REAL registry (`discover(force=True)`), it does not just clear it —
+    mirroring `tests/test_ecosystems.py:41-51`'s landed precedent for the sibling registry. A
+    bare `reset_adapters()` teardown leaves `_BY_KIND` empty afterwards, and the real
+    `fleet.ecosystems.contracts` adapter modules are, by the time this file's own tests have run,
+    already in `sys.modules` — so a later PLAIN `discover()` (`force=False`) cannot repopulate the
+    registry (`importlib.import_module` does not re-execute an already-imported module, so the
+    `@register` decorators never re-run). `src/fleet/cli.py`'s `fleet build` PASS 2b calls exactly
+    that plain `discover()`, and a real pytest session that collects this file ahead of it left the
+    contracts registry permanently empty for the rest of the session, raising `RuntimeError`
+    downstream (round VI task 61 / research-34; the D-number is the controller's to allocate).
+    `force=True` here re-runs `importlib.reload` on the five adapter modules, which re-executes
+    their `@register` decorators and repopulates `_BY_KIND` (`base.py:143`,
+    `reload = force and not _BY_KIND`)."""
     reset_adapters()
     yield
     reset_adapters()
+    discover(force=True)
 
 
 class _FakeProtoAdapter(ContractAdapter):
@@ -138,3 +160,50 @@ def test_for_kind_before_any_registration_fails_loud_not_silently_none() -> None
     """
     with pytest.raises(ContractRegistryNotDiscoveredError, match=r"PROTO"):
         for_kind(ContractKind.PROTO)
+
+
+def test_the_real_contracts_registry_is_a_total_bijection_over_contractkind() -> None:
+    """§12.32's second half: `fleet.ecosystems.contracts.discover()` satisfies the same key-set
+    equality against `set(ContractKind)` that `tests/test_ecosystems.py:59-70`
+    `test_discover_is_a_total_bijection_over_ecosystem` proves for the sibling `ecosystems`
+    registry. Unlike that fixture-scoped mechanism-only file, THIS test drives the real,
+    production `fleet.ecosystems.contracts` package.
+
+    **Why:** `for_kind()` is total by construction only *if* the registry is. A `ContractKind`
+    member with no adapter would not surface as a missing feature at discovery time — it would
+    surface as `fleet build`'s PASS 2b (`src/fleet/cli.py`) raising
+    `ContractRegistryNotDiscoveredError` the first time a repo actually used that kind, potentially
+    days into a run, rather than failing loudly where the defect actually is. `discover()`'s own
+    internal check (`base.py:155-160`) only proves the SUPERSET direction (every `ContractKind`
+    member has a registered adapter) and only fires when `discover()` is actually called; nothing
+    in `src/` catches a key registered OUTSIDE `ContractKind` (`register()`, `base.py:107`, does
+    not check `isinstance(kind, ContractKind)`), so this test also asserts the SUBSET direction the
+    implementation itself does not cover.
+
+    `force=True`: the autouse `_clean_registry` fixture clears the registry before every test in
+    this file, and by the time this test runs the five real adapter modules are typically already
+    in `sys.modules` (imported at collection by the sibling
+    `tests/test_ecosystems_contracts_avro.py` etc. files, or by this file's own module-level
+    `import register` machinery pulling in `base`) — a plain `discover()` cannot re-populate an
+    already-emptied registry from an already-imported module (`importlib.import_module` does not
+    re-execute a cached module, so `@register` never re-runs; see the fixture's own docstring for
+    the full mechanism). Forcing here mirrors the fixture's own teardown."""
+    registry = discover(force=True)
+
+    assert set(registry) == set(ContractKind)
+
+    instances = list(registry.values())
+    assert len({id(inst) for inst in instances}) == len(instances), (
+        "every ContractKind gets its OWN adapter instance (unlike ecosystems' MAVEN/GRADLE, which "
+        "deliberately share one) -- a shared instance here would mean two kinds silently reuse "
+        "one adapter's layout()/binding_target() logic, which is not what any adapter module "
+        "declares"
+    )
+
+    assert {adapter.name for adapter in instances} == {
+        "avro",
+        "openapi",
+        "proto",
+        "shared_lib",
+        "thrift",
+    }

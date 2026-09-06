@@ -9096,7 +9096,8 @@ container-side, cache paths. Mutation-proven: reverting to `sandboxed=payload.im
 flips both cache flags to the container-side paths this bug used to emit, reddening the new test;
 task-scoped re-review independently traced this mutation rather than trusting the report.
 
-## D119 — OPEN. `tests/test_ecosystems_contracts_base.py`'s autouse teardown leaves the contracts
+## D119 — FIXED, LANDED (round VI task 61, `2d19310`, task-scoped review Approved with one
+report-arithmetic correction). `tests/test_ecosystems_contracts_base.py`'s autouse teardown leaves the contracts
 registry unrecoverably empty for the rest of a realistic pytest session, and `fleet build`'s PASS
 2b now depends on it being populated
 
