@@ -123,7 +123,8 @@ own decision — 6d must break edges in the graph 6c-H hoisted into.
 
 The last two elements — a `GraphFinding` tuple and a rejected-`ContractNode` tuple — are 6c-H's
 not-shared-after-retarget outcome (§12.31 case (i), Leg A): threaded the same way as everything
-else here so a rejection inside one SCC's hoist loop reaches `CycleReport` without a side channel."""
+else here so a rejection inside one SCC's hoist loop reaches `CycleReport` without a side
+channel."""
 
 
 def scc_id_for(members: Iterable[str]) -> str:

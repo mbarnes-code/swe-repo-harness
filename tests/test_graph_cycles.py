@@ -174,9 +174,10 @@ def multi_chord_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[Con
     `{e.retargeted_from_repo_id for e in retargeted} == {"acme-b"}` unchanged,
     `min(plan.repo_wave_index.values()) == 1` (was asserted `> 0`, still holds), and
     `plan.repo_wave_index["acme-a"] < plan.repo_wave_index["acme-b"]` unchanged (1 < 2). The one
-    assertion this DID move: `tests/test_graph_sequence.py::test_criterion_c_counts_only_ungated_repos`
-    asserted `plan.repo_members == ("acme-a", "acme-b")`, which is now genuinely 3 repos — fixed
-    there by adding `acme-c` (and its `RepoStatus`) rather than by weakening the assertion.
+    assertion this DID move:
+    `tests/test_graph_sequence.py::test_criterion_c_counts_only_ungated_repos` asserted
+    `plan.repo_members == ("acme-a", "acme-b")`, which is now genuinely 3 repos — fixed there by
+    adding `acme-c` (and its `RepoStatus`) rather than by weakening the assertion.
     """
     graph_nodes = nodes("acme-a", "acme-b", "acme-c")
     edges = [

@@ -57,7 +57,7 @@ from fleet.graph.cycles import GraphFinding
 from fleet.graph.infer import EDGE_BASE_CONFIDENCE
 from fleet.models.enums import BreakStrategy, ContractStatus, EdgeKind
 from fleet.state.db import StateWriter
-from tests.test_cli import RUN_ID, MODELS_YAML, fresh_db, seed_run
+from tests.test_cli import MODELS_YAML, RUN_ID, fresh_db, seed_run
 from tests.test_scan_e2e import _fresh_db, _make_repo
 from tests.test_workers_contracts import (
     CYCLE_FLEET,
@@ -662,7 +662,8 @@ contract's actual single consumer needs to pass the check.
 
 @pytest.fixture
 def not_shared_fleet_min_consumers_1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Identical to `not_shared_fleet` except `fleet.yaml` sets `scan.contracts.min_consumers: 1`."""
+    """Identical to `not_shared_fleet` except `fleet.yaml` sets
+    `scan.contracts.min_consumers: 1`."""
     sources = {
         name: _make_repo(tmp_path / "sources", name, dict(files))
         for name, files in NOT_SHARED_FLEET.items()

@@ -1,4 +1,4 @@
-# Task 55 report — DONE (fix wave applied, see bottom section)
+# Task 55 report — DONE (two fix waves applied, see bottom sections)
 
 §12.31 case (i), Leg A: not-shared-after-retarget detection + in-memory rollback, landed.
 ADR-0120 (supplied by the controller mid-task) records the placement decision.
@@ -349,3 +349,91 @@ corrected again (55 → 57, re-derived, not computed by hand) to match
 3. Citation drift is now a recurring, mechanical cost of any edit to `cli.py`'s hoist/sequence
    region (this is the third repointing wave across two review rounds on this one task). Noted for
    the controller's awareness, not something to fix here.
+
+---
+
+## Fix round 2 (lint gate) — status: DONE
+
+Both fix-wave findings from round 1 were re-reviewed and verdicted ADDRESSED — no further changes
+needed there. This round is purely mechanical: `tests/test_lint_gate.py::test_ruff_check_is_
+clean_across_the_whole_repository` failing at `6e0b0e7`.
+
+### What ruff flagged
+
+`ruff check --no-cache --output-format=concise .` from the worktree root (the exact invocation
+`test_lint_gate.py::test_ruff_check_is_clean_across_the_whole_repository` runs, `cwd=REPO_ROOT`)
+reported, before any fix:
+
+```
+src/fleet/graph/cycles.py:126:101: E501 Line too long (101 > 100)
+tests/test_graph_cycles.py:177:101: E501 Line too long (103 > 100)
+tests/test_sequence_e2e.py:38:1: I001 [*] Import block is un-sorted or un-formatted
+tests/test_sequence_e2e.py:665:101: E501 Line too long (101 > 100)
+Found 4 errors.
+[*] 1 fixable with the `--fix` option.
+```
+
+Matches the controller's report exactly: 4 total, 2 pre-existing from `d84c780` (`cycles.py:126`,
+`test_graph_cycles.py:177`) and 2 new from the fix wave (`test_sequence_e2e.py:38` and `:665`).
+
+**One thing worth disclosing about how I first measured this**: running the same command before
+cleaning my scratch directory (`scratch_task55/`, untracked, holding the mutation-testing probe
+scripts from both prior rounds) reported **32** errors, not 4 — `ruff check .` scans the whole
+directory tree regardless of git-tracked status, and the scratch scripts (never meant to satisfy
+lint) accounted for 28 of them. Deleted `scratch_task55/` entirely (it was disposable — every
+probe in it had already done its job and its findings are recorded in this report) before
+re-measuring, which is what produced the 4-violation count matching the controller's own
+clean-checkout measurement. Noted so a future round doesn't mistake worktree scratch content for
+gate-relevant violations, in either direction.
+
+### What I changed
+
+1. `.venv/bin/ruff check --fix .` — auto-fixed `tests/test_sequence_e2e.py:38`'s import ordering
+   (`RUN_ID, MODELS_YAML` → `MODELS_YAML, RUN_ID`, alphabetical). 1 of 4 fixed automatically.
+2. Manually wrapped the three E501 lines (auto-fix does not reflow prose):
+   - `src/fleet/graph/cycles.py:126` — the closing sentence of `_HoistOutcome`'s module-level
+     docstring, wrapped one word earlier.
+   - `tests/test_graph_cycles.py:177` — my own docstring line inside `multi_chord_fleet`'s
+     docstring (from the first fix wave's citation to `test_criterion_c_counts_only_ungated_
+     repos`), wrapped across two lines.
+   - `tests/test_sequence_e2e.py:665` — `not_shared_fleet_min_consumers_1`'s one-line docstring,
+     wrapped across two lines.
+
+No logic changed in any of the three files — every edit is either an import reorder or a
+docstring/comment line wrap.
+
+### Before / after violation count
+
+- Before: **4** (`ruff check --no-cache --output-format=concise .` from the worktree root, with
+  `scratch_task55/` already removed).
+- After: **0** — `ruff check --no-cache --output-format=concise .` → `All checks passed!`.
+
+### Lint-gate test result
+
+`pytest tests/test_lint_gate.py -q` (whole file, no `-k`) → **7 passed** (1 warning, pre-existing
+and environmental — `test_ruff_resolves_only_this_projects_own_files` notes this detached worktree
+has no populated `references/*/`/`work/`/`cache/`/`mirrors/`/`artifacts/` trees to test
+`.gitignore` exclusion against, so that one check's own scope-discrimination is inconclusive here;
+it still passes, and is explicitly not a gate against anything I touched).
+
+### Full covering set, re-run after the lint fix
+
+- `pytest tests/test_graph_cycles.py tests/test_graph_sequence.py tests/test_workers_contracts.py
+  tests/test_findings_kinds.py tests/test_sequence_e2e.py tests/test_integration_honesty_
+  citations.py tests/test_lint_gate.py -q` → **179 passed** (172 from fix round 1 + 7 from
+  `test_lint_gate.py`, now included in the standing covering set).
+- `pytest tests/test_bazel.py tests/test_scan_e2e.py tests/test_contracts_criterion_scale.py -q`
+  → **87 passed, 16 skipped** (same pre-existing `bazel` env gap, unaffected).
+- `python -m mypy` (no path arguments) → **Success: no issues found in 129 source files.**
+
+Nothing else moved — as expected for a formatting-only change.
+
+### Concerns (fix round 2)
+
+None load-bearing. One process note for future rounds on this task (or similar ones): `ruff check
+.` and `mypy` (no path arguments) have different scoping defaults — `mypy`'s scope comes from
+`pyproject.toml`'s `packages = ["fleet"]`, which never touched `tests/`, so running `mypy` clean
+in every prior round of this task said nothing about `tests/`'s lint state. `ruff` has no such
+narrowing (it lints the whole tree by default), which is exactly why this gate exists and exactly
+why it caught what `mypy` structurally could not. `tests/test_lint_gate.py` is now in this task's
+standing covering set for any further round.
