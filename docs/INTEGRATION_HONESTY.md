@@ -8788,14 +8788,6 @@ an unresolvable node, or a `HOISTED` row with no `hoist_target_path` raises unha
 built** — this update records the design decision only; §12.34 does not move toward DONE until
 the pass in `ADR-0119` actually lands and is reviewed.
 
-## D116 — see `docs/CRITERIA_PLAN.md`'s §11 entry and this D-ledger's own D116 heading below,
-landed by round VI task 54's worktree (not yet merged at the time this entry was written) —
-`repos.baseline_ok`/`repos.baseline_test_count` are never written by any production code path, so
-§12.11's literal "the fixture run asserts the exclusion set is empty under the shipped config"
-cannot pass: the exclusion set is the whole fleet, not empty. Full entry lands with that task's
-merge; not re-derived here to avoid a second, possibly-divergent account — see the task's own
-report (`.superpowers/sdd/round-VI-criteria-closure/task-54-report.md`) for the primary account.
-
 ## D117 — OPEN. SPEC's and the `DependencyEdge` model's own claim that `edges.retargeted_from_repo_id`
 makes a contract un-hoist "exact" is false as written — the column cannot reconstruct a REPO-dst
 edge
@@ -8898,3 +8890,57 @@ reaches it — task 43 confirmed this empirically (a genuine `severity='error'` 
 still exits 0 with real data wired through). **Piece (a)+(b) closing §9(d) is unaffected and
 remains correctly landed. Piece (c) is retired, not merely deferred — do not dispatch it.** Full
 account in `docs/CRITERIA_PLAN.md`'s §27 entry.
+
+## D116 — OPEN. Nothing in `src/fleet/` ever writes `repos.baseline_ok` or
+`repos.baseline_test_count` — under the shipped default config, §12.11's last sentence's
+"exclusion set" is the WHOLE fleet, not the empty set it requires
+
+**Found by round VI task 54 (2026-09-06), while proving §12.11's third and last disclosed gap
+(`docs/CRITERIA_PLAN.md`, criterion 11, "gap 3", itself first named by round VI task 38's own
+audit).** Verified free before allocating: form-agnostic sweep (`grep -oE '\bD[0-9]+\b'
+docs/*.md`) found `D115` as the highest allocated number.
+
+**The gap, as measured.** SPEC §12.11's literal last sentence (`docs/SPEC.md:7447`): "Repos with
+`baseline_ok IS NULL` (baseline never measured, e.g. `preflight.baseline_build.enabled: false` or
+a pre-schema-7 run) are excluded from the count assertion, not silently passed: the fixture run
+asserts the exclusion set is empty under the shipped config." `tests/test_baseline_ok_exclusion.
+py::test_the_baseline_ok_exclusion_set_is_empty_under_the_shipped_config` drives the real CLI
+(`scan -> sequence -> transform -> build`, `tests/test_transform_e2e.py`'s five-repo fixture, no
+`preflight.baseline_build.enabled: false` override anywhere in the fixture's `config/fleet.yaml`
+— i.e. genuinely "the shipped config", since `BaselineBuild.enabled`'s pydantic default is `True`,
+`settings.py:282`) and reads `repos.baseline_ok` back from the real database `fleet build` wrote
+to. Measured result: **every** fixture repo's `baseline_ok` is NULL after a real build — the
+exclusion set is the entire fleet, not empty. Root cause, independently confirmed by two
+form-agnostic sweeps: zero sites anywhere in `src/fleet/` ever `UPDATE`/`INSERT` `repos.
+baseline_ok` or `repos.baseline_test_count` (both columns are read in several places —
+`_RepoFacts.baseline_ok`/`baseline_test_count` in `cli.py`, the `SELECT` at `cli.py:7368`,
+`graph/sequence.py::_exemptions_for`'s `baseline_ok.get(repo_id) == 0` — and written nowhere), and
+`BaselineBuild.enabled` (`settings.py:282`) itself is read nowhere outside `settings.py` (`grep
+-rn "baseline_build" src/fleet/` returns only its own declaration at `settings.py:295`). There is
+no production code path, gated on the config flag or otherwise, that ever runs the native
+baseline build §3.1/§9's own comments (`state/schema.sql:87`'s `baseline_ok` column comment,
+`settings.py:280`'s `BaselineBuild` docstring: "the native build/test gate §14.1 claims to have")
+describe.
+
+**Consequence.** §12.11's own count-comparison half (`bazel query 'tests(//<dest>/...)' | wc -l`
+`>= repos.baseline_test_count` for every `baseline_ok = 1` repo) is structurally unreachable for
+any repo in any real run — `baseline_ok` never becomes `1` (or `0`) for anyone, so the guarded
+comparison this criterion's main clause exists to run never executes, and the sentence guarding
+its blind spot ("the exclusion set is empty") is currently false rather than vacuously satisfied.
+This is a strictly larger gap than Task A's gap 1 (`D112`, `BuildUnit.test_srcs` never populated —
+that blocks a NONZERO test count from ever reaching the comparison) and gap 2 (`migrated_test_
+count` persistence, closed round VI task 47): those two assume `baseline_ok`/`baseline_test_count`
+themselves get written, which this entry shows they never do.
+
+**Not required by this task to fix** (round VI task 54 was TEST-ONLY, no production code
+change): `tests/test_baseline_ok_exclusion.py`'s first test pins the target state as a
+`strict=True` xfail so a future fix's own correctness self-proves by making the xfail an
+unexpected pass (CI failure) until the marker is deleted; its second test proves the assertion
+helper is a genuine, non-tautological `repos.baseline_ok IS NULL` read against real DB state
+(three-step direct-DB-write discriminator, since the pipeline's own natural state is already the
+"red" case with no seed needed — see that test's docstring for why the task brief's literal
+"seed a NULL, confirm red, remove it, confirm green" recipe had to be inverted).
+
+**Not yet built:** the native baseline build measurement itself — what repo kinds it can run
+against, how it maps to `baseline_ok`/`baseline_test_count`, and where in Phase 1/Phase 3 it
+belongs. No design choice is made here.
