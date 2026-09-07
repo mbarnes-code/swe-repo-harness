@@ -52,6 +52,7 @@ from uuid import UUID
 import pytest
 
 import fleet
+from fleet import cli
 from fleet.bazel.generators import (
     VersionConflict,
     coarse_build_targets,
@@ -62,6 +63,8 @@ from fleet.bazel.generators import (
     render_gazelle_build,
     render_module_bazel,
     resolve_workspace_deps,
+    stub_alias_target,
+    stub_failing_target,
     validate_override,
 )
 from fleet.bazel.layout import (
@@ -74,6 +77,7 @@ from fleet.bazel.layout import (
     scc_label,
     select_primary_coordinate,
     skeleton_paths,
+    stub_dest,
 )
 from fleet.bazel.lockfile import (
     LockfileRegistryMismatchError,
@@ -113,6 +117,7 @@ from fleet.models.build import (
     BuildTarget,
     BuildUnit,
     GazelleConfig,
+    InternalDep,
     ToolchainRequirement,
     WorkspaceDep,
 )
@@ -1573,6 +1578,179 @@ def test_real_bazel_builds_the_generated_python_package(
         registry=bazel_registry_args,
     )
     assert data.stdout.split() == [f"//{dest}:pyproject.toml"], data.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
+def test_real_bazel_fails_an_empty_failing_stub_target_with_an_explicit_message(
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
+) -> None:
+    """§3.5 item 2 (task-68, Leg 2, `stub_failing_target`): `bazel build` of a never-published
+    provider's `EMPTY_FAILING` stub package exits non-zero, with an explicit message naming the
+    abandoned provider and its coordinate — never a green build that ships an empty package
+    nothing consumes, and never a runtime failure a consumer discovers only later.
+
+    A real build over a real `genrule`, exactly the shape
+    `test_real_bazel_builds_the_generated_python_package` above uses for the success case: the
+    target comes out of the shipped, generic (non-per-ecosystem) rendering function and is
+    written to disk, and Bazel itself is what fails the action — not a string check on generated
+    text.
+
+    The target NAME is `cli._internal_label(...)`'s own leaf (fix round, review finding I2), not
+    a hand-picked string: that is the exact label `cli._unit_deps`'s redirect and
+    `cli._create_stub_records`'s `bazel_label` column both use, so this test builds at the SAME
+    label a real redirected consumer would name.
+    """
+    coord_key = "npm::acme-abandoned-lib"
+    provider_repo_id = "acme-abandoned-lib"
+    dest = stub_dest(coord_key)
+    label = cli._internal_label(dest)
+    package, _, name = label.removeprefix("//").partition(":")
+    target = stub_failing_target(
+        name=name, coord_key=coord_key, provider_repo_id=provider_repo_id, dest=package
+    )
+
+    (bazel_workspace / "MODULE.bazel").write_text(
+        render_module_bazel([], module_name="acme_monorepo", ruleset_versions={}),
+        encoding="utf-8",
+    )
+    (bazel_workspace / "BUILD.bazel").write_text("", encoding="utf-8")
+    package_dir = bazel_workspace / package
+    package_dir.mkdir(parents=True)
+    (package_dir / "BUILD.bazel").write_text(render_build_bazel([target]), encoding="utf-8")
+
+    built = _bazel(
+        bazel_startup_argv,
+        "build",
+        label,
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(built, bazel_registry_args)
+    assert built.returncode != 0, built.stderr[-3000:]
+    assert provider_repo_id in built.stderr, built.stderr[-3000:]
+    assert coord_key in built.stderr, built.stderr[-3000:]
+    # (Fix round, review finding M2: the PREVIOUS form of this test asserted the declared output
+    # was absent from the SOURCE package — a path Bazel never writes a declared `outs` file into
+    # regardless of outcome, so the assertion could not fail either way. Dropped rather than
+    # replaced with another non-discriminating check: `returncode != 0` together with the two
+    # message assertions above already establish the failure is OUR `cmd`'s exit code and message,
+    # not a generic "output missing" error from Bazel itself — which is the actual property that
+    # needed proving.)
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
+def test_real_bazel_resolves_a_redirected_consumer_through_a_published_artifact_stub_alias(
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
+) -> None:
+    """§3.5 item 1's PACKAGE half (fix round, review finding I1): a consumer redirected to a
+    `PUBLISHED_ARTIFACT` stub — via exactly the label `cli._unit_deps`'s already-landed redirect
+    (Blocker C, round VI task 13) substitutes for the abandoned provider's own — must resolve
+    under REAL Bazel, not merely appear as a string in generated text. Every stub test before
+    this fix round, including this leg's own first landing, ran only under `FakeBazel`, which
+    never asks Bazel to resolve anything — so a redirect that could never build passed every one
+    of them.
+
+    **Python, not Maven — a deliberate choice, not the first one tried.** A maven/guava attempt
+    surfaced a SEPARATE, pre-existing, previously-undetected defect: `JvmAdapter.workspace_deps()`
+    emits `maven.install(name=…, version=…)` per artifact (`bazel/generators.py`'s generic
+    `_tag_attrs` fallback, since that adapter deliberately sets no `attrs`), but real
+    `rules_jvm_external`'s `install` tag class has NO per-artifact `name`/`version` attrs at all —
+    only `artifacts` (a `string_list` of `"group:artifact:version"` tuples) or the separate
+    `maven.artifact(...)` tag class. Real Bazel: `Error: in 'install' tag, unknown attribute
+    'version' provided`. No test anywhere in this tree had ever run a REAL `bazel build`/`mod
+    graph` against a generated `maven.install` tag before this attempt — every existing maven
+    assertion (including `test_module_bazel_carries_the_workspace_deps_the_adapters_declare`) is
+    `FakeBazel`-seamed. This is OUT OF SCOPE for task-68 (a pre-existing `ecosystems/jvm.py`/
+    `bazel/generators.py` defect, unrelated to the stub-render mechanism) and is disclosed to the
+    controller in this round's report rather than fixed here — fixing it correctly means changing
+    how EVERY maven-ecosystem repo's `MODULE.bazel` renders, a blast radius well beyond this leg.
+
+    Real PyPI instead, reusing the version-free-by-dialect `pip.parse` shape this suite's other
+    real-bazel Python tests already exercise (`test_real_bazel_builds_the_generated_python_package`
+    et al.) — `six` 1.16.0, a tiny, pure, dependency-free, single-module wheel, resolved for real
+    via a real `requirements.lock`. The stub package (`stub_alias_target`, produced the identical
+    way `cli._stub_package_files` produces it in production) is a generic `alias` forwarding to
+    `@pypi//six`; the "consumer" `py_library` depends on the stub's label via
+    `PyAdapter.generate_targets`'s own `dep_labels()`/`InternalDep` path — the SAME shape
+    `_unit_deps`'s redirect would hand a real consumer, never a hand-rolled `deps` list.
+    """
+    coord_key = "pypi::six"
+    pinned_version = "1.16.0"
+    dest = stub_dest(coord_key)
+    label = cli._internal_label(dest)
+    package, _, name = label.removeprefix("//").partition(":")
+
+    adapter = PyAdapter()
+    six = Coordinate(ecosystem=Ecosystem.PYPI, name="six", version_spec=pinned_version)
+    stub_unit = BuildUnit(
+        unit_id=name,
+        ecosystem=Ecosystem.PYPI,
+        dest=package,
+        published=six,
+        internal_deps=[],
+        external_coordinates=[six],
+    )
+    deps = adapter.workspace_deps(stub_unit)
+    labels = adapter.external_labels(stub_unit)
+    assert labels == ["@pypi//six"], labels
+    stub_target = stub_alias_target(name=name, dest=package, actual=labels[0])
+
+    consumer_dest = "py/acme_consumer"
+    consumer_unit = BuildUnit(
+        unit_id="acme-consumer",
+        ecosystem=Ecosystem.PYPI,
+        dest=consumer_dest,
+        srcs=[f"{consumer_dest}/acme_consumer/__init__.py"],
+        published=Coordinate(ecosystem=Ecosystem.PYPI, name="acme-consumer"),
+        internal_deps=[InternalDep(label=label, dest=package, published=six)],
+    )
+    consumer_targets = adapter.generate_targets(consumer_unit)
+
+    (bazel_workspace / "MODULE.bazel").write_text(
+        render_module_bazel(
+            deps,
+            module_name="acme_monorepo",
+            ruleset_versions=dict(BuildSection().ruleset_versions),
+            toolchains=adapter.toolchain_requirements(),
+        ),
+        encoding="utf-8",
+    )
+    (bazel_workspace / "BUILD.bazel").write_text("", encoding="utf-8")
+    (bazel_workspace / "requirements.lock").write_text("six==1.16.0\n", encoding="utf-8")
+    stub_pkg_dir = bazel_workspace / package
+    stub_pkg_dir.mkdir(parents=True)
+    (stub_pkg_dir / "BUILD.bazel").write_text(render_build_bazel([stub_target]), encoding="utf-8")
+
+    consumer_pkg_dir = bazel_workspace / consumer_dest / "acme_consumer"
+    consumer_pkg_dir.mkdir(parents=True)
+    (consumer_pkg_dir / "__init__.py").write_text("VERSION = '0.1'\n", encoding="utf-8")
+    (bazel_workspace / consumer_dest / "BUILD.bazel").write_text(
+        render_build_bazel(consumer_targets), encoding="utf-8"
+    )
+
+    built = _bazel(
+        bazel_startup_argv,
+        "build",
+        f"//{consumer_dest}/...",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(built, bazel_registry_args)
+    assert built.returncode == 0, built.stderr[-3000:]
+
+    # The redirect label ITSELF resolves to the real external target, not to nothing: this is
+    # the exact fact Blocker C's own `FakeBazel`-seam tests cannot observe.
+    queried = _bazel(
+        bazel_startup_argv,
+        "query",
+        f"deps({label})",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    assert queried.returncode == 0, queried.stderr[-2000:]
+    assert "@pypi//six:six" in queried.stdout.split(), queried.stdout
 
 
 @pytest.mark.integration

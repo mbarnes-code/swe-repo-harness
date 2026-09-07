@@ -60,7 +60,13 @@ from typer._click.exceptions import Exit as ClickExit
 from typer.core import TyperGroup
 
 from fleet import ecosystems
-from fleet.bazel.generators import render_gazelle_build, render_root_package
+from fleet.bazel.generators import (
+    render_build_bazel,
+    render_gazelle_build,
+    render_root_package,
+    stub_alias_target,
+    stub_failing_target,
+)
 from fleet.bazel.layout import (
     LayoutNode,
     ReservedDestError,
@@ -8845,6 +8851,285 @@ async def _create_stub_records(
     return tuple(created)
 
 
+# --------------------------------------------------------------------------------------
+# §37 Leg 2 (round VI task 68) — the BUILD-phase RENDER of an already-created `stubs` row, in TWO
+# parts, both of which SPEC §3.5 item 1 names in one sentence: "`workers/buildgen.py` emits a
+# stub PACKAGE at `third_party/stubs/<coord_key_path>/` ... produced by
+# `ecosystems.for_ecosystem(coord.ecosystem).workspace_deps(stub_unit)`". The FIRST landing of
+# this leg built only the second half (the `MODULE.bazel` declaration, `_stub_workspace_deps`);
+# a task-scoped review correctly found the first half MISSING — nothing materialized a real
+# `BUILD.bazel` at `stub_dest(coord_key)`, so `_unit_deps`'s already-landed redirect label
+# resolved to nothing under real Bazel (masked because every stub test ran under `FakeBazel`).
+# `_stub_package_files` (below `_stub_workspace_deps`) is that missing half, fixed in this same
+# leg rather than deferred to a new one (review ruling: "BUILD-phase render" is not done until
+# something actually renders the package SPEC names).
+#
+# Both functions run their OWN query rather than reusing `_unit_deps`'s (Blocker C, round VI
+# task 13) — that function is explicitly out of scope here ("already landed, correct, do not
+# touch"), and the two ask different questions of the same table: `_unit_deps` needs
+# `(consumer_repo_id, dst_coord_key) -> (bazel_label, pinned_version)` to redirect ONE edge; these
+# need every field of every `stub_coord_key`'s row, unioned across every consumer of the SAME
+# provider. Same `state = 'ACTIVE'` predicate (reused, not re-derived), different projection —
+# `_active_stub_facts` is that shared projection, read once and consumed by both.
+#
+# `ecosystems.for_ecosystem(coord.ecosystem).workspace_deps(unit)` /
+# `EcosystemAdapter.external_labels(unit)` are the exact mechanisms SPEC §3.5 item 1 names, and
+# neither has any stub-awareness (`src/fleet/ecosystems/py.py::workspace_deps` et al.) — a stub is
+# just another `Coordinate` in `external_coordinates`. Only wired into the render half; the
+# TRANSFORM-phase DECISION (trigger detection, `StubRecord`, the `stubs` INSERT, the
+# `RUNNING -> DEGRADED` write) is task-67's and stays untouched.
+#
+# **Why `stub_failing_target` is wired for real in THIS round, corrected from the first landing's
+# reasoning.** The first landing left it unwired because "dependents of an `EMPTY_FAILING`
+# provider stay `BLOCKED`, so there is no live caller" — a task-scoped review traced this and
+# found it FALSE on the landed tree: `orchestrator.reentry.stub_permits_removal` has no fidelity
+# check at all (`REQUIRES_HUMAN_INTERVENTION` at any phase + the `stub_blocked` policy flag is
+# sufficient), `state.repository.SqliteStateRepository.stub_degrade_transform` leaves an
+# `EMPTY_FAILING`-only consumer at `SUCCEEDED` rather than `BLOCKED`, and `_eligible_build_units`
+# admits a TRANSFORM-`SUCCEEDED` repo into BUILD — so the moment task-69 removes the three
+# `--stub-blocked` CLI refusals, an `EMPTY_FAILING` provider's dependent WOULD reach BUILD with no
+# failing target wired, silently contradicting SPEC. The ACTUAL reason this was safe to leave
+# unwired until now is narrower and still true today: all three refusals still stand (ADR-0113
+# condition 2), so nothing reaches this path in PRODUCTION yet regardless of which reason is
+# given — but the mechanism itself is real and wired now, not deferred on a false premise.
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _ActiveStub:
+    """One `stubs.stub_coord_key`'s worth of facts, deduped across every consumer row that shares
+    it — the shared projection `_stub_workspace_deps` and `_stub_package_files` both read."""
+
+    coord_key: str
+    provider_repo_id: str
+    pinned_version: str | None
+    fidelity: str  # 'PUBLISHED_ARTIFACT' | 'EMPTY_FAILING' (schema.sql's own CHECK values)
+
+
+async def _active_stub_facts(
+    conn: aiosqlite.Connection, run_id: str
+) -> dict[str, _ActiveStub]:
+    """Every `ACTIVE` `stubs` row of this run, deduped by `stub_coord_key` — the single query
+    `_stub_workspace_deps` and `_stub_package_files` both read, so the two can never disagree
+    about which rows are live or what fidelity/version/provider one names.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT stub_coord_key, provider_repo_id, pinned_version, stub_fidelity FROM stubs "
+        " WHERE run_id = ? AND state = 'ACTIVE'",
+        (run_id,),
+    )
+    out: dict[str, _ActiveStub] = {}
+    for row in rows:
+        out.setdefault(
+            str(row[0]),
+            _ActiveStub(
+                coord_key=str(row[0]),
+                provider_repo_id=str(row[1]),
+                pinned_version=None if row[2] is None else str(row[2]),
+                fidelity=str(row[3]),
+            ),
+        )
+    return out
+
+
+async def _coordinate_for_key(conn: aiosqlite.Connection, coord_key: str) -> Coordinate:
+    """Reconstruct a `Coordinate` from `coordinates` for a `stub_coord_key` — the same table and
+    the same three columns `_owner_index` reads, so a stub's coordinate is described identically
+    to an ordinary owned one. Raises rather than returning `None` (Rule 11): a `stubs` row's
+    `stub_coord_key` is always a real `edges.dst_coord_key` (`_detect_transform_stub_triggers`),
+    and `coordinates` has no row for it only if an upstream invariant already broke.
+    """
+    rows = await _rows(
+        conn, "SELECT ecosystem, grp, name FROM coordinates WHERE coord_key = ?", (coord_key,)
+    )
+    if not rows:
+        raise ValueError(
+            f"stubs.stub_coord_key={coord_key!r} has no coordinates row; a stub's coordinate is "
+            "always a real edges.dst_coord_key and coordinates must already carry it "
+            "(Rule 11: fail loud)"
+        )
+    return Coordinate(
+        ecosystem=Ecosystem(str(rows[0][0])), group=str(rows[0][1]), name=str(rows[0][2])
+    )
+
+
+async def _stub_workspace_deps(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[WorkspaceDep, ...]:
+    """§3.5 item 1's `MODULE.bazel` half, over every `ACTIVE`, `PUBLISHED_ARTIFACT`-fidelity
+    `stubs` row of this run — the half `_build_impl`'s wave loop unions into the fleet's aggregate
+    `workspace_deps` (`_build_payloads`, alongside `_module_inputs(plans)`'s ordinary ones), so
+    it reaches `BuildgenInput.workspace_deps` and from there `MODULE.bazel` exactly like any
+    other external dependency, with `workers/buildgen.py` never told a `WorkspaceDep` came from a
+    stub. `_stub_package_files` below is item 1's OTHER half — the package itself.
+
+    `EMPTY_FAILING` rows (`pinned_version IS NULL`) are excluded by an EXPLICIT
+    `stub_fidelity = 'PUBLISHED_ARTIFACT'` predicate, not merely by `pinned_version IS NOT NULL`
+    (fix round, review finding M1): `state.repository.stub_degrade_transform`'s own docstring
+    warns not to trust "a `PUBLISHED_ARTIFACT`-only row has a non-NULL `pinned_version`" as an
+    invariant to lean on elsewhere without re-checking — cheap to check both here too, and it
+    documents the exclusion at the query rather than leaving it implicit in a `None` check.
+
+    **Deduped by `stub_coord_key` before calling `workspace_deps()`.** Two consumers of the SAME
+    abandoned provider each get their OWN `stubs` row (keyed `(run_id, repo_id, stub_coord_key,
+    revalidation_round)` — `repo_id` is the CONSUMER, per `_create_stub_records`), but the
+    PROVIDER's `workspace_deps()` output is identical for both: `workspace_deps()` renders one tag
+    call per coordinate, and unioning two rows for the same coordinate would emit it twice — the
+    same reason `_plan_build`'s own `BuildUnit.external_coordinates` is deduplicated by coordinate
+    key (`src/fleet/cli.py` comment, "two rows would emit it twice").
+
+    **`resolved_version` is stamped from `pinned_version` directly, not through
+    `bazel.generators.reconcile_versions`/`resolve_workspace_deps`.** MVS reconciles CONFLICTING
+    version RANGES declared by several repos on one external coordinate; an abandoned provider's
+    coordinate is never declared as an external requirement by anything in this run — it is
+    INTERNALLY owned (`_external_coordinates` skips any `coordinate.key in owned`), so nothing
+    contributes a `VersionRequirement` for it to reconcile against. There is exactly one fact:
+    the provider's own last published version, already resolved. Left at `None`, a per-artifact-
+    pin ecosystem's `render_module_bazel` would raise outright for every such stub — maven's own
+    `workspace_deps()` sets neither `attrs` nor `resolved_version` (`ecosystems/jvm.py`), by
+    design, because rendering with an unreconciled version is exactly what that adapter's own
+    docstring says must never happen. Harmless for the four lockfile-dialect adapters (py/js/
+    rust/go), whose `attrs` are always non-empty and whose render ignores `resolved_version`
+    entirely.
+
+    `BuildUnit.ecosystem` is the COORDINATE's own ecosystem (`coordinates.ecosystem`), not
+    necessarily the provider repo's primary one — SPEC §3.5 item 1 names it precisely as
+    `ecosystems.for_ecosystem(coord.ecosystem)`, and a polyglot provider's non-primary published
+    coordinate would otherwise be rendered by the wrong adapter.
+    """
+    facts = await _active_stub_facts(conn, run_id)
+    deps: dict[tuple[str, str, str, str], WorkspaceDep] = {}
+    for coord_key in sorted(facts):
+        fact = facts[coord_key]
+        if fact.fidelity != StubFidelity.PUBLISHED_ARTIFACT.value or fact.pinned_version is None:
+            continue
+        coordinate = await _coordinate_for_key(conn, coord_key)
+        published = coordinate.model_copy(update={"version_spec": fact.pinned_version})
+        stub_unit = BuildUnit(
+            unit_id=stub_dest(coord_key).rsplit("/", 1)[-1],
+            ecosystem=coordinate.ecosystem,
+            dest=stub_dest(coord_key),
+            published=published,
+            internal_deps=[],
+            external_coordinates=[published],
+        )
+        for dep in ecosystems.for_ecosystem(coordinate.ecosystem).workspace_deps(stub_unit):
+            resolved = dep.model_copy(update={"resolved_version": fact.pinned_version})
+            deps.setdefault(
+                (resolved.ruleset, resolved.extension, resolved.repo_name, resolved.coordinate.key),
+                resolved,
+            )
+    return tuple(deps[key] for key in sorted(deps))
+
+
+def _union_workspace_deps(
+    base: Sequence[WorkspaceDep], stub_deps: Sequence[WorkspaceDep]
+) -> list[WorkspaceDep]:
+    """Add `_stub_workspace_deps`'s output to the fleet's aggregate `workspace_deps`
+    (`_module_inputs(plans)`'s own output), keyed exactly the way `_module_inputs` itself keys
+    its dedup (`ruleset, extension, repo_name, coordinate.key`) — an ordinary dependency on the
+    same coordinate (impossible today, since a stub's coordinate is internally owned, but not
+    structurally forbidden) wins over the stub's, since the real declaration is strictly more
+    informative.
+    """
+    merged: dict[tuple[str, str, str, str], WorkspaceDep] = {
+        (d.ruleset, d.extension, d.repo_name, d.coordinate.key): d for d in base
+    }
+    for dep in stub_deps:
+        merged.setdefault(
+            (dep.ruleset, dep.extension, dep.repo_name, dep.coordinate.key), dep
+        )
+    return [merged[key] for key in sorted(merged)]
+
+
+async def _stub_package_files(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[SupportFile, ...]:
+    """§3.5 item 1's PACKAGE half (fix round, review finding I1) — the actual `BUILD.bazel` at
+    `bazel.layout.stub_dest(coord_key)` that `_unit_deps`'s already-landed redirect (Blocker C)
+    substitutes a label for. Without this, that label (`cli._internal_label(stub_dest(...))`)
+    names a package that does not exist, and a real Bazel build of a redirected consumer fails
+    with "no such package" — masked in every existing stub test because they all run under
+    `FakeBazel`, which never asks Bazel to resolve anything.
+
+    One `SupportFile` per `ACTIVE` `stub_coord_key` (same dedup as `_stub_workspace_deps`, same
+    shared `_active_stub_facts` projection), keyed on `stub_fidelity`:
+
+    * `PUBLISHED_ARTIFACT` → `bazel.generators.stub_alias_target`: a generic `alias` forwarding
+      to the REAL external label (`EcosystemAdapter.external_labels(stub_unit)` — the SAME
+      machinery `EcosystemAdapter.dep_labels` builds an ORDINARY package's `deps` from, so a
+      consumer redirected to the stub sees exactly what depending on the real coordinate would
+      give it, and no new per-ecosystem rendering logic is needed).
+    * `EMPTY_FAILING` → `bazel.generators.stub_failing_target`: the build-time-failing target.
+
+    **The target name is `cli._internal_label(stub_dest(coord_key))`'s own name — read off THAT
+    function, never recomputed** (fix round, review finding I2): `_create_stub_records` computes
+    `stubs.bazel_label` the same way, and `_unit_deps`'s redirect reads it back from that column.
+    Three call sites, one label-construction convention.
+    """
+    facts = await _active_stub_facts(conn, run_id)
+    files: dict[str, SupportFile] = {}
+    for coord_key in sorted(facts):
+        fact = facts[coord_key]
+        dest = stub_dest(coord_key)
+        label = _internal_label(dest)
+        package, _, name = label.removeprefix("//").partition(":")
+        if fact.fidelity == StubFidelity.PUBLISHED_ARTIFACT.value:
+            if fact.pinned_version is None:
+                raise ValueError(
+                    f"stubs.stub_coord_key={coord_key!r} is PUBLISHED_ARTIFACT with a NULL "
+                    "pinned_version; schema.sql's own CHECK forbids this combination "
+                    "(Rule 11: fail loud)"
+                )
+            coordinate = await _coordinate_for_key(conn, coord_key)
+            published = coordinate.model_copy(update={"version_spec": fact.pinned_version})
+            stub_unit = BuildUnit(
+                unit_id=name,
+                ecosystem=coordinate.ecosystem,
+                dest=dest,
+                published=published,
+                internal_deps=[],
+                external_coordinates=[published],
+            )
+            adapter = ecosystems.for_ecosystem(coordinate.ecosystem)
+            labels = adapter.external_labels(stub_unit)
+            if len(labels) != 1:
+                raise ValueError(
+                    f"stub {coord_key!r}: {adapter.name} external_labels() returned {labels!r} "
+                    "for a unit with exactly one external_coordinates entry; expected exactly "
+                    "one label to alias (Rule 11: fail loud)"
+                )
+            target = stub_alias_target(name=name, dest=package, actual=labels[0])
+        else:
+            target = stub_failing_target(
+                name=name,
+                coord_key=coord_key,
+                provider_repo_id=fact.provider_repo_id,
+                dest=package,
+            )
+        files[package] = SupportFile(
+            path=f"{package}/BUILD.bazel", content=render_build_bazel([target])
+        )
+    return tuple(files[key] for key in sorted(files))
+
+
+def _union_support_files(
+    base: Sequence[SupportFile], stub_files: Sequence[SupportFile]
+) -> list[SupportFile]:
+    """Add `_stub_package_files`'s output to the fleet's aggregate root/support files
+    (`_module_inputs(plans)`'s own `root_files`), keyed on `path` exactly the way `_module_inputs`
+    itself dedupes `plan.workspace_files` — a real file at the same path wins over the stub's.
+    Not reachable under any of the five shipped adapters today (none names `third_party` as its
+    `monorepo_dir`), but `bazel.layout.is_reserved_dest` does NOT cover this path — only the
+    `_scc` segment is a mechanism-enforced reservation — so this is a real dedup, not a dead one.
+    """
+    merged: dict[str, SupportFile] = {f.path: f for f in base}
+    for file in stub_files:
+        merged.setdefault(file.path, file)
+    return [merged[key] for key in sorted(merged)]
+
+
 async def _owned_coordinate_keys(conn: aiosqlite.Connection) -> frozenset[str]:
     """Every `Coordinate.key` an internal repo publishes — §3.1 step 3's internal/external oracle.
 
@@ -10155,6 +10440,8 @@ def _build_payloads(
     lock_dir: Path,
     sandboxed: bool,
     hoist_watch: tuple[HoistWatch, ...] = (),
+    stub_workspace_deps: tuple[WorkspaceDep, ...] = (),
+    stub_package_files: tuple[SupportFile, ...] = (),
 ) -> PayloadFactory[BuildInput]:
     """One repo's Phase 3 dispatch payload, built from its plan. Injected (Guardrail 3).
 
@@ -10162,6 +10449,14 @@ def _build_payloads(
     this function does not) and handed to every repo's `BuildInput` unchanged — the same closed-
     over-once, reused-per-repo shape `mounts` below already uses (§12.31 case (ii), Leg C2, round
     VI task 66; see `_hoist_watch_for_run`'s own docstring for why this is unscoped per repo).
+
+    `stub_workspace_deps`/`stub_package_files` are the same shape, for the same reason (§37 Leg 2,
+    round VI task 68): computed ONCE by `_run_build_wave` (`_stub_workspace_deps`/
+    `_stub_package_files`, which need the DB connection this function does not) and unioned into
+    every dispatch's `workspace_deps`/`support_files`, alongside `_module_inputs(plans)`'s
+    ordinary ones. Empty in every run today — nothing in `src/` yet writes an `ACTIVE` `stubs` row
+    in production (ADR-0113 condition 2) — so this is a live, currently-inert wire, not a
+    behavior change.
     """
     log_dir = str((settings.root / "artifacts/logs").resolve())
     mounts = _cache_mounts(settings)
@@ -10175,6 +10470,8 @@ def _build_payloads(
         # domain has been prepared, so every dispatch renders the identical MODULE.bazel and the
         # second one to publish merges instead of conflicting.
         deps, toolchains, requirements, module_targets, root_files = _module_inputs(plans)
+        deps = _union_workspace_deps(deps, stub_workspace_deps)
+        root_files = _union_support_files(root_files, stub_package_files)
         return BuildInput(
             repo_id=repo_id,
             dest=plan.dest,
@@ -10321,6 +10618,8 @@ async def _run_build_wave(
         rss_reader=RSS_READER or read_own_rss_bytes,
     )
     hoist_watch = await _hoist_watch_for_run(read_conn, run_id)
+    stub_workspace_deps = await _stub_workspace_deps(read_conn, run_id)
+    stub_package_files = await _stub_package_files(read_conn, run_id)
     runner = PhaseRunner(
         ctx,
         BuildPipelineWorker(bazel_runner=BAZEL_RUNNER),
@@ -10332,6 +10631,8 @@ async def _run_build_wave(
             lock_dir=lock_dir,
             sandboxed=sandboxed,
             hoist_watch=hoist_watch,
+            stub_workspace_deps=stub_workspace_deps,
+            stub_package_files=stub_package_files,
         ),
         sink=_BuildSink(
             attempts=_AttemptWriter(
