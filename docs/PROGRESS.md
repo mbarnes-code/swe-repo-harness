@@ -9873,3 +9873,124 @@ full closure). Natural next dispatches, cheapest-and-highest-leverage first: §3
 or Leg E of §12.31/D111 (both root-level per research-32's corrected ordering, no undone
 prerequisites), or the D112 JS/Rust/JVM slice (mechanically similar to the already-landed Python
 leg, no new design needed).
+
+## Round VI, twenty-sixth wave (2026-09-06/07) — §12 count: 41 of 48, unchanged from session start
+of this wave, but substantial real progress landed within two multi-leg criteria clusters. New
+session picked up after a context gap; ledger reconstructed from git log per this project's own
+recovery discipline (`.superpowers/sdd/round-VI-criteria-closure/progress.md`).
+
+**Recovered a real agent-dormancy incident before anything else.** Round VI task 62 (D120: two
+live §12.6 confinement-invariant violations) had been fully implemented and verified DONE by a
+prior session's dispatched agent, but the session ended before committing or reporting back — the
+work sat complete and uncommitted in an orphaned worktree. Found via `git worktree list` showing
+uncommitted changes plus a full `task-62-report.md`; picked up (not redispatched) rather than
+duplicating real, already-verified work. The worktree's branch was also rooted at a stale
+pre-"main was red" commit — naively merging would have reverted four already-landed tasks (58,
+59, 60, 61); rebased cleanly onto current `main` first, re-verified with the full real-Bazel
+`tests/test_build_e2e.py` (73/73) before dispatching review. D120 fixed and merged (`1996e44`),
+flipped to `FIXED, LANDED`.
+
+**Research this wave produced two major corrections and one high-leverage dissolution, each
+caught by re-verifying inherited framing against primary sources rather than trusting it:**
+- Research-35 found "Leg C1 (FILE_PATH collision)" — the framing every prior round used for
+  §12.31 case (ii) — is NOT what the criterion's literal text requires; Leg C2 (build-failure
+  attribution) is. The "unrelated repo" phrasing this whole thread inherited appears nowhere in
+  `docs/SPEC.md`. Corrected in `docs/CRITERIA_PLAN.md` §31, redirecting all further case-(ii) work
+  to Leg C2.
+- Research-36 found the "genuinely deeper open question" research-7/8 raised in an earlier round
+  (whether stub redirect needs dynamic `RewriteRule` construction) DISSOLVES entirely on direct
+  read of `docs/SPEC.md:1663` — the stub publishes the same `Coordinate` as the real provider and
+  every ecosystem adapter's `import_specifier()` ignores `dest`, so old/new import text are
+  byte-identical; the already-landed BUILD-graph label swap is the whole mechanism. This unblocked
+  §12.37's (and §12.14's/§12.39's shared) stub-creation-logic bundle for direct dispatch — the
+  single highest-leverage finding this wave, since it clears the path for 3 of the session's 7
+  open criteria at once. Landed as a doc-only correction (`27b688e`).
+- Research-37 drafted ADR-0122 (§12.31 Leg D design), resolving all 7 judgment calls research-35
+  named, and found a genuinely new, previously-unmeasured crash risk along the way: `_graph_edges`
+  had no filter symmetric to `_graph_nodes`'s, so a `FAILED` contract's dangling edges would crash
+  the next `fleet sequence` with `GraphError`. Landing this ADR took 2 fix rounds (an opus-tier
+  review found 2 Critical + 2 Important — a missed 5th Rule-14-class site, and fresh citation
+  drift the landing task's own edits introduced) before merging clean (`9c5f805`).
+- Research-38 scoped §12.31 Leg C2's detection half as one-shot-sized (not ADR-shaped): a contract
+  never gets its own `phases` row, so attribution is necessarily a stderr string-match against
+  `hoist_target_path`, not an edge/wave join. Wrote task-66-brief.md.
+- Research-39 decomposed §12.37's stub-creation-logic bundle into 3 sequenced worker-ready tasks
+  (67→68→69) once research-36 unblocked it, resolving one more inherited tension along the way:
+  SPEC's "buildgen.py emits the stub" and research-7's "the decision is TRANSFORM-phase" are two
+  true layers of one pipeline, not a conflict.
+
+**Three worker tasks landed real production mechanism this wave, all after real review-driven
+fix rounds — none closes its full criterion alone, all three genuinely narrow what remains:**
+- **Task 65 (§12.31/D111 Leg D slice 1, `884f3d6`)** — closes the `_graph_edges` crash risk for
+  real (not just design), a new `cli.unhoist_contract` (blast-set demotion, transitive
+  downstream-merge refusal), zero call sites outside its own tests. Fix round found a genuine bug
+  in ADR-0122 Decision 3 ITSELF (not the implementation): the demotion gate's phase threshold was
+  a transcription slip that excluded the paradigm case SPEC's own rollback paragraph exists for —
+  traced and corrected via `demote_to_floor`'s own inclusive-span semantics. Two review passes,
+  zero residual findings.
+- **Task 66 (§12.31/D111 Leg C2, `cb77005`)** — build-failure attribution (`HoistBrokeOwner`,
+  `contracts.status='FAILED'`, retry-ladder integration with zero changes to `retry.py`). Fix round
+  found ADR-0123's own "FAILED survives a rebuild" decision was INERT in production — the actual
+  feeder function never selected `FAILED` rows, so a broken hoist was silently re-hoisted the very
+  next cycle, the opposite of the documented decision. Also fixed a per-wave (not per-SCC) watch
+  gap. Review independently proved the crash-risk sequencing question in both directions (a real
+  second `fleet scan`, plus a known-bad control reproducing the exact pre-fix crash).
+- **Task 67 (§12.37/§12.14/§12.39 Leg 1, `fe46f0c`)** — the TRANSFORM-phase stub-creation decision.
+  Fix round 1 found and fixed two real production bugs the initial pass shipped: an
+  `EMPTY_FAILING` stub would have driven its consumer to `DEGRADED`, directly contradicting
+  §12.14's literal text; and `stub_coord_key` was keyed on the wrong coordinate, silently breaking
+  the redirect for any multi-coordinate provider. Also corrected a FALSE precedent citation
+  (`_quarantine_impl` does not bypass `transition()`; the real precedent for this shape is D77, an
+  already-adjudicated recurring-class defect). Controller-ruled design decision landed as
+  **ADR-0124**: a `RESUME_DEMOTE`/ADR-0077-shaped `STUB_DEGRADE` door, not a bare raw-SQL bypass —
+  independently verified correct on all 4 scrutiny points by a second opus-tier review. Fix round
+  2 closed self-inflicted citation drift (16 citations, root-caused to a covering-set derived from
+  changed function names rather than from what merely reads a growing file).
+
+**Merge integration was the load-bearing work this wave, not incidental to it.** All three tasks
+were dispatched from a common ancestor and all touch the same shared doc files
+(`docs/CRITERIA_PLAN.md`, `docs/INTEGRATION_HONESTY.md`, `docs/DECISIONS.md`, `docs/SPEC.md`,
+`src/fleet/state/schema.sql`) — merging them in sequence (65 → 67 → 66, driven by which cleared
+review first, not by task number) surfaced real conflicts every time: citation-drift narration
+needing merged attribution across all three tasks, two genuinely distinct ADRs (0123, 0124) that
+needed both kept in numerical order rather than one clobbering the other, and — the one substantive
+conflict, not just prose — the `findings.kind` CAVEAT listing in `schema.sql`/`docs/SPEC.md`
+needing a real UNION resolution once task 65 gave `HoistRollbackDemotion` a writer and task 66 gave
+`HoistBrokeOwner` one in the same wave. Hit the same apostrophe-parsing hazard (`_QUOTED =
+re.compile(r"'([^']+)'")` treats every single quote in the CAVEAT block as a token boundary,
+corrupting several sibling entries when a possessive appears near a new one) independently at both
+the task-66 fix round and the task-67 merge — same root cause, same fix (rephrase to avoid the
+stray apostrophe), not yet fixed at its root in the instrument itself. Post-merge citation-hygiene
+gate caught real drift after every single merge this wave (task 62: 12 citations; task 65/66/67's
+own fix rounds: several rounds each) — re-confirming this session's own standing rule that citation
+drift is the default outcome of any `cli.py`-touching merge, not an edge case.
+
+**Status: main green.** Citation-hygiene (74/74 combined with findings-kinds), mypy, ruff, and
+targeted regression sweeps (169+ tests) all re-verified clean after every merge this wave.
+`docs/DECISIONS.md` now holds ADR-0122/0123/0124 in numerical order. `docs/INTEGRATION_HONESTY.md`
+D117 and D120 both flipped to `FIXED, LANDED`; D111 stays `OPEN` (Leg D's git-mechanics slice and
+production wiring, plus case (i)'s remaining legs, are still unbuilt). §12 count: 41 of 48,
+unchanged in COUNT but real, disclosed progress within two multi-leg clusters — per Rule 13, this
+is not a 0-target wave (it advanced criteria substantively, just not to full closure) and the next
+wave should aim to close at least one criterion outright, not just narrow further.
+
+**Remaining open criteria and exactly what closes each, cheapest/highest-leverage first:**
+- **§12.37/§12.14/§12.39** (shared done bar) — task-68 (Leg 2, BUILD-phase render: stub
+  `BuildUnit`/`workspace_deps()` wiring, `EMPTY_FAILING` fallback) then task-69 (Leg 3,
+  integration: `_eligible_build_units` widening, all 3 `--stub-blocked` refusal removals, a real
+  e2e fixture) are both already briefed (`.superpowers/sdd/round-VI-criteria-closure/
+  task-68-brief.md`/`task-69-brief.md`) and sequenced — task-68 must land and merge before task-69
+  is dispatched (research-39's own dependency ordering). This is the single highest-leverage
+  remaining thread: closing it closes 3 criteria, not 1.
+- **§12.31** — case (i) closed; case (ii)'s detection half (Leg C2) now landed; Leg D's DB/graph
+  mechanism landed. Remaining: the git-mechanics revert-series execution (ADR-0122 Decisions 4/5 —
+  no task briefed yet) and the production wiring connecting Leg C2's finding to Leg D's mechanism
+  (no task briefed yet, blocked on the revert-series slice existing first per research-35/37's own
+  dependency analysis).
+- **§12.11** — D112 JS/Rust/JVM slice (mechanically similar to the already-landed Python leg) and
+  D116 (nothing writes `baseline_ok` under the shipped config) both remain, unrelated to each
+  other, either dispatchable independently.
+- **§12.14** — shares §12.37's done bar exactly; see above.
+- **§12.39** — shares §12.37's done bar exactly; see above.
+- **§12.43** (case ii) — the D55/D58 circuit-breaker gap, still needs its own dedicated round; not
+  touched this wave.
