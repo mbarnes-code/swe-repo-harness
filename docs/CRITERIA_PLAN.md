@@ -2195,14 +2195,32 @@ hits, 682 lines). Both facts are independently true and unreconciled. This is na
 unresolved and needing adjudication by whichever task/round eventually scopes the
 stub-creation-logic bundle's dispatch — it is not adjudicated by this update.
 
-**Update, round VI task 67 (2026-09-06) — resolved.** `docs/SPEC.md` §3.5 item 1 now names the
-TRANSFORM-phase decision site explicitly, immediately before the `workers/buildgen.py` emission
-sentence quoted above (which stays correct, unchanged, describing the render step only). See that
-task's commit for the SPEC wording and the landed decision-half functions
+**Update, round VI task 67 (2026-09-06, `d548b38`) — resolved.** `docs/SPEC.md` §3.5 item 1 now
+names the TRANSFORM-phase decision site explicitly, immediately before the `workers/buildgen.py`
+emission sentence quoted above (which stays correct, unchanged, describing the render step only).
+See that commit for the SPEC wording and the landed decision-half functions
 (`orchestrator.stubs.detect_stub_triggers`/`build_stub_record`/`stub_completion_correction`,
 `cli._detect_transform_stub_triggers`/`_create_stub_records`/`_correct_transform_status_for_stubs`
 — Leg 1 of the bundle scoped above; the BUILD-phase render half is Leg 2, separately dispatched).
 This paragraph is kept intact per CLAUDE.md's "annotate, never rewrite" ledger discipline.
+
+> **Update, round VI task 67 fix round 1 (2026-09-07) — the function list above is SUPERSEDED; the
+> RESOLVED verdict stands.** A task-scoped review found `d548b38`'s `RUNNING -> DEGRADED`
+> correction (`stub_completion_correction`/`_correct_transform_status_for_stubs`) bypassed
+> `models.enums.transition()` on a false precedent (see `docs/DECISIONS.md` **ADR-0124**) and was
+> blind to stub fidelity, contradicting §12.14 (an `EMPTY_FAILING` stub must never drive
+> `DEGRADED`) — and separately, that `_create_stub_records` keyed `stubs.stub_coord_key` on the
+> provider's `primary_coord_key` rather than the consumer edge's own `dst_coord_key`, silently
+> defeating `_unit_deps`'s redirect for any multi-coordinate provider. Both are fixed in this same
+> fix-round commit: `stub_completion_correction`/`_correct_transform_status_for_stubs` are DELETED
+> (not merely edited) and replaced by `models.enums.STUB_DEGRADE`/`degrade_for_stub`/
+> `StubDegradation` and `state.repository.SqliteStateRepository.stub_degrade_transform` (ADR-0124,
+> fidelity-aware, one `ALLOWED_TRANSITIONS`-modelled door instead of a raw-SQL bypass);
+> `orchestrator.stubs.StubTrigger` now carries the edge's own `coord_key` and
+> `_detect_transform_stub_triggers`/`_create_stub_records` key every `stubs` row on it. **Still
+> not yet wired into any production call site** — all three `--stub-blocked` refusals stand per
+> ADR-0113 condition 2; see `docs/SPEC.md` §3.5 item 1's own "not yet wired" sentence, added in
+> this same fix round.
 
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of

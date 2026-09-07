@@ -181,3 +181,177 @@ trusting any result, per CLAUDE.md's import-isolation guardrail.
    DEGRADED correction against whatever the controller decides on concern 1.
 3. No ADR or D-number was needed or self-allocated — the doc fix (step 4) is a documentation-
    currency correction of an already-disclosed tension, not a §12 criterion wording change.
+
+---
+
+# Fix round 1 (2026-09-07) — task-scoped review findings addressed
+
+**Status after this round: DONE.** All three Critical findings, the controller's ADR-0124 ruling,
+both Important findings, and the two cheap Minor findings are fixed. Two Minor findings (M4/M5)
+are addressed as documentation/design disclosure rather than code changes (see below).
+
+## C1 — `EMPTY_FAILING` no longer drives `DEGRADED` (§12.14)
+
+Fixed by moving the whole correction into a fidelity-aware mechanism
+(`SqliteStateRepository.stub_degrade_transform`, see ADR-0124 below): it reads the consumer's
+`ACTIVE` `stubs` rows' `stub_fidelity` values inside the same transaction as the phase-status read
+and fires only when at least one is `PUBLISHED_ARTIFACT` — an `EMPTY_FAILING`-only stub set is a
+no-op, exactly as §12.14 requires. Discriminating test:
+`tests/test_repository.py::test_stub_degrade_transform_does_not_fire_for_an_empty_failing_only_stub`
+(EMPTY_FAILING-only -> `None`) alongside
+`test_stub_degrade_transform_fires_for_an_active_published_artifact_stub` (PUBLISHED_ARTIFACT ->
+fires) and `test_stub_degrade_transform_fires_when_at_least_one_qualifying_stub_exists` (mixed
+fidelities -> fires, "at least one" not "every row"). Mutation-proven: dropping the fidelity
+filter (`qualifying = sorted({str(r[1]) for r in active})`, no `PUBLISHED_ARTIFACT` check) reddened
+exactly the EMPTY_FAILING-only test (1 failed / 6 passed in that file's `stub_degrade` tests),
+verified in a fresh `env -i`-isolated interpreter pinned to the worktree, backup-diffed (not
+HEAD-relative); reverted and re-confirmed green (64/64 in `tests/test_repository.py`).
+
+## C2 — `stub_coord_key` now keyed on the consuming edge's own coordinate, not the provider's primary
+
+Fixed by threading `coord_key` through the whole pipeline: `orchestrator.stubs.StubTrigger` gained
+a `coord_key: str` field; `detect_stub_triggers` now takes `(provider_id, consumer_id, coord_key)`
+triples (the same shape `_unit_deps`'s own edge query already selects) instead of
+`_ordering_pairs`'s coordinate-less pairs, and dedupes on `(consumer, provider, coord_key)` rather
+than `(consumer, provider)` alone — one `StubTrigger` per distinct coordinate a real edge names.
+`cli._detect_transform_stub_triggers` now runs its own query (mirroring `_unit_deps`'s edge-select
+shape verbatim, over the identical filter conditions `_ordering_pairs` uses) instead of calling
+`_ordering_pairs`, since that function's return shape carries no `dst_coord_key` at all.
+`cli._create_stub_records` no longer takes a `facts: Mapping[str, _RepoFacts]` parameter — it
+reads `pinned_version` off `coordinates.version` for `trigger.coord_key` directly, so a
+multi-coordinate provider's stub rows carry each coordinate's own version, not the primary
+coordinate's. Discriminating tests: `tests/test_stubs.py::
+test_detect_stub_triggers_fires_once_per_distinct_coordinate_a_real_edge_names` (pure layer),
+`tests/test_cli.py::test_detect_transform_stub_triggers_keys_on_the_edges_own_coordinate` (real
+DB, a provider with two published coordinates, `primary_coord_key` deliberately pinned to only the
+first one) and `test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate` (two
+triggers for one `(consumer, provider)` pair produce two `stubs` rows, each correctly
+`stub_coord_key`'d). Mutation-proven: collapsing the dedup key back to `(consumer_id,
+provider_id)` (dropping `coord_key`) reddened exactly the multi-coordinate pure test (1 failed / 5
+passed in `test_stubs.py`'s trigger tests), same isolation/backup-diff discipline as C1; reverted
+and re-confirmed green (40/40 in `tests/test_stubs.py`).
+
+## C3 — the false `_quarantine_impl` precedent citation removed
+
+`_quarantine_impl` was mischaracterized in both docstrings as raw-SQL-bypassing-`ALLOWED_
+TRANSITIONS` precedent; it actually calls `transition()` before writing and never violates the
+modelled graph in practice. Both docstrings citing it as precedent for a bypass are DELETED along
+with the functions that carried them (`stub_completion_correction`,
+`_correct_transform_status_for_stubs` — see ADR-0124 immediately below, which replaces them
+entirely rather than patching the false citation in place). The real precedent for "a raw-SQL
+write that bypasses the modelled graph", `docs/INTEGRATION_HONESTY.md`'s D77, is cited honestly in
+ADR-0124's Context section — including that D77's own fix went the OPPOSITE direction (gate with
+`transition()`, skip on refusal) from what this leg needed, which is exactly why ADR-0124 chose a
+new `ALLOWED_TRANSITIONS` door instead of reusing D77's fixed shape verbatim.
+
+## Controller ruling — ADR-0124 written
+
+Allocated and written as directed: `docs/DECISIONS.md` ADR-0124 (verified free at write time —
+`docs/DECISIONS.md`'s own max was ADR-0122 in this branch; the controller's message named
+ADR-0124 directly, so I did not re-derive or self-allocate a number). Summary of the mechanism
+(full text in `docs/DECISIONS.md`):
+- `models/enums.py`: `STUB_DEGRADE: {RepoStatus.SUCCEEDED: frozenset({RepoStatus.DEGRADED})}`,
+  mirroring `RESUME_DEMOTE` exactly; `transition()` gains a `stub_degrade: bool = False` keyword
+  opening it, additive and default-off like `operator`/`resume`.
+- `StubDegradation` (mirrors `PhaseDemotion`) and `degrade_for_stub()` (mirrors `demote()`):
+  accepts only a `STUB_DEGRADE` key, returns `(new_status, StubDegradation)` as one value so a
+  caller cannot obtain the status without the audit obligation.
+- `SqliteStateRepository.stub_degrade_transform(run_id, repo_id, *, phase, now)` (declared on the
+  `StateRepository` Protocol beside `demote_to_floor`): ONE transaction reads `phases.status` and
+  the consumer's `ACTIVE` stub fidelities, fires `degrade_for_stub` + a `_STUB_DEGRADE_PHASE_SQL`
+  CAS UPDATE (`AND status = 'SUCCEEDED'`, mirroring `_DEMOTE_PHASE_SQL`'s own fencing style) + a
+  `StubDegraded` finding (reusing `_DEMOTE_FINDING_SQL`'s generic INSERT/upsert shape) — all in the
+  same `writer.submit(unit)` call, closing M1 (no more read-outside-transaction) and I4 (no more
+  missing audit finding) as a side effect of the pattern.
+- `stub_completion_correction` and `_correct_transform_status_for_stubs` are DELETED (not edited)
+  from `orchestrator/stubs.py`/`cli.py` respectively, along with their now-obsolete imports and
+  `__all__` entries.
+
+Tests: `tests/test_state_models.py` gained `test_a_stub_degradation_is_impossible_without_the_
+stub_degrade_flag`, `test_the_stub_degrade_door_opens_onto_degraded_from_succeeded_and_nothing_
+else`, and `test_degrade_for_stub_pairs_the_finding_and_is_stricter_than_transition`, mirroring
+the three equivalent `RESUME_DEMOTE`/`demote()` tests exactly. Fixing these ALSO required updating
+`test_transition_demotes_without_writing_a_record_or_naming_a_new_sink`'s `TRANSITION_GLOBALS`
+whitelist (added `"STUB_DEGRADE"`) and its `__kwdefaults__` assertion (added `"stub_degrade":
+False`) — both are the test's own documented, expected consequence of "editing `transition()`
+legitimately," not a weakening. `tests/test_repository.py` gained the seven `stub_degrade_
+transform` tests described under C1 above, using a new `_insert_active_stub` fixture helper and
+the existing `demotion_bed`/`_settle_phase` fixtures (the same real-CAS-pair pattern D77's own test
+uses) rather than hand-rolled raw SQL for the parts a production path can produce.
+
+## I1 — honest test counts (re-measured fresh, whole files, no `-k`)
+
+The original report's `tests/test_workers_transform.py` (46) and `tests/test_transform_e2e.py`
+(13) counts were false, as the review found. Re-run fresh in this fix round:
+- `tests/test_workers_transform.py` — **28 passed** (matches the review's count).
+- `tests/test_transform_e2e.py` — **17 passed** (matches the review's count).
+No narrowing was applied in this re-run (no `-k`, whole files). I did not further investigate how
+the original false counts were produced; the honest numbers above are what is reported now and in
+the "Tests run" section below.
+
+## I3 — "not yet wired" disclosure added
+
+`docs/SPEC.md` §3.5 item 1 now states explicitly: "Not yet wired into any production call site as
+of round VI task 67 (fix round 1) ... Do not read this item as describing live behavior until
+[ADR-0113 condition 2] is satisfied and a later dated update here says so." `docs/CRITERIA_PLAN.md`
+§37's new fix-round-1 annotation paragraph (below the original, kept-intact per "annotate, never
+rewrite") states the same explicitly and cross-references the SPEC sentence.
+
+## Minor items
+
+- **M1 (has_active_stub read outside the transaction)** — closed structurally by ADR-0124's
+  design: `stub_degrade_transform` reads `phases.status` AND the `ACTIVE` stub fidelities inside
+  the SAME `writer.submit(unit)` transaction, so there is no longer a read-then-write race window
+  to document or accept.
+- **M2 (no `stub_blocked` policy switch)** — addressed as directed: a docstring note on
+  `detect_stub_triggers` explains explicitly why none is needed here (its own caller is never
+  invoked while `--stub-blocked` stays refused) and states plainly that task-69 must supply that
+  gating externally when it wires the CLI surface.
+- **M3 (`max_revalidation_rounds` default duplication)** — fixed: `build_stub_record`'s
+  `max_revalidation_rounds` parameter is now REQUIRED (no default), so every caller must read the
+  configured value and pass it explicitly rather than silently substituting `2`.
+- **M4 (commit SHA in the CRITERIA_PLAN.md paragraph)** — added: the original paragraph now cites
+  `d548b38` (this leg's first landing) inline, and the new fix-round-1 annotation paragraph
+  describes what changed since.
+- **M5 (fencing on the UPDATE)** — addressed via ADR-0124's design and documented explicitly in
+  `stub_degrade_transform`'s docstring and in the SQL comment beside `_STUB_DEGRADE_PHASE_SQL`:
+  the `AND status = 'SUCCEEDED'` clause is the fence (there is no `lease_fence` to CAS on by the
+  time this follow-up write runs, since the dispatch that produced `SUCCEEDED` already released
+  it), structurally identical in shape to `_DEMOTE_PHASE_SQL`'s own guard.
+
+## Tests run this fix round (whole files, no `-k`, fresh)
+
+- `tests/test_stubs.py` — 40 passed.
+- `tests/test_state_models.py` — 126 passed.
+- `tests/test_repository.py` — 64 passed.
+- `tests/test_workers_transform.py` — 28 passed (honest count, corrects I1).
+- `tests/test_transform_e2e.py` — 17 passed (honest count, corrects I1).
+- `tests/test_cli.py` — 194 passed.
+- `tests/test_lint_gate.py` — 7 passed (`ruff check --no-cache .` clean across the whole repo).
+- `python -m mypy --strict src/fleet/` — `Success: no issues found in 129 source files`.
+
+## Mutation proof this fix round (fresh `env -i`-isolated interpreter pinned to the worktree)
+
+1. **C2** — collapsed `detect_stub_triggers`'s dedup key from `(consumer_id, provider_id,
+   coord_key)` to `(consumer_id, provider_id)`. Backup-diff (not HEAD-relative) confirmed a
+   genuine change. Reddened exactly `test_detect_stub_triggers_fires_once_per_distinct_
+   coordinate_a_real_edge_names` (1 failed / 5 passed in that file's trigger tests). Reverted;
+   diff returned to zero; `tests/test_stubs.py` re-ran green (40/40).
+2. **C1** — dropped `stub_degrade_transform`'s `PUBLISHED_ARTIFACT` fidelity filter. Backup-diff
+   confirmed a genuine change. Reddened exactly `test_stub_degrade_transform_does_not_fire_for_
+   an_empty_failing_only_stub` (1 failed / 6 passed in that file's `stub_degrade` tests). Reverted;
+   diff returned to zero; `tests/test_repository.py` re-ran green (64/64).
+
+## Files touched this fix round
+
+`docs/DECISIONS.md` (ADR-0124, new), `docs/SPEC.md` (§3.5 item 1, "not yet wired" sentence),
+`docs/CRITERIA_PLAN.md` (§37, dated annotation), `src/fleet/models/enums.py` (`STUB_DEGRADE`,
+`STUB_DEGRADED_KIND`, `StubDegradation`, `degrade_for_stub`, `transition()`'s new keyword),
+`src/fleet/state/repository.py` (`stub_degrade_transform` + its Protocol declaration and SQL
+constants), `src/fleet/orchestrator/stubs.py` (`StubTrigger.coord_key`, `detect_stub_triggers`
+rewritten for C2, `stub_completion_correction` deleted, `build_stub_record`'s M3 fix),
+`src/fleet/cli.py` (`_detect_transform_stub_triggers`/`_create_stub_records` rewritten for C2,
+`_correct_transform_status_for_stubs` deleted, stale imports removed), `tests/test_stubs.py`,
+`tests/test_state_models.py`, `tests/test_repository.py`, `tests/test_cli.py`.
+
+Commit on `agent/roundvi-task67`; not merged to `main`.

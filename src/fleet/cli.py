@@ -207,7 +207,6 @@ from fleet.orchestrator.stubs import build_stub_record as _build_stub_record
 from fleet.orchestrator.stubs import detect_stub_triggers as _detect_stub_triggers
 from fleet.orchestrator.stubs import plan_revalidation as plan_stub_revalidation
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
-from fleet.orchestrator.stubs import stub_completion_correction as _stub_completion_correction
 from fleet.orchestrator.stubs import supersede as supersede_stub
 from fleet.rewrite.rules import (
     EngineRegistry,
@@ -7810,11 +7809,15 @@ async def _unit_deps(
 
 # --------------------------------------------------------------------------------------
 # §37 Leg 1 (round VI task 67) — the `--stub-blocked` TRANSFORM-phase stub-creation DECISION:
-# trigger detection, `StubRecord` construction + the `stubs` INSERT, and the `RUNNING ->
-# DEGRADED` correction. The pure decision half of each lives in `orchestrator.stubs`
-# (`detect_stub_triggers`, `build_stub_record`, `stub_completion_correction`); these three
+# trigger detection and `StubRecord` construction + the `stubs` INSERT. The pure decision half of
+# each lives in `orchestrator.stubs` (`detect_stub_triggers`, `build_stub_record`); these two
 # functions are the DB-touching callers, in the same split `_read_blocker_states`/
 # `_apply_stub_decisions` already use for that module's other five decisions.
+#
+# The third piece of this leg — the `RUNNING -> DEGRADED` correction — is NOT here: ADR-0124
+# (fix round 1) put it in `state/repository.py`'s `SqliteStateRepository.stub_degrade_transform`,
+# a real `ALLOWED_TRANSITIONS` door (`models.enums.STUB_DEGRADE`), mirroring `demote_to_floor`
+# exactly, rather than the bare raw-SQL bypass this leg's first landing (`d548b38`) used.
 #
 # NOT wired into `_transform_impl`/`_run_transform_wave` this round. `_validate_transform_flags`
 # still refuses `--stub-blocked` unconditionally (ADR-0113 condition 2: the CLI surface stays
@@ -7831,17 +7834,37 @@ async def _detect_transform_stub_triggers(
     run_id: str,
     dispatched_repo_ids: Sequence[str],
 ) -> tuple[StubTrigger, ...]:
-    """Step 1: which of `dispatched_repo_ids` (this TRANSFORM wave's members) need a stub.
+    """Step 1: which of `dispatched_repo_ids` (this TRANSFORM wave's members) need a stub, and
+    for which coordinate.
 
-    Reuses `_ordering_pairs` itself — not a re-derived copy of its filter — so this can never
-    silently drift from the ordering subgraph `_unit_deps` shares. `_read_blocker_states` is the
-    existing per-repo `phases`-status query (there is no `repos.status` column); the decision
-    itself is `orchestrator.stubs.detect_stub_triggers`.
+    Runs its own query rather than calling `_ordering_pairs` (fix round 1, review finding C2):
+    `_ordering_pairs` returns `(provider_id, dependent_id)` pairs with no `dst_coord_key`, and a
+    provider owning two-plus published coordinates needs the EDGE's own coordinate, not the
+    provider's `primary_coord_key` — `_unit_deps`'s stub-redirect lookup is keyed on
+    `(consumer_repo_id, edges.dst_coord_key)`. This query is `_unit_deps`'s own edge-selection
+    shape verbatim (`SELECT src_id, dst_id, dst_coord_key FROM edges ...`) over the SAME filter
+    `_ordering_pairs`/`_unit_deps` share (`graph.dag_edge_kinds`, `confidence >=
+    graph.min_confidence`, `ordering_suppressed = 0`, both kinds `= 'REPO'`) — reusing the filter
+    CONDITIONS, since reusing `_ordering_pairs` itself is no longer possible once `dst_coord_key`
+    is required. `_read_blocker_states` is the existing per-repo `phases`-status query (there is
+    no `repos.status` column); the decision itself is `orchestrator.stubs.detect_stub_triggers`.
     """
-    pairs = await _ordering_pairs(conn, settings, run_id)
-    provider_ids = {provider_id for provider_id, _ in pairs}
+    kinds = tuple(str(kind) for kind in settings.config.graph.dag_edge_kinds)
+    placeholders = ",".join("?" for _ in kinds)
+    rows = await _rows(
+        conn,
+        # `placeholders` is a run of `?`, one per configured edge kind — no value is
+        # interpolated, so this is parameterised in the only sense that matters.
+        "SELECT src_id, dst_id, dst_coord_key FROM edges "  # noqa: S608
+        " WHERE run_id = ? AND src_kind = 'REPO' AND dst_kind = 'REPO' AND dst_id IS NOT NULL "
+        "   AND ordering_suppressed = 0 AND confidence >= ? "
+        f"   AND kind IN ({placeholders})",
+        (run_id, settings.config.graph.min_confidence, *kinds),
+    )
+    edges = [(str(row[1]), str(row[0]), str(row[2])) for row in rows]
+    provider_ids = {provider_id for provider_id, _, _ in edges}
     states = await _read_blocker_states(conn, run_id, provider_ids)
-    return _detect_stub_triggers(dispatched_repo_ids, pairs, states)
+    return _detect_stub_triggers(dispatched_repo_ids, edges, states)
 
 
 async def _create_stub_records(
@@ -7850,12 +7873,13 @@ async def _create_stub_records(
     *,
     run_id: str,
     triggers: Sequence[StubTrigger],
-    facts: Mapping[str, _RepoFacts],
     max_revalidation_rounds: int,
     now: datetime,
 ) -> tuple[StubRecord, ...]:
     """Step 2: `StubRecord` + the FIRST `stubs` row (`revalidation_round=0`, `state='ACTIVE'`)
-    for every trigger step 1 found.
+    for every trigger step 1 found — one row per `StubTrigger`, i.e. one row per distinct
+    `(consumer, provider, coord_key)` a real edge names (fix round 1, review finding C2's fix: no
+    longer one row per `(consumer, provider)` pair using the provider's `primary_coord_key`).
 
     **Idempotent by check-then-skip**, at the schema's own idempotency key (`PRIMARY KEY (run_id,
     repo_id, stub_coord_key, revalidation_round)`): a repeat call over an unchanged database (a
@@ -7864,23 +7888,27 @@ async def _create_stub_records(
     precedent, applied here at creation rather than at re-emission.
 
     `bazel_label` is computed exactly as `_unit_deps`'s own stub-redirect branch expects to read
-    it back: `_internal_label(stub_dest(coord_key))`, never an ad-hoc string.
+    it back: `_internal_label(stub_dest(coord_key))`, never an ad-hoc string — and now, post-C2
+    fix, from the SAME `coord_key` `_unit_deps` looks the row up by (`trigger.coord_key`, the
+    edge's own `dst_coord_key`), not a separately-derived one.
 
-    A trigger whose provider carries no published `Coordinate` at all (`facts[...].published is
-    None`) is silently skipped — `StubRecord.coord_key` requires `min_length=1` and there is
-    nothing to build a label from. Not expected in practice: `_unit_deps`'s own resolution means
-    an edge's destination already names a repo the graph resolved to an owned coordinate, so this
-    is a defensive guard (§3.5 names no such scenario), not a modelled case.
+    `pinned_version` is read off `coordinates.version` FOR `trigger.coord_key` directly (not off
+    `repos.primary_coord_key`'s own row) — the coordinate a real consumer edge names may not be
+    the provider's primary one, so its own version is the only fact that answers "did `r` publish
+    THIS coordinate?"
     """
     created: list[StubRecord] = []
     stamp = _iso(now)
     for trigger in triggers:
-        fact = facts.get(trigger.provider_repo_id)
-        published = fact.published if fact is not None else None
-        if published is None:
-            continue
-        coord_key = published.key
-        pinned_version = published.version_spec
+        coord_key = trigger.coord_key
+        version_rows = await _rows(
+            conn, "SELECT version FROM coordinates WHERE coord_key = ?", (coord_key,)
+        )
+        pinned_version = (
+            str(version_rows[0][0])
+            if version_rows and version_rows[0][0] is not None
+            else None
+        )
         existing = await _rows(
             conn,
             "SELECT 1 FROM stubs WHERE run_id = ? AND repo_id = ? AND stub_coord_key = ? "
@@ -7932,67 +7960,6 @@ async def _create_stub_records(
         await writer.submit(unit)
         created.append(record)
     return tuple(created)
-
-
-async def _correct_transform_status_for_stubs(
-    conn: aiosqlite.Connection,
-    writer: StateWriter,
-    *,
-    run_id: str,
-    repo_id: str,
-    now: datetime,
-) -> bool:
-    """Step 3: `RUNNING -> DEGRADED` (in effect — see below), fired once this wave's stub set is
-    known, for a repo whose TRANSFORM phase the generic completion loop just wrote `SUCCEEDED`.
-
-    **Chosen site, and why (research-7 flagged this as genuinely open):** a FOLLOW-UP write,
-    called after `_run_transform_wave` returns for the wave and `_create_stub_records` has run —
-    never an edit to `workers.base.WorkerBase.execute` or `orchestrator.runner.PhaseRunner.
-    _dispatch`, both generic and shared by every phase/worker type (out of this leg's scope, and
-    the brief says so explicitly). No other site is reachable: `WorkerResult` has no status that
-    the generic dispatch loop maps to `DEGRADED` at all today, and a within-fence write racing
-    the generic one would be overwritten by it (`DEGRADED -> SUCCEEDED` is itself a legal
-    `ALLOWED_TRANSITIONS` edge, so the generic completion firing afterward would silently win).
-
-    **Disclosed rather than hidden: this UPDATE bypasses `models.enums.transition()`.**
-    `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` is the empty set (terminal), so there is no legal
-    CAS this can go through once the row already reads `SUCCEEDED` — `orchestrator.stubs.
-    stub_completion_correction`'s own docstring records the same finding. `cli._quarantine_impl`
-    already writes `phases.status` via raw SQL outside `transition()`'s CAS for its own,
-    different reason (an operator action against a phase no worker currently leases); this
-    follows the same shape. Whether `SUCCEEDED -> DEGRADED` should instead become a modelled
-    `ALLOWED_TRANSITIONS` edge is a state-machine question left open here, per the brief's own
-    "report which site you chose and why" — not decided or self-adjudicated by this function.
-
-    Returns whether the write fired.
-    """
-    rows = await _rows(
-        conn,
-        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
-        (run_id, repo_id, int(Phase.TRANSFORM)),
-    )
-    if not rows:
-        return False
-    current = RepoStatus(str(rows[0][0]))
-    active = await _rows(
-        conn,
-        "SELECT 1 FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND state = 'ACTIVE'",
-        (run_id, repo_id),
-    )
-    target = _stub_completion_correction(current_status=current, has_active_stub=bool(active))
-    if target is None:
-        return False
-    stamp = _iso(now)
-
-    async def unit(conn: aiosqlite.Connection) -> None:
-        await conn.execute(
-            "UPDATE phases SET status = ?, updated_at = ? "
-            " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status = ?",
-            (target.value, stamp, run_id, repo_id, int(Phase.TRANSFORM), current.value),
-        )
-
-    await writer.submit(unit)
-    return True
 
 
 async def _owned_coordinate_keys(conn: aiosqlite.Connection) -> frozenset[str]:

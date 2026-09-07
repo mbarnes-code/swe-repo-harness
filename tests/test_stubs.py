@@ -58,7 +58,6 @@ from fleet.orchestrator.stubs import (
     reconcile,
     revalidation_key,
     settle_revalidation,
-    stub_completion_correction,
     supersede,
 )
 
@@ -533,8 +532,10 @@ def test_the_carve_out_is_bounded_by_the_merge_wait_window() -> None:
 
 
 # --------------------------------------------------------------------------------------
-# §37 Leg 1 (round VI task 67) — TRANSFORM-phase stub-creation DECISION: trigger detection,
-# `StubRecord` construction, and the `RUNNING -> DEGRADED` correction predicate.
+# §37 Leg 1 (round VI task 67) — TRANSFORM-phase stub-creation DECISION: trigger detection and
+# `StubRecord` construction. (The `RUNNING -> DEGRADED` correction predicate moved to
+# `models.enums`/`state.repository` in fix round 1 — ADR-0124; see `tests/test_state_models.py`/
+# `tests/test_repository.py` for its tests, not here.)
 # --------------------------------------------------------------------------------------
 
 
@@ -543,13 +544,44 @@ def _rhi_state() -> BlockerState:
 
 
 def test_detect_stub_triggers_fires_on_a_dispatched_consumer_of_an_rhi_provider() -> None:
-    """The positive case: consumer `C` is dispatched this wave, has an edge to provider `P`
-    (`_ordering_pairs`'s own `(provider, dependent)` pair shape), and `P` is terminally RHI."""
-    pairs = [("acme-provider", "acme-consumer")]
+    """The positive case: consumer `C` is dispatched this wave, has an edge naming `coord_key`
+    to provider `P` (`(provider, consumer, coord_key)` triples, `_unit_deps`'s own edge shape),
+    and `P` is terminally RHI."""
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
     states = {"acme-provider": _rhi_state()}
-    found = detect_stub_triggers(["acme-consumer"], pairs, states)
+    found = detect_stub_triggers(["acme-consumer"], edges, states)
     assert found == (
-        StubTrigger(consumer_repo_id="acme-consumer", provider_repo_id="acme-provider"),
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+    )
+
+
+def test_detect_stub_triggers_fires_once_per_distinct_coordinate_a_real_edge_names() -> None:
+    """C2 fix (review finding, task 67 fix round 1): a provider owning TWO published coordinates,
+    each named by its own edge from the same consumer, produces TWO `StubTrigger`s — one per
+    `(consumer, provider, coord_key)` — never one collapsed onto the provider's primary
+    coordinate alone. This is the shape `_unit_deps`'s lookup key (`consumer_repo_id,
+    dst_coord_key`) demands."""
+    edges = [
+        ("acme-provider", "acme-consumer", "maven:com.acme:provider-core"),
+        ("acme-provider", "acme-consumer", "maven:com.acme:provider-extras"),
+    ]
+    states = {"acme-provider": _rhi_state()}
+    found = detect_stub_triggers(["acme-consumer"], edges, states)
+    assert found == (
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider-core",
+        ),
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider-extras",
+        ),
     )
 
 
@@ -557,9 +589,9 @@ def test_detect_stub_triggers_does_not_fire_when_the_provider_is_not_rhi() -> No
     """Discriminating mutation 1: same edge, same dispatch, provider status changed away from
     REQUIRES_HUMAN_INTERVENTION -> no longer a candidate (old-passes/new-fails against the test
     above)."""
-    pairs = [("acme-provider", "acme-consumer")]
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
     states = {"acme-provider": BlockerState(phase_statuses=frozenset({RepoStatus.SUCCEEDED}))}
-    assert detect_stub_triggers(["acme-consumer"], pairs, states) == ()
+    assert detect_stub_triggers(["acme-consumer"], edges, states) == ()
 
 
 def test_detect_stub_triggers_does_not_fire_without_the_edge() -> None:
@@ -571,19 +603,19 @@ def test_detect_stub_triggers_does_not_fire_without_the_edge() -> None:
 def test_detect_stub_triggers_does_not_fire_for_an_undispatched_consumer() -> None:
     """Discriminating mutation 3 (this wave's own admission gate): the edge and the RHI status
     both hold, but `C` is not among this wave's dispatched repos -> no longer a candidate. This
-    is the wave-scoping half; confidence/ordering-suppression are `_ordering_pairs`'s own filter
-    and are proven at the `cli._detect_transform_stub_triggers` layer that actually runs the
-    query (`tests/test_cli.py`), not re-derived here."""
-    pairs = [("acme-provider", "acme-consumer")]
+    is the wave-scoping half; confidence/ordering-suppression are the SQL filter's own job and
+    are proven at the `cli._detect_transform_stub_triggers` layer that actually runs the query
+    (`tests/test_cli.py`), not re-derived here."""
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
     states = {"acme-provider": _rhi_state()}
-    assert detect_stub_triggers([], pairs, states) == ()
+    assert detect_stub_triggers([], edges, states) == ()
 
 
 def test_detect_stub_triggers_ignores_a_provider_absent_from_provider_states() -> None:
     """A provider with no `BlockerState` at all (no `phases` rows) is not a trigger — mirrors
     `stub_permits_removal`'s own fail-closed default for an unresolvable name."""
-    pairs = [("acme-provider", "acme-consumer")]
-    assert detect_stub_triggers(["acme-consumer"], pairs, {}) == ()
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
+    assert detect_stub_triggers(["acme-consumer"], edges, {}) == ()
 
 
 def test_build_stub_record_published_artifact() -> None:
@@ -593,6 +625,7 @@ def test_build_stub_record_published_artifact() -> None:
         provider_repo_id="acme-provider",
         coord_key="maven:com.acme:provider",
         pinned_version="1.2.3",
+        max_revalidation_rounds=2,
         now=NOW,
     )
     assert record.fidelity is StubFidelity.PUBLISHED_ARTIFACT
@@ -612,31 +645,8 @@ def test_build_stub_record_empty_failing_when_no_pinned_version() -> None:
         provider_repo_id="acme-provider",
         coord_key="maven:com.acme:provider",
         pinned_version=None,
+        max_revalidation_rounds=2,
         now=NOW,
     )
     assert record.fidelity is StubFidelity.EMPTY_FAILING
     assert record.pinned_version is None
-
-
-def test_stub_completion_correction_fires_only_on_succeeded_with_an_active_stub() -> None:
-    """The `(current_status, has_active_stub)` truth table: `DEGRADED` iff BOTH `SUCCEEDED` and
-    an active stub exist; every other combination is a no-op (`None`) — the old-passes/new-fails
-    shape lives in flipping either input alone."""
-    assert (
-        stub_completion_correction(current_status=RepoStatus.SUCCEEDED, has_active_stub=True)
-        is RepoStatus.DEGRADED
-    )
-    # Flip `has_active_stub` alone -> no correction.
-    assert (
-        stub_completion_correction(current_status=RepoStatus.SUCCEEDED, has_active_stub=False)
-        is None
-    )
-    # Flip `current_status` alone -> no correction, even with an active stub.
-    assert (
-        stub_completion_correction(current_status=RepoStatus.RUNNING, has_active_stub=True)
-        is None
-    )
-    assert (
-        stub_completion_correction(current_status=RepoStatus.DEGRADED, has_active_stub=True)
-        is None
-    )

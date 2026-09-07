@@ -96,7 +96,6 @@ __all__ = [
     "reconcile",
     "revalidation_key",
     "settle_revalidation",
-    "stub_completion_correction",
     "supersede",
 ]
 
@@ -775,42 +774,64 @@ def next_round_record(stub: StubRecord, *, now: datetime) -> StubRecord:
 
 
 # --------------------------------------------------------------------------------------
-# §37 Leg 1 (round VI task 67) — the TRANSFORM-phase stub-creation DECISION. Trigger
-# detection, `StubRecord` construction, and the `RUNNING -> DEGRADED` correction, all as pure
-# functions in the same "the caller persists" shape as the four transitions above (`apply()`'s
-# own docstring: "Persistence is still the caller's: this returns the row the single writer
-# should write"). No connection, no SQL: the async query/INSERT/UPDATE glue this leg also needs
-# lives in `cli.py` (`_detect_transform_stub_triggers`, `_create_stub_records`,
-# `_correct_transform_status_for_stubs`), the same split `orchestrator.reentry.
-# stub_permits_removal` (a pure predicate) and `cli._read_blocker_states`/`cli._apply_stub_
-# decisions` (the DB-touching callers) already use.
+# §37 Leg 1 (round VI task 67) — the TRANSFORM-phase stub-creation DECISION. Trigger detection and
+# `StubRecord` construction, as pure functions in the same "the caller persists" shape as the four
+# transitions above (`apply()`'s own docstring: "Persistence is still the caller's: this returns
+# the row the single writer should write"). No connection, no SQL: the async query/INSERT glue
+# this leg also needs lives in `cli.py` (`_detect_transform_stub_triggers`, `_create_stub_
+# records`), the same split `orchestrator.reentry.stub_permits_removal` (a pure predicate) and
+# `cli._read_blocker_states`/`cli._apply_stub_decisions` (the DB-touching callers) already use.
+#
+# The third piece of this leg — the `RUNNING -> DEGRADED` correction — is NOT here: ADR-0124
+# (fix round 1, following a task-scoped review) moved it to `state/repository.py`'s
+# `SqliteStateRepository.stub_degrade_transform`, alongside `models.enums.STUB_DEGRADE`/
+# `degrade_for_stub`/`StubDegradation`, mirroring `demote_to_floor`/`RESUME_DEMOTE`/`demote`/
+# `PhaseDemotion` exactly — a real `ALLOWED_TRANSITIONS` door for the one narrow, audited case a
+# TRANSFORM completion needs, not a bare raw-SQL bypass. See ADR-0124 for why.
 # --------------------------------------------------------------------------------------
 
 
 @dataclass(frozen=True, slots=True)
 class StubTrigger:
-    """One `(consumer, provider)` pair `detect_stub_triggers` found for THIS TRANSFORM wave:
-    `consumer_repo_id` is dispatched this wave, it has a live dependency edge (over the ordering
-    subgraph — `_ordering_pairs`'s own filter) to `provider_repo_id`, and the provider is
-    mechanically terminal at `REQUIRES_HUMAN_INTERVENTION` (§3.5.1's stub-creation trigger)."""
+    """One `(consumer, provider, coord_key)` triple `detect_stub_triggers` found for THIS
+    TRANSFORM wave: `consumer_repo_id` is dispatched this wave, it has a live dependency edge
+    naming `coord_key` (over the ordering subgraph filter) to `provider_repo_id`, and the
+    provider is mechanically terminal at `REQUIRES_HUMAN_INTERVENTION` (§3.5.1's stub-creation
+    trigger).
+
+    **`coord_key` is the EDGE's own `dst_coord_key`, never the provider's `primary_coord_key`.**
+    A provider owning two-plus published coordinates (e.g. a monorepo publishing several Maven
+    artifacts) can have consumers naming DIFFERENT coordinates of it; `_unit_deps`'s stub-redirect
+    lookup is keyed on `(consumer_repo_id, edges.dst_coord_key)` — the exact coordinate the
+    consumer's own edge names — so a stub keyed on the provider's primary coordinate alone would
+    silently never redirect for any edge naming a different one (a review-caught defect in this
+    leg's first landing, `d548b38`). One `StubTrigger` per distinct `(consumer, provider,
+    coord_key)` a real edge names is what keeps this byte-identical to `_unit_deps`'s lookup key.
+    """
 
     consumer_repo_id: RepoId
     provider_repo_id: RepoId
+    coord_key: str
 
 
 def detect_stub_triggers(
     dispatched_repo_ids: Iterable[str],
-    ordering_pairs: Iterable[tuple[str, str]],
+    edges: Iterable[tuple[str, str, str]],
     provider_states: Mapping[str, BlockerState],
 ) -> tuple[StubTrigger, ...]:
-    """§37 Leg 1 step 1: which of `dispatched_repo_ids` need a stub this wave.
+    """§37 Leg 1 step 1: which of `dispatched_repo_ids` need a stub this wave, and for which
+    coordinate.
 
-    `ordering_pairs` is `_ordering_pairs`'s own return shape verbatim — `(provider_id,
-    dependent_id)`, i.e. `(dependency, dependent)` per that function's docstring — over the SAME
-    filter `_unit_deps` shares (`graph.dag_edge_kinds`, `confidence >= graph.min_confidence`,
-    `ordering_suppressed = 0`); this function does not re-derive that filter, it only consumes
-    its output, so reusing the real `_ordering_pairs` call is what makes the reuse real rather
-    than a restated SQL string that can drift from it.
+    `edges` is `(provider_id, consumer_id, coord_key)` — the same `(dst_id, src_id,
+    dst_coord_key)` shape `_unit_deps`'s own edge query already selects, over the SAME filter
+    `_ordering_pairs`/`_unit_deps` share (`graph.dag_edge_kinds`, `confidence >=
+    graph.min_confidence`, `ordering_suppressed = 0`, `src_kind = 'REPO' AND dst_kind = 'REPO'`);
+    this function does not re-derive that filter, it only consumes its output. (Earlier than
+    ADR-0124's fix round, this took `_ordering_pairs`'s own `(provider_id, dependent_id)` pairs
+    directly — that shape carries no `dst_coord_key` at all, which is what made the C2 defect
+    possible; the caller now runs its own query over the identical filter, with `dst_coord_key`
+    and the REPO-kind restriction added, matching `_unit_deps`'s query verbatim rather than
+    `_ordering_pairs`'s narrower one.)
 
     There is no `repos.status` column (`schema.sql`'s `repos` table carries none) — a repo's
     status is a `phases`-table fact, so "the provider's status is `REQUIRES_HUMAN_INTERVENTION`"
@@ -822,22 +843,37 @@ def detect_stub_triggers(
     A provider absent from `provider_states` (no `phases` row at all, or never resolved) is not a
     trigger — there is no RHI to find, mirroring `stub_permits_removal`'s own fail-closed default
     for an unresolvable name.
+
+    **No `stub_blocked` policy switch here (review finding M2, fix round 1) — deliberately, not
+    an oversight.** `stub_permits_removal` (`orchestrator/reentry.py`) takes one because it is
+    reachable from `fleet resume` regardless of the flag and must be a hard `False` for every
+    input when the operator did not opt in; this function has no such caller today; ITS OWN
+    caller (`cli._detect_transform_stub_triggers`) is never invoked at all while `--stub-blocked`
+    stays refused (ADR-0113 condition 2). Whichever task wires this leg's CLI surface (task-69)
+    must supply that gating externally — by not calling this function at all when the flag is
+    off — the same way this leg's own callers already gate themselves out of production.
     """
     dispatched = set(dispatched_repo_ids)
-    seen: set[tuple[str, str]] = set()
+    seen: set[tuple[str, str, str]] = set()
     found: list[StubTrigger] = []
-    for provider_id, consumer_id in ordering_pairs:
+    for provider_id, consumer_id, coord_key in edges:
         if consumer_id not in dispatched:
             continue
         state = provider_states.get(provider_id)
         if state is None or RepoStatus.REQUIRES_HUMAN_INTERVENTION not in state.phase_statuses:
             continue
-        key = (consumer_id, provider_id)
+        key = (consumer_id, provider_id, coord_key)
         if key in seen:
             continue
         seen.add(key)
-        found.append(StubTrigger(consumer_repo_id=consumer_id, provider_repo_id=provider_id))
-    return tuple(sorted(found, key=lambda t: (t.consumer_repo_id, t.provider_repo_id)))
+        found.append(
+            StubTrigger(
+                consumer_repo_id=consumer_id, provider_repo_id=provider_id, coord_key=coord_key
+            )
+        )
+    return tuple(
+        sorted(found, key=lambda t: (t.consumer_repo_id, t.provider_repo_id, t.coord_key))
+    )
 
 
 def build_stub_record(
@@ -847,12 +883,18 @@ def build_stub_record(
     provider_repo_id: RepoId,
     coord_key: str,
     pinned_version: str | None,
-    max_revalidation_rounds: int = 2,
+    max_revalidation_rounds: int,
     now: datetime,
 ) -> StubRecord:
     """§37 Leg 1 step 2: the FIRST `StubRecord` of a stub's lifecycle (`state=ACTIVE`,
     `revalidation_round=0` implicitly — that column is not a `StubRecord` field; the caller's
     INSERT supplies it, per `schema.sql`'s own comment: "0 while ACTIVE").
+
+    `max_revalidation_rounds` is REQUIRED, deliberately with no default: `StubRecord`'s own model
+    default (2) and `settings.config.stubs.max_revalidation_rounds`'s default (also 2, `settings.
+    py`'s `StubsSection`) happen to agree today, but a default HERE would silently substitute a
+    value the operator never wrote the moment either one changes (review finding M3, task 67 fix
+    round 1) — the caller must read the configured value and pass it explicitly.
 
     `pinned_version is None` is the ENTIRE fidelity decision (§3.5 item 2: "If no published
     artifact exists... the stub is an empty target that fails at build time") — `EMPTY_FAILING`
@@ -875,40 +917,6 @@ def build_stub_record(
         state_changed_at=now,
     )
 
-
-def stub_completion_correction(
-    *, current_status: RepoStatus, has_active_stub: bool
-) -> RepoStatus | None:
-    """§37 Leg 1 step 3: does a TRANSFORM dispatch that just completed `SUCCEEDED` actually earn
-    `DEGRADED` instead (§3.5 item 3: "Each stubbed dependent goes to `RepoStatus.DEGRADED`, not
-    `SUCCEEDED`")?
-
-    Pure decision, same split as every function above: `None` means "no correction", never "no
-    stub" — a caller with `has_active_stub=False` gets `None` regardless of `current_status`, and
-    a caller whose repo is not `SUCCEEDED` (still `RUNNING`, already `DEGRADED`, ...) also gets
-    `None`, because there is nothing this decision needs to do to it.
-
-    **Disclosed, not silently patched around: writing the returned `DEGRADED` requires bypassing
-    `models.enums.transition()`.** `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` is the empty
-    set — `SUCCEEDED` is modeled as terminal, and the generic completion path that reaches it
-    (`orchestrator.runner.PhaseRunner._dispatch`'s `execution.status is RepoStatus.SUCCEEDED`
-    branch, itself downstream of `workers.base.WorkerBase.execute`'s `status =
-    RepoStatus.SUCCEEDED` on `result.status == "ok"`) is shared by every phase and every worker
-    type and is out of this leg's scope to edit. There is no WorkerResult status that reaches
-    `DEGRADED` through that generic path at all today — matching `docs/CRITERIA_PLAN.md` §37's
-    own "nothing writes a real DEGRADED TRANSFORM-phase row in production yet". A caller applying
-    this decision (`cli._correct_transform_status_for_stubs`) therefore writes `phases.status`
-    directly, the same way `cli._quarantine_impl` already writes `status = 'SKIPPED'` via raw SQL
-    for its own, different reason (an operator action outside any worker's lease) — precedent for
-    a caller correcting `phases.status` outside `transition()`'s ordinary graph, not a novel
-    pattern this function invents. Whether this should instead be modeled as a new
-    `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` edge (a state-machine change, ADR-shaped per the
-    ADR-0113 precedent) is left to whichever round wires this leg's write for real — flagged, not
-    decided, here.
-    """
-    if current_status is RepoStatus.SUCCEEDED and has_active_stub:
-        return RepoStatus.DEGRADED
-    return None
 
 
 # --------------------------------------------------------------------------------------

@@ -31,7 +31,15 @@ import pytest
 from aiosqlite.context import contextmanager as aiosqlite_contextmanager
 from pydantic import BaseModel
 
-from fleet.models.enums import PHASE_DEMOTED_KIND, EdgeKind, Phase, RepoStatus, TaskKind
+from fleet.models.enums import (
+    PHASE_DEMOTED_KIND,
+    STUB_DEGRADED_KIND,
+    EdgeKind,
+    Phase,
+    RepoStatus,
+    StubDegradation,
+    TaskKind,
+)
 from fleet.models.graph import NodeKind, edge_key_for
 from fleet.obs.redact import redact_text
 from fleet.state import checkpoints
@@ -2485,3 +2493,238 @@ async def test_insert_revalidation_task_mints_a_new_row_for_a_different_key(
     finally:
         conn.close()
     assert count == 2
+
+
+# ======================================================================================
+# §37 Leg 1 step 3 — the stub-degrade correction write (ADR-0124, task 67 fix round 1)
+# ======================================================================================
+
+
+async def _insert_active_stub(
+    writer: StateWriter,
+    *,
+    stub_id: str,
+    consumer_repo_id: str,
+    provider_repo_id: str,
+    coord_key: str,
+    fidelity: str,
+    pinned_version: str | None,
+) -> None:
+    """A minimal, schema-CHECK-satisfying `ACTIVE` `stubs` row, for fixture setup only — no
+    production path is under test here, `stub_degrade_transform` is."""
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "  provider_repo_id, pinned_version, bazel_label, state, stub_fidelity, "
+            "  revalidation_round, max_revalidation_rounds, state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, 0, 2, ?, ?)",
+            (
+                stub_id,
+                RUN,
+                consumer_repo_id,
+                coord_key,
+                consumer_repo_id,
+                provider_repo_id,
+                pinned_version,
+                f"//third_party/stubs/{coord_key.replace(':', '/')}:stub",
+                fidelity,
+                NOW.isoformat(),
+                NOW.isoformat(),
+            ),
+        )
+
+    await writer.submit(unit)
+
+
+async def test_stub_degrade_transform_fires_for_an_active_published_artifact_stub(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """The positive case: TRANSFORM already `SUCCEEDED`, one `ACTIVE`/`PUBLISHED_ARTIFACT` stub
+    row exists for this consumer -> `SUCCEEDED -> DEGRADED`, with a `StubDegraded` finding
+    written in the same call."""
+    store, writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-1",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="PUBLISHED_ARTIFACT",
+        pinned_version="2.0.0",
+    )
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert isinstance(record, StubDegradation)
+    assert record.from_status is RepoStatus.SUCCEEDED
+    assert record.to_status is RepoStatus.DEGRADED
+    assert "maven:com.acme:provider" in record.reason
+
+
+async def test_stub_degrade_transform_does_not_fire_for_an_empty_failing_only_stub(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """C1 (review finding, task 67 fix round 1): §12.14 verbatim — "an `EMPTY_FAILING` stub
+    unblocks nothing... no repo becomes `DEGRADED`." A consumer whose only `ACTIVE` stub is
+    `EMPTY_FAILING` must NOT be degraded — discriminates against the test above (fidelity is the
+    only input that changes)."""
+    store, writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-1",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="EMPTY_FAILING",
+        pinned_version=None,
+    )
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert record is None, "an EMPTY_FAILING-only stub must never drive DEGRADED (§12.14)"
+
+
+async def test_stub_degrade_transform_fires_when_at_least_one_qualifying_stub_exists(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """A consumer with BOTH an `EMPTY_FAILING` and a `PUBLISHED_ARTIFACT` `ACTIVE` stub still
+    degrades — "at least one qualifying row", not "every row qualifies"."""
+    store, writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-empty",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:never-published",
+        fidelity="EMPTY_FAILING",
+        pinned_version=None,
+    )
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-published",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="PUBLISHED_ARTIFACT",
+        pinned_version="2.0.0",
+    )
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert isinstance(record, StubDegradation)
+
+
+async def test_stub_degrade_transform_is_a_noop_with_no_active_stub(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """No `stubs` row at all -> `None`, and the phase is left exactly `SUCCEEDED`."""
+    store, _writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert record is None
+
+
+async def test_stub_degrade_transform_is_a_noop_when_the_phase_is_not_succeeded(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """Even with a qualifying `ACTIVE`/`PUBLISHED_ARTIFACT` stub present, a phase that never
+    reached `SUCCEEDED` (still `RUNNING`) is left alone — mirrors `stub_completion_correction`'s
+    original truth table, now enforced inside the real transactional write."""
+    store, writer = demotion_bed
+    await store.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW, max_attempts=3)
+    fence = await store.acquire_phase_lease(
+        RUN, REPO, Phase.TRANSFORM, owner=WORKER, now=NOW, lease_ttl_s=300
+    )
+    assert fence is not None
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-1",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="PUBLISHED_ARTIFACT",
+        pinned_version="2.0.0",
+    )
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert record is None
+
+
+async def test_stub_degrade_transform_writes_the_phase_row_and_a_finding_in_one_call(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], db_path: Path
+) -> None:
+    """The write itself, read back through a plain `sqlite3` connection (the CHECK constraints
+    and the finding row are the proof, not a mock): `phases.status` reads `DEGRADED` and exactly
+    one `findings` row of kind `StubDegraded` exists, in the SAME call (closes review finding I4:
+    no audit finding was previously written beside this status change)."""
+    store, writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-1",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="PUBLISHED_ARTIFACT",
+        pinned_version="2.0.0",
+    )
+
+    record = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+    assert record is not None
+
+    conn = sqlite3.connect(db_path)
+    try:
+        status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+            (RUN, REPO, int(Phase.TRANSFORM)),
+        ).fetchone()
+        findings = conn.execute(
+            "SELECT kind, repo_id FROM findings WHERE run_id = ? AND kind = ?",
+            (RUN, STUB_DEGRADED_KIND),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert status == ("DEGRADED",)
+    assert findings == [(STUB_DEGRADED_KIND, REPO)]
+
+
+async def test_stub_degrade_transform_is_idempotent_on_a_repeat_call(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], db_path: Path
+) -> None:
+    """A second call after the first already degraded the phase is a clean no-op: `phases.status`
+    is no longer `SUCCEEDED`, so the method's own read finds nothing to do (never a raise, never
+    a second finding row)."""
+    store, writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.TRANSFORM, status=RepoStatus.SUCCEEDED, attempts=1)
+    await _insert_active_stub(
+        writer,
+        stub_id="stub-1",
+        consumer_repo_id=REPO,
+        provider_repo_id=OTHER,
+        coord_key="maven:com.acme:provider",
+        fidelity="PUBLISHED_ARTIFACT",
+        pinned_version="2.0.0",
+    )
+
+    first = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+    second = await store.stub_degrade_transform(RUN, REPO, phase=Phase.TRANSFORM, now=NOW)
+
+    assert first is not None
+    assert second is None
+
+    conn = sqlite3.connect(db_path)
+    try:
+        count = conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = ?",
+            (RUN, STUB_DEGRADED_KIND),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert count == 1, "a repeat call must not duplicate the audit finding"
