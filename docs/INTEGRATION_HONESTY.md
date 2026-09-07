@@ -9032,9 +9032,8 @@ ever been analysed by real Bazel in this codebase's history, this task's attempt
 Fixing it means adding `rules_java` (some version) as an explicit `bazel_dep` in
 `build.ruleset_versions`/`render_module_bazel` — a design decision (which version, whether it
 also finally closes the JDK-toolchain gap `toolchain_requirements()` already discloses) outside
-this task's scope, per its own "no new ADR/D-number" instruction. **Flagging for the controller:
-this defect blocks ANY future real-Bazel JVM proof, not just this one, and is a candidate for its
-own D-number** — not allocated here.
+this task's scope, per its own "no new ADR/D-number" instruction. **Controller allocation:
+`D121`** (verified free — max was `D120`; see `## D121`'s own entry below for the full account).
 
 **JS (`NPM`) and Rust (`CARGO`) are measured, real Bazel-analysis-time blockers in each adapter's
 OWN `test_targets()` — not merely an undecided file-naming convention** — see
@@ -9478,3 +9477,41 @@ Behavior preservation proven by an exhaustive equivalence check over both enums'
 (7 `Ecosystem` + 5 `ContractKind` members), independently re-derived by task-scoped review plus a
 genuine mutation test (emptying each table at runtime and confirming membership behavior actually
 changes). `tests/test_ecosystems.py` — 90/90 passing (was 87 pass / 3 fail).
+
+## D121 — OPEN. No generated JVM package has ever been analysed by real Bazel: the generated
+`MODULE.bazel` never declares `rules_java` as an explicit `bazel_dep`
+
+**Found by round VI task 70 (2026-09-07), while attempting the real-Bazel half of D112's JVM
+test-source proof.** Verified free before allocating: form-agnostic sweep found `D120` as the
+highest allocated number.
+
+**The gap, as measured.** Every JVM `BUILD.bazel` this adapter has ever rendered contains
+`load("@rules_java//java:defs.bzl", "java_library")` (or `java_test`). A real-Bazel run against a
+generated JVM package — `acme-commons-java`, a pre-existing fixture, not one this task added —
+fails before any target-level analysis even starts:
+```
+ERROR: error loading package 'java/com/acme/widgets': Unable to find package for
+@@[unknown repo 'rules_java' requested from @@]//java:defs.bzl: The repository
+'@@[unknown repo 'rules_java' requested from @@]' could not be resolved: No repository visible
+as '@rules_java' from main repository.
+```
+`jvm.py`'s own `toolchain_requirements()` docstring already names the underlying fact:
+`rules_java` is a transitive `bazel_dep` of `rules_jvm_external`, not a key in
+`build.ruleset_versions`. Under bzlmod, a transitive dependency's repo is not visible to the root
+module by that route alone — the generated `MODULE.bazel` needs its own explicit
+`bazel_dep(name = "rules_java", ...)` line, which nothing in `build.ruleset_versions`/
+`render_module_bazel` ever writes.
+
+**Consequence.** This is not narrow to test-source population — it blocks ANY real-Bazel
+analysis of ANY generated JVM package, with or without a test file, independent of this task's
+own `_is_jvm_test_src` predicate (confirmed: the error is at package-load time, before `srcs`
+content is ever read). It is the concrete, previously-unmeasured root cause behind this file's
+own long-standing "jvm is still zero" real-Bazel-analysis status note (§24/§27's own audit row,
+`grep -n "jvm is still zero"`).
+
+**Not yet built:** the fix — add `rules_java` (some pinned version) as an explicit `bazel_dep` in
+`build.ruleset_versions`/`render_module_bazel`. Sizing/design note: whether the same fix should
+also close the JDK-toolchain gap `jvm.py::toolchain_requirements()`'s own docstring already
+discloses is a design choice, not a re-derivation from this task's own measurement — a future
+task should check both possibilities before deciding scope. No task briefed yet; this is the
+controller's next dispatch candidate.
