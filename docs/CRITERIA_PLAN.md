@@ -1600,6 +1600,22 @@ working name — a DIFFERENT, already-dispatched task-66-brief.md is Leg C2's ow
 slice has no task number allocated as of this update), and the production wiring (task-67, not yet
 scoped). Full account: `.superpowers/sdd/round-VI-criteria-closure/task-65-report.md`.
 
+**Correction, 2026-09-07 (task-65 fix round, controller review) — item (b) above is superseded:
+the SPEC-vs-ADR divergence is resolved, in SPEC's favor, and was a defect in ADR-0122 Decision 3
+itself.** `demote_to_floor`'s span is INCLUSIVE of `floor`, so `floor=Phase.TRANSFORM` already
+means "`SUCCEEDED` at TRANSFORM or above" — exactly SPEC's own unmodified "beyond `PHASE_SCAN`"
+text (the claim that clause was "as corrected by this same ADR-0122" was itself wrong; it was
+never touched). ADR-0122 Decision 3's "beyond `Phase.TRANSFORM`" gate text was a transcription
+slip, annotated in place in `docs/DECISIONS.md`. `cli.unhoist_contract`'s pre-filter is deleted;
+`demote_to_floor` now runs unconditionally over every blast-set member, using its own `()` no-op
+return as the filter. Also fixed this same round (task-65 review): I1 (`docs/SPEC.md` §13 row 28
+now says the mechanism is implemented, citing the commit, rather than "pending task-65"), I2
+(`docs/INTEGRATION_HONESTY.md` D117's heading flipped to `FIXED, LANDED`), and I3 (`demote_to_floor`
+is now called with `observed=`, and a short-circuited member is reported in a new
+`unresolved_repo_ids` rather than silently dropped). Full account, including the minor citation
+and cross-reference fixes: `.superpowers/sdd/round-VI-criteria-closure/task-65-report.md`'s fix-
+round section.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
@@ -2021,7 +2037,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7917-7955`, moved by round VI task 65's `cli.py` insertions) always constructs
+  (`cli.py:7955-7993`, moved by round VI task 65's `cli.py` insertions) always constructs
   `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
@@ -2029,7 +2045,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   the post-fix state (the citation's line number is repointed for the drift check above; the
   narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:8027-8118`, moved by round VI
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:8065-8156`, moved by round VI
   task 65's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
@@ -2062,7 +2078,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9652-9685`, moved by round VI task 65's
+blockers above**: `_eligible_build_units` (`cli.py:9690-9723`, moved by round VI task 65's
 `cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row

@@ -359,27 +359,42 @@ async def test_a_failed_contracts_edges_crash_the_pre_fix_query_and_the_fix_clos
 # =======================================================================================
 
 
-async def test_unhoist_contract_applies_demotes_only_members_past_transform_and_retains_attempts(
+async def test_unhoist_contract_applies_demotes_everyone_at_or_past_transform_and_retains_attempts(
     db_path: Path, tmp_path: Path
 ) -> None:
+    """Fix round (task-65 review CRITICAL): `demote_to_floor`'s span is INCLUSIVE of `floor`, so
+    `floor=Phase.TRANSFORM` already means "SUCCEEDED at TRANSFORM or above" -- SPEC's own "beyond
+    PHASE_SCAN" restated exactly. `transform_only` (TRANSFORM SUCCEEDED, nothing above) is THE
+    paradigm case SPEC's rollback paragraph exists for and must be demoted, not skipped: a
+    consumer whose imports were rewritten to the hoist target and is done at TRANSFORM would,
+    under the idempotency rule, never re-enter and would walk into BUILD importing a path the
+    rollback just deleted. `untouched` (only SCAN SUCCEEDED, TRANSFORM itself still PENDING) is
+    the genuine below-the-floor case with nothing to demote."""
     settings = _settings(tmp_path)
     _seed(
         db_path,
-        repos=("deep", "shallow"),
-        blast_set=("deep", "shallow"),
+        repos=("deep", "transform_only", "untouched"),
+        blast_set=("deep", "transform_only", "untouched"),
         phases={
-            # `deep`: BUILD SUCCEEDED -> past PHASE_TRANSFORM -> demoted
+            # `deep`: BUILD SUCCEEDED -> TRANSFORM and BUILD both demoted
             "deep": {
                 1: ("SUCCEEDED", 1),
                 2: ("SUCCEEDED", 2),
                 3: ("SUCCEEDED", 3),
                 4: ("PENDING", 0),
             },
-            # `shallow`: only TRANSFORM SUCCEEDED -> "at or below Phase.TRANSFORM has nothing to
-            # demote" (ADR-0122 Decision 3) -> untouched
-            "shallow": {
+            # `transform_only`: TRANSFORM SUCCEEDED only -> demoted at TRANSFORM alone
+            "transform_only": {
                 1: ("SUCCEEDED", 1),
                 2: ("SUCCEEDED", 5),
+                3: ("PENDING", 0),
+                4: ("PENDING", 0),
+            },
+            # `untouched`: only SCAN SUCCEEDED, TRANSFORM itself still PENDING -> genuinely
+            # below the floor, nothing to demote
+            "untouched": {
+                1: ("SUCCEEDED", 1),
+                2: ("PENDING", 0),
                 3: ("PENDING", 0),
                 4: ("PENDING", 0),
             },
@@ -402,31 +417,42 @@ async def test_unhoist_contract_applies_demotes_only_members_past_transform_and_
 
     assert isinstance(outcome, UnhoistOutcome)
     assert outcome.decision == "APPLIED"
-    assert outcome.blast_set == ("deep", "shallow")
-    assert outcome.demoted_repo_ids == ("deep",)
+    assert outcome.blast_set == ("deep", "transform_only", "untouched")
+    assert outcome.demoted_repo_ids == ("deep", "transform_only")
     assert outcome.blocking_repo_ids == ()
+    assert outcome.unresolved_repo_ids == ()
 
     assert _contract_status(db_path) == "FAILED"
 
     # `deep`: TRANSFORM and BUILD both go PENDING (both were SUCCEEDED, span >= TRANSFORM);
-    # `attempts` is retained on every phase, not reset (ADR-0122 Decision 3 / ADR-0014 precedent).
+    # `attempts` is retained on every phase, not reset (ADR-0014 precedent).
     assert _phase_row(db_path, "deep", 2) == ("PENDING", 2)
     assert _phase_row(db_path, "deep", 3) == ("PENDING", 3)
     assert _phase_row(db_path, "deep", 1) == ("SUCCEEDED", 1), "below the floor: untouched"
 
-    # `shallow` is untouched entirely: not in `demoted_repo_ids`, and its TRANSFORM row (with its
-    # distinctive attempts=5 marker) is still SUCCEEDED.
-    assert _phase_row(db_path, "shallow", 2) == ("SUCCEEDED", 5)
+    # `transform_only`: its TRANSFORM row (with its distinctive attempts=5 marker) goes PENDING,
+    # attempts retained -- this is the flipped assertion the fix round required.
+    assert _phase_row(db_path, "transform_only", 2) == ("PENDING", 5)
+
+    # `untouched` is genuinely below the floor: TRANSFORM was never SUCCEEDED, so there is
+    # nothing to demote -- not in `demoted_repo_ids`, and every row is byte-identical to seeded.
+    assert _phase_row(db_path, "untouched", 1) == ("SUCCEEDED", 1)
+    assert _phase_row(db_path, "untouched", 2) == ("PENDING", 0)
 
     phase_demoted = _findings_of_kind(db_path, "PhaseDemoted")
-    assert {repo_id for repo_id, _ in phase_demoted} == {"deep"}
-    assert len(phase_demoted) == 2, "one PhaseDemoted per demoted phase (TRANSFORM, BUILD)"
+    assert {repo_id for repo_id, _ in phase_demoted} == {"deep", "transform_only"}
+    assert len(phase_demoted) == 3, (
+        "one PhaseDemoted per demoted phase: deep's TRANSFORM+BUILD, transform_only's TRANSFORM"
+    )
 
     rollback_findings = _findings_of_kind(db_path, HOIST_ROLLBACK_DEMOTION_FINDING_KIND)
-    assert [repo_id for repo_id, _ in rollback_findings] == ["deep"]
-    payload = rollback_findings[0][1]
-    assert payload["contract_id"] == CONTRACT_ID
-    assert payload["pre_demotion_phase"] == "BUILD"
+    by_repo = dict(rollback_findings)
+    assert set(by_repo) == {"deep", "transform_only"}
+    assert by_repo["deep"]["contract_id"] == CONTRACT_ID
+    assert by_repo["deep"]["pre_demotion_phase"] == "BUILD"
+    assert by_repo["transform_only"]["pre_demotion_phase"] == "TRANSFORM", (
+        "the highest phase ACTUALLY demoted, not a hardcoded BUILD/VERIFY guess"
+    )
 
     assert _findings_of_kind(db_path, HOIST_ROLLBACK_REFUSED_FINDING_KIND) == []
 
@@ -463,6 +489,61 @@ def _seed_refusal_case(db_path: Path, *, hops: int, mid_merged: bool) -> None:
         )
     else:
         raise ValueError(hops)
+
+
+async def test_unhoist_contract_reports_unresolved_rather_than_silently_dropping_a_short_circuit(
+    db_path: Path, tmp_path: Path
+) -> None:
+    """Fix round (task-65 review I3, Rule 11 fail-loud). A blast-set member that acquired
+    `REQUIRES_HUMAN_INTERVENTION` on one phase makes `demote_to_floor` short-circuit to `()`
+    (`state/repository.py:1795-1796`) even though this member's own TRANSFORM row is SUCCEEDED
+    and would otherwise be demoted. That must surface as `unresolved_repo_ids`, not vanish from
+    `demoted_repo_ids` while `decision` still reads APPLIED."""
+    settings = _settings(tmp_path)
+    _seed(
+        db_path,
+        repos=("deep", "stuck"),
+        blast_set=("deep", "stuck"),
+        phases={
+            "deep": {
+                1: ("SUCCEEDED", 1),
+                2: ("SUCCEEDED", 2),
+                3: ("PENDING", 0),
+                4: ("PENDING", 0),
+            },
+            # `stuck`: TRANSFORM SUCCEEDED (plainly demotable in isolation), but VERIFY already
+            # carries REQUIRES_HUMAN_INTERVENTION -- demote_to_floor refuses the WHOLE repo.
+            "stuck": {
+                1: ("SUCCEEDED", 1),
+                2: ("SUCCEEDED", 3),
+                3: ("REQUIRES_HUMAN_INTERVENTION", 0),
+                4: ("PENDING", 0),
+            },
+        },
+    )
+
+    async with StateWriter(db_path, owner="test-unhoist") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            outcome = await unhoist_contract(
+                read_conn, settings, writer=writer, run_id=RUN_ID, contract_id=CONTRACT_ID, now=NOW
+            )
+        finally:
+            await read_conn.close()
+
+    assert outcome.decision == "APPLIED"
+    assert outcome.demoted_repo_ids == ("deep",)
+    assert outcome.unresolved_repo_ids == ("stuck",), (
+        "silently dropping `stuck` here (empty unresolved_repo_ids) is exactly Rule 11's failure "
+        "shape this fix round closes"
+    )
+    # `stuck`'s TRANSFORM row is untouched -- demote_to_floor's own refusal means NOTHING about
+    # this repo was written, not a partial demotion.
+    assert _phase_row(db_path, "stuck", 2) == ("SUCCEEDED", 3)
+    assert _phase_row(db_path, "stuck", 3) == ("REQUIRES_HUMAN_INTERVENTION", 0)
+    assert [
+        repo_id for repo_id, _ in _findings_of_kind(db_path, HOIST_ROLLBACK_DEMOTION_FINDING_KIND)
+    ] == ["deep"]
 
 
 async def test_unhoist_contract_refuses_on_a_direct_merged_dependent_sanity(

@@ -3994,14 +3994,20 @@ class UnhoistOutcome:
     """`unhoist_contract`'s result. `APPLIED`/`REFUSED` are exhaustive and mutually exclusive —
     CLAUDE.md's D44 precedent ("every repo lands in exactly one of four buckets, and none of them
     is a bare count") applied here: never collapse this into a bare bool. `blast_set` is
-    populated on BOTH branches (the refusal traversal seeds from it); `demoted_repo_ids` is empty
-    on `REFUSED` and `blocking_repo_ids` is empty on `APPLIED`."""
+    populated on BOTH branches (the refusal traversal seeds from it); `demoted_repo_ids` and
+    `unresolved_repo_ids` are empty on `REFUSED`, `blocking_repo_ids` is empty on `APPLIED`.
+    `unresolved_repo_ids` (fix round, task-65 review I3) names a blast-set member
+    `demote_to_floor` could not confirm — its `phases` snapshot moved underneath the read
+    (`FloorSnapshotStaleError`), or it acquired `REQUIRES_HUMAN_INTERVENTION` between the read and
+    the write and `demote_to_floor` short-circuited to `()` — reported here rather than silently
+    absent from `demoted_repo_ids` while `decision` still reads `APPLIED` (Rule 11)."""
 
     decision: Literal["APPLIED", "REFUSED"]
     contract_id: str
     blast_set: tuple[str, ...]
     demoted_repo_ids: tuple[str, ...] = ()
     blocking_repo_ids: tuple[str, ...] = ()
+    unresolved_repo_ids: tuple[str, ...] = ()
 
 
 async def _write_hoist_rollback_refused_finding(
@@ -4054,7 +4060,7 @@ async def _write_hoist_rollback_demotion_findings(
     (every currently-live cycle, every currently-FORBIDDEN contract); it would be wrong here,
     where one `unhoist_contract` call covers exactly ONE contract's rollback — a blanket
     delete-by-kind would erase a DIFFERENT contract's already-recorded `HoistRollbackDemotion`
-    rows from earlier in the same run. `_upsert_pr_record` (`cli.py` above) is the precedent this
+    rows from earlier in the same run. `_upsert_pr_record` (`cli.py` below) is the precedent this
     mirrors instead: idempotent per-row upsert, safe to re-run.
     """
     findings = [
@@ -4116,28 +4122,39 @@ async def unhoist_contract(
     blast-set re-read + `contracts.status = 'FAILED'` write, together in ONE unit (Decision 2's
     own timing requirement); (2) one `demote_to_floor` call per qualifying blast-set member, each
     already atomic (and independently staleness-checked) on its own — the EXACT pattern
-    `_apply_floor_demotions` above already uses for this same primitive ("one `StateWriter`, one
+    `_apply_floor_demotions` below already uses for this same primitive ("one `StateWriter`, one
     `BEGIN IMMEDIATE` per repo"); (3) one final unit writing every `HoistRollbackDemotion` finding
     together. A crash between phases leaves a state a future `fleet resume` Leg D re-entry point
     (not yet built) can read and continue from; nothing here claims one-transaction atomicity
     across the whole operation, and this docstring is where that is disclosed rather than implied
     by the brief's original "all inside one `StateWriter` unit" phrasing.
 
-    **Gating condition for calling `demote_to_floor` at all (ADR-0122 Decision 3, followed
-    verbatim, with a divergence disclosed rather than silently resolved):** only a blast-set
-    member with `Phase.BUILD` or `Phase.VERIFY` currently `SUCCEEDED` — "a member still at or
-    below `Phase.TRANSFORM` has nothing to demote." `docs/SPEC.md`'s own §3.1 6c-H prose, AS
-    CORRECTED by this same ADR-0122, instead reads "SUCCEEDED beyond `PHASE_SCAN`" — a strictly
-    BROADER predicate that would also demote a member whose only progress is `Phase.TRANSFORM`
-    itself `SUCCEEDED`. This function follows ADR-0122 Decision 3's own narrower text (this
-    task's brief: "Decision 3 explains why at length; do not re-litigate it"); the SPEC-prose-vs-
-    ADR-Decision-3 wording divergence is reported to the controller rather than picked between
-    silently (CLAUDE.md: "if you find a fact here disagrees with the ADR, the ADR is wrong and
-    you report that, you don't silently pick one").
+    **No pre-filter on which blast-set member gets a `demote_to_floor` call — fix round,
+    task-65 review CRITICAL, correcting this docstring's own prior claim.** The FIRST landing of
+    this function gated the call on `Phase.BUILD` or `Phase.VERIFY` currently `SUCCEEDED`,
+    following ADR-0122 Decision 3's own text ("beyond `Phase.TRANSFORM`") verbatim. That gate was
+    WRONG, and the task-65 review traced why: `demote_to_floor`'s span is INCLUSIVE of `floor`
+    (`orchestrator/reentry.py`, `state/repository.py:1674`'s own docstring — "everything from
+    `floor` up to `Phase.VERIFY`"), so `floor=Phase.TRANSFORM` already means "`SUCCEEDED` at
+    TRANSFORM or above" — which IS `docs/SPEC.md`'s own unmodified §3.1 6c-H text, "SUCCEEDED
+    beyond `PHASE_SCAN`", restated exactly. ADR-0122 Decision 3's "beyond `Phase.TRANSFORM`" gate
+    text was a transcription slip (it quoted the DEMOTION TARGET into the GATE slot), not a
+    considered narrowing — annotated in place in `docs/DECISIONS.md`. The fix is to delete the
+    gate entirely: `demote_to_floor` already returns `()` (a correct no-op) for a repo with
+    nothing SUCCEEDED in `[Phase.TRANSFORM, Phase.VERIFY]`, so no caller-side pre-filter is
+    needed, and one that excluded `Phase.TRANSFORM` itself was excluding the PARADIGM case SPEC's
+    rollback paragraph exists for — a consumer whose imports were rewritten to the hoist target
+    and is `SUCCEEDED` at TRANSFORM only, which under the idempotency rule would never re-enter
+    and would walk into BUILD importing a path the rollback just deleted.
 
     Returns `UnhoistOutcome`. On the `REFUSED` branch: no `contracts` write, no demotion, no
     finding other than `HoistRollbackRefused`. On `APPLIED`: `contracts.status = 'FAILED'`,
-    zero or more blast-set members demoted, one `HoistRollbackDemotion` finding per demoted repo.
+    zero or more blast-set members demoted, one `HoistRollbackDemotion` finding per demoted repo,
+    and — fix round, task-65 review I3 — a member `demote_to_floor` could not confirm (a stale
+    `observed` snapshot, or a `REQUIRES_HUMAN_INTERVENTION` row acquired between the read and the
+    write) is named in `unresolved_repo_ids` rather than silently absent while `decision` still
+    reads `APPLIED`, mirroring `_apply_floor_demotions`'s own `observed=`/staleness/
+    applied-vs-plan checks for this same primitive.
     """
     nodes = await _graph_nodes(read_conn, run_id)
     edges = await _graph_edges(read_conn, run_id)
@@ -4191,31 +4208,51 @@ async def unhoist_contract(
 
     fresh_blast_set = await writer.submit(fail_contract_unit)
 
-    # -- write phase 2: demote each qualifying member, one `demote_to_floor` call (one
+    # -- write phase 2: demote every blast-set member, one `demote_to_floor` call (one
     # transaction) per repo, matching `_apply_floor_demotions`'s own established shape for this
-    # exact primitive ---------------------------------------------------------------------------
+    # exact primitive (`observed=`, the `FloorSnapshotStaleError` catch, and the
+    # applied-vs-plan check — task-65 review I3). No pre-filter: `demote_to_floor`'s own `()`
+    # return on a repo with nothing SUCCEEDED in [TRANSFORM, VERIFY] IS the correct no-op — a
+    # gate here duplicated (and, before this fix round, mis-stated) that membership rule. Fix
+    # round, task-65 review CRITICAL: the prior gate required BUILD or VERIFY SUCCEEDED, which
+    # is ADR-0122 Decision 3's own transcription slip, not SPEC's rule — `demote_to_floor`'s span
+    # is INCLUSIVE of `floor` (`orchestrator/reentry.py`, `state/repository.py:1674`'s own
+    # docstring), so `floor=Phase.TRANSFORM` already means "SUCCEEDED at TRANSFORM or above",
+    # exactly SPEC's own "beyond PHASE_SCAN" — see the dated correction on ADR-0122 Decision 3 in
+    # `docs/DECISIONS.md`.
     repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
     demoted_repo_ids: list[str] = []
+    unresolved_repo_ids: list[str] = []
     pending_findings: list[tuple[str, Phase]] = []
     for repo_id in fresh_blast_set:
         statuses = await _repo_phase_statuses(read_conn, run_id, repo_id)
-        if not any(
-            statuses.get(phase) is RepoStatus.SUCCEEDED for phase in (Phase.BUILD, Phase.VERIFY)
-        ):
-            continue  # "at or below Phase.TRANSFORM has nothing to demote" (ADR-0122 Decision 3)
-        pre_demotion_phase = (
-            Phase.VERIFY if statuses.get(Phase.VERIFY) is RepoStatus.SUCCEEDED else Phase.BUILD
-        )
-        demotions = await repository.demote_to_floor(
-            run_id,
-            repo_id,
-            floor=Phase.TRANSFORM,
-            reason=f"hoist_rollback:{contract_id}",
-            now=now,
-        )
+        plan = demotable_phases(statuses, Phase.TRANSFORM)
+        try:
+            demotions = await repository.demote_to_floor(
+                run_id,
+                repo_id,
+                floor=Phase.TRANSFORM,
+                reason=f"hoist_rollback:{contract_id}",
+                now=now,
+                observed=statuses,
+            )
+        except FloorSnapshotStaleError:
+            unresolved_repo_ids.append(repo_id)
+            continue
+        applied = tuple(record.phase for record in demotions)
+        if applied != plan:
+            # The only way in: the repo acquired a REQUIRES_HUMAN_INTERVENTION row between the
+            # `statuses` read above and the write, which `demote_to_floor` short-circuits to `()`
+            # rather than refusing (`state/repository.py:1795-1796`). Reported, never silently
+            # absent from `demoted_repo_ids` while `decision` still reads APPLIED (Rule 11).
+            unresolved_repo_ids.append(repo_id)
+            continue
         if demotions:
             demoted_repo_ids.append(repo_id)
-            pending_findings.append((repo_id, pre_demotion_phase))
+            # The highest phase actually demoted -- not a hardcoded BUILD/VERIFY guess (fix
+            # round, task-65 review CRITICAL fallout): `applied` now legitimately contains just
+            # `(Phase.TRANSFORM,)` for a member whose only progress was TRANSFORM itself.
+            pending_findings.append((repo_id, max(applied)))
 
     # -- write phase 3: every HoistRollbackDemotion finding, together -----------------------
     if pending_findings:
@@ -4228,6 +4265,7 @@ async def unhoist_contract(
         contract_id=contract_id,
         blast_set=fresh_blast_set,
         demoted_repo_ids=tuple(sorted(demoted_repo_ids)),
+        unresolved_repo_ids=tuple(sorted(unresolved_repo_ids)),
     )
 
 
