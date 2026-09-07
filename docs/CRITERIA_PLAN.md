@@ -831,17 +831,37 @@ named — not a weaker "an exception can happen somewhere" substitute.
 
 ## 14. Blast containment + escape hatch
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
-and `fleet resume` unblocking — are fully covered through real e2e paths. (c)/(d) are actively
-refused: `--stub-blocked` exits USAGE, verified directly against `src/fleet/cli.py:3606-3611`/
-`5554-5559` — the refusal text is "`--stub-blocked` is not implemented: emitting a generated stub
-for a blocked dependency..." — this is the missing stub-creation worker gap (no worker in
-`src/fleet/workers/` writes a `stubs` row for it), the exact NEW-MECHANISM item §37's own entry
-already names, **not** D50's config-key-wiring thesis. D50 only mentions `--stub-blocked` in
-passing, grouping it rhetorically with two other refused flags that share the same refusal
-shape, not because D50 is the fix for all three.
-**Done bar:** identical to §37's `--stub-blocked` stub-creation worker (build it, wire it to
-actually create a `stubs` row instead of refusing exit 2) — not D50's scope. Do not open a
-separate effort for a "D50 closure" here; do not duplicate §37's own done bar.
+and `fleet resume` unblocking — used to be described here as "fully covered through real e2e
+paths" and the done bar as "identical to §37's" — **both corrected by the controller, round VI
+task 69 review (`cfe82bb`): "(a)/(b) fully covered" is false (a direct dependent of an RHI repo
+does not become BLOCKED at the TRANSFORM phase — D123), and "done bar identical to §37" is false
+(§12.14 needs, beyond the Leg 1-3 bundle this file's §37 entry tracks, a re-run-to-SUCCEEDED
+CLI/state-machine mechanism — D124, shared with §12.37's own identical-shaped clause — and an
+undesigned transitive stub-stacking mechanism). See `docs/INTEGRATION_HONESTY.md`'s D123/D124
+entries for the full measurement.**
+
+**Corrected 2026-09-07 (round VI task 69 fix round): (c)/(d) are no longer refused.** This
+sentence used to read "(c)/(d) are actively refused: `--stub-blocked` exits USAGE" — false since
+round VI task 69 removed all three `--stub-blocked` CLI refusals
+(`_validate_transform_flags`/`_validate_build_flags`/`_validate_resume_flags`; `src/fleet/
+cli.py`'s old refusal text this sentence quoted, "`--stub-blocked` is not implemented: emitting a
+generated stub...", no longer exists in any of the three). The stub-creation worker gap this
+sentence named as missing is closed (round VI tasks 67-69): `--stub-blocked` now creates a real
+`stubs` row and drives a consumer to `DEGRADED` through TRANSFORM/BUILD/VERIFY for real
+(`tests/test_pr_e2e.py::test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real`).
+This closes real ground on (c)/(d) but does not, on its own, resolve the D123/D124 gaps above —
+see those entries for what still blocks §12.14 from DONE.
+**Done bar:** **corrected 2026-09-07 (round VI task 69, second fix round) — the line this
+replaces said "unchanged in substance from §37's own remaining done bar," omitting the
+transitive-stub-stacking mechanism this very entry's own opening paragraph already names as
+required beyond D104/D107/D108/D123/D124; that omission made this line contradict its own entry.**
+Two things must close, not one: (1) §37's own remaining done bar
+(D104/D107/D108/D123/D124, all pre-existing, all independent of the Leg 1-3 bundle) — the part
+this entry shares with §37; and (2) an undesigned, not-yet-briefed mechanism for transitive stub
+stacking (§3.5 item 4's whole-descendant-set stacking), which §37 does not need and §12.14's own
+text does — no D-number or design exists for it yet. Not D50's scope either way. Do not open a
+separate effort for a "D50 closure" here; do not duplicate §37's own done bar for item (1), and do
+not treat item (1) alone as sufficient for §12.14.
 
 **Correction, 2026-09-07 (round VI task 69's own task-scoped review) — both claims above are now
 known false, independently re-verified against `docs/SPEC.md`'s literal §12 item 14 text rather

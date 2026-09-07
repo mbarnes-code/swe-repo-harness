@@ -1673,13 +1673,33 @@ placeholder instead of waiting for a human:
    `bazel.generators.stub_alias_target` for `PUBLISHED_ARTIFACT`, `stub_failing_target` for
    `EMPTY_FAILING`, item 2 below) are real, tested against a REAL (non-`FakeBazel`) Bazel, and
    wired into the LIVE `fleet build` pipeline (`_run_build_wave`/`_build_payloads`) — reachable on
-   every invocation, not gated behind `--stub-blocked`. All three `--stub-blocked` refusals
-   (`_validate_transform_flags`/`_validate_build_flags`/`_validate_resume_flags`) still stand per
-   ADR-0113 condition 2 — the reason is narrower now: the TRANSFORM-phase DECISION above (trigger
-   detection/`StubRecord`/the `stubs` INSERT) has no production call site yet, so nothing ever
-   writes an `ACTIVE` `stubs` row today, which is what keeps this now-real render machinery
-   currently inert. Do not read this item as describing reachable production behavior until that
-   remaining wiring (task-69's scope) lands and a later dated update here says so.
+   every invocation, not gated behind `--stub-blocked`. **Update, round VI task 69 (2026-09-07) —
+   all three `--stub-blocked` refusals are REMOVED.** `_validate_transform_flags`/
+   `_validate_build_flags`/`_validate_resume_flags` no longer raise: the TRANSFORM-phase DECISION
+   (trigger detection/`StubRecord`/the `stubs` INSERT) is wired into `_transform_impl`'s wave loop,
+   gated on the flag, so `fleet transform --stub-blocked` now writes a real `ACTIVE` `stubs` row
+   when a dispatched repo has a live edge to a `REQUIRES_HUMAN_INTERVENTION` provider, and `fleet
+   resume --stub-blocked` frees a repo blocked solely by such a provider (§11.5 step 6) and
+   re-dispatches it with the same trigger armed (step 8, same invocation). The render machinery
+   above is no longer inert: `tests/test_pr_e2e.py::
+   test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` drives
+   the whole chain for real, through TRANSFORM/BUILD/VERIFY, producing a real `VerificationReport`
+   with `equivalence == STUB_LIMITED`. One necessary consequence, stated so it is not mistaken for
+   a defect: `fleet build`/`fleet verify` now leave ANY consumer of a live `ACTIVE`/
+   `PUBLISHED_ARTIFACT` stub `DEGRADED` at that phase — unconditionally, data-driven off the
+   `stubs` table, not gated on the flag, since `models.state.RepoState._stub_invariants` requires
+   it once BUILD/VERIFY becomes that repo's highest phase. One limit this update does NOT
+   overcome: §12.37's own "P re-runs to SUCCEEDED... C becomes SUCCEEDED" clause is still not
+   reachable through any real mechanism — blocked on D104/D107/D108
+   (REVALIDATE dispatch has no execution path, nothing rewrites the consumer's redirected
+   `BUILD.bazel` label back to the real one, and `StubDecision.consumer_status` has zero
+   production readers) and D124 (no `fleet retry` CLI surface and no `ALLOWED_TRANSITIONS` edge
+   out of `REQUIRES_HUMAN_INTERVENTION`), all pre-existing and out of task-69's scope. A separate,
+   also pre-existing gap found while proving this end to end — `_transform_impl`'s cross-wave
+   `blocked_by` propagation never reaches a not-yet-dispatched dependent's phase row — is D123; it
+   is orthogonal to stubs (any abandoned provider triggers it) and did not block this leg's own
+   fixture, which worked around it by seeding the dependent's `BLOCKED` row directly (see round VI
+   task 69's report for the full disclosure).
    For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
    `third_party/stubs/<coord_key_path>/` from `r`'s **published `Coordinate` alone** — no source
    from `r` is needed, which is the point. The stub is an external-registry dependency pinned to

@@ -850,7 +850,8 @@ def test_an_indeterminate_probe_blocks_the_run_unlike_a_genuinely_missing_engine
 
 
 def test_transform_refuses_the_flags_it_cannot_honour(fleet: Path) -> None:
-    """`--stub-blocked` exits 2 rather than parsing and doing nothing.
+    """`--max-attempts` above `transform.ladder`'s declared rung count exits 2 rather than
+    parsing and doing nothing.
 
     Why a test and not a docstring: an accepted-and-ignored flag is indistinguishable from an
     honoured one at the exit code, which is all CI reads.
@@ -867,15 +868,41 @@ def test_transform_refuses_the_flags_it_cannot_honour(fleet: Path) -> None:
     worker-level proof of its effect —
     a colliding proposal applied anyway, with a `GuardOffEvent` recorded — is
     `tests/test_workers_transform.py::test_no_anchoring_guard_applies_the_repeat_and_records_a_guard_off_event`.
+
+    `--stub-blocked` USED to be a FOURTH flag here, refused unconditionally (ADR-0113 §37 Blocker
+    A condition 2) until the TRANSFORM-worker stub-creation half (task-67) and the BUILD-phase
+    render (task-68) both existed and were wired together (round VI task 69, §12.37 Leg 3) — see
+    `test_stub_blocked_no_op_when_nothing_is_abandoned_does_not_raise_usage_error` below for its
+    replacement, an old-fails/new-passes proof of the SAME behavioural change.
     """
     scanned(fleet)
-    for flag in (
-        ["--stub-blocked"],
-        ["--max-attempts", "9"],
-    ):
-        refused = transform(fleet, *flag)
-        assert refused.exit_code == ExitCode.USAGE, f"{flag} was silently accepted"
+    refused = transform(fleet, "--max-attempts", "9")
+    assert refused.exit_code == ExitCode.USAGE, "--max-attempts 9 was silently accepted"
     assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(0,)]
+
+
+def test_stub_blocked_no_op_when_nothing_is_abandoned_does_not_raise_usage_error(
+    fleet: Path,
+) -> None:
+    """The discriminating proof for the refusal `test_transform_refuses_the_flags_it_cannot_
+    honour` above used to assert (round VI task 69, §12.37 Leg 3).
+
+    OLD assertion (pre-task-69, `--stub-blocked` in that test's refused-flags tuple): `transform
+    (fleet, "--stub-blocked").exit_code == ExitCode.USAGE` — PASSES on `main` before this round
+    (`_validate_transform_flags` raised `UsageError` unconditionally) and FAILS after it (the
+    refusal is removed). NEW assertion here is the inverse and is what now holds: with no provider
+    abandoned, `_detect_transform_stub_triggers` finds zero triggers every wave, so the flag is a
+    genuine no-op — SAME exit code and SAME phase-2 dispatch count as a plain `fleet transform`
+    with no flag at all, never `ExitCode.USAGE`.
+    """
+    scanned(fleet)
+    stubbed = transform(fleet, "--stub-blocked", json_output=False)
+    assert stubbed.exit_code != ExitCode.USAGE, stubbed.output
+    # Same shape a plain `fleet transform` (no flag) produces on this fixture: every repo
+    # dispatched and none needing a human — the flag changed nothing because nothing is abandoned.
+    assert stubbed.exit_code == ExitCode.SUCCESS, stubbed.output
+    assert "0 needing a human" in stubbed.output, stubbed.output
+    assert query(fleet, "SELECT COUNT(*) FROM phases WHERE phase = 2") == [(4,)]
 
 
 def test_context_policy_reaches_the_worker_not_the_hardcoded_default(fleet: Path) -> None:

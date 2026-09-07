@@ -48,8 +48,9 @@ from fleet import cli
 from fleet.cli import ExitCode, app
 from fleet.llm import client as client_module
 from fleet.llm.client import StructuredOutputMode, TransportError
-from fleet.models.enums import BreakStrategy, PrState
-from fleet.orchestrator.stubs import revalidation_key
+from fleet.models.enums import BreakStrategy, PrState, RepoStatus, StubFidelity, StubState
+from fleet.models.tasks import StubRecord
+from fleet.orchestrator.stubs import ProviderFacts, StubTransition, revalidation_key, supersede
 from fleet.state.db import connect_ro
 from fleet.state.projection import build_state
 from fleet.util.proc import ProcResult
@@ -75,6 +76,7 @@ from tests.test_transform_e2e import (  # noqa: F401  (fixtures are used by inje
     scanned,
     sequence,
     transform,
+    write_rules,
 )
 
 runner = CliRunner()
@@ -262,9 +264,20 @@ def degrade(
 ) -> None:
     """Put one repo in the §3.5 escape hatch: DEGRADED, with a live `ACTIVE`/`SUPERSEDED` stub row.
 
-    Written straight to SQLite because `--stub-blocked` is refused by `fleet build` (no worker
-    emits a stub in this tree), and refusing to test the draft/banner rule until that worker
-    exists would leave §3.5.1's most consequential PR rule unproven.
+    Written straight to SQLite. **Corrected 2026-09-07 (round VI task 69 fix round): this
+    docstring used to say "`--stub-blocked` is refused by `fleet build` (no worker emits a stub in
+    this tree)" — false since round VI task 69 removed all three `--stub-blocked` refusals and
+    wired real stub creation into `_transform_impl`.** The raw-SQL seed stays here regardless, for
+    a reason specific to this helper rather than a general absence: most callers pass
+    `provider_repo_id='acme-empty'` (see below) — a name deliberately absent from this fixture
+    fleet's real repos — which a real `--stub-blocked` dispatch could never produce, since it
+    requires a genuine graph edge to a genuine `REQUIRES_HUMAN_INTERVENTION` provider. The one
+    caller that DOES want a real provider (`test_pr_sync_fires_t1_and_enqueues_a_revalidate_
+    task_for_a_merged_providers_stub`) still uses this helper rather than a real dispatch because
+    driving one here would also need a real abandoned provider and a real wave sequence — see
+    `tests/test_pr_e2e.py::test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_
+    feeds_t1_for_real` for that full real-CLI proof, built separately because it needs its own
+    fixture topology.
 
     `state` defaults to `ACTIVE` (the original fixture shape) and also accepts `SUPERSEDED` — the
     OTHER member of `_HELD_STATES`/§12.38's refusal set, so a caller can prove the guard holds on
@@ -1852,3 +1865,215 @@ def test_fleet_pr_persists_its_llm_findings_even_when_the_command_fails_partway(
         "every finding went out with the failure"
     )
     assert {json.loads(r[0])["actual"] for r in rows} == {"PROMPTED"}
+
+
+
+
+# ---------------------------------------------------------------------------------------
+# §12.37 Leg 3 (round VI task 69) — the real `--stub-blocked` CLI path end to end
+# ---------------------------------------------------------------------------------------
+
+_STUB_PROVIDER = "acme-lib-py"
+_STUB_CONSUMER = "acme-app-py"
+_STUB_COORD_KEY = "pypi::acme-lib-py"
+
+#: A rule that claims `acme-lib-py`'s own module and matches nothing in it — the PROVIDER-side
+#: mirror of `tests/test_transform_e2e.py`'s `PY_MISSING_RULE` (which targets the CONSUMER,
+#: `acme_app_py/main.py`). Same RULE_MISS shape (§5), retargeted so the PROVIDER is the one that
+#: genuinely, mechanically exhausts its ladder and reaches REQUIRES_HUMAN_INTERVENTION.
+_PROVIDER_FAILS_RULE = """\
+rules:
+  - id: py-lib-missing
+    description: claims acme-lib-py's module and matches nothing in it
+    engine: fixture
+    languages: [python]
+    applies_to: ["**/acme_lib_py/__init__.py"]
+    rule:
+      pattern: "class Registry"
+    params:
+      find: "class RegistryNotPresent"
+      replace: "class Registry"
+"""
+
+
+def _seed_blocked(root: Path, *, repo_id: str, blocked_by: list[str]) -> None:
+    """Hand-seed one repo's TRANSFORM `phases` row to `BLOCKED`, bypassing
+    `SqliteSchedulerStore.append_blocked_by` — the real writer this test could not reach through.
+
+    **Why this is necessary rather than a shortcut for something a real dispatch could do.**
+    `_transform_impl`'s wave loop creates each wave's `phases` rows LAZILY, at the top of that
+    wave's OWN iteration (`for index in waves: ... upsert_phase(...) ... await _run_transform_
+    wave(...)`) — so by the time `PhaseRunner._contain` -> `propagate_blocked` ->
+    `append_blocked_by` runs for a provider abandoned in an EARLIER wave, a dependent in a LATER
+    wave has no `phases` row yet for `append_blocked_by` (an UPDATE-only write, "every non-
+    SUCCEEDED phase of a repo") to touch. Measured directly, twice: once with both waves driven in
+    ONE `fleet transform` call and once across two separate `fleet transform --wave N` calls —
+    `acme-app-py` reached `SUCCEEDED` with `blocked_by == '[]'` both times, never `BLOCKED`, after
+    a REAL `_PROVIDER_FAILS_RULE`-driven failure of `acme-lib-py`. This is a genuine, pre-existing
+    structural gap in `_transform_impl` (BUILD's own `_eligible_build_units`/upfront full-domain
+    `upsert_phase` INGEST pass does not have it, which is why `tests/test_build_e2e.py`'s "Blocker
+    C" fixture can drive the SAME shape through two real `build()` calls with no seed at all) — not
+    introduced by this leg, not fixed by it (out of scope), reported to the controller in this
+    task's report rather than patched here.
+
+    `acme-lib-py` itself is NOT hand-seeded: it reaches `REQUIRES_HUMAN_INTERVENTION` for real,
+    through a real `fleet transform --wave 0` dispatch, in this test — so the evidence `fleet
+    resume`'s step 5 (`_demote_to_floors`) reads (real `attempts` rows, a real `RULE_MISS`
+    finding) is genuine and step 5 correctly leaves it at RHI rather than re-deriving a fresh
+    floor for it (an earlier draft of this test hand-seeded `acme-lib-py`'s status too, with no
+    backing evidence, and step 5 — correctly, from its own perspective — demoted it back to a
+    fresh `TRANSFORM` floor and it simply succeeded on retry, silently invalidating the whole
+    fixture).
+    """
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        run_id = str(conn.execute("SELECT run_id FROM runs").fetchone()[0])
+        # An INSERT, not an UPDATE: `_STUB_CONSUMER`'s wave (wave 1) never opened in this test —
+        # only `--wave 0` ran — so its `phases(TRANSFORM)` row does not exist yet, and a plain
+        # UPDATE would silently affect zero rows (an earlier draft of this helper did exactly
+        # that: it "succeeded" for the wrong reason, because step 8 then dispatched the consumer
+        # as an ORDINARY un-blocked repo and the trigger still fired on the live edge regardless
+        # of blocking — proving stub-creation fires on a normal dispatch, not that the unblock
+        # path was exercised at all).
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, blocked_by, updated_at) "
+            "VALUES (?, ?, 2, 'BLOCKED', ?, ?)",
+            (run_id, repo_id, json.dumps(sorted(blocked_by)), "2026-08-09T00:00:00+00:00"),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+) -> None:
+    """§12.37's own literal scenario (`docs/SPEC.md:7595`), driven for real through
+    `--stub-blocked` end to end for the first time (round VI task 69).
+
+    `acme-lib-py` (`_STUB_PROVIDER`) reaches `REQUIRES_HUMAN_INTERVENTION` through a REAL
+    `fleet transform --wave 0` dispatch (three real `RULE_MISS` attempts against
+    `_PROVIDER_FAILS_RULE`). `acme-app-py` (`_STUB_CONSUMER`) is hand-seeded `BLOCKED` — see
+    `_seed_blocked`'s own docstring for the measured, disclosed reason a real dispatch cannot
+    reach that state here. Everything from there on is real:
+
+    1. ONE `fleet resume --stub-blocked` drives step 6 (`_unblock_dependents`, real — frees
+       `acme-app-py`) and step 8's REAL `_transform_impl(stub_blocked=True)` continuation:
+       `acme-app-py` transforms for real, task-67's trigger detection fires for real against the
+       real `edges`/`coordinates` rows `scanned()` produced, and the `RUNNING -> DEGRADED`
+       correction (this leg) fires for real.
+    2. `fleet build --no-sandbox` / `fleet verify` carry `acme-app-py` through for real (real
+       `FakeBazel`/`FakeFilterRepo` argv, no further seeding), proving `_eligible_build_units`/
+       `_gated_members`'s widening (this leg) actually admits a `DEGRADED` TRANSFORM row into
+       BUILD and BUILD's own new `DEGRADED` row into VERIFY.
+    3. The REAL `stubs` row this run created is fed to `orchestrator.stubs.supersede` (D80,
+       unmodified) exactly as `tests/test_stubs.py::test_t1_fires_on_succeeded_and_merged` feeds
+       its own hand-built fixture — proving the CREATION side lands in the shape D80's tests
+       already start from, per this task's brief, rather than re-proving reconciliation itself.
+    """
+    write_rules(fleet, _PROVIDER_FAILS_RULE)
+    scanned(fleet)
+    first = transform(fleet, "--wave", "0", json_output=False)
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+    provider_status = dict(
+        query(
+            fleet,
+            "SELECT repo_id, status FROM phases WHERE phase = 2 AND repo_id = ?",
+            (_STUB_PROVIDER,),
+        )
+    )
+    assert provider_status[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", provider_status
+
+    _seed_blocked(fleet, repo_id=_STUB_CONSUMER, blocked_by=[_STUB_PROVIDER])
+
+    # --- step 6 (real unblock) + step 8 (real TRANSFORM re-dispatch with the trigger armed) ---
+    resumed = runner.invoke(app, [*base_args(fleet), "--json", "resume", "--stub-blocked"])
+    assert resumed.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, resumed.output
+    resume_payload = json.loads(resumed.stdout)
+    assert resume_payload["unblocked_dependents"]["unblocked"] == [
+        {
+            "repo_id": _STUB_CONSUMER,
+            "removed": [_STUB_PROVIDER],
+            "remaining": [],
+            "floor": "TRANSFORM",
+        }
+    ], resume_payload["unblocked_dependents"]
+
+    transform_statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert transform_statuses[_STUB_CONSUMER] == "DEGRADED", transform_statuses
+    assert transform_statuses[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", transform_statuses
+
+    stub_rows = query(
+        fleet,
+        "SELECT state, stub_fidelity, pinned_version, consumer_repo_id, provider_repo_id, "
+        "       max_revalidation_rounds, revalidation_round "
+        "  FROM stubs WHERE run_id = (SELECT run_id FROM runs) AND stub_coord_key = ?",
+        (_STUB_COORD_KEY,),
+    )
+    assert stub_rows == [
+        ("ACTIVE", "PUBLISHED_ARTIFACT", "2.0.1", _STUB_CONSUMER, _STUB_PROVIDER, 2, 0)
+    ], stub_rows
+
+    # --- BUILD/VERIFY admit the DEGRADED row (this leg's `_eligible_build_units`/`_gated_
+    # members` widening) and correct their OWN rows to DEGRADED too (this leg's new per-phase
+    # `stub_degrade_transform` calls) ---
+    built = build(fleet, "--no-sandbox", json_output=False)
+    # Exit 7, not 0: a `DEGRADED` repo alone (no RHI at THIS phase) still reports "a human is
+    # needed" per D93/§3.5.1 point 5 — `acme-lib-py` itself never reaches BUILD at all (excluded
+    # from `_eligible_build_units`'s domain, asserted below), so the ONLY reason for exit 7 here
+    # is `acme-app-py`'s own DEGRADED status.
+    assert built.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, built.output
+    build_statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert build_statuses[_STUB_CONSUMER] == "DEGRADED", build_statuses
+    assert _STUB_PROVIDER not in build_statuses, "the RHI provider must never reach BUILD"
+
+    verified_result = verify(fleet, json_output=False)
+    assert verified_result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, verified_result.output
+    verify_statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 4"))
+    assert verify_statuses[_STUB_CONSUMER] == "DEGRADED", verify_statuses
+
+    report_rows = query(
+        fleet,
+        "SELECT payload FROM findings WHERE kind = 'VerificationReport' AND repo_id = ?",
+        (_STUB_CONSUMER,),
+    )
+    assert len(report_rows) == 1, report_rows
+    report_body = json.loads(str(report_rows[0][0]))["report"]
+    assert report_body["equivalence"] == "STUB_LIMITED", report_body
+    assert report_body["verified_against_stubs"] == [_STUB_COORD_KEY], report_body
+    assert report_body["stub_fidelity"] == {_STUB_COORD_KEY: "PUBLISHED_ARTIFACT"}, report_body
+
+    # --- §12.37 clause 1, in full: C is DEGRADED, one ACTIVE/PUBLISHED_ARTIFACT stubs row, and a
+    # VerificationReport whose equivalence is STUB_LIMITED naming P's coordinate. Proven above.
+
+    # --- "the transition INTO the already-proven reconciliation path" (D80, unmodified): a
+    # `StubRecord` CONSTRUCTED to match every field of the REAL row just asserted above (state,
+    # stub_fidelity, pinned_version, consumer/provider ids, max_revalidation_rounds,
+    # revalidation_round -- all seven asserted equal to the real row immediately above, none
+    # invented) is fed to `orchestrator.stubs.supersede` exactly as `tests/test_stubs.py::
+    # test_t1_fires_on_succeeded_and_merged` feeds its own hand-built one. Not a read-back
+    # through `StubRecord.model_validate` (D80's own reconstruction shape, `cli._stub_reconcile_
+    # inputs`) -- constructing it directly here is enough to prove `supersede()` accepts and
+    # correctly transitions the exact values this run produced.
+    record = StubRecord(
+        run_id=UUID(str(run_id_of(fleet))),
+        coord_key=_STUB_COORD_KEY,
+        provider_repo_id=_STUB_PROVIDER,
+        consumer_repo_ids=[_STUB_CONSUMER],
+        fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+        pinned_version="2.0.1",
+        state=StubState.ACTIVE,
+        max_revalidation_rounds=2,
+        rounds_spent=0,
+    )
+    decisions = supersede(
+        record, ProviderFacts(_STUB_PROVIDER, RepoStatus.SUCCEEDED, PrState.MERGED)
+    )
+    assert len(decisions) == 1, decisions
+    decision = decisions[0]
+    assert decision.transition is StubTransition.T1, decision
+    assert (decision.from_state, decision.to_state) == (StubState.ACTIVE, StubState.SUPERSEDED)
+    assert decision.consumer_status is RepoStatus.DEGRADED, decision

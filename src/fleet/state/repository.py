@@ -1897,6 +1897,18 @@ class SqliteStateRepository:
         whose `phase` the generic completion loop just wrote `SUCCEEDED` and which now has at
         least one qualifying `ACTIVE` stub row.
 
+        **Despite the method's own name, `phase` is not restricted to TRANSFORM.** ADR-0124's
+        first landing (round VI task 67) called this only for `Phase.TRANSFORM`; round VI task 69
+        also calls it for `Phase.BUILD` and `Phase.VERIFY` (unconditionally, right after each of
+        those phases' own wave dispatch) — `models.state.RepoState._stub_invariants` requires
+        `stubbed_deps` non-empty IFF `status is DEGRADED`, and a repo built or verified against a
+        live `ACTIVE` stub must not project as plain `SUCCEEDED` once BUILD or VERIFY becomes its
+        highest phase (`state.projection._fold_repos` folds the highest phase reached to the
+        top-level status). The name is kept rather than renamed in that same round — a rename
+        would touch every call site and every reference to this method across `cli.py`/`tests/
+        test_repository.py` for a naming concern only, not a behavior one — but a future reader
+        should not assume "transform" in the name means "TRANSFORM-only" in the parameter.
+
         **§12.14, read literally, is the qualifying predicate**: "an `EMPTY_FAILING` stub
         unblocks nothing... no repo becomes `DEGRADED`." So this fires ONLY when at least one
         `ACTIVE` row's `stub_fidelity` is `PUBLISHED_ARTIFACT` -- a consumer whose only `ACTIVE`
