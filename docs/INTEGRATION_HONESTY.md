@@ -9655,6 +9655,19 @@ of the blockers `docs/SPEC.md`'s §12.37 item 1 needs for its own "re-running `P
 clause (see `docs/CRITERIA_PLAN.md`'s `## 37.` entry) — the same missing mechanism blocks both
 criteria's identical-shaped clause.
 
+**Correction, 2026-09-07 (round VI research-42, ADR-0125) — the "no `OPERATOR_REOPEN`-style flag
+exists" clause above is false, measured against current `HEAD`.** `src/fleet/models/enums.py`
+already defines `OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {REQUIRES_HUMAN_
+INTERVENTION: frozenset({PENDING})}`, and `transition()` already accepts the `operator: bool`
+keyword that opens it — both present since the project's initial commit (`a1178f7`), predating
+this entry, and already unit-tested (`tests/test_state_models.py::
+test_abandoned_is_reachable_only_through_the_audited_operator_door`). The design decision this
+entry called for was already made; what is genuinely missing, per ADR-0125, is narrower: a
+dedicated writer function pairing the CAS-guarded status write with an audit finding (mirroring
+`degrade_for_stub()`), and the `fleet retry` CLI command itself — zero production call sites of
+`operator=True` exist anywhere in `src/`. The rest of this entry's verdict stands unchanged: OPEN,
+no CLI surface, no writer function, no production call site. See ADR-0125 for the full design.
+
 **Consequence.** Neither §12.14's clause (2) nor §12.37's "re-running P" clause can ever be driven
 for real today, regardless of anything else either criterion's own bundle builds. `D104` (already
 `OPEN`) covers the `TaskKind.REVALIDATE` dispatch path specifically; this entry is the narrower,

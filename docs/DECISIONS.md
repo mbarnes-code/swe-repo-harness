@@ -13821,3 +13821,255 @@ nothing in Python enforces routing through the record-returning function. Scope 
 decide: it does not wire `stub_degrade_transform` into any production call site — `--stub-blocked`
 stays refused in all three CLI validators per ADR-0113 condition 2, and task-69 owns deciding the
 actual per-wave call site once the render leg (task-68) also exists.
+
+## ADR-0125 — §12.14 / §12.37 shared gap: `fleet retry` re-opens an abandoned repo through the
+ALREADY-EXISTING `OPERATOR_REOPEN` door; no new `ALLOWED_TRANSITIONS` edge is needed
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D124 (round VI task 69, `525e274`) found neither
+§12.14 clause (2) ("re-running the abandoned repo to `SUCCEEDED` removes it from every
+`blocked_by`...") nor §12.37's identically-shaped "re-running `P` to `SUCCEEDED`" clause can be
+driven for real, because no `fleet retry` CLI command exists. D124's own entry additionally claims
+"`RepoStatus.REQUIRES_HUMAN_INTERVENTION` has no outbound edge in `ALLOWED_TRANSITIONS`... and no
+`OPERATOR_REOPEN`-style flag exists to open one."
+
+**That second half of D124's claim is measurably false at current `HEAD` (research-42,
+2026-09-07) and this ADR corrects it rather than re-deciding it.** `src/fleet/models/enums.py`
+already defines, verbatim:
+
+```python
+OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
+    RepoStatus.REQUIRES_HUMAN_INTERVENTION: frozenset({RepoStatus.PENDING}),
+}  # The one documented exception (§12.14): a human re-runs an abandoned repo via `fleet retry`.
+```
+
+and `transition()` already accepts an `operator: bool = False` keyword that opens exactly this
+door (`if operator and new in OPERATOR_REOPEN.get(old, frozenset()): return new`). `git log -S
+OPERATOR_REOPEN -- src/fleet/models/enums.py` shows this map and gate were present in the
+project's **initial commit** (`a1178f7`), predating every round this project has run. It is
+already fully unit-tested: `tests/test_state_models.py::
+test_abandoned_is_reachable_only_through_the_audited_operator_door` asserts `transition(
+RHI, PENDING)` raises without the flag, `transition(RHI, PENDING, operator=True)` succeeds, the
+door opens onto `PENDING` and nothing else, and it is not a master key over `SUCCEEDED`. Two other
+test docstrings (`tests/test_cli.py:3608`, `tests/test_state_models.py:619`) already name `fleet
+retry`'s `operator=True` door as the intended, designed mechanism for exactly this recovery.
+
+So this project already made the design decision D124 asked for, before D124 was ever filed — it
+simply was never wired to a writer function or a CLI command. **What is genuinely missing**,
+re-measured directly against `HEAD`, is narrower than D124's entry states:
+
+1. `grep -rn "operator=True\|operator: bool" src/fleet/cli.py src/fleet/state/repository.py
+   src/fleet/orchestrator/*.py` returns **nothing** — zero production call sites of the flag
+   anywhere. The door exists and is tested in isolation; nothing has ever knocked on it.
+2. There is no dedicated writer function pairing the CAS-guarded status write with an audit
+   finding — the `demote()`/`PhaseDemotion` and `degrade_for_stub()`/`StubDegradation` precedent
+   this project already uses for `RESUME_DEMOTE` (ADR-0077) and `STUB_DEGRADE` (ADR-0124). Nothing
+   analogous exists for `OPERATOR_REOPEN`.
+3. `grep -n "def retry" src/fleet/cli.py` returns zero hits — D124's claim here is confirmed
+   correct. No CLI surface exists at all.
+
+**This ADR's decision is therefore much smaller than "design a new gated transition edge."** The
+edge and its gate are done. This is: (a) add the missing writer function, mirroring
+`degrade_for_stub()`/`StubDegradation` exactly, (b) add the missing CLI command, and (c) confirm —
+not build — that the existing `blocked_by`-clearing machinery picks the result up for free.
+
+---
+
+### Judgment call 1 — the `ALLOWED_TRANSITIONS`/gate shape
+
+**Decision: no new map, no new keyword.** Reuse `OPERATOR_REOPEN` and the existing `operator: bool`
+parameter on `transition()` verbatim. `RepoStatus.REQUIRES_HUMAN_INTERVENTION` is the only key,
+`RepoStatus.PENDING` is the only value, exactly as it already reads. Widening this map or adding a
+second key would be an undisclosed, unreviewed change to a door this project already closed
+(`OPERATOR_REOPEN.keys() == {rhi}` is itself asserted by `tests/test_state_models.py`) — nothing in
+this ADR's scope requires touching it.
+
+### Judgment call 2 — a dedicated writer function (the actual gap)
+
+**Decision:** add, in `src/fleet/models/enums.py`, mirroring `degrade_for_stub()`/
+`StubDegradation` (ADR-0124) and `demote()`/`PhaseDemotion` (ADR-0077) exactly:
+
+- `OPERATOR_REOPENED_KIND: Final[str] = "OperatorReopened"` — the `findings.kind` every reopen
+  writes, same audit discipline as `PHASE_DEMOTED_KIND`/`STUB_DEGRADED_KIND`.
+- `@dataclass(frozen=True, slots=True) class OperatorReopen:` — `repo_id: str`, `phase: Phase`,
+  `reason: str` (required; an operator's stated basis for asserting the repo is fixed — mirrors
+  `fleet quarantine`'s required `--reason`), `from_status: RepoStatus = RepoStatus.
+  REQUIRES_HUMAN_INTERVENTION`, `to_status: RepoStatus = RepoStatus.PENDING`, and a `.payload()`
+  method shaped identically to `PhaseDemotion.payload()`/`StubDegradation.payload()`.
+- `def reopen_abandoned(old: RepoStatus, *, repo_id: str, phase: Phase, reason: str) -> tuple[
+  RepoStatus, OperatorReopen]:` — accepts **only** an `OPERATOR_REOPEN` key (i.e. only
+  `REQUIRES_HUMAN_INTERVENTION`), raising `ValueError` otherwise (mirrors `demote()`'s and
+  `degrade_for_stub()`'s stricter-than-`transition()` contract — this is deliberately an explicit,
+  single-repo operator command, not a sweep that may be called speculatively over rows that may or
+  may not qualify, so it should refuse loudly rather than silently no-op). Calls `transition(old,
+  RepoStatus.PENDING, operator=True)` and returns `(new_status, OperatorReopen)` as one value, so a
+  caller cannot obtain the status without the finding it owes — the identical discipline ADR-0077
+  §4 states for `demote()` and ADR-0124 restates for `degrade_for_stub()`.
+
+**Why raise rather than return `None`:** `stub_degrade_transform`'s `None` return exists because
+it is called unconditionally after every phase's generic completion, over rows that usually do NOT
+qualify — `None` there means "not applicable this time," a normal outcome. `fleet retry <repo>` is
+the opposite shape: an operator names one specific repo and asserts "this one is fixed." If that
+repo is not actually at `REQUIRES_HUMAN_INTERVENTION`, the operator's premise is wrong and the
+command should fail loudly (Rule 11), exactly as `demote()` raises rather than silently declining
+for a status outside `RESUME_DEMOTE`.
+
+### Judgment call 3 — the repository-layer transaction
+
+**Decision:** add `SqliteStateRepository.reopen_to_pending(run_id, repo_id, *, reason, now) ->
+OperatorReopen`, declared on the `StateRepository` Protocol beside `demote_to_floor`/
+`stub_degrade_transform`, mirroring `stub_degrade_transform`'s transaction shape (`src/fleet/
+state/repository.py:1893-1974`) exactly:
+
+1. Inside one `BEGIN IMMEDIATE`, `SELECT phase, status FROM phases WHERE run_id = ? AND repo_id =
+   ?` and find every row whose status is `REQUIRES_HUMAN_INTERVENTION`.
+2. **Require exactly one such row.** Zero: raise (`repo_id` is not actually abandoned — the
+   operator's premise is wrong; `fleet retry` on a repo that is not RHI must fail the way
+   `_quarantine_impl` fails on an unknown repo, not silently no-op). More than one: raise — the
+   generic completion loop stops advancing a repo the instant one phase reaches RHI (`orchestrator.
+   reentry.phase_floor`'s own docstring: RHI means "nothing for this function to compute"), so a
+   repo with two independent RHI rows would be a structural surprise worth surfacing loudly rather
+   than silently picking the first. (Task-74 must confirm this invariant against a real fixture,
+   not merely assert it in a docstring — see the task brief.)
+3. Call `reopen_abandoned(RepoStatus.REQUIRES_HUMAN_INTERVENTION, repo_id=repo_id, phase=<the one
+   row's phase>, reason=reason)`.
+4. Write the phase row via a CAS `UPDATE ... SET status = ?, updated_at = ? WHERE run_id = ? AND
+   repo_id = ? AND phase = ? AND status = 'REQUIRES_HUMAN_INTERVENTION'`, asserting
+   `cursor.rowcount == 1` exactly as `_STUB_DEGRADE_PHASE_SQL`'s call site does (a mismatch means
+   the row moved between the SELECT and the UPDATE inside the same transaction, which should be
+   structurally impossible and is a `RepositoryError` if it ever happens).
+5. Write one `findings` row in the same transaction via `_DEMOTE_FINDING_SQL`'s existing
+   INSERT/upsert shape with `kind=OPERATOR_REOPENED_KIND`, mirroring `stub_degrade_transform`'s own
+   finding write verbatim (same fingerprinting concern `PhaseDemotion.payload()`'s docstring
+   raises: fingerprint on `(run_id, repo_id, kind)` — since a repo can only ever have one RHI row
+   at a time, this is not the multi-phase collapse hazard `PhaseDemotion` warns about, but the
+   fingerprint helper should still be reused rather than re-derived).
+
+### Judgment call 4 — the CLI surface
+
+**Decision: a new, dedicated `fleet retry <repo> --reason <text>` command — not a `fleet resume`
+flag.** Three reasons, all from precedent already in this tree:
+
+- The enum-layer comment, and two independent test docstrings, already name `fleet retry` as the
+  intended surface. Nothing needs inventing.
+- `fleet retry <repo>` is shaped exactly like `fleet quarantine <repo> --reason <text>
+  [--dry-run]` — a single named repo, a required audit reason, an explicit one-time operator
+  assertion — not like `fleet resume --stub-blocked`, which is a fleet-wide **policy switch**
+  threaded through an automatic reconciliation sweep. `fleet retry` is not reconciling anything; it
+  is reversing a specific, prior, deliberate abandonment for a specific repo, on the operator's own
+  say-so — the same shape `quarantine` already established for the opposite direction (removing a
+  repo, rather than re-admitting one).
+- `fleet resume`'s docstring already states `--stub-blocked` was "wired live" as an addition to an
+  *existing* reconciliation step (step 6); there is no existing resume step this reopening
+  belongs inside — it precedes step 5 entirely (a repo cannot be at its "re-entry floor" if it is
+  still `REQUIRES_HUMAN_INTERVENTION`; `phase_floor` explicitly returns `None` for such a row).
+  Folding it into `resume` would mean inventing a brand new resume step for a fleet-wide sweep
+  where SPEC actually describes a targeted, named, one-repo action.
+
+`fleet retry`'s scope is deliberately narrow, mirroring `demote()`'s own scope: it performs
+**only** the reopen (RHI phase → `PENDING`, one audited finding). It does **not** re-execute any
+work itself, and does **not** call the `blocked_by`-clearing machinery directly (judgment call 5
+covers why that is unnecessary). Command surface:
+
+```
+fleet retry <repo> --reason <text> [--dry-run]
+```
+
+`--reason` is required, exactly as `quarantine --reason` is required, and for the identical stated
+reason ("§10: it is the audit record"). `--dry-run` previews the identified RHI row and the finding
+that would be written, writing nothing — mirrors `quarantine --dry-run` exactly.
+
+### Judgment call 5 — what actually triggers re-execution, and the `blocked_by` clearing
+
+**Decision: nothing new. Both are already-built, generic machinery that this fix does not need to
+touch, because `fleet retry` only ever produces an ordinary `PENDING` phase row.**
+
+*Re-execution.* `fleet resume`'s own docstring already states step 8 "re-enters `fleet transform`/
+`build`/`verify`'s own composition roots, every servable phase from the lowest servable floor
+upward." Once `fleet retry` writes the formerly-RHI phase to `PENDING`, `orchestrator.reentry.
+phase_floor`'s "nothing to compute: `None`" special case for RHI no longer applies — the row now
+reads as an ordinary unsettled frontier phase, and step 5/8's existing backward-walk-then-continue
+logic handles it with no new code. This is not asserted from reading alone: task-74's fixture (see
+the task brief) must prove it, because `phase_floor`'s docstring is written entirely in terms of
+statuses that are already `SUCCEEDED`/`DEGRADED`/`SKIPPED`/RHI at call time, and a row that
+transitioned OUT of RHI moments before is a state the existing test suite has apparently never
+exercised (a `grep` for a fixture that calls `phase_floor` or drives `fleet resume` over a
+previously-`operator=True`-reopened row returns nothing).
+
+*`blocked_by` clearing.* `orchestrator.reentry.still_blocking` already answers "may `name` be
+removed from a dependent's `blocked_by`?" purely from **every one of that repo's `phases.status`
+values being in `LANDED_STATUSES` (`= {SUCCEEDED}`)** — it has no special case for *how* a row
+reached `SUCCEEDED`, whether via the ordinary completion loop or via a `fleet retry` → re-run →
+completion cycle. `plan_unblocking`/`SqliteStateRepository.clear_blocked_by` (§11.5 step 6,
+ADR-0090) are driven inside `fleet resume` and nowhere else (`grep -n "_apply_unblocking("
+src/fleet/cli.py` shows its one call site is inside `_resume_impl`). So once the reopened phase
+is genuinely re-run and reaches `SUCCEEDED` through the **ordinary** `ALLOWED_TRANSITIONS[RUNNING]
+→ SUCCEEDED` edge (already legal; no change here), a subsequent `fleet resume` invocation's step 6
+will see the repo's full phase-row set landed and clear it from every dependent's `blocked_by`,
+identically to any other repo.
+
+**Disclosed, not fixed, exactly as ADR-0089 §4 already discloses for `demote()`:** step 6 runs
+*before* step 8 inside one `fleet resume` invocation, so the SAME invocation that reopens-and-
+continues a repo to fresh `SUCCEEDED` cannot also clear that repo's own `blocked_by` entries in
+that pass — a second `fleet resume` call does. This is not a new residue this ADR introduces; it
+is the same "one more `fleet resume` does not repeat it" property `_apply_unblocking`'s own
+docstring already states for the ordinary demotion case, now inherited by the reopen case for the
+identical structural reason (step ordering, not this mechanism). §12.37's own criterion text
+already anticipates multiple invocations for its lifecycle ("Triggering the resolution three more
+times (a replay, a `fleet resume`, and a `fleet stubs resolve`)..."), so this is consistent with
+how this project already reads "re-running P to `SUCCEEDED`."
+
+Also inherited, not new: reopening a phase whose `wave_members` row sits in an already-`CLOSED`
+wave re-opens that wave, the identical residue ADR-0089 §4 already discloses for `demote()`
+("A demotion writes `SUCCEEDED → PENDING`, so a repo demoted out of a closed wave re-opens that
+wave... §11.5 step 5 does not mention waves at all"). `fleet retry` writes the structurally
+identical `X → PENDING` shape and inherits the identical, already-accepted residue.
+
+---
+
+### D104 relationship (research-42 job 2)
+
+**Confirmed distinct, and fixing D124 does not make D104 easier, harder, or unrelated in any
+structural sense — it makes D104's *own* gap reachable in practice, for the first time, which is a
+different thing from making it easier to fix.**
+
+- D124/this ADR operates on `RepoStatus.REQUIRES_HUMAN_INTERVENTION` phase rows and the
+  `phases`/`blocked_by` machinery.
+- D104 operates on `stubs`/`tasks` rows of `kind='REVALIDATE'` for `DEGRADED` consumers — a wholly
+  separate status (`DEGRADED`, never `REQUIRES_HUMAN_INTERVENTION`) and a separate table
+  (`stubs`/`tasks`, not `phases.blocked_by`).
+- The connecting thread is §12.37's fixture narrative, not shared code: D102 (`FIXED, LANDED`,
+  round VI task 6) already wired T1 (`orchestrator.stubs.supersede`, `ACTIVE → SUPERSEDED`) into
+  `cli.py::_pr_sync_impl`'s `pr_merged` branch, keyed on the **provider's PR reaching `MERGED`**,
+  not on how the provider reached `SUCCEEDED`. Once this ADR's fix lands, `fleet retry` +
+  re-execution + `fleet pr --sync` is simply a new *path* by which a provider's PR can reach
+  `MERGED` — T1 fires exactly as already built, unmodified. Whether the minted `REVALIDATE` task
+  is ever dispatched is D104's own, still-open, entirely separate gap (no dispatch-grain mapping,
+  no worker). This ADR does not touch, and does not need to touch, any file D104's entry names
+  (`_run_*_wave` functions, `_COARSE_TASK_KIND`).
+- Net: D124's fix is a **prerequisite for exercising** the already-built T1 trigger against an
+  RHI-provider scenario for the first time (today that trigger can only be exercised by a test
+  fixture that seeds a `stubs` row directly, since no production path can ever get an RHI provider
+  to `SUCCEEDED`), but it is orthogonal to, and does not shrink, D104's own remaining scope.
+
+---
+
+### Open questions for the controller
+
+**None found that are genuine value judgments rather than technical facts.** Every choice above
+(reuse `OPERATOR_REOPEN` unchanged; mirror `degrade_for_stub()`'s writer shape; raise rather than
+no-op on a non-RHI target; a dedicated `fleet retry` command over a `fleet resume` flag; no new
+`blocked_by`-clearing code) is settled by reading this project's own established precedent, not by
+a preference this ADR is guessing at. The one genuinely empirical question — whether `fleet
+resume` step 5/8's existing floor/continuation logic in fact handles a freshly-reopened row
+correctly with zero code changes, as judgment call 5 argues it must from reading the code alone —
+is not a controller judgment call either; it is task-74's required fixture proof, not a design
+choice, and is scoped there rather than escalated here.
+
+**Correction owed to `docs/INTEGRATION_HONESTY.md`'s D124 entry, for the controller to land
+alongside this ADR (not made here per this research task's read-only constraint):** D124's own
+text states "no `OPERATOR_REOPEN`-style flag exists to open one." That clause is false as measured
+against current `HEAD` (the flag has existed since the initial commit) and should be corrected in
+place with a dated marker per this project's own "annotate, never rewrite" discipline (`CLAUDE.md`
+§7, the `docs/INTEGRATION_HONESTY.md` status-heading convention) — the entry's overall verdict
+(OPEN; no CLI surface; no writer function; no production call site) remains correct and needs no
+other change.
