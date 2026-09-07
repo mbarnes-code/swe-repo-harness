@@ -8712,7 +8712,15 @@ async def test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate(
 ) -> None:
     """C2 (review finding, task 67 fix round 1), the creation-side half: two triggers for the
     SAME `(consumer, provider)` naming two DIFFERENT coordinates produce two `stubs` rows, each
-    `stub_coord_key`'d on its own trigger's `coord_key` — never both collapsed onto one."""
+    `stub_coord_key`'d on its own trigger's `coord_key` — never both collapsed onto one.
+
+    `repos.primary_coord_key` is deliberately set to ONE of the two coordinates (fix round 2,
+    review finding M-NEW-5) — the same discriminating shape `test_detect_transform_stub_triggers_
+    keys_on_the_edges_own_coordinate` already uses. Without it, a regression that falls back to
+    `primary_coord_key` whenever it happens to be set (rather than always using the trigger's own
+    `coord_key`) would still pass here by accident, because nothing in this fixture gives such a
+    fallback anything to fall back to.
+    """
     import aiosqlite
 
     from fleet.cli import _create_stub_records
@@ -8746,6 +8754,13 @@ async def test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate(
                         "VALUES (?, 'maven', 'com.acme', ?, ?, 'acme-provider', ?)",
                         (coord_key, coord_key.rsplit(":", 1)[-1], version, now.isoformat()),
                     )
+                # Pinned to only ONE of the two coordinates, same as `_seed_stub_trigger_
+                # fixture`'s own convention — see the docstring above for why this is load-
+                # bearing, not incidental.
+                await conn.execute(
+                    "UPDATE repos SET primary_coord_key = ? WHERE repo_id = 'acme-provider'",
+                    ("maven:com.acme:provider-core",),
+                )
 
             await writer.submit(unit)
 
@@ -8786,5 +8801,8 @@ async def test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate(
     assert rows == [
         ("maven:com.acme:provider-core",),
         ("maven:com.acme:provider-extras",),
-    ], "each trigger's own coord_key must reach its own row — this is what makes _unit_deps's " \
-       "per-edge redirect lookup actually find each row"
+    ], (
+        "each trigger's own coord_key must reach its own row, not both collapsed onto "
+        "primary_coord_key — no test here drives _unit_deps end-to-end against these rows "
+        "(a disclosed gap, not proven closed by this assertion)"
+    )

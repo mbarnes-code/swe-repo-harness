@@ -237,7 +237,7 @@ def degrade_for_stub(
             f"{'/'.join(sorted(k.value for k in STUB_DEGRADE))} may be degraded for a stub"
         )
     new = transition(old, RepoStatus.DEGRADED, stub_degrade=True)
-    return new, StubDegradation(repo_id=repo_id, phase=phase, reason=reason)
+    return new, StubDegradation(repo_id=repo_id, phase=phase, reason=reason, from_status=old)
 
 
 class StubState(StrEnum):

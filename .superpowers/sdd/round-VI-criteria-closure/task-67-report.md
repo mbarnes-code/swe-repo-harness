@@ -355,3 +355,90 @@ rewritten for C2, `stub_completion_correction` deleted, `build_stub_record`'s M3
 `tests/test_state_models.py`, `tests/test_repository.py`, `tests/test_cli.py`.
 
 Commit on `agent/roundvi-task67`; not merged to `main`.
+
+---
+
+# Fix round 2 (2026-09-07) — re-review findings addressed
+
+**Status after this round: DONE.** All 10 fix-round-1 findings were independently re-verified
+correct by the re-review (no action needed). One Important finding (citation drift) and three
+cheap Minors are fixed in this round.
+
+## Important — citation drift, both layers
+
+Root cause per the re-review: my round-1 covering-set for "what to re-check" was derived from
+changed function NAMES, which misses a citation gate failure caused by a file merely GROWING below
+the cited line — a citation whose named function was never touched can still drift if any earlier
+code in the same file grows. Re-ran `pytest tests/test_integration_honesty_citations.py` (whole
+file, no `-k`) at my branch's actual current commit (`6d8961e`) rather than assuming which
+citations "should" have drifted; it reported **3 failed / 67 passed** (16 unresolved citations
+total across two failing parametrized cases, plus a self-contradicting census-number assertion
+inside the test module's own docstring-derived count). Re-verified this was NOT about `main`
+having moved — `git merge-base --is-ancestor 884f3d6 HEAD` confirms task-65's merge is not an
+ancestor of this branch, so every one of these 16 citations drifted from MY OWN two commits
+(`d548b38`, `6d8961e`) alone, measured against this branch's own tree, not against `main`.
+
+Fixed by re-locating each cited symbol's CURRENT definition span directly from the test's own
+`defined at [...]` failure output (which already computes the exact resolvable line range) and
+`grep -n` confirmation against the real source, then repointing the citation text — never by
+applying a fixed offset, since the shift amount differs per symbol (some +3 lines from this leg's
+own `cli.py` insertions, others +118/+132/+158 depending on which unrelated intervening code grew
+independently of my changes):
+
+- `docs/INTEGRATION_HONESTY.md`: 13 citations repointed —
+  `EdgeRow` (353→354), `_transform_payloads` (5326→5329), `_run_verify_wave` (9236→9368),
+  `record_attempt` (2365-2433→2483-2551, the second of two AST matches — the concrete
+  implementation, not the `StateRepository` Protocol declaration at 640-642), `_AttemptWriter.
+  record` (7343-7415→7346-7418), `_reconcile_tasks_with_git` (14084-14321→14242-14479, also
+  bumping that entry's own "repointed SIXTEEN times" running tally to SEVENTEEN and naming this
+  task's two branch commits as the cause, per that paragraph's established convention),
+  `_TransformSink` (4734-4942→4737-4945), `repository.insert_edges` (2491→2609, second of two AST
+  matches), `_persist_scan_edges` (2291-2355→2294-2358), `_sequence_impl` (3225-3434→3228-3437),
+  `_continue_impl` (10427-10540→10585-10698), `_persist_contract_edges` (3571-3619→3574-3622),
+  `_graph_edges` (3860-3906→3863-3909).
+- `docs/CRITERIA_PLAN.md`: 3 citations repointed — `_repo_facts` (7601-7641→7604-7644), `_unit_deps`
+  (7711-7804→7714-7807), `_eligible_build_units` (9336-9371→9494-9529).
+
+Re-ran `tests/test_integration_honesty_citations.py` whole, no `-k`: **70 passed**, matching
+`main`'s own count (confirmed by the re-review as the target).
+
+## Minor items
+
+- **M-NEW-1** — `degrade_for_stub` now passes `from_status=old` explicitly into `StubDegradation`,
+  matching `demote()`'s own explicit `PhaseDemotion` construction, rather than relying on the
+  dataclass field default.
+- **M-NEW-3** — `tests/test_repository.py`'s docstring referencing the deleted
+  `stub_completion_correction` symbol now describes the behavior directly (`current_status is
+  RepoStatus.SUCCEEDED`) and cites the deleted symbol only as historical lineage (`d548b38`'s
+  deleted `stub_completion_correction`), not as a live thing being mirrored.
+- **M-NEW-5** — `test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate`'s fixture
+  now pins `repos.primary_coord_key` to ONE of the two coordinates (mirroring
+  `test_detect_transform_stub_triggers_keys_on_the_edges_own_coordinate`'s already-discriminating
+  shape), and its final assertion message no longer claims to prove `_unit_deps`'s lookup finds
+  the rows end-to-end (a disclosed gap — no test drives that path against real stub rows).
+  Mutation-proven: reintroducing a `primary_coord_key`-preferred fallback in `_create_stub_records`
+  now correctly reddens exactly this test (1 failed / 1 passed in `create_stub_records` tests,
+  verified in a fresh `env -i`-isolated interpreter pinned to the worktree, backup-diffed);
+  reverted and re-confirmed green (2/2).
+- M-NEW-2 and M-NEW-4 skipped per the coordinator's explicit instruction (cosmetic, not worth a
+  round).
+
+## Verification this round
+
+- `tests/test_integration_honesty_citations.py` — **70 passed** (whole file, no `-k`).
+- `python -m mypy` — run UNSCOPED (no path arguments, disclosed per the coordinator's note that the
+  prior report scoped it to `src/fleet/`): `Success: no issues found in 129 source files` — same
+  129 files as the scoped run, no discrepancy this time.
+- `tests/test_lint_gate.py` — 7 passed.
+- Full set, whole files, no `-k`: `tests/test_stubs.py` (40), `tests/test_state_models.py` (126),
+  `tests/test_repository.py` (64), `tests/test_workers_transform.py` (28),
+  `tests/test_transform_e2e.py` (17), `tests/test_cli.py` (195, +1 from M-NEW-5's fixture fix),
+  `tests/test_lint_gate.py` (7), `tests/test_integration_honesty_citations.py` (70) — **all pass**.
+
+## Files touched this round
+
+`docs/INTEGRATION_HONESTY.md` (13 citation repoints + the SIXTEEN→SEVENTEEN tally),
+`docs/CRITERIA_PLAN.md` (3 citation repoints), `src/fleet/models/enums.py` (M-NEW-1),
+`tests/test_repository.py` (M-NEW-3), `tests/test_cli.py` (M-NEW-5).
+
+Commit on `agent/roundvi-task67`; not merged to `main`.

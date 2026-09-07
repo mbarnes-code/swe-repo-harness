@@ -2634,8 +2634,9 @@ async def test_stub_degrade_transform_is_a_noop_when_the_phase_is_not_succeeded(
     demotion_bed: tuple[SqliteStateRepository, StateWriter],
 ) -> None:
     """Even with a qualifying `ACTIVE`/`PUBLISHED_ARTIFACT` stub present, a phase that never
-    reached `SUCCEEDED` (still `RUNNING`) is left alone — mirrors `stub_completion_correction`'s
-    original truth table, now enforced inside the real transactional write."""
+    reached `SUCCEEDED` (still `RUNNING`) is left alone — the `current_status is RepoStatus.
+    SUCCEEDED` half of the decision, now enforced inside the real transactional write rather than
+    by a standalone pure predicate (`d548b38`'s deleted `stub_completion_correction`)."""
     store, writer = demotion_bed
     await store.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW, max_attempts=3)
     fence = await store.acquire_phase_lease(
