@@ -2738,20 +2738,54 @@ def test_build_refuses_without_a_monorepo_to_merge_into(fleet: Path) -> None:  #
     assert "run.monorepo_path" in result.output, result.output
 
 
-def test_stub_blocked_is_refused_rather_than_silently_ignored(fleet: Path) -> None:  # noqa: F811
-    """A flag that parses and is then dropped is read by an operator as honoured (§10).
+def test_stub_blocked_on_build_is_a_no_op_when_no_stub_exists(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """`fleet build --stub-blocked` USED to refuse (round VI task 69, §12.37 Leg 3 replaces this).
 
-    `--stub-blocked` promises a generated stub for a blocked dependency (§3.5.1); no worker
-    writes a `stubs` row, so accepting it would build the repo WITHOUT the stub it promised and
-    report the result as if the escape hatch had been used.
+    OLD assertion (pre-task-69): `build(fleet, "--stub-blocked").exit_code == ExitCode.USAGE` —
+    PASSED on `main` before this round (`_validate_build_flags` raised `UsageError`
+    unconditionally) and FAILS after it (the refusal is removed once task-67's TRANSFORM-phase
+    creation and task-68's BUILD-phase render both landed).
 
-    `scanned()` first because §10 validates a verb's flags *after* its run preconditions: the
-    refusal has to be the flag's, not "this database holds no runs".
+    NEW behaviour: `--stub-blocked` on `fleet build` is accepted and does nothing distinguishable
+    — task-68's rendering and this leg's `stub_degrade_transform(phase=Phase.BUILD)` correction
+    are both unconditional and data-driven off the `stubs` table, never off this flag
+    (`_validate_build_flags`'s own docstring). On a fleet with no `stubs` row at all, the build
+    must refuse for the SAME reason a plain `fleet build` here does (no monorepo to merge into,
+    `test_build_refuses_without_a_monorepo_to_merge_into` above) — proving the flag changed
+    nothing, not that the command started succeeding.
+
+    A monorepo, `FakeFilterRepo` and `FakeBazel` are all provisioned (`monorepo`/`filter_repo`/
+    `bazel` fixtures) precisely so `ExitCode.USAGE` cannot mean "no monorepo to merge into" here —
+    the only refusal that could fire is the one under test, and a plain `fleet build` on the same
+    transformed fixture reaches `ExitCode.SUCCESS`.
     """
-    scanned(fleet)
-    result = build(fleet, "--stub-blocked", json_output=False)
-    assert result.exit_code == ExitCode.USAGE, result.output
-    assert "--stub-blocked" in result.output, result.output
+    _ = bazel  # the default (all-green) FakeBazel; present only to avoid a real bazel dependency
+    transformed(fleet)
+    plain = build(fleet, "--no-sandbox", json_output=False)
+    assert plain.exit_code == ExitCode.SUCCESS, plain.output
+    dests = relocations(filter_repo)
+
+    def _bazel_files() -> dict[str, str]:
+        return {
+            repo: (build_worktree(fleet, repo) / dest / "BUILD.bazel").read_text(
+                encoding="utf-8"
+            )
+            for repo, dest in dests.items()
+        }
+
+    before = _bazel_files()
+    stubbed = build(fleet, "--no-sandbox", "--stub-blocked", "--wave", "0", json_output=False)
+    assert stubbed.exit_code != ExitCode.USAGE, stubbed.output
+    assert stubbed.exit_code == ExitCode.SUCCESS, stubbed.output
+    # A settled wave dispatches nothing regardless of the flag — the SAME idempotency
+    # `test_build_is_idempotent_and_the_second_invocation_dispatches_nothing` proves for a plain
+    # re-run; `--stub-blocked` must not be the thing that makes a second `fleet build` re-dispatch.
+    assert _bazel_files() == before
 
 
 def test_no_rdeps_is_refused_rather_than_reporting_a_blast_radius_of_zero(

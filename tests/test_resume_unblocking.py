@@ -878,29 +878,31 @@ def test_the_floor_step_6_reports_comes_from_step_5_even_when_step_5_demoted_not
 # (`orchestrator.reentry.stub_permits_removal`, threaded through `plan_unblocking` /
 # `_unblock_dependents` / `_apply_unblocking` / `clear_blocked_by`) is exercised directly, at the
 # pure-function level, in `tests/test_reentry_unblocking.py`. The two tests below are what this
-# file's own CLI-level machinery can prove: (1) the flag is REFUSED, not functional, per ADR-0113
-# condition 2, and (2) with the flag absent (the only state the CLI can reach this round) an
-# RHI-blocked repo stays blocked — `plan_unblocking`'s new parameter genuinely defaults to off.
+# file's own CLI-level machinery can prove: (1) the flag is FUNCTIONAL, not refused, as of round
+# VI task 69 (§12.37 Leg 3) — it frees `RETAINED_RHI` at step 6 for real, through this file's own
+# hand-seeded fixture — and (2) with the flag absent an RHI-blocked repo stays blocked —
+# `plan_unblocking`'s `stub_blocked` parameter genuinely defaults to off.
 # --------------------------------------------------------------------------------------
 
 
-def test_stub_blocked_is_refused_on_resume_rather_than_silently_ignored(fleet: Path) -> None:
-    """ADR-0113 condition 2: the CLI surface must not be reachable until the TRANSFORM-worker
-    stub-creation logic exists. `RETAINED_RHI` is blocked solely by `CONTAINED`, an RHI provider
-    — exactly the repo `--stub-blocked` would free if it worked — and this test proves it does
-    NOT: the flag raises before step 6 (or any other step) runs, so nothing is written.
+def test_stub_blocked_frees_an_rhi_blocked_repo_at_step_6(fleet: Path) -> None:
+    """`--stub-blocked` USED to be refused here (ADR-0113 condition 2) until the TRANSFORM-worker
+    stub-creation logic (task-67) and the BUILD-phase render (task-68) both existed — round VI
+    task 69 (§12.37 Leg 3) removes the refusal now that both have landed.
 
-    A flag that parsed and was then dropped would be read by an operator as honoured (§10); this
-    is the same refusal shape `_validate_build_flags`/`_validate_transform_flags` already use for
-    their own (different) `--stub-blocked` sites.
+    OLD assertion (pre-task-69): `resume(fleet, "--stub-blocked").exit_code == ExitCode.USAGE`
+    with `_rows(db) == before` — PASSED on `main` before this round and FAILS after it (the
+    refusal is gone and step 6 now writes). NEW assertion: `RETAINED_RHI` is blocked solely by
+    `CONTAINED`, an RHI provider — exactly `orchestrator.reentry.stub_permits_removal`'s own
+    predicate — and `--stub-blocked` frees it at step 6 for real, through THIS file's own
+    `_unblock_dependents` call (`--no-continue`, so only step 6 is under test, matching every
+    other case in this file).
     """
-    db = fleet / "state" / "fleet.db"
-    before = _rows(db)
-    result = runner.invoke(app, [*base_args(fleet), "resume", "--stub-blocked"])
-    assert result.exit_code == ExitCode.USAGE, result.output
-    assert "--stub-blocked" in result.output, result.output
-    assert "not implemented" in result.output, result.output
-    assert _rows(db) == before, "the refusal did not fire before a write landed"
+    code, payload = _resume(fleet, "--stub-blocked")
+    assert code == ExitCode.SUCCESS, payload
+    assert _blocked_by(fleet / "state" / "fleet.db", RETAINED_RHI) == [], (
+        "an RHI-only blocker was NOT removed with --stub-blocked set: step 6 did not free it"
+    )
 
 
 def test_an_rhi_blocked_repo_stays_blocked_when_the_flag_is_absent(fleet: Path) -> None:

@@ -52,6 +52,7 @@ async def _drive(
     results: dict[Phase, dict[str, object]] | None = None,
     trace: list[Any] | None = None,
     patch_mutex: bool = True,
+    stub_blocked: bool = False,
 ) -> dict[str, object]:
     """Run `_continue_impl` with the three roots replaced by recorders.
 
@@ -95,6 +96,7 @@ async def _drive(
         only=only,
         ladder=1,
         dry_run=False,
+        stub_blocked=stub_blocked,
         timeout_s=600,
         sandboxed=True,
         rdeps_limit=2000,

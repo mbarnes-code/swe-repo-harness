@@ -4,11 +4,18 @@
 opening two paragraphs originally used `cli.py`'s then-blanket refusal of `--context-policy` as
 the motivating example for the whole file's design — round EE wired `transform.ladder.
 context_policy` through to the worker for real (`orchestrator/runner.py:523`), closing §12.35's
-CLI-level proof, and the refusal was removed. `--stub-blocked` is still refused in the same block,
-for the same reason — *a flag that parses and is then dropped is read by the operator as
-honoured* — so the file's motivating pattern still holds for that one. `--no-anchoring-guard` is
-ALSO no longer refused (round VI task 46, §12.36): it now sets `transform.anchoring.enabled:
-false` for real. Two of the original example's three refusals are now historical.
+CLI-level proof, and the refusal was removed. `--no-anchoring-guard` is ALSO no longer refused
+(round VI task 46, §12.36): it now sets `transform.anchoring.enabled: false` for real.
+
+**Corrected 2026-09-07 (round VI task 69, §12.37 Leg 3): `--stub-blocked` is no longer refused
+either.** All three of the original example's refusals are now historical — the CLI flag `--stub-
+blocked`/local `stub_blocked` genuinely reaches `_transform_impl`'s wave loop, `_unblock_
+dependents`, and `_continue_impl`'s TRANSFORM delegate; see `cli.py`'s own `_validate_transform_
+flags`/`_validate_build_flags`/`_validate_resume_flags` for what each does instead of refusing.
+The `KNOWN_INERT` entry for `fleet.yaml:transform.stub_blocked` below is UNCHANGED by this: that
+entry is about the CONFIG key (`config.transform.stub_blocked`), which still does not exist and
+was never what this leg wired — the flag and the config section are different surfaces, and this
+leg touched only the former.
 
 That refusal covers the flag layer only. The identical defect one layer down — a **config key**
 behind the same missing code — is still accepted silently: `config/fleet.yaml` validates, the
@@ -291,10 +298,14 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # `orchestrator/context.py::call_policy_for`. They keep their `QUALIFIED_MATCH_KEYS`
         # membership: the wrong-object collision is unchanged, and it is the only thing that
         # would hide a revert. Their three still-inert siblings are above, under §11.8.)
-        # `cli.py` declares a `--stub-blocked` flag / local named `stub_blocked` at five
-        # sites (2377, 3046, 3120, 4770, 9536) — never `config.transform.stub_blocked`. The
-        # refusal block `cli.py:3156-3158`/`4772-4774` even says so: "--stub-blocked is not
-        # implemented". Qualified `transform.stub_blocked` occurs nowhere for real.
+        # `cli.py` declares a `--stub-blocked` flag / local named `stub_blocked` at many sites
+        # (`transform()`/`build()`/`resume()`'s own commands, `_transform_impl`, `_continue_impl`,
+        # `_resume_impl`, `_unblock_dependents`, `_apply_unblocking`, and the three per-verb
+        # `_validate_*_flags` functions) — CORRECTED 2026-09-07 (round VI task 69): the flag is no
+        # longer refused (`_validate_transform_flags` et al. removed the `UsageError`), but it
+        # still never reads `config.transform.stub_blocked` — every site above is the bare CLI
+        # flag/parameter, not a qualified config-section read. Qualified `transform.stub_blocked`
+        # occurs nowhere for real.
         "fleet.yaml:transform.stub_blocked",                # settings.py:453
         # (`llm.cache_mode` used to sit here, and the mechanism was: `GlobalOptions.cache_mode`
         # was derived entirely from `--llm-cache` and never from `config.llm.cache_mode`, so

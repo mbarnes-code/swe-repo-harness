@@ -4736,6 +4736,7 @@ def transform(
                 only=repo,
                 ladder=ladder,
                 dry_run=dry_run,
+                stub_blocked=stub_blocked,
             )
         )
         unprobed = cast("list[str]", result["parse_probe_unavailable"])
@@ -4796,12 +4797,13 @@ def _validate_transform_flags(
             f"or add rungs to transform.ladder."
         )
     policies = _parse_context_policies(context_policy, max_attempts)
-    if stub_blocked:
-        raise UsageError(
-            "--stub-blocked is not implemented: emitting a generated stub for a blocked "
-            "dependency (§3.5.1) has no worker in src/fleet/workers/ and would write no `stubs` "
-            "row, so the flag would silently transform the repo WITHOUT the stub it promised."
-        )
+    # `--stub-blocked` was refused here through ADR-0113 condition 2, pending two other legs:
+    # task-67's trigger-detection/`StubRecord`/`stubs`-INSERT/`RUNNING -> DEGRADED` write and
+    # task-68's BUILD-phase render. Both landed on `main` before this leg (round VI task 69),
+    # which wires the flag to `_transform_impl`'s wave loop (`_detect_transform_stub_triggers` /
+    # `_create_stub_records` / `stub_degrade_transform`) instead of refusing it — the refusal is
+    # removed, not merely silenced, so a stale refusal cannot mask a future regression here.
+    _ = stub_blocked
     return (1 if deterministic_only else max_attempts), policies
 
 
@@ -6326,8 +6328,17 @@ async def _transform_impl(
     only: str | None,
     ladder: int,
     dry_run: bool,
+    stub_blocked: bool,
 ) -> dict[str, object]:
     """Phase 2 over one fleet, wave by wave, through the real composition.
+
+    `stub_blocked` (ADR-0113 §37 Blocker A, wired for real round VI task 69): after each wave
+    completes, if set, runs task-67's trigger detection (`_detect_transform_stub_triggers`) and
+    stub-record creation (`_create_stub_records`) for that wave's dispatched members, then
+    `state.SqliteStateRepository.stub_degrade_transform` for each of them — a no-op unless the
+    repo now carries at least one `ACTIVE`/`PUBLISHED_ARTIFACT` `stubs` row (§12.14). Required, no
+    default (this module's own convention for an operator-facing knob no caller may silently
+    choose): `transform()` threads its own flag, `_continue_impl` threads `resume()`'s.
 
     Waves are driven in ascending order and the loop stops at the first halt: `WaveScheduler`
     refuses to open wave N+1 while wave N is not `CLOSED`, which is the whole ordering guarantee
@@ -6431,6 +6442,33 @@ async def _transform_impl(
                     except WaveNotReadyError as exc:
                         raise UsageError(str(exc)) from exc
                     reports.append(report)
+                    if stub_blocked:
+                        # §37 Leg 3 (round VI task 69): task-67's trigger detection + `StubRecord`
+                        # creation, wired live for the first time. `members` is this wave's own
+                        # dispatched set — exactly `detect_stub_triggers`'s own `dispatched_repo_
+                        # ids` contract. Gated on the flag per `orchestrator.stubs.detect_stub_
+                        # triggers`'s own docstring: "by not calling this function at all when the
+                        # flag is off" — every existing (flagless) caller runs none of this.
+                        triggers = await _detect_transform_stub_triggers(
+                            read_conn, settings, run_id, members
+                        )
+                        await _create_stub_records(
+                            read_conn,
+                            writer,
+                            run_id=run_id,
+                            triggers=triggers,
+                            max_revalidation_rounds=settings.config.stubs.max_revalidation_rounds,
+                            now=_now(),
+                        )
+                        # The `RUNNING -> DEGRADED` correction (ADR-0124): a no-op per repo unless
+                        # it now carries a qualifying `ACTIVE`/`PUBLISHED_ARTIFACT` stub row — see
+                        # `stub_degrade_transform`'s own docstring. Called for every dispatched
+                        # member rather than only `triggers`' consumers: cheap, and correct either
+                        # way, since a member with no qualifying stub reads back `None`.
+                        for repo_id in members:
+                            await repository.stub_degrade_transform(
+                                run_id, repo_id, phase=Phase.TRANSFORM, now=_now()
+                            )
                     if report.exit_code is not None:
                         break
                 statuses = await _transform_statuses(read_conn, run_id)
@@ -6935,13 +6973,19 @@ class MonorepoUnavailableError(FleetCliError):
 
 
 def _validate_build_flags(*, stub_blocked: bool) -> None:
-    """Every `fleet build` flag either does what it says or is refused here (§10)."""
-    if stub_blocked:
-        raise UsageError(
-            "--stub-blocked is not implemented: emitting a generated stub for a blocked "
-            "dependency (§3.5.1) has no worker in src/fleet/workers/ and would write no `stubs` "
-            "row, so the flag would silently build the repo WITHOUT the stub it promised."
-        )
+    """Every `fleet build` flag either does what it says or is refused here (§10).
+
+    `--stub-blocked` was refused here through ADR-0113 condition 2; the refusal is removed (round
+    VI task 69) now that task-67/68 have landed. Unlike `transform`'s and `resume`'s own
+    `--stub-blocked`, this one is accepted and does nothing distinguishable: task-68's BUILD-phase
+    render (`_stub_workspace_deps`/`_stub_package_files`/`_unit_deps`'s stub redirect) and this
+    leg's own `stub_degrade_transform(phase=Phase.BUILD)` correction are both unconditional and
+    data-driven off the `stubs` table a prior `fleet transform --stub-blocked` already wrote —
+    `fleet build` need not be told the policy twice. The flag is accepted (not refused) purely so
+    an operator's identical `--stub-blocked` across every phase of one migration is never itself
+    the reason a later phase stops, mirroring `--regen-build-files`'s own "accepted, not a switch".
+    """
+    _ = stub_blocked
 
 
 def _validate_verify_flags(*, rdeps: bool, rdeps_limit: int, rdeps_sample_n: int) -> None:
@@ -7806,6 +7850,13 @@ class VerifyInput(WorkerInput):
     rdeps_sample_n: int = Field(default=DEFAULT_SAMPLE_N, ge=0)
     rdeps_sample_seed: str | None = None
     remaining_units: tuple[str, ...] | None = None
+    verified_against_stubs: list[str] = Field(
+        default_factory=list,
+        description="This consumer's `ACTIVE` `stubs.stub_coord_key`s (round VI task 69, §12.37 "
+        "Leg 3) — threaded straight into `RdepverifyInput` of the same name, never recomputed "
+        "there, so the two cannot disagree about which coordinates are live.",
+    )
+    stub_fidelity: dict[str, StubFidelity] = Field(default_factory=dict)
 
 
 class VerifyOutput(WorkerOutput):
@@ -7940,6 +7991,10 @@ class VerifyPipelineWorker(BaseWorker[VerifyInput, VerifyOutput]):
             # from the disk cache Phase 3 just filled. `VerifyInput` has carried them all along —
             # only this line was missing, and without it Phase 4 ran with no cache at all.
             cache_mounts=list(payload.cache_mounts),
+            # Round VI task 69 (§12.37 Leg 3): threaded straight through, never recomputed here —
+            # `_verify_payloads` is where these are read off the `stubs` table.
+            verified_against_stubs=list(payload.verified_against_stubs),
+            stub_fidelity=dict(payload.stub_fidelity),
         )
 
     @staticmethod
@@ -8708,12 +8763,10 @@ async def _unit_deps(
 # a real `ALLOWED_TRANSITIONS` door (`models.enums.STUB_DEGRADE`), mirroring `demote_to_floor`
 # exactly, rather than the bare raw-SQL bypass this leg's first landing (`d548b38`) used.
 #
-# NOT wired into `_transform_impl`/`_run_transform_wave` this round. `_validate_transform_flags`
-# still refuses `--stub-blocked` unconditionally (ADR-0113 condition 2: the CLI surface stays
-# refused until this leg AND task-68's BUILD-phase render leg both exist and are wired together
-# end to end) — so a live call site here would be unreachable in production and untestable end
-# to end before that wiring exists. Built and unit-tested directly instead, exactly as Blockers
-# A/B/C's own predicates were before their CLI surface existed.
+# Wired into `_transform_impl`'s wave loop as of round VI task 69 (§37 Leg 3): once task-68's
+# BUILD-phase render also landed, the `--stub-blocked` refusal (ADR-0113 condition 2) was removed
+# in all three CLI validators and this leg's two functions are called for real, gated on the flag,
+# right after each TRANSFORM wave completes — see `_transform_impl`'s own call site.
 # --------------------------------------------------------------------------------------
 
 
@@ -8930,6 +8983,39 @@ async def _active_stub_facts(
                 fidelity=str(row[3]),
             ),
         )
+    return out
+
+
+async def _active_stubs_by_consumer(
+    conn: aiosqlite.Connection, run_id: str
+) -> dict[str, dict[str, StubFidelity]]:
+    """§3.4 step 3's `verified_against_stubs`/`stub_fidelity` inputs (round VI task 69, §12.37
+    Leg 3): every `ACTIVE` `stubs` row of this run, keyed by CONSUMER — the shape `VerifyInput`/
+    `RdepverifyInput` need and `_active_stub_facts` (keyed by `stub_coord_key`, for the BUILD-phase
+    render) cannot supply, since two consumers of the SAME provider read as one entry there.
+
+    Discovered missing while wiring this leg's own end-to-end fixture: `RdepverifyInput.
+    verified_against_stubs`/`.stub_fidelity` (`workers/rdepverify.py`) have existed, unpopulated,
+    since before this bundle — no caller ever read the `stubs` table to fill them, so
+    `VerificationReport.equivalence` could never resolve to `STUB_LIMITED` even with a live,
+    correctly-rendered stub redirect. Not task-67's or task-68's code (neither touches VERIFY's
+    payload construction); reported in this task's own report rather than silently patched.
+
+    `EMPTY_FAILING` rows are INCLUDED here, unlike `_stub_workspace_deps`'s `PUBLISHED_ARTIFACT`-
+    only filter: §3.5 item 2 fails an `EMPTY_FAILING` consumer at BUILD time (never reaches
+    VERIFY), but `verified_against_stubs`/`stub_fidelity` name every stub a consumer is verified
+    against, fidelity included — the caller (`VerificationReport`'s own `_derive_equivalence`)
+    is what turns "non-empty" into `STUB_LIMITED`, not this query.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, stub_coord_key, stub_fidelity FROM stubs "
+        " WHERE run_id = ? AND state = 'ACTIVE'",
+        (run_id,),
+    )
+    out: dict[str, dict[str, StubFidelity]] = {}
+    for row in rows:
+        out.setdefault(str(row[0]), {})[str(row[1])] = StubFidelity(str(row[2]))
     return out
 
 
@@ -10454,9 +10540,9 @@ def _build_payloads(
     round VI task 68): computed ONCE by `_run_build_wave` (`_stub_workspace_deps`/
     `_stub_package_files`, which need the DB connection this function does not) and unioned into
     every dispatch's `workspace_deps`/`support_files`, alongside `_module_inputs(plans)`'s
-    ordinary ones. Empty in every run today — nothing in `src/` yet writes an `ACTIVE` `stubs` row
-    in production (ADR-0113 condition 2) — so this is a live, currently-inert wire, not a
-    behavior change.
+    ordinary ones. Empty on any run with no `ACTIVE` `stubs` row — the overwhelming majority,
+    still — and live for real as of round VI task 69, which removed the CLI refusal
+    (ADR-0113 condition 2) blocking `--stub-blocked` from ever writing one in production.
     """
     log_dir = str((settings.root / "artifacts/logs").resolve())
     mounts = _cache_mounts(settings)
@@ -10524,15 +10610,23 @@ def _verify_payloads(
     rdeps_limit: int,
     rdeps_sample_n: int,
     affected_only: bool,
+    stub_facts: Mapping[str, Mapping[str, StubFidelity]] | None = None,
 ) -> PayloadFactory[VerifyInput]:
+    """`stub_facts` (round VI task 69, §12.37 Leg 3): `repo_id -> {stub_coord_key: fidelity}`,
+    this consumer's OWN `ACTIVE` `stubs` rows (`_active_stubs_by_consumer`) — see that function's
+    docstring for why `RdepverifyInput.verified_against_stubs`/`.stub_fidelity` needed a caller at
+    all. Defaults to empty so every pre-existing caller (none of which pass it) is unaffected
+    byte-for-byte; `_run_verify_wave` is the one live caller that reads the `stubs` table."""
     log_dir = str((settings.root / "artifacts/logs").resolve())
     mounts = _cache_mounts(settings)
+    facts_by_consumer: Mapping[str, Mapping[str, StubFidelity]] = stub_facts or {}
 
     async def build(
         *, repo_id: str, phase: Phase, attempt: int, remaining_units: Sequence[str] | None
     ) -> VerifyInput:
         _ = (phase, attempt)
         plan = plans[repo_id]
+        fidelity = facts_by_consumer.get(repo_id, {})
         return VerifyInput(
             repo_id=repo_id,
             dest=plan.dest,
@@ -10548,6 +10642,8 @@ def _verify_payloads(
             rdeps_limit=rdeps_limit,
             rdeps_sample_n=rdeps_sample_n,
             remaining_units=None if remaining_units is None else tuple(remaining_units),
+            verified_against_stubs=sorted(fidelity),
+            stub_fidelity=dict(fidelity),
         )
 
     return build
@@ -10718,6 +10814,11 @@ async def _run_verify_wave(
         cgroup_reader=CGROUP_MEMORY_READER or read_process_tree_memory_bytes,
         rss_reader=RSS_READER or read_own_rss_bytes,
     )
+    # Round VI task 69 (§12.37 Leg 3): unconditional and data-driven, exactly like `_run_build_
+    # wave`'s own `stub_workspace_deps`/`stub_package_files` reads just above it in that function
+    # — a run with no `stubs` row reads back `{}` and every `VerifyInput` gets the same empty
+    # defaults it always did.
+    stub_facts = await _active_stubs_by_consumer(read_conn, run_id)
     runner = PhaseRunner(
         ctx,
         VerifyPipelineWorker(bazel_runner=BAZEL_RUNNER),
@@ -10729,6 +10830,7 @@ async def _run_verify_wave(
             rdeps_limit=rdeps_limit,
             rdeps_sample_n=rdeps_sample_n,
             affected_only=affected_only,
+            stub_facts=stub_facts,
         ),
         sink=_VerifySink(
             attempts=_AttemptWriter(
@@ -10767,11 +10869,18 @@ async def _gated_members(
     `PENDING` member holds the wave `OPEN` forever over work this phase is not allowed to do.
     Withholding it here — rather than letting the worker refuse later — also means no attempt is
     consumed and no lease is taken for a repo that was never eligible.
+
+    Widened to also admit `DEGRADED` (round VI task 69, §12.37 Leg 3): a repo the previous phase
+    left `DEGRADED` migrated/built against a stub (§3.5 item 3) and must still proceed through the
+    remaining phases — "draft-only PRs", not "stranded out of BUILD/VERIFY". Excluding `DEGRADED`
+    here is the exact stranding `_eligible_build_units`'s own widening (this same round) exists to
+    avoid; the two gates would otherwise disagree about the same predecessor phase's domain.
     """
     members = await _wave_repos(conn, run_id, wave_index, only)
     rows = await _rows(
         conn,
-        "SELECT repo_id FROM phases WHERE run_id = ? AND phase = ? AND status = 'SUCCEEDED'",
+        "SELECT repo_id FROM phases WHERE run_id = ? AND phase = ? "
+        "   AND status IN ('SUCCEEDED', 'DEGRADED')",
         (run_id, int(predecessor)),
     )
     ready = {str(row[0]) for row in rows}
@@ -10803,14 +10912,19 @@ async def _eligible_build_units(
     tree to read their manifests from — `external_coordinates` is not in §6, it is re-parsed from
     the merged worktree by `_external_coordinates`.
 
-    Gated on TRANSFORM `SUCCEEDED` for the reason `_gated_members` is: §3.3 opens with it, and a
-    repo that never transformed has no `migrate/<repo>` branch to ingest.
+    Gated on TRANSFORM `SUCCEEDED` **or `DEGRADED`** for the reason `_gated_members` is: §3.3
+    opens with "TRANSFORM SUCCEEDED", and a repo that never transformed has no `migrate/<repo>`
+    branch to ingest — but a repo TRANSFORM left `DEGRADED` (migrated against a stub, §3.5 item 3)
+    DID produce that branch, and excluding it here would silently strand every stub-limited repo
+    out of BUILD/VERIFY (round VI task 69, §12.37 Leg 3): SPEC's "draft-only PRs" requires the
+    repo to still build and verify, just not ship as ready-for-review.
     """
     rows = await _rows(
         conn,
         "SELECT m.node_id FROM wave_members m "
         "  JOIN phases p ON p.run_id = m.run_id AND p.repo_id = m.node_id AND p.phase = ? "
-        " WHERE m.run_id = ? AND m.node_kind = 'REPO' AND p.status = 'SUCCEEDED' "
+        " WHERE m.run_id = ? AND m.node_kind = 'REPO' "
+        "   AND p.status IN ('SUCCEEDED', 'DEGRADED') "
         " ORDER BY m.wave_index, m.node_id",
         (int(Phase.TRANSFORM), run_id),
     )
@@ -11426,6 +11540,22 @@ async def _build_impl(
                     except WaveNotReadyError as exc:
                         raise UsageError(str(exc)) from exc
                     reports.append(report)
+                    # §37 Leg 3 (round VI task 69): the `RUNNING -> DEGRADED` correction is not
+                    # only TRANSFORM's — `models.state.RepoState._stub_invariants` requires
+                    # `stubbed_deps` non-empty IFF `status is DEGRADED`, and `state.projection.
+                    # _fold_repos` folds the HIGHEST phase reached to the top level. A repo whose
+                    # BUILD row stayed plain `SUCCEEDED` after building against an ACTIVE stub
+                    # would report as a plain `SUCCEEDED` repo with an unresolved stub the moment
+                    # BUILD becomes its highest phase — exactly what §3.5.1 exists to prevent.
+                    # Unconditional (no `stub_blocked` gating): `stub_degrade_transform` is a
+                    # no-op unless the repo already carries a qualifying `ACTIVE`/
+                    # `PUBLISHED_ARTIFACT` stub row, and that row exists only if some earlier
+                    # `--stub-blocked` transform created it — this is the same "accepted and
+                    # data-driven" shape `_validate_build_flags` documents for the flag itself.
+                    for repo_id in members:
+                        await repository.stub_degrade_transform(
+                            run_id, repo_id, phase=Phase.BUILD, now=_now()
+                        )
                     # Whatever this wave built has published to `integration`, so the NEXT wave's
                     # members must be re-cut from a snapshot taken after it.
                     published = True
@@ -11655,6 +11785,13 @@ async def _verify_impl(
                     except WaveNotReadyError as exc:
                         raise UsageError(str(exc)) from exc
                     reports.append(report)
+                    # §37 Leg 3 (round VI task 69): same correction, same reason, as `_build_
+                    # impl`'s own (see that call site's comment) — VERIFY is the LAST phase, so a
+                    # stub-limited repo's projected top-level status is READ off this row.
+                    for repo_id in members:
+                        await repository.stub_degrade_transform(
+                            run_id, repo_id, phase=Phase.VERIFY, now=_now()
+                        )
                     if report.exit_code is not None:
                         break
                 statuses = await _phase_statuses(read_conn, run_id, Phase.VERIFY)
@@ -11882,6 +12019,7 @@ async def _continue_impl(
     only: str | None,
     ladder: int,
     dry_run: bool,
+    stub_blocked: bool,
     timeout_s: int,
     sandboxed: bool,
     rdeps_limit: int,
@@ -11891,11 +12029,19 @@ async def _continue_impl(
     """Drive `_continue_from_floors`'s plan through the three phase composition roots.
 
     Every per-phase knob is a REQUIRED keyword with no default. The three roots do not share a
-    signature and this function does not invent one: `ladder`/`dry_run` are `_transform_impl`'s,
-    `timeout_s`/`sandboxed` are `_build_impl`'s, the three `rdeps*`/`affected_only` are
-    `_verify_impl`'s. Defaulting any of them here would be step 8 choosing a value the operator
-    never wrote, which is the same defect the `SCAN` skip exists to avoid; the caller that owns
-    the command line chooses them.
+    signature and this function does not invent one: `ladder`/`dry_run`/`stub_blocked` are
+    `_transform_impl`'s, `timeout_s`/`sandboxed` are `_build_impl`'s, the three `rdeps*`/
+    `affected_only` are `_verify_impl`'s. Defaulting any of them here would be step 8 choosing a
+    value the operator never wrote, which is the same defect the `SCAN` skip exists to avoid; the
+    caller that owns the command line chooses them.
+
+    `stub_blocked` (round VI task 69, ADR-0113 §37 Blocker A) is `resume()`'s own flag, threaded
+    ONLY to the `Phase.TRANSFORM` delegate below: `_build_impl`/`_verify_impl` need no such
+    parameter (their own `stub_degrade_transform` correction is unconditional and data-driven, see
+    their own call sites) and neither ever took one. A repo `_unblock_dependents` (§11.5 step 6,
+    same call, same flag) just freed from `BLOCKED` re-enters TRANSFORM here, in the SAME `fleet
+    resume --stub-blocked` invocation — so the flag has to reach this delegate for the freed
+    repo's real dispatch to run the stub-creation trigger, not plain un-stubbed work.
 
     **No fifth `PhaseRunner`.** The four instantiations in this module are the phase impls' own;
     step 8 re-enters them rather than composing a runner of its own, so a continuation and a
@@ -11948,6 +12094,7 @@ async def _continue_impl(
                 only=only,
                 ladder=ladder,
                 dry_run=dry_run,
+                stub_blocked=stub_blocked,
             )
         elif entry.phase is Phase.BUILD:
             phase_result = await _build_impl(
@@ -14219,14 +14366,14 @@ def resume(
     re-opens that wave. `docs/SPEC.md` §3.5's "closed waves are never re-opened" governs
     un-blocking, and §11.5 step 5 does not mention waves at all.
 
-    **`--stub-blocked` is REFUSED, not implemented (ADR-0113 §37 Blocker A condition 2).** Step 6
-    already carries the plumbing for a stub-eligible repo (one whose sole blocker is
-    `REQUIRES_HUMAN_INTERVENTION`) to re-enter — `orchestrator.reentry.stub_permits_removal` — but
-    the TRANSFORM-worker half that would create the stub does not exist yet. Accepting this flag
-    today would free the repo into ordinary `PENDING` for a PLAIN `fleet transform` (no flag
-    required) to dispatch real work — real tokens — against a dependency that objectively does not
-    exist, exactly the harm `scheduler.py` excludes `BLOCKED` from admission to prevent. The flag
-    is refused until the stub-creation half lands.
+    **`--stub-blocked` (ADR-0113 §37 Blocker A) is wired live (round VI task 69).** Step 6 frees a
+    stub-eligible repo (one whose sole blocker is `REQUIRES_HUMAN_INTERVENTION`) back to `PENDING`
+    — `orchestrator.reentry.stub_permits_removal` via `_unblock_dependents` — and, in the SAME
+    invocation, step 8's `Phase.TRANSFORM` delegate carries the SAME flag value so the freed
+    repo's real dispatch runs task-67's stub-creation trigger rather than plain, un-stubbed work
+    against a dependency that objectively does not exist. The refusal this docstring used to
+    describe is gone: it existed only until the TRANSFORM-worker creation half (task-67) and the
+    BUILD-phase render (task-68) both landed, which they now have.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -14252,6 +14399,7 @@ def resume(
                 raise_wave_budget=raise_wave_budget,
                 repoll_prs=repoll_prs,
                 dry_run=dry_run,
+                stub_blocked=stub_blocked,
             )
         )
         # A forge failure is a REAL failure (exit 1) and outranks the continuation: it means the
@@ -14285,6 +14433,7 @@ def resume(
                         # such a choice — `--dry-run` returns above without continuing at all.
                         ladder=settings.config.transform.max_attempts,
                         dry_run=False,
+                        stub_blocked=stub_blocked,
                         timeout_s=settings.config.budgets.build_timeout_s,
                         # `sandboxed` has no config form. This is not a chosen value but the
                         # ABSENCE of `fleet build --no-sandbox`, whose own help says "CI only";
@@ -14383,6 +14532,7 @@ async def _resume_impl(
     raise_wave_budget: float | None,
     repoll_prs: bool,
     dry_run: bool,
+    stub_blocked: bool,
 ) -> dict[str, object]:
     # The three refusals run in §11.5's order — config, then profile, then the durable wave
     # ledger — inside ONE read handle. A resume that reported the budget before the drift would
@@ -14566,7 +14716,13 @@ async def _resume_impl(
     # `tests/test_resume_unblocking.py`, asserts it against the published file rather than
     # against this comment.
     unblocked = await _unblock_dependents(
-        settings, path, run_id, floors=computed_floors, dry_run=dry_run, now=now
+        settings,
+        path,
+        run_id,
+        floors=computed_floors,
+        dry_run=dry_run,
+        now=now,
+        stub_blocked=stub_blocked,
     )
 
     projection: str | None = None
@@ -14956,27 +15112,20 @@ def _refuse_unbuilt_resume_flags(
 
 
 def _validate_resume_flags(*, stub_blocked: bool) -> None:
-    """`fleet resume`'s own `--stub-blocked` refusal (§10, ADR-0113 §37 Blocker A condition 2).
+    """`fleet resume`'s own `--stub-blocked` handling (§10, ADR-0113 §37 Blocker A).
 
-    Same shape as `_validate_build_flags`'s and `_validate_transform_flags`'s `--stub-blocked`
-    refusals (`grep -n "stub-blocked is not implemented" src/fleet/cli.py`), but a DIFFERENT
-    hazard from theirs: those two refuse a flag that would tell a worker to CREATE a stub, with no
-    such worker in `src/fleet/workers/`. This flag would instead ADMIT a repo blocked solely by a
-    `REQUIRES_HUMAN_INTERVENTION` provider back into `PENDING` — the pure predicate for that,
-    `orchestrator.reentry.stub_permits_removal`, is built and unit-tested, but ADR-0113 condition
-    2 requires the CLI surface stay refused until the TRANSFORM-worker half that would actually
-    create the stub also exists: a freed repo with no stub to build against would be picked up by
-    a plain `fleet transform` (no flag needed) and spend real tokens against a dependency that
-    objectively does not exist.
+    The refusal ADR-0113 condition 2 required here is REMOVED (round VI task 69): the
+    TRANSFORM-worker half that creates the stub (task-67) and the BUILD-phase render (task-68)
+    have both landed on `main`. Per ADR-0113 condition 2's own instruction ("whichever task lands
+    second must remove the refusal"), this is that removal. `stub_blocked` now reaches
+    `_unblock_dependents`/`orchestrator.reentry.plan_unblocking` (§11.5 step 6, ADMITTING a repo
+    blocked solely by a `REQUIRES_HUMAN_INTERVENTION` provider back into `PENDING`) and
+    `_continue_impl`'s `Phase.TRANSFORM` delegate (step 8, so the freed repo's re-dispatch this
+    SAME `fleet resume` call runs the real stub-creation trigger rather than plain, un-stubbed
+    work against a dependency that objectively does not exist) — see `resume()`'s own body for
+    both call sites.
     """
-    if stub_blocked:
-        raise UsageError(
-            "--stub-blocked is not implemented: admitting a repo whose sole blocker is "
-            "REQUIRES_HUMAN_INTERVENTION (ADR-0113 §37 Blocker A) back into PENDING has no "
-            "TRANSFORM-worker stub-creation logic in src/fleet/workers/ yet, so the freed repo "
-            "would be picked up by a plain `fleet transform` (no flag required) and dispatch "
-            "real work -- real tokens -- against a dependency that objectively does not exist."
-        )
+    _ = stub_blocked
 
 
 # --------------------------------------------------------------------------------------
@@ -16355,10 +16504,10 @@ async def _unblock_dependents(
 
     **`stub_blocked` (ADR-0113 §37 Blocker A) is threaded exactly like `floors`: a plain value
     passed in, never re-derived inside the transaction below.** Defaulting to `False` means every
-    existing caller is unaffected byte-for-byte. `fleet resume`'s own `--stub-blocked` flag does
-    NOT reach this parameter yet — it is refused unconditionally at the CLI layer (ADR-0113
-    condition 2) until the TRANSFORM-worker stub-creation half exists; this parameter is the
-    plumbing that refusal will be removed in front of, not a live path today.
+    caller that predates round VI task 69 is unaffected byte-for-byte. `fleet resume`'s own
+    `--stub-blocked` flag reaches this parameter live as of that round: the CLI-layer refusal
+    (ADR-0113 condition 2) is removed now that the TRANSFORM-worker stub-creation half (task-67)
+    and the BUILD-phase render (task-68) have both landed — see `resume()`'s own body.
 
     **Four buckets, none of them a bare count (D44).** `unblocked` is a repo whose list is now
     empty — it re-enters the queue; `retained` is a repo still held, *by these names*, which is a
