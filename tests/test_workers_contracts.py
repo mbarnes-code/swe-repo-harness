@@ -467,6 +467,15 @@ def test_a_failed_contract_survives_the_rebuild_it_is_not_part_of(tmp_path: Path
     `carry_over_committed`'s widening (this task), an EMPTY fresh set for a `FAILED` row made it
     vanish from `out` entirely — the identical "vanished row" lie the function's own docstring
     warns about for `HOISTED`/`MIGRATED`.
+
+    **This test alone does NOT prove the decision is reachable in production** (fix-round finding
+    C1, controller review): it constructs `committed` nodes directly, bypassing
+    `cli._committed_contracts` — the ONLY production feeder of this function's `committed`
+    argument — entirely. `_committed_contracts`'s own SQL `status IN (...)` list had to be widened
+    too, or a real `FAILED` row would never reach this function at all. See
+    `tests/test_sequence_e2e.py::test_a_failed_contract_survives_a_real_re_scan` for the sibling
+    proof that drives the real path (a real `fleet scan`/`fleet sequence`, then `_committed_
+    contracts` called directly against the resulting database).
     """
     payload = _payload(tmp_path, SHARED_FLEET)
     fresh = _run(payload).contracts

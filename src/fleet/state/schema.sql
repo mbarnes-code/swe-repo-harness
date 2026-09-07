@@ -308,10 +308,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   emitted. Several names in this list are
                                                   --   READ by Python that nothing writes
                                                   --   ('BaselineRed', 'PreflightFailed',
-                                                  --   'RuleConflict') and three have no Python at
-                                                  --   all ('WeakEdge' and two of the four
-                                                  --   Contract/Hoist kinds: 'HoistBrokeOwner',
-                                                  --   'HoistRollbackDemotion').
+                                                  --   'RuleConflict') and two have no Python at
+                                                  --   all ('WeakEdge' and one of the four
+                                                  --   Contract/Hoist kinds: 'HoistRollbackDemotion'
+                                                  --   -- 'HoistBrokeOwner' left this group round
+                                                  --   VI task 66, see below).
                                                   --   The two annotated above each have a
                                                   --   live INSERT behind them, in
                                                   --   orchestrator/findings.py. THREE more are
@@ -341,10 +342,16 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   it now has a live INSERT in cli.py's
                                                   --   _persist_contract_hoist_override_findings,
                                                   --   one per currently-FORBIDDEN contract,
-                                                  --   repo_id the owner's. The other two
-                                                  --   Contract/Hoist kinds (Legs C/D:
-                                                  --   'HoistBrokeOwner', 'HoistRollbackDemotion')
-                                                  --   remain no-Python.
+                                                  --   repo_id the owner's.
+                                                  --   'HoistBrokeOwner' left that group 2026-09-06
+                                                  --   (§12.31 case (ii) Leg C2, round VI task 66,
+                                                  --   ADR-0123): it now has a live INSERT in the
+                                                  --   cli.py _BuildSink.__call__ method, one per
+                                                  --   Phase 3 build failure attributed to a
+                                                  --   watched hoist target path, repo_id the
+                                                  --   failing repo.
+                                                  --   The remaining Contract/Hoist kind (Leg D:
+                                                  --   'HoistRollbackDemotion') remains no-Python.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',

@@ -1593,7 +1593,11 @@ naturally re-derives it), a `FAILED` contract's hoist commit is not reverted by 
 (Leg D does not exist), so the code is physically in the monorepo exactly like a `HOISTED` row's,
 and dropping it would silently lose the row on the next rebuild with no compensating rediscovery.
 Proven at the unit level against all five REAL quoted bazel error strings already in this
-codebase's own adapter docstrings (`tests/test_workers_build.py::
+codebase's own adapter docstrings — correction, round VI task 66 fix round: all five are negative
+cases (correctly return no match, since none names an in-tree package a real `hoist_target_path`
+would ever equal); the POSITIVE match path is exercised only by constructed text built against a
+real `hoist_target_path` shape, not by any of the five real strings themselves — (`tests/
+test_workers_build.py::
 test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`, each case asserted
 individually), the carry-over decision (`tests/test_workers_contracts.py::
 test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`), and end to end through the real
@@ -1614,6 +1618,33 @@ non-retryable-`BUILD_ERROR` terminal status already does (`REQUIRES_HUMAN_INTERV
 disclosed placeholder until Leg D exists to re-route it. `docs/INTEGRATION_HONESTY.md` D111's
 heading stays `OPEN` (a dated in-body marker records Leg C2 there). Full account:
 `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`.
+
+**Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) found the ADR-0123
+`carry_over_committed` decision above was INERT, plus a per-wave attribution gap; both fixed,
+proven, and disclosed here — this update does not change the "not DONE" verdict above.**
+(C1) `carry_over_committed`'s `FAILED` widening had no effect in production: `_committed_
+contracts` (`cli.py:2551-2558`), the ONLY production feeder of `carry_over_committed`'s
+`committed` argument, still selected only `'HOISTED','MIGRATED','FORBIDDEN'` — so a real `FAILED`
+row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`, re-hoisting a
+contract that had just broken a build (the exact `REJECTED` treatment ADR-0123 argues against).
+Fixed by adding `'FAILED'` to `_committed_contracts`'s own SQL list too (mirroring round VI task
+58's `e3b1a86`, which widened both halves for `FORBIDDEN` in the same commit); proven end to end
+against a real database (`tests/test_sequence_e2e.py::
+test_a_failed_contract_survives_a_real_re_scan`), not the pre-existing unit test alone, which
+bypasses `_committed_contracts` entirely and could not have caught this (now annotated to say so).
+(I3, found by the same review) `_hoist_watch_for_run` is recomputed fresh per wave; once the FIRST
+failing consumer's dispatch wrote `contracts.status = 'FAILED'`, its `HOISTED`/`MIGRATED`-only
+filter silently stopped watching that contract for every LATER-wave consumer of the SAME broken
+hoist, which would then burn its own full retry ladder unattributed — the opposite of what
+§12.31(ii) needs. Fixed by widening `_hoist_watch_for_run`'s own filter to include `FAILED`;
+proven end to end (`tests/test_sequence_e2e.py::
+test_a_failed_contracts_watch_survives_into_a_later_wave`). Also fixed this round: 13 citations in
+`docs/INTEGRATION_HONESTY.md`/`docs/CRITERIA_PLAN.md` drifted by this task's own `~224`-line
+`cli.py` insertion (re-measured and repointed, not repointed by offset); `HoistBrokeOwner`'s
+"remains no-Python" declaration in `src/fleet/state/schema.sql`/`docs/SPEC.md` corrected to record
+its new writer; 6 `ruff check` regressions (2 unused imports, 1 ASYNC240, 3 line-length). Full
+fix-round account: `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`'s fix-round
+section.
 
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
@@ -2036,7 +2067,8 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7601-7641`, moved by round VI task 58's `cli.py` insertions) always constructs
+  (`cli.py:7788-7826`, re-measured round VI task 66 fix-round — moved from `7601-7641`, task 58's
+  own number, by task 66's own `cli.py` insertion) always constructs
   `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
@@ -2044,8 +2076,9 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   the post-fix state (the citation's line number is repointed for the drift check above; the
   narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7711-7804`, moved by round VI
-  task 58's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7896-7989`, re-measured round VI
+  task 66 fix-round — moved from `7711-7804`, task 58's own number, by task 66's own `cli.py`
+  insertion) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
 
@@ -2077,8 +2110,10 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9336-9371`, moved by round VI task 58's
-`cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
+blockers above**: `_eligible_build_units` (`cli.py:9577-9610`, re-measured round VI task 66
+fix-round, second pass — moved again from `9566-9599` by this same task's own further `cli.py`
+edits, originally `9336-9371`, task 58's own number)
+filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
 in production yet); does not need its own ADR (a mechanical domain-widening, not a guarded-

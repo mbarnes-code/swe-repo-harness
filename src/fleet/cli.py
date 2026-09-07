@@ -2536,16 +2536,24 @@ async def _contract_symbols(
 async def _committed_contracts(
     conn: aiosqlite.Connection, run_id: str
 ) -> tuple[ContractNode, ...]:
-    """The `HOISTED`/`MIGRATED`/`FORBIDDEN` rows the rebuild must not lose (§3.1 "re-runnable by
-    construction"; `FORBIDDEN` joined this set in §12.31 Leg E, round VI task 58 — see
-    `workers/contracts.py::carry_over_committed`, which is what actually re-applies these).
-    Only the three fields that survive are read back: everything else is re-derived, which is
-    the point of a rebuild."""
+    """The `HOISTED`/`MIGRATED`/`FORBIDDEN`/`FAILED` rows the rebuild must not lose (§3.1
+    "re-runnable by construction"; `FORBIDDEN` joined this set in §12.31 Leg E, round VI task 58,
+    `FAILED` in §12.31 Leg C2, round VI task 66, ADR-0123 — see `workers/contracts.py::
+    carry_over_committed`, which is what actually re-applies these). This function is the ONLY
+    production feeder of `carry_over_committed`'s `committed` argument (`_sequence_impl` at
+    `cli.py:2444`); widening `carry_over_committed`'s own membership set without ALSO widening
+    this query's `status IN (...)` list leaves the decision inert — a `FAILED` row this function
+    never selects can never reach `carry_over_committed` to be carried over at all, so it would
+    silently fall back to the `REJECTED` treatment ADR-0123 argues against (round VI task 66
+    fix-round finding: the row was dropped and re-derived as `EXTRACTABLE` on the very next scan,
+    re-hoisting a contract that had just broken a build). Only the fields that survive are read
+    back: everything else is re-derived, which is the point of a rebuild."""
     rows = await _rows(
         conn,
         "SELECT contract_id, kind, identifier, owning_repo_id, status, status_detail, "
         "       hoist_target_path FROM contracts "
-        " WHERE run_id = ? AND status IN ('HOISTED','MIGRATED','FORBIDDEN') ORDER BY contract_id",
+        " WHERE run_id = ? AND status IN ('HOISTED','MIGRATED','FORBIDDEN','FAILED') "
+        " ORDER BY contract_id",
         (run_id,),
     )
     return tuple(
@@ -9196,8 +9204,8 @@ def _cache_mounts(settings: FleetSettings) -> list[CacheMount]:
 async def _hoist_watch_for_run(
     conn: aiosqlite.Connection, run_id: str
 ) -> tuple[HoistWatch, ...]:
-    """Every `HOISTED`/`MIGRATED` contract for the RUN (§12.31 case (ii), Leg C2, round VI task
-    66) — every repo's `BuildInput` gets the SAME, full, run-wide set.
+    """Every `HOISTED`/`MIGRATED`/`FAILED` contract for the RUN (§12.31 case (ii), Leg C2, round
+    VI task 66) — every repo's `BuildInput` gets the SAME, full, run-wide set.
 
     Reuses `_sequence_contracts` (Rule 8), not `_eligible_contract_units`: the latter restricts to
     THIS run's wave-member contract ids, which is the wrong scope here — attribution is a plain
@@ -9208,16 +9216,27 @@ async def _hoist_watch_for_run(
     when inferring consume edges (`repo_id != owner`), so the owner structurally never holds such
     an edge to its own contract, and a wave-scoped or edge-based set would silently miss it.
 
+    `FAILED` joined this filter in round VI task 66's own controller-review fix round: this
+    function is called fresh, per wave (`_run_build_wave`, inside `_build_impl`'s wave loop), so
+    once the FIRST failing consumer's dispatch writes `contracts.status = 'FAILED'` (via
+    `_BuildSink`), a `HOISTED`/`MIGRATED`-only filter would silently stop watching that contract
+    for every LATER-wave consumer of the SAME broken hoist — each of those would then hit an
+    unattributed, `retryable=True` `BUILD_ERROR` and burn its own full retry ladder, the opposite
+    of what §12.31(ii) needs (every SCC member's `phases.attempts` should stay unspent, not just
+    the first repo to trip the finding). Watching `FAILED` too closes that gap: every later
+    consumer's build against the SAME already-`FAILED` `hoist_target_path` is attributed and
+    terminated without charging an attempt, the same as the first.
+
     `hoist_target_path` is filtered non-`None` defensively for typing only — every `HOISTED`/
-    `MIGRATED` row is `extractable = 1` by construction (only an `EXTRACTABLE` candidate is ever
-    hoisted), and `schema.sql`'s own CHECK requires `hoist_target_path IS NOT NULL` whenever
-    `extractable = 1`.
+    `MIGRATED`/`FAILED` row is `extractable = 1` by construction (only an `EXTRACTABLE` candidate
+    is ever hoisted, and `FAILED` only reached via an already-`HOISTED`/`MIGRATED` row), and
+    `schema.sql`'s own CHECK requires `hoist_target_path IS NOT NULL` whenever `extractable = 1`.
     """
     nodes = await _sequence_contracts(conn, run_id)
     return tuple(
         HoistWatch(contract_id=node.contract_id, hoist_target_path=node.hoist_target_path)
         for node in nodes
-        if node.status in (ContractStatus.HOISTED, ContractStatus.MIGRATED)
+        if node.status in (ContractStatus.HOISTED, ContractStatus.MIGRATED, ContractStatus.FAILED)
         and node.hoist_target_path is not None
     )
 

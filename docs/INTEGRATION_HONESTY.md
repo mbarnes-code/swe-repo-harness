@@ -2807,10 +2807,11 @@ retired from the pin list once, then a second wave of edits in the SAME task (th
 review fixes: threading `min_consumers` through `break_cycles`'s call site, and the
 `ContractNotShared` findings-writer filter) drifted it back to genuinely unresolved, and it was
 re-pinned. This is normal churn for a citation into a large, actively-edited function, not a
-correction to the finding it sits beside. `_transform_payloads` (now `cli.py:5326`, round VI task
-58's `cli.py` insertions having since moved it again, twice within the same task's own fix wave)
-still reads `settings.config.transform.max_patch_bytes` at `cli.py:5342` and sets it on the built
-`TransformInput` at `cli.py:5380` — the two threading sites this paragraph's claim is actually
+correction to the finding it sits beside. `_transform_payloads` (now `cli.py:5339`, round VI
+task 66's own ~224-line `cli.py` insertion earlier in the file — §12.31 Leg C2 — having moved it
+again, re-measured at this task's own fix-round commit rather than trusted from task 58's number)
+still reads `settings.config.transform.max_patch_bytes` at `cli.py:5357` and sets it on the built
+`TransformInput` at `cli.py:5395` — the two threading sites this paragraph's claim is actually
 about are unmoved in substance, only in line number.
 
 **Two deferred minors, both against the leg-1 fix specifically.** No accept-at-boundary test
@@ -6766,7 +6767,9 @@ already impossible before the loop began.
 calls `_prepare_verify` for every member (`cli.py:9216-9223` — **corrected 2026-09-02, round EE
 final review: the citations here had rotted to the point of naming the wrong function entirely**,
 `8430-8449` now falls inside `_run_verify_wave`'s own definition, a different function) before
-`_run_verify_wave` (`cli.py:9236`), and `_prepare_verify` is the heavier git mutator of the two: under the integration
+`_run_verify_wave` (`cli.py:9451`, re-measured round VI task 66 fix-round, second pass — moved
+again from `9440` by this same task's own further `cli.py` edits, originally `9236`), and
+`_prepare_verify` is the heavier git mutator of the two: under the integration
 mutex it takes a fresh snapshot ref, then per member runs `worktree remove --force`, a `shutil.rmtree`
 fallback, `worktree prune`, and `worktree add --detach --force`. So **2 of the 3 wave-driving phase
 impls** put per-member git mutation ahead of admission. `_build_impl` is **not** in this class as
@@ -7406,8 +7409,8 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 2. `record_attempt` (`state/repository.py:2365-2433`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
-   Production caller `_AttemptWriter.record` (`cli.py:7343-7415`, moved by round VI task 58's
-   `cli.py` insertions) sets
+   Production caller `_AttemptWriter.record` (`cli.py:7496-7567`, re-measured round VI task 66
+   fix-round — moved again by task 66's own `cli.py` insertion) sets
    `stderr_tail="" if step.ok or error is None else error.stderr_tail`, the same
    `WorkerError.stderr_tail` value D88 traced for `phases.last_error`.
 
@@ -7504,16 +7507,22 @@ entry is the underlying defect those corrections point back to.
 
 **Correction (2026-09-01, round U fix wave) — the "Consequence" paragraph above overstates what
 the guard blocks; re-measured against the merged post-Task-B `_reconcile_tasks_with_git`
-(`cli.py:14084-14321`), not the pre-Task-B code the paragraph above was describing.** *(Repointed
-2026-09-06, round VI, SIXTEEN separate times now as this round's own successive `cli.py`
+(`cli.py:14325-14560`, moved again from `14314-14549` by this same task 66's own further
+`cli.py` edits within its fix round), not the pre-Task-B code the paragraph above was
+describing.** *(Repointed
+2026-09-06, round VI, EIGHTEEN separate times now as this round's own successive `cli.py`
 additions keep shifting it — this repointing follows, in order: round VI task 53's merge (added
 `_partition_test_srcs`/`_is_python_test_src`), task 56's merge (added the §12.34 Clause B PASS 2b),
 task 55's fix waves (threaded `min_consumers` through `break_cycles`'s call site, filtered the
-`ContractNotShared` findings writer, and added the Leg A hoist-rejection writers themselves), and
+`ContractNotShared` findings writer, and added the Leg A hoist-rejection writers themselves),
 task 58 in two waves (§12.31 Leg E's own commit adding `_forbidden_contract_rows` and
 `_persist_contract_hoist_override_findings`, then this same task's controller-review fix wave
-growing `_sequence_graph_config`'s corrected docstring by two more lines) — all merged in sequence
-onto `main`, each shifting this citation in turn. Correction to this
+growing `_sequence_graph_config`'s corrected docstring by two more lines), task 66's own
+~224-line `cli.py` insertion (§12.31 Leg C2, moving it from `14084-14321`), and task 66's own
+fix-round docstring growth on `_hoist_watch_for_run` (moving it again, within the same task, from
+`14314-14549`) — all merged in
+sequence onto `main` (the last two both landing in this task's own commits, not yet merged), each
+shifting this citation in turn. Correction to this
 paragraph's own prior self: the "at `<sha>`" suffix a previous repointing added here was NOT a
 functional exemption — `test_no_unpinned_anchored_citation_
 fails_to_resolve` checks a hardcoded `pins` tuple in the test module, not an "at sha" prose
@@ -7531,8 +7540,10 @@ Task B's `if units and not missing_units:` DONE branch (`:12335-12343`) and its 
 partially-landed branch (`:12360-12376`) never read `task_anchor` at all — neither is gated by
 this guard, and both are production-reachable: `phases.pre_commit_sha` (a *different* column,
 read into `anchor`/`phase_anchor` above, not `task_anchor`) DOES have a real production writer
-(moved by round VI task 58's `cli.py` insertions: `cli.py:4734-4942`, `_TransformSink`'s
-`UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...`), so
+(re-measured round VI task 66 fix-round — `_TransformSink` moved from `cli.py:4734-4942` to
+`cli.py:4747-4953`, and its `UPDATE phases SET base_ref = ?, pre_commit_sha = ?, ...` statement
+from `:4537` to `:5143`, task 66's own `cli.py` insertion plus the cumulative shift of every
+round between round GG's original measurement and this one), so
 `find_task_commit` can genuinely locate a landed unit's commit and route into DONE or
 partially-landed with `task_anchor` still `NULL` throughout. The heading's claim stays true as far
 as it goes — the discard path (what §12.15(i)/§12.45(i) actually need guarded, since discarding
@@ -7983,12 +7994,16 @@ standalone reproduction script (not a reuse of the implementer's own test code) 
 directly by SQL.
 
 **The gap, as measured, twice.** `repository.insert_edges` (`src/fleet/state/repository.py:2491`)
-has exactly ONE production call site anywhere in `src/`: `cli.py:2232`, inside
-`_persist_scan_edges` (`cli.py:2291-2355`), itself reachable only from the scan path (`cli.py:1876`).
-`_persist_scan_edges` builds its `InferenceInput` with no `contracts=` argument
-(`cli.py:2222`), so `infer_contract_edges` never fires there — there is nothing to persist at scan
-time because no contract has been hoisted yet. Separately, `_sequence_impl`
-(`cli.py:3225-3434`, moved by round VI task 58's `cli.py` insertions) does reach a real hoist via
+has exactly ONE production call site anywhere in `src/`: `cli.py:1936`, inside
+`_persist_scan_edges` (`cli.py:2296-2358`, re-measured round VI task 66 fix-round — moved from
+`2291-2355` by task 66's own `cli.py` insertion), itself called only from `_scan_impl`
+(`cli.py:1864`, the scan path) at that same `cli.py:1936` call site. `_persist_scan_edges`
+builds its `InferenceInput` (`cli.py:2315`) with no `contracts=` argument, so
+`infer_contract_edges` never fires there — there is nothing to persist at scan time because no
+contract has been hoisted yet.
+Separately, `_sequence_impl`
+(`cli.py:3238-3445`, re-measured round VI task 66 fix-round — moved again from `3225-3434`, task
+58's own number, by task 66's own insertion) does reach a real hoist via
 `break_cycles` → `graph/cycles.py::_materialize`, which genuinely
 computes `CONTRACT_IMPL`/`CONTRACT_CONSUME` `DependencyEdge` objects in memory for wave
 assignment — but the whole of `_sequence_impl`'s body contains zero calls to `insert_edges` or any
@@ -8054,9 +8069,11 @@ a stub (nothing else servable that cycle) exits **0**, not 7 — confirmed via a
 `fleet --json resume` invocation over a minimal fixture (a `DEGRADED` consumer at the frontier
 phase plus one `ACTIVE` stub row, nothing else). The JSON payload shows
 `"continuation": {"plan": [], "driven": [], "halted": null, "halted_phase": null}`.
-`_continue_impl` (`src/fleet/cli.py:10427-10540`, moved by round VI task 58's `cli.py`
-insertions) returns early at `if not servable: return result`
-(`:9596-9597`) with `halted: None`, and `_raise_for_continuation` (`:9655-9665`) is a no-op when
+`_continue_impl` (`src/fleet/cli.py:10668-10779`, re-measured round VI task 66 fix-round, second
+pass — moved again from `10657-10768` by this same task's own further `cli.py` edits, originally
+`10427-10540`) returns early at `if not servable: return
+result` (`:10723-10724`) with `halted: None`, and `_raise_for_continuation` (`:10782-10792`) is a
+no-op when
 `halted is None` — `resume`'s own exit path never calls `_needs_human_attention` or reads the run's
 overall phase statuses at all when nothing gets re-driven. D93's fix (four call sites at
 `cli.py:1889`, `:5183`, `:9113`, `:9333`) lives exclusively inside `_scan_impl`/`_transform_impl`/
@@ -8823,7 +8840,10 @@ never committed, a `FAILED` contract's hoist commit is NOT reverted by anything 
 does not exist, so the code is physically in the monorepo exactly like a `HOISTED` row's).
 Proof: `tests/test_workers_build.py::test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`
 (unit, the five REAL quoted bazel error strings already in this codebase's own adapter docstrings
-plus three constructed cases, each asserted individually) and two more unit tests proving the
+plus three constructed cases, each asserted individually — correction, round VI task 66 fix round:
+all five real strings are negative cases, correctly returning no match; the POSITIVE match path is
+exercised only by the three constructed cases, never by any of the five real strings) and two more
+unit tests proving the
 `BuildPipelineWorker._attribute_hoist_break` wiring itself (retryable flip + no-op cases);
 `tests/test_workers_contracts.py::test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`
 (the ADR-0123 carry-over proof, mirroring the pre-existing `HOISTED` test); and
@@ -8854,6 +8874,37 @@ opening "gap, as measured" paragraph is now stale for case (ii) specifically and
 unedited per this file's own annotate-don't-rewrite convention; it remains literally true only of
 whatever Leg C1 would additionally need. Full details:
 `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`.
+
+**Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
+reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
+(C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
+(`cli.py:2551-2558`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
+still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
+`FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
+re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123
+argues against). The pre-existing unit test (`test_a_failed_contract_survives_the_rebuild_it_is_
+not_part_of`) could not have caught this — it constructs `committed` nodes directly, bypassing
+`_committed_contracts` entirely (now annotated to say so in its own docstring). Fixed by adding
+`'FAILED'` to `_committed_contracts`'s SQL list (mirroring round VI task 58's `e3b1a86`, which
+widened both halves for `FORBIDDEN` in one commit); proven end to end against a real database
+driven through a real `fleet scan`/`fleet sequence` (`tests/test_sequence_e2e.py::
+test_a_failed_contract_survives_a_real_re_scan`, calling `_committed_contracts` directly against
+the resulting database rather than a second full `fleet scan` — a second real scan currently
+crashes on the disclosed `_graph_edges` gap ADR-0122/task-65 owns, reproduced and confirmed before
+the test was written to avoid it). (I3, important) `_hoist_watch_for_run` is recomputed fresh per
+wave; its `HOISTED`/`MIGRATED`-only filter silently stopped watching a contract the moment it went
+`FAILED`, so every LATER-wave consumer of the SAME broken hoist would burn its own full retry
+ladder unattributed. Fixed by widening the filter to include `FAILED`; proven
+(`tests/test_sequence_e2e.py::test_a_failed_contracts_watch_survives_into_a_later_wave`). Also
+fixed: 13 anchored citations across this file and `docs/CRITERIA_PLAN.md` that this task's own
+`cli.py` insertion drifted (re-measured and repointed by content, not by offset —
+`tests/test_integration_honesty_citations.py` now 70/70, matching `main`); `HoistBrokeOwner`'s
+"remains no-Python" declaration in `schema.sql`/`docs/SPEC.md` corrected now that it has a live
+writer; 6 `ruff check` regressions (2 unused imports, 1 ASYNC240 blocking-call, 3 line-length);
+and the overstated claim above that the five real quoted bazel strings prove the matcher's
+positive path (corrected: all five are negative cases; the positive path is exercised only by
+constructed text). Full fix-round account:
+`.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`'s fix-round section.
 
 ## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
 adapter — no adapter can ever emit a real nonzero test target
@@ -8989,8 +9040,9 @@ dst_coordinate"` on any attempt to reconstruct a REPO-dst edge from a persisted 
 alone — a `ValidationError`, not a wrong-but-valid edge.
 
 **Why nothing is broken today.** `grep -rn "DELETE FROM edges" src/fleet/` returns zero hits in the
-whole codebase; `_persist_contract_edges` (`cli.py:3571-3619`, moved by round VI task 58's
-`cli.py` insertions) only INSERTs. The pre-hoist repo→repo
+whole codebase; `_persist_contract_edges` (`cli.py:3584-3630`, re-measured round VI task 66
+fix-round — moved from `3571-3619` by task 66's own `cli.py` insertion) only INSERTs. The
+pre-hoist repo→repo
 row is therefore still present in the `edges` table, untouched, alongside the new contract row. A
 durable, exact un-hoist IS achievable today — by deleting the contract-kind rows and letting the
 pre-existing repo→repo row stand — just not by the mechanism SPEC's own prose describes.
@@ -9010,7 +9062,10 @@ the Leg C/D design pass to correct alongside its own build. No design choice is 
 **Update, 2026-09-06 (round VI, D111 Leg D design pass, ADR-0122): the remedy choice above is now
 decided.** Neither of D117's own two named remedy options is what got chosen: the mechanism is
 **exclusion at graph-build read time**, not a preserved-row-plus-`DELETE` and not reconstruction.
-`_graph_edges` (`cli.py:3860-3906`) is widened with the identical `contracts.status IN
+`_graph_edges` (`cli.py:3873-3917`, re-measured round VI task 66 fix-round — moved from
+`3860-3906` by task 66's own `cli.py` insertion; not yet landed as of this fix round — task 65,
+dispatched concurrently in a separate worktree, is the one actually widening it) is widened with
+the identical `contracts.status IN
 ('HOISTED','MIGRATED')` predicate `_graph_nodes` already applies, so a `FAILED`/`REJECTED`
 contract's edge rows are simply never read into the next graph build — the untouched pre-hoist
 repo→repo row stands in their place, and nothing is ever deleted or reconstructed. This also

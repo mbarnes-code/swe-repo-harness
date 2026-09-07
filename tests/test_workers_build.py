@@ -45,8 +45,6 @@ from fleet.cli import (
     HoistWatch,
     RootFileConflictError,
     _BuildPlan,
-    _hoist_break_match,
-    _hoist_break_package,
     _match_hoist_broke_owner,
     _module_inputs,
     _resolve_support_files,
@@ -1103,7 +1101,9 @@ async def test_attribute_hoist_break_flips_retryable_and_records_the_match(tmp_p
         encoding="utf-8",
     )
     payload = _a_hoist_watch_build_input(
-        hoist_watch=(HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="proto/acme.hub.v1"),)
+        hoist_watch=(
+            HoistWatch(contract_id="proto:acme.hub.v1", hoist_target_path="proto/acme.hub.v1"),
+        )
     )
     error = WorkerError(
         failure_class=FailureClass.BUILD_ERROR, retryable=True, artifact_ref=str(log)
@@ -1137,7 +1137,11 @@ async def test_attribute_hoist_break_is_a_noop_when_nothing_matches(tmp_path) ->
     )
 
     cases = [
-        ("no hoist_watch", no_watch_payload, WorkerResult[BuildOutput](status="failed", error=build_error)),
+        (
+            "no hoist_watch",
+            no_watch_payload,
+            WorkerResult[BuildOutput](status="failed", error=build_error),
+        ),
         (
             "no error",
             _a_hoist_watch_build_input(hoist_watch=watch),

@@ -5987,6 +5987,10 @@ def _bazel_seam_failing_one_dest(log_root: Path, *, fail_dest: str, fail_stderr:
     need only this one has.
     """
     calls = {"n": 0}
+    log_root.mkdir(parents=True, exist_ok=True)  # once, here -- `mkdir` inside `async def runner`
+    # below is ASYNC240 (a blocking pathlib call in an async function); made once at setup time,
+    # synchronously, in this plain `def` factory, mirrors `FakeBazel._result`'s own split above
+    # (a sync helper doing the file I/O, called from the async `__call__`).
 
     async def runner(
         argv: Sequence[str],
@@ -5998,7 +6002,6 @@ def _bazel_seam_failing_one_dest(log_root: Path, *, fail_dest: str, fail_stderr:
     ) -> ProcResult:
         _ = (env, deadline, timeout_s)
         calls["n"] += 1
-        log_root.mkdir(parents=True, exist_ok=True)
         out_path = log_root / f"call-{calls['n']}.out"
         err_path = log_root / f"call-{calls['n']}.err"
         pattern = next((a for a in argv if a.startswith("//")), "")
@@ -6051,9 +6054,9 @@ def test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_a
 
     fail_dest = DESTINATIONS["acme-app-ts"]
     run_id = query(fleet, "SELECT run_id FROM runs")[0][0]
-    assert query(fleet, "SELECT 1 FROM phases WHERE repo_id = ? AND phase = 3", ("acme-app-ts",)) == [], (
-        "sanity: Phase 3 has not even been admitted yet, so no attempt could have been spent"
-    )
+    assert query(
+        fleet, "SELECT 1 FROM phases WHERE repo_id = ? AND phase = 3", ("acme-app-ts",)
+    ) == [], "sanity: Phase 3 has not even been admitted yet, so no attempt could have been spent"
 
     conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
     try:
