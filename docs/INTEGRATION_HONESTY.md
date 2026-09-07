@@ -8991,6 +8991,91 @@ above, which remains true for those three). Do not round the `<n> of 48` §12 co
 account; §11's Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, and
 it is dispatched separately.
 
+**PARTLY ADDRESSED, widened (round VI task 70, 2026-09-07) — JVM now covered; JS and Rust are NOT,
+for a measured reason each, not a scoping choice; `Ecosystem.GO` needs no coverage at all — it is
+structurally out of scope, not merely unaddressed.** `go.py`'s `generate_targets()`/
+`test_targets()` return `[]` unconditionally: Gazelle generates `go_test` targets directly from
+`*_test.go` files (the `uses_gazelle` adapter invariant), bypassing `BuildUnit.test_srcs` entirely
+— there is no `test_srcs`-driven path for Go to populate. This closes D112's full membership
+question: PyPI (done), Maven/Gradle (this task), Go (N/A by design) — JS and Rust remain the only
+two genuinely open gaps, both for the measured reasons below.
+`TEST_SRC_PARTITIONED_ECOSYSTEMS`
+(`ecosystems/base.py`) now also carries `MAVEN`/`GRADLE` (one adapter, `jvm.py`), and
+`cli._partition_test_srcs` dispatches to a new `cli._is_jvm_test_src` (the Maven Standard
+Directory Layout's `src/test/{java,kotlin,scala}/` convention) via a small
+`Mapping[str, Callable[[str], bool]]` table (`cli._TEST_SRC_PREDICATES`, keyed by
+`Ecosystem.value` rather than by the member itself — see that table's own docstring for why:
+§12.6/ADR-0100's textual sweep bans the literal member spelling anywhere in `cli.py`, not only in
+a `Compare`/`Subscript`). Proven at the FakeBazel tier exactly as task 53 proved Python: the fast
+covering test
+`tests/test_build_e2e.py::test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target`
+(revert-and-rerun RED/GREEN plus a mutation on `_is_jvm_test_src`'s path-prefix table, both
+in-worktree per Rule 12) — `java_test(` renders with the right `srcs`/`deps`, and the test file is
+correctly absent from `java_library`'s own `srcs`.
+
+**The real-Bazel half of this proof was ATTEMPTED and could NOT be completed — not because of
+this task's predicate logic, but because of a separate, pre-existing, measured defect that blocks
+EVERY JVM repo's real-Bazel analysis, with or without a test file.** A
+`test_a_jvm_test_target_runs_and_passes_under_a_real_bazel` test mirroring the Python one was
+written, run against the real toolchain, and removed again after it failed with:
+
+```
+ERROR: error loading package 'java/com/acme/widgets': Unable to find package for
+@@[unknown repo 'rules_java' requested from @@]//java:defs.bzl: The repository
+'@@[unknown repo 'rules_java' requested from @@]' could not be resolved: No repository visible
+as '@rules_java' from main repository.
+```
+
+i.e. `load("@rules_java//java:defs.bzl", "java_library")` — the load statement EVERY JVM
+`BUILD.bazel` this adapter has ever rendered contains — cannot resolve, because the generated
+`MODULE.bazel` never declares `bazel_dep(name = "rules_java", ...)` directly; `jvm.py`'s own
+`toolchain_requirements()` docstring already names the underlying fact ("`rules_java`... is a
+transitive `bazel_dep` of `rules_jvm_external` and is **not** a key in `build.ruleset_versions`"),
+but under bzlmod a transitive dependency's repo is not visible to the root module by that route
+alone. This reproduces on the PRE-EXISTING `acme-commons-java` fixture too (confirmed by the error
+being about the `load()` itself, before any target-level analysis, and independent of `srcs`
+content) — it is §24/§27's own audit row's "jvm is still zero" status (`docs/
+INTEGRATION_HONESTY.md`'s shared D4/D6/D7 audit table, not `## D7`'s own dedicated entry, which
+is exclusively about `js_binary`'s missing `deps` attribute), unresolved: **no generated JVM
+package has ever been analysed by real Bazel in this codebase's history, this task's attempt
+included.**
+Fixing it means adding `rules_java` (some version) as an explicit `bazel_dep` in
+`build.ruleset_versions`/`render_module_bazel` — a design decision (which version, whether it
+also finally closes the JDK-toolchain gap `toolchain_requirements()` already discloses) outside
+this task's scope, per its own "no new ADR/D-number" instruction. **Controller allocation:
+`D121`** (verified free — max was `D120`; see `## D121`'s own entry below for the full account).
+
+**JS (`NPM`) and Rust (`CARGO`) are measured, real Bazel-analysis-time blockers in each adapter's
+OWN `test_targets()` — not merely an undecided file-naming convention** — see
+`ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS`'s docstring for the full citation of each:
+
+* **Rust**: `rust.py::test_targets()` emits `rust_test(crate = ":<lib>", srcs = test_srcs, ...)`.
+  `rules_rust`'s `_rust_test_impl` (`rust/private/rust.bzl`, read directly off the pinned
+  `rules_rust@0.65.0` tag) hard-fails analysis the instant BOTH `crate` and a non-empty `srcs` are
+  set: `"rust_test.crate and rust_test.srcs are mutually exclusive. Update <target> to use only
+  one of these attributes"`. Since `test_srcs` has always been `()` for Rust, this line has never
+  fired — widening `TEST_SRC_PARTITIONED_ECOSYSTEMS` to `CARGO` with any nonempty-producing
+  predicate turns every matching Rust repo's build into a hard failure, in real Bazel, today.
+* **JS**: `js.py::test_targets()` emits `js_test(srcs = test_srcs, deps = [f":{name}", ...], ...)`.
+  This repeats, unfixed, the exact defect class `## D7` above already found and fixed in the
+  SIBLING `js_binary` target one function up (`generate_targets()`): `js_binary`/`js_test` are
+  rules_js *runtime* rules with **no `deps` attribute** — the fix there was to use `data` instead,
+  and the fix's own comment says so. `test_targets()` was written with the pre-D7 `deps=` shape
+  and has never been exercised (`test_srcs` has always been `()` for JS too), so it still carries
+  the bug D7 fixed everywhere else.
+
+Fixing either requires a design decision about how to reshape that adapter's `test_targets()` (a
+separate `rust_test(srcs=[file], deps=[":lib"])` per Cargo integration-test file, rather than one
+combined with `crate=`, for Rust; swapping `deps=` for `data=` — and verifying `js_test` needs
+nothing else beyond that single-attribute fix, which was NOT verified here — for JS), which is
+explicitly out of this task's scope (brief: no new ADR/D-number, land what can be proven). Neither
+was attempted; both are left `test_srcs=()`-unchanged, exactly as before this task, so this is not
+a regression. **Remaining under D112: JS and Rust's `test_targets()` methods need their own fix
+before either can be added to `TEST_SRC_PARTITIONED_ECOSYSTEMS`; JVM's predicate/table wiring is
+done and FakeBazel-proven, but its own real-Bazel proof needs the separate `rules_java`
+`bazel_dep` fix flagged above first.** Do not round the `<n> of 48` §12 count up on this account
+(same as task 53's note above).
+
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found
 
@@ -9402,3 +9487,41 @@ Behavior preservation proven by an exhaustive equivalence check over both enums'
 (7 `Ecosystem` + 5 `ContractKind` members), independently re-derived by task-scoped review plus a
 genuine mutation test (emptying each table at runtime and confirming membership behavior actually
 changes). `tests/test_ecosystems.py` — 90/90 passing (was 87 pass / 3 fail).
+
+## D121 — OPEN. No generated JVM package has ever been analysed by real Bazel: the generated
+`MODULE.bazel` never declares `rules_java` as an explicit `bazel_dep`
+
+**Found by round VI task 70 (2026-09-07), while attempting the real-Bazel half of D112's JVM
+test-source proof.** Verified free before allocating: form-agnostic sweep found `D120` as the
+highest allocated number.
+
+**The gap, as measured.** Every JVM `BUILD.bazel` this adapter has ever rendered contains
+`load("@rules_java//java:defs.bzl", "java_library")` (or `java_test`). A real-Bazel run against a
+generated JVM package — `acme-commons-java`, a pre-existing fixture, not one this task added —
+fails before any target-level analysis even starts:
+```
+ERROR: error loading package 'java/com/acme/widgets': Unable to find package for
+@@[unknown repo 'rules_java' requested from @@]//java:defs.bzl: The repository
+'@@[unknown repo 'rules_java' requested from @@]' could not be resolved: No repository visible
+as '@rules_java' from main repository.
+```
+`jvm.py`'s own `toolchain_requirements()` docstring already names the underlying fact:
+`rules_java` is a transitive `bazel_dep` of `rules_jvm_external`, not a key in
+`build.ruleset_versions`. Under bzlmod, a transitive dependency's repo is not visible to the root
+module by that route alone — the generated `MODULE.bazel` needs its own explicit
+`bazel_dep(name = "rules_java", ...)` line, which nothing in `build.ruleset_versions`/
+`render_module_bazel` ever writes.
+
+**Consequence.** This is not narrow to test-source population — it blocks ANY real-Bazel
+analysis of ANY generated JVM package, with or without a test file, independent of this task's
+own `_is_jvm_test_src` predicate (confirmed: the error is at package-load time, before `srcs`
+content is ever read). It is the concrete, previously-unmeasured root cause behind this file's
+own long-standing "jvm is still zero" real-Bazel-analysis status note (§24/§27's own audit row,
+`grep -n "jvm is still zero"`).
+
+**Not yet built:** the fix — add `rules_java` (some pinned version) as an explicit `bazel_dep` in
+`build.ruleset_versions`/`render_module_bazel`. Sizing/design note: whether the same fix should
+also close the JDK-toolchain gap `jvm.py::toolchain_requirements()`'s own docstring already
+discloses is a design choice, not a re-derivation from this task's own measurement — a future
+task should check both possibilities before deciding scope. No task briefed yet; this is the
+controller's next dispatch candidate.
