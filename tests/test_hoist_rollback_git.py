@@ -737,14 +737,21 @@ async def test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts
     record and the contract's own draft are the SAME row (`PullRequestDraft.repo_id` is the
     OWNING repo for a contract PR)."""
     _seed_run(db_path)
-    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
-              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(
+        db_path,
+        repo_id=OWNER_REPO,
+        url="https://forge.invalid/owner/pull/1",
+        state=PrState.MERGED,
+        contract_id=CONTRACT_ID,
+    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
-    forge = FakeForge({
-        "https://forge.invalid/owner/pull/1": _status("c" * 40, T0),
-        "https://forge.invalid/a/pull/1": _status("a" * 40, T0 + timedelta(hours=1)),
-    })
+    forge = FakeForge(
+        {
+            "https://forge.invalid/owner/pull/1": _status("c" * 40, T0),
+            "https://forge.invalid/a/pull/1": _status("a" * 40, T0 + timedelta(hours=1)),
+        }
+    )
 
     read_conn = await connect_ro(db_path)
     try:
@@ -777,31 +784,48 @@ async def test_execute_hoist_rollback_dedupes_owner_in_blast_set_and_commits_cle
     the fix, exactly 2 commits land (not 3) and the repo ends up clean."""
     monorepo = await _init_monorepo(tmp_path)
     merge_contract = await _merge_feature(
-        monorepo, file_name="contract.txt", text="hoisted\n", subject="merge contract hoist",
+        monorepo,
+        file_name="contract.txt",
+        text="hoisted\n",
+        subject="merge contract hoist",
         feature_branch="feat-contract",
     )
     merge_a = await _merge_feature(
-        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        monorepo,
+        file_name="a.txt",
+        text="consumer a\n",
+        subject="merge blast-a",
         feature_branch="feat-a",
     )
     git = Git(monorepo, timeout_s=60)
 
     _seed_run(db_path)
-    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
-              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(
+        db_path,
+        repo_id=OWNER_REPO,
+        url="https://forge.invalid/owner/pull/1",
+        state=PrState.MERGED,
+        contract_id=CONTRACT_ID,
+    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
-    forge = FakeForge({
-        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
-    })
+    forge = FakeForge(
+        {
+            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+        }
+    )
 
     read_conn = await connect_ro(db_path)
     try:
         settings = _settings(tmp_path)
         outcome = await execute_hoist_rollback(
-            read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
-            blast_set=(OWNER_REPO, "blast-a"), forge=forge,
+            read_conn,
+            settings,
+            run_id=RUN_ID,
+            contract_id=CONTRACT_ID,
+            blast_set=(OWNER_REPO, "blast-a"),
+            forge=forge,
         )
     finally:
         await read_conn.close()
@@ -827,25 +851,38 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_while_holding_the
     immediately after acquiring) must still catch this."""
     monorepo = await _init_monorepo(tmp_path)
     merge_contract = await _merge_feature(
-        monorepo, file_name="contract.txt", text="hoisted\n", subject="merge contract hoist",
+        monorepo,
+        file_name="contract.txt",
+        text="hoisted\n",
+        subject="merge contract hoist",
         feature_branch="feat-contract",
     )
     merge_a = await _merge_feature(
-        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        monorepo,
+        file_name="a.txt",
+        text="consumer a\n",
+        subject="merge blast-a",
         feature_branch="feat-a",
     )
     git = Git(monorepo, timeout_s=60)
     tip_before_race = await git.rev_parse("integration")
 
     _seed_run(db_path)
-    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
-              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(
+        db_path,
+        repo_id=OWNER_REPO,
+        url="https://forge.invalid/owner/pull/1",
+        state=PrState.MERGED,
+        contract_id=CONTRACT_ID,
+    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
-    forge = FakeForge({
-        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
-    })
+    forge = FakeForge(
+        {
+            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+        }
+    )
 
     real_acquire = IntegrationMutex.acquire
     moved = {"done": False}
@@ -864,8 +901,12 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_while_holding_the
     try:
         settings = _settings(tmp_path)
         outcome = await execute_hoist_rollback(
-            read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
-            blast_set=("blast-a",), forge=forge,
+            read_conn,
+            settings,
+            run_id=RUN_ID,
+            contract_id=CONTRACT_ID,
+            blast_set=("blast-a",),
+            forge=forge,
         )
     finally:
         await read_conn.close()
@@ -896,24 +937,37 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
     left clean afterward (no `REVERT_HEAD`, no dirty index), proving the abort actually ran."""
     monorepo = await _init_monorepo(tmp_path)
     merge_contract = await _merge_feature(
-        monorepo, file_name="shared.txt", text="hoisted\n", subject="merge contract hoist",
+        monorepo,
+        file_name="shared.txt",
+        text="hoisted\n",
+        subject="merge contract hoist",
         feature_branch="feat-contract",
     )
     merge_a = await _merge_feature(
-        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        monorepo,
+        file_name="a.txt",
+        text="consumer a\n",
+        subject="merge blast-a",
         feature_branch="feat-a",
     )
     git = Git(monorepo, timeout_s=60)
 
     _seed_run(db_path)
-    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
-              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(
+        db_path,
+        repo_id=OWNER_REPO,
+        url="https://forge.invalid/owner/pull/1",
+        state=PrState.MERGED,
+        contract_id=CONTRACT_ID,
+    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
-    forge = FakeForge({
-        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
-    })
+    forge = FakeForge(
+        {
+            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+        }
+    )
 
     real_revert_and_commit = revert_and_commit
     calls = {"n": 0}
@@ -925,7 +979,9 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
             # edit to shared.txt here has no effect on IT, but sets up the SECOND call (the
             # contract's own hoist, which touches shared.txt) to genuinely conflict.
             await _write_and_commit(
-                monorepo, "shared.txt", "hoisted\nconflicting-edit\n",
+                monorepo,
+                "shared.txt",
+                "hoisted\nconflicting-edit\n",
                 "injected mid-series conflict",
             )
         return await real_revert_and_commit(git_, **kwargs)  # type: ignore[arg-type]
@@ -937,8 +993,12 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
         settings = _settings(tmp_path)
         with pytest.raises(HoistRollbackConflictError):
             await execute_hoist_rollback(
-                read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
-                blast_set=("blast-a",), forge=forge,
+                read_conn,
+                settings,
+                run_id=RUN_ID,
+                contract_id=CONTRACT_ID,
+                blast_set=("blast-a",),
+                forge=forge,
             )
     finally:
         await read_conn.close()
