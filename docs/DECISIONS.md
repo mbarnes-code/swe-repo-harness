@@ -13549,6 +13549,27 @@ contract, `state/repository.py:1685-1686`). **Leg D additionally writes its own
 existing writer pattern (`_persist_cycle_findings`/`ContractNotShared`'s
 DELETE-then-INSERT-keyed-on-`(run_id, kind)` shape, `cli.py:3449-3498`).
 
+**Correction, 2026-09-07 (task-65 fix round, controller review) — Decision 3's gate text above
+("SUCCEEDED beyond `Phase.TRANSFORM`") is WRONG; do not implement it as written.** The review
+traced why: `demote_to_floor`'s own span is INCLUSIVE of `floor`
+(`orchestrator/reentry.py:155-157`; `state/repository.py:1674`'s own docstring, "everything from
+`floor` up to `Phase.VERIFY`"), so `floor=Phase.TRANSFORM` ALREADY means "`SUCCEEDED` at
+TRANSFORM or above" — which is `docs/SPEC.md`'s own unmodified §3.1 6c-H text, "SUCCEEDED beyond
+`PHASE_SCAN`", restated exactly. This Decision's gate text is a transcription slip, not a
+considered narrowing: it quoted SPEC's DEMOTION TARGET phrase ("demotes it to `PENDING` at
+`PHASE_TRANSFORM`") a second time into the GATE slot, producing a threshold that EXCLUDES a
+member `SUCCEEDED` at `Phase.TRANSFORM` only — the paradigm case the whole paragraph exists for
+(a consumer whose imports were rewritten to the hoist target and is done at TRANSFORM; under the
+idempotency rule it would never re-enter, and would walk into BUILD importing a path the rollback
+just deleted). **The correct rule is: call `demote_to_floor` for every blast-set member, with no
+caller-side pre-filter at all** — `demote_to_floor`'s own `()` return for a member with nothing
+`SUCCEEDED` in `[Phase.TRANSFORM, Phase.VERIFY]` already is the correct no-op, and gating on it a
+second time (with the wrong threshold, as landed) is both redundant and a defect. Fixed in
+`cli.unhoist_contract` at `6f74ea9`'s fix-round commit; the corresponding test flips its
+`shallow`/`transform_only` case from "asserted untouched" to "asserted demoted at TRANSFORM,
+attempts retained." This text is kept as the historical record of the original (wrong) decision,
+annotated per this project's own convention, not rewritten.
+
 **Decision 4 — revert-series atomicity across multiple merges.** Design: pre-check, then commit —
 validate the whole series before any of it touches the real integration branch. (1) Compute the
 ordered revert list (the contract's own merge sha, plus each blast-set member's merge sha for

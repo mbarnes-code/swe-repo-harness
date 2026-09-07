@@ -1574,6 +1574,48 @@ name): the git-mechanics revert-series execution (Decisions 4/5) and the product
 whichever leg (C1/C2) produces the triggering `HoistBrokeOwner` finding. No code has landed for Leg
 D; this criterion is not marked DONE.
 
+**Update, round VI task 65 (2026-09-06) — Leg D slice 1 landed (code, not just design); this
+criterion is still not marked DONE.** `cli._graph_edges` now carries ADR-0122 Decision 1's
+`contracts.status IN ('HOISTED','MIGRATED')` filter — the previously-undiscovered `GraphError`
+crash on any edge naming a vanished `FAILED`/`REJECTED` contract node is reproduced-then-closed by
+a dedicated test. `cli.unhoist_contract` (new, standalone, zero call sites outside its own tests —
+the same shape Leg B shipped in) builds the graph, runs the transitive downstream-merge-refusal
+check (Decision 6: `graph/query.py::descendants` over `G_order`, proven to catch a two-hop merged
+descendant a single-hop check misses), and on the non-refused path writes
+`contracts.status = 'FAILED'`, demotes qualifying blast-set members via
+`SqliteStateRepository.demote_to_floor(floor=Phase.TRANSFORM)` directly (confirmed by grep: zero
+new calls into `phase_floor`/`evidence_holds`/`resume_floor`/`cli._demote_to_floors`), and writes
+`HoistRollbackDemotion`/`HoistRollbackRefused` findings. Two things disclosed rather than silently
+resolved, both in `docs/INTEGRATION_HONESTY.md` D111's own dated update: (a) the brief's "one
+`StateWriter` unit" instruction is infeasible given `demote_to_floor`'s own internal transaction —
+implemented as three write phases instead, forced by a real single-pump-queue deadlock hazard, not
+a style choice; (b) `docs/SPEC.md`'s own §3.1 6c-H prose ("SUCCEEDED beyond `PHASE_SCAN`") and
+ADR-0122 Decision 3's own text ("SUCCEEDED beyond `Phase.TRANSFORM`") disagree on the demotion
+gate — this task followed Decision 3 verbatim per its own brief's instruction not to re-litigate
+it, and neither document is corrected here. Mutation-proven (gate read before the result, per
+CLAUDE.md Rule 12): the `_graph_edges` filter and the `descendants` traversal each independently
+discriminate, with a cosmetic reflow control staying green. **Still not built:** Leg C1/C2 (the
+trigger), the `git revert -m 1` revert-series execution (Decisions 4/5, task-66 in the ADR's
+working name — a DIFFERENT, already-dispatched task-66-brief.md is Leg C2's own; the revert-series
+slice has no task number allocated as of this update), and the production wiring (task-67, not yet
+scoped). Full account: `.superpowers/sdd/round-VI-criteria-closure/task-65-report.md`.
+
+**Correction, 2026-09-07 (task-65 fix round, controller review) — item (b) above is superseded:
+the SPEC-vs-ADR divergence is resolved, in SPEC's favor, and was a defect in ADR-0122 Decision 3
+itself.** `demote_to_floor`'s span is INCLUSIVE of `floor`, so `floor=Phase.TRANSFORM` already
+means "`SUCCEEDED` at TRANSFORM or above" — exactly SPEC's own unmodified "beyond `PHASE_SCAN`"
+text (the claim that clause was "as corrected by this same ADR-0122" was itself wrong; it was
+never touched). ADR-0122 Decision 3's "beyond `Phase.TRANSFORM`" gate text was a transcription
+slip, annotated in place in `docs/DECISIONS.md`. `cli.unhoist_contract`'s pre-filter is deleted;
+`demote_to_floor` now runs unconditionally over every blast-set member, using its own `()` no-op
+return as the filter. Also fixed this same round (task-65 review): I1 (`docs/SPEC.md` §13 row 28
+now says the mechanism is implemented, citing the commit, rather than "pending task-65"), I2
+(`docs/INTEGRATION_HONESTY.md` D117's heading flipped to `FIXED, LANDED`), and I3 (`demote_to_floor`
+is now called with `observed=`, and a short-circuited member is reported in a new
+`unresolved_repo_ids` rather than silently dropped). Full account, including the minor citation
+and cross-reference fixes: `.superpowers/sdd/round-VI-criteria-closure/task-65-report.md`'s fix-
+round section.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
@@ -1995,7 +2037,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7601-7641`, moved by round VI task 58's `cli.py` insertions) always constructs
+  (`cli.py:7955-7993`, moved by round VI task 65's `cli.py` insertions) always constructs
   `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
@@ -2003,8 +2045,8 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   the post-fix state (the citation's line number is repointed for the drift check above; the
   narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:7711-7804`, moved by round VI
-  task 58's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
+  `C → P` edge from internal to external — `_unit_deps` (`cli.py:8065-8156`, moved by round VI
+  task 65's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
 
@@ -2036,7 +2078,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9336-9371`, moved by round VI task 58's
+blockers above**: `_eligible_build_units` (`cli.py:9690-9723`, moved by round VI task 65's
 `cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
