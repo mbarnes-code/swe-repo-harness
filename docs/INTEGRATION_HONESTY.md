@@ -9402,3 +9402,45 @@ Behavior preservation proven by an exhaustive equivalence check over both enums'
 (7 `Ecosystem` + 5 `ContractKind` members), independently re-derived by task-scoped review plus a
 genuine mutation test (emptying each table at runtime and confirming membership behavior actually
 changes). `tests/test_ecosystems.py` — 90/90 passing (was 87 pass / 3 fail).
+
+## D122 — OPEN. A contract's own PR record and its owning repo's own PR record cannot coexist —
+one silently overwrites the other via `findings`' own `ux_findings_ident` unique index.
+
+**Found by round VI task 71's controller-review fix round (2026-09-07), while disclosing why
+`execute_hoist_rollback` (`cli.py`, ADR-0122 Decisions 4/5) is currently unreachable via
+production data.** `PullRequestDraft.repo_id`'s own docstring: "For a contract PR this is the
+OWNING repo" — so a contract's migration PR and its owning repo's own migration PR would, if both
+were ever written, be persisted under the IDENTICAL `repo_id`. `_upsert_pr_record` (`cli.py`)
+computes its fingerprint as `_fingerprint(run_id, draft.repo_id, PR_RECORD_KIND)` — a pure function
+of `repo_id` and the finding kind, with no `contract_id` component — and writes via `INSERT ...
+ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) DO UPDATE SET payload = excluded...`,
+where the conflict target is exactly `findings`' own unique index, `ux_findings_ident` (`state/
+schema.sql:422`, `ON findings (run_id, IFNULL(repo_id, ''), kind, fingerprint)`). Two
+`PullRequestDraft` rows sharing one `repo_id` therefore share one fingerprint and one `findings`
+row: writing the second **overwrites** the first rather than coexisting beside it. `_pr_records`
+(`cli.py`) reads this same table keyed by `repo_id` into a `dict[str, PullRequestDraft]`, so even
+if both writes somehow landed in some order, only the LAST one written would ever be visible again.
+
+**Why this blocks task-72 (or any future task wiring contract PRs into `fleet pr`), not merely
+narrows it.** Confirmed, this same round: no production code path in `src/fleet/` today
+constructs a `PullRequestDraft` with `contract_id` set (`_emit_one_pr`'s `PrwriterInput` call never
+passes it, and `_PrCandidate` has no `contract_id` field at all) — so
+`cli._ordered_revert_shas`'s scan for `draft.contract_id == contract_id` always returns `None`
+today, and any call to `execute_hoist_rollback` with a non-empty ordered list raises
+`RollbackAnchorError` by design (there is no anchor to resume from). This is not merely "a future
+wiring task hasn't been written yet" — the FIRST attempt to wire contract-PR dispatch would hit
+this collision immediately, because the natural way to add it (give the contract's PR task
+`ctx.repo_id = <owning repo>`, matching the model's own documented field meaning, and let it
+`_write_pr_record` normally) silently clobbers whichever of the two PRs (the owner's own, or the
+contract's) is written second — a defect that would not surface as a crash, only as one PR
+record silently vanishing from `_pr_records`'s output the next time either PR is polled or
+referenced. Wiring contract PRs therefore needs a real persistence-schema decision first: a
+different key shape (e.g. keying a contract's PR record on `contract_id` instead of `repo_id`,
+or a compound key), or a separate table/column — not a pass-through of the existing
+`_upsert_pr_record`/`_pr_records` shape as-is.
+
+**Not yet built:** the fix, or even the design decision. Scoped here as a disclosed blocking gap
+for whoever briefs the contract-PR-dispatch task (named but not itself designed by ADR-0122's own
+"Consequences" paragraph) — allocating D122 rather than silently leaving this implicit, per
+CLAUDE.md's Central Number Allocation rule and Guardrail 6 ("state exactly what you ran, including
+what you excluded").

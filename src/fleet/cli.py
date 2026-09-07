@@ -4348,6 +4348,18 @@ async def _ordered_revert_shas(
     all (a gap for whichever future task wires contract PR dispatch, not this one). This function's
     scan is correct against the model's own declared contract regardless of whether anything
     populates it yet; see this task's report for the full citation trail.
+
+    **Fix round (controller review, C1): the owning repo is deduplicated against the contract's
+    own draft, not appended a second time.** The FIRST landing of this function appended the
+    contract's own draft (found by the scan above) AND `records.get(repo_id)` for every
+    `blast_set` member unconditionally — but Decision 2's own blast-set query always includes the
+    owning repo (its `CONTRACT_IMPL` edge is exactly what the query selects on), and the owning
+    repo's PR record IS the contract's own draft (same row, same `repo_id`). Counting it twice
+    produced two `OrderedRevertEntry` rows for the IDENTICAL merge sha, and the real pass then
+    tried to revert that sha a second time after the first had already landed — a real,
+    end-to-end-reproduced defect (a partial series committed, `REVERT_HEAD` left set on the shared
+    checkout), not merely a theoretical one. See
+    `test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts_own_draft`.
     """
     records = await _pr_records(read_conn, run_id)
     candidates: list[tuple[str | None, PullRequestDraft]] = []
@@ -4356,7 +4368,18 @@ async def _ordered_revert_shas(
     )
     if contract_draft is not None:
         candidates.append((None, contract_draft))
+    # Fix round (controller review C1): the contract's OWNING repo is structurally always a
+    # blast-set member -- Decision 2's own query selects on `CONTRACT_IMPL`/`CONTRACT_CONSUME`
+    # edges, and the owner necessarily holds a `CONTRACT_IMPL` edge to its own hoisted contract.
+    # `PullRequestDraft.repo_id` for the contract's draft IS that owning repo (its own docstring),
+    # so `records.get(owner_repo_id)` would return the EXACT SAME row as `contract_draft` above --
+    # counting it a second time would revert the identical merge sha twice. Skip it here rather
+    # than dedup after the fact, since there is only ever one row per `repo_id` (findings' own
+    # unique constraint; see D122) and comparing `repo_id` is therefore sufficient and exact.
+    owner_repo_id = contract_draft.repo_id if contract_draft is not None else None
     for repo_id in blast_set:
+        if repo_id == owner_repo_id:
+            continue
         draft = records.get(repo_id)
         if draft is not None:
             candidates.append((repo_id, draft))
@@ -4446,11 +4469,15 @@ async def execute_hoist_rollback(
     computed BEFORE any git mutation this call might make, which is what makes this function safe
     to call twice with no separate "fleet resume re-entry point" needed elsewhere, mirroring
     `apply_and_commit`'s own `guard()`-based idempotency; (c) dry-check the not-yet-reverted
-    remainder as a WHOLE series in a disposable worktree; (d) re-read the REAL `integration` tip
-    immediately before the real pass — a CAS-style check in spirit, mirroring
+    remainder as a WHOLE series in a disposable worktree; (d) acquire `IntegrationMutex`, THEN
+    re-read the REAL `integration` tip immediately before the real pass begins — fix round
+    (controller review C2): this re-read must happen INSIDE the mutex, not before acquiring it,
+    because the only writer that could move the tip between the dry-check and the real pass is a
+    process HOLDING this same mutex; reading it outside first and acquiring the mutex second
+    leaves that exact window open a second time. A CAS-style check in spirit, mirroring
     `push_force_with_lease`'s own pattern (this function does not call that method itself, since
-    this is a revert against a local branch, not a push); (e) commit the real pass under
-    `IntegrationMutex`, same order, stamping every commit with the Decision 5 trailer.
+    this is a revert against a local branch, not a push); (e) commit the real pass, same order,
+    stamping every commit with the Decision 5 trailer, still inside the same mutex acquisition.
 
     A genuine dry-check conflict is a settled `REFUSED_CONFLICT` — the real branch is never
     touched. A tip that moved between the dry-check and the real pass is a settled `RACE_ABORTED`
@@ -4481,7 +4508,10 @@ async def execute_hoist_rollback(
             "assumes this), so there is no safe anchor for Decision 5's resume query"
         )
 
-    monorepo, monorepo_path, lock_dir = await _monorepo_checkout(settings)
+    # `monorepo_path` (the second tuple element) is unused here: `_reap_worktree_manager` below
+    # derives its own `repo_dir` identically from `settings` (M6 fix round), so this function no
+    # longer needs its own copy.
+    monorepo, _monorepo_path, lock_dir = await _monorepo_checkout(settings)
     branch = settings.config.run.monorepo_branch
 
     already_reverted = await contract_rollback_shas_in_range(
@@ -4499,11 +4529,12 @@ async def execute_hoist_rollback(
         )
 
     tip = await monorepo.rev_parse(branch)
-    worktree_manager = WorktreeManager(
-        repo_dir=monorepo_path,
-        work_dir=(settings.root / settings.config.run.work_dir).resolve(),
-        run_id=run_id,
-    )
+    # Fix round (controller review M6): routed through the existing `_reap_worktree_manager`
+    # seam rather than a second, ad hoc `WorktreeManager(...)` construction site -- that
+    # function's own docstring calls itself "the one construction site" precisely so a test can
+    # drive every worktree-management call through one place; a second bespoke construction here
+    # would have made that docstring false and reinvented an identical seam for no reason.
+    worktree_manager = _reap_worktree_manager(settings, run_id)
     # `repo=f"unhoist-{contract_id}", attempt=0`: `sandbox_name` slugs both, so this cannot
     # collide with a real per-repo Phase 3/4 worktree unless a real `repo_id` itself begins with
     # the literal string "unhoist-" — no worse a collision surface than `sandbox_name`'s own
@@ -4530,23 +4561,38 @@ async def execute_hoist_rollback(
             newly_reverted_shas=(),
         )
 
-    fresh_tip = await monorepo.rev_parse(branch)
-    if fresh_tip != tip:
-        return HoistRollbackOutcome(
-            decision="RACE_ABORTED",
-            contract_id=contract_id,
-            ordered_shas=ordered_shas,
-            already_reverted_shas=already,
-            newly_reverted_shas=(),
-        )
-
     newly: list[str] = []
     async with IntegrationMutex(lock_dir, run_id):
+        # ADR-0122 Decision 4 point 3's CAS-style check -- fix round (controller review C2): this
+        # MUST run INSIDE the mutex, immediately before the real pass begins, not before acquiring
+        # it. The only writer that could move the tip between the dry-check and this point is a
+        # process HOLDING this same mutex; re-reading the tip BEFORE acquiring it (the first
+        # landing's mistake) leaves exactly that window open, since the tip can move again in the
+        # gap between the outside read and this call's own acquisition. Reading it the instant
+        # the mutex is held closes the window structurally rather than narrowing it.
+        fresh_tip = await monorepo.rev_parse(branch)
+        if fresh_tip != tip:
+            return HoistRollbackOutcome(
+                decision="RACE_ABORTED",
+                contract_id=contract_id,
+                ordered_shas=ordered_shas,
+                already_reverted_shas=already,
+                newly_reverted_shas=(),
+            )
         for sha in remaining:
             outcome = await revert_and_commit(
                 monorepo,
                 sha=sha,
                 subject=f"fleet: hoist rollback for {contract_id} (revert {sha[:12]})",
+                # `repo_id`/`task_id`/`phase`/`attempt` below are deliberate stand-ins, not the
+                # per-repo-task values those fields normally carry elsewhere (`Fleet-Task-Id` is
+                # usually a task UUID, `Fleet-Repo-Id` a `RepoId`) -- a hoist rollback is a
+                # per-CONTRACT event with no owning task/repo/phase of its own to stamp. The
+                # SIX-trailer shape is kept for uniformity with every other harness commit (M7,
+                # controller review); the field this rollback is actually keyed and resumed on is
+                # `contract_rollback_id` (Decision 5), not any of these six. No collision with a
+                # real per-repo commit is reachable: `contract_id` values and `RepoId`s are drawn
+                # from disjoint namespaces (`contracts.contract_id` vs. `repos.repo_id`).
                 trailers=FleetTrailers(
                     run_id=run_id,
                     repo_id=contract_id,
@@ -4560,6 +4606,13 @@ async def execute_hoist_rollback(
                 body=f"This reverts commit {sha}.",
             )
             if outcome.conflicted:
+                # Rule 11 (fail loud), but `Git.revert`'s own docstring is explicit that the
+                # caller MUST call `abort_revert()` before doing anything else with this repo --
+                # fix round (controller review I3): the first landing raised without doing so,
+                # leaving the shared monorepo mid-revert (`REVERT_HEAD` set, a dirty index) for
+                # the next writer to inherit. This mirrors the dry-check's own conflict handling
+                # above, which already did this correctly.
+                await monorepo.abort_revert()
                 raise HoistRollbackConflictError(
                     f"hoist rollback for {contract_id!r}: the REAL pass conflicted reverting "
                     f"{sha} despite a clean dry-check moments earlier on the same tip {tip} -- "

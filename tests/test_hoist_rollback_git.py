@@ -21,6 +21,7 @@ from pathlib import Path
 
 import pytest
 
+import fleet.cli as cli
 from fleet.cli import (
     PR_RECORD_KIND,
     HoistRollbackConflictError,
@@ -38,6 +39,7 @@ from fleet.settings import FleetSettings
 from fleet.state.db import connect_ro, initialize_database
 from fleet.util.proc import run
 from fleet.vcs.commits import FleetTrailers, revert_and_commit
+from fleet.vcs.filter_repo import IntegrationMutex
 from fleet.vcs.forge import PrStatus
 from fleet.vcs.git import Git
 
@@ -714,3 +716,233 @@ def test_hoist_rollback_conflict_error_is_a_git_error() -> None:
     from fleet.vcs.git import GitError
 
     assert issubclass(HoistRollbackConflictError, GitError)
+
+
+# --------------------------------------------------------------------------------------
+# Fix round (controller review, opus-tier task-scoped review of commit a8403d7):
+#
+# C1 -- `_ordered_revert_shas` must dedupe the owning repo's blast-set entry against the
+# contract's own draft (the SAME persisted row): Decision 2's own query always makes the owner a
+# blast-set member (its `CONTRACT_IMPL` edge is exactly what the query selects on), and every
+# EXISTING fixture used a separate owner vs. blast-set repo -- exactly the "two anchors that
+# coincide" hazard CLAUDE.md warns about, which is why nothing above caught it.
+# C2 -- the CAS-style tip re-check must run INSIDE `IntegrationMutex`, not before acquiring it.
+# I3 -- a real-pass conflict must `abort_revert()` before `HoistRollbackConflictError` raises.
+# --------------------------------------------------------------------------------------
+async def test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts_own_draft(
+    db_path: Path,
+) -> None:
+    """C1: a `blast_set` containing the OWNING repo (Decision 2's own query always produces this)
+    must not yield two `OrderedRevertEntry` rows for the identical merge sha -- the owner's PR
+    record and the contract's own draft are the SAME row (`PullRequestDraft.repo_id` is the
+    OWNING repo for a contract PR)."""
+    _seed_run(db_path)
+    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
+              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
+
+    forge = FakeForge({
+        "https://forge.invalid/owner/pull/1": _status("c" * 40, T0),
+        "https://forge.invalid/a/pull/1": _status("a" * 40, T0 + timedelta(hours=1)),
+    })
+
+    read_conn = await connect_ro(db_path)
+    try:
+        # The OWNING repo IS in the blast set -- this is the fixture shape the review named as
+        # missing from every prior test (all of which used a separate owner vs. blast member).
+        entries = await _ordered_revert_shas(
+            read_conn, RUN_ID, forge, contract_id=CONTRACT_ID, blast_set=(OWNER_REPO, "blast-a")
+        )
+    finally:
+        await read_conn.close()
+
+    assert len(entries) == 2, f"expected exactly 2 deduplicated entries, got {entries!r}"
+    assert [entry.merge_sha for entry in entries].count("c" * 40) == 1, (
+        "the owner/contract merge sha must appear exactly once"
+    )
+    assert entries == (
+        OrderedRevertEntry(
+            repo_id="blast-a", merge_sha="a" * 40, merged_at=T0 + timedelta(hours=1)
+        ),
+        OrderedRevertEntry(repo_id=None, merge_sha="c" * 40, merged_at=T0),
+    )
+
+
+async def test_execute_hoist_rollback_dedupes_owner_in_blast_set_and_commits_cleanly(
+    tmp_path: Path, db_path: Path
+) -> None:
+    """C1, end to end with real git: before the fix, this exact fixture landed the first revert
+    commit for real and then died on an uncaught conflict re-reverting the SAME sha a second
+    time, leaving a PARTIAL series committed and `REVERT_HEAD` set on the shared checkout. After
+    the fix, exactly 2 commits land (not 3) and the repo ends up clean."""
+    monorepo = await _init_monorepo(tmp_path)
+    merge_contract = await _merge_feature(
+        monorepo, file_name="contract.txt", text="hoisted\n", subject="merge contract hoist",
+        feature_branch="feat-contract",
+    )
+    merge_a = await _merge_feature(
+        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        feature_branch="feat-a",
+    )
+    git = Git(monorepo, timeout_s=60)
+
+    _seed_run(db_path)
+    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
+              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
+
+    forge = FakeForge({
+        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+    })
+
+    read_conn = await connect_ro(db_path)
+    try:
+        settings = _settings(tmp_path)
+        outcome = await execute_hoist_rollback(
+            read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
+            blast_set=(OWNER_REPO, "blast-a"), forge=forge,
+        )
+    finally:
+        await read_conn.close()
+
+    assert outcome.decision == "COMMITTED"
+    assert outcome.ordered_shas == (merge_a, merge_contract), "deduplicated: 2 entries, not 3"
+    assert outcome.newly_reverted_shas == (merge_a, merge_contract)
+    assert not (monorepo / "contract.txt").exists()
+    assert not (monorepo / "a.txt").exists()
+    assert await git.resolve("REVERT_HEAD") is None
+    assert await git.is_dirty() is False
+
+
+async def test_execute_hoist_rollback_detects_a_tip_moved_race_while_holding_the_mutex(
+    tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C2: the pre-fix-round race test (`..._detects_a_tip_moved_race_and_aborts` above) injects
+    its concurrent commit via a `WorktreeManager.remove` monkeypatch -- a hook point OUTSIDE
+    `IntegrationMutex`, which is exactly where the FIRST landing's bug put its own (wrong) CAS
+    check. This test injects the commit at the window C2 actually names: the instant THIS call
+    itself acquires the mutex, modelling a sibling writer that held it immediately before and
+    committed while holding it. The fixed CAS re-check (now inside the `async with` block, read
+    immediately after acquiring) must still catch this."""
+    monorepo = await _init_monorepo(tmp_path)
+    merge_contract = await _merge_feature(
+        monorepo, file_name="contract.txt", text="hoisted\n", subject="merge contract hoist",
+        feature_branch="feat-contract",
+    )
+    merge_a = await _merge_feature(
+        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        feature_branch="feat-a",
+    )
+    git = Git(monorepo, timeout_s=60)
+    tip_before_race = await git.rev_parse("integration")
+
+    _seed_run(db_path)
+    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
+              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
+
+    forge = FakeForge({
+        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+    })
+
+    real_acquire = IntegrationMutex.acquire
+    moved = {"done": False}
+
+    async def _acquire_and_advance_tip(self: IntegrationMutex) -> None:
+        await real_acquire(self)
+        if not moved["done"]:
+            moved["done"] = True
+            await _write_and_commit(
+                monorepo, "concurrent2.txt", "x\n", "landed while holding the mutex"
+            )
+
+    monkeypatch.setattr(IntegrationMutex, "acquire", _acquire_and_advance_tip)
+
+    read_conn = await connect_ro(db_path)
+    try:
+        settings = _settings(tmp_path)
+        outcome = await execute_hoist_rollback(
+            read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
+            blast_set=("blast-a",), forge=forge,
+        )
+    finally:
+        await read_conn.close()
+
+    assert outcome.decision == "RACE_ABORTED"
+    assert outcome.newly_reverted_shas == ()
+    assert outcome.already_reverted_shas == ()
+
+    tip_after = await git.rev_parse("integration")
+    assert tip_after != tip_before_race, "the concurrent commit really did move the tip"
+    assert (monorepo / "contract.txt").exists() and (monorepo / "a.txt").exists(), (
+        "nothing from the rollback itself landed"
+    )
+    assert await git.resolve("REVERT_HEAD") is None
+
+
+async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real_pass_conflict(
+    tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """I3: `Git.revert`'s own docstring requires the caller to call `abort_revert()` before doing
+    anything else with the repo on a conflict -- the dry-check path already did this correctly;
+    the real-pass Rule-11 raise path did not (an asymmetry, not a stated policy). Drives a
+    GENUINE real-pass conflict (not just the dry-check's) via a synthetic fault: a monkeypatched
+    `revert_and_commit` commits a conflicting change to the real monorepo as a side effect of its
+    FIRST call -- modelling content diverging inside the mutex-protected critical section itself,
+    the literal should-never-happen race ADR-0122 Decision 4 point 4 names -- so the SECOND, REAL
+    call to `revert_and_commit` genuinely conflicts. Asserts the raise happens AND the repo is
+    left clean afterward (no `REVERT_HEAD`, no dirty index), proving the abort actually ran."""
+    monorepo = await _init_monorepo(tmp_path)
+    merge_contract = await _merge_feature(
+        monorepo, file_name="shared.txt", text="hoisted\n", subject="merge contract hoist",
+        feature_branch="feat-contract",
+    )
+    merge_a = await _merge_feature(
+        monorepo, file_name="a.txt", text="consumer a\n", subject="merge blast-a",
+        feature_branch="feat-a",
+    )
+    git = Git(monorepo, timeout_s=60)
+
+    _seed_run(db_path)
+    _seed_pr(db_path, repo_id=OWNER_REPO, url="https://forge.invalid/owner/pull/1",
+              state=PrState.MERGED, contract_id=CONTRACT_ID)
+    _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
+
+    forge = FakeForge({
+        "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
+        "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+    })
+
+    real_revert_and_commit = revert_and_commit
+    calls = {"n": 0}
+
+    async def _inject_conflict_then_call(git_: Git, **kwargs: object) -> object:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            # blast-a's revert (this first call) touches only a.txt; injecting a conflicting
+            # edit to shared.txt here has no effect on IT, but sets up the SECOND call (the
+            # contract's own hoist, which touches shared.txt) to genuinely conflict.
+            await _write_and_commit(
+                monorepo, "shared.txt", "hoisted\nconflicting-edit\n",
+                "injected mid-series conflict",
+            )
+        return await real_revert_and_commit(git_, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "revert_and_commit", _inject_conflict_then_call)
+
+    read_conn = await connect_ro(db_path)
+    try:
+        settings = _settings(tmp_path)
+        with pytest.raises(HoistRollbackConflictError):
+            await execute_hoist_rollback(
+                read_conn, settings, run_id=RUN_ID, contract_id=CONTRACT_ID,
+                blast_set=("blast-a",), forge=forge,
+            )
+    finally:
+        await read_conn.close()
+
+    assert calls["n"] == 2, "the conflict must be reached on the SECOND (real) revert call"
+    assert await git.resolve("REVERT_HEAD") is None, "abort_revert() must have run before the raise"
+    assert await git.is_dirty() is False
