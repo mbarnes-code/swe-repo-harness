@@ -572,17 +572,22 @@ async def test_abort_rebase_with_nothing_in_progress_raises(git: Git) -> None:
 # §3.2 step 6). Standalone: nothing wires this into the cycle-breaking machinery yet (Legs C/D).
 # --------------------------------------------------------------------------------------
 async def _merge_feature_branch(git_: Git, *, branch: str, file_name: str, feature_text: str,
-                                 subject: str = "merge feature") -> str:
+                                 subject: str = "merge feature",
+                                 feature_branch: str = "hoist-feature") -> str:
     """Build the `-m 1` shape: a real merge commit with two parents, on `branch`.
 
     `branch`'s own tip becomes parent 1 (mainline) and the new feature branch's tip becomes
     parent 2 — exactly the shape SPEC's rollback reverts ("a hoist … merged … `git revert -m 1`",
     where the integration branch is always parent 1). Returns the merge commit's SHA.
+
+    `feature_branch` defaults to the original hardcoded name so every existing caller is
+    unaffected; a caller building MULTIPLE merges in one test (a real revert-series fixture) must
+    pass a distinct name each time, since `git checkout -b` on a name already used raises.
     """
-    await git_.exec(["checkout", "-b", "hoist-feature"])
+    await git_.exec(["checkout", "-b", feature_branch])
     await _write_and_commit(git_.path, file_name, feature_text, "feature commit")
     await git_.exec(["checkout", branch])
-    await git_.exec(["merge", "--no-ff", "-m", subject, "hoist-feature"])
+    await git_.exec(["merge", "--no-ff", "-m", subject, feature_branch])
     return await git_.rev_parse(branch)
 
 
@@ -738,6 +743,103 @@ async def test_revert_and_commit_on_a_conflict_makes_no_commit_and_leaves_it_for
     await git.abort_revert()
     assert await git.rev_parse(BRANCH) == branch_tip
     assert await git.is_dirty() is False
+
+
+# --------------------------------------------------------------------------------------
+# ADR-0122 Decision 5 (round VI task 71): the `Fleet-Contract-Rollback-Id` trailer and its
+# resume/idempotency query, `contract_rollback_shas_in_range`.
+# --------------------------------------------------------------------------------------
+def test_fleet_trailers_as_mapping_has_exactly_six_keys_when_contract_rollback_id_is_unset() -> (
+    None
+):
+    """Old-passes half of Rule 12's mutation proof: every existing call site constructs
+    `FleetTrailers` without the new seventh field, and `as_mapping()` must still produce EXACTLY
+    the original six-key mapping for them — the new field must not leak in as e.g. a `None`-valued
+    entry."""
+    mapping = trailers_for("0" * 64).as_mapping()
+    assert set(mapping) == {
+        C.RUN_ID_TRAILER, C.REPO_ID_TRAILER, C.PHASE_TRAILER,
+        C.TASK_ID_TRAILER, C.ATTEMPT_TRAILER, C.PATCH_ID_TRAILER,
+    }
+    assert C.CONTRACT_ROLLBACK_ID_TRAILER not in mapping
+
+
+def test_fleet_trailers_as_mapping_includes_seventh_key_when_contract_rollback_id_is_set() -> None:
+    """New-fails-without-the-change half of the same proof (Rule 12): setting
+    `contract_rollback_id` must add EXACTLY one new key, with the exact value, on top of the same
+    six. This is the discriminator — reverting this task's `as_mapping()` change makes this test
+    fail (`Fleet-Contract-Rollback-Id` never appears) while the test above keeps passing, verified
+    with a real reverted-diff mutation (this task's report)."""
+    trailers = C.FleetTrailers(
+        run_id=RUN_ID, repo_id=REPO_ID, phase=2,
+        task_id="11111111-1111-4111-8111-111111111111", attempt=1, patch_id="0" * 64,
+        contract_rollback_id="proto:demo",
+    )
+    mapping = trailers.as_mapping()
+    assert mapping[C.CONTRACT_ROLLBACK_ID_TRAILER] == "proto:demo"
+    without_seventh = dict(mapping)
+    del without_seventh[C.CONTRACT_ROLLBACK_ID_TRAILER]
+    assert without_seventh == trailers_for("0" * 64).as_mapping()
+
+
+async def test_contract_rollback_shas_in_range_round_trips_a_real_revert_series(
+    git: Git,
+) -> None:
+    """The full Decision 5 primitive, against real commits: two merges, both reverted with the
+    SAME `Fleet-Contract-Rollback-Id` trailer value — proving the function does not just check the
+    trailer (which cannot by itself distinguish which original sha a given revert commit reverts)
+    but reads each matching commit's BODY for "This reverts commit <sha>." to recover the mapping.
+    A third, unrelated revert carrying a DIFFERENT contract id must be excluded."""
+    anchor = await C.record_task_anchor(git, BRANCH)
+    merge_1 = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="one.txt", feature_text="hoist one\n",
+        subject="merge one", feature_branch="feature-one",
+    )
+    merge_2 = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="two.txt", feature_text="hoist two\n",
+        subject="merge two", feature_branch="feature-two",
+    )
+    merge_3 = await _merge_feature_branch(
+        git, branch=BRANCH, file_name="three.txt", feature_text="unrelated\n",
+        subject="merge three", feature_branch="feature-three",
+    )
+
+    async def _revert(sha: str, *, contract_id: str, task_suffix: str) -> None:
+        outcome = await C.revert_and_commit(
+            git,
+            sha=sha,
+            subject=f"fleet: revert {sha[:8]}",
+            trailers=C.FleetTrailers(
+                run_id=RUN_ID, repo_id=REPO_ID, phase=3,
+                task_id=f"22222222-2222-4222-8222-2222222222{task_suffix}",
+                attempt=1, patch_id=sha, contract_rollback_id=contract_id,
+            ),
+            mainline=1,
+            body=f"This reverts commit {sha}.",
+        )
+        assert outcome.conflicted is False
+
+    # Reverse-chronological order, exactly ADR-0122 Decision 4's ordering rule (most recently
+    # merged reverted first): merge_2 then merge_1, both stamped for "proto:demo".
+    await _revert(merge_2, contract_id="proto:demo", task_suffix="02")
+    await _revert(merge_1, contract_id="proto:demo", task_suffix="01")
+    # An unrelated rollback for a DIFFERENT contract, sharing nothing but the mechanism.
+    await _revert(merge_3, contract_id="proto:other", task_suffix="03")
+
+    reverted = await C.contract_rollback_shas_in_range(
+        git, pre_commit_sha=anchor, branch=BRANCH, contract_id="proto:demo"
+    )
+    assert reverted == frozenset({merge_1, merge_2})
+
+    reverted_other = await C.contract_rollback_shas_in_range(
+        git, pre_commit_sha=anchor, branch=BRANCH, contract_id="proto:other"
+    )
+    assert reverted_other == frozenset({merge_3})
+
+    reverted_unknown = await C.contract_rollback_shas_in_range(
+        git, pre_commit_sha=anchor, branch=BRANCH, contract_id="proto:no-such-contract"
+    )
+    assert reverted_unknown == frozenset()
 
 
 async def test_push_force_with_lease_with_the_correct_expected_sha_succeeds(

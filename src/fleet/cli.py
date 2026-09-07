@@ -272,7 +272,14 @@ from fleet.util.hashing import sha256_text
 from fleet.util.proc import CommandRunner
 from fleet.util.proc import run as proc_run
 from fleet.vcs import build_forge
-from fleet.vcs.commits import discard_task, find_task_commit
+from fleet.vcs.commits import (
+    FleetTrailers,
+    RollbackAnchorError,
+    contract_rollback_shas_in_range,
+    discard_task,
+    find_task_commit,
+    revert_and_commit,
+)
 from fleet.vcs.filter_repo import (
     FilterRepoUnavailableError,
     IngestError,
@@ -4280,6 +4287,345 @@ async def unhoist_contract(
         blast_set=fresh_blast_set,
         demoted_repo_ids=tuple(sorted(demoted_repo_ids)),
         unresolved_repo_ids=tuple(sorted(unresolved_repo_ids)),
+    )
+
+
+# --------------------------------------------------------------------------------------
+# §12.31/D111 Leg D slice 2 (round VI task 71, ADR-0122 Decisions 4/5): the git-mechanics
+# revert-series execution that runs AFTER `unhoist_contract` (slice 1, above) consumes its
+# `APPLIED` output. `unhoist_contract` itself does no git, by its own docstring; this is that git.
+# A standalone, unit-tested primitive with zero call sites outside its own tests, exactly the
+# shape task-59 (Leg B, `vcs.commits.revert_and_commit`) and task-65 (slice 1) both shipped in —
+# production wiring is a separate future task per ADR-0122's own "Consequences" paragraph.
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class OrderedRevertEntry:
+    """One already-`MERGED` entry in a hoist rollback's revert series (ADR-0122 Decision 4 point
+    1). `repo_id` is `None` for the contract's own migration PR — distinguishing it from a
+    blast-set member's PR, which is what `execute_hoist_rollback` needs to find the contract's own
+    merge sha to anchor Decision 5's resume query on (research-40's recommendation, task-71
+    brief)."""
+
+    repo_id: str | None
+    merge_sha: str
+    merged_at: datetime
+
+
+async def _ordered_revert_shas(
+    read_conn: aiosqlite.Connection,
+    run_id: str,
+    forge: Forge,
+    *,
+    contract_id: str,
+    blast_set: Sequence[str],
+) -> tuple[OrderedRevertEntry, ...]:
+    """ADR-0122 Decision 4 point 1: the contract's own merge sha, plus every already-`MERGED`
+    blast-set member's merge sha, ordered reverse-chronologically by `PrStatus.merged_at` (most
+    recently merged reverted first — this is what avoids gratuitous revert conflicts between the
+    reverts themselves). A blast-set member whose PR is not yet `MERGED` contributes nothing (there
+    is nothing to revert for it).
+
+    **Measured, this round (research-40): no `merge_commit_sha` for a MERGED PR is durably
+    persisted anywhere in this codebase** — `PullRequestDraft` (`models/tasks.py`) has no such
+    field; `_stub_reconcile_impl`'s PR-poll loop writes `merge_commit_sha` only into a `pr_merged`
+    **event**, and nothing in `src/` reads events by kind (write-only telemetry). So every entry's
+    sha and merge timestamp are resolved FRESH via `Forge.view()`, mirroring
+    `push_force_with_lease`'s own documented pattern ("D94's eventual caller always reads a real
+    tip back from `Forge.view()` first").
+
+    **The contract's own PR record is NOT reachable via `records.get(contract_id)` — confirmed
+    directly, not assumed.** `PullRequestDraft.repo_id`'s own docstring: "For a contract PR this is
+    the OWNING repo, so the PR stays attributable to a code-owner without a contract needing a
+    `phases` row" — `contract_id` is a SEPARATE, optional field on that SAME draft (ADR-0019).
+    `_pr_records`'s dict is keyed by `repo_id` throughout this codebase (e.g. `_render_pr_body`'s
+    own `records[dep]` lookups, keyed by dependency repo ids). So the contract's own draft is found
+    by scanning every record for `draft.contract_id == contract_id`, never by a keyed lookup on
+    `contract_id` itself. **Also measured, this round: nothing in `src/fleet/` currently
+    constructs a `PullRequestDraft` with `contract_id` set** — `_emit_one_pr`'s `PrwriterInput`
+    call never passes it, so contract PRs are not yet wired into `fleet pr`'s production path at
+    all (a gap for whichever future task wires contract PR dispatch, not this one). This function's
+    scan is correct against the model's own declared contract regardless of whether anything
+    populates it yet; see this task's report for the full citation trail.
+
+    **Fix round (controller review, C1): the owning repo is deduplicated against the contract's
+    own draft, not appended a second time.** The FIRST landing of this function appended the
+    contract's own draft (found by the scan above) AND `records.get(repo_id)` for every
+    `blast_set` member unconditionally — but Decision 2's own blast-set query always includes the
+    owning repo (its `CONTRACT_IMPL` edge is exactly what the query selects on), and the owning
+    repo's PR record IS the contract's own draft (same row, same `repo_id`). Counting it twice
+    produced two `OrderedRevertEntry` rows for the IDENTICAL merge sha, and the real pass then
+    tried to revert that sha a second time after the first had already landed — a real,
+    end-to-end-reproduced defect (a partial series committed, `REVERT_HEAD` left set on the shared
+    checkout), not merely a theoretical one. See
+    `test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts_own_draft`.
+    """
+    records = await _pr_records(read_conn, run_id)
+    candidates: list[tuple[str | None, PullRequestDraft]] = []
+    contract_draft = next(
+        (draft for draft in records.values() if draft.contract_id == contract_id), None
+    )
+    if contract_draft is not None:
+        candidates.append((None, contract_draft))
+    # Fix round (controller review C1): the contract's OWNING repo is structurally always a
+    # blast-set member -- Decision 2's own query selects on `CONTRACT_IMPL`/`CONTRACT_CONSUME`
+    # edges, and the owner necessarily holds a `CONTRACT_IMPL` edge to its own hoisted contract.
+    # `PullRequestDraft.repo_id` for the contract's draft IS that owning repo (its own docstring),
+    # so `records.get(owner_repo_id)` would return the EXACT SAME row as `contract_draft` above --
+    # counting it a second time would revert the identical merge sha twice. Skip it here rather
+    # than dedup after the fact, since there is only ever one row per `repo_id` (findings' own
+    # unique constraint; see D122) and comparing `repo_id` is therefore sufficient and exact.
+    owner_repo_id = contract_draft.repo_id if contract_draft is not None else None
+    for repo_id in blast_set:
+        if repo_id == owner_repo_id:
+            continue
+        draft = records.get(repo_id)
+        if draft is not None:
+            candidates.append((repo_id, draft))
+
+    entries: list[OrderedRevertEntry] = []
+    for entry_repo_id, draft in candidates:
+        if draft.state is not PrState.MERGED or draft.url is None:
+            # `url` is `str | None` on the model (unset before a PR is actually opened) — a
+            # `MERGED` draft with no URL cannot happen in practice (the forge can't merge a PR
+            # this harness never opened), but this function does not assume that; it skips
+            # exactly as an unmerged blast-set member is skipped, rather than guess or crash.
+            continue
+        status = await forge.view(draft.url)
+        if not status.is_merged or status.merge_commit_sha is None or status.merged_at is None:
+            # The harness believed this PR MERGED, but the forge's live answer disagrees or lacks
+            # a sha/timestamp this function needs in order to place and revert it — skip it
+            # exactly as an unmerged blast-set member is skipped, rather than guess (symmetric
+            # with the "nothing to revert for it" rule above).
+            continue
+        entries.append(
+            OrderedRevertEntry(
+                repo_id=entry_repo_id, merge_sha=status.merge_commit_sha, merged_at=status.merged_at
+            )
+        )
+
+    return tuple(
+        sorted(entries, key=lambda entry: (entry.merged_at, entry.merge_sha), reverse=True)
+    )
+
+
+class HoistRollbackConflictError(GitError):
+    """ADR-0122 Decision 4 point 4's should-never-happen race: the REAL pass conflicted reverting
+    a sha that staged cleanly moments earlier, on the SAME tip, in the disposable dry-check
+    worktree. Rule 11 (fail loud) — unlike a dry-check conflict or a moved tip (both settled,
+    expected "no"s a caller may retry), this means the dry-check's own guarantee (a clean series
+    applies cleanly against the tip it was checked at) did not hold between the check and the real
+    pass despite the CAS-style tip re-read finding no movement — a genuine race this codebase has
+    no other explanation for, not an outcome to swallow into a settled value."""
+
+
+@dataclass(frozen=True, slots=True)
+class HoistRollbackOutcome:
+    """`execute_hoist_rollback`'s result (ADR-0122 Decisions 4/5). Never a bare bool (CLAUDE.md's
+    D44 precedent): a caller needs to distinguish a settled refusal from a settled "retry me" from
+    "done", and on the done branch, which shas were newly committed THIS call versus already
+    landed from an earlier, crashed attempt.
+
+    `ordered_shas` is the full computed series. `already_reverted_shas` and `newly_reverted_shas`
+    are both subsets of it; on `REFUSED_CONFLICT`/`RACE_ABORTED` the real branch was not touched
+    this call at all, so `newly_reverted_shas` is always empty there — the two decisions differ
+    only in WHY nothing was committed.
+    """
+
+    decision: Literal["COMMITTED", "REFUSED_CONFLICT", "RACE_ABORTED"]
+    contract_id: str
+    ordered_shas: tuple[str, ...]
+    already_reverted_shas: tuple[str, ...]
+    newly_reverted_shas: tuple[str, ...]
+
+
+async def execute_hoist_rollback(
+    read_conn: aiosqlite.Connection,
+    settings: FleetSettings,
+    *,
+    run_id: str,
+    contract_id: str,
+    blast_set: Sequence[str],
+    forge: Forge,
+) -> HoistRollbackOutcome:
+    """ADR-0122 Decisions 4/5's top-level entry point: §12.31/D111 Leg D's git-mechanics slice.
+    Consumes `unhoist_contract`'s (slice 1's) `APPLIED` outcome as its caller's precondition — this
+    function itself never reads or writes `contracts.status`; `unhoist_contract` already wrote
+    `FAILED` and computed the blast set, and the caller passes both through unchanged.
+
+    `forge` is taken as an explicit parameter, deliberately NOT derived internally via `_forge
+    (settings)` the way `unhoist_contract`'s neighbours derive their own seams — CLAUDE.md
+    Guardrail 3 (dependency inversion: route a vendor SDK through a `Protocol`, never construct it
+    inside orchestration logic) applies most acutely to exactly this call, `Forge.view()`, since it
+    is the one real network/subprocess call this whole function makes. A caller in production
+    passes `_forge(settings)`; a test passes a two-line fake satisfying the `Forge` Protocol's
+    `view()` method, with no `gh`/`curl` JSON-scripting required to exercise this function's own
+    revert-series logic (that JSON-parsing surface is `GitHubCli`/`GiteaForge`'s own, already
+    covered by `tests/test_vcs.py`'s `gh`-availability section).
+
+    Pre-check, then commit (Decision 4): (a) compute the ordered revert list; (b) compute which of
+    those shas already have a landed revert commit (Decision 5's resume query) — crash recovery,
+    computed BEFORE any git mutation this call might make, which is what makes this function safe
+    to call twice with no separate "fleet resume re-entry point" needed elsewhere, mirroring
+    `apply_and_commit`'s own `guard()`-based idempotency; (c) dry-check the not-yet-reverted
+    remainder as a WHOLE series in a disposable worktree; (d) acquire `IntegrationMutex`, THEN
+    re-read the REAL `integration` tip immediately before the real pass begins — fix round
+    (controller review C2): this re-read must happen INSIDE the mutex, not before acquiring it,
+    because the only writer that could move the tip between the dry-check and the real pass is a
+    process HOLDING this same mutex; reading it outside first and acquiring the mutex second
+    leaves that exact window open a second time. A CAS-style check in spirit, mirroring
+    `push_force_with_lease`'s own pattern (this function does not call that method itself, since
+    this is a revert against a local branch, not a push); (e) commit the real pass, same order,
+    stamping every commit with the Decision 5 trailer, still inside the same mutex acquisition.
+
+    A genuine dry-check conflict is a settled `REFUSED_CONFLICT` — the real branch is never
+    touched. A tip that moved between the dry-check and the real pass is a settled `RACE_ABORTED`
+    — also untouched; bounded retry is the CALLER's job, not this function's (this function never
+    loops on either outcome). A conflict in the REAL pass despite a clean dry-check moments earlier
+    on the same tip is Decision 4 point 4's should-never-happen race and raises
+    `HoistRollbackConflictError` (Rule 11) rather than returning a settled value.
+    """
+    ordered = await _ordered_revert_shas(
+        read_conn, run_id, forge, contract_id=contract_id, blast_set=blast_set
+    )
+    ordered_shas = tuple(entry.merge_sha for entry in ordered)
+    if not ordered_shas:
+        return HoistRollbackOutcome(
+            decision="COMMITTED",
+            contract_id=contract_id,
+            ordered_shas=(),
+            already_reverted_shas=(),
+            newly_reverted_shas=(),
+        )
+
+    contract_entry = next((entry for entry in ordered if entry.repo_id is None), None)
+    if contract_entry is None:
+        raise RollbackAnchorError(
+            f"contract {contract_id!r}: no MERGED PR draft resolvable for the contract's own "
+            "hoist migration -- ADR-0122 Decision 4/5's precondition is that the contract's own "
+            "hoist is already merged (Leg C2/`unhoist_contract`'s own APPLIED outcome already "
+            "assumes this), so there is no safe anchor for Decision 5's resume query"
+        )
+
+    # `monorepo_path` (the second tuple element) is unused here: `_reap_worktree_manager` below
+    # derives its own `repo_dir` identically from `settings` (M6 fix round), so this function no
+    # longer needs its own copy.
+    monorepo, _monorepo_path, lock_dir = await _monorepo_checkout(settings)
+    branch = settings.config.run.monorepo_branch
+
+    already_reverted = await contract_rollback_shas_in_range(
+        monorepo, pre_commit_sha=contract_entry.merge_sha, branch=branch, contract_id=contract_id
+    )
+    already = tuple(sha for sha in ordered_shas if sha in already_reverted)
+    remaining = tuple(sha for sha in ordered_shas if sha not in already_reverted)
+    if not remaining:
+        return HoistRollbackOutcome(
+            decision="COMMITTED",
+            contract_id=contract_id,
+            ordered_shas=ordered_shas,
+            already_reverted_shas=already,
+            newly_reverted_shas=(),
+        )
+
+    tip = await monorepo.rev_parse(branch)
+    # Fix round (controller review M6): routed through the existing `_reap_worktree_manager`
+    # seam rather than a second, ad hoc `WorktreeManager(...)` construction site -- that
+    # function's own docstring calls itself "the one construction site" precisely so a test can
+    # drive every worktree-management call through one place; a second bespoke construction here
+    # would have made that docstring false and reinvented an identical seam for no reason.
+    worktree_manager = _reap_worktree_manager(settings, run_id)
+    # `repo=f"unhoist-{contract_id}", attempt=0`: `sandbox_name` slugs both, so this cannot
+    # collide with a real per-repo Phase 3/4 worktree unless a real `repo_id` itself begins with
+    # the literal string "unhoist-" — no worse a collision surface than `sandbox_name`'s own
+    # already-disclosed non-injectivity (`checkout_name`'s docstring).
+    dry_worktree = await worktree_manager.create(f"unhoist-{contract_id}", 0, tip)
+    dry_git = Git(dry_worktree.path)
+    clean = True
+    try:
+        for sha in remaining:
+            staged = await dry_git.revert(sha, mainline=1)
+            if not staged:
+                await dry_git.abort_revert()
+                clean = False
+                break
+    finally:
+        await worktree_manager.remove(dry_worktree)
+
+    if not clean:
+        return HoistRollbackOutcome(
+            decision="REFUSED_CONFLICT",
+            contract_id=contract_id,
+            ordered_shas=ordered_shas,
+            already_reverted_shas=already,
+            newly_reverted_shas=(),
+        )
+
+    newly: list[str] = []
+    async with IntegrationMutex(lock_dir, run_id):
+        # ADR-0122 Decision 4 point 3's CAS-style check -- fix round (controller review C2): this
+        # MUST run INSIDE the mutex, immediately before the real pass begins, not before acquiring
+        # it. The only writer that could move the tip between the dry-check and this point is a
+        # process HOLDING this same mutex; re-reading the tip BEFORE acquiring it (the first
+        # landing's mistake) leaves exactly that window open, since the tip can move again in the
+        # gap between the outside read and this call's own acquisition. Reading it the instant
+        # the mutex is held closes the window structurally rather than narrowing it.
+        fresh_tip = await monorepo.rev_parse(branch)
+        if fresh_tip != tip:
+            return HoistRollbackOutcome(
+                decision="RACE_ABORTED",
+                contract_id=contract_id,
+                ordered_shas=ordered_shas,
+                already_reverted_shas=already,
+                newly_reverted_shas=(),
+            )
+        for sha in remaining:
+            outcome = await revert_and_commit(
+                monorepo,
+                sha=sha,
+                subject=f"fleet: hoist rollback for {contract_id} (revert {sha[:12]})",
+                # `repo_id`/`task_id`/`phase`/`attempt` below are deliberate stand-ins, not the
+                # per-repo-task values those fields normally carry elsewhere (`Fleet-Task-Id` is
+                # usually a task UUID, `Fleet-Repo-Id` a `RepoId`) -- a hoist rollback is a
+                # per-CONTRACT event with no owning task/repo/phase of its own to stamp. The
+                # SIX-trailer shape is kept for uniformity with every other harness commit (M7,
+                # controller review); the field this rollback is actually keyed and resumed on is
+                # `contract_rollback_id` (Decision 5), not any of these six. No collision with a
+                # real per-repo commit is reachable: `contract_id` values and `RepoId`s are drawn
+                # from disjoint namespaces (`contracts.contract_id` vs. `repos.repo_id`).
+                trailers=FleetTrailers(
+                    run_id=run_id,
+                    repo_id=contract_id,
+                    phase=int(Phase.BUILD),
+                    task_id=contract_id,
+                    attempt=1,
+                    patch_id=sha256_text(sha),
+                    contract_rollback_id=contract_id,
+                ),
+                mainline=1,
+                body=f"This reverts commit {sha}.",
+            )
+            if outcome.conflicted:
+                # Rule 11 (fail loud), but `Git.revert`'s own docstring is explicit that the
+                # caller MUST call `abort_revert()` before doing anything else with this repo --
+                # fix round (controller review I3): the first landing raised without doing so,
+                # leaving the shared monorepo mid-revert (`REVERT_HEAD` set, a dirty index) for
+                # the next writer to inherit. This mirrors the dry-check's own conflict handling
+                # above, which already did this correctly.
+                await monorepo.abort_revert()
+                raise HoistRollbackConflictError(
+                    f"hoist rollback for {contract_id!r}: the REAL pass conflicted reverting "
+                    f"{sha} despite a clean dry-check moments earlier on the same tip {tip} -- "
+                    "ADR-0122 Decision 4 point 4's should-never-happen race"
+                )
+            newly.append(sha)
+
+    return HoistRollbackOutcome(
+        decision="COMMITTED",
+        contract_id=contract_id,
+        ordered_shas=ordered_shas,
+        already_reverted_shas=already,
+        newly_reverted_shas=tuple(newly),
     )
 
 
