@@ -843,6 +843,33 @@ shape, not because D50 is the fix for all three.
 actually create a `stubs` row instead of refusing exit 2) — not D50's scope. Do not open a
 separate effort for a "D50 closure" here; do not duplicate §37's own done bar.
 
+**Correction, 2026-09-07 (round VI task 69's own task-scoped review) — both claims above are now
+known false, independently re-verified against `docs/SPEC.md`'s literal §12 item 14 text rather
+than accepted from this entry's own prior framing.** §12 item 14 (`docs/SPEC.md:7578`) is THREE
+sentences, not one shared done bar with §37: (1) blast containment — "a repo in
+`REQUIRES_HUMAN_INTERVENTION` marks exactly its transitive dependents... `BLOCKED` — no more, no
+less"; (2) re-running the abandoned repo to `SUCCEEDED` clears `blocked_by`; (3) `--stub-blocked`
+produces the **whole descendant set**, not only the first layer, as a `DEGRADED` `STUB_LIMITED`
+stack (§3.5 item 4) — transitive stub stacking, which round VI task 69's own brief explicitly
+scoped OUT as deferred. So "(a)/(b) fully covered" and "done bar identical to §37" are BOTH false:
+- **(a) is NOT fully covered.** Task 69's review independently reproduced, on unmodified `main`
+  (`c01fe46`, zero task-69 code involved) via a real `fleet scan`+`fleet transform` fixture, that a
+  direct dependent of an RHI repo does NOT become `BLOCKED` at the TRANSFORM phase — the wave
+  loop's lazy per-wave `upsert_phase` means cross-wave `blocked_by` propagation silently never
+  reaches a not-yet-dispatched dependent. **Allocated D123** for this gap (verified free — max was
+  `D122`).
+- **The done bar is NOT identical to §37's.** §12.14 needs, beyond what §37/§14/§39's Leg 1-3
+  bundle built: clause (2)'s "re-running to `SUCCEEDED`" mechanism (no `fleet retry` CLI surface
+  and no `ALLOWED_TRANSITIONS` edge out of `REQUIRES_HUMAN_INTERVENTION` exist — **allocated
+  D124** for this gap, verified free), and clause (3)'s transitive (whole-descendant-set) stub
+  stacking, which `orchestrator.stubs.detect_stub_triggers` does not implement (it fires only where
+  the DIRECT provider is RHI, not where a second-layer dependent's provider is itself `DEGRADED`)
+  — deferred, not yet designed, and NOT interchangeable with the single-hop mechanism §37 built.
+**Revised done bar:** §37/§14/§39's shared Leg 1-3 bundle satisfies §12.14's *last sentence's*
+single-hop, `PUBLISHED_ARTIFACT`-only case only. Closing §12.14 in full additionally needs D123
+(cross-wave `blocked_by` propagation), D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism), and a
+new, undesigned transitive-stub-stacking mechanism — none of which is briefed yet.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely

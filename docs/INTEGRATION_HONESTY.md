@@ -9601,3 +9601,72 @@ for whoever briefs the contract-PR-dispatch task (named but not itself designed 
 "Consequences" paragraph) — allocating D122 rather than silently leaving this implicit, per
 CLAUDE.md's Central Number Allocation rule and Guardrail 6 ("state exactly what you ran, including
 what you excluded").
+
+## D123 — OPEN. A direct dependent of an RHI repo does not become `BLOCKED` at the TRANSFORM
+phase — cross-wave `blocked_by` propagation silently never reaches a not-yet-dispatched dependent
+
+**Found by round VI task 69's own task-scoped review (2026-09-07), independently reproduced on
+unmodified `main` (`c01fe46`) with zero task-69 code involved.** Verified free before allocating:
+form-agnostic sweep found `D122` as the highest allocated number.
+
+**The gap, as measured.** A real `fleet scan` + `fleet transform` fixture (one provider forced to
+fail and reach `REQUIRES_HUMAN_INTERVENTION`, one direct dependent with an ordinary edge to it)
+was run against real `main`. Expected per `docs/SPEC.md:7578`'s literal §12 item 14 text: the
+dependent marks `BLOCKED`. Measured: `EXIT=7 | ('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]')
+| ('acme-app-py','SUCCEEDED','[]')` — the dependent never became `BLOCKED`, and its own
+`blocked_by` column stayed empty throughout.
+
+**Root cause, as traced.** `_transform_impl`'s wave loop writes each wave's `phases` rows via a
+lazy per-wave `upsert_phase` call. A dependent scheduled in a LATER wave than its now-RHI provider
+never has its own `blocked_by` column populated at the moment the provider's status is known,
+because the write that would set it only happens when that dependent's own wave is reached — by
+which point the propagation step that should have caught it has already run and moved on. This is
+a structural gap in the propagation timing, not a one-off bug in a single call site.
+
+**Consequence.** §12.14's own blast-containment clause — "a repo in `REQUIRES_HUMAN_INTERVENTION`
+marks exactly its transitive dependents ... `BLOCKED` — no more, no less" — is provably FALSE
+against real production code today, independent of anything §37/§14/§39's stub-creation bundle
+built or didn't build. This also falsifies `docs/CRITERIA_PLAN.md`'s own prior §14 entry, which
+claimed "(a) and (b) — containment and `fleet resume` unblocking — are fully covered through real
+e2e paths" — see that entry's own dated correction, landed in the same commit as this one.
+
+**Not yet built:** the fix — most likely restructuring the wave loop's `blocked_by` propagation to
+run before or independent of each wave's own lazy `upsert_phase`, so a provider's RHI status is
+visible to every dependent's `blocked_by` column regardless of which wave the dependent is
+scheduled in, not only dependents in the same or an earlier wave. No task briefed yet; this is the
+controller's next dispatch candidate for §12.14.
+
+## D124 — OPEN. No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
+repo to `SUCCEEDED` — `fleet retry` does not exist, and `ALLOWED_TRANSITIONS` has no edge out of
+that status
+
+**Found by round VI task 69's own task-scoped review (2026-09-07).** Verified free before
+allocating (immediately after D123, same investigation): form-agnostic sweep found `D123` as the
+highest allocated number at the moment of this entry.
+
+**The gap, as measured.** `docs/SPEC.md:7578`'s literal §12 item 14 text requires: "Re-running the
+abandoned repo to `SUCCEEDED` removes it from every `blocked_by` and returns any repo with an
+empty `blocked_by` to `PENDING`." `grep -n "def retry" src/fleet/cli.py` returns zero hits — no
+`fleet retry` (or equivalent) CLI command exists to drive this. Independently, `RepoStatus.
+REQUIRES_HUMAN_INTERVENTION` has no outbound edge in `ALLOWED_TRANSITIONS` (`models/enums.py`),
+and no `OPERATOR_REOPEN`-style flag exists to open one — so even a caller that wanted to write
+`SUCCEEDED` over an RHI row has no legal transition to do it with. This is also, independently, one
+of the blockers `docs/SPEC.md`'s §12.37 item 1 needs for its own "re-running `P` to `SUCCEEDED`"
+clause (see `docs/CRITERIA_PLAN.md`'s `## 37.` entry) — the same missing mechanism blocks both
+criteria's identical-shaped clause.
+
+**Consequence.** Neither §12.14's clause (2) nor §12.37's "re-running P" clause can ever be driven
+for real today, regardless of anything else either criterion's own bundle builds. `D104` (already
+`OPEN`) covers the `TaskKind.REVALIDATE` dispatch path specifically; this entry is the narrower,
+structurally distinct gap of there being no CLI entry point or legal state-machine edge at all for
+re-running an RHI repo, which D104's own scope does not cover.
+
+**Not yet built:** the fix — a new `fleet retry <repo>` (or similarly-named) CLI command, a new
+`ALLOWED_TRANSITIONS` edge (likely gated behind an explicit `operator: bool` flag on `transition()`,
+mirroring the `resume`/`stub_degrade` precedent already established for other operator-gated
+terminal-state exceptions), and the `blocked_by`-clearing/`PENDING`-return logic clause (2)
+describes. This is real design work (a new gated transition edge is exactly the class of change
+this project's own precedent treats as needing an ADR — see `RESUME_DEMOTE`/`STUB_DEGRADE`'s own
+history), not a mechanical wiring task. No task briefed yet; this is the controller's next dispatch
+candidate for both §12.14 and §12.37, likely as a shared fix since both criteria need the identical
+mechanism.
