@@ -1148,6 +1148,61 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
             "assert _double(21) == 42\n"
         ),
     },
+    #: D112, round VI task 70: `acme-commons-java` above (like every other JVM fixture in this
+    #: file) ships zero `src/test/java` files, so `test_sources()` has always returned `[]` for
+    #: every real-Bazel run this suite has ever done, exactly as `acme-widgets-py` was for Python.
+    #: This is the first JVM fixture with a real test class, named by Maven/Gradle's own
+    #: `src/test/java` convention (`docs/INTEGRATION_HONESTY.md`'s `## D112` entry,
+    #: `_is_jvm_test_src` in `cli.py`). Unlike the Python/JS precedent, `jvm.py`'s `test_targets()`
+    #: emits a plain `java_test(srcs=test_srcs, deps=[lib, *external_labels])` with no `attrs` at
+    #: all — the default `use_testrunner=True` JUnit4 runner — so the test class needs a REAL
+    #: `junit:junit` dependency reachable on the classpath, declared with Maven's own `<scope>test
+    #: </scope>` (kept by `_external_coordinates`/`workspace_deps`: nothing in this harness filters
+    #: dependencies by scope — see `graph/infer.py`'s `TEST_SCOPES` check, which only ever gates
+    #: INTERNAL dependency-edge inference, not `BuildUnit.external_coordinates`).
+    "acme-widgets-jvm": {
+        "pom.xml": (
+            "<project>\n"
+            "  <groupId>com.acme</groupId>\n"
+            "  <artifactId>widgets</artifactId>\n"
+            "  <version>0.1.0</version>\n"
+            "  <dependencies>\n"
+            "    <dependency>\n"
+            "      <groupId>junit</groupId>\n"
+            "      <artifactId>junit</artifactId>\n"
+            "      <version>4.13.2</version>\n"
+            "      <scope>test</scope>\n"
+            "    </dependency>\n"
+            "  </dependencies>\n"
+            "</project>\n"
+        ),
+        "src/main/java/com/acme/widgets/Widget.java": (
+            "package com.acme.widgets;\n"
+            "\n"
+            "public final class Widget {\n"
+            "    public static int doubleIt(int value) {\n"
+            "        return value * 2;\n"
+            "    }\n"
+            "}\n"
+        ),
+        # A real JUnit4 `@Test`, not a bare `main`: unlike `py_test`'s `main=`/no-framework shape,
+        # `jvm.py:test_targets()` sets no `attrs` at all, so the target keeps `java_test`'s DEFAULT
+        # `use_testrunner=True` and expects a JUnit-style test class — a `main` method would never
+        # be invoked by the bundled JUnit4 runner and would make the target "pass" vacuously.
+        "src/test/java/com/acme/widgets/WidgetTest.java": (
+            "package com.acme.widgets;\n"
+            "\n"
+            "import org.junit.Test;\n"
+            "import static org.junit.Assert.assertEquals;\n"
+            "\n"
+            "public final class WidgetTest {\n"
+            "    @Test\n"
+            "    public void doublesTwentyOne() {\n"
+            "        assertEquals(42, Widget.doubleIt(21));\n"
+            "    }\n"
+            "}\n"
+        ),
+    },
 }
 
 
@@ -2825,6 +2880,50 @@ def test_a_python_repo_with_a_real_test_file_gets_a_real_py_test_target(
     library_body = body[library_start:test_start]
     assert '"acme_widgets_py/__init__.py"' in library_body, library_body
     assert '"acme_widgets_py/test_widgets.py"' not in library_body, library_body
+
+
+def test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """D112 (round VI task 70), over `FakeBazel`: a JVM repo with a real `src/test/java` class
+    gets a real `java_test` target, and the test file is NOT also a `java_library` source.
+
+    **The discriminator.** Before this task's fix, `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+    (`ecosystems/base.py`) had no `MAVEN`/`GRADLE` member, so `_partition_test_srcs` always took
+    its `ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS` branch for JVM units and returned
+    `(list(srcs), [])` unconditionally — `test_srcs` stayed `()`, `jvm.py:test_targets()`'s `if
+    not test_srcs: return []` guard always fired, and `generate_targets()`'s `java_library`
+    swallowed `WidgetTest.java` into its own `srcs` instead (nothing partitioned it out, since
+    `sources()` reads `unit.srcs` verbatim). So pre-fix this assertion set is exactly reversed: no
+    `java_test(` in the body, and the test file present in `java_library`'s `srcs=[...]` list.
+    This is the JVM half of `D112` in `docs/INTEGRATION_HONESTY.md`, and this task's report
+    records the revert-and-rerun that proves it.
+    """
+    add_repos(fleet, ["acme-widgets-jvm"])
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dest = relocations(filter_repo)["acme-widgets-jvm"]
+    body = (build_worktree(fleet, "acme-widgets-jvm") / dest / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert "java_test(" in body, body
+    assert 'name = "widgets_test"' in body, body
+    assert '"src/test/java/com/acme/widgets/WidgetTest.java"' in body, body
+    assert '"@maven//:junit"' in body, body
+
+    # The library target still exists (`Widget.java` is real library source) but its `srcs` no
+    # longer swallows the test file — the half a test asserting ONLY "a `java_test` exists"
+    # would miss entirely.
+    library_start = body.index("java_library(")
+    test_start = body.index("java_test(")
+    library_body = body[library_start:test_start]
+    assert '"src/main/java/com/acme/widgets/Widget.java"' in library_body, library_body
+    assert "WidgetTest.java" not in library_body, library_body
 
 
 def test_destinations_come_from_the_adapters_not_from_the_driver(

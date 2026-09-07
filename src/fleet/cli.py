@@ -9649,23 +9649,73 @@ def _is_python_test_src(path: str) -> bool:
     return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
 
 
+_JVM_TEST_SOURCE_ROOTS: Final[tuple[str, ...]] = (
+    "src/test/java/",
+    "src/test/kotlin/",
+    "src/test/scala/",
+)
+"""The Maven Standard Directory Layout's test half, mirroring `jvm.py`'s own `_SOURCE_ROOTS` for
+main sources (`src/main/java/`, `src/main/kotlin/`, `src/main/scala/`) — Gradle's `java`/`kotlin`
+plugins adopt the identical convention, per `jvm.py`'s own module docstring ("Maven and Gradle are
+two manifest formats... that produce the same artifacts")."""
+
+
+def _is_jvm_test_src(path: str) -> bool:
+    """Maven/Gradle's own default test-source convention: anything under `src/test/{java,kotlin,
+    scala}/`.
+
+    D112 (round VI task 70): `jvm.py`'s `test_targets()` already reads `test_sources()` correctly
+    (one `java_test` over `src/test/**`, depending on the library) and was always fed an empty
+    list; this decides what counts as a JVM test file for this fleet, mirroring
+    `_is_python_test_src`'s role for Python. One predicate for both JVM members (`MAVEN` and
+    `GRADLE`) — `jvm.py` is the one adapter for both (`JvmAdapter.ecosystems`).
+    """
+    return path.startswith(_JVM_TEST_SOURCE_ROOTS)
+
+
+_TEST_SRC_PREDICATES: Final[Mapping[str, Callable[[str], bool]]] = {
+    "pypi": _is_python_test_src,
+    "maven": _is_jvm_test_src,
+    "gradle": _is_jvm_test_src,
+}
+"""`Ecosystem.value` → the predicate that decides whether one discovered source is a test file for
+that ecosystem — D112, round VI task 70's table-driven dispatch (mirrors
+`workers/contracts.py::KIND_MODIFIERS`'s "`Mapping`, looked up not branched on" shape).
+
+**Keyed by the `StrEnum`'s `.value` string, not by the `Ecosystem` member itself, and that is not
+a stylistic choice.** §12.6/ADR-0100's textual sweep
+(`test_no_ecosystem_member_other_than_the_unknown_sentinel_is_named_outside_the_packages`) bans
+the literal substring `Ecosystem.<MEMBER>` ANYWHERE in a file outside the two adapter packages —
+not only in a `Compare`/`Subscript`, which is why `TEST_SRC_PARTITIONED_ECOSYSTEMS` above (an
+`Ecosystem`-keyed table) has to live in `ecosystems/base.py` rather than here. A `Mapping[Ecosystem,
+Callable]` literal in `cli.py` would need to spell each member (e.g. the MAVEN one) as a
+dict-literal key and fail that same sweep; `ecosystem.value` is an attribute read on a local
+variable (`ecosystem: Ecosystem`), which the sweep's regex and this file's own already-established
+`.value` usage elsewhere (`coord.ecosystem.value`, `ref.ecosystem.value`) both already treat as
+ecosystem-free plumbing, not language knowledge."""
+
+
 def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[list[str], list[str]]:
     """Split a unit's discovered sources into `(srcs, test_srcs)` for one ecosystem — D112.
 
-    Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` only (round VI task 53): the other
-    three adapters' `test_targets()` already read `test_sources()` correctly, but nobody has yet
-    made a design call on their own test-file conventions (JS's `*.test.ts` vs colocated
-    `__tests__/`, Rust's `#[cfg(test)]` in-file modules, JVM's `src/test/java` layout), so every
-    non-member ecosystem keeps its whole walk in `srcs` exactly as before this task — `test_srcs`
-    stays `()` for them, which is a no-op against `test_sources()`'s existing (always empty)
-    behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round VI
-    task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two adapter
-    packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime behavior.
+    Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` (round VI task 53: Python only;
+    widened round VI task 70 to JVM/`MAVEN`+`GRADLE`). Rust/`CARGO` and JS/`NPM` are deliberately
+    NOT members — see that constant's docstring for the two measured real-Bazel analysis-time
+    failures (Rust: `rust_test.crate`/`rust_test.srcs` mutual exclusivity; JS: `js_test`'s `deps`
+    reintroducing `docs/INTEGRATION_HONESTY.md`'s `## D7`) a naive predicate for either would
+    trigger. Every non-member ecosystem keeps its whole walk in `srcs` exactly as before this task —
+    `test_srcs` stays `()` for it, which is a no-op against `test_sources()`'s existing (always
+    empty) behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round
+    VI task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two
+    adapter packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime
+    behavior. The per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same
+    table-lookup shape, keyed by `ecosystem.value` for the reason documented on that table.
     """
     if ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS:
         return list(srcs), []
-    test_srcs = [path for path in srcs if _is_python_test_src(path)]
-    rest = [path for path in srcs if not _is_python_test_src(path)]
+    predicate = _TEST_SRC_PREDICATES[ecosystem.value]
+    test_srcs = [path for path in srcs if predicate(path)]
+    rest = [path for path in srcs if not predicate(path)]
     return rest, test_srcs
 
 
