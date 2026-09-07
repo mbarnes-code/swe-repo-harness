@@ -847,11 +847,14 @@ def detect_stub_triggers(
     **No `stub_blocked` policy switch here (review finding M2, fix round 1) — deliberately, not
     an oversight.** `stub_permits_removal` (`orchestrator/reentry.py`) takes one because it is
     reachable from `fleet resume` regardless of the flag and must be a hard `False` for every
-    input when the operator did not opt in; this function has no such caller today; ITS OWN
-    caller (`cli._detect_transform_stub_triggers`) is never invoked at all while `--stub-blocked`
-    stays refused (ADR-0113 condition 2). Whichever task wires this leg's CLI surface (task-69)
-    must supply that gating externally — by not calling this function at all when the flag is
-    off — the same way this leg's own callers already gate themselves out of production.
+    input when the operator did not opt in; this function has no such caller today. **Corrected
+    2026-09-07 (round VI task 69 fix round): its own caller, `cli._detect_transform_stub_
+    triggers`, is no longer permanently unreachable** — the `--stub-blocked` refusal (ADR-0113
+    condition 2) was removed in round VI task 69, and `_detect_transform_stub_triggers` is now
+    called for real from `_transform_impl`'s wave loop, gated exactly as this paragraph
+    anticipated: `_transform_impl` does not call it at all when the flag is off, so this
+    function's own gating-free contract still holds — nothing here changed, only the caller's
+    reachability.
     """
     dispatched = set(dispatched_repo_ids)
     seen: set[tuple[str, str, str]] = set()

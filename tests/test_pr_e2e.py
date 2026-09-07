@@ -1997,12 +1997,13 @@ def test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t
 
     stub_rows = query(
         fleet,
-        "SELECT state, stub_fidelity, pinned_version, consumer_repo_id, provider_repo_id "
+        "SELECT state, stub_fidelity, pinned_version, consumer_repo_id, provider_repo_id, "
+        "       max_revalidation_rounds, revalidation_round "
         "  FROM stubs WHERE run_id = (SELECT run_id FROM runs) AND stub_coord_key = ?",
         (_STUB_COORD_KEY,),
     )
     assert stub_rows == [
-        ("ACTIVE", "PUBLISHED_ARTIFACT", "2.0.1", _STUB_CONSUMER, _STUB_PROVIDER)
+        ("ACTIVE", "PUBLISHED_ARTIFACT", "2.0.1", _STUB_CONSUMER, _STUB_PROVIDER, 2, 0)
     ], stub_rows
 
     # --- BUILD/VERIFY admit the DEGRADED row (this leg's `_eligible_build_units`/`_gated_
@@ -2037,9 +2038,15 @@ def test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t
     # --- §12.37 clause 1, in full: C is DEGRADED, one ACTIVE/PUBLISHED_ARTIFACT stubs row, and a
     # VerificationReport whose equivalence is STUB_LIMITED naming P's coordinate. Proven above.
 
-    # --- "the transition INTO the already-proven reconciliation path" (D80, unmodified): the
-    # REAL StubRecord this run created is fed to `orchestrator.stubs.supersede` exactly as
-    # `tests/test_stubs.py::test_t1_fires_on_succeeded_and_merged` feeds its own hand-built one.
+    # --- "the transition INTO the already-proven reconciliation path" (D80, unmodified): a
+    # `StubRecord` CONSTRUCTED to match every field of the REAL row just asserted above (state,
+    # stub_fidelity, pinned_version, consumer/provider ids, max_revalidation_rounds,
+    # revalidation_round -- all seven asserted equal to the real row immediately above, none
+    # invented) is fed to `orchestrator.stubs.supersede` exactly as `tests/test_stubs.py::
+    # test_t1_fires_on_succeeded_and_merged` feeds its own hand-built one. Not a read-back
+    # through `StubRecord.model_validate` (D80's own reconstruction shape, `cli._stub_reconcile_
+    # inputs`) -- constructing it directly here is enough to prove `supersede()` accepts and
+    # correctly transitions the exact values this run produced.
     record = StubRecord(
         run_id=UUID(str(run_id_of(fleet))),
         coord_key=_STUB_COORD_KEY,

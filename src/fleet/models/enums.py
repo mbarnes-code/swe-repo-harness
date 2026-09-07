@@ -182,15 +182,19 @@ def demote(
 STUB_DEGRADE: dict[RepoStatus, frozenset[RepoStatus]] = {
     RepoStatus.SUCCEEDED: frozenset({RepoStatus.DEGRADED}),
 }  # §37 Leg 1's own door (ADR-0124), same construction and same reason as RESUME_DEMOTE above:
-# a TRANSFORM phase the generic completion loop just wrote SUCCEEDED earns DEGRADED instead once
-# it is known to have at least one ACTIVE, PUBLISHED_ARTIFACT stub row (never an EMPTY_FAILING-
-# only one — §12.14 forbids that consumer from ever becoming DEGRADED). The write goes through
-# `degrade_for_stub()` — never `transition(..., stub_degrade=True)` directly, which opens the same
-# door but returns the status ALONE and would degrade silently, mirroring ADR-0077 §4's identical
-# concern for `demote()`. Reached only behind the `stub_degrade` flag, so SUCCEEDED's mechanical
-# terminality against the crash sweep, the reaper and `_on_breach` is untouched — none of those
-# pass the flag. SUCCEEDED is the ONLY key: this correction fires only against a phase the generic
-# completion loop just wrote SUCCEEDED, never against any other status.
+# a phase (TRANSFORM originally; round VI task 69 also calls this for BUILD and VERIFY, since a
+# repo built or verified against a live stub must not project as plain SUCCEEDED either —
+# `models.state.RepoState._stub_invariants`) the generic completion loop just wrote SUCCEEDED
+# earns DEGRADED instead once it is known to have at least one ACTIVE, PUBLISHED_ARTIFACT stub row
+# (never an EMPTY_FAILING-only one — §12.14 forbids that consumer from ever becoming DEGRADED).
+# The write goes through `degrade_for_stub()` — never `transition(..., stub_degrade=True)`
+# directly, which opens the same door but returns the status ALONE and would degrade silently,
+# mirroring ADR-0077 §4's identical concern for `demote()`. Reached only behind the `stub_degrade`
+# flag, so SUCCEEDED's mechanical terminality against the crash sweep, the reaper and `_on_breach`
+# is untouched — none of those pass the flag. SUCCEEDED is the ONLY key: this correction fires
+# only against A phase the generic completion loop just wrote SUCCEEDED, never against any other
+# status — and never against more than one phase of the same repo in one call, since the caller
+# names which `phase` each time.
 
 
 STUB_DEGRADED_KIND: Final[str] = "StubDegraded"

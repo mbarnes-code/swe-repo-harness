@@ -1,10 +1,70 @@
 # Task 69 report — §37 stub-creation, Leg 3: wire it live end to end
 
-**Status: DONE_WITH_CONCERNS** (see "Concerns" and "What remains" below — the mechanical wiring is
-real and proven; two genuine, pre-existing gaps were discovered while proving it, neither
-introduced nor fixed by this task)
+**Status: DONE** (fix round complete — see "Fix round" section immediately below for the
+task-scoped review's findings and this round's response to each; the original landing's own
+findings, still accurate, are the "Concerns"/closability sections further down)
 
-**Branch:** `agent/roundvi-task69` (from `main` @ `c01fe46`, not merged)
+**Branch:** `agent/roundvi-task69`. Original landing: `dbb6eb7` (from `main` @ `c01fe46`). Fix
+round: see `git log agent/roundvi-task69` for the fix-round commit (this file is committed in the
+same commit as the fix-round code/doc changes it describes).
+
+## Fix round (task-scoped review response)
+
+The original landing (`dbb6eb7`) was task-scoped reviewed given the stakes; verdict "Needs
+fixes," Critical/Important/Minor findings. Responses:
+
+- **C1 (Critical — regression, misattributed in my original report).** My unconditional
+  `stub_degrade_transform(phase=Phase.BUILD)` correction silently regressed 3 of task-68's own
+  acceptance tests in `tests/test_build_e2e.py`
+  (`test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stubs_label`,
+  `test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel`,
+  `test_active_stubs_package_files_are_materialized_into_every_dispatchs_worktree`) — each hand-
+  inserts an `ACTIVE`/`PUBLISHED_ARTIFACT` stub row and asserted the OLD, now-superseded end
+  state (`phases(BUILD).status == 'SUCCEEDED'`/`exit_code == SUCCESS`). My original report's "none
+  of the 10 failures touch a file this task modified" was wrong on these 3 — they are `test_build_
+  e2e.py`, a file I modified, and the reviewer correctly found my own already-written §5 disclosed
+  WHY (the degrade is unconditional) while I failed to connect that to these 3 tests. **Fixed**:
+  updated all 3 tests' assertions to the new, correct end state
+  (`DEGRADED`/`ExitCode.REQUIRES_HUMAN_INTERVENTION`), with a dated "Corrected 2026-09-07"
+  docstring paragraph in each explaining the behavior change, and old-fails/new-passes verified
+  for all 3 (old assertions against current code: 3 failed; new assertions: 3 passed). **The real,
+  production-visible consequence, confirmed intended**: `fleet build`/`fleet verify` over any
+  fleet carrying an `ACTIVE`/`PUBLISHED_ARTIFACT` stub row now exits 7 (not 0) for that consumer,
+  unconditionally, with no flag required — required by `models.state.RepoState._stub_invariants`
+  (a live stub with a `SUCCEEDED` consumer status would violate an already-enforced Pydantic
+  invariant), confirmed correct on the merits independently by the reviewer.
+- **C2 (Critical — stale docs).** `docs/SPEC.md` §3.5 item 1 and `docs/CRITERIA_PLAN.md`'s §14
+  entry both still described the pre-task-69 refused state as current, in paragraphs explicitly
+  written to be updated once this leg landed. **Fixed**: both carry a dated update now (see the
+  diffs), per Guardrail 7 ("fix the code and its doc listing in the same change").
+- **I3 (Important — false claim in my own report and test comment).** I wrote the `StubRecord`
+  fed to `supersede()` was "read back from step 6's row" — false; it is constructed from module
+  constants. **Fixed**: corrected the claim in this report (see the "transition into
+  reconciliation" section below) and in the test's own comment, and added the two previously-
+  unasserted fields (`max_revalidation_rounds`, `revalidation_round`) to the query/assertion
+  against the real row, so all seven constructed fields are now separately verified equal to it.
+- **I4 (Important — 4 stale docstrings).** Fixed all four: `state/repository.py::
+  stub_degrade_transform`'s docstring now discloses it is called for BUILD/VERIFY too (name kept —
+  see the docstring's own reasoning for why a rename was judged not worth the blast radius);
+  `models/enums.py`'s `STUB_DEGRADE` comment no longer says "a TRANSFORM phase" exclusively;
+  `orchestrator/stubs.py`'s stale "never invoked... while `--stub-blocked` stays refused" comment
+  corrected with a dated note; the 4th (`tests/test_build_e2e.py:3195-3197`'s "still REFUSES"
+  docstring) was fixed as part of C1's own update to that same test.
+- **M5 (Minor — overbroad claim).** Narrowed "`VerificationReport.equivalence` could never
+  resolve to `STUB_LIMITED`" to the accurate, narrower claim: the **persisted Phase-4** report
+  (the `findings` row VERIFY itself writes, what §12.37's criterion actually names) could never
+  be `STUB_LIMITED` — `cli._report_with_stubs` already re-derives it fresh from live `stubs` rows
+  at `fleet pr` time, independent of this gap. Fixed in both the `cli.py` docstring and this
+  report.
+- **M6 (Minor — disclose, no fix).** `fleet quarantine` also declares and silently discards a
+  `--stub-blocked` flag — pre-existing, out of this task's scope, disclosed in its own section
+  below.
+- **M7 (Minor — incomplete blocker list).** My report named D104 as the sole blocker for §12.37's
+  "P re-runs to SUCCEEDED" clause. Updated throughout this report to name all five: D104, D107,
+  D108, D123, D124 (D123/D124 allocated by the controller's own task-69 review, `cfe82bb`, for
+  exactly the two gaps my original report disclosed without a number).
+
+Verification for this fix round: see "Fix-round test proof" at the end of this report.
 
 ## Pre-flight
 
@@ -77,11 +137,17 @@ Proven for real by the end-to-end test: `acme-app-py`'s BUILD and VERIFY phase r
 found beyond the brief's scope, also load-bearing for §12.37's own criterion text**
 `workers/rdepverify.py`'s `RdepverifyInput.verified_against_stubs`/`.stub_fidelity` fields have
 existed, **unpopulated**, since before this bundle (not task-67's or task-68's code — neither
-touches VERIFY's payload construction). No caller ever read the `stubs` table to fill them, so
-`VerificationReport.equivalence` could never resolve to `STUB_LIMITED` even with a fully correct,
-live stub redirect — confirmed empirically: before this fix, my end-to-end fixture's own
-`VerificationReport` read `"equivalence": "FULL"`, `"verified_against_stubs": []` despite a real,
-live `ACTIVE` stub redirect being in effect. Added:
+touches VERIFY's payload construction). No caller ever read the `stubs` table to fill them.
+**Narrowed in the fix round (M5): the original claim here ("equivalence could never resolve to
+STUB_LIMITED") was overbroad** — `cli._report_with_stubs` already re-derives `equivalence` fresh
+from the live `stubs` table at `fleet pr` time, independent of this gap, so a PR body could
+already show `STUB_LIMITED` before this fix. What this gap actually blocked: the **persisted
+Phase-4 `VerificationReport`** — the `findings` row VERIFY itself writes, the exact artifact
+§12.37's own criterion text names — could never carry `STUB_LIMITED`, even with a live,
+correctly-rendered stub redirect, because nothing populated the fields it derives from —
+confirmed empirically: before this fix, my end-to-end fixture's own PERSISTED report read
+`"equivalence": "FULL"`, `"verified_against_stubs": []` despite a real, live `ACTIVE` stub
+redirect being in effect. Added:
 - `_active_stubs_by_consumer` (`cli.py:~8989`, new): `repo_id -> {stub_coord_key: fidelity}` for
   every `ACTIVE` stubs row — the consumer-keyed shape `_active_stub_facts` (coord-key-keyed, for
   BUILD's render) cannot supply.
@@ -149,23 +215,31 @@ own topology-driving code rather than a direct reuse of `_insert_stub_row`.
    `verified_against_stubs == ["pypi::acme-lib-py"]`, `stub_fidelity == {"pypi::acme-lib-py":
    "PUBLISHED_ARTIFACT"}`.
 10. **"The transition into the already-proven reconciliation path."** Per the brief's own
-    instruction not to re-prove reconciliation, the REAL `StubRecord` this run created (read back
-    from step 6's row) is fed to `orchestrator.stubs.supersede` (D80, completely unmodified) —
-    exactly the shape `tests/test_stubs.py::test_t1_fires_on_succeeded_and_merged` feeds its own
-    hand-built fixture. `supersede(record, ProviderFacts("acme-lib-py", RepoStatus.SUCCEEDED,
-    PrState.MERGED))` returns exactly one `StubTransition.T1` decision, `ACTIVE -> SUPERSEDED`,
-    `consumer_status == DEGRADED` — proving the CREATION side genuinely lands in the shape D80's
-    own tests already start from.
+    instruction not to re-prove reconciliation, a `StubRecord` is fed to `orchestrator.stubs.
+    supersede` (D80, completely unmodified) — exactly the shape `tests/test_stubs.py::
+    test_t1_fires_on_succeeded_and_merged` feeds its own hand-built fixture.
+    **Correction (fix round, I3): this `StubRecord` is CONSTRUCTED from module constants, not
+    read back from the row via a query** — my original report claimed "read back from step 6's
+    row," which is false; the accurate description is "constructed to match the row's asserted
+    values." All seven fields it sets (`coord_key`, `provider_repo_id`, `consumer_repo_ids`,
+    `fidelity`, `pinned_version`, `max_revalidation_rounds`, `rounds_spent`) are now separately
+    asserted equal to the real row immediately above this call in the test (the fix round added
+    the `max_revalidation_rounds`/`revalidation_round` columns to that query and assertion — they
+    were previously asserted nowhere). `supersede(record, ProviderFacts("acme-lib-py",
+    RepoStatus.SUCCEEDED, PrState.MERGED))` returns exactly one `StubTransition.T1` decision,
+    `ACTIVE -> SUPERSEDED`, `consumer_status == DEGRADED` — proving the CREATION side genuinely
+    lands in the shape D80's own tests already start from.
 
 **§12.37 clauses this fixture proves:** clause 1 in full (C reaches DEGRADED; one `stubs` row
 `state=ACTIVE`, `stub_fidelity=PUBLISHED_ARTIFACT`; a `VerificationReport` with
 `equivalence=STUB_LIMITED` naming P's coordinate) — for the first time ever, through the real
-`--stub-blocked` CLI path. The first half of clause 2 (the CREATION side reaches a state
-`supersede()` accepts and correctly transitions) — proven directly against the real created
-`StubRecord`.
+`--stub-blocked` CLI path. The first half of clause 2 (a `StubRecord` matching every field of the
+real row this run created is accepted and correctly transitioned by `supersede()`) — proven
+against a constructed record whose fields are all separately asserted equal to the real row, not
+against a literal read-back.
 
-**§12.37 clauses this fixture does NOT prove, and why (both pre-existing, both disclosed, neither
-mine to fix):**
+**§12.37 clauses this fixture does NOT prove, and why (all pre-existing, all disclosed, none
+mine to fix — updated in the fix round (M7) to name every independent blocker, not only D104):**
 - **"Re-running P to SUCCEEDED with its PR MERGED"** cannot be driven through any real, built CLI
   mechanism today. `models/enums.py`'s `OPERATOR_REOPEN` map (`{REQUIRES_HUMAN_INTERVENTION:
   {PENDING}}`) documents `fleet retry` as "the one documented exception" for reopening an RHI
@@ -175,17 +249,24 @@ mine to fix):**
   refused (`_refuse_unbuilt_resume_flags`: "name machinery with no implementation in `src/`").
   `RepoStatus.REQUIRES_HUMAN_INTERVENTION` maps to the empty set in `ALLOWED_TRANSITIONS` — it is
   mechanically terminal by construction, with `OPERATOR_REOPEN` the only door and no CLI key to
-  it. This is why `supersede()` is fed a **constructed** `ProviderFacts`, not a live-driven one.
+  it. **This is now D124** (allocated by the controller's own task-69 review, `cfe82bb`: "no
+  `fleet retry` CLI surface and no `ALLOWED_TRANSITIONS` edge out of `REQUIRES_HUMAN_
+  INTERVENTION`" — shared with §12.14's identically-shaped clause). This is why `supersede()` is
+  fed a **constructed** `ProviderFacts`, not a live-driven one.
 - **"produces zero new phase-2 commits... an `already_applied` event... C becomes SUCCEEDED,
-  equivalence becomes FULL."** Blocked by **D104** (`docs/INTEGRATION_HONESTY.md`, OPEN,
-  pre-existing, found by research-3 before this bundle): `TaskKind.REVALIDATE` has zero
-  execution/dispatch path anywhere in `src/`, and `settle_revalidation` (T2/T3) has zero
-  production callers — `tests/test_stubs.py` is its only caller anywhere. D104's own text names
-  this exact clause of §12.37 as unreachable independent of the stub-creation gap this bundle
-  closed. Not part of task-67/68/69's scope (D104 predates this whole bundle and is explicitly out
-  of scope per the brief's own "Transitive stub stacking... still deferred" framing — this is the
-  same "genuinely new production logic, do not attempt as a one-shot" category `docs/
-  CRITERIA_PLAN.md` §37 already used for the stub-creation worker itself).
+  equivalence becomes FULL."** Blocked by **three independent, pre-existing, already-OPEN
+  entries in `docs/INTEGRATION_HONESTY.md`**, not D104 alone: **D104** — `TaskKind.REVALIDATE`
+  has zero execution/dispatch path anywhere in `src/`, and `settle_revalidation` (T2/T3) has zero
+  production callers (`tests/test_stubs.py` is its only caller anywhere); **D107** — nothing
+  rewrites a consumer's `BUILD.bazel` dependency label from the stub target back to the real one
+  once the stub resolves, so `verified_against_stubs` can never actually clear on a real tree
+  even if D104 were fixed; **D108** — `StubDecision.consumer_status` has zero production readers,
+  so even a fixed D104 producing a T2 `RESOLVED` decision would not by itself promote the
+  consumer's `phases` row to `SUCCEEDED`. All three predate this bundle (D104 found by research-3,
+  D107/D108 found by research-14, all before task-67 started) and are independent of the
+  stub-creation gap task-67/68/69 closed — fixing all three is "genuinely new production logic, do
+  not attempt as a one-shot," the same category `docs/CRITERIA_PLAN.md` §37 already used for the
+  stub-creation worker itself.
 
 ## Concerns — a genuine, disclosed, pre-existing gap in `_transform_impl` (NOT introduced or fixed
 by this task)
@@ -229,11 +310,25 @@ back to a fresh floor and it simply succeeded on retry, silently invalidating th
 by re-measuring rather than trusting the first "green" run — see `_seed_blocked`'s own docstring
 in the test file for the full account.)
 
-No D-number self-allocated for this finding, per CLAUDE.md's Central Number Allocation rule —
-flagging it here for the controller to allocate one if it judges the class worth tracking
-separately from D104.
+**This finding is now D123** (allocated by the controller's own task-69 review, `cfe82bb`:
+"cross-wave `blocked_by` propagation gap (the wave loop's lazy per-wave `upsert_phase` means a
+not-yet-dispatched dependent's `blocked_by` column never gets set)") — not self-allocated here,
+per CLAUDE.md's Central Number Allocation rule; the number above is quoted from the controller's
+own commit, not chosen by this report.
 
-## Test proof (Rule 12)
+## A fourth `--stub-blocked` surface (M6, found by the fix-round reviewer, not fixed — disclosed
+per the reviewer's own instruction)
+
+`fleet quarantine` also declares a `--stub-blocked` flag and silently discards it: `src/fleet/
+cli.py`'s `quarantine()` command takes `stub_blocked: Annotated[bool, typer.Option("--stub-
+blocked")] = False` and its body reads only `_ = stub_blocked` — no validation, no refusal, no
+effect of any kind. Pre-existing (not introduced by task-67/68/69), and absent from this task's
+brief's 3-site list (`transform`/`build`/`resume`). Left as found: fixing it is out of this fix
+round's scope (the reviewer flagged it as a found-but-out-of-scope item, not a required fix), and
+the controller will decide whether it needs its own D-number.
+
+## Original-landing test proof (Rule 12) — see "Fix-round test proof" at the end of this
+report for the corrected, re-measured numbers
 
 **Old-fails/new-passes, all three refusal removals, verified by `git stash` of `src/fleet/cli.py`
 against each test:**
@@ -280,15 +375,22 @@ pytest test; see below).
   the wall clock): **10 failed, 164 passed.** All 10 failures are in `test_build_e2e.py`'s
   real-Bazel section 7, every one naming `acme-app-ts`/`acme-lib-ts` (the TypeScript fixture
   repos) reaching `REQUIRES_HUMAN_INTERVENTION`, e.g. `test_build_against_a_real_bazel`.
-  **Verified pre-existing, not a regression**: stashed `src/fleet/cli.py` and every test-file
-  change, re-ran `test_build_against_a_real_bazel` alone against unmodified `main` content — it
-  fails **identically** (same two repos, same exit code 7, same shape), confirming an
-  environmental issue in this sandbox (real Bazel + a JS toolchain reaching an external registry)
-  unrelated to this task. Restored all changes immediately after. None of the 10 failures touch a
-  file this task modified or a code path this task's wiring reaches (`--stub-blocked` is not
-  passed by any of the 10 failing tests). All tests in `test_stubs.py`, `test_pr_e2e.py`,
-  `test_resume_continue.py`, and `test_resume_unblocking.py` passed, including every test this
-  task added or modified in those files.
+  **Verified pre-existing, not a regression, for 7 of the 10** (`test_build_against_a_real_bazel`
+  and its real-Bazel-JS siblings): stashed `src/fleet/cli.py` and every test-file change, re-ran
+  `test_build_against_a_real_bazel` alone against unmodified `main` content — it fails
+  **identically** (same two repos, same exit code 7, same shape), confirming an environmental
+  issue in this sandbox (real Bazel + a JS toolchain reaching an external registry) unrelated to
+  this task. **CORRECTED (fix round, C1): the other 3 of the 10 were WRONGLY included in that
+  blanket "pre-existing, none touch a file this task modified" claim.** The reviewer measured
+  precisely: base `c01fe46` is 11 failed/55 passed/11 skipped on `test_build_e2e.py` alone; this
+  branch (pre-fix-round) was 14 failed/52 passed/11 skipped — the extra 3 were exactly task-68's
+  own acceptance tests, regressed by this leg's own new, unconditional
+  `stub_degrade_transform(phase=Phase.BUILD)` call (see the "Fix round" section at the top of this
+  report, C1). My original sentence here — "None of the 10 failures touch a file this task
+  modified... `--stub-blocked` is not passed by any of the 10 failing tests" — was therefore
+  FALSE for those 3 (they do not need `--stub-blocked` passed; the correction that broke them is
+  unconditional). Fixed in this fix round; see "Fix-round test proof" below for the re-measured,
+  corrected numbers.
 - `tests/test_cli.py tests/test_lint_gate.py` run together, separately (never two pytest sessions
   concurrently): **1 failed, 200 passed.** Every `test_cli.py` test passed. The one failure is
   `test_lint_gate.py::test_ruff_format_check_dirty_count_matches_the_pinned_baseline`: whole-repo
@@ -304,9 +406,13 @@ pytest test; see below).
   task.
 
 ## Files touched
-- `src/fleet/cli.py` — the six wiring changes above.
-- `tests/test_pr_e2e.py` — new end-to-end test + fixtures + imports.
-- `tests/test_build_e2e.py` — refusal test replaced.
+- `src/fleet/cli.py` — the six wiring changes above; plus (fix round, M5) a narrowed claim in
+  `_active_stubs_by_consumer`'s docstring.
+- `tests/test_pr_e2e.py` — new end-to-end test + fixtures + imports; plus (fix round, I3) two
+  added assertion columns and a corrected in-test comment.
+- `tests/test_build_e2e.py` — refusal test replaced; plus (fix round, C1/I4) 3 of task-68's own
+  tests updated to the new, correct `DEGRADED`/exit-7 end state, each with a dated docstring
+  correction.
 - `tests/test_transform_e2e.py` — refusal test updated + replacement added.
 - `tests/test_resume_unblocking.py` — refusal test replaced.
 - `tests/test_resume_continue.py` — `_drive` helper threads `stub_blocked`.
@@ -314,26 +420,85 @@ pytest test; see below).
   corrected, dated, per this file's own citation-currency convention. No behavioral change; the
   `KNOWN_INERT` verdict for `fleet.yaml:transform.stub_blocked` is unchanged (this leg never added
   a `config.transform.stub_blocked` field — only the CLI flag/parameter of the same bare name).
+- `src/fleet/models/enums.py` — (fix round, I4) `STUB_DEGRADE`'s comment corrected to not claim
+  TRANSFORM-only.
+- `src/fleet/state/repository.py` — (fix round, I4) `stub_degrade_transform`'s docstring now
+  discloses it fires for BUILD/VERIFY too, and explains why the name was kept.
+- `src/fleet/orchestrator/stubs.py` — (fix round, I4) a stale "never invoked" comment corrected
+  with a dated note.
+- `docs/SPEC.md` — (fix round, C2) §3.5 item 1's stale "refusals still stand" paragraph replaced
+  with a dated update naming what actually landed and what still doesn't work.
+- `docs/CRITERIA_PLAN.md` — (fix round, C2) §14's stale "(c)/(d) actively refused" sentence
+  corrected with a dated update; done bar reworded to name D104/D107/D108/D123/D124 explicitly.
 
 ## Is §12.37 (and §12.14/§12.39) now closable?
 
-**Not yet, and this fixture is the first evidence to say precisely why not**, per the brief's own
-instruction not to self-certify. What is now true, proven for real rather than asserted: the
-CREATION half (trigger detection → `StubRecord` → `stubs` INSERT → `RUNNING → DEGRADED`, all three
-prior legs) and the render half (task-68) are wired together and reachable through the real
-`--stub-blocked` CLI surface end to end through VERIFY, producing a real `STUB_LIMITED`
-`VerificationReport` for the first time. What remains, both pre-existing and both disclosed above
-rather than newly created by this task: (1) `fleet retry`/`OPERATOR_REOPEN` has no CLI surface, so
-"a repo re-runs to SUCCEEDED" is not drivable for real; (2) D104 (REVALIDATE has no dispatch path)
-blocks the reconciliation side from ever completing T2/RESOLVED in production. Both are
-independent, both predate this bundle, and closing either is "genuinely new production logic, not
-wiring" in exactly the sense `docs/CRITERIA_PLAN.md` §37 already used for the stub-creation worker
-itself — recommend each get its own tracked item (D104 already has one; the `fleet retry` gap does
-not, and I have not self-allocated one for it) rather than being folded into a future §37 leg
-sized like this one.
+**Confirmed by the controller's own task-scoped review: not yet, for either §12.37, §12.14, or
+§12.39** (`cfe82bb`, allocating D123/D124 and correcting a false "§14's done bar is identical to
+§37's" claim in `docs/CRITERIA_PLAN.md`) — this fixture is the first evidence to say precisely
+why not, per the brief's own instruction not to self-certify. What is now true, proven for real
+rather than asserted: the CREATION half (trigger detection → `StubRecord` → `stubs` INSERT →
+`RUNNING → DEGRADED`, all three prior legs) and the render half (task-68) are wired together and
+reachable through the real `--stub-blocked` CLI surface end to end through VERIFY, producing a
+real, persisted `STUB_LIMITED` `VerificationReport` for the first time. What remains, all
+pre-existing and all disclosed above rather than newly created by this task, each independently
+tracked with its own D-number: **D124** (no `fleet retry` CLI surface, no `ALLOWED_TRANSITIONS`
+edge out of `REQUIRES_HUMAN_INTERVENTION` — "a repo re-runs to SUCCEEDED" is not drivable for
+real), **D104** (REVALIDATE has no dispatch path), **D107** (nothing rewrites a consumer's
+redirected `BUILD.bazel` label back to the real one once the stub resolves), **D108**
+(`StubDecision.consumer_status` has zero production readers), and **D123** (the cross-wave
+`blocked_by` propagation gap this leg's own fixture had to work around — orthogonal to stubs,
+also blocks §12.14 per the controller's correction). All five are "genuinely new production
+logic, not wiring" in exactly the sense `docs/CRITERIA_PLAN.md` §37 already used for the
+stub-creation worker itself — each is its own tracked item; none should be folded into a future
+§37/§14 leg sized like this one.
 
-§12.14 (an `EMPTY_FAILING` stub unblocks nothing, no repo becomes DEGRADED for it) is unaffected
-by this leg either way — `stub_degrade_transform`'s own qualifying-fidelity check was ADR-0124's
-work, untouched here, and this leg only adds NEW call sites of it, all subject to the same check.
+§12.14: the controller's review found "(a)/(b) fully covered" was ALSO false (D123 — a direct
+dependent of an RHI repo does not become BLOCKED at the TRANSFORM phase) and corrected
+`docs/CRITERIA_PLAN.md`'s claim that its done bar is "identical to §37's" (it needs D124 — shared
+with §12.37 — plus an undesigned transitive stub-stacking mechanism, beyond the Leg 1-3 bundle).
+`stub_degrade_transform`'s own qualifying-fidelity check (an `EMPTY_FAILING` stub unblocks
+nothing, no repo becomes DEGRADED for it) was ADR-0124's work, untouched here — this leg only
+adds NEW call sites of it, all subject to the same check.
 
 §12.39 not independently investigated this round; out of this task's assigned scope.
+
+## Fix-round test proof (fresh measurements, this commit)
+
+**`tests/test_build_e2e.py`, whole file, no `-k`: 7 failed, 70 passed.** Every one of the 7
+failures is in the real-Bazel section (7) naming `acme-app-ts`/`acme-lib-ts` reaching
+`REQUIRES_HUMAN_INTERVENTION` — e.g. `test_build_against_a_real_bazel`,
+`test_two_js_repos_with_different_npm_dependencies_both_build`. **Confirmed exact parity with
+unmodified `main`, measured in THIS SAME sandbox rather than assumed from the reviewer's own
+numbers**: ran the identical `pytest tests/test_build_e2e.py -q` directly against the PRIMARY
+checkout (`/home/redmage/swe repo harness`, commit `cfe82bb`, zero task-69 involvement) — it also
+reports **7 failed, 70 passed**, the same 7 test names, the same shape. (The reviewer's own
+baseline measurement of "11 failed/55 passed/11 skipped" reflects a different environment — 0
+tests are skipped in this sandbox on either `main` or this branch, most likely because this
+sandbox's network/registry reachability to `npm` differs from theirs; the class of failure is the
+same real-Bazel-JS-toolchain issue either way, and the controlled, same-sandbox comparison is what
+actually proves no regression.) This confirms C1's fix genuinely restores task-68's 3 tests to
+green without altering the underlying, intentional `DEGRADED`/exit-7 behavior change — the 3 tests
+this round fixed are absent from both failure lists.
+
+**`tests/test_cli.py`, whole file, no `-k`: 194 passed.**
+
+**`tests/test_integration_honesty_citations.py`: found and fixed one genuine citation-drift
+regression from this fix round's own edits, then 70 passed.** `stub_degrade_transform`'s
+docstring expansion (I4) added lines to `src/fleet/state/repository.py` ABOVE `record_attempt`,
+shifting its definition from `2483-2551` to `2495-2563` — `docs/INTEGRATION_HONESTY.md:7406`'s
+anchored citation of `record_attempt` (`state/repository.py:2483-2551`) stopped resolving as a
+result, caught by this exact test (`test_no_unpinned_anchored_citation_fails_to_resolve
+[INTEGRATION_HONESTY]`) and by its sibling census check (`test_every_census_number_this_module_
+states_is_the_number_it_derives`, which read 57 unresolved anchored citations against the
+module's own stated 56). Repointed the citation to `2495-2563`; both tests pass clean afterward
+(confirmed no other citation in the tree drifted from this round's edits — the full 70-test module
+is green, not just the two that failed).
+
+**`python -m mypy` (no path args, repo root)**: `Success: no issues found in 129 source files`.
+
+**`ruff check .`**: `All checks passed!`
+
+## Final commit
+
+Fix round committed on `agent/roundvi-task69`. Not merged to `main`.

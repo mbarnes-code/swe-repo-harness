@@ -3191,15 +3191,27 @@ def test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stub
     `_contain`, unconditional — it does not consult `stubs`) marks `acme-app-py` `BLOCKED` the
     moment `acme-lib-py` reaches `REQUIRES_HUMAN_INTERVENTION`, in the SAME invocation, before its
     own wave ever opens: a `BLOCKED` member is never admitted (`scheduler.Admission`), so its
-    `BUILD.bazel` is never written. The worker that would create a stub AND un-block its consumer
-    is `--stub-blocked`, which every call site in this tree still REFUSES as not-implemented
-    (§37 Blocker A/B landed only the plumbing `clear_blocked_by` needs, not the worker that drives
-    it) — so this test stands in for that not-yet-built worker's END STATE with the same raw-SQL
-    approach `tests/test_pr_e2e.py`'s `degrade()` already uses for the same reason: a direct
-    `BLOCKED -> PENDING` write with `blocked_by` cleared, matching `clear_blocked_by`'s effect
-    without exercising its floor/staleness machinery (`orchestrator/reentry.py`), which is a
-    landed, separately-tested surface this task does not touch. The second `build()` call then
-    admits `acme-app-py` through the ordinary, unmodified scheduler.
+    `BUILD.bazel` is never written. **Corrected 2026-09-07 (round VI task 69 fix round):** this
+    docstring used to say every `--stub-blocked` call site "still REFUSES as not-implemented" —
+    false since round VI task 69 removed all three refusals. The real unblock path is now
+    `fleet resume --stub-blocked` (§11.5 step 6, `orchestrator.reentry.stub_permits_removal` via
+    `_unblock_dependents`); this test still uses the raw-SQL stand-in below rather than that real
+    path because this file's fixtures do not drive `fleet resume`, and re-plumbing this test onto
+    it is out of this fix round's scope — the raw-SQL write matches `clear_blocked_by`'s own
+    effect (`BLOCKED -> PENDING` with `blocked_by` cleared) without exercising its floor/staleness
+    machinery (`orchestrator/reentry.py`), which is landed and separately tested. The second
+    `build()` call then admits `acme-app-py` through the ordinary, unmodified scheduler.
+
+    **Corrected 2026-09-07 (round VI task 69 fix round): `acme-app-py`'s own BUILD row is now
+    `DEGRADED`, not `SUCCEEDED`.** `cli._build_impl` now calls `stub_degrade_transform(phase=
+    Phase.BUILD)` unconditionally after every wave (round VI task 69) — `models.state.RepoState.
+    _stub_invariants` requires `stubbed_deps` non-empty IFF `status is DEGRADED`, so a repo built
+    against a live `ACTIVE` stub must not project as plain `SUCCEEDED`. This is a real,
+    intentional, production-visible behavior change this leg introduces: `fleet build` over any
+    fleet carrying an `ACTIVE`/`PUBLISHED_ARTIFACT` stub row now leaves that consumer `DEGRADED`
+    (and the overall run reports `REQUIRES_HUMAN_INTERVENTION`/exit 7) where it previously left it
+    `SUCCEEDED`/exit 0 — unconditionally, with no flag needed, since the correction is data-driven
+    off the `stubs` table rather than gated on `--stub-blocked`.
     """
     fake = FakeBazel(
         fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS[_STUB_PROVIDER]): 34}
@@ -3237,7 +3249,9 @@ def test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stub
 
     statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
     assert statuses[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", statuses
-    assert statuses[_STUB_CONSUMER] == "SUCCEEDED", statuses
+    # DEGRADED, not SUCCEEDED (round VI task 69 fix round) — see the docstring's second
+    # "Corrected" paragraph above.
+    assert statuses[_STUB_CONSUMER] == "DEGRADED", statuses
 
     dests = relocations(filter_repo)
     body = (
@@ -3376,7 +3390,21 @@ def test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel(
     )
 
     result = build(fleet, "--no-sandbox")
-    assert result.exit_code == ExitCode.SUCCESS, result.output
+    # REQUIRES_HUMAN_INTERVENTION, not SUCCESS (round VI task 69 fix round): `acme-app-py` is
+    # this stub's consumer and carries an ACTIVE/PUBLISHED_ARTIFACT row, so `cli._build_impl`'s
+    # unconditional `stub_degrade_transform(phase=Phase.BUILD)` correction leaves its BUILD row
+    # DEGRADED, forcing exit 7 — `models.state.RepoState._stub_invariants` requires this (a repo
+    # built against a live ACTIVE stub must not project as plain SUCCEEDED). The render under
+    # test (MODULE.bazel) is unaffected by this — it is written before the terminal status.
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+    consumer_status = dict(
+        query(
+            fleet,
+            "SELECT repo_id, status FROM phases WHERE phase = 3 AND repo_id = ?",
+            ("acme-app-py",),
+        )
+    )
+    assert consumer_status["acme-app-py"] == "DEGRADED", consumer_status
 
     module = (build_worktree(fleet, "acme-commons-java") / "MODULE.bazel").read_text(
         encoding="utf-8"
@@ -3473,7 +3501,12 @@ def test_active_stubs_package_files_are_materialized_into_every_dispatchs_worktr
     )
 
     result = build(fleet, "--no-sandbox")
-    assert result.exit_code == ExitCode.SUCCESS, result.output
+    # REQUIRES_HUMAN_INTERVENTION, not SUCCESS (round VI task 69 fix round) — same reason as
+    # `test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel` above:
+    # `acme-app-py` is the consumer of the qualifying (PUBLISHED_ARTIFACT) stub row here too, so
+    # its BUILD row is left DEGRADED by `stub_degrade_transform(phase=Phase.BUILD)`. The package
+    # materialization under test is unaffected — it is written before the terminal status.
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
 
     worktree = build_worktree(fleet, "acme-commons-java")
 

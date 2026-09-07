@@ -8996,10 +8996,17 @@ async def _active_stubs_by_consumer(
 
     Discovered missing while wiring this leg's own end-to-end fixture: `RdepverifyInput.
     verified_against_stubs`/`.stub_fidelity` (`workers/rdepverify.py`) have existed, unpopulated,
-    since before this bundle — no caller ever read the `stubs` table to fill them, so
-    `VerificationReport.equivalence` could never resolve to `STUB_LIMITED` even with a live,
-    correctly-rendered stub redirect. Not task-67's or task-68's code (neither touches VERIFY's
-    payload construction); reported in this task's own report rather than silently patched.
+    since before this bundle — no caller ever read the `stubs` table to fill them. **Narrower
+    claim than "equivalence could never resolve to STUB_LIMITED" (an earlier draft of this
+    docstring overclaimed that):** `cli._report_with_stubs` already re-derives `equivalence`
+    fresh from the live `stubs` table at `fleet pr` time, independent of this gap, so a PR body
+    could already show `STUB_LIMITED` before this fix. What this gap actually blocked is
+    narrower and still real: the PERSISTED Phase-4 `VerificationReport` (the `findings` row
+    `_VerifySink`/`_record_verification` writes when VERIFY itself runs — the exact artifact
+    §12.37's own criterion text names) could never carry `STUB_LIMITED`, even with a live,
+    correctly-rendered stub redirect, because nothing populated the fields it derives from. Not
+    task-67's or task-68's code (neither touches VERIFY's payload construction); reported in this
+    task's own report rather than silently patched.
 
     `EMPTY_FAILING` rows are INCLUDED here, unlike `_stub_workspace_deps`'s `PUBLISHED_ARTIFACT`-
     only filter: §3.5 item 2 fails an `EMPTY_FAILING` consumer at BUILD time (never reaches
