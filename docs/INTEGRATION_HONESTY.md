@@ -8992,7 +8992,14 @@ account; §11's Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work t
 it is dispatched separately.
 
 **PARTLY ADDRESSED, widened (round VI task 70, 2026-09-07) — JVM now covered; JS and Rust are NOT,
-for a measured reason each, not a scoping choice.** `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+for a measured reason each, not a scoping choice; `Ecosystem.GO` needs no coverage at all — it is
+structurally out of scope, not merely unaddressed.** `go.py`'s `generate_targets()`/
+`test_targets()` return `[]` unconditionally: Gazelle generates `go_test` targets directly from
+`*_test.go` files (the `uses_gazelle` adapter invariant), bypassing `BuildUnit.test_srcs` entirely
+— there is no `test_srcs`-driven path for Go to populate. This closes D112's full membership
+question: PyPI (done), Maven/Gradle (this task), Go (N/A by design) — JS and Rust remain the only
+two genuinely open gaps, both for the measured reasons below.
+`TEST_SRC_PARTITIONED_ECOSYSTEMS`
 (`ecosystems/base.py`) now also carries `MAVEN`/`GRADLE` (one adapter, `jvm.py`), and
 `cli._partition_test_srcs` dispatches to a new `cli._is_jvm_test_src` (the Maven Standard
 Directory Layout's `src/test/{java,kotlin,scala}/` convention) via a small
@@ -9027,8 +9034,11 @@ transitive `bazel_dep` of `rules_jvm_external` and is **not** a key in `build.ru
 but under bzlmod a transitive dependency's repo is not visible to the root module by that route
 alone. This reproduces on the PRE-EXISTING `acme-commons-java` fixture too (confirmed by the error
 being about the `load()` itself, before any target-level analysis, and independent of `srcs`
-content) — it is `## D7`'s "jvm is still zero" row, unresolved: **no generated JVM package has
-ever been analysed by real Bazel in this codebase's history, this task's attempt included.**
+content) — it is §24/§27's own audit row's "jvm is still zero" status (`docs/
+INTEGRATION_HONESTY.md`'s shared D4/D6/D7 audit table, not `## D7`'s own dedicated entry, which
+is exclusively about `js_binary`'s missing `deps` attribute), unresolved: **no generated JVM
+package has ever been analysed by real Bazel in this codebase's history, this task's attempt
+included.**
 Fixing it means adding `rules_java` (some version) as an explicit `bazel_dep` in
 `build.ruleset_versions`/`render_module_bazel` — a design decision (which version, whether it
 also finally closes the JDK-toolchain gap `toolchain_requirements()` already discloses) outside
