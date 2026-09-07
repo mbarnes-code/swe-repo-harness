@@ -851,9 +851,17 @@ sentence named as missing is closed (round VI tasks 67-69): `--stub-blocked` now
 (`tests/test_pr_e2e.py::test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real`).
 This closes real ground on (c)/(d) but does not, on its own, resolve the D123/D124 gaps above —
 see those entries for what still blocks §12.14 from DONE.
-**Done bar:** unchanged in substance from §37's own remaining done bar (D104/D107/D108/D123/D124,
-all pre-existing, all independent of the Leg 1-3 bundle) — not D50's scope. Do not open a
-separate effort for a "D50 closure" here; do not duplicate §37's own done bar.
+**Done bar:** **corrected 2026-09-07 (round VI task 69, second fix round) — the line this
+replaces said "unchanged in substance from §37's own remaining done bar," omitting the
+transitive-stub-stacking mechanism this very entry's own opening paragraph already names as
+required beyond D104/D107/D108/D123/D124; that omission made this line contradict its own entry.**
+Two things must close, not one: (1) §37's own remaining done bar
+(D104/D107/D108/D123/D124, all pre-existing, all independent of the Leg 1-3 bundle) — the part
+this entry shares with §37; and (2) an undesigned, not-yet-briefed mechanism for transitive stub
+stacking (§3.5 item 4's whole-descendant-set stacking), which §37 does not need and §12.14's own
+text does — no D-number or design exists for it yet. Not D50's scope either way. Do not open a
+separate effort for a "D50 closure" here; do not duplicate §37's own done bar for item (1), and do
+not treat item (1) alone as sufficient for §12.14.
 
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:

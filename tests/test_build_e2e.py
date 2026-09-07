@@ -3113,10 +3113,17 @@ def test_an_unknown_ecosystem_still_falls_back_visibly(
 # `_unit_deps` (cli.py) used to resolve every consumer -> provider graph edge to the provider's
 # OWN internal Bazel label unconditionally — even when the provider is REQUIRES_HUMAN_INTERVENTION
 # and a stub exists for it, which is precisely the case where that label was never merged onto the
-# branch. These two tests seed a `stubs` row directly via SQL (no worker in this tree emits one
-# yet — `--stub-blocked` is refused by `fleet build`, the same reason `tests/test_pr_e2e.py`'s
-# `degrade()` does the same) and prove BOTH halves of the fix on the ONE real internal edge that
-# survives Phase 3 (`acme-app-py` -> `acme-lib-py`, see `DEPENDENCY_REPO`/`DEPENDENT_REPO` below):
+# branch. These two tests seed a `stubs` row directly via SQL. **Corrected 2026-09-07 (round VI
+# task 69 fix round): the original comment here said "no worker in this tree emits one yet --
+# `--stub-blocked` is refused by `fleet build`" -- false since round VI task 69 removed all three
+# `--stub-blocked` refusals and wired real stub creation into `_transform_impl`.** The raw-SQL
+# seed stays here regardless: driving a real `--stub-blocked` TRANSFORM dispatch needs a genuinely
+# abandoned provider and a real wave sequence (see `tests/test_pr_e2e.py::test_stub_blocked_
+# creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` for that full real-CLI
+# proof), which is out of scope for this file's own narrower target — `_unit_deps`'s redirect
+# logic in isolation, over a stub row whose STATE is the one thing under test. These two tests
+# prove BOTH halves of the fix on the ONE real internal edge that survives Phase 3
+# (`acme-app-py` -> `acme-lib-py`, see `DEPENDENCY_REPO`/`DEPENDENT_REPO` below):
 # an `ACTIVE` stub redirects the edge, and a `SUPERSEDED` one — the state T1 moves a stub to only
 # once the provider's PR is `MERGED` (`orchestrator/stubs.py`'s `supersede`, ADR-0011 stacking) —
 # does not, because by then the provider's real label IS live on the integration branch.

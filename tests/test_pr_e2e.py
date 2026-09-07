@@ -264,9 +264,20 @@ def degrade(
 ) -> None:
     """Put one repo in the §3.5 escape hatch: DEGRADED, with a live `ACTIVE`/`SUPERSEDED` stub row.
 
-    Written straight to SQLite because `--stub-blocked` is refused by `fleet build` (no worker
-    emits a stub in this tree), and refusing to test the draft/banner rule until that worker
-    exists would leave §3.5.1's most consequential PR rule unproven.
+    Written straight to SQLite. **Corrected 2026-09-07 (round VI task 69 fix round): this
+    docstring used to say "`--stub-blocked` is refused by `fleet build` (no worker emits a stub in
+    this tree)" — false since round VI task 69 removed all three `--stub-blocked` refusals and
+    wired real stub creation into `_transform_impl`.** The raw-SQL seed stays here regardless, for
+    a reason specific to this helper rather than a general absence: most callers pass
+    `provider_repo_id='acme-empty'` (see below) — a name deliberately absent from this fixture
+    fleet's real repos — which a real `--stub-blocked` dispatch could never produce, since it
+    requires a genuine graph edge to a genuine `REQUIRES_HUMAN_INTERVENTION` provider. The one
+    caller that DOES want a real provider (`test_pr_sync_fires_t1_and_enqueues_a_revalidate_
+    task_for_a_merged_providers_stub`) still uses this helper rather than a real dispatch because
+    driving one here would also need a real abandoned provider and a real wave sequence — see
+    `tests/test_pr_e2e.py::test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_
+    feeds_t1_for_real` for that full real-CLI proof, built separately because it needs its own
+    fixture topology.
 
     `state` defaults to `ACTIVE` (the original fixture shape) and also accepts `SUPERSEDED` — the
     OTHER member of `_HELD_STATES`/§12.38's refusal set, so a caller can prove the guard holds on

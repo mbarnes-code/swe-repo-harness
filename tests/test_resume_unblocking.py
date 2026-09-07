@@ -909,10 +909,17 @@ def test_an_rhi_blocked_repo_stays_blocked_when_the_flag_is_absent(fleet: Path) 
     """The negative case (brief item, `test_a_blocked_repo_is_not_admitted`-style discipline):
     prove the OLD behaviour survives unchanged, not just that new code exists.
 
-    `plan_unblocking`'s new `stub_blocked` parameter defaults to `False`, and every CLI path this
-    round reaches it with no other value available (the flag above is refused before `_resume_
-    impl` ever runs) — so a plain `fleet resume`, with `--stub-blocked` entirely absent, must
-    leave `RETAINED_RHI` blocked by `CONTAINED` exactly as it always has.
+    `plan_unblocking`'s `stub_blocked` parameter defaults to `False`. **Corrected 2026-09-07
+    (round VI task 69 fix round): this docstring used to say the flag "is refused before
+    `_resume_impl` ever runs" — false, and it directly contradicted the test immediately above
+    this one (`test_stub_blocked_frees_an_rhi_blocked_repo_at_step_6`), which passes
+    `--stub-blocked` and asserts `ExitCode.SUCCESS`.** The flag has been live since round VI task
+    69 removed the refusal; the actual reason a PLAIN `fleet resume` (this test, flag absent
+    entirely) must leave `RETAINED_RHI` blocked is simply that `stub_blocked` genuinely defaults
+    to `False` when the caller does not pass `--stub-blocked` at all — no refusal involved, just
+    the parameter's own default. This is the companion negative case to the test immediately
+    above: that one proves the flag frees the repo when passed, this one proves nothing frees it
+    when the flag is absent.
     """
     code, payload = _resume(fleet)
     assert code == ExitCode.SUCCESS, payload
