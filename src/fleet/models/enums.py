@@ -123,18 +123,25 @@ class PhaseDemotion:
 
 
 def transition(
-    old: RepoStatus, new: RepoStatus, *, operator: bool = False, resume: bool = False
+    old: RepoStatus,
+    new: RepoStatus,
+    *,
+    operator: bool = False,
+    resume: bool = False,
+    stub_degrade: bool = False,
 ) -> RepoStatus:
     """THE single gate for every status write (§6, §11.5). A no-op re-write of the same status
     is allowed, so an idempotent replay (§11.7) is not an error; anything unlisted raises.
 
     `operator=True` opens `OPERATOR_REOPEN` (a human at `fleet retry`); `resume=True` opens
-    `RESUME_DEMOTE` (§11.5 step 5). Both default to False, so no existing caller — and no
-    automatic sweep — gains a single new edge.
+    `RESUME_DEMOTE` (§11.5 step 5); `stub_degrade=True` opens `STUB_DEGRADE` (§37 Leg 1,
+    ADR-0124). All three default to False, so no existing caller — and no automatic sweep — gains
+    a single new edge.
 
-    DO NOT pass `resume=True` here. Call `demote()` instead: this function returns the status
-    alone, so a demotion made through it emits NO `PhaseDemoted` finding and is invisible to
-    whoever reads the run. Nothing enforces that — it is a convention (ADR-0077 §4)."""
+    DO NOT pass `resume=True` or `stub_degrade=True` here. Call `demote()`/`degrade_for_stub()`
+    instead: this function returns the status alone, so a write made through it directly emits NO
+    audit finding and is invisible to whoever reads the run. Nothing enforces that — it is a
+    convention (ADR-0077 §4, extended to `stub_degrade` by ADR-0124)."""
     if new is old:
         return new
     if new in ALLOWED_TRANSITIONS[old]:
@@ -142,6 +149,8 @@ def transition(
     if operator and new in OPERATOR_REOPEN.get(old, frozenset()):
         return new
     if resume and new in RESUME_DEMOTE.get(old, frozenset()):
+        return new
+    if stub_degrade and new in STUB_DEGRADE.get(old, frozenset()):
         return new
     raise ValueError(f"illegal status transition {old.value} -> {new.value}")
 
@@ -168,6 +177,67 @@ def demote(
         )
     new = transition(old, RepoStatus.PENDING, resume=True)
     return new, PhaseDemotion(repo_id=repo_id, phase=phase, from_status=old, reason=reason)
+
+
+STUB_DEGRADE: dict[RepoStatus, frozenset[RepoStatus]] = {
+    RepoStatus.SUCCEEDED: frozenset({RepoStatus.DEGRADED}),
+}  # §37 Leg 1's own door (ADR-0124), same construction and same reason as RESUME_DEMOTE above:
+# a TRANSFORM phase the generic completion loop just wrote SUCCEEDED earns DEGRADED instead once
+# it is known to have at least one ACTIVE, PUBLISHED_ARTIFACT stub row (never an EMPTY_FAILING-
+# only one — §12.14 forbids that consumer from ever becoming DEGRADED). The write goes through
+# `degrade_for_stub()` — never `transition(..., stub_degrade=True)` directly, which opens the same
+# door but returns the status ALONE and would degrade silently, mirroring ADR-0077 §4's identical
+# concern for `demote()`. Reached only behind the `stub_degrade` flag, so SUCCEEDED's mechanical
+# terminality against the crash sweep, the reaper and `_on_breach` is untouched — none of those
+# pass the flag. SUCCEEDED is the ONLY key: this correction fires only against a phase the generic
+# completion loop just wrote SUCCEEDED, never against any other status.
+
+
+STUB_DEGRADED_KIND: Final[str] = "StubDegraded"
+"""The `findings.kind` every §37 Leg 1 `SUCCEEDED -> DEGRADED` correction writes (ADR-0124). Same
+audit discipline as `PHASE_DEMOTED_KIND`: a write that quietly turned a green migration into a
+stub-limited one is a fact an operator must be told, not merely a status bit."""
+
+
+@dataclass(frozen=True, slots=True)
+class StubDegradation:
+    """The audit record for one `SUCCEEDED -> DEGRADED` stub correction (ADR-0124), returned by
+    `degrade_for_stub()` *alongside* the new status — mirrors `PhaseDemotion` exactly, for the
+    same reason: a caller that goes through `degrade_for_stub()` cannot end up holding the new
+    status without the finding it owes."""
+
+    repo_id: str
+    phase: Phase
+    reason: str          # names the qualifying ACTIVE/PUBLISHED_ARTIFACT stub_coord_key(s)
+    from_status: RepoStatus = RepoStatus.SUCCEEDED
+    to_status: RepoStatus = RepoStatus.DEGRADED
+
+    def payload(self) -> dict[str, object]:
+        """The `findings.payload` body, shaped for `cli._note_finding(kind=STUB_DEGRADED_KIND)`
+        (mirrors `PhaseDemotion.payload()`)."""
+        return {
+            "repo_id": self.repo_id,
+            "phase": int(self.phase),
+            "from_status": self.from_status.value,
+            "to_status": self.to_status.value,
+            "reason": self.reason,
+        }
+
+
+def degrade_for_stub(
+    old: RepoStatus, *, repo_id: str, phase: Phase, reason: str
+) -> tuple[RepoStatus, StubDegradation]:
+    """The §37 Leg 1 correction path (ADR-0124) — the status AND its audit record, as one value.
+    Mirrors `demote()` exactly, including its stricter-than-`transition()` acceptance: only a
+    `STUB_DEGRADE` key is accepted, so a caller cannot mint a `StubDegraded` finding for a status
+    this map does not name."""
+    if old not in STUB_DEGRADE:
+        raise ValueError(
+            f"{old.value} is not a stub degradation: only "
+            f"{'/'.join(sorted(k.value for k in STUB_DEGRADE))} may be degraded for a stub"
+        )
+    new = transition(old, RepoStatus.DEGRADED, stub_degrade=True)
+    return new, StubDegradation(repo_id=repo_id, phase=phase, reason=reason, from_status=old)
 
 
 class StubState(StrEnum):

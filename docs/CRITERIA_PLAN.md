@@ -2037,7 +2037,7 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   here changes tested behavior (correctly extending it is the real work, not a side effect).
 - **Blocker B.** "The abandoned provider's last published version" has no durable field, not just
   no populated one — `coordinates` (schema.sql) has no version column at all, and `_repo_facts`
-  (`cli.py:7955-7993`, moved by round VI task 65's `cli.py` insertions) always constructs
+  (moved by round VI task 65's and task 67's `cli.py` insertions) always constructs
   `published: Coordinate` with `version_spec=None`. This is  a schema-or-design decision (new column vs. re-parse-from-git-history-at-stub-time), not a
   re-derivation from an existing carrier as previously assumed. **This was Blocker B's state as
   investigated by round VI task 9; see the round VI task-12 update below for its landed fix —
@@ -2045,8 +2045,8 @@ forcing a fit. Full detail in that branch's `task-9-report.md`; summary:
   the post-fix state (the citation's line number is repointed for the drift check above; the
   narrative claim itself is not).**
 - **Blocker C (newly found, not previously flagged).** No code branch reclassifies a stubbed
-  `C → P` edge from internal to external — `_unit_deps` (`cli.py:8065-8156`, moved by round VI
-  task 65's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
+  `C → P` edge from internal to external — `_unit_deps` (moved by round VI task 65's and task
+  67's `cli.py` insertions) resolves every  consumer→provider edge straight to the provider's own internal Bazel label with no stub-aware
   branch, so a stubbed consumer's generated `BUILD.bazel` would reference a package that was never
   materialized: a build break, not the stub SPEC promises.
 
@@ -2078,7 +2078,7 @@ now ready for direct dispatch** — ADR-0113's own §7 gives a design precise en
 without further investigation.
 
 **A fourth, previously-untraced item, found by the same research pass and distinct from all three
-blockers above**: `_eligible_build_units` (`cli.py:9690-9723`, moved by round VI task 65's
+blockers above**: `_eligible_build_units` (moved by round VI task 65's and task 67's
 `cli.py` insertions) filters on the literal string`phases.status = 'SUCCEEDED'`, which would silently exclude a `DEGRADED` stub-limited consumer from
 the BUILD-phase domain — contradicting SPEC's "draft-only PRs" requirement for that case. Correct
 for everything the codebase can reach today (nothing writes a real `DEGRADED` TRANSFORM-phase row
@@ -2236,6 +2236,33 @@ confirmed to have zero stub-awareness (`grep -n -i "stub" src/fleet/workers/buil
 hits, 682 lines). Both facts are independently true and unreconciled. This is named here as
 unresolved and needing adjudication by whichever task/round eventually scopes the
 stub-creation-logic bundle's dispatch — it is not adjudicated by this update.
+
+**Update, round VI task 67 (2026-09-06, `d548b38`) — resolved.** `docs/SPEC.md` §3.5 item 1 now
+names the TRANSFORM-phase decision site explicitly, immediately before the `workers/buildgen.py`
+emission sentence quoted above (which stays correct, unchanged, describing the render step only).
+See that commit for the SPEC wording and the landed decision-half functions
+(`orchestrator.stubs.detect_stub_triggers`/`build_stub_record`/`stub_completion_correction`,
+`cli._detect_transform_stub_triggers`/`_create_stub_records`/`_correct_transform_status_for_stubs`
+— Leg 1 of the bundle scoped above; the BUILD-phase render half is Leg 2, separately dispatched).
+This paragraph is kept intact per CLAUDE.md's "annotate, never rewrite" ledger discipline.
+
+> **Update, round VI task 67 fix round 1 (2026-09-07) — the function list above is SUPERSEDED; the
+> RESOLVED verdict stands.** A task-scoped review found `d548b38`'s `RUNNING -> DEGRADED`
+> correction (`stub_completion_correction`/`_correct_transform_status_for_stubs`) bypassed
+> `models.enums.transition()` on a false precedent (see `docs/DECISIONS.md` **ADR-0124**) and was
+> blind to stub fidelity, contradicting §12.14 (an `EMPTY_FAILING` stub must never drive
+> `DEGRADED`) — and separately, that `_create_stub_records` keyed `stubs.stub_coord_key` on the
+> provider's `primary_coord_key` rather than the consumer edge's own `dst_coord_key`, silently
+> defeating `_unit_deps`'s redirect for any multi-coordinate provider. Both are fixed in this same
+> fix-round commit: `stub_completion_correction`/`_correct_transform_status_for_stubs` are DELETED
+> (not merely edited) and replaced by `models.enums.STUB_DEGRADE`/`degrade_for_stub`/
+> `StubDegradation` and `state.repository.SqliteStateRepository.stub_degrade_transform` (ADR-0124,
+> fidelity-aware, one `ALLOWED_TRANSITIONS`-modelled door instead of a raw-SQL bypass);
+> `orchestrator.stubs.StubTrigger` now carries the edge's own `coord_key` and
+> `_detect_transform_stub_triggers`/`_create_stub_records` key every `stubs` row on it. **Still
+> not yet wired into any production call site** — all three `--stub-blocked` refusals stand per
+> ADR-0113 condition 2; see `docs/SPEC.md` §3.5 item 1's own "not yet wired" sentence, added in
+> this same fix round.
 
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of

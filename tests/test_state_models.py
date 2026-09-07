@@ -56,6 +56,8 @@ from fleet.models.enums import (
     OPERATOR_REOPEN,
     PHASE_DEMOTED_KIND,
     RESUME_DEMOTE,
+    STUB_DEGRADE,
+    STUB_DEGRADED_KIND,
     TERMINAL_STATUSES,
     BreakStrategy,
     ContextPolicy,
@@ -72,11 +74,13 @@ from fleet.models.enums import (
     PrState,
     RepoStatus,
     StructuredOutputMode,
+    StubDegradation,
     StubFidelity,
     StubState,
     SymbolKind,
     TaskKind,
     TransformTier,
+    degrade_for_stub,
     demote,
     transition,
 )
@@ -717,6 +721,76 @@ def test_demote_pairs_the_finding_and_is_stricter_than_transition() -> None:
     assert transition(RepoStatus.BLOCKED, RepoStatus.PENDING) is RepoStatus.PENDING
 
 
+def test_a_stub_degradation_is_impossible_without_the_stub_degrade_flag() -> None:
+    """`SUCCEEDED -> DEGRADED` is refused on every path that does not say `stub_degrade=True`
+    (ADR-0124), mirroring `test_a_resume_demotion_is_impossible_without_the_resume_flag` exactly.
+
+    Why it matters: this is the property `STUB_DEGRADE` exists to guard without touching the
+    empty `ALLOWED_TRANSITIONS[SUCCEEDED]` set — the crash sweep, the reaper and `_on_breach`
+    must stay unable to turn settled, landed work into a stub-limited one by accident. Also pins
+    that `resume=True` and `operator=True` are NOT this door: only `stub_degrade=True` is.
+    """
+    with pytest.raises(ValueError, match="illegal status transition"):
+        transition(RepoStatus.SUCCEEDED, RepoStatus.DEGRADED)
+    with pytest.raises(ValueError, match="illegal status transition"):
+        transition(RepoStatus.SUCCEEDED, RepoStatus.DEGRADED, resume=True)
+    with pytest.raises(ValueError, match="illegal status transition"):
+        transition(RepoStatus.SUCCEEDED, RepoStatus.DEGRADED, operator=True)
+
+    assert (
+        transition(RepoStatus.SUCCEEDED, RepoStatus.DEGRADED, stub_degrade=True)
+        is RepoStatus.DEGRADED
+    )
+
+
+def test_the_stub_degrade_door_opens_onto_degraded_from_succeeded_and_nothing_else() -> None:
+    """`stub_degrade=True` is not a master key: it degrades settled work and reopens nothing
+    else, mirroring `test_the_resume_door_opens_onto_pending_from_succeeded_and_nothing_else`."""
+    assert STUB_DEGRADE.keys() == {RepoStatus.SUCCEEDED}
+
+    elsewhere = [s for s in RepoStatus if s not in (RepoStatus.DEGRADED, RepoStatus.SUCCEEDED)]
+    assert len(elsewhere) == 5, (
+        "RepoStatus has grown: every non-DEGRADED target must be covered, not a chosen subset. "
+        "Decide whether the new member belongs in STUB_DEGRADE, then update this count to match."
+    )
+    for target in elsewhere:
+        with pytest.raises(ValueError, match="illegal status transition"):
+            transition(RepoStatus.SUCCEEDED, target, stub_degrade=True)
+
+
+def test_degrade_for_stub_pairs_the_finding_and_is_stricter_than_transition() -> None:
+    """`degrade_for_stub()` returns the new status AND the `StubDegraded` finding as one value,
+    and refuses every status `STUB_DEGRADE` does not open — mirrors `demote()`'s own discipline
+    exactly (ADR-0124)."""
+    status, finding = degrade_for_stub(
+        RepoStatus.SUCCEEDED,
+        repo_id="acme/billing",
+        phase=Phase.TRANSFORM,
+        reason="ACTIVE PUBLISHED_ARTIFACT stub(s): maven:com.acme:provider",
+    )
+    assert status is RepoStatus.DEGRADED
+    assert isinstance(finding, StubDegradation)
+    assert STUB_DEGRADED_KIND == "StubDegraded"
+    assert finding.payload() == {
+        "repo_id": "acme/billing",
+        "phase": int(Phase.TRANSFORM),
+        "from_status": "SUCCEEDED",
+        "to_status": "DEGRADED",
+        "reason": "ACTIVE PUBLISHED_ARTIFACT stub(s): maven:com.acme:provider",
+    }
+
+    for refused in (
+        RepoStatus.PENDING,
+        RepoStatus.RUNNING,
+        RepoStatus.BLOCKED,
+        RepoStatus.DEGRADED,
+        RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+        RepoStatus.SKIPPED,
+    ):
+        with pytest.raises(ValueError, match="is not a stub degradation"):
+            degrade_for_stub(refused, repo_id="acme/billing", phase=Phase.TRANSFORM, reason="x")
+
+
 def _enums_mutable_module_state() -> dict[str, str]:
     """Every mutable container bound at `enums` module level, by `repr`."""
     return {
@@ -727,7 +801,7 @@ def _enums_mutable_module_state() -> dict[str, str]:
 
 
 TRANSITION_GLOBALS: frozenset[str] = frozenset(
-    {"ALLOWED_TRANSITIONS", "OPERATOR_REOPEN", "RESUME_DEMOTE",
+    {"ALLOWED_TRANSITIONS", "OPERATOR_REOPEN", "RESUME_DEMOTE", "STUB_DEGRADE",
      "get", "frozenset", "ValueError", "value"}
 )
 """Every global and attribute name `transition()`'s body is allowed to reference.
@@ -804,7 +878,11 @@ def test_transition_demotes_without_writing_a_record_or_naming_a_new_sink(
         "exact failure this gate exists to prevent."
     )
     # ...no state smuggled in as a default argument, and none captured from an enclosing scope,
-    assert transition.__kwdefaults__ == {"operator": False, "resume": False}
+    assert transition.__kwdefaults__ == {
+        "operator": False,
+        "resume": False,
+        "stub_degrade": False,
+    }
     assert transition.__defaults__ is None
     assert transition.__code__.co_freevars == ()
     # ...no function-attribute sink hung off `transition` itself,

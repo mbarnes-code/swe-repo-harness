@@ -292,6 +292,10 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'ContractHoistOverride' | 'ContractNotShared'
                                                   -- | 'HoistBrokeOwner' | 'HoistRollbackDemotion'
                                                   -- | 'HoistRollbackRefused'
+                                                  -- | 'StubDegraded' -- state/repository.py,
+                                                  --     stub_degrade_transform, ADR-0124: the audit
+                                                  --     write paired with the SUCCEEDED->DEGRADED
+                                                  --     CAS write in the same transaction
                                                   -- | 'BaselineRed' | 'RuleConflict'
                                                   -- | 'RuleOscillation' | 'UnmergedDependency'
                                                   -- | 'OperatorQuarantine' | 'ConfigDrift'

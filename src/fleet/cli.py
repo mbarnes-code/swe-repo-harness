@@ -201,8 +201,11 @@ from fleet.orchestrator.stubs import (
     RevalidationPolicy,
     StubDecision,
     StubTransition,
+    StubTrigger,
 )
 from fleet.orchestrator.stubs import apply as apply_stub_decision
+from fleet.orchestrator.stubs import build_stub_record as _build_stub_record
+from fleet.orchestrator.stubs import detect_stub_triggers as _detect_stub_triggers
 from fleet.orchestrator.stubs import plan_revalidation as plan_stub_revalidation
 from fleet.orchestrator.stubs import reconcile as stub_reconcile
 from fleet.orchestrator.stubs import supersede as supersede_stub
@@ -8154,6 +8157,161 @@ async def _unit_deps(
         repo_id: tuple(deps[label] for label in sorted(deps))
         for repo_id, deps in ((key, internal.get(key, {})) for key in facts)
     }
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — the `--stub-blocked` TRANSFORM-phase stub-creation DECISION:
+# trigger detection and `StubRecord` construction + the `stubs` INSERT. The pure decision half of
+# each lives in `orchestrator.stubs` (`detect_stub_triggers`, `build_stub_record`); these two
+# functions are the DB-touching callers, in the same split `_read_blocker_states`/
+# `_apply_stub_decisions` already use for that module's other five decisions.
+#
+# The third piece of this leg — the `RUNNING -> DEGRADED` correction — is NOT here: ADR-0124
+# (fix round 1) put it in `state/repository.py`'s `SqliteStateRepository.stub_degrade_transform`,
+# a real `ALLOWED_TRANSITIONS` door (`models.enums.STUB_DEGRADE`), mirroring `demote_to_floor`
+# exactly, rather than the bare raw-SQL bypass this leg's first landing (`d548b38`) used.
+#
+# NOT wired into `_transform_impl`/`_run_transform_wave` this round. `_validate_transform_flags`
+# still refuses `--stub-blocked` unconditionally (ADR-0113 condition 2: the CLI surface stays
+# refused until this leg AND task-68's BUILD-phase render leg both exist and are wired together
+# end to end) — so a live call site here would be unreachable in production and untestable end
+# to end before that wiring exists. Built and unit-tested directly instead, exactly as Blockers
+# A/B/C's own predicates were before their CLI surface existed.
+# --------------------------------------------------------------------------------------
+
+
+async def _detect_transform_stub_triggers(
+    conn: aiosqlite.Connection,
+    settings: FleetSettings,
+    run_id: str,
+    dispatched_repo_ids: Sequence[str],
+) -> tuple[StubTrigger, ...]:
+    """Step 1: which of `dispatched_repo_ids` (this TRANSFORM wave's members) need a stub, and
+    for which coordinate.
+
+    Runs its own query rather than calling `_ordering_pairs` (fix round 1, review finding C2):
+    `_ordering_pairs` returns `(provider_id, dependent_id)` pairs with no `dst_coord_key`, and a
+    provider owning two-plus published coordinates needs the EDGE's own coordinate, not the
+    provider's `primary_coord_key` — `_unit_deps`'s stub-redirect lookup is keyed on
+    `(consumer_repo_id, edges.dst_coord_key)`. This query is `_unit_deps`'s own edge-selection
+    shape verbatim (`SELECT src_id, dst_id, dst_coord_key FROM edges ...`) over the SAME filter
+    `_ordering_pairs`/`_unit_deps` share (`graph.dag_edge_kinds`, `confidence >=
+    graph.min_confidence`, `ordering_suppressed = 0`, both kinds `= 'REPO'`) — reusing the filter
+    CONDITIONS, since reusing `_ordering_pairs` itself is no longer possible once `dst_coord_key`
+    is required. `_read_blocker_states` is the existing per-repo `phases`-status query (there is
+    no `repos.status` column); the decision itself is `orchestrator.stubs.detect_stub_triggers`.
+    """
+    kinds = tuple(str(kind) for kind in settings.config.graph.dag_edge_kinds)
+    placeholders = ",".join("?" for _ in kinds)
+    rows = await _rows(
+        conn,
+        # `placeholders` is a run of `?`, one per configured edge kind — no value is
+        # interpolated, so this is parameterised in the only sense that matters.
+        "SELECT src_id, dst_id, dst_coord_key FROM edges "  # noqa: S608
+        " WHERE run_id = ? AND src_kind = 'REPO' AND dst_kind = 'REPO' AND dst_id IS NOT NULL "
+        "   AND ordering_suppressed = 0 AND confidence >= ? "
+        f"   AND kind IN ({placeholders})",
+        (run_id, settings.config.graph.min_confidence, *kinds),
+    )
+    edges = [(str(row[1]), str(row[0]), str(row[2])) for row in rows]
+    provider_ids = {provider_id for provider_id, _, _ in edges}
+    states = await _read_blocker_states(conn, run_id, provider_ids)
+    return _detect_stub_triggers(dispatched_repo_ids, edges, states)
+
+
+async def _create_stub_records(
+    conn: aiosqlite.Connection,
+    writer: StateWriter,
+    *,
+    run_id: str,
+    triggers: Sequence[StubTrigger],
+    max_revalidation_rounds: int,
+    now: datetime,
+) -> tuple[StubRecord, ...]:
+    """Step 2: `StubRecord` + the FIRST `stubs` row (`revalidation_round=0`, `state='ACTIVE'`)
+    for every trigger step 1 found — one row per `StubTrigger`, i.e. one row per distinct
+    `(consumer, provider, coord_key)` a real edge names (fix round 1, review finding C2's fix: no
+    longer one row per `(consumer, provider)` pair using the provider's `primary_coord_key`).
+
+    **Idempotent by check-then-skip**, at the schema's own idempotency key (`PRIMARY KEY (run_id,
+    repo_id, stub_coord_key, revalidation_round)`): a repeat call over an unchanged database (a
+    retry, a resumed wave re-detecting the same trigger) inserts nothing a second time, mirroring
+    `orchestrator.stubs.next_round_record`'s own "a re-run never resurrects/duplicates row 0"
+    precedent, applied here at creation rather than at re-emission.
+
+    `bazel_label` is computed exactly as `_unit_deps`'s own stub-redirect branch expects to read
+    it back: `_internal_label(stub_dest(coord_key))`, never an ad-hoc string — and now, post-C2
+    fix, from the SAME `coord_key` `_unit_deps` looks the row up by (`trigger.coord_key`, the
+    edge's own `dst_coord_key`), not a separately-derived one.
+
+    `pinned_version` is read off `coordinates.version` FOR `trigger.coord_key` directly (not off
+    `repos.primary_coord_key`'s own row) — the coordinate a real consumer edge names may not be
+    the provider's primary one, so its own version is the only fact that answers "did `r` publish
+    THIS coordinate?"
+    """
+    created: list[StubRecord] = []
+    stamp = _iso(now)
+    for trigger in triggers:
+        coord_key = trigger.coord_key
+        version_rows = await _rows(
+            conn, "SELECT version FROM coordinates WHERE coord_key = ?", (coord_key,)
+        )
+        pinned_version = (
+            str(version_rows[0][0])
+            if version_rows and version_rows[0][0] is not None
+            else None
+        )
+        existing = await _rows(
+            conn,
+            "SELECT 1 FROM stubs WHERE run_id = ? AND repo_id = ? AND stub_coord_key = ? "
+            "  AND revalidation_round = 0",
+            (run_id, trigger.consumer_repo_id, coord_key),
+        )
+        if existing:
+            continue
+        bazel_label = _internal_label(stub_dest(coord_key))
+        record = _build_stub_record(
+            run_id=UUID(run_id),
+            consumer_repo_id=trigger.consumer_repo_id,
+            provider_repo_id=trigger.provider_repo_id,
+            coord_key=coord_key,
+            pinned_version=pinned_version,
+            max_revalidation_rounds=max_revalidation_rounds,
+            now=now,
+        )
+
+        async def unit(
+            conn: aiosqlite.Connection,
+            record: StubRecord = record,
+            coord_key: str = coord_key,
+            bazel_label: str = bazel_label,
+        ) -> None:
+            await conn.execute(
+                "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+                "  provider_repo_id, pinned_version, bazel_label, state, stub_fidelity, "
+                "  revalidation_round, max_revalidation_rounds, state_changed_at, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    str(record.stub_id),
+                    run_id,
+                    record.consumer_repo_ids[0],
+                    coord_key,
+                    record.consumer_repo_ids[0],
+                    record.provider_repo_id,
+                    record.pinned_version,
+                    bazel_label,
+                    record.state.value,
+                    record.fidelity.value,
+                    0,
+                    record.max_revalidation_rounds,
+                    stamp,
+                    stamp,
+                ),
+            )
+
+        await writer.submit(unit)
+        created.append(record)
+    return tuple(created)
 
 
 async def _owned_coordinate_keys(conn: aiosqlite.Connection) -> frozenset[str]:

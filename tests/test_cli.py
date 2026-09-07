@@ -8373,3 +8373,436 @@ def test_promote_one_pr_reports_a_failed_body_edit_and_never_pushes_or_marks_rea
     assert _sh(remote, "rev-parse", "refs/heads/migrate/acme-lib-py") == pre_remote_tip, (
         "a failed body edit must not leave the branch force-pushed anyway"
     )
+
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 (round VI task 67) — TRANSFORM-phase stub-creation DECISION, the DB-touching half:
+# `_detect_transform_stub_triggers`, `_create_stub_records`. (The `RUNNING -> DEGRADED`
+# correction moved to `state.repository.SqliteStateRepository.stub_degrade_transform` in fix
+# round 1 — ADR-0124; its tests are in `tests/test_repository.py`, not here.)
+# --------------------------------------------------------------------------------------
+
+
+async def _seed_stub_trigger_fixture(
+    db_path: Path,
+    *,
+    now: datetime,
+    confidence: float = 0.9,
+    provider_status: str = "REQUIRES_HUMAN_INTERVENTION",
+    with_edge: bool = True,
+    published_version: str | None = "2.0.0",
+    extra_coord_key: str | None = None,
+) -> None:
+    """One `run`, two `repos` (`acme-provider`/`acme-consumer`), one qualifying edge (unless
+    `with_edge=False`), a `coordinates` row `acme-provider` owns, and `acme-provider`'s TRANSFORM
+    `phases` row forced to `provider_status` via raw SQL (the same test-setup shape round VI
+    task 13's own fixture used: `propagate_blocked` has no stub-awareness, so a raw write is how
+    the fixture reaches a state the ordinary write paths cannot produce standalone).
+
+    `extra_coord_key`, if given, adds a SECOND published coordinate owned by `acme-provider` and
+    a SECOND edge from `acme-consumer` naming it — the C2 regression fixture (a multi-coordinate
+    provider) — while `acme-provider`'s `primary_coord_key` stays pinned to the FIRST coordinate,
+    exactly as `repos.primary_coord_key`'s own `min(...)` selection would leave it.
+    """
+    import aiosqlite
+
+    from fleet.models.enums import EdgeKind, NodeKind
+    from fleet.models.graph import edge_key_for
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import EdgeRow, SqliteStateRepository
+
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t67-stub-trigger-fixture") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer"):
+                await repo.upsert_repo(
+                    repo_id,
+                    name=repo_id,
+                    url=f"https://example.invalid/{repo_id}.git",
+                    now=now,
+                )
+            await repo.upsert_phase(
+                RUN_ID, "acme-provider", Phase.TRANSFORM, now=now, max_attempts=3
+            )
+            coord_keys = ["maven:com.acme:provider"]
+            if extra_coord_key is not None:
+                coord_keys.append(extra_coord_key)
+            if with_edge:
+                edge_rows = []
+                for index, coord_key in enumerate(coord_keys):
+                    key = edge_key_for(
+                        src_kind=NodeKind.REPO,
+                        src_id="acme-consumer",
+                        dst_kind=NodeKind.REPO,
+                        dst_ref=coord_key,
+                        kind=EdgeKind.DECLARED_DEP,
+                        evidence_path="pom.xml",
+                        evidence_line=index + 1,
+                    )
+                    edge_rows.append(
+                        EdgeRow(
+                            edge_key=key,
+                            run_id=RUN_ID,
+                            src_id="acme-consumer",
+                            dst_id="acme-provider",
+                            dst_coord_key=coord_key,
+                            kind=EdgeKind.DECLARED_DEP,
+                            base_confidence=1.0,
+                            confidence=confidence,
+                            evidence_path="pom.xml",
+                            evidence_line=index + 1,
+                            detected_at=now.isoformat(),
+                        )
+                    )
+                await repo.insert_edges(edge_rows)
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                for index, coord_key in enumerate(coord_keys):
+                    version = published_version if index == 0 else f"{published_version}-extra"
+                    await conn.execute(
+                        "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                        "  owner_repo_id, first_seen_at) "
+                        "VALUES (?, 'maven', 'com.acme', ?, ?, ?, ?)",
+                        (
+                            coord_key,
+                            coord_key.rsplit(":", 1)[-1],
+                            version,
+                            "acme-provider",
+                            now.isoformat(),
+                        ),
+                    )
+                # `primary_coord_key` is always the FIRST coordinate — the provider's own
+                # "primary" pick is deliberately NOT the one every edge names, so a fix that
+                # (still) reads `facts[provider].published` instead of the edge's own
+                # `dst_coord_key` would be caught by the multi-coordinate test below.
+                await conn.execute(
+                    "UPDATE repos SET primary_coord_key = ? WHERE repo_id = ?",
+                    (coord_keys[0], "acme-provider"),
+                )
+                await conn.execute(
+                    "UPDATE phases SET status = ? "
+                    " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                    (provider_status, RUN_ID, "acme-provider", int(Phase.TRANSFORM)),
+                )
+
+            await writer.submit(unit)
+        finally:
+            await read_conn.close()
+
+
+async def test_detect_transform_stub_triggers_finds_a_dispatched_consumer_of_an_rhi_provider(
+    tmp_path: Path,
+) -> None:
+    """§37 Leg 1 step 1: the positive case, run through the REAL edge query and the REAL
+    `_read_blocker_states` query — not the pure `detect_stub_triggers` predicate alone
+    (`tests/test_stubs.py` already proves that in isolation). This is what actually proves the
+    ordering-subgraph filter (confidence, edge kind, REPO-kind) is applied, and that the
+    `StubTrigger` carries the edge's own `coord_key`.
+    """
+    from fleet.cli import _detect_transform_stub_triggers
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "base" / "fleet.db"
+    await _seed_stub_trigger_fixture(db_path, now=now)
+    read_conn = await connect_ro(db_path)
+    try:
+        found = await _detect_transform_stub_triggers(
+            read_conn, settings, RUN_ID, ["acme-consumer"]
+        )
+    finally:
+        await read_conn.close()
+    assert found == (
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+    )
+
+
+async def test_detect_transform_stub_triggers_respects_the_ordering_subgraph_filter(
+    tmp_path: Path,
+) -> None:
+    """Discriminating mutations run through the REAL query: a non-RHI provider, no edge, and
+    confidence dropped below `graph.min_confidence` (default 0.5) each make the same fixture
+    produce no trigger — the half `tests/test_stubs.py`'s pure-function tests cannot reach,
+    because `detect_stub_triggers` itself takes an already-filtered edge set."""
+    from fleet.cli import _detect_transform_stub_triggers
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+    assert settings.config.graph.min_confidence == 0.5
+
+    cases = {
+        "not-rhi": {"provider_status": "SUCCEEDED"},
+        "no-edge": {"with_edge": False},
+        "low-confidence": {"confidence": 0.1},
+    }
+    for name, kwargs in cases.items():
+        db_path = tmp_path / name / "fleet.db"
+        await _seed_stub_trigger_fixture(db_path, now=now, **kwargs)  # type: ignore[arg-type]
+        read_conn = await connect_ro(db_path)
+        try:
+            found = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-consumer"]
+            )
+        finally:
+            await read_conn.close()
+        assert found == (), f"{name}: expected no trigger, got {found}"
+
+
+async def test_detect_transform_stub_triggers_keys_on_the_edges_own_coordinate(
+    tmp_path: Path,
+) -> None:
+    """C2 (review finding, task 67 fix round 1): a provider owning TWO published coordinates,
+    each named by its own edge from the consumer, must produce TWO triggers — one per
+    `(consumer, provider, coord_key)` — never collapsed onto the provider's `primary_coord_key`
+    alone (which this fixture deliberately pins to only the FIRST of the two).
+    """
+    from fleet.cli import _detect_transform_stub_triggers
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "multi-coord" / "fleet.db"
+    await _seed_stub_trigger_fixture(
+        db_path, now=now, extra_coord_key="maven:com.acme:provider-extras"
+    )
+    read_conn = await connect_ro(db_path)
+    try:
+        found = await _detect_transform_stub_triggers(
+            read_conn, settings, RUN_ID, ["acme-consumer"]
+        )
+    finally:
+        await read_conn.close()
+    assert found == (
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider-extras",
+        ),
+    ), "a multi-coordinate provider must yield one trigger per edge-named coordinate"
+
+
+async def test_create_stub_records_inserts_a_valid_row_for_both_fidelities(
+    tmp_path: Path,
+) -> None:
+    """§37 Leg 1 step 2: a real `stubs` INSERT via real SQLite for `PUBLISHED_ARTIFACT` (pinned
+    version present) and `EMPTY_FAILING` (`pinned_version IS NULL`) — the schema CHECK
+    constraints are the proof, not a mock. `pinned_version` is read off `coordinates.version` for
+    the trigger's own `coord_key` directly (post-C2-fix), not off a `_RepoFacts` mapping."""
+    import aiosqlite
+
+    from fleet.cli import _create_stub_records
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    for name, version in (("published", "2.0.0"), ("empty-failing", None)):
+        db_path = tmp_path / name / "fleet.db"
+        await initialize_database(db_path)
+        async with StateWriter(db_path, owner=f"test-t67-create-{name}") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                await repo.upsert_run(
+                    RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+                )
+                for repo_id in ("acme-provider", "acme-consumer"):
+                    await repo.upsert_repo(
+                        repo_id,
+                        name=repo_id,
+                        url=f"https://example.invalid/{repo_id}.git",
+                        now=now,
+                    )
+
+                async def unit(conn: aiosqlite.Connection, version: str | None = version) -> None:
+                    await conn.execute(
+                        "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                        "  owner_repo_id, first_seen_at) "
+                        "VALUES ('maven:com.acme:provider', 'maven', 'com.acme', 'provider', "
+                        "  ?, 'acme-provider', ?)",
+                        (version, now.isoformat()),
+                    )
+
+                await writer.submit(unit)
+
+                trigger = StubTrigger(
+                    consumer_repo_id="acme-consumer",
+                    provider_repo_id="acme-provider",
+                    coord_key="maven:com.acme:provider",
+                )
+                created = await _create_stub_records(
+                    read_conn,
+                    writer,
+                    run_id=RUN_ID,
+                    triggers=[trigger],
+                    max_revalidation_rounds=2,
+                    now=now,
+                )
+                assert len(created) == 1
+                assert created[0].fidelity is (
+                    StubFidelity.PUBLISHED_ARTIFACT if version else StubFidelity.EMPTY_FAILING
+                )
+
+                # Idempotency: re-running against the unchanged database inserts no second row
+                # at revalidation_round=0 for the same (run_id, repo_id, stub_coord_key).
+                created_again = await _create_stub_records(
+                    read_conn,
+                    writer,
+                    run_id=RUN_ID,
+                    triggers=[trigger],
+                    max_revalidation_rounds=2,
+                    now=now,
+                )
+                assert created_again == (), (
+                    "a second call over an unchanged database must not insert a duplicate row"
+                )
+            finally:
+                await read_conn.close()
+
+        plain = sqlite3.connect(db_path, isolation_level=None)
+        try:
+            rows = plain.execute(
+                "SELECT state, stub_fidelity, pinned_version, consumer_repo_id, "
+                "  provider_repo_id, revalidation_round FROM stubs WHERE run_id = ?",
+                (RUN_ID,),
+            ).fetchall()
+        finally:
+            plain.close()
+        assert rows == [
+            (
+                "ACTIVE",
+                "PUBLISHED_ARTIFACT" if version else "EMPTY_FAILING",
+                version,
+                "acme-consumer",
+                "acme-provider",
+                0,
+            )
+        ], f"{name}: exactly one CHECK-satisfying row expected, got {rows}"
+
+
+async def test_create_stub_records_keys_each_row_on_its_own_triggers_coordinate(
+    tmp_path: Path,
+) -> None:
+    """C2 (review finding, task 67 fix round 1), the creation-side half: two triggers for the
+    SAME `(consumer, provider)` naming two DIFFERENT coordinates produce two `stubs` rows, each
+    `stub_coord_key`'d on its own trigger's `coord_key` — never both collapsed onto one.
+
+    `repos.primary_coord_key` is deliberately set to ONE of the two coordinates (fix round 2,
+    review finding M-NEW-5) — the same discriminating shape `test_detect_transform_stub_triggers_
+    keys_on_the_edges_own_coordinate` already uses. Without it, a regression that falls back to
+    `primary_coord_key` whenever it happens to be set (rather than always using the trigger's own
+    `coord_key`) would still pass here by accident, because nothing in this fixture gives such a
+    fallback anything to fall back to.
+    """
+    import aiosqlite
+
+    from fleet.cli import _create_stub_records
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    now = datetime(2026, 9, 6, tzinfo=UTC)
+    db_path = tmp_path / "fleet.db"
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-t67-c2-create") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                for coord_key, version in (
+                    ("maven:com.acme:provider-core", "1.0.0"),
+                    ("maven:com.acme:provider-extras", "1.0.0"),
+                ):
+                    await conn.execute(
+                        "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                        "  owner_repo_id, first_seen_at) "
+                        "VALUES (?, 'maven', 'com.acme', ?, ?, 'acme-provider', ?)",
+                        (coord_key, coord_key.rsplit(":", 1)[-1], version, now.isoformat()),
+                    )
+                # Pinned to only ONE of the two coordinates, same as `_seed_stub_trigger_
+                # fixture`'s own convention — see the docstring above for why this is load-
+                # bearing, not incidental.
+                await conn.execute(
+                    "UPDATE repos SET primary_coord_key = ? WHERE repo_id = 'acme-provider'",
+                    ("maven:com.acme:provider-core",),
+                )
+
+            await writer.submit(unit)
+
+            triggers = [
+                StubTrigger(
+                    consumer_repo_id="acme-consumer",
+                    provider_repo_id="acme-provider",
+                    coord_key="maven:com.acme:provider-core",
+                ),
+                StubTrigger(
+                    consumer_repo_id="acme-consumer",
+                    provider_repo_id="acme-provider",
+                    coord_key="maven:com.acme:provider-extras",
+                ),
+            ]
+            created = await _create_stub_records(
+                read_conn,
+                writer,
+                run_id=RUN_ID,
+                triggers=triggers,
+                max_revalidation_rounds=2,
+                now=now,
+            )
+        finally:
+            await read_conn.close()
+
+    assert {record.coord_key for record in created} == {
+        "maven:com.acme:provider-core",
+        "maven:com.acme:provider-extras",
+    }
+    plain = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        rows = plain.execute(
+            "SELECT stub_coord_key FROM stubs WHERE run_id = ? ORDER BY stub_coord_key", (RUN_ID,)
+        ).fetchall()
+    finally:
+        plain.close()
+    assert rows == [
+        ("maven:com.acme:provider-core",),
+        ("maven:com.acme:provider-extras",),
+    ], (
+        "each trigger's own coord_key must reach its own row, not both collapsed onto "
+        "primary_coord_key — no test here drives _unit_deps end-to-end against these rows "
+        "(a disclosed gap, not proven closed by this assertion)"
+    )

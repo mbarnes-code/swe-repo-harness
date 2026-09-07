@@ -1660,7 +1660,18 @@ carrying no wave index, and every repo a resume demotes already has one).
 under `fleet transform|build --stub-blocked`) lets a dependent migrate against a generated
 placeholder instead of waiting for a human:
 
-1. For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
+1. **The decision to stub `r` for a given dependent is made in the TRANSFORM phase**
+   (`cli.py`'s `_detect_transform_stub_triggers`/`_create_stub_records`, round VI task 67 —
+   trigger detection against `r`'s terminal `REQUIRES_HUMAN_INTERVENTION` status, `StubRecord`
+   construction, and the `stubs` INSERT), **not** in `workers/buildgen.py`, which stays a pure
+   renderer with zero stub-awareness and only emits what the render step below describes. **Not
+   yet wired into any production call site as of round VI task 67 (fix round 1)** — all three
+   `--stub-blocked` refusals (`_validate_transform_flags`/`_validate_build_flags`/
+   `_validate_resume_flags`) still stand per ADR-0113 condition 2, correctly, since task-68's
+   BUILD-phase render half does not exist yet; this design-half is built and unit-tested directly,
+   not reachable from the CLI. Do not read this item as describing live behavior until that
+   condition is satisfied and a later dated update here says so.
+   For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
    `third_party/stubs/<coord_key_path>/` from `r`'s **published `Coordinate` alone** — no source
    from `r` is needed, which is the point. The stub is an external-registry dependency pinned to
    `r`'s last published version, produced by
@@ -4229,6 +4240,9 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'HoistRollbackDemotion' (§3.5)
                                                   -- | 'HoistRollbackRefused' (§3.1 6c-H refusal,
                                                   --   ADR-0122 Decision 6; repo_id NULL)
+                                                  -- | 'StubDegraded' (ADR-0124: the audit write,
+                                                  --   paired with the SUCCEEDED->DEGRADED CAS
+                                                  --   write in the same transaction)
                                                   -- | 'BaselineRed' (baseline_build red, §9)
                                                   -- | 'RuleConflict' | 'RuleOscillation' (§7.4)
                                                   -- | 'UnmergedDependency' (§3.4 step 5)

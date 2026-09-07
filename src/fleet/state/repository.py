@@ -70,10 +70,13 @@ import aiosqlite
 
 from fleet.models.enums import (
     PHASE_DEMOTED_KIND,
+    STUB_DEGRADED_KIND,
     Phase,
     PhaseDemotion,
     RepoStatus,
+    StubDegradation,
     TaskKind,
+    degrade_for_stub,
     demote,
     transition,
 )
@@ -568,6 +571,10 @@ class StateRepository(ReadOnlyRepository, Protocol):
         observed: Mapping[Phase, RepoStatus] | None = None,
     ) -> tuple[PhaseDemotion, ...]: ...
 
+    async def stub_degrade_transform(
+        self, run_id: str, repo_id: str, *, phase: Phase, now: datetime
+    ) -> StubDegradation | None: ...
+
     async def clear_blocked_by(
         self,
         run_id: str,
@@ -962,6 +969,34 @@ _DEMOTE_FINDING_SQL: Final = (
 def _demotion_fingerprint(run_id: str, repo_id: str, phase: Phase) -> str:
     """Semantic identity of one demotion: this repo, this phase, in this run."""
     return sha256_text("\x00".join((run_id, repo_id, PHASE_DEMOTED_KIND, str(int(phase)))))
+
+
+# --------------------------------------------------------------------------------------
+# §37 Leg 1 -- the stub-degrade correction write (ADR-0124)
+# --------------------------------------------------------------------------------------
+
+#: Every `ACTIVE` stub row's fidelity for one consumer -- read *inside* the same transaction as
+#: the phase-status read below, so the two facts this write's decision needs are never taken from
+#: two different snapshots.
+_STUB_DEGRADE_ACTIVE_FIDELITY_SQL: Final = (
+    "SELECT stub_fidelity, stub_coord_key FROM stubs "
+    " WHERE run_id = ? AND consumer_repo_id = ? AND state = 'ACTIVE'"
+)
+
+#: The correction itself. Same shape as `_DEMOTE_PHASE_SQL`: `AND status = 'SUCCEEDED'` is the
+#: fence -- there is no `lease_fence` to CAS on by the time this follow-up write runs (the
+#: dispatch that produced `SUCCEEDED` already released it), so the status itself is the guard a
+#: row that changed underneath the read matches zero rows rather than being silently overwritten.
+_STUB_DEGRADE_PHASE_SQL: Final = (
+    "UPDATE phases SET status = ?, updated_at = ? "
+    " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status = 'SUCCEEDED'"
+)
+
+
+def _stub_degradation_fingerprint(run_id: str, repo_id: str, phase: Phase) -> str:
+    """Semantic identity of one stub degradation: this repo, this phase, in this run (mirrors
+    `_demotion_fingerprint`)."""
+    return sha256_text("\x00".join((run_id, repo_id, STUB_DEGRADED_KIND, str(int(phase)))))
 
 
 # --------------------------------------------------------------------------------------
@@ -1852,6 +1887,89 @@ class SqliteStateRepository:
                     ),
                 )
             return tuple(demotions)
+
+        return await self._writer.submit(unit)
+
+    async def stub_degrade_transform(
+        self, run_id: str, repo_id: str, *, phase: Phase, now: datetime
+    ) -> StubDegradation | None:
+        """§37 Leg 1 step 3 (ADR-0124): `SUCCEEDED -> DEGRADED`, in ONE transaction, for a repo
+        whose `phase` the generic completion loop just wrote `SUCCEEDED` and which now has at
+        least one qualifying `ACTIVE` stub row.
+
+        **§12.14, read literally, is the qualifying predicate**: "an `EMPTY_FAILING` stub
+        unblocks nothing... no repo becomes `DEGRADED`." So this fires ONLY when at least one
+        `ACTIVE` row's `stub_fidelity` is `PUBLISHED_ARTIFACT` -- a consumer whose only `ACTIVE`
+        stubs are all `EMPTY_FAILING` is left exactly as `SUCCEEDED` leaves it (in practice such a
+        consumer should never have reached `SUCCEEDED` at all, since an `EMPTY_FAILING` stub fails
+        at build time per §3.5 item 2 -- but this method does not assume that invariant holds
+        upstream; it re-checks fidelity itself rather than trusting `state = 'ACTIVE'` alone).
+
+        Both facts the decision needs (`phases.status`, the `ACTIVE` rows' fidelities) are read
+        inside this same transaction, never from an earlier snapshot (closes a review finding
+        against the original landing, which read `has_active_stub` outside the transaction).
+
+        The write itself goes through `degrade_for_stub()` (ADR-0124), never
+        `transition(..., stub_degrade=True)` directly, so the `StubDegraded` finding this method
+        writes in the SAME unit is never optional -- mirrors `demote_to_floor`'s own discipline
+        with `demote()`/`PhaseDemoted` exactly.
+
+        Returns the `StubDegradation` record if the write fired, `None` if the phase was not
+        `SUCCEEDED` or no qualifying stub row exists (a genuine no-op, not an error -- a caller
+        may call this speculatively without first checking either fact itself).
+        """
+        stamp = _iso(now)
+
+        async def unit(conn: aiosqlite.Connection) -> StubDegradation | None:
+            async with conn.execute(
+                "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                (run_id, repo_id, int(phase)),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None or RepoStatus(str(row[0])) is not RepoStatus.SUCCEEDED:
+                return None
+
+            async with conn.execute(
+                _STUB_DEGRADE_ACTIVE_FIDELITY_SQL, (run_id, repo_id)
+            ) as cursor:
+                active = await cursor.fetchall()
+            qualifying = sorted(
+                {str(r[1]) for r in active if str(r[0]) == "PUBLISHED_ARTIFACT"}
+            )
+            if not qualifying:
+                return None
+
+            new_status, record = degrade_for_stub(
+                RepoStatus.SUCCEEDED,
+                repo_id=repo_id,
+                phase=phase,
+                reason=f"ACTIVE PUBLISHED_ARTIFACT stub(s): {', '.join(qualifying)}",
+            )
+            cursor = await conn.execute(
+                _STUB_DEGRADE_PHASE_SQL,
+                (str(new_status), stamp, run_id, repo_id, int(phase)),
+            )
+            if cursor.rowcount != 1:
+                # The SELECT above, in this same BEGIN IMMEDIATE, already confirmed the row is
+                # SUCCEEDED at this exact key -- a mismatch here means it moved between the two
+                # reads inside one transaction, which should be structurally impossible.
+                raise RepositoryError(
+                    f"stub_degrade_transform: UPDATE matched {cursor.rowcount} rows for "
+                    f"phases({run_id}, {repo_id}, phase={int(phase)}), expected exactly 1"
+                )
+            await conn.execute(
+                _DEMOTE_FINDING_SQL,
+                (
+                    run_id,
+                    repo_id,
+                    STUB_DEGRADED_KIND,
+                    "warn",
+                    _stub_degradation_fingerprint(run_id, repo_id, phase),
+                    redact_text(json.dumps(record.payload(), sort_keys=True)),
+                    stamp,
+                ),
+            )
+            return record
 
         return await self._writer.submit(unit)
 

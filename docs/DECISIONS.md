@@ -13628,3 +13628,89 @@ this ADR found (Rule 2). Follow-on work this ADR authorizes but does not itself 
 mechanism — Decisions 1, 2, 3, and 6). Two further slices — the git-mechanics revert-series
 execution (Decisions 4/5) and the production wiring from whichever leg (C1/C2) produces the
 triggering finding — are named as separate future tasks, not designed away by omission.
+
+## ADR-0124 — §12.37 Leg 1: `RUNNING → DEGRADED`'s `SUCCEEDED`-terminal correction gets a real
+`ALLOWED_TRANSITIONS` door (`STUB_DEGRADE`), not a bare raw-SQL bypass
+
+**Context.** Round VI task 67 (§37 Leg 1, `d548b38`) needed to correct a TRANSFORM phase's status
+from `SUCCEEDED` to `DEGRADED` once a wave's stub set is known — SPEC §3.5 item 3's own text
+("Each stubbed dependent goes to `RepoStatus.DEGRADED`, not `SUCCEEDED`") and §12.14 both require
+the literal `RepoStatus` write, not merely a finding (unlike ADR-0112's DEGRADED→BLOCKED fork,
+which found §12.38's text needed no status transition at all and settled for a finding — a
+genuinely different case, not a precedent this ADR reopens). No site can intercept the write
+before it happens: `ALLOWED_TRANSITIONS[RepoStatus.SUCCEEDED]` is the empty set (terminal), the
+generic completion path that writes it (`orchestrator.runner.PhaseRunner._dispatch`'s
+`execution.status is RepoStatus.SUCCEEDED` branch, downstream of `workers.base.WorkerBase.
+execute`) is shared by every phase and worker type and is out of this leg's scope to edit, and a
+within-fence write racing that generic completion would be silently undone by it (`DEGRADED →
+SUCCEEDED` is itself a legal edge, so the generic completion firing afterward wins). The only
+tractable site is a follow-up write, strictly after the wave's dispatch loop has finished with
+that repo's fence. Task 67's original landing implemented this as a bare raw-SQL `UPDATE …
+WHERE status = ?`, bypassing `transition()` entirely, and cited `cli._quarantine_impl` as
+precedent — a task-scoped review (opus-tier) found that citation FALSE: `_quarantine_impl` calls
+`transition()` before writing and never actually violates `ALLOWED_TRANSITIONS` in production (its
+own pre-write check refuses a currently-`RUNNING` row). The review found the real precedent for
+"a raw-SQL write that bypasses the modelled graph" is `docs/INTEGRATION_HONESTY.md`'s **D77**
+(`append_blocked_by`'s `DEGRADED → BLOCKED` write) — `FIXED, LANDED` (`c4a1532`) specifically by
+*replacing* the bypass with a `transition()`-gated skip, and `docs/CRITERIA_PLAN.md` §46 already
+names this class as an open, recurring concern rather than a settled pattern.
+
+**Options considered.**
+(a) Fix task 67's bypass the way D77 was fixed: gate with `transition()` and skip (no-op) when it
+raises. Rejected for this case: `transition()` has no edge to open here (`SUCCEEDED` is terminal
+in `ALLOWED_TRANSITIONS` by design, unlike D77's `DEGRADED → BLOCKED`, which was refused only
+because it was the WRONG target for an already-open write path — `DEGRADED`'s real exits already
+exist). Gating-then-skipping would mean the correction never fires at all, defeating its purpose.
+(b) Widen `ALLOWED_TRANSITIONS[SUCCEEDED]` directly to include `DEGRADED`. Rejected: this makes
+`SUCCEEDED` non-terminal against every automatic path that currently relies on its terminality —
+the crash sweep, the reaper, and `_on_breach` all pass no special flag and must not gain a new
+edge out of settled, landed work by accident.
+(c) A new, narrower, explicitly-flagged map — `STUB_DEGRADE`, opened only behind a dedicated
+keyword on `transition()` — mirroring `RESUME_DEMOTE`/ADR-0077's own precedent for exactly this
+shape: "a legal write out of a terminal status, for one named reason, that ordinary callers cannot
+reach by accident."
+
+**Decision: (c).** `RESUME_DEMOTE` is this project's own adjudicated, tested precedent for "a
+terminal-in-general status needs one narrow, audited door for one named caller" — CLAUDE.md Rule
+7 says prefer the cleaner, more-tested pattern over an ad-hoc bypass, and this project already has
+one. Mechanism, mirroring `RESUME_DEMOTE`/`demote()`/`PhaseDemotion` exactly:
+- `models/enums.py`: `STUB_DEGRADE: dict[RepoStatus, frozenset[RepoStatus]] = {RepoStatus.
+  SUCCEEDED: frozenset({RepoStatus.DEGRADED})}` — `SUCCEEDED` is the only key, because it is the
+  only status this correction ever fires against (the generic completion loop is the only writer
+  of a fresh `SUCCEEDED` this leg cares about). `transition()` gains a `stub_degrade: bool = False`
+  keyword opening this map, additive and default-off exactly like `operator`/`resume` — no
+  existing caller gains a new edge.
+- `StubDegradation` (mirrors `PhaseDemotion`): the audit record — `repo_id`, `phase`,
+  `from_status=SUCCEEDED`, `to_status=DEGRADED`, `reason` (names the qualifying `stub_coord_key`s),
+  and a `.payload()` for the finding row. `degrade_for_stub(old, *, repo_id, phase, reason)`
+  (mirrors `demote()`): accepts only a `STUB_DEGRADE` key, calls `transition(old, DEGRADED,
+  stub_degrade=True)`, and returns `(new_status, StubDegradation)` as one value — so a caller
+  cannot obtain the status without the audit obligation it owes, the same discipline ADR-0077 §4
+  states for `demote()`.
+- `state/repository.py`: a new `SqliteStateRepository.stub_degrade_transform(run_id, repo_id, *,
+  phase, now)` method (declared on the `StateRepository` Protocol beside `demote_to_floor`),
+  mirroring `demote_to_floor`'s shape: ONE transaction reads the phase's current status AND the
+  repo's `ACTIVE` `stubs` rows' `stub_fidelity` values (closing the review's C1 finding: an
+  `EMPTY_FAILING`-only stub set must never fire this, per §12.14 verbatim — only a qualifying
+  `PUBLISHED_ARTIFACT` row does), and — only if `SUCCEEDED` AND at least one qualifying row exists
+  — calls `degrade_for_stub`, writes the phase row via a `_DEMOTE_PHASE_SQL`-shaped CAS UPDATE
+  (`AND status = 'SUCCEEDED'` in the WHERE, so a row that changed underneath the read matches zero
+  rows rather than being silently overwritten — this closes the review's M5 finding: the CAS guard
+  is the fencing, structurally identical to `_DEMOTE_PHASE_SQL`'s own, just keyed on status rather
+  than `lease_fence` since there is no lease held by the time this follow-up write runs), and
+  writes one `findings` row in the same transaction (reusing `_DEMOTE_FINDING_SQL`'s generic
+  INSERT/upsert shape verbatim with a new `kind`, `StubDegraded` — closing the review's I4 finding
+  for free, since the pattern bundles an audit write with the status write by construction).
+
+**Consequences.** Positive: `SUCCEEDED`'s mechanical terminality against the crash sweep, the
+reaper, and `_on_breach` is completely unaffected (none of those pass `stub_degrade=True`); the
+correction is now impossible to reach silently (mirrors `PhaseDemotion`'s "cannot hold the status
+without the finding" discipline); and D77's actual lesson — bypassing `ALLOWED_TRANSITIONS` with
+bare raw SQL is a recurring, named problem class in this codebase (`docs/CRITERIA_PLAN.md` §46) —
+is honored rather than repeated a second time under a different citation. Honest limit, mirroring
+ADR-0077 §4's own: `stub_degrade=True` is a convention a future caller could still misuse by
+calling `transition()` directly instead of `degrade_for_stub()`, exactly as `resume=True` could;
+nothing in Python enforces routing through the record-returning function. Scope this ADR does NOT
+decide: it does not wire `stub_degrade_transform` into any production call site — `--stub-blocked`
+stays refused in all three CLI validators per ADR-0113 condition 2, and task-69 owns deciding the
+actual per-wave call site once the render leg (task-68) also exists.
