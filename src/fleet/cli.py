@@ -8499,6 +8499,140 @@ async def _create_stub_records(
     return tuple(created)
 
 
+# --------------------------------------------------------------------------------------
+# §37 Leg 2 (round VI task 68) — the BUILD-phase RENDER of an already-created `stubs` row: the
+# provider's external-registry declaration reaching the fleet's `MODULE.bazel` (`_stub_
+# workspace_deps`), and the build-time-failing target for a never-published provider
+# (`fleet.bazel.generators.stub_failing_target`).
+#
+# `_stub_workspace_deps` runs its OWN query rather than reusing `_unit_deps`'s (Blocker C, round
+# VI task 13) — that function is explicitly out of scope here ("already landed, correct, do not
+# touch"), and the two ask different questions of the same table: `_unit_deps` needs
+# `(consumer_repo_id, dst_coord_key) -> (bazel_label, pinned_version)` to redirect ONE edge;
+# this needs `stub_coord_key -> pinned_version`, unions across every consumer of the SAME
+# provider, and needs no `bazel_label`/`consumer_repo_id` at all. Same `state = 'ACTIVE'`
+# predicate (reused, not re-derived), different projection.
+#
+# `ecosystems.for_ecosystem(coord.ecosystem).workspace_deps(unit)` is the exact mechanism SPEC
+# §3.5 item 1 names, and it has zero stub-awareness (`src/fleet/ecosystems/py.py::workspace_deps`
+# et al.) — a stub is just another `Coordinate` in `external_coordinates`. Only wired into the
+# render half; the TRANSFORM-phase DECISION (trigger detection, `StubRecord`, the `stubs` INSERT,
+# the `RUNNING -> DEGRADED` write) is task-67's and stays untouched.
+# --------------------------------------------------------------------------------------
+
+
+async def _stub_workspace_deps(
+    conn: aiosqlite.Connection, run_id: str
+) -> tuple[WorkspaceDep, ...]:
+    """§3.5 item 1's render, over every `ACTIVE`, `PUBLISHED_ARTIFACT`-fidelity `stubs` row of
+    this run — the half `_build_impl`'s wave loop unions into the fleet's aggregate
+    `workspace_deps` (`_build_payloads`, alongside `_module_inputs(plans)`'s ordinary ones), so
+    it reaches `BuildgenInput.workspace_deps` and from there `MODULE.bazel` exactly like any
+    other external dependency, with `workers/buildgen.py` never told a `WorkspaceDep` came from a
+    stub.
+
+    `EMPTY_FAILING` rows (`pinned_version IS NULL`) are excluded here by construction — they have
+    no published artifact to declare and are rendered as a failing Bazel target instead
+    (`fleet.bazel.generators.stub_failing_target`), never as a `MODULE.bazel` entry.
+
+    **Deduped by `stub_coord_key` before calling `workspace_deps()`.** Two consumers of the SAME
+    abandoned provider each get their OWN `stubs` row (keyed `(run_id, repo_id, stub_coord_key,
+    revalidation_round)` — `repo_id` is the CONSUMER, per `_create_stub_records`), but the
+    PROVIDER's `workspace_deps()` output is identical for both: `workspace_deps()` renders one tag
+    call per coordinate, and unioning two rows for the same coordinate would emit it twice — the
+    same reason `_plan_build`'s own `BuildUnit.external_coordinates` is deduplicated by coordinate
+    key (`src/fleet/cli.py` comment, "two rows would emit it twice").
+
+    **`resolved_version` is stamped from `pinned_version` directly, not through
+    `bazel.generators.reconcile_versions`/`resolve_workspace_deps`.** MVS reconciles CONFLICTING
+    version RANGES declared by several repos on one external coordinate; an abandoned provider's
+    coordinate is never declared as an external requirement by anything in this run — it is
+    INTERNALLY owned (`_external_coordinates` skips any `coordinate.key in owned`), so nothing
+    contributes a `VersionRequirement` for it to reconcile against. There is exactly one fact:
+    the provider's own last published version, already resolved. Left at `None`, a per-artifact-
+    pin ecosystem's `render_module_bazel` would raise outright for every such stub — maven's own
+    `workspace_deps()` sets neither `attrs` nor `resolved_version` (`ecosystems/jvm.py`), by
+    design, because rendering with an unreconciled version is exactly what that adapter's own
+    docstring says must never happen. Harmless for the four lockfile-dialect adapters (py/js/
+    rust/go), whose `attrs` are always non-empty and whose render ignores `resolved_version`
+    entirely.
+
+    `BuildUnit.ecosystem` is the COORDINATE's own ecosystem (`coordinates.ecosystem`), not
+    necessarily the provider repo's primary one — SPEC §3.5 item 1 names it precisely as
+    `ecosystems.for_ecosystem(coord.ecosystem)`, and a polyglot provider's non-primary published
+    coordinate would otherwise be rendered by the wrong adapter.
+    """
+    stub_rows = await _rows(
+        conn,
+        "SELECT stub_coord_key, pinned_version FROM stubs "
+        " WHERE run_id = ? AND state = 'ACTIVE'",
+        (run_id,),
+    )
+    pinned_by_coord: dict[str, str] = {}
+    for row in stub_rows:
+        pinned_version = row[1]
+        if pinned_version is None:
+            continue
+        pinned_by_coord.setdefault(str(row[0]), str(pinned_version))
+    deps: dict[tuple[str, str, str, str], WorkspaceDep] = {}
+    for coord_key in sorted(pinned_by_coord):
+        pinned_version = pinned_by_coord[coord_key]
+        coord_rows = await _rows(
+            conn,
+            "SELECT ecosystem, grp, name FROM coordinates WHERE coord_key = ?",
+            (coord_key,),
+        )
+        if not coord_rows:
+            raise ValueError(
+                f"stubs.stub_coord_key={coord_key!r} is PUBLISHED_ARTIFACT "
+                f"(pinned_version={pinned_version!r}) but coordinates has no row for it; "
+                "pinned_version can only be set from coordinates.version at stub-creation time "
+                "(Rule 11: fail loud)"
+            )
+        ecosystem = Ecosystem(str(coord_rows[0][0]))
+        published = Coordinate(
+            ecosystem=ecosystem,
+            group=str(coord_rows[0][1]),
+            name=str(coord_rows[0][2]),
+            version_spec=pinned_version,
+        )
+        stub_unit = BuildUnit(
+            unit_id=stub_dest(coord_key).rsplit("/", 1)[-1],
+            ecosystem=ecosystem,
+            dest=stub_dest(coord_key),
+            published=published,
+            internal_deps=[],
+            external_coordinates=[published],
+        )
+        for dep in ecosystems.for_ecosystem(ecosystem).workspace_deps(stub_unit):
+            resolved = dep.model_copy(update={"resolved_version": pinned_version})
+            deps.setdefault(
+                (resolved.ruleset, resolved.extension, resolved.repo_name, resolved.coordinate.key),
+                resolved,
+            )
+    return tuple(deps[key] for key in sorted(deps))
+
+
+def _union_workspace_deps(
+    base: Sequence[WorkspaceDep], stub_deps: Sequence[WorkspaceDep]
+) -> list[WorkspaceDep]:
+    """Add `_stub_workspace_deps`'s output to the fleet's aggregate `workspace_deps`
+    (`_module_inputs(plans)`'s own output), keyed exactly the way `_module_inputs` itself keys
+    its dedup (`ruleset, extension, repo_name, coordinate.key`) — an ordinary dependency on the
+    same coordinate (impossible today, since a stub's coordinate is internally owned, but not
+    structurally forbidden) wins over the stub's, since the real declaration is strictly more
+    informative.
+    """
+    merged: dict[tuple[str, str, str, str], WorkspaceDep] = {
+        (d.ruleset, d.extension, d.repo_name, d.coordinate.key): d for d in base
+    }
+    for dep in stub_deps:
+        merged.setdefault(
+            (dep.ruleset, dep.extension, dep.repo_name, dep.coordinate.key), dep
+        )
+    return [merged[key] for key in sorted(merged)]
+
+
 async def _owned_coordinate_keys(conn: aiosqlite.Connection) -> frozenset[str]:
     """Every `Coordinate.key` an internal repo publishes — §3.1 step 3's internal/external oracle.
 
@@ -9759,6 +9893,7 @@ def _build_payloads(
     lock_dir: Path,
     sandboxed: bool,
     hoist_watch: tuple[HoistWatch, ...] = (),
+    stub_workspace_deps: tuple[WorkspaceDep, ...] = (),
 ) -> PayloadFactory[BuildInput]:
     """One repo's Phase 3 dispatch payload, built from its plan. Injected (Guardrail 3).
 
@@ -9766,6 +9901,13 @@ def _build_payloads(
     this function does not) and handed to every repo's `BuildInput` unchanged — the same closed-
     over-once, reused-per-repo shape `mounts` below already uses (§12.31 case (ii), Leg C2, round
     VI task 66; see `_hoist_watch_for_run`'s own docstring for why this is unscoped per repo).
+
+    `stub_workspace_deps` is the same shape, for the same reason (§37 Leg 2, round VI task 68):
+    computed ONCE by `_run_build_wave` (`_stub_workspace_deps`, which needs the DB connection this
+    function does not) and unioned into every dispatch's `workspace_deps`, alongside
+    `_module_inputs(plans)`'s ordinary ones. Empty in every run today — nothing in `src/` yet
+    writes an `ACTIVE` `stubs` row in production (ADR-0113 condition 2) — so this is a live,
+    currently-inert wire, not a behavior change.
     """
     log_dir = str((settings.root / "artifacts/logs").resolve())
     mounts = _cache_mounts(settings)
@@ -9779,6 +9921,7 @@ def _build_payloads(
         # domain has been prepared, so every dispatch renders the identical MODULE.bazel and the
         # second one to publish merges instead of conflicting.
         deps, toolchains, requirements, module_targets, root_files = _module_inputs(plans)
+        deps = _union_workspace_deps(deps, stub_workspace_deps)
         return BuildInput(
             repo_id=repo_id,
             dest=plan.dest,
@@ -9925,6 +10068,7 @@ async def _run_build_wave(
         rss_reader=RSS_READER or read_own_rss_bytes,
     )
     hoist_watch = await _hoist_watch_for_run(read_conn, run_id)
+    stub_workspace_deps = await _stub_workspace_deps(read_conn, run_id)
     runner = PhaseRunner(
         ctx,
         BuildPipelineWorker(bazel_runner=BAZEL_RUNNER),
@@ -9936,6 +10080,7 @@ async def _run_build_wave(
             lock_dir=lock_dir,
             sandboxed=sandboxed,
             hoist_watch=hoist_watch,
+            stub_workspace_deps=stub_workspace_deps,
         ),
         sink=_BuildSink(
             attempts=_AttemptWriter(

@@ -51,6 +51,7 @@ __all__ = [
     "render_root_package",
     "render_target",
     "resolve_workspace_deps",
+    "stub_failing_target",
     "validate_override",
 ]
 
@@ -251,6 +252,47 @@ def coarse_build_targets(
             )
         )
     return out
+
+
+_STUB_FAILING_TARGET_NAME: Final = "stub"
+"""The single target `bazel.layout.stub_dest(coord_key)` names — `//<stub_dest>:stub`."""
+
+_STUB_FAILING_OUT: Final = "UNBUILDABLE"
+"""Never produced: `cmd` exits before writing it. A real output name is still required —
+`genrule` refuses an empty `outs` — and this one names the reason in the label itself."""
+
+
+def stub_failing_target(*, coord_key: str, provider_repo_id: str, dest: str) -> BuildTarget:
+    """§3.5 item 2 — the never-published half of the stub-creation bundle (task-68, Leg 2).
+
+    A single, GENERIC (non-per-ecosystem) `genrule`: it is a Bazel-native rule needing no
+    `load()`, so it renders identically whether the abandoned provider was Maven, npm, PyPI,
+    crates.io or a Go module — no adapter branch is needed, and §12.6's confinement rule (no raw
+    `Ecosystem` check outside `manifests/`/`ecosystems/`/`config/rules/`) would forbid one here
+    anyway. This is the shape research-7 §5 flagged as likely and CLAUDE.md's own directive is to
+    try the ecosystem-agnostic form first — this one needed no adapter branch to satisfy it.
+
+    `cmd` runs `exit 1` after an `echo` to stderr naming the abandoned provider and its
+    coordinate, so the failure is a genuine BUILD-time action failure (SPEC §3.5 item 2: "fails
+    at build time with an explicit message, never at runtime silently") — never a green build
+    that quietly ships an empty package nothing consumes. `outs` names one file that is never
+    produced: `cmd` exits before Bazel ever checks for it, so the actual failure is always the
+    exit code and the message, not a missing-output error that would obscure it.
+    """
+    message = (
+        f"fleet: {provider_repo_id} (coordinate {coord_key}) is REQUIRES_HUMAN_INTERVENTION "
+        "with no published artifact; this EMPTY_FAILING stub cannot be built. Resolve the "
+        "abandoned repo or replace this dependency (SPEC section 3.5 item 2)."
+    )
+    return BuildTarget(
+        package=dest,
+        name=_STUB_FAILING_TARGET_NAME,
+        rule="genrule",
+        attrs={
+            "outs": [_STUB_FAILING_OUT],
+            "cmd": f"echo {json.dumps(message)} >&2; exit 1",
+        },
+    )
 
 
 # =======================================================================================

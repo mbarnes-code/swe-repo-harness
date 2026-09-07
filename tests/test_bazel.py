@@ -62,6 +62,7 @@ from fleet.bazel.generators import (
     render_gazelle_build,
     render_module_bazel,
     resolve_workspace_deps,
+    stub_failing_target,
     validate_override,
 )
 from fleet.bazel.layout import (
@@ -74,6 +75,7 @@ from fleet.bazel.layout import (
     scc_label,
     select_primary_coordinate,
     skeleton_paths,
+    stub_dest,
 )
 from fleet.bazel.lockfile import (
     LockfileRegistryMismatchError,
@@ -1573,6 +1575,51 @@ def test_real_bazel_builds_the_generated_python_package(
         registry=bazel_registry_args,
     )
     assert data.stdout.split() == [f"//{dest}:pyproject.toml"], data.stdout
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
+def test_real_bazel_fails_an_empty_failing_stub_target_with_an_explicit_message(
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
+) -> None:
+    """§3.5 item 2 (task-68, Leg 2, `stub_failing_target`): `bazel build` of a never-published
+    provider's `EMPTY_FAILING` stub package exits non-zero, with an explicit message naming the
+    abandoned provider and its coordinate — never a green build that ships an empty package
+    nothing consumes, and never a runtime failure a consumer discovers only later.
+
+    A real build over a real `genrule`, exactly the shape
+    `test_real_bazel_builds_the_generated_python_package` above uses for the success case: the
+    target comes out of the shipped, generic (non-per-ecosystem) rendering function and is
+    written to disk, and Bazel itself is what fails the action — not a string check on generated
+    text.
+    """
+    coord_key = "npm::acme-abandoned-lib"
+    provider_repo_id = "acme-abandoned-lib"
+    dest = stub_dest(coord_key)
+    target = stub_failing_target(coord_key=coord_key, provider_repo_id=provider_repo_id, dest=dest)
+
+    (bazel_workspace / "MODULE.bazel").write_text(
+        render_module_bazel([], module_name="acme_monorepo", ruleset_versions={}),
+        encoding="utf-8",
+    )
+    (bazel_workspace / "BUILD.bazel").write_text("", encoding="utf-8")
+    package = bazel_workspace / dest
+    package.mkdir(parents=True)
+    (package / "BUILD.bazel").write_text(render_build_bazel([target]), encoding="utf-8")
+
+    built = _bazel(
+        bazel_startup_argv,
+        "build",
+        f"//{dest}/...",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(built, bazel_registry_args)
+    assert built.returncode != 0, built.stderr[-3000:]
+    assert provider_repo_id in built.stderr, built.stderr[-3000:]
+    assert coord_key in built.stderr, built.stderr[-3000:]
+    # Never a runtime-silent stand-in: the declared output must never actually be produced.
+    assert not (package / "UNBUILDABLE").exists()
 
 
 @pytest.mark.integration

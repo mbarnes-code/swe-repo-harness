@@ -3145,6 +3145,111 @@ def test_a_superseded_stub_leaves_the_consumers_generated_dependency_on_the_real
     assert f'"{_STUB_LABEL}"' not in body, body
 
 
+# ---------------------------------------------------------------------------------------
+# §37 Leg 2 (round VI task 68) — an ACTIVE, PUBLISHED_ARTIFACT stub's `workspace_deps()` render
+# reaches the fleet's `MODULE.bazel` (`cli._stub_workspace_deps`/`_union_workspace_deps`)
+# ---------------------------------------------------------------------------------------
+#
+# Deliberately a MAVEN-ecosystem coordinate (`acme-commons-java`, `com.acme:commons`), not one of
+# the four lockfile-dialect ecosystems Blocker C's own fixture above uses: `maven.install` is the
+# one dialect that pins a version PER ARTIFACT in the rendered tag itself (`ecosystems/jvm.py::
+# workspace_deps`), so it is the one ecosystem where "the stub's pinned_version reached
+# MODULE.bazel" is checkable by substring — the four others (py/js/rust/go) are version-free by
+# dialect (the LOCK is the resolution) and never spell a per-coordinate version in the tag at
+# all. No real consumer->provider edge is needed here (that redirect is Blocker C's job, already
+# landed and out of scope for this leg) — `_stub_workspace_deps` reads only `stub_coord_key`/
+# `pinned_version` off the `stubs` row.
+
+_MAVEN_STUB_COORD_KEY: Final = "maven:com.acme:commons"
+#: Deliberately DIFFERENT from `acme-commons-java`'s own real pom.xml version (`1.2.0`, see
+#: `POLYGLOT_REPOS` above) — proving MODULE.bazel carries the STUB's `pinned_version`, not the
+#: provider's own already-scanned `coordinates.version`.
+_MAVEN_STUB_PINNED_VERSION: Final = "9.9.9"
+
+
+def _insert_published_artifact_stub_row(
+    root: Path,
+    *,
+    run_id: str,
+    coord_key: str,
+    provider_repo_id: str,
+    consumer_repo_id: str,
+    pinned_version: str,
+) -> None:
+    """One `ACTIVE`, `PUBLISHED_ARTIFACT` `stubs` row for an arbitrary coordinate, written
+    straight to SQLite — same reason and shape as `_insert_stub_row` above (no worker in this
+    tree emits one yet). Generalized over `coord_key`/`provider_repo_id` because this leg's
+    render (`_stub_workspace_deps`) is exercised over a DIFFERENT ecosystem than Blocker C's own
+    fixture (maven vs. pypi), and reads neither `bazel_label` nor `consumer_repo_id`.
+    """
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, resolved_at, state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', 'PUBLISHED_ARTIFACT', NULL, ?, ?)",
+            (
+                str(uuid4()),
+                run_id,
+                consumer_repo_id,
+                coord_key,
+                consumer_repo_id,
+                provider_repo_id,
+                pinned_version,
+                f"//third_party/stubs/{coord_key.replace(':', '_')}:stub",
+                "2026-09-07T00:00:00+00:00",
+                "2026-09-07T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+    resolver: FakeResolver,
+) -> None:
+    """`fleet build`'s generated `MODULE.bazel` carries a `maven.install()` artifact for the
+    stub's coordinate, pinned at the STUB's `pinned_version` — real render, through
+    `ecosystems.for_ecosystem(...).workspace_deps()`, not a mock of it.
+
+    `acme-commons-java` plays the abandoned PROVIDER here (its own real, scanned
+    `com.acme:commons` coordinate is what the stub names); which repo plays the consumer is
+    irrelevant to this leg's render (`_stub_workspace_deps` never reads `consumer_repo_id`), so
+    the default fixture's `acme-app-py` is reused rather than adding a repo only to satisfy a
+    schema NOT NULL column.
+    """
+    add_repos(fleet, ["acme-commons-java"])
+    transformed(fleet)
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    _insert_published_artifact_stub_row(
+        fleet,
+        run_id=run_id,
+        coord_key=_MAVEN_STUB_COORD_KEY,
+        provider_repo_id="acme-commons-java",
+        consumer_repo_id="acme-app-py",
+        pinned_version=_MAVEN_STUB_PINNED_VERSION,
+    )
+
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    module = (build_worktree(fleet, "acme-commons-java") / "MODULE.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert "maven.install(" in module, module
+    assert (
+        f'name = "commons",\n    version = "{_MAVEN_STUB_PINNED_VERSION}",' in module
+    ), module
+    # The provider's OWN scanned version must not be what got rendered for this coordinate.
+    assert '"1.2.0"' not in module, module
+
+
 def _second_fleet_workspace(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
 ) -> Path:

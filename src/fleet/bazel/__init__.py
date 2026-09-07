@@ -28,6 +28,7 @@ from fleet.bazel.generators import (
     render_module_bazel,
     render_target,
     resolve_workspace_deps,
+    stub_failing_target,
     validate_override,
 )
 from fleet.bazel.layout import (
@@ -111,5 +112,6 @@ __all__ = [
     "scc_package",
     "select_primary_coordinate",
     "select_tested_targets",
+    "stub_failing_target",
     "validate_override",
 ]
