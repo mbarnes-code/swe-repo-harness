@@ -102,6 +102,7 @@ from fleet.bazel.generators import (
     render_module_bazel,
     render_root_package,
 )
+from fleet.bazel.layout import stub_dest
 from fleet.bazel.lockfile import MODULE_LOCK_PATH, check_lock_registry
 from fleet.cli import ExitCode, app
 from fleet.ecosystems import go as go_adapter
@@ -3181,6 +3182,11 @@ def _insert_published_artifact_stub_row(
     tree emits one yet). Generalized over `coord_key`/`provider_repo_id` because this leg's
     render (`_stub_workspace_deps`) is exercised over a DIFFERENT ecosystem than Blocker C's own
     fixture (maven vs. pypi), and reads neither `bazel_label` nor `consumer_repo_id`.
+
+    `bazel_label` is computed via `cli._internal_label(stub_dest(coord_key))` — the SAME function
+    `cli._create_stub_records` uses for the real column, and `_STUB_LABEL` above computes by hand
+    for the SAME reason (fix round, review finding M3: this helper previously hand-rolled a THIRD,
+    inconsistent spelling — `f"...{coord_key.replace(':', '_')}:stub"` — matching neither).
     """
     conn = sqlite3.connect(root / "state" / "fleet.db")
     try:
@@ -3197,7 +3203,7 @@ def _insert_published_artifact_stub_row(
                 consumer_repo_id,
                 provider_repo_id,
                 pinned_version,
-                f"//third_party/stubs/{coord_key.replace(':', '_')}:stub",
+                cli._internal_label(stub_dest(coord_key)),
                 "2026-09-07T00:00:00+00:00",
                 "2026-09-07T00:00:00+00:00",
             ),
@@ -3248,6 +3254,111 @@ def test_an_active_published_artifact_stubs_workspace_dep_reaches_module_bazel(
     ), module
     # The provider's OWN scanned version must not be what got rendered for this coordinate.
     assert '"1.2.0"' not in module, module
+
+
+# ---------------------------------------------------------------------------------------
+# §37 Leg 2 fix round (review finding I1) — the PACKAGE half of §3.5 item 1, complementing the
+# test above (which only proves `_stub_workspace_deps`'s `MODULE.bazel` half). Without
+# `cli._stub_package_files`, `_unit_deps`'s already-landed redirect names a label with no
+# `BUILD.bazel` behind it anywhere on disk — invisible under `FakeBazel`, which never asks a real
+# `bazel` to resolve anything. `tests/test_bazel.py`'s own real-subprocess tests prove the
+# RESOLUTION half of this same mechanism; these two prove the WIRING half — that
+# `_stub_package_files`'s rendered text actually lands in every dispatch's worktree at the exact
+# path `stub_dest(coord_key)` names, for BOTH fidelities.
+# ---------------------------------------------------------------------------------------
+
+
+def _insert_empty_failing_stub_row(
+    root: Path,
+    *,
+    run_id: str,
+    coord_key: str,
+    provider_repo_id: str,
+    consumer_repo_id: str,
+) -> None:
+    """One `ACTIVE`, `EMPTY_FAILING` `stubs` row — `pinned_version` stays `NULL`, exactly as
+    `schema.sql`'s own `CHECK (pinned_version IS NOT NULL OR stub_fidelity = 'EMPTY_FAILING')`
+    requires. `bazel_label` via `cli._internal_label`, same as the PUBLISHED_ARTIFACT helper
+    above, for the same M3 reason (one convention, never a hand-rolled second one).
+    """
+    conn = sqlite3.connect(root / "state" / "fleet.db")
+    try:
+        conn.execute(
+            "INSERT INTO stubs (stub_id, run_id, repo_id, stub_coord_key, consumer_repo_id, "
+            "                   provider_repo_id, pinned_version, bazel_label, state, "
+            "                   stub_fidelity, resolved_at, state_changed_at, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'ACTIVE', 'EMPTY_FAILING', NULL, ?, ?)",
+            (
+                str(uuid4()),
+                run_id,
+                consumer_repo_id,
+                coord_key,
+                consumer_repo_id,
+                provider_repo_id,
+                cli._internal_label(stub_dest(coord_key)),
+                "2026-09-07T00:00:00+00:00",
+                "2026-09-07T00:00:00+00:00",
+            ),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+_EMPTY_FAILING_STUB_COORD_KEY: Final = "npm::acme-abandoned-lib"
+
+
+def test_active_stubs_package_files_are_materialized_into_every_dispatchs_worktree(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+    resolver: FakeResolver,
+) -> None:
+    """`cli._stub_package_files`'s rendered `BUILD.bazel` for an `ACTIVE` stub of EITHER fidelity
+    lands on disk at the exact `bazel.layout.stub_dest(coord_key)` path `cli._unit_deps`'s
+    already-landed redirect names — one `PUBLISHED_ARTIFACT` row (the maven fixture above) and
+    one `EMPTY_FAILING` row, seeded together, both materialized in the SAME `fleet build`.
+    """
+    add_repos(fleet, ["acme-commons-java"])
+    transformed(fleet)
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    _insert_published_artifact_stub_row(
+        fleet,
+        run_id=run_id,
+        coord_key=_MAVEN_STUB_COORD_KEY,
+        provider_repo_id="acme-commons-java",
+        consumer_repo_id="acme-app-py",
+        pinned_version=_MAVEN_STUB_PINNED_VERSION,
+    )
+    _insert_empty_failing_stub_row(
+        fleet,
+        run_id=run_id,
+        coord_key=_EMPTY_FAILING_STUB_COORD_KEY,
+        provider_repo_id="acme-lib-py",
+        consumer_repo_id="acme-app-py",
+    )
+
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    worktree = build_worktree(fleet, "acme-commons-java")
+
+    published_dest = stub_dest(_MAVEN_STUB_COORD_KEY)
+    published_name = cli._internal_label(published_dest).rsplit(":", 1)[-1]
+    published_body = (worktree / published_dest / "BUILD.bazel").read_text(encoding="utf-8")
+    assert "alias(" in published_body, published_body
+    assert (
+        f'name = "{published_name}",\n    actual = "@maven//:commons",' in published_body
+    ), published_body
+
+    failing_dest = stub_dest(_EMPTY_FAILING_STUB_COORD_KEY)
+    failing_name = cli._internal_label(failing_dest).rsplit(":", 1)[-1]
+    failing_body = (worktree / failing_dest / "BUILD.bazel").read_text(encoding="utf-8")
+    assert "genrule(" in failing_body, failing_body
+    assert f'name = "{failing_name}",\n    cmd = ' in failing_body, failing_body
+    assert "acme-lib-py" in failing_body, failing_body
+    assert _EMPTY_FAILING_STUB_COORD_KEY in failing_body, failing_body
 
 
 def _second_fleet_workspace(

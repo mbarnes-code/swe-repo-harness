@@ -1664,13 +1664,22 @@ placeholder instead of waiting for a human:
    (`cli.py`'s `_detect_transform_stub_triggers`/`_create_stub_records`, round VI task 67 —
    trigger detection against `r`'s terminal `REQUIRES_HUMAN_INTERVENTION` status, `StubRecord`
    construction, and the `stubs` INSERT), **not** in `workers/buildgen.py`, which stays a pure
-   renderer with zero stub-awareness and only emits what the render step below describes. **Not
-   yet wired into any production call site as of round VI task 67 (fix round 1)** — all three
-   `--stub-blocked` refusals (`_validate_transform_flags`/`_validate_build_flags`/
-   `_validate_resume_flags`) still stand per ADR-0113 condition 2, correctly, since task-68's
-   BUILD-phase render half does not exist yet; this design-half is built and unit-tested directly,
-   not reachable from the CLI. Do not read this item as describing live behavior until that
-   condition is satisfied and a later dated update here says so.
+   renderer with zero stub-awareness and only emits what the render step below describes. **Update,
+   round VI task 68 (fix round, 2026-09-07) — task-68's BUILD-phase render half now exists and is
+   wired; the sentence this replaces (which said the render half did not exist yet) is
+   superseded.** `cli._stub_workspace_deps`/`_union_workspace_deps` (item 1's `MODULE.bazel`
+   declaration, below) and `cli._stub_package_files`/`_union_support_files` (the actual
+   `BUILD.bazel` PACKAGE at `stub_dest(coord_key)` item 1 also describes, for BOTH fidelities —
+   `bazel.generators.stub_alias_target` for `PUBLISHED_ARTIFACT`, `stub_failing_target` for
+   `EMPTY_FAILING`, item 2 below) are real, tested against a REAL (non-`FakeBazel`) Bazel, and
+   wired into the LIVE `fleet build` pipeline (`_run_build_wave`/`_build_payloads`) — reachable on
+   every invocation, not gated behind `--stub-blocked`. All three `--stub-blocked` refusals
+   (`_validate_transform_flags`/`_validate_build_flags`/`_validate_resume_flags`) still stand per
+   ADR-0113 condition 2 — the reason is narrower now: the TRANSFORM-phase DECISION above (trigger
+   detection/`StubRecord`/the `stubs` INSERT) has no production call site yet, so nothing ever
+   writes an `ACTIVE` `stubs` row today, which is what keeps this now-real render machinery
+   currently inert. Do not read this item as describing reachable production behavior until that
+   remaining wiring (task-69's scope) lands and a later dated update here says so.
    For each abandoned repo `r`, `workers/buildgen.py` emits a stub package at
    `third_party/stubs/<coord_key_path>/` from `r`'s **published `Coordinate` alone** — no source
    from `r` is needed, which is the point. The stub is an external-registry dependency pinned to

@@ -51,6 +51,7 @@ __all__ = [
     "render_root_package",
     "render_target",
     "resolve_workspace_deps",
+    "stub_alias_target",
     "stub_failing_target",
     "validate_override",
 ]
@@ -254,16 +255,23 @@ def coarse_build_targets(
     return out
 
 
-_STUB_FAILING_TARGET_NAME: Final = "stub"
-"""The single target `bazel.layout.stub_dest(coord_key)` names — `//<stub_dest>:stub`."""
-
 _STUB_FAILING_OUT: Final = "UNBUILDABLE"
 """Never produced: `cmd` exits before writing it. A real output name is still required —
 `genrule` refuses an empty `outs` — and this one names the reason in the label itself."""
 
 
-def stub_failing_target(*, coord_key: str, provider_repo_id: str, dest: str) -> BuildTarget:
+def stub_failing_target(
+    *, name: str, coord_key: str, provider_repo_id: str, dest: str
+) -> BuildTarget:
     """§3.5 item 2 — the never-published half of the stub-creation bundle (task-68, Leg 2).
+
+    `name` is the caller's job to supply, not this function's to invent (round VI task 68 fix
+    round, review finding I2): the stub's target name must be BYTE-IDENTICAL to what
+    `cli._internal_label(bazel.layout.stub_dest(coord_key))` produces — the same function
+    `cli._create_stub_records` uses to compute `stubs.bazel_label`, the same one
+    `cli._unit_deps`'s redirect reads back — so there is exactly ONE label-construction
+    convention for a stub's target, never a second one recomputed here. A hardcoded name here
+    previously produced `//<stub_dest>:stub`, which the redirect's real label never names.
 
     A single, GENERIC (non-per-ecosystem) `genrule`: it is a Bazel-native rule needing no
     `load()`, so it renders identically whether the abandoned provider was Maven, npm, PyPI,
@@ -286,13 +294,34 @@ def stub_failing_target(*, coord_key: str, provider_repo_id: str, dest: str) -> 
     )
     return BuildTarget(
         package=dest,
-        name=_STUB_FAILING_TARGET_NAME,
+        name=name,
         rule="genrule",
         attrs={
             "outs": [_STUB_FAILING_OUT],
             "cmd": f"echo {json.dumps(message)} >&2; exit 1",
         },
     )
+
+
+def stub_alias_target(*, name: str, dest: str, actual: str) -> BuildTarget:
+    """§3.5 item 1's PACKAGE half — the never-built-before-now other end of `stub_failing_target`
+    (round VI task 68 fix round, review finding I1).
+
+    `_unit_deps`'s stub-redirect (Blocker C, round VI task 13) already substitutes a consumer's
+    dependency label with `cli._internal_label(bazel.layout.stub_dest(coord_key))` — but until
+    this function, nothing rendered a real `BUILD.bazel` AT that path, so the substituted label
+    resolved to nothing under real Bazel. A generic (non-per-ecosystem) native `alias`, exactly
+    the same shape as `stub_failing_target`'s `genrule`: `alias` forwards the underlying target's
+    providers, so a consumer depending on `//<dest>:<name>` sees exactly what depending on
+    `actual` (the REAL external label `_stub_workspace_deps`'s `workspace_deps()` call already
+    declares in `MODULE.bazel`, read off `EcosystemAdapter.external_labels()` — the SAME
+    machinery an ordinary package's own `deps` are built from, `EcosystemAdapter.dep_labels`) —
+    directly would.
+
+    `name` is the caller's job for the identical reason `stub_failing_target` states: it must
+    equal `cli._internal_label(...)`'s own target name, never a second, independently-derived one.
+    """
+    return BuildTarget(package=dest, name=name, rule="alias", attrs={"actual": actual})
 
 
 # =======================================================================================
