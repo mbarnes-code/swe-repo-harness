@@ -1108,7 +1108,8 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1315-1327`, moved by round VI task 58's
+`validate_memory_budget` (`settings.py:1323-1335`, moved by round VI task 73's `rules_java`
+pin addition to `BuildSection.ruleset_versions`, and before that by round VI task 58's
 `GraphSection.forbidden_contract_ids` addition) already had the complete, correct arithmetic
 with zero callers — wired into `cli.py::_load_settings` via a new injectable
 `_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.

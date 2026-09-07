@@ -565,6 +565,7 @@ class BuildSection(Section):
             "gazelle": "0.52.2",
             "rules_rust": "0.65.0",
             "rules_proto": "7.1.0",
+            "rules_java": "9.1.0",
         }
     )
     """A **pin**, enforced as one: `render_module_bazel` emits `single_version_override` beside
@@ -597,6 +598,13 @@ class BuildSection(Section):
     the whole table, which is why
     `test_bazel.py::test_every_pinned_ruleset_version_loads_under_real_bazel` is parametrized over
     this dict rather than over a list of suspects.
+
+    `rules_java` (D121) was added later and pinned above its dependent's own floor for the same
+    Bazel-9 reason: `rules_jvm_external@6.7` (pinned above) declares `bazel_dep(name = "rules_java",
+    version = "7.12.2")` as ITS floor, but `7.12.2` and `8.6.1` both fail on this table's Bazel
+    (9.2.0) with `name 'JavaInfo' is not defined` / `JavaPluginInfo` (`java/private/native.bzl`) —
+    the same class of native-symbol removal as the `CcInfo` failures above, for Java instead of
+    C++. `9.1.0` loads and builds cleanly combined with every other pin in this table.
 
     **This table needs Bazel >= 7.6.0** and is verified on the 9.2.0 that `tools/bin/bazel` runs:
     `aspect_rules_js@3.x` declares `bazel_compatibility = [">=7.6.0"]`, so the 7.4.1 that

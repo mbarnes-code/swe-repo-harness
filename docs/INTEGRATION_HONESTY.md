@@ -9488,8 +9488,9 @@ Behavior preservation proven by an exhaustive equivalence check over both enums'
 genuine mutation test (emptying each table at runtime and confirming membership behavior actually
 changes). `tests/test_ecosystems.py` — 90/90 passing (was 87 pass / 3 fail).
 
-## D121 — OPEN. No generated JVM package has ever been analysed by real Bazel: the generated
-`MODULE.bazel` never declares `rules_java` as an explicit `bazel_dep`
+## D121 — FIXED, LANDED (round VI task 73, `d9dd533`, controller review pending). No generated
+JVM package has ever been analysed by real Bazel: the generated `MODULE.bazel` never declares
+`rules_java` as an explicit `bazel_dep`
 
 **Found by round VI task 70 (2026-09-07), while attempting the real-Bazel half of D112's JVM
 test-source proof.** Verified free before allocating: form-agnostic sweep found `D120` as the
@@ -9525,6 +9526,39 @@ also close the JDK-toolchain gap `jvm.py::toolchain_requirements()`'s own docstr
 discloses is a design choice, not a re-derivation from this task's own measurement — a future
 task should check both possibilities before deciding scope. No task briefed yet; this is the
 controller's next dispatch candidate.
+
+**Fixed (2026-09-07, round VI task 73, `d9dd533`, controller review pending).** Pinned
+`"rules_java": "9.1.0"` in `BuildSection.ruleset_versions` (`src/fleet/settings.py`) — measured,
+not guessed, against this repo's real, pinned Bazel (9.2.0): `rules_jvm_external@6.7`'s own floor
+(`7.12.2`) and `8.6.1` both fail with `name 'JavaInfo' is not defined` / `JavaPluginInfo`
+(`java/private/native.bzl`), the same class of Bazel-9 native-symbol-removal breakage already
+documented for `rules_rust`/`rules_go`/`gazelle`/`aspect_rules_ts`; `9.1.0` loads and builds
+cleanly combined with all 8 pre-existing pins. No change to `generators.py` or
+`jvm.py::toolchain_requirements()` (still `return []`, unchanged docstring) — `render_module_bazel`'s
+pre-existing `loaded & set(ruleset_versions)` admission mechanism does the rest automatically the
+moment the key exists, and `rules_java`'s apparent repo name equals its module name, so no
+`ruleset_repo_names()` entry is needed either.
+
+Proven under real Bazel, not merely offline: `tests/test_bazel.py::_RULESET_LOAD_PROBES` gained a
+`"rules_java"` entry (required — `test_every_pinned_ruleset_has_a_load_probe` asserts set equality
+against `ruleset_versions` and fails immediately without it), which also auto-parametrizes
+`test_every_pinned_ruleset_version_loads_under_real_bazel` with a `rules_java` case. A new test,
+`test_real_bazel_builds_the_generated_jvm_package`, mirrors D6's
+`test_real_bazel_resolves_a_load_whose_ruleset_only_a_target_names` shape exactly for a synthetic
+`java_library` (no Maven/`rules_jvm_external` involvement): proves the pre-fix failure
+(`unknown repo 'rules_java'`) against the real loader, then proves a real `bazel build` completes
+successfully post-fix. `--java_runtime_version=remotejdk_21` in that second half is
+test-invocation plumbing only — it is not emitted by `render_module_bazel` or
+`toolchain_requirements()`, and does not resolve the JDK-toolchain gap named above, which stays
+explicitly out of scope pending its own future D-number/task.
+
+Verified: `pytest tests/test_bazel.py -k "ruleset_has_a_load_probe or
+every_pinned_ruleset_version_loads or jvm_package" -m integration` — 10/10 pass under real Bazel
+9.2.0. Full `tests/test_bazel.py` + `tests/test_settings.py` (including all integration tests) —
+123/123 pass, no regressions. This does NOT move any `<n> of 48` §12 criterion count — no §12
+criterion names JVM/Bazel real-analysis directly (checked `docs/SPEC.md` and
+`docs/CRITERIA_PLAN.md`); this is an infrastructure/blocker fix (unblocks JVM real-Bazel analysis
+generally), consistent with research-41's own read.
 
 ## D122 — OPEN. A contract's own PR record and its owning repo's own PR record cannot coexist —
 one silently overwrites the other via `findings`' own `ux_findings_ident` unique index.

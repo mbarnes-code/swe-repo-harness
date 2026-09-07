@@ -1826,6 +1826,88 @@ def test_real_bazel_resolves_a_load_whose_ruleset_only_a_target_names(
 
 @pytest.mark.integration
 @pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
+def test_real_bazel_builds_the_generated_jvm_package(
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
+) -> None:
+    """D121: a JVM package's ONLY connection to `rules_java` is a target's `load_from` — same
+    shape as D6's `rules_python` case above, and the same real fix: `rules_java` must be pinned in
+    `build.ruleset_versions` for `render_module_bazel`'s `loaded`-set admission to name it.
+
+    Before this fix, `bazel build` on the SAME generated files failed at package-LOAD time —
+    before any target-level analysis — with `Unable to find package for @@[unknown repo
+    'rules_java' requested from @@]//java:defs.bzl` (docs/INTEGRATION_HONESTY.md D121). This test
+    proves both halves, same as the `rules_python` test above: the failure with `targets=()`, and
+    the fix with `targets` supplied.
+
+    `--java_runtime_version=remotejdk_21` is test-invocation plumbing ONLY — it stands in for
+    whatever JDK-toolchain story a future task decides (see D121's own "sizing/design note" on the
+    JDK-toolchain gap `jvm.py::toolchain_requirements()` discloses); it is not something
+    `render_module_bazel` or `toolchain_requirements()` emits, and this test must not be read as
+    resolving that separate, still-open question.
+    """
+    dest = "java/com/acme/widgets"
+    package = bazel_workspace / dest
+    package.mkdir(parents=True)
+    (package / "Widget.java").write_text(
+        "package com.acme.widgets;\n"
+        "public class Widget {\n"
+        "    public static int value() { return 42; }\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (bazel_workspace / "BUILD.bazel").write_text("", encoding="utf-8")
+    targets = [
+        BuildTarget(
+            package=dest,
+            name="widgets",
+            rule="java_library",
+            load_from="@rules_java//java:defs.bzl",
+            srcs=["Widget.java"],
+        )
+    ]
+    (package / "BUILD.bazel").write_text(render_build_bazel(targets), encoding="utf-8")
+    pinned = BuildSection().ruleset_versions["rules_java"]
+
+    def render(*, with_targets: bool) -> None:
+        (bazel_workspace / "MODULE.bazel").write_text(
+            render_module_bazel(
+                [],
+                module_name="acme_monorepo",
+                ruleset_versions={"rules_java": pinned},
+                targets=targets if with_targets else (),
+            ),
+            encoding="utf-8",
+        )
+
+    # The defect, reproduced against the real loader: nothing DECLARED rules_java.
+    render(with_targets=False)
+    without = _bazel(
+        bazel_startup_argv,
+        "build",
+        f"//{dest}:all",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(without, bazel_registry_args)
+    assert without.returncode != 0, without.stdout
+    assert "unknown repo 'rules_java'" in without.stderr, without.stderr[-2000:]
+
+    render(with_targets=True)
+    built = _bazel(
+        bazel_startup_argv,
+        "build",
+        f"//{dest}:all",
+        "--java_runtime_version=remotejdk_21",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(built, bazel_registry_args)
+    assert built.returncode == 0, built.stderr[-3000:]
+    assert "Build completed successfully" in built.stderr, built.stderr[-3000:]
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
 def test_use_repo_brings_a_toolchain_extensions_repos_into_scope(
     bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
 ) -> None:
@@ -1911,6 +1993,7 @@ _RULESET_LOAD_PROBES: dict[str, tuple[str, str, str]] = {
     "aspect_rules_ts": ("aspect_rules_ts", "@aspect_rules_ts//ts:defs.bzl", "ts_project"),
     "gazelle": ("gazelle", "@gazelle//:def.bzl", "gazelle"),
     "rules_go": ("io_bazel_rules_go", "@io_bazel_rules_go//go:def.bzl", "go_library"),
+    "rules_java": ("rules_java", "@rules_java//java:defs.bzl", "java_library"),
     "rules_jvm_external": ("rules_jvm_external", "@rules_jvm_external//:defs.bzl", "maven_install"),
     "rules_proto": ("rules_proto", "@rules_proto//proto:defs.bzl", "proto_library"),
     "rules_python": ("rules_python", "@rules_python//python:defs.bzl", "py_library"),
