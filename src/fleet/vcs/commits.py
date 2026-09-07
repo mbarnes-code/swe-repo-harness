@@ -40,6 +40,7 @@ Writes no SQL (§11.5 single-writer rule): the runner persists what these helper
 from __future__ import annotations
 
 import hashlib
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -49,6 +50,7 @@ from uuid import UUID
 from fleet.vcs.git import Git, GitCommandError, GitError
 
 __all__ = [
+    "CONTRACT_ROLLBACK_ID_TRAILER",
     "PATCH_ID_TRAILER",
     "TASK_ID_TRAILER",
     "TRAILER_PREFIX",
@@ -62,6 +64,7 @@ __all__ = [
     "RollbackIndeterminateError",
     "apply_and_commit",
     "commits_in_range",
+    "contract_rollback_shas_in_range",
     "discard_task",
     "find_task_commit",
     "guard",
@@ -79,6 +82,11 @@ PHASE_TRAILER: Final = "Fleet-Phase"
 TASK_ID_TRAILER: Final = "Fleet-Task-Id"
 ATTEMPT_TRAILER: Final = "Fleet-Attempt"
 PATCH_ID_TRAILER: Final = "Fleet-Patch-Id"
+CONTRACT_ROLLBACK_ID_TRAILER: Final = "Fleet-Contract-Rollback-Id"
+"""ADR-0122 Decision 5: stamped on every revert commit in one hoist-rollback series, all sharing
+the SAME value (the failed contract's own `contract_id`) — the trailer alone does not say which
+original sha a given revert commit reverts; `contract_rollback_shas_in_range` below reads each
+matching commit's body for that (Decision 5's own "This reverts commit <sha>." text)."""
 
 
 class PatchLike(Protocol):
@@ -155,7 +163,8 @@ def patch_id(patches: Sequence[PatchLike]) -> str:
 
 @dataclass(frozen=True, slots=True)
 class FleetTrailers:
-    """The six trailers every harness commit carries (SPEC §3.2 step 6).
+    """The six trailers every harness commit carries (SPEC §3.2 step 6), plus one optional
+    seventh (ADR-0122 Decision 5).
 
     They are what turn "did my work land?" into a git query, from a bare clone, with no database.
     """
@@ -166,9 +175,15 @@ class FleetTrailers:
     task_id: UUID | str
     attempt: int
     patch_id: str
+    contract_rollback_id: str | None = None
+    """ADR-0122 Decision 5, appended LAST so every existing call site (`apply_and_commit`, and
+    every test constructing `FleetTrailers` positionally) is unaffected. Set on a hoist-rollback
+    revert commit to the failed contract's own `contract_id`; left `None` everywhere else, in
+    which case `as_mapping()` omits the trailer entirely (unlike the six required fields above,
+    which are always present) — the first optional trailer this dataclass has ever carried."""
 
     def as_mapping(self) -> dict[str, str]:
-        return {
+        mapping = {
             RUN_ID_TRAILER: str(self.run_id),
             REPO_ID_TRAILER: self.repo_id,
             PHASE_TRAILER: str(self.phase),
@@ -176,6 +191,9 @@ class FleetTrailers:
             ATTEMPT_TRAILER: str(self.attempt),
             PATCH_ID_TRAILER: self.patch_id,
         }
+        if self.contract_rollback_id is not None:
+            mapping[CONTRACT_ROLLBACK_ID_TRAILER] = self.contract_rollback_id
+        return mapping
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +392,50 @@ async def commits_in_range(
         }
         for commit in found
     )
+
+
+_REVERTS_COMMIT_RE = re.compile(r"This reverts commit ([0-9a-f]{7,40})\.")
+"""Decision 5's own revert-body text, verbatim (`execute_hoist_rollback`'s real pass writes it).
+Matches a short OR full hex sha (7-40 hex chars) so this stays correct even if some future caller
+writes an abbreviated sha; every writer in THIS codebase always writes the full 40-char form."""
+
+
+async def contract_rollback_shas_in_range(
+    git: Git, *, pre_commit_sha: str, branch: str, contract_id: str
+) -> frozenset[str]:
+    """ADR-0122 Decision 5's resume/idempotency query: which of a hoist-rollback's ORIGINAL merge
+    shas already have a landed revert commit on `branch`.
+
+    Every revert commit in one rollback series carries the IDENTICAL `Fleet-Contract-Rollback-Id`
+    trailer value (the failed contract's own `contract_id`) — the trailer alone cannot say which
+    original sha a given revert commit reverts, only that it belongs to this contract's series. So
+    this reads each matching commit's BODY for Decision 5's "This reverts commit <sha>." text
+    (`revert_and_commit`'s caller supplies exactly that as `body`) to recover the mapping.
+
+    `git.log()` does not carry commit bodies (only subject + parsed trailers), so each matching
+    commit costs one extra `git log -1 --format=%b` call — one call per rollback commit that
+    exists, never per candidate sha, and a hoist-rollback series is always small (one contract plus
+    its blast set).
+
+    `pre_commit_sha` should anchor at a commit that is a real ancestor of every possible rollback
+    commit and of nothing that could be one falsely — research-40 (task-71 brief) recommends the
+    CONTRACT's own merge sha: it is always an ancestor of `integration` by the time Leg D fires
+    (the contract must already be merged to have broken a build), and no rollback commit for this
+    contract can exist before its own merge sha does. `scoped_range` accepts any non-empty sha
+    string; this function does not itself validate which one the caller chose.
+    """
+    found = await git.log(
+        scoped_range(pre_commit_sha, branch), trailer_keys=[CONTRACT_ROLLBACK_ID_TRAILER]
+    )
+    reverted: set[str] = set()
+    for commit in found:
+        if commit.trailer(CONTRACT_ROLLBACK_ID_TRAILER) != contract_id:
+            continue
+        body = await git.text(["log", "-1", "--format=%b", commit.sha])
+        match = _REVERTS_COMMIT_RE.search(body)
+        if match:
+            reverted.add(match.group(1))
+    return frozenset(reverted)
 
 
 async def record_task_anchor(git: Git, branch: str) -> str:
