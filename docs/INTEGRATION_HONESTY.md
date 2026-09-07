@@ -9636,7 +9636,7 @@ visible to every dependent's `blocked_by` column regardless of which wave the de
 scheduled in, not only dependents in the same or an earlier wave. No task briefed yet; this is the
 controller's next dispatch candidate for §12.14.
 
-## D124 — OPEN. No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
+## D124 — FIXED, LANDED (round VI task 74, `489cc0d`, controller review pending). No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
 repo to `SUCCEEDED` — `fleet retry` does not exist, and `ALLOWED_TRANSITIONS` has no edge out of
 that status
 
@@ -9683,3 +9683,21 @@ this project's own precedent treats as needing an ADR — see `RESUME_DEMOTE`/`S
 history), not a mechanical wiring task. No task briefed yet; this is the controller's next dispatch
 candidate for both §12.14 and §12.37, likely as a shared fix since both criteria need the identical
 mechanism.
+
+**Fixed (2026-09-07, round VI task 74, `489cc0d`).** `models.enums.OperatorReopen`/
+`reopen_abandoned()` (mirrors `PhaseDemotion`/`demote()` and `StubDegradation`/`degrade_for_stub()`
+exactly) and `state.repository.SqliteStateRepository.reopen_to_pending` (mirrors
+`stub_degrade_transform`'s transaction shape — CAS-guarded, audit finding in the same `BEGIN
+IMMEDIATE`, raises `RepositoryError` on zero or multiple RHI rows rather than silently picking one)
+back a new `fleet retry <repo> --reason <text> [--dry-run]` CLI command (ADR-0125). A real
+end-to-end fixture (`tests/test_cli.py::
+test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succeeded`) proves ADR-0125
+judgment call 5's central empirical claim: a repo reopened via `fleet retry`, driven to a genuine
+`SUCCEEDED` (disclosed shortcut in the test's own docstring: a direct SQL write standing in for the
+real VERIFY worker, the same shortcut this suite's own step-5/6 fixtures already use elsewhere),
+then a SECOND `fleet resume` clears a dependent's `blocked_by` and returns it to `PENDING` in a
+freshly appended synthetic wave — with zero changes to `orchestrator/reentry.py`. This closes this
+entry's own scope in full: CLI surface, writer function, production call site all now exist and
+are tested. It does **not** by itself close §12.14 (D123's cross-wave `blocked_by` propagation gap
+and the undesigned transitive-stub-stacking mechanism are untouched) or §12.37 (D104's separate,
+still-open `REVALIDATE`-dispatch gap is untouched) — see `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
