@@ -1439,7 +1439,7 @@ asserts on `EdgeRow` in memory passes.
 **FIXED, 2026-09-03 (round VI task 31, commit `d4cfc3e`, merge `31357cd`).** The brief this task
 was dispatched against assumed `EdgeRow` already carried `retargeted_from_repo_id` — investigation
 found that was false: that field belongs to `DependencyEdge` (`models/graph.py:141`), a
-structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:354`) had no such
+structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:357`) had no such
 field at all. The real fix touched three things, not one: (1) added the field to `EdgeRow`
 itself, (2) added it to `insert_edges`'s SQL column list and params (now sixteen columns, not
 fifteen), (3) updated both production call sites (`_persist_scan_edges`, `_persist_contract_edges`
@@ -7403,7 +7403,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2495-2563`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2615-2683`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (repointed fresh below, moved repeatedly by round VI
@@ -8917,7 +8917,7 @@ whatever Leg C1 would additionally need. Full details:
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2551-2558`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
+(`cli.py:2552-2559`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
 re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123

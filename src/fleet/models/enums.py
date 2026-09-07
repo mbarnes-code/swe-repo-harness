@@ -58,6 +58,63 @@ OPERATOR_REOPEN: dict[RepoStatus, frozenset[RepoStatus]] = {
 # the difference between "the operator un-abandoned it" and "the reaper lost track of it".
 
 
+OPERATOR_REOPENED_KIND: Final[str] = "OperatorReopened"
+"""The `findings.kind` every §12.14 `fleet retry` reopen writes (ADR-0125). Same audit discipline
+as `PHASE_DEMOTED_KIND`/`STUB_DEGRADED_KIND`: an operator's assertion that an abandoned repo is
+fixed is a fact the run's audit trail must carry, not merely a status bit."""
+
+
+@dataclass(frozen=True, slots=True)
+class OperatorReopen:
+    """The audit record for one `REQUIRES_HUMAN_INTERVENTION -> PENDING` reopen (ADR-0125),
+    returned by `reopen_abandoned()` *alongside* the new status — mirrors `PhaseDemotion`/
+    `StubDegradation` exactly: a caller that goes through `reopen_abandoned()` cannot end up
+    holding the new status without the finding it owes."""
+
+    repo_id: str
+    phase: Phase
+    reason: str          # the operator's stated basis for asserting the repo is fixed
+    from_status: RepoStatus = RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    to_status: RepoStatus = RepoStatus.PENDING
+
+    def payload(self) -> dict[str, object]:
+        """The `findings.payload` body, shaped for `cli._note_finding(kind=OPERATOR_REOPENED_KIND)`
+        (mirrors `PhaseDemotion.payload()`/`StubDegradation.payload()`)."""
+        return {
+            "repo_id": self.repo_id,
+            "phase": int(self.phase),
+            "from_status": self.from_status.value,
+            "to_status": self.to_status.value,
+            "reason": self.reason,
+        }
+
+
+def reopen_abandoned(
+    old: RepoStatus, *, repo_id: str, phase: Phase, reason: str
+) -> tuple[RepoStatus, OperatorReopen]:
+    """The §12.14 `fleet retry` reopen path (ADR-0125) — the status AND its audit record, as one
+    value. Mirrors `demote()`/`degrade_for_stub()` exactly, including their stricter-than-
+    `transition()` acceptance: only an `OPERATOR_REOPEN` key (i.e. `REQUIRES_HUMAN_INTERVENTION`)
+    is accepted, so a caller cannot mint an `OperatorReopened` finding for a status this map does
+    not name.
+
+    Raises loudly rather than returning `None` on a non-qualifying status: `fleet retry <repo>`
+    is an operator naming one specific repo and asserting "this one is fixed", not a speculative
+    call made unconditionally over rows that usually do not qualify (`stub_degrade_transform`'s
+    shape). If that repo is not actually `REQUIRES_HUMAN_INTERVENTION`, the operator's premise is
+    wrong and the command must fail (CLAUDE.md Rule 11), exactly as `demote()` raises rather than
+    silently declining for a status outside `RESUME_DEMOTE`.
+    """
+    if old not in OPERATOR_REOPEN:
+        raise ValueError(
+            f"{old.value} is not reopenable: only "
+            f"{'/'.join(sorted(k.value for k in OPERATOR_REOPEN))} may be reopened via `fleet "
+            f"retry`, and a {old.value} row has nothing for an operator to reopen"
+        )
+    new = transition(old, RepoStatus.PENDING, operator=True)
+    return new, OperatorReopen(repo_id=repo_id, phase=phase, reason=reason, from_status=old)
+
+
 RESUME_DEMOTE: dict[RepoStatus, frozenset[RepoStatus]] = {
     RepoStatus.SUCCEEDED: frozenset({RepoStatus.PENDING}),
 }  # The second such door (ADR-0077), same construction and same reason as OPERATOR_REOPEN above:

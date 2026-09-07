@@ -389,6 +389,7 @@ _SCHEMA_CHECKED_COMMANDS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = 
     (("transform",), ()),
     (("pr",), ()),
     (("quarantine",), ("acme-commons", "--reason", "operator")),
+    (("retry",), ("acme-commons", "--reason", "operator")),
     (("abort",), ()),
     (("resume",), ()),
     (("gc",), ()),
@@ -981,6 +982,275 @@ def test_quarantine_dry_run_changes_nothing(workspace: Path) -> None:
         assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
     finally:
         conn.close()
+
+
+# --------------------------------------------------------------------------------------
+# retry: reopen an abandoned repo through the audited OPERATOR_REOPEN door (§12.14, ADR-0125)
+# --------------------------------------------------------------------------------------
+
+
+def test_retry_reopens_the_rhi_phase_and_writes_a_finding(workspace: Path) -> None:
+    """`fleet retry` writes the RHI phase to `PENDING` and an audited `OperatorReopened` finding,
+    mirroring `test_quarantine_writes_a_finding_and_skips_without_touching_config`'s shape."""
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "retry", "acme-commons", "--reason", "upstream fixed the build"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    conn = sqlite3.connect(db)
+    try:
+        status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons' AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()
+        finding = conn.execute(
+            "SELECT kind, repo_id, payload FROM findings WHERE kind = 'OperatorReopened'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == ("PENDING",)
+    assert finding is not None
+    assert finding[1] == "acme-commons"
+    assert "upstream fixed the build" in finding[2]
+
+
+def test_retry_requires_a_reason(workspace: Path) -> None:
+    """`--reason` is required and non-empty: it IS the audit record (§12.14), mirroring
+    `test_quarantine_requires_a_reason`."""
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+
+    empty = runner.invoke(app, [*base_args(workspace), "retry", "acme-commons", "--reason", "  "])
+    assert empty.exit_code == ExitCode.USAGE
+    missing = runner.invoke(app, [*base_args(workspace), "retry", "acme-commons"])
+    assert missing.exit_code != 0
+
+
+def test_retry_refuses_an_unknown_repo(workspace: Path) -> None:
+    """No `repos` row at all -- refused with the same message style as `quarantine`'s."""
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "does-not-exist", "--reason", "x"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "no repo" in result.output
+
+
+def test_retry_refuses_a_repo_not_at_requires_human_intervention(workspace: Path) -> None:
+    """A repo that is not actually abandoned is the operator's premise being wrong -- refused
+    loudly (Rule 11), not silently accepted."""
+    db = workspace / "state" / "fleet.db"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'acme-commons', 1, 'PENDING', ?)",
+            (RUN_ID, "2026-08-08T12:00:00+00:00"),
+        )
+    finally:
+        conn.close()
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"]
+    )
+    assert result.exit_code == ExitCode.USAGE
+    assert "REQUIRES_HUMAN_INTERVENTION" in result.output
+
+
+def test_retry_dry_run_changes_nothing(workspace: Path) -> None:
+    """`--dry-run` reports the phase that would be reopened and writes no finding."""
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+
+    result = runner.invoke(
+        app,
+        [*base_args(workspace), "--json", "retry", "acme-commons", "--reason", "look first",
+         "--dry-run"],
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert payload["phase"] == "VERIFY"
+
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM findings").fetchone()[0] == 0
+        status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'acme-commons' AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()
+    finally:
+        conn.close()
+    assert status == ("REQUIRES_HUMAN_INTERVENTION",), "the dry-run preview must write nothing"
+
+
+def _seed_wave(
+    conn: sqlite3.Connection, run_id: str, index: int, members: Sequence[str], *, ceiling: float
+) -> None:
+    conn.execute(
+        "INSERT INTO waves (run_id, wave_index, computed_at, wave_started_at, synthetic, "
+        "                   max_usd) VALUES (?, ?, ?, ?, 0, ?)",
+        (run_id, index, "2026-08-08T12:00:00+00:00", "2026-08-08T12:00:00+00:00", ceiling),
+    )
+    for node_id in members:
+        conn.execute(
+            "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+            "VALUES (?, ?, 'REPO', ?)",
+            (run_id, index, node_id),
+        )
+
+
+def test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succeeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """**The required end-to-end fixture (ADR-0125's central empirical claim, §12.14 clause (2)
+    and §12.37's identically-shaped clause).** `fleet retry` alone must NOT clear any dependent's
+    `blocked_by`; only after the reopened phase genuinely reaches `SUCCEEDED` and a SECOND
+    `fleet resume` runs does `C`'s `blocked_by` clear and `C` return to `PENDING` in a freshly
+    appended synthetic wave -- proving `orchestrator.reentry.phase_floor`/`still_blocking` handle
+    a row that transitioned OUT of `REQUIRES_HUMAN_INTERVENTION` with zero new code, exactly as
+    ADR-0125 judgment call 5 argues from reading alone.
+
+    **Disclosed shortcut (CLAUDE.md "state what you ran, including what you excluded"):** `P`'s
+    reopened VERIFY phase is driven to `SUCCEEDED` by a direct SQL write, mirroring the shortcut
+    `tests/test_cli.py::test_resume_step_5_refuses_a_floor_whose_phase_rows_moved_under_it` and
+    `test_resume_unblocking.py`'s whole fixture already use elsewhere in this suite for phases
+    they are not exercising the real worker for -- standing up a real VERIFY (Bazel test) run is
+    unreasonable machinery for this fixture's scope. `C`'s `blocked_by` entry, in contrast, is
+    seeded through the REAL production writer (`SqliteSchedulerStore.append_blocked_by`), not a
+    hand-written JSON column, per the brief's "do not hand-write a `blocked_by` column no
+    production path would ever write" instruction.
+    """
+    write_config(tmp_path)
+    from fleet.orchestrator.scheduler import SqliteSchedulerStore
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    settings = FleetSettings.load(tmp_path / "config")
+    db = tmp_path / "state" / "fleet.db"
+    fresh_db(db)
+    seed_run(
+        db,
+        repos=("p-repo", "c-repo"),
+        config_digests=json.dumps(dict(settings.section_digests), sort_keys=True),
+    )
+    stamp = "2026-08-08T12:00:00+00:00"
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        # P: phases 1-3 SUCCEEDED, phase 4 (VERIFY) REQUIRES_HUMAN_INTERVENTION -- mirrors
+        # `_put_consumer_at_rhi`'s shape exactly.
+        for phase, status in (
+            (1, "SUCCEEDED"), (2, "SUCCEEDED"), (3, "SUCCEEDED"),
+            (4, "REQUIRES_HUMAN_INTERVENTION"),
+        ):
+            conn.execute(
+                "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                "VALUES (?, 'p-repo', ?, ?, ?)",
+                (RUN_ID, phase, status, stamp),
+            )
+        # C: one PENDING phase row, so `append_blocked_by` has a legal, non-terminal row to mark
+        # BLOCKED.
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+            "VALUES (?, 'c-repo', 1, 'PENDING', ?)",
+            (RUN_ID, stamp),
+        )
+        _seed_wave(conn, RUN_ID, 0, ["p-repo"], ceiling=24.0)
+        _seed_wave(conn, RUN_ID, 1, ["c-repo"], ceiling=8.0)
+    finally:
+        conn.close()
+
+    async def _seed_blocked_by() -> None:
+        async with StateWriter(db, owner="test-retry-e2e-blocked-by") as writer:
+            read_conn = await connect_ro(db)
+            try:
+                store = SqliteSchedulerStore(writer=writer, read_conn=read_conn)
+                touched = await store.append_blocked_by(
+                    RUN_ID, "c-repo", "p-repo", now=datetime.fromisoformat(stamp)
+                )
+            finally:
+                await read_conn.close()
+        assert touched == 1, "setup check: C's one phase row must have been marked BLOCKED"
+
+    asyncio.run(_seed_blocked_by())
+
+    monkeypatch.chdir(tmp_path)
+
+    # --- step 1: `fleet retry P` reopens ONLY P's phase; C is untouched. ---------------------
+    retried = runner.invoke(
+        app, [*base_args(tmp_path), "retry", "p-repo", "--reason", "upstream published a fixed tag"]
+    )
+    assert retried.exit_code == ExitCode.SUCCESS, retried.output
+
+    conn = sqlite3.connect(db)
+    try:
+        p_phase4 = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = 'p-repo' AND phase = 4",
+            (RUN_ID,),
+        ).fetchone()
+        c_status, c_blocked_by = conn.execute(
+            "SELECT status, blocked_by FROM phases "
+            " WHERE run_id = ? AND repo_id = 'c-repo' AND phase = 1",
+            (RUN_ID,),
+        ).fetchone()
+        reopened_finding = conn.execute(
+            "SELECT repo_id FROM findings WHERE kind = 'OperatorReopened'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert p_phase4 == ("PENDING",)
+    assert reopened_finding == ("p-repo",)
+    assert c_status == "BLOCKED", "the reopen alone must not clear anything for C"
+    assert json.loads(c_blocked_by) == ["p-repo"]
+
+    # --- step 2: drive P's reopened VERIFY phase to a genuine SUCCEEDED. --------------------
+    # Shortcut disclosed in the test's own docstring above: a direct SQL write, not a real
+    # VERIFY/Bazel run.
+    conn = sqlite3.connect(db, isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE phases SET status = 'SUCCEEDED', updated_at = ? "
+            " WHERE run_id = ? AND repo_id = 'p-repo' AND phase = 4",
+            (stamp, RUN_ID),
+        )
+    finally:
+        conn.close()
+
+    # --- step 3: a `fleet resume` (`--no-continue`: this fixture is not standing up step 8's
+    # real worker composition roots) clears C's `blocked_by` and returns it to PENDING in a
+    # freshly appended synthetic wave. ---------------------------------------------------------
+    resumed = runner.invoke(app, [*base_args(tmp_path), "--json", "resume", "--no-continue"])
+    assert resumed.exit_code == ExitCode.SUCCESS, resumed.output
+    payload = json.loads(resumed.stdout)
+    unblocked = {entry["repo_id"] for entry in payload["unblocked_dependents"]["unblocked"]}
+    assert "c-repo" in unblocked, payload["unblocked_dependents"]
+
+    conn = sqlite3.connect(db)
+    try:
+        c_rows = conn.execute(
+            "SELECT status, blocked_by, wave_index FROM phases p "
+            "  JOIN wave_members wm ON wm.node_id = p.repo_id AND wm.run_id = p.run_id "
+            " WHERE p.run_id = ? AND p.repo_id = 'c-repo'",
+            (RUN_ID,),
+        ).fetchall()
+        c_wave_index = conn.execute(
+            "SELECT wave_index FROM wave_members WHERE run_id = ? AND node_id = 'c-repo'", (RUN_ID,)
+        ).fetchone()[0]
+        wave_synthetic = conn.execute(
+            "SELECT synthetic FROM waves WHERE run_id = ? AND wave_index = ?",
+            (RUN_ID, c_wave_index),
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert c_rows[0][0] == "PENDING", "C's blocked_by emptied, so it returns to PENDING"
+    assert json.loads(c_rows[0][1]) == []
+    assert c_wave_index != 1, "C must have MOVED into a freshly appended wave, not stayed in wave 1"
+    assert wave_synthetic == 1, (
+        "the appended wave is the `waves.synthetic = 1` shape (§11.5 step 6)"
+    )
 
 
 # --------------------------------------------------------------------------------------

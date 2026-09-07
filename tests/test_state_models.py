@@ -54,6 +54,7 @@ from fleet.models.enums import (
     ALLOWED_TRANSITIONS,
     EQUIVALENCE_RANK,
     OPERATOR_REOPEN,
+    OPERATOR_REOPENED_KIND,
     PHASE_DEMOTED_KIND,
     RESUME_DEMOTE,
     STUB_DEGRADE,
@@ -69,6 +70,7 @@ from fleet.models.enums import (
     FailureClass,
     ModelTier,
     NodeKind,
+    OperatorReopen,
     Phase,
     PhaseDemotion,
     PrState,
@@ -82,6 +84,7 @@ from fleet.models.enums import (
     TransformTier,
     degrade_for_stub,
     demote,
+    reopen_abandoned,
     transition,
 )
 from fleet.models.graph import (
@@ -789,6 +792,39 @@ def test_degrade_for_stub_pairs_the_finding_and_is_stricter_than_transition() ->
     ):
         with pytest.raises(ValueError, match="is not a stub degradation"):
             degrade_for_stub(refused, repo_id="acme/billing", phase=Phase.TRANSFORM, reason="x")
+
+
+def test_reopen_abandoned_pairs_the_finding_and_is_stricter_than_transition() -> None:
+    """`reopen_abandoned()` returns the new status AND the `OperatorReopened` finding as one
+    value, and refuses every status `OPERATOR_REOPEN` does not open — mirrors `demote()`'s/
+    `degrade_for_stub()`'s own discipline exactly (ADR-0125)."""
+    status, finding = reopen_abandoned(
+        RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+        repo_id="acme/billing",
+        phase=Phase.VERIFY,
+        reason="upstream dependency published a fixed release",
+    )
+    assert status is RepoStatus.PENDING
+    assert isinstance(finding, OperatorReopen)
+    assert OPERATOR_REOPENED_KIND == "OperatorReopened"
+    assert finding.payload() == {
+        "repo_id": "acme/billing",
+        "phase": int(Phase.VERIFY),
+        "from_status": "REQUIRES_HUMAN_INTERVENTION",
+        "to_status": "PENDING",
+        "reason": "upstream dependency published a fixed release",
+    }
+
+    for refused in (
+        RepoStatus.PENDING,
+        RepoStatus.RUNNING,
+        RepoStatus.SUCCEEDED,
+        RepoStatus.BLOCKED,
+        RepoStatus.DEGRADED,
+        RepoStatus.SKIPPED,
+    ):
+        with pytest.raises(ValueError, match="is not reopenable"):
+            reopen_abandoned(refused, repo_id="acme/billing", phase=Phase.VERIFY, reason="x")
 
 
 def _enums_mutable_module_state() -> dict[str, str]:

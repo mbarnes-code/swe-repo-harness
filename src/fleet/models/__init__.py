@@ -24,6 +24,7 @@ from fleet.models.enums import (
     EQUIVALENCE_RANK,
     KIND_RANK,
     OPERATOR_REOPEN,
+    OPERATOR_REOPENED_KIND,
     PHASE_DEMOTED_KIND,
     RESUME_DEMOTE,
     TERMINAL_STATUSES,
@@ -38,6 +39,7 @@ from fleet.models.enums import (
     FailureClass,
     ModelTier,
     NodeKind,
+    OperatorReopen,
     Phase,
     PhaseDemotion,
     PrState,
@@ -49,6 +51,7 @@ from fleet.models.enums import (
     TaskKind,
     TransformTier,
     demote,
+    reopen_abandoned,
     transition,
 )
 from fleet.models.graph import (
@@ -102,6 +105,7 @@ __all__ = [
     "LOG_TAIL_BYTES",
     "MAX_ATTEMPTS",
     "OPERATOR_REOPEN",
+    "OPERATOR_REOPENED_KIND",
     "PHASE_DEMOTED_KIND",
     "RESUME_DEMOTE",
     "SCHEMA_VERSION",
@@ -140,6 +144,7 @@ __all__ = [
     "ModelTier",
     "NodeId",
     "NodeKind",
+    "OperatorReopen",
     "Phase",
     "PhaseDemotion",
     "PhaseRecord",
@@ -172,6 +177,7 @@ __all__ = [
     "VerificationReport",
     "WorkspaceDep",
     "demote",
+    "reopen_abandoned",
     "transition",
     "utcnow",
 ]
