@@ -453,6 +453,50 @@ def test_a_hoisted_contract_survives_the_rebuild_it_is_not_part_of(tmp_path: Pat
     assert [n.contract_id for n in gone] == [PROTO_ID], "a hoisted contract is never dropped"
 
 
+def test_a_failed_contract_survives_the_rebuild_it_is_not_part_of(tmp_path: Path) -> None:
+    """A `FAILED` row is carried across an EMPTY fresh set, exactly like `HOISTED` — never like
+    `REJECTED`, which is deliberately dropped and re-derived (§12.31 case (ii), Leg C2, round VI
+    task 66, ADR-0123).
+
+    The measured judgment call this test proves: `FAILED`'s underlying hoist commit is not yet
+    reverted (Leg D doesn't exist), so the code is physically in the monorepo just like a `HOISTED`
+    row's — a post-hoist rescan can no longer see the ORIGINAL duplication (the code already moved
+    into the shared package), so `fresh` legitimately comes back EMPTY for this contract_id, the
+    same shape `test_a_hoisted_contract_survives_the_rebuild_it_is_not_part_of` above already
+    exercises for `HOISTED` via its own `gone = carry_over_committed([], hoisted)` case. Before
+    `carry_over_committed`'s widening (this task), an EMPTY fresh set for a `FAILED` row made it
+    vanish from `out` entirely — the identical "vanished row" lie the function's own docstring
+    warns about for `HOISTED`/`MIGRATED`.
+
+    **This test alone does NOT prove the decision is reachable in production** (fix-round finding
+    C1, controller review): it constructs `committed` nodes directly, bypassing
+    `cli._committed_contracts` — the ONLY production feeder of this function's `committed`
+    argument — entirely. `_committed_contracts`'s own SQL `status IN (...)` list had to be widened
+    too, or a real `FAILED` row would never reach this function at all. See
+    `tests/test_sequence_e2e.py::test_a_failed_contract_survives_a_real_re_scan` for the sibling
+    proof that drives the real path (a real `fleet scan`/`fleet sequence`, then `_committed_
+    contracts` called directly against the resulting database).
+    """
+    payload = _payload(tmp_path, SHARED_FLEET)
+    fresh = _run(payload).contracts
+    failed = [
+        node.model_copy(
+            update={
+                "status": ContractStatus.FAILED,
+                "hoist_target_path": "proto/x",
+                "status_detail": "hoist_broke_owner",
+            }
+        )
+        for node in fresh
+    ]
+    carried = carry_over_committed(fresh, failed)
+    assert [n.status for n in carried] == [ContractStatus.FAILED]
+    assert carried[0].hoist_target_path == "proto/x"
+
+    gone = carry_over_committed([], failed)
+    assert [n.contract_id for n in gone] == [PROTO_ID], "a failed contract is never dropped"
+
+
 # =======================================================================================
 # 2 — discovery, identity and ownership
 # =======================================================================================

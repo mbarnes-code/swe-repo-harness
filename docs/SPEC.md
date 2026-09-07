@@ -4258,9 +4258,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   that nothing writes ('BaselineRed',
                                                   --   'PreflightFailed', 'RuleConflict') and two
                                                   --   have no Python at all ('WeakEdge' and one
-                                                  --   of the four Contract/Hoist kinds:
-                                                  --   'HoistBrokeOwner' -- 'HoistRollbackDemotion'
-                                                  --   left this group 2026-09-06, see below).
+                                                  --   of the four Contract/Hoist kinds -- as of
+                                                  --   2026-09-06, ALL FOUR now have live writers
+                                                  --   ('ContractNotShared', 'ContractHoistOverride',
+                                                  --   'HoistRollbackDemotion', 'HoistBrokeOwner' all
+                                                  --   left this group; see below).
                                                   --   The two
                                                   --   annotated above each have a live INSERT in
                                                   --   orchestrator/findings.py. THREE more are
@@ -4297,17 +4299,23 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   _write_hoist_rollback_demotion_findings, one
                                                   --   per blast-set repo `demote_to_floor`
                                                   --   actually demoted, repo_id that demoted repo.
-                                                  --   The remaining Contract/Hoist kind
-                                                  --   ('HoistBrokeOwner', Legs C1/C2) remains
-                                                  --   no-Python. The SAME task also introduced a
-                                                  --   NEW kind, 'HoistRollbackRefused' (ADR-0122
-                                                  --   Decision 6, the downstream-merge refusal;
-                                                  --   repo_id NULL, since the refusal is a
-                                                  --   property of the whole blast set, not one
-                                                  --   repo), emitted from cli.py, function
+                                                  --   The SAME task also introduced a NEW kind,
+                                                  --   'HoistRollbackRefused' (ADR-0122 Decision 6,
+                                                  --   the downstream-merge refusal; repo_id NULL,
+                                                  --   since the refusal is a property of the whole
+                                                  --   blast set, not one repo), emitted from
+                                                  --   cli.py, function
                                                   --   _write_hoist_rollback_refused_finding -- see
                                                   --   the DECLARED list above, where it is added
                                                   --   alongside 'HoistRollbackDemotion'.
+                                                  --   'HoistBrokeOwner' left the no-Python group
+                                                  --   the same day (§12.31 case (ii) Leg C2, round
+                                                  --   VI task 66, ADR-0123): it now has a live
+                                                  --   INSERT in the cli.py _BuildSink.__call__
+                                                  --   method, one per Phase 3 build failure
+                                                  --   attributed to a watched hoist target path,
+                                                  --   repo_id the failing repo.
+                                                  --   No Contract/Hoist kind remains no-Python.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE
                                                   --   `kind` column ('OversizeBlob',

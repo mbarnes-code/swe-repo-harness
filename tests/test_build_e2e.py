@@ -5948,6 +5948,172 @@ def test_sqlite_is_readable_after_the_two_phases(
 
 
 # --------------------------------------------------------------------------------------
+# 7½. §12.31 case (ii), Leg C2 (round VI task 66) — a real Phase-3 build failure attributed
+# to a broken hoist
+# --------------------------------------------------------------------------------------
+# Through the fakes, same as sections 1-6 above and for the same stated reason (this file's own
+# docstring): "what is real about them is the argv, the exit-code handling, the output parsing,
+# the failure classification and everything downstream" — exactly this task's scope. Whether REAL
+# bazel really spells its label-resolution errors this way is answered independently and
+# separately, at the unit level, against five real quoted strings already in this codebase's own
+# adapter docstrings (`test_workers_build.py::
+# test_hoist_broke_owner_matcher_reads_real_quoted_bazel_error_forms`) — this test's job is only
+# to prove the WIRING: a real `contracts` row, a real failing `fleet build` dispatch, and a real
+# database left with `status='FAILED'`, a `HoistBrokeOwner` finding, and `phases.attempts`
+# untouched. Building a REAL bazel package at `hoist_target_path` is a separate, much larger lift
+# this task does not need: nothing in `src/fleet` today (a disclosed, pre-existing D113/ADR-0119
+# scope boundary — "narrow read-only PASS 2b, nothing commits hoisted contract content") ever
+# populates `BuildUnit.contract_deps`, so no organic manifest-driven dependency on a hoisted
+# contract's package exists to fail against for real; the `contracts` row is seeded directly,
+# which is this file's own established convention for state a phase upstream of the one under
+# test does not itself organically produce (see e.g. the direct `INSERT INTO stubs` above).
+
+_HOIST_BREAK_CONTRACT_ID = "openapi:acme.shared"
+_HOIST_BREAK_TARGET_PATH = "contracts/openapi/acme-shared"
+_HOIST_BREAK_STDERR = (
+    "ERROR: /work/ts/acme/app/BUILD.bazel:5:12: no such target "
+    "'//contracts/openapi/acme-shared:pkg': target 'pkg' not declared in package "
+    "'contracts/openapi/acme-shared'\n"
+)
+
+
+def _bazel_seam_failing_one_dest(log_root: Path, *, fail_dest: str, fail_stderr: str) -> Any:
+    """A minimal `cli.BAZEL_RUNNER` seam: every `bazel` call succeeds except `bazel build` for
+    `fail_dest`, which exits 1 with `fail_stderr` written to a real log file (so `WorkerError.
+    artifact_ref` -- always the FULL stream, never `stderr_tail` -- names a real path this test's
+    matcher assertion can read back). Deliberately narrower than the shared `FakeBazel` above
+    (which hardcodes one fixed `LOUD_STDERR` for every failure): this test needs a SPECIFIC quoted
+    label, and adding that to the shared class would widen a fixture ~50 other tests share for a
+    need only this one has.
+    """
+    calls = {"n": 0}
+    log_root.mkdir(parents=True, exist_ok=True)  # once, here -- `mkdir` inside `async def runner`
+    # below is ASYNC240 (a blocking pathlib call in an async function); made once at setup time,
+    # synchronously, in this plain `def` factory, mirrors `FakeBazel._result`'s own split above
+    # (a sync helper doing the file I/O, called from the async `__call__`).
+
+    async def runner(
+        argv: Sequence[str],
+        *,
+        cwd: Path | None = None,
+        env: Mapping[str, str] | None = None,
+        deadline: float | None = None,
+        timeout_s: float | None = None,
+    ) -> ProcResult:
+        _ = (env, deadline, timeout_s)
+        calls["n"] += 1
+        out_path = log_root / f"call-{calls['n']}.out"
+        err_path = log_root / f"call-{calls['n']}.err"
+        pattern = next((a for a in argv if a.startswith("//")), "")
+        dest = pattern.removeprefix("//").removesuffix("/...")
+        sub = argv[1] if len(argv) > 1 else ""
+        fail = sub == "build" and dest == fail_dest
+        text = fail_stderr if fail else ""
+        out_path.write_text("", encoding="utf-8")
+        err_path.write_text(text, encoding="utf-8")
+        return ProcResult(
+            argv=tuple(argv),
+            exit_code=1 if fail else 0,
+            stdout_tail="",
+            stderr_tail=text,
+            duration_ms=5,
+            timed_out=False,
+            stdout_bytes=0,
+            stderr_bytes=len(text.encode()),
+            stdout_path=out_path,
+            stderr_path=err_path,
+            cwd=cwd,
+        )
+
+    return runner
+
+
+def test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_and_terminal(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    filter_repo: FakeFilterRepo,
+    resolver: FakeResolver,
+    gazelle: FakeGazelle,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§12.31 case (ii), Leg C2 (round VI task 66, ADR-0123): a `bazel build` failure whose
+    stderr names a watched hoist's package writes `contracts.status='FAILED'`, one
+    `HoistBrokeOwner` finding, and spends `acme-app-ts`'s Phase 3 `phases.attempts` ZERO rungs --
+    the assertion that actually proves the `retryable=False` wiring worked (CLAUDE.md Rule 12:
+    "not merely that the string match fired").
+
+    `acme-app-ts` is chosen as the failing repo deliberately: it is also given `owning_repo_id`
+    on the seeded contract, i.e. this exercises SPEC's FIRST-named disjunct -- the owner's own
+    build -- which `graph/cycles.py::_materialize` structurally excludes from ever holding a
+    `CONTRACT_CONSUME` edge to its own contract (research-38-report.md Question 1). An edge- or
+    wave-membership-based attribution could never have caught this case; the plain string match
+    against `hoist_target_path` does.
+    """
+    _ = (filter_repo, resolver, gazelle)
+    transformed(fleet)
+
+    fail_dest = DESTINATIONS["acme-app-ts"]
+    run_id = query(fleet, "SELECT run_id FROM runs")[0][0]
+    assert query(
+        fleet, "SELECT 1 FROM phases WHERE repo_id = ? AND phase = 3", ("acme-app-ts",)
+    ) == [], "sanity: Phase 3 has not even been admitted yet, so no attempt could have been spent"
+
+    conn = sqlite3.connect(fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO contracts (run_id, contract_id, kind, identifier, owning_repo_id, "
+            "                       extractable, hoist_target_path, status, detected_at) "
+            "VALUES (?, ?, 'OPENAPI', 'acme.shared', ?, 1, ?, 'HOISTED', ?)",
+            (
+                run_id,
+                _HOIST_BREAK_CONTRACT_ID,
+                "acme-app-ts",
+                _HOIST_BREAK_TARGET_PATH,
+                "2026-09-06T00:00:00+00:00",
+            ),
+        )
+    finally:
+        conn.close()
+
+    fake_bazel = _bazel_seam_failing_one_dest(
+        fleet / "artifacts" / "fake-bazel-hoist-break",
+        fail_dest=fail_dest,
+        fail_stderr=_HOIST_BREAK_STDERR,
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
+    build(fleet, "--no-sandbox")  # exit code not asserted: one repo of four is meant to fail
+
+    assert query(
+        fleet, "SELECT status FROM contracts WHERE contract_id = ?", (_HOIST_BREAK_CONTRACT_ID,)
+    ) == [("FAILED",)]
+
+    findings = query(
+        fleet,
+        "SELECT repo_id, severity, payload FROM findings WHERE kind = 'HoistBrokeOwner'",
+    )
+    assert len(findings) == 1, findings
+    finding_repo_id, severity, raw_payload = findings[0]
+    assert finding_repo_id == "acme-app-ts"
+    assert severity == "error"
+    finding_payload = json.loads(str(raw_payload))
+    assert finding_payload["contract_id"] == _HOIST_BREAK_CONTRACT_ID
+    assert finding_payload["hoist_target_path"] == _HOIST_BREAK_TARGET_PATH
+    assert finding_payload["repo_id"] == "acme-app-ts"
+    assert "no such target" in finding_payload["matched_line"]
+
+    after = query(
+        fleet,
+        "SELECT status, attempts FROM phases WHERE repo_id = ? AND phase = 3",
+        ("acme-app-ts",),
+    )
+    assert after == [("REQUIRES_HUMAN_INTERVENTION", 0)], (
+        "a non-retryable BUILD_ERROR must terminate without spending a rung (PhaseRunner."
+        "_terminate_uncharged) -- this is the assertion that proves retryable=False actually "
+        "reached the ladder, not merely that the string match fired"
+    )
+
+
+# --------------------------------------------------------------------------------------
 # 8. the REAL BUILD-file generator
 # --------------------------------------------------------------------------------------
 # Everything above that asserts on generated Go BUILD content goes through `FakeGazelle`, whose

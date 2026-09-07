@@ -37,18 +37,22 @@ The three tests are one claim and its two controls:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import aiosqlite
 import pytest
 from typer.testing import CliRunner
 
 from fleet.cli import (
     CONTRACT_NOT_SHARED_FINDING_KIND,
     ExitCode,
+    _committed_contracts,
+    _hoist_watch_for_run,
     _now,
     _persist_contract_not_shared_findings,
     app,
@@ -529,6 +533,133 @@ def test_a_forbid_hoist_veto_survives_a_real_re_scan_and_re_sequence(cycle_fleet
     assert resequenced.exit_code == ExitCode.SUCCESS, resequenced.output
     assert json.loads(resequenced.stdout)["hoisted"] == [], (
         "never re-proposed once FORBIDDEN, even with --forbid-hoist not repeated"
+    )
+
+
+# =======================================================================================
+# §12.31 case (ii), Leg C2 (round VI task 66, ADR-0123): a FAILED contract survives a real
+# re-scan -- the fix-round proof for a controller review finding (C1)
+# =======================================================================================
+
+
+def test_a_failed_contract_survives_a_real_re_scan(cycle_fleet: Path) -> None:
+    """`carry_over_committed`'s `FAILED` widening (ADR-0123) is inert unless its ONLY production
+    feeder, `_committed_contracts`, also selects `FAILED` rows -- round VI task 66's first landing
+    widened only `carry_over_committed` and left `_committed_contracts`'s `status IN (...)` list
+    unchanged, so a `FAILED` contract was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the
+    very next `fleet scan`: the exact `REJECTED` treatment ADR-0123 argues against, re-hoisting a
+    contract that had just broken a build. Fixed by adding `'FAILED'` to `_committed_contracts`'s
+    SQL list (mirroring round VI task 58's `e3b1a86`, which widened BOTH halves for `FORBIDDEN` in
+    the same commit).
+
+    This test drives the REAL path up to but not including a second `fleet scan`'s own
+    graph-consistency audit: `_committed_contracts` is called DIRECTLY against a real database a
+    real `fleet scan`+`fleet sequence` produced, rather than a hand-built `ContractNode` passed
+    straight to `carry_over_committed` -- exactly the two-anchor blindness the reviewer's finding
+    named: the pre-existing unit test (`tests/test_workers_contracts.py::
+    test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`) bypasses `_committed_contracts`
+    entirely and could not have caught this. A full SECOND `fleet scan` is deliberately not run
+    here: `ADR-0122` (Leg D design, Decision 1, landed before this task) already documents that
+    `_graph_edges` applies no `contracts.status IN (...)` filter symmetric to `_graph_nodes`'s, so
+    a `contracts.status = 'FAILED'` row -- this task's own new capability -- makes the FLEET-WIDE
+    scan's graph-consistency audit crash with `GraphError` on the retargeted `CONTRACT_CONSUME`
+    edge the FIRST `fleet sequence` already wrote (confirmed by actually running a second `fleet
+    scan` here and reproducing exactly that crash before this test was rewritten to avoid it).
+    That fix is `task-65-brief.md`'s own scope (Leg D slice 1, a separate, concurrent, non-
+    overlapping task) -- not this test's job, and the controller has already been told (this
+    task's own report) that task-65 must merge before task-66 for this exact reason. Calling
+    `_committed_contracts` directly is the sanctioned alternative the review comment itself named
+    ("call `_committed_contracts` directly (or run a full `fleet scan`-equivalent)").
+
+    The `UPDATE contracts SET status = 'FAILED'` below is the exact SQL `cli._BuildSink.__call__`
+    runs in production (`cli.py`, this task's own new write) -- a real Phase 3 build failure is
+    not reproduced here (that is `tests/test_build_e2e.py`'s job, proven separately, real bazel
+    seam included); this test isolates the SCAN-side carry-over question only, which is what C1
+    is about.
+    """
+    assert _scan(cycle_fleet).exit_code == ExitCode.SUCCESS
+    assert _query(
+        cycle_fleet, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [(ContractStatus.EXTRACTABLE.value,)], "must genuinely be a live hoist candidate first"
+
+    sequenced = _sequence(cycle_fleet)
+    assert sequenced.exit_code == ExitCode.SUCCESS, sequenced.output
+    assert json.loads(sequenced.stdout)["hoisted"] == [PROTO_ID]
+    assert _query(
+        cycle_fleet, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [(ContractStatus.HOISTED.value,)], "sanity: must genuinely be HOISTED before it can FAIL"
+
+    run_id = str(_query(cycle_fleet, "SELECT run_id FROM runs")[0][0])
+    conn = sqlite3.connect(cycle_fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE contracts SET status = 'FAILED' WHERE run_id = ? AND contract_id = ?",
+            (run_id, PROTO_ID),
+        )
+    finally:
+        conn.close()
+    assert _query(
+        cycle_fleet, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [(ContractStatus.FAILED.value,)], "sanity: the simulated Phase 3 write landed"
+
+    # THE proof C1 is about: `_committed_contracts` -- the ONLY production feeder of
+    # `carry_over_committed`'s `committed` argument -- must actually SELECT the FAILED row, not
+    # merely be theoretically able to carry it over if handed one.
+    async def _read_committed() -> tuple[str, ...]:
+        async with aiosqlite.connect(cycle_fleet / "state" / "fleet.db") as aconn:
+            nodes = await _committed_contracts(aconn, run_id)
+            return tuple(node.contract_id for node in nodes if node.status == ContractStatus.FAILED)
+
+    failed_committed_ids = asyncio.run(_read_committed())
+    assert failed_committed_ids == (PROTO_ID,), (
+        "a FAILED contract must be selected by _committed_contracts -- if this is empty, its SQL "
+        "status IN (...) list is not including 'FAILED' (C1)"
+    )
+
+
+def test_a_failed_contracts_watch_survives_into_a_later_wave(cycle_fleet: Path) -> None:
+    """`_hoist_watch_for_run` must keep watching a contract once it is `FAILED`, not only while
+    it is `HOISTED`/`MIGRATED` -- controller review finding I3, round VI task 66 fix round.
+
+    `_hoist_watch_for_run` is recomputed FRESH per wave (`_run_build_wave`, inside `_build_impl`'s
+    wave loop). Before this fix, once the FIRST failing consumer's dispatch wrote `contracts.
+    status = 'FAILED'` (via `_BuildSink`), a `HOISTED`/`MIGRATED`-only filter would silently stop
+    watching that contract for every LATER-wave consumer of the SAME broken hoist -- each of those
+    would then hit an unattributed, still-`retryable=True` `BUILD_ERROR` and burn its own full
+    retry ladder, exactly the opposite of what §12.31(ii) needs (every SCC member's `phases.
+    attempts` should stay unspent, not just the first repo to trip the finding).
+
+    This test proves the fix at the function `_hoist_watch_for_run` actually reads from, against a
+    real database a real `fleet scan`+`fleet sequence` produced (the same shape as the C1 proof
+    above, for the same reason: a hand-built `HoistWatch` tuple would not have caught either bug).
+    """
+    assert _scan(cycle_fleet).exit_code == ExitCode.SUCCESS
+    sequenced = _sequence(cycle_fleet)
+    assert sequenced.exit_code == ExitCode.SUCCESS, sequenced.output
+    assert json.loads(sequenced.stdout)["hoisted"] == [PROTO_ID]
+
+    run_id = str(_query(cycle_fleet, "SELECT run_id FROM runs")[0][0])
+    hoist_target_path = _query(
+        cycle_fleet, "SELECT hoist_target_path FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    )[0][0]
+    conn = sqlite3.connect(cycle_fleet / "state" / "fleet.db", isolation_level=None)
+    try:
+        conn.execute(
+            "UPDATE contracts SET status = 'FAILED' WHERE run_id = ? AND contract_id = ?",
+            (run_id, PROTO_ID),
+        )
+    finally:
+        conn.close()
+
+    async def _read_watch() -> tuple[tuple[str, str], ...]:
+        async with aiosqlite.connect(cycle_fleet / "state" / "fleet.db") as aconn:
+            watch = await _hoist_watch_for_run(aconn, run_id)
+            return tuple((w.contract_id, w.hoist_target_path) for w in watch)
+
+    watched = asyncio.run(_read_watch())
+    assert watched == ((PROTO_ID, hoist_target_path),), (
+        "a FAILED contract must still be watched -- if this is empty, a later wave's consumer of "
+        "the SAME broken hoist would go unattributed and burn its own full retry ladder (I3)"
     )
 
 

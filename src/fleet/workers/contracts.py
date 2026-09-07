@@ -404,7 +404,8 @@ def discover_contracts(
 def carry_over_committed(
     fresh: Iterable[ContractNode], committed: Iterable[ContractNode]
 ) -> tuple[ContractNode, ...]:
-    """Re-apply `HOISTED`/`MIGRATED`/`FORBIDDEN` (and `hoist_target_path`) onto a rebuilt row set.
+    """Re-apply `HOISTED`/`MIGRATED`/`FORBIDDEN`/`FAILED` (and `hoist_target_path`) onto a rebuilt
+    row set.
 
     §3.1: a hoist is already committed in git and named by an open PR, so it "MUST survive that
     cycle" — 6c-H treats an already-`HOISTED` contract as pre-committed and never re-ranks it. A
@@ -417,12 +418,32 @@ def carry_over_committed(
     (6c-H's own automatic not-shared-after-retarget rejection, deliberately re-tried against fresh
     data on every rebuild — `cli.py::_rejected_contract_rows`' own docstring), a `FORBIDDEN` row is
     an explicit, durable operator decision that a whole-run rebuild must not silently discard.
+
+    `FAILED` joined this set in §12.31 Leg C2 (round VI task 66, ADR-0123) for the SAME reason as
+    `HOISTED`/`MIGRATED`, not `REJECTED`'s: a `FAILED` contract's underlying hoist commit is
+    already merged and — Leg D (the `git revert -m 1` rollback) not yet existing — is NOT reverted
+    by anything today, so the code is physically in the monorepo exactly like a `HOISTED` row's,
+    and this docstring's own opening argument ("the files are in the monorepo either way") applies
+    identically. `REJECTED` is the opposite case: a rejected candidate's code was never moved (6c-H
+    rejects it in memory, before any commit), so it stays duplicated and a fresh scan naturally
+    re-derives it as `EXTRACTABLE` — nothing needs to survive rebuild for it. Measured directly
+    (`tests/test_workers_contracts.py::
+    test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`, mirroring the pre-existing
+    `HOISTED` proof immediately below in this same test file): with an EMPTY fresh set — the
+    "duplication signal is gone because the code already moved" case a real post-hoist rescan
+    produces — a `FAILED` row excluded from this membership set would vanish from `out` entirely,
+    the identical "vanished row" lie this docstring already warns about for `HOISTED`/`MIGRATED`.
     """
     survivors = {
         node.contract_id: node
         for node in committed
         if node.status
-        in (ContractStatus.HOISTED, ContractStatus.MIGRATED, ContractStatus.FORBIDDEN)
+        in (
+            ContractStatus.HOISTED,
+            ContractStatus.MIGRATED,
+            ContractStatus.FORBIDDEN,
+            ContractStatus.FAILED,
+        )
     }
     out: dict[str, ContractNode] = {}
     for node in fresh:

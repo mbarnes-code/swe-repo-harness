@@ -13629,6 +13629,113 @@ mechanism — Decisions 1, 2, 3, and 6). Two further slices — the git-mechanic
 execution (Decisions 4/5) and the production wiring from whichever leg (C1/C2) produces the
 triggering finding — are named as separate future tasks, not designed away by omission.
 
+## ADR-0123 — §12.31 / D111 Leg C2: `carry_over_committed` treats a `FAILED` contract like
+`HOISTED`/`MIGRATED` (sticky), not like `REJECTED` (dropped, re-derived)
+
+**Decision (2026-09-06, round VI, task 66, controller-allocated number).** Leg C2 (round VI task
+66) is the first producer of `contracts.status = 'FAILED'` in this codebase (`ContractStatus.
+FAILED` was declared, per D111's own "gap, as measured" paragraph, but never assigned anywhere
+in `src/fleet/` before this task). Landing that write immediately raises the judgment call the
+brief flagged and forbade guessing at: does `workers/contracts.py::carry_over_committed` carry a
+`FAILED` row across a whole-run `fleet scan` rebuild, or let it drop and be re-derived fresh?
+
+**Decided: sticky, added alongside `HOISTED`/`MIGRATED`/`FORBIDDEN` in `carry_over_committed`'s
+membership set — NOT alongside `REJECTED`, which is deliberately not carried.**
+
+**Why, measured rather than assumed.** The distinguishing fact is what a `FAILED` row's
+underlying code state actually looks like at the moment of a rescan, and the two prior precedents
+already answer it by analogy once that fact is checked directly:
+
+- A `REJECTED` contract's hoist was rejected *in memory*, before any commit
+  (`graph/cycles.py::_hoist_contracts`'s not-shared branch never reassigns `edges`/`nodes`/
+  `committed` on the reject path — Leg A, ADR-0120). Nothing physically moved, so the ORIGINAL
+  duplication a fresh scan looks for is still there, `discover_contracts` naturally re-derives an
+  `EXTRACTABLE` candidate for the identical `(kind, identifier)`, and 6c-H gets a fair second try
+  against whatever the graph looks like now. Dropping it from `carry_over_committed`'s membership
+  set is correct because the rebuild does not need help remembering it — it will find the same
+  thing again on its own.
+- A `FAILED` contract, by contrast, reached that status only after its hoist was **already
+  committed and merged** onto `integration` (Leg C2 fires from inside `BuildPipelineWorker.run`'s
+  VERIFY_UNIT handling, which only runs after PASS 2b treats the contract as already-`HOISTED`/
+  `MIGRATED` — `cli.py::_eligible_contract_units`'s own docstring: "a contract has no `phases`
+  row... nothing ever runs `bazel build` against it directly", so by the time ANY consumer's real
+  build could fail against it, the commit already landed). Leg D (the `git revert -m 1` rollback)
+  does not exist yet, so nothing has undone that commit. The code is physically in the monorepo
+  exactly the way a `HOISTED` row's is — `carry_over_committed`'s own founding argument for
+  `HOISTED`/`MIGRATED` ("the files are in the monorepo either way, and a vanished row would make
+  `COUNT(contracts WHERE status IN ('HOISTED','MIGRATED')) == COUNT(wave_members …)` a lie")
+  applies to `FAILED` identically, not to `REJECTED`'s.
+
+**Measured, not merely argued: `test_a_hoisted_contract_survives_the_rebuild_it_is_not_part_of`**
+(`tests/test_workers_contracts.py`, pre-existing) already proves the mechanism this decision
+depends on for `HOISTED`: `carry_over_committed([], hoisted)` — an EMPTY fresh set, the exact
+shape a post-hoist rescan produces once the code has physically moved and the original
+duplication is gone — still returns the row, because `HOISTED` is in the membership set. Before
+this task's widening, the identical empty-fresh-set case for a `FAILED` row returned nothing at
+all: the row would vanish from `carry_over_committed`'s output entirely on the next `fleet scan`,
+silently losing the record that a hoist broke a build, with no compensating rediscovery (the
+duplication that would let a fresh scan reinvent it is gone, unlike `REJECTED`'s case). This
+task's own test, `test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`, mirrors the
+`HOISTED` proof exactly and would have failed against the pre-widening code — see the task's own
+report for the mutation gate (reverting the `FAILED` membership addition reddens this test,
+zero-diff gate read first, cosmetic-reflow control green).
+
+**What this decision does NOT claim.** It does not claim `fleet scan`'s `discover_contracts` was
+run against a real post-hoist tree and observed to omit the contract (Leg A's own hoist mechanism
+does not itself rewrite the owning/consuming repos' source — see the caveat below); the argument
+is the structural one `carry_over_committed`'s own docstring already makes for `HOISTED`/
+`MIGRATED`; a rescan of an untouched repo would trivially still find the duplication and
+re-discover the identical `EXTRACTABLE` node regardless of what this decision does, in which case
+`carry_over_committed`'s existing "fresh wins unless a prior status survives" merge logic applies
+uniformly either way — this decision only changes what happens in the case fresh comes back
+empty for this `contract_id`, which is the case that matters once real code movement (Leg D's
+territory once it exists, or any future producer of `MIGRATED`) has actually happened. It does not
+decide anything about Leg D's eventual rollback of a `FAILED` contract (out of this task's scope
+by the brief's own instruction) — if and when Leg D reverts the commit, that revert is a fresh
+event that can re-derive or explicitly clear the row; this ADR only settles what the INTERIM
+period (a `FAILED` row before any revert exists) must do to stay consistent with
+`carry_over_committed`'s existing invariant.
+
+**Known interim consequence, disclosed rather than fixed here.** ADR-0122 (Leg D design, Decision
+1) already found that `_graph_edges` applies no
+`contracts.status IN (...)` filter symmetric to `_graph_nodes`'s, so a `contracts.status =
+'FAILED'` write — this task's own — can make the very next `fleet sequence` crash with
+`GraphError` on an edge naming a node `_graph_nodes` no longer includes. That fix is `task-65-
+brief.md`'s own scope (Leg D slice 1, concurrent with this task), not this one's — and, per that
+task's own review, IS now landed and closes this crash risk; this ADR's
+`carry_over_committed` widening does not change whether that crash risk exists (it existed the
+moment ANY code sets `contracts.status = 'FAILED'`, regardless of survive-vs-drop), it only
+decides what happens to the row on a rebuild that runs after that crash risk is closed.
+
+**Fix round, round VI task 66 (2026-09-06) — this decision was INERT in production until this fix
+round; corrected, not re-decided.** Controller review (opus-tier, independently reproduced against
+a real seeded schema) found that widening `carry_over_committed`'s membership set, by itself, does
+nothing: `cli._committed_contracts` — the ONLY production feeder of
+`carry_over_committed`'s `committed` argument, reached from `_extract_contracts` (itself called
+from the SCAN-phase `_scan_impl`, not from sequencing) — still selected
+`WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')`, with no `'FAILED'`. A real `FAILED` row was
+therefore NEVER handed to `carry_over_committed` at all; it was dropped by `_committed_contracts`
+before `carry_over_committed` ever saw it, and re-derived fresh as `EXTRACTABLE` on the next `fleet
+scan` — exactly the `REJECTED` treatment this ADR argues against, meaning a hoist that had just
+broken a build was silently re-hoisted on the very next cycle. The decision above (sticky, not
+dropped) is UNCHANGED by this correction — it was always right about which treatment a `FAILED`
+row should get; what was missing was the second half of the wiring that makes that treatment
+reachable at all. Fixed by adding `'FAILED'` to `_committed_contracts`'s own SQL list, mirroring
+round VI task 58's `e3b1a86`, which widened BOTH `_committed_contracts` and `carry_over_committed`
+for `FORBIDDEN` in the SAME commit — the precedent this task's first landing should have followed
+and did not. Proven end to end against a real database produced by a real `fleet scan`/`fleet
+sequence` (`tests/test_sequence_e2e.py::test_a_failed_contract_survives_a_real_re_scan`), calling
+`_committed_contracts` directly rather than running a second full `fleet scan` (which, at the time
+this fix was written, still crashed on the disclosed `_graph_edges` gap immediately above —
+reproduced and confirmed before this test was written to route around it; task-65's own review
+later independently proved a real second `fleet scan` now succeeds end to end once that crash risk
+was closed, confirming this decision's own interim consequence note above). The pre-existing unit
+test this ADR originally cited as
+proof (`test_a_failed_contract_survives_the_rebuild_it_is_not_part_of`) is annotated, not deleted:
+it correctly proves `carry_over_committed`'s own logic, but constructs `committed` nodes directly
+and so cannot see a defect in `_committed_contracts`, which sits one layer upstream of it in
+production.
+
 ## ADR-0124 — §12.37 Leg 1: `RUNNING → DEGRADED`'s `SUCCEEDED`-terminal correction gets a real
 `ALLOWED_TRANSITIONS` door (`STUB_DEGRADE`), not a bare raw-SQL bypass
 
