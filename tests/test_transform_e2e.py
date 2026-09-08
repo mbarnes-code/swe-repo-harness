@@ -194,6 +194,27 @@ rules:
       replace: "from acme.lib import missing"
 """
 
+#: D123 / ADR-0127 / task-76: the same RULE_MISS shape as `PY_MISSING_RULE`, but on the PROVIDER
+#: side (`acme-lib-py`, wave 0) rather than the consumer (`acme-app-py`, wave 1) — mirrors
+#: `tests/test_pr_e2e.py`'s `_PROVIDER_FAILS_RULE` (defined locally rather than imported: that
+#: module's import pulls in its own heavy `FakeBazel`/`FakeFilterRepo` fixtures for no benefit
+#: here). This is what lets `acme-lib-py` genuinely exhaust its real retry ladder and reach
+#: `REQUIRES_HUMAN_INTERVENTION` through a real dispatch, so its direct dependent's cross-wave
+#: `blocked_by` propagation (D123's own root cause) is under test.
+PY_PROVIDER_FAILS_RULE = """\
+rules:
+  - id: py-lib-missing
+    description: claims acme-lib-py's own module and matches nothing in it
+    engine: fixture
+    languages: [python]
+    applies_to: ["**/acme_lib_py/__init__.py"]
+    rule:
+      pattern: "class RegistryNotPresent"
+    params:
+      find: "class RegistryNotPresent"
+      replace: "class Registry"
+"""
+
 
 # ---------------------------------------------------------------------------------------
 # fixture fleet
@@ -583,6 +604,80 @@ def test_a_failing_repo_does_not_stop_its_siblings_or_the_wave(fleet: Path) -> N
     landed = commits_on_branch(fleet, "acme-app-py")
     assert len(landed) == 2, "the failing repo lost the relocation commits it had landed"
     assert len(commits_on_branch(fleet, "acme-app-ts")) == 3
+
+
+def test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run(
+    fleet: Path,
+) -> None:
+    """D123 / ADR-0127 (task-76): `acme-lib-py` (wave 0) reaches `REQUIRES_HUMAN_INTERVENTION`
+    through a REAL dispatch (no hand-seeding) via `PY_PROVIDER_FAILS_RULE`, and its direct
+    dependent `acme-app-py` — scheduled into a LATER wave in the SAME `fleet transform` invocation
+    (`tests/test_scan_e2e.py`'s own `waves["acme-lib-py"] < waves["acme-app-py"]` assertion) — must
+    become `BLOCKED` with `blocked_by == ["acme-lib-py"]`, per §12.14's blast-containment clause
+    (`docs/SPEC.md:7578`: "a repo in `REQUIRES_HUMAN_INTERVENTION` marks exactly its transitive
+    dependents ... `BLOCKED` — no more, no less").
+
+    **Before the fix** (`_transform_impl`'s lazy per-wave `upsert_phase`, one `upsert_phase` loop
+    per wave iteration, run only when that wave's own dispatch begins): `acme-app-py`'s wave-1
+    `phases` row does not exist yet at the moment `PhaseRunner._contain` ->
+    `WaveScheduler.propagate_blocked` -> `SqliteSchedulerStore.append_blocked_by` runs for
+    `acme-lib-py`'s RHI transition (which happens inside wave 0's `_run_transform_wave` call,
+    strictly before wave 1's own `upsert_phase` loop iteration executes). `append_blocked_by`'s
+    write is UPDATE-only (`SELECT ... WHERE run_id = ? AND repo_id = ?` then `UPDATE ... WHERE
+    run_id = ? AND repo_id = ? AND phase = ?`) — zero rows exist to touch, so the write silently
+    no-ops, and `acme-app-py` is later admitted into wave 1 as an ordinary unblocked repo and
+    reads back `SUCCEEDED` / `blocked_by == '[]'`. This is D123's own measurement, and the
+    old-fails/new-passes proof for this exact assertion (via `git stash` on `src/fleet/cli.py`) is
+    recorded in this task's report (`.superpowers/sdd/round-VI-criteria-closure/task-76-report.md`).
+
+    **After the fix**, every wave's TRANSFORM `phases` row for this invocation's whole domain is
+    pre-seeded before any wave dispatches (mirroring `_build_impl`'s PASS 1), so `acme-app-py`'s
+    wave-1 row already exists when `acme-lib-py`'s containment fires during wave 0, and
+    `append_blocked_by`'s write lands for real.
+
+    The two TypeScript-ecosystem repos are an unrelated dependency chain (`acme-app-ts` imports
+    `@acme/lib`, not `acme_lib_py`) and must read `SUCCEEDED` — proving the fix does not
+    over-block anything outside the true descendant set (§12.14: "no more, no less").
+    """
+    write_rules(fleet, PY_PROVIDER_FAILS_RULE)
+    scanned(fleet)
+    result = transform(fleet)
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    rows = query(fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 2")
+    statuses = {repo_id: (status, json.loads(blocked_by)) for repo_id, status, blocked_by in rows}
+
+    assert statuses["acme-lib-py"][0] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    assert statuses["acme-app-py"] == ("BLOCKED", ["acme-lib-py"]), statuses
+    for survivor in ("acme-lib-ts", "acme-app-ts"):
+        assert statuses[survivor] == ("SUCCEEDED", []), statuses
+
+    # --- the OTHER shape D123's own discovery measured ("Measured directly, twice") -------------
+    #
+    # `tests/test_pr_e2e.py::_seed_blocked`'s docstring records that the identical defect was ALSO
+    # measured across two SEPARATE `fleet transform --wave N` invocations, not only one invocation
+    # driving both waves. Read fresh against this worktree's `HEAD`: `propagate_blocked` has
+    # exactly ONE call site in the whole codebase (`grep -rn "propagate_blocked" src/fleet/`) —
+    # `orchestrator/runner.py`'s `PhaseRunner._contain`, invoked synchronously at the moment a repo
+    # transitions to `REQUIRES_HUMAN_INTERVENTION`, never again afterward for that repo.
+    #
+    # This task's fix pre-seeds only the domain the CURRENT invocation's own `_open_transform_
+    # waves(..., wave)` call resolves — `_open_phase_waves` returns `(wave,)` verbatim when `wave`
+    # is not `None` (`cli.py`), so a `--wave 0` call's pre-seed pass touches ONLY wave 0's members
+    # and a subsequent, separate `--wave 1` call's pre-seed pass touches ONLY wave 1's members.
+    # `acme-lib-py`'s RHI transition — and therefore its one and only `propagate_blocked` call —
+    # already happened inside the FIRST (`--wave 0`) invocation, before `acme-app-py`'s phases row
+    # existed in EITHER invocation. The second (`--wave 1`) invocation's pre-seed pass creates
+    # `acme-app-py`'s row fresh at `PENDING`, but nothing in that invocation re-fires containment
+    # for the already-terminal, already-exited `acme-lib-py` — there is no second call site to do
+    # so. So this second shape is NOT fixed by this change: `acme-app-py` is still admitted and
+    # dispatched as an ordinary unblocked repo across two separate invocations, exactly as D123's
+    # own "measured directly, twice" discovery recorded. Closing it needs a mechanism this task's
+    # scope (ADR-0127 judgment call 1, a same-invocation pre-seed reordering) does not build —
+    # most likely a `fleet resume`-time or wave-open-time re-derivation of `blocked_by` against
+    # already-terminal providers, which is a materially different, undispatched fix. Not tested
+    # further here per the brief's own permission to reason about this shape rather than build a
+    # second fixture for a gap this task does not claim to close.
 
 
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:

@@ -6378,12 +6378,20 @@ async def _transform_impl(
                 await repository.open_budget_ledger(
                     run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=_now()
                 )
+                # D123 / ADR-0127: pre-seed EVERY wave's TRANSFORM `phases` row for this
+                # invocation's whole domain, upfront, before any wave dispatches — mirroring
+                # `_build_impl`'s PASS 1. `append_blocked_by` (scheduler.py) is UPDATE-only: if a
+                # later-wave dependent's phase row does not exist yet at the moment an earlier
+                # wave's provider reaches REQUIRES_HUMAN_INTERVENTION, `propagate_blocked`'s write
+                # silently touches zero rows and the dependent is admitted unblocked. Creating
+                # every row before dispatch begins closes that timing gap; `upsert_phase`'s
+                # `ON CONFLICT DO UPDATE` never touches `status`/`blocked_by`, so this changes
+                # nothing about what gets dispatched, only when the row exists to be written into.
+                members_by_wave: dict[int, tuple[str, ...]] = {}
                 for index in waves:
-                    members = await _wave_repos(read_conn, run_id, index, only)
-                    if not members:
-                        continue
-                    driven.append(index)
-                    for repo_id in members:
+                    members_by_wave[index] = await _wave_repos(read_conn, run_id, index, only)
+                for index in waves:
+                    for repo_id in members_by_wave[index]:
                         await repository.upsert_phase(
                             run_id,
                             repo_id,
@@ -6391,6 +6399,11 @@ async def _transform_impl(
                             now=_now(),
                             max_attempts=ladder,
                         )
+                for index in waves:
+                    members = members_by_wave[index]
+                    if not members:
+                        continue
+                    driven.append(index)
                     # D84: a wave whose wall clock is already spent admits nothing, so every
                     # branch, anchor and worktree `_prepare_repo` cuts below is git mutation for
                     # work that cannot run. Skipping it changes no verdict: control falls through
