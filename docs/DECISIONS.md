@@ -15105,3 +15105,175 @@ housing them as §15 keeps §12 stable as the object being re-verified, and keep
 §12 criterion does this round move" bookkeeping unambiguous: research/build rounds targeting the
 7 open §12 criteria are unaffected by this addition, and §15 work is separately book-kept once it
 starts.
+
+---
+
+## ADR-0132 — D55/D58: `llm/failover.py` builds the §11.8 `BackendHealth` circuit breaker,
+layered on a new same-target backoff retry for `RATE_LIMIT`, closing §12.43 case (ii)
+
+> Draft produced by research-48 for the controller to land. ADR number `0132` is the next free
+> number as measured at research-48's own time of writing (`grep -noE "ADR-01[0-9]{2}"
+> docs/DECISIONS.md docs/INTEGRATION_HONESTY.md docs/CRITERIA_PLAN.md .superpowers/sdd/round-VI-
+> criteria-closure/*.md` → highest landed is `ADR-0131`, `docs/DECISIONS.md:15062`) — per
+> CLAUDE.md's central-number-allocation rule, the controller must re-verify this is still free at
+> dispatch time before landing, since other lanes may allocate concurrently.
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D55 (OPEN) and D58 (PARTLY ADDRESSED, `1963ca9`) both
+trace to the same absent module: `llm/failover.py`, the per-target three-state `BackendHealth`
+circuit breaker §11.8 (`docs/SPEC.md:7595-7598`) describes and `docs/SPEC.md:6232` locates, does
+not exist anywhere in `src/`. D55 is the symptom — `orchestrator/runner.py:640` raises an `is DOWN`
+halt with no `BackendHealth` behind it, so a target that is merely throttled and a target that is
+genuinely unreachable produce the identical diagnosis. D58 is the mechanism — `CallPolicy`
+structurally cannot express `open_after_failures`/`cooldown_s`, and `call_policy_for`
+(`orchestrator/context.py:107-133`) says so in its own docstring. `docs/SPEC.md` §12.43 case (ii)
+is the acceptance bar neither entry closes: "a target that returns 429 through its entire §11.8
+backoff schedule is marked `DOWN` after `open_after_failures`, is not called again until
+`cooldown_s` has elapsed, and one `HALF_OPEN` probe restores it." Re-measured fresh at current
+`HEAD` (`f45e75f0ae64e419fc214e6c117e8a1bfff9693e`) by research-48, byte-for-byte consistent with
+both ledger entries: zero code implements any part of case (ii), and it is the sole remaining
+blocker on §12.43 (`docs/CRITERIA_PLAN.md` §43 confirms cases (i)/(iii)/(iv) closed; re-verified
+against current test names, not trusted). See research-48-report.md for the full derivation.
+
+**Root cause, traced fresh.** Two mechanisms are missing, and they only work together:
+
+1. **No same-target backoff exists for a 429.** Every backend (`llm/backends/{anthropic,
+   openai_compatible,bedrock,vertex}.py`) raises `TransportError(trigger="RATE_LIMIT")`
+   immediately on a 429; `_call_target`'s existing retry `while True:` loop
+   (`llm/client.py:788-859`) retries the same target only for truncation and schema repair, never
+   for a `TransportError`, which propagates straight to `complete()`'s outer loop and triggers an
+   **immediate** failover (`client.py:602-620`). There is no schedule for case (ii)'s "entire §11.8
+   backoff schedule" to name.
+2. **No `BackendHealth` state exists.** `LadderModelClient` (the once-per-run singleton
+   `RunContext.__post_init__` constructs) holds no per-target failure count, no `DOWN`/`HALF_OPEN`
+   state, no cooldown timer — `complete()`'s target loop tries every target in `route.targets`
+   fresh, every call, with no memory of a target's recent history.
+
+§11.8's own prose resolves why both are needed together, not sequentially-optional: "`DOWN`
+requires a connection-level failure or a 5xx — **never throttling alone**" sits in the same
+section as case (ii)'s "429 through its entire backoff schedule ⇒ `DOWN`". The reconciliation is
+the design: a single 429 (or several, each absorbed by backing off and eventually succeeding) is
+ordinary backpressure and must never open the breaker; only a target that **still** answers 429
+after fully walking its own backoff schedule graduates to a "qualifying failure"
+(`docs/SPEC.md:7595-7598`'s own phrase) that counts toward `open_after_failures`. Building the
+circuit breaker without the backoff-exhaustion signal either opens on the first transient 429
+(reproducing exactly the "sustained throttling mistaken for an outage" disaster §13 row 43 exists
+to prevent) or has nothing to count at all. Full derivation: research-48-report.md §3.
+
+**A near-miss worth recording.** `orchestrator/retry.py:67-71` already carries a backoff primitive
+whose own comment cites §11.8 by name (`DEFAULT_MAX_TRANSIENT_RETRIES = 4`, "retried with
+exponential backoff + jitter inside the call") — it is the correct math, sitting one layer away
+from where §11.8 needs it, unwired: a raw LLM `TransportError` can never reach it, because
+`complete()` always converts a 429 to either an immediate same-call failover or, at tier
+exhaustion, `TierUnavailable` (`FailureClass.BACKEND_UNAVAILABLE`, non-retryable, terminal for the
+run per `orchestrator/retry.py:194-198`) — never lets it propagate as a bare, retryable
+`TransportError`.
+
+---
+
+### Judgment call 1 — the fix's shape: two new pieces, wired together, reusing existing primitives
+
+**Decision: (a) a bounded same-target backoff-retry loop for `RATE_LIMIT`, added alongside
+`_call_target`'s existing truncation/repair arms and reusing `orchestrator/retry.py`'s
+`RetryPolicy.backoff_delay`/`DEFAULT_MAX_TRANSIENT_RETRIES` rather than inventing new jitter math;
+(b) a new `src/fleet/llm/failover.py::BackendHealth`, held once per `LadderModelClient` (matching
+§11.8's "in-memory and per-run" — no new SQLite table, no persistence, a resumed run re-probes
+from scratch by construction).** `BackendHealth.record_failure(target)` is called only when (a)'s
+backoff bound is exhausted (i.e., exactly the "qualifying failure" event), never on a single 429;
+`record_success(target)` on any successful reply. `complete()`'s target loop consults health
+before calling a target — skip a `DOWN` one exactly as an immediate failover, unless it has become
+eligible for its one `HALF_OPEN` probe (`cooldown_s` elapsed since it went `DOWN`), in which case
+exactly one call is let through and its outcome decides `UP` (reset) or back to `DOWN` (cooldown
+restarts).
+
+**Why not fold the backoff loop into `_call_target`'s existing `while True:` without a bound
+reused from `retry.py`.** A new, independently-tuned constant would duplicate `retry.py:67-71`'s
+already-§11.8-labeled `DEFAULT_MAX_TRANSIENT_RETRIES`/`DEFAULT_BACKOFF_BASE_S`/
+`DEFAULT_BACKOFF_CAP_S` for no reason — the comment there already states the intended semantics
+("the harness-side budget matches so the two layers agree on what 'spent' is"), so reuse is the
+minimal, non-speculative choice (CLAUDE.md Rule 2).
+
+**Why not persist `BackendHealth` to SQLite.** §11.8 states the property explicitly: "a resumed
+run re-probes rather than inheriting a stale verdict, because the outage it recorded may have
+ended hours ago." Persisting it would be a deliberate SPEC violation, not a stronger
+implementation; it would also create a second place a health fact could drift from the calls that
+actually happened, the exact shape CLAUDE.md's Architectural Guardrail 4 warns against.
+
+**Why not build the proactive token-bucket/AIMD half (`llm.rate_limit.rpm`/`tpm`/`aimd.*`) in the
+same task.** §12.43(ii)'s literal text is entirely about the reactive backoff-then-breaker response
+to a 429 that has already happened; it names neither proactive pacing nor AIMD resize. Building
+those would fully close D55's broader "no rate limiter exists at all" framing and the remaining 8
+`llm.rate_limit.*` `KNOWN_INERT` leaves, but is not required to satisfy the acceptance bar this ADR
+targets, and CLAUDE.md Rule 14's own discipline is to build to the criterion's literal wording, not
+past it. **Disclosed as an explicit residual, not silently dropped:** after this fix lands, D55's
+title claim ("no rate limiter... genuinely unsized") should be corrected to reflect that the
+circuit-breaker half is closed while the token-bucket/AIMD half remains open — mirroring exactly
+how D58's own 2026-08-22 status paragraph disclosed which of its five leaves were and were not
+wired by that fix.
+
+### Judgment call 2 — sizing: one task
+
+**Decision: one task.** Structurally, this is one coherent mechanism (backoff-exhaustion feeds the
+breaker; the breaker gates the dispatch loop) with no genuinely separable call sites or safety
+profiles — splitting it would create an intermediate state where either half lands with nothing to
+connect to. Estimated size (research-48-report.md §4): one new ~80-150 line module
+(`llm/failover.py`), ~40-80 lines of wiring across `client.py` (the backoff arm + health
+consultation) and `context.py` (`CallPolicy` extension + `call_policy_for` mapping), a
+`tests/test_config_keys_are_read.py::KNOWN_INERT` edit removing the 3 now-wired
+`llm.failover.*` leaves, and a new ~150-300 line test file reusing `tests/test_llm_client.py`'s
+existing `FakeBackend`/recorded-call-log pattern — comparable to a mid-sized round-VI task, larger
+than D126/ADR-0130's single shared-helper fix, smaller than a multi-file split like D107/D104/D108.
+
+### Judgment call 3 — does this change `TierUnavailable`, `FailureClass`, `ALLOWED_TRANSITIONS`, or
+any persisted schema?
+
+**Decision: no.** This fix adds a new caller of `TierUnavailable` reachability (a `DOWN`/probing
+target contributes to `tried`/exhaustion exactly as an immediately-failed one already does) and a
+new in-memory consultation before `backend.invoke`; it changes no existing method's logic, no
+`phases`/`attempts`/`migration_state.json` schema, and no state-machine transition. `runner.py:640`'s
+halt message and `workers/classify.py`'s `TierUnavailable → BACKEND_UNAVAILABLE` mapping are
+unaffected — a genuinely exhausted tier (every target `DOWN` or a target with no health record that
+still fails) still reaches exit 8 exactly as today. The only behavior change is **which** calls
+reach `TierUnavailable` (fewer, thanks to backoff absorbing transient 429s) and **whether the
+operator-facing message is honest** — an improvement this ADR does not itself scope (D55's own
+`asserts_outage`/`failover_triggers_recorded` reporting machinery, already landed per D55's "Partly
+addressed" note, is the existing place that would consume a more accurate `BackendHealth` state;
+wiring that through is left to the implementing task's own judgment, not mandated here).
+
+---
+
+### Disclosed — this is a LIVENESS gap, not a soundness gap
+
+Per this session's own convention (research-46/ADR-0130 §5), stated explicitly: **no path this
+defect touches can produce a wrong persisted result.** Every failure mode terminates in the
+already-existing, already-safe `TierUnavailable` → `BackendUnavailable` finding → exit 8 →
+`PENDING` mechanism, unchanged before and after this fix — checked directly against `complete()`'s
+and `runner.py:640`'s control flow, not assumed by analogy. The defect's actual cost is **wasted
+calls and delay** (busy-looping against a throttled target with no backoff, today) and
+**operator-facing dishonesty** (an `is DOWN` message asserting an outage diagnosis a
+merely-throttled backend does not support, potentially causing an unnecessary exit-8 halt or
+sending an operator toward the wrong remediation). Both are liveness/observability failures. This
+is the mirror image of D126/ADR-0130, which found a genuinely wrong `SUCCEEDED` result **reaching
+persistence** — that class of risk does not exist here, because §11.8's fail-closed exit-8 design
+is intact throughout and this fix only changes when it fires and what it truthfully reports.
+
+---
+
+### Open questions for the controller
+
+1. **ADR number confirmation** — `0132` was free at research-48's own time of writing; re-verify
+   before landing.
+2. **Whether to also wire an observability event** for `DOWN`/`HALF_OPEN`/restored transitions
+   (beyond the call-log assertion §12.43(ii)'s literal text requires) — an implementer/controller
+   call, not a technical fact this ADR settles.
+3. **Whether the D55 ledger entry's status/title should be split** once this lands — the
+   circuit-breaker half closes, the token-bucket/AIMD half (explicitly out of scope here) does
+   not, which is exactly D58's own "PARTLY ADDRESSED, three of five leaves" shape. A controller
+   call on ledger bookkeeping, not a design decision.
+4. **Dispatch priority relative to the other two "needs a design pass" §12 blockers**
+   (transitive-stub-stacking for §12.14/§12.31 case (ii)'s Leg C1/C2) — a prioritization judgment,
+   not something this research is positioned to rule on.
+
+No other genuine value judgment was found. The two-piece fix shape and why both pieces are
+required together (judgment call 1), the "one task" sizing (judgment call 2), and the "no
+schema/transition change" confirmation (judgment call 3) are each settled by reading the code and
+SPEC text fresh, not by a preference this ADR is guessing at.
