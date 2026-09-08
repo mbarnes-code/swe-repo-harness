@@ -677,6 +677,21 @@ gaps: Task B still pending; gap 1 open for JS/Rust/JVM (Python closed, round VI 
 open (`D116`, round VI task 54).** Do not round up the `<n> of 48` count for §12.11 — none of the
 three gaps are fully closed.
 
+**Gap 1 (`D112`) narrowed further — JVM (round VI task 70) and Rust (round VI task 86) closed;
+JS is the only remaining member.** JVM: `TEST_SRC_PARTITIONED_ECOSYSTEMS` widened to
+`MAVEN`/`GRADLE`, FakeBazel-proven, real-Bazel proof still blocked on the separate `rules_java`
+`bazel_dep` gap (`D121`) — see `docs/INTEGRATION_HONESTY.md`'s `## D112` entry. Rust: the
+`crate=`/`srcs=` mutual-exclusivity constraint `rust.py::test_targets()` required — a SEPARATE
+`rust_test(srcs=[file], deps=[":<lib>", ...])` per Cargo integration-test file, never combined
+with the unconditional `crate=` unit-test target — is now built and proven at BOTH tiers this
+gap's own text required: FakeBazel (`tests/test_build_e2e.py::
+test_a_rust_repo_with_a_real_test_file_gets_a_real_rust_test_target`) and real Bazel
+(`tests/test_build_e2e.py::test_a_rust_integration_test_target_runs_and_passes_under_a_real_bazel`,
+`bazel test //rust/acme-widgets-rust:acme-widgets-rust_widgets_test` PASSES against the pinned
+`rules_rust@0.65.0` toolchain). `Ecosystem.CARGO` is now a `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+member. Do not round up the `<n> of 48` count for §12.11 on this account — Task B (still pending)
+plus the JS slice of gap 1 plus gap 3 remain.
+
 **Task B built and proven end to end (round VI task 57, 2026-09-06)**, on branch
 `agent/roundvi-task57`, pending review/merge. `tests/test_build_e2e.py::
 test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`: Phase A

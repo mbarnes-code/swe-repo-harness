@@ -1204,6 +1204,37 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
             "}\n"
         ),
     },
+    #: D112, round VI task 86: every other Rust fixture in this file (`acme-codec-rs`,
+    #: `acme-case-rs`) ships zero `tests/` files, so `test_sources()` has always returned `[]` for
+    #: every real-Bazel run this suite has ever done — the same gap `acme-widgets-py`/
+    #: `acme-widgets-jvm` above closed for Python/JVM. This is the first Rust fixture with a real
+    #: Cargo integration-test file, named by Cargo's own `tests/*.rs` convention
+    #: (`docs/INTEGRATION_HONESTY.md`'s `## D112` entry, `_is_rust_test_src` in `cli.py`). Unlike
+    #: those two ecosystems, `rust.py:test_targets()` cannot put the test file in the SAME target
+    #: as the crate's unconditional unit-test target (`rules_rust`'s `crate`/`srcs` mutual
+    #: exclusivity, `_rust_test_impl`) — this fixture's `tests/widgets.rs` is a REAL `#[test] fn`
+    #: asserting a real value, not a bare script, so a `bazel test` that never actually ran it
+    #: would report FAILED, not a vacuous PASS.
+    #:
+    #: `tests/common/mod.rs` is the negative case: a helper module a top-level integration-test
+    #: file `mod`-includes, which Cargo itself does not compile as its own independent test
+    #: binary. `_is_rust_test_src` only matches DIRECT children of `tests/`, so this file must NOT
+    #: get its own `rust_test` target — it lands in the library's `srcs` instead (harmless: rustc
+    #: only compiles files reachable via `mod` from `crate_root`, so an extra untouched file is an
+    #: unused Bazel input, not a compile error).
+    "acme-widgets-rust": {
+        "Cargo.toml": (
+            '[package]\nname = "acme-widgets-rust"\nversion = "0.1.0"\nedition = "2021"\n'
+        ),
+        "src/lib.rs": ("pub fn double(value: i32) -> i32 {\n    value * 2\n}\n"),
+        "tests/widgets.rs": (
+            "#[test]\n"
+            "fn doubles_twenty_one() {\n"
+            "    assert_eq!(acme_widgets_rust::double(21), 42);\n"
+            "}\n"
+        ),
+        "tests/common/mod.rs": ("#[allow(dead_code)]\npub fn unused_helper() {}\n"),
+    },
 }
 
 
@@ -3237,6 +3268,77 @@ def test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target(
     library_body = body[library_start:test_start]
     assert '"src/main/java/com/acme/widgets/Widget.java"' in library_body, library_body
     assert "WidgetTest.java" not in library_body, library_body
+
+
+def test_a_rust_repo_with_a_real_test_file_gets_a_real_rust_test_target(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """D112, round VI task 86, over `FakeBazel`: a Rust repo with a real `tests/*.rs` integration
+    test gets its own `rust_test` target, NEVER combined with the crate's `crate=` unit-test
+    target on the same target — and a nested `tests/common/mod.rs` helper gets no target of its
+    own and stays out of the library's `srcs` predicate's positive set (it lands in the library).
+
+    **The discriminator.** Before this task's fix, `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+    (`ecosystems/base.py`) had no `CARGO` member, so `_partition_test_srcs` always took its
+    `ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS` branch for Rust units and returned
+    `(list(srcs), [])` unconditionally — `test_srcs` stayed `()`, `rust.py:test_targets()`'s test
+    file never reached `srcs=`, and `generate_targets()`'s `rust_library` swallowed
+    `tests/widgets.rs` into its own `srcs` instead. So pre-fix this assertion set is exactly
+    reversed: no SECOND `rust_test(` in the body (only the unconditional `crate=` one), and the
+    test file present in `rust_library`'s `srcs=[...]` list. Even if `CARGO` had simply been added
+    to the old table without reshaping `rust.py`, the single combined target this repo would have
+    produced sets BOTH `crate` and a non-empty `srcs` — the exact `rules_rust@0.65.0`
+    `_rust_test_impl` mutual-exclusivity failure `docs/INTEGRATION_HONESTY.md`'s `## D112` entry
+    measured — which is why this test also asserts the two `rust_test(` blocks never share one.
+    """
+    add_repos(fleet, ["acme-widgets-rust"])
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dest = relocations(filter_repo)["acme-widgets-rust"]
+    body = (build_worktree(fleet, "acme-widgets-rust") / dest / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert body.count("rust_test(") == 2, body
+    assert 'name = "acme-widgets-rust_test"' in body, body
+    assert 'name = "acme-widgets-rust_widgets_test"' in body, body
+    assert '"tests/widgets.rs"' in body, body
+    # No target for the nested helper — `_is_rust_test_src` only matches DIRECT children of
+    # `tests/`, so `tests/common/mod.rs` never reaches a `rust_test`'s `srcs`.
+    assert 'name = "acme-widgets-rust_common_test"' not in body, body
+    assert 'name = "acme-widgets-rust_mod_test"' not in body, body
+
+    # The two `rust_test` blocks, split apart at every `rust_test(`/`)` boundary and matched to
+    # each other by their OWN `name = "..."` marker (rendered targets sort by `(name, rule)`, so
+    # this does not depend on emission order) — each then checked for the mutual-exclusivity shape
+    # `rules_rust@0.65.0`'s `_rust_test_impl` hard-fails Bazel analysis over: `crate=` alongside a
+    # non-empty `srcs=` on the SAME target.
+    rust_test_blocks = ["rust_test(" + block for block in body.split("rust_test(")[1:] if block]
+    (unit_test_block,) = [b for b in rust_test_blocks if "acme-widgets-rust_test" in b]
+    (integration_test_block,) = [
+        b for b in rust_test_blocks if "acme-widgets-rust_widgets_test" in b
+    ]
+    assert 'crate = ":acme-widgets-rust"' in unit_test_block, unit_test_block
+    assert "srcs = [" not in unit_test_block, unit_test_block
+    assert '"tests/widgets.rs"' in integration_test_block, integration_test_block
+    assert "crate = " not in integration_test_block, integration_test_block
+    assert 'deps = [\n        ":acme-widgets-rust",\n    ],' in integration_test_block, (
+        integration_test_block
+    )
+
+    # The library target still exists (`src/lib.rs` is real library source, and the nested helper
+    # module is real library source too — it is not a Cargo test binary) but its `srcs` no longer
+    # swallows the top-level integration-test file.
+    library_start = body.index("rust_library(")
+    first_test_start = body.index("rust_test(")
+    library_body = body[library_start:first_test_start]
+    assert '"src/lib.rs"' in library_body, library_body
+    assert '"tests/common/mod.rs"' in library_body, library_body
+    assert '"tests/widgets.rs"' not in library_body, library_body
 
 
 def test_destinations_come_from_the_adapters_not_from_the_driver(
@@ -6161,6 +6263,101 @@ def test_a_python_test_target_runs_and_passes_under_a_real_bazel(
     log = checkout / "bazel-testlogs" / dest / "acme-widgets-py_test" / "test.log"
     assert log.is_file(), f"{detail}\n(no test.log at {log})"
     assert "Traceback" not in log.read_text(encoding="utf-8"), log.read_text(encoding="utf-8")
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("bazel") is None,
+    reason=(
+        "bazel is not installed on this host; this is D112's Rust slice's own proof (round VI "
+        "task 86), and it is exactly the one no `FakeBazel` invocation can give: that a real "
+        "`bazel test` runs and PASSES a `rust_test(srcs=[...])` target built from a real "
+        "`test_srcs` list, WITHOUT the `crate=`/`srcs=` mutual-exclusivity failure "
+        "`rules_rust@0.65.0`'s `_rust_test_impl` hard-fails Bazel analysis over"
+    ),
+)
+def test_a_rust_integration_test_target_runs_and_passes_under_a_real_bazel(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    tmp_path: Path,
+    bazel_cache_home: Path,
+    bazel_registry: str,
+    bazel_fetch_bazelrc: str,
+    bazel_startup_argv: tuple[str, ...],
+) -> None:
+    """D112's Rust slice, closed end to end (round VI task 86): `bazel test
+    //rust/acme-widgets-rust:acme-widgets-rust_widgets_test` PASSES against the real toolchain,
+    over a target `fleet build` emitted from a real `test_srcs` list — and analysis does not hit
+    the `rust_test.crate and rust_test.srcs are mutually exclusive` failure
+    `docs/INTEGRATION_HONESTY.md`'s `## D112` entry measured against the pinned
+    `rules_rust@0.65.0` tag, because this target carries `srcs=` and no `crate=` at all.
+
+    **Why this and not just the `FakeBazel` version above.** A `FakeBazel` seam answering from a
+    canned table cannot show `_rust_test_impl` actually accepting the generated attribute
+    combination at Bazel ANALYSIS time — the whole reason this task could not just widen
+    `TEST_SRC_PARTITIONED_ECOSYSTEMS` the way the Python/JVM slices did. Only a real `bazel test`
+    invocation, over the real pinned `rustc`, running the real `assert_eq!(acme_widgets_rust::
+    double(21), 42)`, can.
+
+    **Zero external crates, deliberately** (unlike `test_two_rust_repos_in_one_wave_both_build`'s
+    `hex`/`heck` fixtures): `workspace_deps()` returns `[]` when a unit's `external_coordinates` is
+    empty, so this fleet never invokes `crate.from_cargo` at all — no `MODULE.bazel.lock` seeding,
+    no `//:Cargo.toml` root workspace, no risk of this test's own network access to crates.io
+    being what makes or breaks the result. What is being proven is `rust_test`'s OWN attribute
+    shape, not the crate resolver.
+
+    **`only_repos`, not `add_repos`, unlike the Python/JVM precedents** — deliberately: this
+    fleet's default baseline repos are a different ecosystem's own resolvers (`uv pip compile`,
+    `pnpm install`), and this test's claim is about Rust, not about whether every unrelated
+    resolver reaches its own registry on this host today. `real_build`'s own seam assertions
+    (`FILTER_REPO_RUNNER`/`BAZEL_RUNNER`/`RESOLVER_RUNNER` all `None`) still hold — every binary
+    this run touches is still the real one — only the FLEET is narrower, exactly as `only_repos`'s
+    own docstring describes for the two-Rust-repo test above.
+
+    Run alongside the fast unit-tier test above (same file, `@pytest.mark.integration`, skipped
+    together) rather than in it, per this task's brief and the Python/JVM precedents: a real Bazel
+    invocation is too slow for the fast tier.
+    """
+    only_repos(fleet, ["acme-widgets-rust"])
+    result = real_build(fleet, monorepo, bazel_cache_home, bazel_registry, bazel_fetch_bazelrc)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    checkout = tmp_path / "integration-checkout"
+    git(monorepo, "worktree", "add", "--detach", str(checkout), "integration")
+    dest = "rust/acme-widgets-rust"
+    build_file = checkout / dest / "BUILD.bazel"
+    assert build_file.is_file(), f"{dest} generated no BUILD.bazel"
+    body = build_file.read_text(encoding="utf-8")
+    assert body.count("rust_test(") == 2, body
+    assert '"tests/widgets.rs"' in body, body
+
+    target = f"//{dest}:acme-widgets-rust_widgets_test"
+    tested = subprocess.run(  # noqa: S603
+        [*bazel_startup_argv, "test", target, "--test_output=errors"],
+        cwd=checkout,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=1800.0,
+    )
+    detail = (
+        f"fleet build exited {result.exit_code}\n\n--- bazel test stderr ---\n"
+        f"{tested.stderr[-8000:]}"
+    )
+    # `--test_output=errors` prints nothing about a PASSING test but the failing test's own
+    # output on a red one, so the exit code plus Bazel's own "completed successfully" summary —
+    # not a `PASSED`/`FAILED` string that only appears under `--test_output=all` or in the test
+    # log — is what a passing `bazel test` actually asserts about itself. A failing target makes
+    # `bazel test`'s OWN exit nonzero and its summary read "FAILED", which this would catch, and
+    # so would `rules_rust`'s own `_rust_test_impl` `fail()` — that failure surfaces as an
+    # ANALYSIS error, which `bazel test`'s nonzero exit and stderr catch just as surely as a RUN
+    # failure would.
+    assert tested.returncode == 0, detail
+    assert target in tested.stderr, detail
+    assert "Build completed successfully" in tested.stderr, detail
+    log = checkout / "bazel-testlogs" / dest / "acme-widgets-rust_widgets_test" / "test.log"
+    assert log.is_file(), f"{detail}\n(no test.log at {log})"
+    assert "test result: ok" in log.read_text(encoding="utf-8"), log.read_text(encoding="utf-8")
 
 
 @pytest.mark.integration
