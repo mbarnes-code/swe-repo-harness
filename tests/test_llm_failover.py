@@ -594,3 +594,66 @@ def test_record_success_resets_consecutive_failures_across_intervening_failures(
         "no DOWN transition anywhere in this run -- consecutive_failures reset on every success, "
         "so the target never accumulated 3 in a row"
     )
+
+
+def test_the_third_consecutive_failure_opens_the_breaker_at_open_after_failures_3() -> None:
+    """WHY (round VI task 94, research-49's own correction): every breaker test up to this file's
+    prior state ran at `open_after_failures=1`, EXCEPT the sibling test just above
+    (`test_record_success_resets_consecutive_failures_across_intervening_failures`), which drives
+    `open_after_failures=3` but only ever exercises the BELOW-threshold half (two failures, reset
+    by a success, repeated) -- it deliberately never lets three land back-to-back. What remained
+    genuinely untested at N>1 was the ABOVE-threshold half: does the Nth (here 3rd) CONSECUTIVE
+    qualifying failure actually open the breaker, or does `open_after_failures=1`'s single-failure
+    shape hide an off-by-one that N=1 cannot discriminate (`consecutive_failures >= 1` and
+    `consecutive_failures > 1` both open on the first failure when the threshold is 1)?
+
+    Three CONNECTION failures on ONE target, no intervening success, `open_after_failures=3`:
+    the FIRST two must be swallowed as ordinary qualifying-but-below-threshold failures (still UP,
+    no transition, `TierUnavailable` because there is nowhere else for a single-target route to
+    fail over to), and the THIRD must be the one that flips UP -> DOWN.
+    """
+    retry_policy = RetryPolicy(max_transient_retries=0, backoff_base_s=0.0, backoff_cap_s=0.0)
+    backend = FakeBackend(
+        [
+            TransportError("down", trigger="CONNECTION"),  # consecutive_failures 0 -> 1
+            TransportError("down", trigger="CONNECTION"),  # consecutive_failures 1 -> 2
+            TransportError("down", trigger="CONNECTION"),  # consecutive_failures 2 -> 3: DOWN
+            ok_reply(),  # proves the target is skipped, not merely unlucky -- see below
+        ]
+    )
+    transitions: list[BackendHealthTransition] = []
+    client = build_client(
+        backend,
+        [target("m1")],  # single target: no failover to mask the breaker's own state
+        policy=CallPolicy(open_after_failures=3, cooldown_s=999.0),
+        retry_policy=retry_policy,
+        health_transitions=transitions,
+    )
+
+    with pytest.raises(TierUnavailable):
+        call(client)  # 1st failure -- below threshold
+    assert transitions == [], "one qualifying failure at N=3 must not open the breaker"
+
+    with pytest.raises(TierUnavailable):
+        call(client)  # 2nd failure -- still below threshold
+    assert transitions == [], "two qualifying failures at N=3 must not open the breaker either"
+
+    with pytest.raises(TierUnavailable):
+        call(client)  # 3rd consecutive failure -- reaches the threshold
+    assert len(transitions) == 1, (
+        "the 3rd CONSECUTIVE qualifying failure must open the breaker exactly once, at N=3 same "
+        "as it does at N=1 -- the threshold, not the number 1, is what opens it"
+    )
+    assert (transitions[0].from_state, transitions[0].to_state) == ("UP", "DOWN")
+
+    # m1 is now DOWN and cooldown_s=999.0 has nowhere near elapsed: a 4th call must skip it
+    # outright (immediate TierUnavailable, no backend call at all) rather than dial it again --
+    # the fake's remaining `ok_reply()` script entry proves this, exactly like
+    # `test_a_down_target_is_skipped_not_called_again`'s single-target sibling would if it had
+    # one; here there is no second target to fail over to, so "skipped" surfaces as a 4th
+    # `TierUnavailable` with the call log unchanged rather than a fourth `invoke()`.
+    with pytest.raises(TierUnavailable):
+        call(client)
+    assert [c["model_id"] for c in backend.calls] == ["m1", "m1", "m1"], (
+        "the 4th call must not have reached invoke() at all -- m1 is DOWN and skipped"
+    )

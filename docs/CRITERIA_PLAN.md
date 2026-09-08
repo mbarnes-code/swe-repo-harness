@@ -3053,9 +3053,92 @@ always `"run"`, independently confirmed by task review inferring the closure str
 diff's own data flow (no separate end-to-end test drives a real `TierUnavailable` through the
 whole `_drive` path in one run; the two halves — `_error_for` populates, `_drive` forwards — are
 proven separately, which is sufficient since neither has untested branching between them).
-**Done bar (remaining):** none named by this task; a reviewer re-deriving §12.43's case list
-against the landed tests is the closure this criterion still needs before the controller's own
-`<n> of 48` count moves.
+**Corrected 2026-09-08 (round VI research-49 + task 94) — the "none named" line above is retired;
+§12.43 is NOT satisfied and must not be counted.** research-49 (independent re-derivation against
+§12.43's literal `docs/SPEC.md` text, not against this entry's own prior summary) found case (ii)
+genuinely built and strongest, but 4 of the criterion's literal sub-assertions had ZERO test
+coverage anywhere in the suite and 6 more were only materially approximated (hand-built
+`TokenUsage`/`FakeClient` objects standing in for the real dispatch path), plus the criterion's
+own framing clause ("Four induced cases **on the fixture fleet**") holds for exactly one assertion
+in the whole criterion. Full findings: `.superpowers/sdd/round-VI-criteria-closure/
+research-49-report.md` item 3. research-49 split the remaining work into 43-A/43-B (small,
+TEST-ONLY) and 43-C (medium, TEST-ONLY + a Rule-14 scope question).
+
+**43-A/43-B closed by round VI task 94 (TEST-ONLY, `tests/test_llm_failover.py` +
+`tests/test_runner.py`):**
+- Case (i)'s two previously-zero-coverage sub-assertions, `phases.attempts` unchanged and
+  `transient_retries` unchanged across an induced backend failover — proven through the real
+  `RunContext` wiring (router → `CachingModelClient` → `LadderModelClient` → backend) under a real
+  `PhaseRunner.run_wave` dispatch, with a genuinely induced CONNECTION failover (`FailoverBackend`
+  in `tests/test_runner.py`), not a hand-built stand-in:
+  `test_an_induced_connection_failover_leaves_phases_attempts_and_transient_retries_unchanged`.
+  Mutation-checked two ways: zeroing `LadderModelClient.complete()`'s `llm_failovers` stamp reddens
+  this test's own `attempts.llm_failovers == 1` assertion (proving the harness is wired to the real
+  stamp, not a vacuous pass); and a fixture-vacuity control (`fail_model_id` pointed at a name
+  neither target has, so no failover is actually induced) fails loudly on
+  `backend.calls == ["fake-1", "fake-2"]` rather than passing for the wrong reason.
+- As a side effect of driving that failover for real, the same test also closes two of research-49's
+  "materially approximated" items: `attempts.llm_failovers = 1` is now proven from a REAL induced
+  failover (not `tests/test_llm_backend_failover_attribution.py`'s hand-built
+  `TokenUsage(llm_failovers=…)`), and the persisted `llm_cache` row's second-target attribution is
+  now proven through the real ladder (not `tests/test_llm_cache.py:354-372`'s
+  `FakeClient(answered_by=STANDBY)` stub).
+- Case (ii)'s above-threshold N>1 leg (research-49's own corrected finding: N=3 was already
+  exercised below-threshold by `test_record_success_resets_consecutive_failures_across_
+  intervening_failures`, but never above it) —
+  `test_the_third_consecutive_failure_opens_the_breaker_at_open_after_failures_3` in
+  `tests/test_llm_failover.py`, proving the 3rd CONSECUTIVE qualifying failure (not failures 1 or
+  2) opens the breaker at `open_after_failures=3`, and that the target is then skipped rather than
+  redialled. Mutation-checked: capping `consecutive_failures` at 2 (a mutation that leaves every
+  `open_after_failures=1` test green, since N=1 never needs the counter to exceed 1) reddens only
+  this new test — 12 of 13 tests in the file stay green under it, confirming N=1 coverage alone
+  could not have caught this gap.
+
+**43-C — still fully open, NOT attempted here (out of this task's scope by the controller's own
+brief):**
+- Case (iv)'s two sub-assertions research-49 found with zero coverage — "zero `HEAVY` calls served
+  by another tier, asserted over `llm_cache.tier`" and "a valid checkpoint" after the exit-8 halt —
+  remain untested. task 94 confirmed a concrete reason building these is not the same small lift as
+  43-A/43-B's items: `docs/SPEC.md`'s literal case (iv) needs a genuine "every target for `HEAVY`
+  unreachable" dispatch through a REAL production worker (not a hand-built `ModelClient` stand-in,
+  per the same discipline 43-A just applied), and task 94 measured that the one real production
+  HEAVY-tier caller in `src/` — `workers/rewrite.py`'s `LLM_ESCALATION` rung
+  (`escalate_repair`/`propose_repair`) — wraps ANY `LlmError` it catches, `TierUnavailable`
+  included, into `WorkerRepairError` (`rewrite.py:730-731`), and `workers/base.py`'s generic
+  fallback classifier (`classify_exception`/`error_from_exception`, the `except Exception` arm
+  `_run_one` falls back to for any worker that does not classify its own LLM errors) has no special
+  case for either exception type. Measured directly: constructing a `WorkerRepairError` wrapping a
+  real `TierUnavailable`'s message and running it through `classify_exception`/`error_from_exception`
+  yields `FailureClass.UNKNOWN`, `retryable=True` — NOT `BACKEND_UNAVAILABLE` — so as coded today a
+  real HEAVY-tier exhaustion reached through rewrite's own production call site would not obviously
+  reach `_drive`'s exit-8/`BackendUnavailable` halt path at all. **This is a measured code-reading
+  finding, not a proven live defect** (no test was run driving `rewrite.py`'s worker through this
+  path end to end, and no fix was attempted — out of this task's TEST-ONLY 43-A/43-B scope, and the
+  file is not `llm/failover.py`/`client.py`, so the brief's narrow "fix a hidden defect there"
+  carve-out does not cover it either). Flagging it now so 43-C's scope is not set assuming a
+  case-(iv) vehicle "just works" once a HEAVY-tier fixture exists. A possible starting point that
+  does NOT hit this: `workers/classify.py`'s worker already classifies `TierUnavailable` correctly
+  via its own `_error_for` (proven in `tests/test_workers_scan.py::
+  test_classify_takes_no_model_client_by_constructor_and_calls_the_one_on_the_context`), so a
+  test-only router forcing `classify`'s role onto `ModelTier.HEAVY` (production `config/models.yaml`
+  never does; nothing stops a test `LlmRouter` from doing so) may be a smaller vehicle than fixing
+  or rearchitecting rewrite.py's HEAVY path — an implementer decision, not made here.
+- Case (iv)'s other sub-assertions (a real CLI exit status 8, "every target tried" driven through an
+  actually-unreachable target rather than a synthesized `WorkerError`, a real `fleet resume` CLI
+  invocation rather than a direct `reap_expired_phase_leases` call) remain unproven, per
+  research-49's items 8-10 — none attempted here.
+- Case (iii)'s two halves (schema-exhaustion AND `CapabilityDrift` proven together, in one induced
+  scenario) remain proven only separately (research-49 item 7) — not attempted here.
+- The criterion's own framing clause ("on the fixture fleet") remains open across the board for
+  every case except `tests/test_transform_e2e.py:1158` — unaffected by this task, and not part of
+  either 43-A/43-B or 43-C's own scoping (research-49 flagged it as a structural obstacle behind
+  case (iv) specifically, not as a fifth work item).
+
+**Done bar (remaining):** 43-C in full (case (iv)'s untested sub-assertions plus the rewrite.py
+classification question above, which the controller must adjudicate before dispatching a build
+task), case (iii)'s together-not-separately gap, and the fixture-fleet framing clause. §12.43 must
+stay OUT of the `<n> of 48` count until 43-C closes or the controller issues a disclosed Rule-14
+adjudication narrowing the criterion's text.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
