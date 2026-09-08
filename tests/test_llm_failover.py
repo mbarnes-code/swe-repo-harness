@@ -539,3 +539,58 @@ def test_backoff_is_genuinely_consulted_between_retries_not_a_busy_loop() -> Non
     assert spy.calls == [1, 2, 3], "backoff consulted once per retry, index incrementing"
     assert response.usage.model_id == "m1"
     assert [c["model_id"] for c in backend.calls] == ["m1", "m1", "m1", "m1"]
+
+
+def test_record_success_resets_consecutive_failures_across_intervening_failures() -> None:
+    """WHY: `record_success` clearing `consecutive_failures` is what makes "N qualifying failures
+    in a row" (the module docstring's own words) mean literally that. Six CONNECTION failures
+    total here, arranged 2-success-2-success, `open_after_failures=3`: a target that has never
+    failed three times in a row without an intervening success must stay UP throughout. If the
+    reset silently broke, `consecutive_failures` would carry over the first block's 2 instead of
+    clearing to 0, so the SECOND block's very first failure would take the running count to 3
+    (2 carried + 1) and open the breaker for a target that never actually failed twice
+    back-to-back — the "throttling mistaken for an outage" shape §13 row 43 forbids, arriving by a
+    different door than a 429. Regression for the audit's Mutation D (delete
+    `state.consecutive_failures = 0` from `record_success`), which survived all of
+    `test_llm_failover.py` + `test_llm_client.py` + `test_llm_findings.py` (46 tests, nothing
+    fired) before this test was added."""
+    retry_policy = RetryPolicy(max_transient_retries=0, backoff_base_s=0.0, backoff_cap_s=0.0)
+    backend = FakeBackend(
+        [
+            TransportError("down", trigger="CONNECTION"),  # cf 0 -> 1
+            TransportError("down", trigger="CONNECTION"),  # cf 1 -> 2
+            ok_reply(),  # success -- cf must reset to 0 here
+            TransportError("down", trigger="CONNECTION"),  # cf 0 -> 1 (or 2->3 if not reset)
+            TransportError("down", trigger="CONNECTION"),  # cf 1 -> 2 (or already DOWN)
+            ok_reply(),  # success -- must still be reachable and UP
+        ]
+    )
+    transitions: list[BackendHealthTransition] = []
+    client = build_client(
+        backend,
+        [target("m1")],  # single target: no failover to mask the breaker's own state
+        policy=CallPolicy(open_after_failures=3, cooldown_s=999.0),
+        retry_policy=retry_policy,
+        health_transitions=transitions,
+    )
+
+    with pytest.raises(TierUnavailable):
+        call(client)
+    with pytest.raises(TierUnavailable):
+        call(client)
+    first_success = call(client)
+    assert first_success.usage.model_id == "m1"
+    with pytest.raises(TierUnavailable):
+        call(client)
+    with pytest.raises(TierUnavailable):
+        call(client)
+    second_success = call(client)
+
+    assert second_success.usage.model_id == "m1", (
+        "still UP and reachable after two more failures below the threshold -- "
+        "the reset held across the intervening success"
+    )
+    assert transitions == [], (
+        "no DOWN transition anywhere in this run -- consecutive_failures reset on every success, "
+        "so the target never accumulated 3 in a row"
+    )
