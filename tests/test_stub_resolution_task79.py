@@ -24,6 +24,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
+import structlog.testing
 from typer.testing import CliRunner
 
 from fleet import cli
@@ -823,3 +824,142 @@ def test_pr_sync_lines_is_silent_when_every_rewrite_succeeded() -> None:
         }
     )
     assert not any("FAILED" in line for line in lines), lines
+
+
+# ---------------------------------------------------------------------------------------
+# Round VI task 81 — the two disclosed nits from the D107/D104/D108 bundle's final review:
+# a fail-open on a missing BUILD.bazel (nit 1), and no escalation ladder for a permanently-
+# refusing REVALIDATE round (nit 2).
+# ---------------------------------------------------------------------------------------
+
+
+def test_c1_gate_refuses_a_revalidate_round_whose_build_bazel_is_missing(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+) -> None:
+    """Nit 1. The pre-task-81 gate read a missing `<dest>/BUILD.bazel` as `""` — no stub label
+    found — and let the round proceed (fail OPEN). `migrate/<consumer>` never carries a generated
+    `BUILD.bazel` at all until D107's OWN rewrite (or a prior successful REVALIDATE round) puts
+    one there (`test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label`'s own opening
+    comment: "Before D107 runs, `migrate/<consumer>`... carries NO generated `BUILD.bazel` at
+    all") — so simply never planting one (D107's rewrite is deliberately never called here either)
+    already models the exact case the brief describes ("Bazel hasn't generated it yet, or the
+    checkout is in an unexpected state"), with no extra fixture needed. This drives the REAL
+    claiming loop against that untouched tree and asserts the round is REFUSED exactly as the
+    still-present-stub-label case is, but with a DISTINCT reason ("is missing", never "still names
+    stub label") so an operator is not told to look for a stub label that was never there.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest = relocations(filter_repo)[_STUB_CONSUMER]
+    with pytest.raises(subprocess.CalledProcessError):
+        _git_show(monorepo, f"migrate/{_STUB_CONSUMER}:{dest}/BUILD.bazel")
+
+    # T1's DB effect only -- D107's own rewrite is deliberately never called.
+    _supersede_stub_row(fleet, run_id)
+
+    task_id = str(uuid4())
+    _insert_revalidate_task(fleet, run_id=run_id, task_id=task_id, dest_path=dest)
+    settings = _load_settings(GlobalOptions(config_path=fleet / "config" / "fleet.yaml"))
+
+    fake = FakeBazel(fleet / "artifacts" / "fake-bazel-c1-gate-missing")
+    cli.BAZEL_RUNNER = fake
+    try:
+        result = asyncio.run(
+            _run_revalidation_claims_impl(
+                settings, fleet / "state" / "fleet.db", run_id, now=cli._now()
+            )
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+    outcome = result["outcomes"][task_id]
+    assert outcome.startswith("FAILED:"), outcome
+    assert "is missing" in outcome, outcome
+    assert "still names stub label" not in outcome, outcome
+
+    # The gate fires BEFORE any worker is constructed -- exactly the stub-label case's own proof.
+    assert fake.calls == [], "the C1 gate must refuse before dispatching VerifyPipelineWorker"
+
+    task_status = query(fleet, "SELECT status FROM tasks WHERE task_id = ?", (task_id,))
+    assert task_status == [("PENDING",)], task_status
+
+    stub_state = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_state] == ["SUPERSEDED"], stub_state
+
+    findings = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'RevalidationLabelNotRewritten'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert findings, "the C1 gate must write an audited RevalidationLabelNotRewritten finding"
+    disclosed = json.loads(str(findings[0][0]))
+    assert disclosed["reason"] == "build_file_missing", disclosed
+    assert disclosed["stub_labels"] == [], disclosed
+
+
+def test_c1_gate_logs_a_distinct_warning_once_a_round_has_refused_max_attempts_times(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+) -> None:
+    """Nit 2. Nothing surfaced a REVALIDATE round refusing forever. This reuses `tasks.
+    max_attempts` (already 3 on the row `_insert_revalidate_task` seeds -- ADR-0014's own retry-
+    budget default) as the escalation threshold rather than a bespoke parallel counter, per the
+    brief's own instruction to check for existing ladder machinery first.
+
+    Drives the SAME stuck fixture (a stub label that never gets rewritten -- D107's rewrite is
+    deliberately never called) through THREE separate claiming-loop invocations, the shape three
+    separate `fleet resume` calls would take against a genuinely-stuck round, and asserts the
+    `revalidation_round_stuck_refusing` WARNING stays silent while `refused_count` is below
+    `max_attempts` and fires once it reaches it -- with the finding's own `refused_count`
+    visibly incrementing across calls, proving the count is neither reset nor double-counted.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest = relocations(filter_repo)[_STUB_CONSUMER]
+
+    _plant_stub_labeled_build_file(monorepo, _STUB_CONSUMER, dest)
+    _supersede_stub_row(fleet, run_id)
+
+    task_id = str(uuid4())
+    _insert_revalidate_task(fleet, run_id=run_id, task_id=task_id, dest_path=dest)
+    settings = _load_settings(GlobalOptions(config_path=fleet / "config" / "fleet.yaml"))
+
+    fake = FakeBazel(fleet / "artifacts" / "fake-bazel-c1-gate-escalate")
+    cli.BAZEL_RUNNER = fake
+    refused_counts: list[int] = []
+    stuck_warnings_per_round: list[int] = []
+    try:
+        for _ in range(3):
+            with structlog.testing.capture_logs() as logs:
+                result = asyncio.run(
+                    _run_revalidation_claims_impl(
+                        settings, fleet / "state" / "fleet.db", run_id, now=cli._now()
+                    )
+                )
+            outcome = result["outcomes"][task_id]
+            assert outcome.startswith("FAILED:"), outcome
+
+            findings = query(
+                fleet,
+                "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+                "  AND kind = 'RevalidationLabelNotRewritten'",
+                (run_id, _STUB_CONSUMER),
+            )
+            disclosed = json.loads(str(findings[0][0]))
+            refused_counts.append(int(disclosed["refused_count"]))
+
+            stuck = [e for e in logs if e.get("event") == "revalidation_round_stuck_refusing"]
+            stuck_warnings_per_round.append(len(stuck))
+    finally:
+        cli.BAZEL_RUNNER = None
+
+    assert refused_counts == [1, 2, 3], refused_counts
+    assert stuck_warnings_per_round == [0, 0, 1], (
+        "the stuck-round WARNING must stay silent below max_attempts and fire once it is "
+        f"reached, exactly once per crossing round: {stuck_warnings_per_round}"
+    )

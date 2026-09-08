@@ -13411,6 +13411,7 @@ async def _run_one_revalidation_task(
     revalidation_key_value: str,
     dest_path: str,
     revalidate_root: Path,
+    max_attempts: int,
     now: datetime,
 ) -> str:
     """D104(b): claim ONE `REVALIDATE` task and, on a won claim, run its round to completion.
@@ -13422,11 +13423,19 @@ async def _run_one_revalidation_task(
     push), so this function does not trust it happened. **Below, before dispatching the worker,
     this function reads the checked-out `BUILD.bazel` itself and refuses the round (fails the
     task back to `PENDING`, writes a `RevalidationLabelNotRewritten` finding) if a stub label is
-    still present.** That gate -- not the trigger ordering alone -- is what makes
-    `verified_against_stubs` reading empty (`_active_stubs_by_consumer`, unmodified, `state =
-    'ACTIVE'` only) trustworthy: it is empty because the DB row genuinely moved to `SUPERSEDED`
-    AND the real dependency was actually built against, not merely because this loop stopped
-    asking about it (ADR-0128's whole safety argument, round VI task 79 fix round 1, C1).
+    still present, OR if the file cannot be found/read at all (round VI task 81 nit 1 -- a missing
+    or unreadable `BUILD.bazel` used to fail OPEN, admitting an un-inspectable tree).** That gate
+    -- not the trigger ordering alone -- is what makes `verified_against_stubs` reading empty
+    (`_active_stubs_by_consumer`, unmodified, `state = 'ACTIVE'` only) trustworthy: it is empty
+    because the DB row genuinely moved to `SUPERSEDED` AND the real dependency was actually built
+    against, not merely because this loop stopped asking about it (ADR-0128's whole safety
+    argument, round VI task 79 fix round 1, C1). Round VI task 81 nit 2: every refusal (either
+    reason) accumulates a `refused_count` in the `RevalidationLabelNotRewritten` finding's own
+    payload (keyed on task_id, so it survives across separate `fleet resume` invocations); once
+    `refused_count` reaches `max_attempts` (the SAME ceiling this task's own row already carries
+    -- `tasks.max_attempts`, ADR-0014's retry-budget convention -- reused rather than inventing a
+    parallel counter), a `revalidation_round_stuck_refusing` WARNING is logged so a permanently-
+    refusing round is visible rather than silently refusing forever.
     """
     claimed = await repository.claim_task_by_id(
         task_id, worker="fleet-resume-revalidate", now=now, lease_ttl_s=_REVALIDATE_LEASE_TTL_S
@@ -13456,18 +13465,49 @@ async def _run_one_revalidation_task(
 
         await writer.submit(unit)
 
-    async def refuse_stub_still_present(stub_labels: Sequence[str]) -> str:
-        """C1 (fix round 1, opus-tier review): the mechanical gate ADR-0128's whole safety
-        argument needs, made real rather than a docstring claim. Fails the task back to
-        `PENDING` (retryable -- a later `fleet pr --sync`/`fleet resume` may yet land the
-        rewrite this round needed) and writes a `RevalidationLabelNotRewritten` finding naming
-        the consumer and the still-present stub label(s), in the SAME transaction, so a refused
-        round is never silent."""
+    async def _refuse_gate(
+        reason_kind: str, outcome_detail: str, stub_labels: Sequence[str]
+    ) -> str:
+        """Shared refusal path for the C1 gate (fix round 1, opus-tier review) and both round VI
+        task 81 nits. A missing/unreadable `BUILD.bazel` and a still-present stub label are
+        different failure modes with different repair actions -- `reason_kind` (e.g.
+        `"build_file_missing"` vs `"stub_label_present"`) is disclosed distinctly in the finding
+        payload, and `outcome_detail` (the caller's own wording) is never conflated between the
+        two. Both refuse the round the same mechanical way: task back to `PENDING` (retryable --
+        a later `fleet pr --sync`/`fleet resume` may yet land the rewrite this round needed), and
+        a `RevalidationLabelNotRewritten` finding in the SAME transaction, so a refused round is
+        never silent.
+
+        Nit 2: the finding's fingerprint is task_id-keyed (unchanged from the pre-task-81 gate),
+        so BOTH reasons accumulate into the SAME `refused_count` -- an operator asking "has this
+        round been stuck" does not care which reason kept it refused. The prior count is read
+        from the finding's own payload (persists across separate `fleet resume` invocations,
+        needing no new schema column) before the upsert overwrites it.
+        """
+        fingerprint = _fingerprint(run_id, repo_id, task_id, "RevalidationLabelNotRewritten")
+        prior_rows = await _rows(
+            read_conn,
+            "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+            "  AND kind = 'RevalidationLabelNotRewritten' AND fingerprint = ?",
+            (run_id, repo_id, fingerprint),
+        )
+        prior_count = 0
+        first_refused_at = _iso(now)
+        if prior_rows:
+            try:
+                prior_payload = json.loads(str(prior_rows[0][0]))
+            except (TypeError, ValueError):
+                prior_payload = {}
+            try:
+                prior_count = int(prior_payload.get("refused_count", 0))
+            except (TypeError, ValueError):
+                prior_count = 0
+            first_refused_at = str(prior_payload.get("first_refused_at") or first_refused_at)
+        refused_count = prior_count + 1
+
         detail = (
-            f"{repo_id!r}: committed BUILD.bazel at {dest_path}/BUILD.bazel still names stub "
-            f"label(s) {stub_labels} -- D107's rewrite for this round did not land (or landed "
-            "only partially); refusing rather than promoting a consumer verified against a "
-            "tree that still names a stub"
+            f"{repo_id!r}: {outcome_detail} -- refused {refused_count} time(s) since "
+            f"{first_refused_at}"
         )
 
         async def unit(conn: aiosqlite.Connection) -> None:
@@ -13486,14 +13526,17 @@ async def _run_one_revalidation_task(
                 (
                     run_id,
                     repo_id,
-                    _fingerprint(run_id, repo_id, task_id, "RevalidationLabelNotRewritten"),
+                    fingerprint,
                     redact_text(
                         json.dumps(
                             {
                                 "repo_id": repo_id,
                                 "task_id": task_id,
                                 "dest": dest_path,
+                                "reason": reason_kind,
                                 "stub_labels": list(stub_labels),
+                                "refused_count": refused_count,
+                                "first_refused_at": first_refused_at,
                             },
                             sort_keys=True,
                         )
@@ -13503,7 +13546,52 @@ async def _run_one_revalidation_task(
             )
 
         await writer.submit(unit)
+
+        # Task 81 nit 2: once refused_count reaches this task's own max_attempts (the project's
+        # standard retry-budget ceiling, ADR-0014, already carried on tasks.max_attempts -- reused
+        # rather than a bespoke parallel threshold), log a distinct WARNING so a permanently-
+        # refusing round is visible to an operator rather than silently refusing forever. Emitted
+        # on every crossing refusal (not just the first), since the stuck state stays true until
+        # the underlying rewrite lands.
+        if refused_count >= max_attempts:
+            default_logger("fleet.stub-revalidate").warning(
+                "revalidation_round_stuck_refusing",
+                repo_id=repo_id,
+                task_id=task_id,
+                reason=reason_kind,
+                refused_count=refused_count,
+                max_attempts=max_attempts,
+                first_refused_at=first_refused_at,
+                detail=(
+                    f"{repo_id!r}: REVALIDATE task {task_id} has been refused by the C1 gate "
+                    f"{refused_count} time(s) (>= max_attempts={max_attempts}) since "
+                    f"{first_refused_at} and is not making progress -- operator attention likely "
+                    "needed (see the RevalidationLabelNotRewritten finding for the current reason)"
+                ),
+            )
+
         return f"FAILED: {detail}"
+
+    async def refuse_stub_still_present(stub_labels: Sequence[str]) -> str:
+        return await _refuse_gate(
+            "stub_label_present",
+            f"committed BUILD.bazel at {dest_path}/BUILD.bazel still names stub label(s) "
+            f"{stub_labels} -- D107's rewrite for this round did not land (or landed "
+            "only partially); refusing rather than promoting a consumer verified against a "
+            "tree that still names a stub",
+            stub_labels,
+        )
+
+    async def refuse_build_file_missing(problem: str) -> str:
+        """Nit 1: a missing/unreadable/unparseable `BUILD.bazel` refuses -- same code path as a
+        still-present stub label -- rather than reading as `""` (no stub label found -> fail
+        OPEN)."""
+        return await _refuse_gate(
+            "build_file_missing",
+            f"committed BUILD.bazel at {dest_path}/BUILD.bazel {problem} -- cannot confirm "
+            "the stub label was rewritten; refusing rather than admitting an un-inspectable tree",
+            (),
+        )
 
     branch = f"migrate/{repo_id}"
     wt = revalidate_root / repo_id
@@ -13529,21 +13617,20 @@ async def _run_one_revalidation_task(
         # property of THIS loop's own admission check, independent of whether the upstream
         # rewrite trigger actually succeeded, rather than a docstring claim resting on trigger
         # ordering alone.
-        # Disclosed, not fixed here (round VI task 79 re-review): a MISSING BUILD.bazel reads
-        # as "" -- no stub label found -- and fails OPEN rather than refusing the round. Not a
-        # live promotion path today (an empty `dest_path` also breaks `VerifyInput`, and a
-        # missing package makes a real Bazel build fail rather than silently pass), but the
-        # fail-open direction is a choice worth naming, not assuming. Separately: a permanently
-        # failing rewrite loops PENDING -> claim -> refuse indefinitely with no `attempts`
-        # ladder consumption and no escalation to REQUIRES_HUMAN_INTERVENTION (Rule 11) -- safer
-        # than silently promoting, but an operator has no automatic signal that a round has been
-        # stuck refusing forever versus merely not yet retried.
+        # Round VI task 81 nit 1 (fixed here): a missing, unreadable, or unparseable BUILD.bazel
+        # now refuses the round -- the SAME code path as "stub label still present" -- rather than
+        # reading as "" (no stub label found) and failing OPEN. An un-inspectable case is exactly
+        # as untrustworthy as a confirmed stub label: the gate cannot confirm the rewrite landed
+        # either way, so it must not admit the round on the strength of an absence it never
+        # actually checked. Nit 2 (fixed here): see `_refuse_gate`'s own docstring above for the
+        # refused_count/max_attempts escalation this refusal (and the stub-label one) now feeds.
         build_path = wt / dest_path / "BUILD.bazel"
-        build_text = (
-            await asyncio.to_thread(build_path.read_text, "utf-8")
-            if await asyncio.to_thread(build_path.exists)
-            else ""
-        )
+        if not await asyncio.to_thread(build_path.exists):
+            return await refuse_build_file_missing("is missing")
+        try:
+            build_text = await asyncio.to_thread(build_path.read_text, "utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            return await refuse_build_file_missing(f"could not be read ({exc})")
         stub_needle = f'"//{STUB_ROOT}/'
         if stub_needle in build_text:
             still_stubbed = sorted(
@@ -13693,7 +13780,7 @@ async def _run_revalidation_claims_impl(
     try:
         candidates = await _rows(
             read_conn,
-            "SELECT task_id, repo_id, revalidation_key, dest_path FROM tasks "
+            "SELECT task_id, repo_id, revalidation_key, dest_path, max_attempts FROM tasks "
             " WHERE run_id = ? AND kind = 'REVALIDATE' AND status = 'PENDING' "
             " ORDER BY created_at, task_id",
             (run_id,),
@@ -13727,6 +13814,7 @@ async def _run_revalidation_claims_impl(
                     str(row[2]),
                     str(row[3]),
                 )
+                max_attempts = int(row[4])
                 outcomes[task_id] = await _run_one_revalidation_task(
                     settings,
                     monorepo,
@@ -13739,6 +13827,7 @@ async def _run_revalidation_claims_impl(
                     revalidation_key_value=revalidation_key_value,
                     dest_path=dest_path,
                     revalidate_root=revalidate_root,
+                    max_attempts=max_attempts,
                     now=now,
                 )
         finally:
