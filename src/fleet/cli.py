@@ -1070,13 +1070,13 @@ def _unavailable(verb: str, module: str) -> NoReturn:
     """The verb has no code path: `_phase_preflight` ran, and there is nothing after it.
 
     **The message's own precondition: every caller runs `_phase_preflight` first**, which is what
-    licenses the list of validated checks. All three call sites (`plan`, `migrate`, `stubs
-    resolve`) do; a future caller that does not must not use this helper.
+    licenses the list of validated checks. Both remaining call sites (`plan`, `migrate`) do; a
+    future caller that does not must not use this helper. **`stubs resolve` used to be a third
+    call site (D130, `docs/INTEGRATION_HONESTY.md`) — it is wired now and no longer calls this.**
 
-    It deliberately asserts NOTHING about the named module. The two modules the call sites name,
-    `workers/relocate.py` and `workers/buildverify.py`, are implemented — `RelocateWorker` is
-    dispatched by `fleet transform` and `BuildverifyWorker` by `fleet build` — so the gap is a
-    missing driver in this file, not a missing worker body (D63).
+    It deliberately asserts NOTHING about the named module. `workers/relocate.py` is
+    implemented — `RelocateWorker` is dispatched by `fleet transform` — so the gap is a missing
+    driver in this file, not a missing worker body (D63).
     """
     raise CommandUnavailableError(
         f"`fleet {verb}` cannot run: this verb has no implementation in the CLI. Its "
@@ -13225,6 +13225,7 @@ async def _fire_t1_for_provider(
     *,
     policy: RevalidationPolicy,
     now: datetime,
+    operator_triggered: bool = False,
 ) -> frozenset[tuple[str, str]]:
     """T1 (`orchestrator.stubs.supersede`) for every `ACTIVE` stub naming `repo_id` as provider,
     given `provider_pr` is that provider's own durably-persisted `PullRequestDraft`.
@@ -13239,6 +13240,13 @@ async def _fire_t1_for_provider(
     with no `ACTIVE` stub, or one already `SUPERSEDED` by an earlier firing, returns `frozenset()`
     having written nothing — see `supersede()`'s own docstring for why a `SUPERSEDED` row is a
     no-op rather than a second transition.
+
+    `operator_triggered` (D130, round VI task 89): threaded verbatim to `supersede()`/
+    `plan_revalidation()`, which is what lets `fleet stubs resolve` — the only caller that ever
+    passes `True` — fire under `stubs.revalidation: manual`, per those functions' own docstrings
+    ("`manual`: nothing is enqueued; `fleet stubs resolve` is the only trigger", §3.5.1). `fleet
+    pr --sync`'s two call sites below never pass it, so their behaviour under every policy is
+    unchanged by this parameter's addition.
 
     Returns the `(consumer_repo_id, coord_key)` pairs T1 just superseded — the empty set is the
     common case (no `ACTIVE` stub names this provider) and is not a failure. D105
@@ -13271,7 +13279,11 @@ async def _fire_t1_for_provider(
     )
     t1_decisions: list[StubDecision] = []
     for stub in t1_grouped.values():
-        t1_decisions.extend(supersede_stub(stub, provider_facts, policy=policy))
+        t1_decisions.extend(
+            supersede_stub(
+                stub, provider_facts, policy=policy, operator_triggered=operator_triggered
+            )
+        )
     if not t1_decisions:
         return frozenset()
     superseded_this_call = frozenset(
@@ -13282,7 +13294,14 @@ async def _fire_t1_for_provider(
         by_consumer.setdefault(decision.consumer_repo_id, []).append(decision)
     plans: list[RevalidationPlan] = []
     for consumer_id in sorted(by_consumer):
-        plans.extend(plan_stub_revalidation(consumer_id, by_consumer[consumer_id], policy=policy))
+        plans.extend(
+            plan_stub_revalidation(
+                consumer_id,
+                by_consumer[consumer_id],
+                policy=policy,
+                operator_triggered=operator_triggered,
+            )
+        )
 
     async def t1_unit(
         conn: aiosqlite.Connection,
@@ -19316,11 +19335,145 @@ def stubs_resolve(
     revalidation: Annotated[Revalidation | None, typer.Option("--revalidation")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
 ) -> None:
-    """The manual T1 trigger: supersede a provider's ACTIVE stubs and enqueue revalidation."""
+    """The manual T1 trigger: supersede a provider's ACTIVE stubs and enqueue revalidation.
+
+    D130 (`docs/INTEGRATION_HONESTY.md`): this verb used to validate its preconditions and then
+    unconditionally raise `CommandUnavailableError`. It now reuses `_fire_t1_for_provider`
+    unchanged -- the SAME function `fleet pr --sync`'s merge-driven trigger and its D103 gap-1
+    crash-window sweep both call -- scoped to one operator-named `provider` rather than every
+    provider a `--sync` poll discovers. This is CLI-driver wiring over existing T1/REVALIDATE
+    machinery, not a new mechanism (task 85's own assessment, `docs/CRITERIA_PLAN.md` §37).
+    """
+    opts = _options(ctx)
     with _mapped_errors():
-        _phase_preflight(ctx)
-        _ = (provider, revalidation, dry_run)
-        _unavailable("stubs resolve", "src/fleet/workers/buildverify.py")
+        _, settings, run_id = _phase_preflight(ctx)
+        if revalidation is not None:
+            raise UsageError(
+                "--revalidation cannot be honoured: it names a per-call revalidation-policy "
+                "override that has no implementation in `src/` -- the same gap `fleet resume "
+                "--revalidation` refuses (see `_refuse_unbuilt_resume_flags`). "
+                "`config.stubs.revalidation` is what T1 actually reads. Re-run without it."
+            )
+        path = _require_db(opts)
+        result = _run(
+            _stubs_resolve_impl(settings, path, run_id=run_id, provider=provider, dry_run=dry_run)
+        )
+        if dry_run:
+            pairs = cast("list[str]", result["would_supersede"])
+            lines = (
+                [f"would supersede {len(pairs)} stub(s) for provider {provider}"]
+                if pairs
+                else [f"nothing to supersede for provider {provider} (no ACTIVE stub names it)"]
+            )
+        else:
+            superseded = cast("list[str]", result["superseded"])
+            lines = (
+                [
+                    f"superseded {len(superseded)} stub(s) for provider {provider}: "
+                    + ", ".join(superseded)
+                ]
+                if superseded
+                else [
+                    f"nothing to supersede for provider {provider} "
+                    "(no ACTIVE stub names it, or it is already resolved -- idempotent no-op)"
+                ]
+            )
+        _emit(opts, result, lines)
+
+
+async def _stubs_resolve_impl(
+    settings: FleetSettings,
+    path: Path,
+    *,
+    run_id: str,
+    provider: str,
+    dry_run: bool,
+) -> dict[str, object]:
+    """§3.5.1's manual T1 trigger: supersede `provider`'s ACTIVE stubs and enqueue REVALIDATE.
+
+    `provider` must already carry a durably `MERGED` `PullRequestDraft` record -- `supersede()`
+    itself requires SUCCEEDED + MERGED (ADR-0011 stacking), same as the merge-driven trigger this
+    reuses. This verb performs no forge polling of its own: `fleet pr --sync` is what discovers a
+    merge and writes that record; this verb only fires T1 off a record that already says MERGED.
+
+    Idempotent by construction, not by a special case here: `_stub_supersede_inputs`'s own
+    `state = 'ACTIVE'` scoping (inside `_fire_t1_for_provider`) makes a repeat call against an
+    already-`SUPERSEDED`/`RESOLVED` stub return `frozenset()` before opening any transaction --
+    the same mechanism that makes a `--sync` replay a no-op (§12.37's literal idempotency clause).
+
+    Passes `operator_triggered=True` to `_fire_t1_for_provider`, unlike `--sync`'s two call
+    sites: `orchestrator.stubs.supersede`/`plan_revalidation` disable the automatic trigger
+    entirely under `stubs.revalidation: manual` and require exactly this flag to fire at all
+    (§3.5.1: "`manual`: nothing is enqueued; `fleet stubs resolve` is the only trigger") -- so
+    this verb, and only this verb, is live under that policy.
+
+    `dry_run` previews the `(consumer, coord_key)` pairs currently `ACTIVE` against `provider` and
+    writes nothing -- not even a `StateWriter` session is opened.
+    """
+    conn = await connect_ro(path)
+    try:
+        known = await _rows(conn, "SELECT repo_id FROM repos WHERE repo_id = ?", (provider,))
+        if not known:
+            raise UsageError(f"no repo {provider!r} in {path}: `fleet status` lists the fleet")
+        records = await _pr_records(conn, run_id)
+        if dry_run:
+            active = await _rows(
+                conn,
+                "SELECT consumer_repo_id, stub_coord_key FROM stubs "
+                " WHERE run_id = ? AND provider_repo_id = ? AND state = 'ACTIVE'",
+                (run_id, provider),
+            )
+    finally:
+        await conn.close()
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "run_id": run_id,
+            "provider": provider,
+            "would_supersede": [f"{row[0]}→{row[1]}" for row in active],
+        }
+
+    provider_pr = next(
+        (draft for (repo_id, _contract_id), draft in records.items() if repo_id == provider),
+        None,
+    )
+    if provider_pr is None or provider_pr.state is not PrState.MERGED:
+        raise UsageError(
+            f"{provider!r} has no durably MERGED PullRequest record in run {run_id}: `fleet "
+            "stubs resolve` only supersedes a provider's ACTIVE stubs once its own PR is MERGED "
+            "(§3.5.1). `fleet pr --sync` is what discovers a merge -- run it first, or check "
+            "`fleet status` for the provider's own PR state."
+        )
+
+    now = _now()
+    policy = RevalidationPolicy(settings.config.stubs.revalidation)
+    async with StateWriter(path, owner="fleet-stubs-resolve") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            superseded = await _fire_t1_for_provider(
+                read_conn,
+                writer,
+                run_id,
+                provider,
+                provider_pr,
+                policy=policy,
+                now=now,
+                operator_triggered=True,
+            )
+        finally:
+            await read_conn.close()
+
+    label_rewrites = await _rewrite_superseded_consumer_labels(
+        settings, path, run_id=run_id, consumer_repo_ids={pair[0] for pair in superseded}
+    )
+
+    return {
+        "run_id": run_id,
+        "provider": provider,
+        "superseded": sorted(f"{consumer}→{coord_key}" for consumer, coord_key in superseded),
+        "label_rewrites": label_rewrites,
+    }
 
 
 @stubs_app.command("abandon")

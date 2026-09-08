@@ -1592,10 +1592,6 @@ UNAVAILABLE_CALL_SITES: Mapping[str, tuple[tuple[str, ...], str]] = MappingProxy
             ("migrate",),
             "src/fleet/workers/relocate.py (Phase 2 of the end-to-end run)",
         ),
-        "stubs resolve": (
-            ("stubs", "resolve", "acme-commons"),
-            "src/fleet/workers/buildverify.py",
-        ),
     }
 )
 """Every `_unavailable` call site, and the ONLY text each may put after `Related module: `.
@@ -1604,10 +1600,15 @@ A POSITIONAL whitelist, and the counterpart to `UNAVAILABLE_MESSAGE_VOCABULARY` 
 governs the message's fixed prose, this one governs its one variable field. The two partition the
 message at `Related module: ` and neither can see the other's half, which is why both are here.
 
-All three call sites are covered because the sweep that found the first escape found it in the
-shape the **`migrate`** site already uses — a parenthetical hung off the module argument — and
-`migrate` and `stubs resolve` had no test over their messages at all. Guarding only the site a
-reviewer reported is how a class survives its own fix (CLAUDE.md: sweep for the class).
+**`stubs resolve` used to be a third call site here (D130, `docs/INTEGRATION_HONESTY.md`) —
+removed (round VI task 89) once that verb was wired to real T1 machinery and stopped calling
+`_unavailable` at all.** See `tests/test_stub_resolution_task79.py` for its own real-behaviour
+coverage now.
+
+Both remaining call sites are covered because the sweep that found the first escape found it in
+the shape the **`migrate`** site already uses — a parenthetical hung off the module argument — and
+`migrate` had no test over its message at all. Guarding only the site a reviewer reported is how a
+class survives its own fix (CLAUDE.md: sweep for the class).
 
 Widening an entry to go green is the wrong response unless the new text is still a pointer and
 still says nothing about the named module — see the assertion's own failure message.
@@ -1659,7 +1660,8 @@ def test_unavailable_verb_names_a_module_without_calling_it_a_stub(
     a claim about the named module's status. Rule 11: fail loud, say where.
 
     Retargeted from `scan` to `plan` when `fleet scan` was wired to the real workers, then
-    widened to all three `_unavailable` call sites.
+    widened to all `_unavailable` call sites (once three; `stubs resolve` was wired for real in
+    round VI task 89 and dropped from `UNAVAILABLE_CALL_SITES`, see that mapping's own note).
 
     **The inverted assertion is the point.** This test previously required the word
     `NotImplementedError` to be PRESENT in the output, which is why D63 survived: the message

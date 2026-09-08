@@ -2655,6 +2655,48 @@ round itself produces zero new `migrate/C` phase-2 commits, zero LLM calls, and 
 Only once (1)-(4) all close does §12.37's literal text hold in full; wiring D130 alone is
 necessary but was wrongly stated as sufficient in this file's own pre-fix-round-1 text.
 
+**Update, round VI task 89 (2026-09-08, `dee859c`) — three of four done-bar items close; (2)
+remains the sole open residual; §12.37 stays PARTLY ADDRESSED, not DONE.** D130 is wired for
+real: `cli.stubs_resolve` now reuses `_fire_t1_for_provider` (the same function `fleet pr
+--sync` calls), scoped to one operator-named provider, plus the D107 label rewrite — see D130's
+own updated entry in `docs/INTEGRATION_HONESTY.md` for the full account, including a real
+`operator_triggered`-threading defect found and fixed during implementation (without it, neither
+`--sync` nor this verb could ever fire T1 under `stubs.revalidation: manual`).
+
+(1) **D130 itself — closed** (this task).
+(3) **Atomicity — closed.** `tests/test_stub_resolution_task79.py::
+test_stubs_resolve_fires_t1_for_real_and_is_idempotent_and_atomic` simulates a crash between the
+stub `UPDATE` and the `REVALIDATE` task `INSERT` inside T1's single `writer.submit` transaction
+(forcing `insert_revalidation_task_row` to raise) and asserts neither write survives, then
+resumes with a real, uninterrupted call.
+(4) **Exact counts — closed; the zero-cost/idempotent-repeat half — closed for the repeat-
+trigger reading; the literal "already_applied event" sub-phrase — investigated and found
+vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
+minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
+asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
+`_run_one_revalidation_task` (`cli.py:13733`) was read directly: it re-runs `VerifyPipelineWorker`
+against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
+at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —
+"zero new phase-2 commits" holds vacuously by construction, and "the revalidation_key is the
+proof" is exactly what the exact-count-plus-idempotent-repeat assertions above establish. This is
+task 89's own reading, not a re-confirmation against SPEC's original drafting intent, and is
+recorded as such rather than claimed as closure of a mechanism that was searched for and not
+found.
+(2) **Stub creation via the real CLI, combined into this same resolution chain — still open.**
+Task 89's own brief named exactly three residual pieces (atomicity, the exact count, and the
+idempotent-repeat assertion — items (3)/(4) above) and did not name this one; task 89 disclosed
+the resulting brief-vs-this-file discrepancy rather than silently narrowing scope to match the
+brief, per CLAUDE.md's Rule 13/14 discipline. `tests/test_pr_e2e.py::
+test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` still
+drives CREATION alone, never combined with the D107/REVALIDATE chain this file's own tests
+combine — that combination remains the done bar for §12.37 in full.
+
+**§12.37 is NOT flipped to DONE by this update** — item (2) above is the sole remaining
+residual, precisely scoped: combine an existing real `--stub-blocked` stub-creation dispatch
+with the existing real merge/`--sync`/`resume`/`stubs resolve` chain into one fixture (or a
+sibling reusing both fixtures' scaffolding, per this file's own prior note that "the two
+fixtures' setups are compatible in shape").
+
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
 this entry for the final piece (all 20 sub-clauses COVERED); everything below is kept as history.**

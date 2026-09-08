@@ -31,10 +31,17 @@ from fleet import cli
 from fleet.cli import (
     ExitCode,
     GlobalOptions,
+    PrState,
+    StateWriter,
     _load_settings,
+    _now,
+    _pr_records,
     _rewrite_superseded_consumer_labels,
     _run_revalidation_claims_impl,
+    _write_pr_record,
     app,
+    connect_ro,
+    insert_revalidation_task_row,
 )
 from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     _PROVIDER_LABEL,
@@ -1067,8 +1074,11 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
        == 'FULL'` (D108).
     6. Idempotency: a replay (`fleet pr --sync` again), a second `fleet resume`, and `fleet
        stubs resolve` are each driven for real and `tasks`/`stubs`/`attempts` row counts are
-       asserted unchanged across all three -- see the `fleet stubs resolve` block's own
-       comment for a DISCLOSED finding this task surfaced: that verb has zero implementation.
+       asserted unchanged across all three. As of round VI task 89 (D130), the third trigger
+       genuinely runs its resolution logic rather than being an unimplemented no-op -- see
+       `tests/test_stub_resolution_task79.py::test_stubs_resolve_fires_t1_for_real_and_is_
+       idempotent_and_atomic` (a sibling test, this same file) for the FIRST-trigger proof
+       (real supersede, exact task count, kill/resume atomicity, zero-new-commit repeat).
     """
     run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
     dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
@@ -1303,20 +1313,388 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     assert _scoped_counts() == before, ("second resume", _scoped_counts(), before)
 
     # (c) `fleet stubs resolve <provider>` -- SPEC's own literal third idempotency trigger.
-    # DISCLOSED FINDING (round VI task 85, not previously flagged by research-47): this CLI
-    # verb has ZERO implementation. `cli.stubs_resolve` validates its preconditions and then
-    # unconditionally calls `cli._unavailable("stubs resolve", ...)`, which raises
-    # `CommandUnavailableError` before touching any state-mutating code at all -- confirmed
-    # here by driving it for real rather than assumed. It genuinely adds no rows, but for a
-    # WEAKER reason than SPEC's literal text presumes ("triggering the resolution... adds no
-    # further rows" presumes the trigger actually runs its resolution logic and finds nothing
-    # to do; this trigger never reaches that logic at all). See this task's report for why
-    # §12.37 is not flipped to DONE over this residual gap.
+    # D130 (`docs/INTEGRATION_HONESTY.md`, round VI task 89): this CLI verb is now wired to the
+    # same `_fire_t1_for_provider` machinery `fleet pr --sync` uses. This time it genuinely
+    # RUNS its resolution logic (not merely fails to reach it) and finds nothing left to do --
+    # the stub is already RESOLVED, not ACTIVE, so `_stub_supersede_inputs`' own scoping makes
+    # this a real no-op, matching SPEC's literal text ("adds no further rows") for the reason it
+    # actually asks for.
     resolve_attempt = runner.invoke(
         app,
-        [*base_args(fleet), "stubs", "resolve", _STUB_PROVIDER],
+        [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER],
         catch_exceptions=False,
     )
-    assert resolve_attempt.exit_code == ExitCode.UNEXPECTED_ERROR, resolve_attempt.output
-    assert "cannot run" in resolve_attempt.output, resolve_attempt.output
+    assert resolve_attempt.exit_code == ExitCode.SUCCESS, resolve_attempt.output
+    resolve_payload = json.loads(resolve_attempt.stdout)
+    assert resolve_payload["superseded"] == [], resolve_payload
     assert _scoped_counts() == before, ("stubs resolve", _scoped_counts(), before)
+
+
+# ---------------------------------------------------------------------------------------
+# D130 (round VI task 89) -- `fleet stubs resolve` as the FIRST, genuine T1 trigger, and
+# §12.37's three residual sub-clauses (b)/(c)/(d) task 85's fix round found beyond D130's own
+# wiring: same-transaction atomicity, an EXACT REVALIDATE-row count, and a zero-new-work
+# idempotent repeat -- all through this verb specifically, matching SPEC's own literal text
+# naming it as one of the three idempotency triggers.
+# ---------------------------------------------------------------------------------------
+
+
+def test_stubs_resolve_fires_t1_for_real_and_is_idempotent_and_atomic(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """`fleet stubs resolve` as the FIRST trigger of T1 -- distinct in shape from
+    `test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end`'s own step 6c above,
+    where `stubs resolve` runs only AFTER `fleet pr --sync` has already superseded the stub (a
+    real no-op replay). This test proves the verb doing real work for the first time, and the
+    three residual sub-clauses task 85's fix round found beyond D130's own wiring gap:
+
+    (b) same-transaction atomicity -- a simulated crash mid-T1-transaction, confirming no
+        partial state (stub SUPERSEDED with no matching REVALIDATE row, or vice versa);
+    (c) an EXACT one-`REVALIDATE`-row-created assertion (`COUNT(*) = 1`, not `IS NOT NULL`);
+    (d) a zero-new-commits / zero-new-rows assertion on an idempotent repeat trigger.
+
+    **Disclosed, matching this file's own established convention** (`_insert_stub_row`/
+    `_supersede_stub_row`/`_insert_revalidate_task` above all hand-seed a precondition NOT under
+    test): the provider's `PullRequestDraft` is opened for REAL via `fleet pr`, then its `state`
+    is hand-flipped to `MERGED` via a direct `_write_pr_record` call rather than through `fleet
+    pr --sync` -- because `--sync`'s own per-repo loop ALWAYS fires T1 in the SAME call the
+    instant it observes a NEW merge (`_pr_sync_impl`'s `if status.state is PrState.MERGED`
+    branch), so driving the merge discovery through `--sync` would make T1 fire from `--sync`,
+    not from `fleet stubs resolve` under test here. This models exactly the scenario SPEC's own
+    §3.5.1 / D103 gap-1 comment names: "a stub minted... against a provider that had ALREADY
+    merged in an earlier `--sync`" -- the PR is durably MERGED and no T1 has fired for it yet,
+    which is precisely when an operator would reach for the manual `fleet stubs resolve` trigger.
+    Everything from that hand-flipped MERGED record onward -- T1 firing, the label rewrite, the
+    atomicity proof, the exact count, and the idempotent replay -- is driven through the REAL
+    `fleet stubs resolve` CLI invocation, never `_fire_t1_for_provider` called directly.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
+    branch = f"migrate/{_STUB_CONSUMER}"
+    db_path = fleet / "state" / "fleet.db"
+
+    # --- land the provider SUCCEEDED and open its real PR (same shape as steps 2/3 of the
+    # combined fixture above). ---
+    fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task89")
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        reopened = runner.invoke(
+            app,
+            [
+                *base_args(fleet),
+                "retry",
+                _STUB_PROVIDER,
+                "--reason",
+                "round VI task 89: fixed for real",
+            ],
+            catch_exceptions=False,
+        )
+        assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+        build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+        verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    provider_phase4 = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase4 == [("SUCCEEDED",)], provider_phase4
+
+    pr_opened = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER], catch_exceptions=False
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+
+    # --- hand-flip the just-opened record's state to MERGED, bypassing `--sync` (see docstring
+    # above for why `--sync` cannot be used here without firing T1 itself). ---
+    async def _mark_provider_merged() -> None:
+        conn = await connect_ro(db_path)
+        try:
+            records = await _pr_records(conn, run_id)
+        finally:
+            await conn.close()
+        draft = next(
+            d for (repo_id, _contract_id), d in records.items() if repo_id == _STUB_PROVIDER
+        )
+        merged_draft = draft.model_copy(update={"state": PrState.MERGED})
+        async with StateWriter(db_path, owner="test-seed-task89") as writer:
+            await _write_pr_record(writer, run_id, merged_draft, now=_now())
+
+    asyncio.run(_mark_provider_merged())
+
+    stub_before = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert stub_before == [("ACTIVE",)], stub_before
+    tasks_before_crash = query(
+        fleet, "SELECT COUNT(*) FROM tasks WHERE repo_id = ?", (_STUB_CONSUMER,)
+    )[0][0]
+
+    # --- (b) ATOMICITY: simulate a crash mid-T1-transaction. `insert_revalidation_task_row` is
+    # the SECOND write inside `_fire_t1_for_provider`'s single `writer.submit(t1_unit)` unit
+    # (the stub UPDATE via `_apply_stub_decisions` runs first, in the SAME `BEGIN IMMEDIATE`
+    # transaction) -- forcing it to raise proves the whole unit rolls back together, not merely
+    # that both writes land together on the happy path. ---
+    async def _boom(*_args: object, **_kwargs: object) -> str:
+        raise RuntimeError("simulated crash mid-T1-transaction (round VI task 89)")
+
+    cli.insert_revalidation_task_row = _boom  # type: ignore[assignment]
+    try:
+        crashed = runner.invoke(
+            app, [*base_args(fleet), "stubs", "resolve", _STUB_PROVIDER], catch_exceptions=True
+        )
+    finally:
+        cli.insert_revalidation_task_row = insert_revalidation_task_row  # type: ignore[assignment]
+    assert crashed.exit_code != ExitCode.SUCCESS, crashed.output
+
+    stub_after_crash = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    tasks_after_crash = query(
+        fleet, "SELECT COUNT(*) FROM tasks WHERE repo_id = ?", (_STUB_CONSUMER,)
+    )[0][0]
+    # NO PARTIAL STATE: a crash between the two writes inside the ONE transaction must leave
+    # NEITHER durable -- the stub still ACTIVE (not SUPERSEDED with no matching task) and no new
+    # `tasks` row (not a REVALIDATE row with no matching SUPERSEDED stub). Resuming after the
+    # crash (a fresh `fleet stubs resolve` call, below) reads state and task as agreeing.
+    assert stub_after_crash == [("ACTIVE",)], (
+        "state must be unchanged after a crash",
+        stub_after_crash,
+    )
+    assert tasks_after_crash == tasks_before_crash, (
+        "no partial task row after a crash",
+        tasks_after_crash,
+        tasks_before_crash,
+    )
+
+    # --- resume: a REAL, uninterrupted `fleet stubs resolve` call -- the genuine first trigger. ---
+    resolved = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert resolved.exit_code == ExitCode.SUCCESS, resolved.output
+    resolved_payload = json.loads(resolved.stdout)
+    assert resolved_payload["superseded"] == [f"{_STUB_CONSUMER}→{_STUB_COORD_KEY}"], (
+        resolved_payload
+    )
+
+    stub_after = query(
+        fleet,
+        "SELECT state, revalidation_task_id FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_after] == ["SUPERSEDED"], stub_after
+    assert stub_after[0][1], "revalidation_task_id must be stamped by real T1 (D103 gap 2)"
+
+    # --- (c) EXACT COUNT: exactly one REVALIDATE task row, not merely non-null. ---
+    revalidate_task_count = query(
+        fleet,
+        "SELECT COUNT(*) FROM tasks WHERE repo_id = ? AND kind = 'REVALIDATE'",
+        (_STUB_CONSUMER,),
+    )[0][0]
+    assert revalidate_task_count == 1, revalidate_task_count
+
+    # The D107 label rewrite fires synchronously off this trigger too, same as `--sync`'s own
+    # path -- read the ACTUAL committed tree, matching this file's established proof shape.
+    assert resolved_payload["label_rewrites"].get(_STUB_CONSUMER, "").startswith("committed "), (
+        resolved_payload
+    )
+    after_rewrite = _git_show(monorepo, f"{branch}:{dest_consumer}/BUILD.bazel")
+    assert f'"{_PROVIDER_LABEL}"' in after_rewrite, after_rewrite
+    assert f'"{_STUB_LABEL}"' not in after_rewrite, after_rewrite
+    commit_count_after_first_resolve = _git_log_count(monorepo, branch)
+
+    # --- (d) IDEMPOTENT REPEAT: a second `fleet stubs resolve` on the now-SUPERSEDED stub adds
+    # zero new commits, zero new tasks/stubs/attempts rows -- the mechanical form of "zero LLM
+    # calls", since every LLM interaction in this harness is priced onto an `attempts` row and
+    # this path (pure SQL + a deterministic label rename) has none to begin with. ---
+    before_repeat = (
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM tasks WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM stubs WHERE consumer_repo_id = ? AND provider_repo_id = ?",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM attempts WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+    )
+    repeat = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert repeat.exit_code == ExitCode.SUCCESS, repeat.output
+    repeat_payload = json.loads(repeat.stdout)
+    assert repeat_payload["superseded"] == [], repeat_payload
+    assert _git_log_count(monorepo, branch) == commit_count_after_first_resolve, (
+        "an idempotent repeat trigger must add no commit to migrate/<consumer>"
+    )
+    after_repeat = (
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM tasks WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM stubs WHERE consumer_repo_id = ? AND provider_repo_id = ?",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+        query(
+            fleet,
+            "SELECT COUNT(*) FROM attempts WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0],
+    )
+    assert after_repeat == before_repeat, (after_repeat, before_repeat)
+
+
+def test_stubs_resolve_refuses_a_provider_with_no_merged_pr(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+) -> None:
+    """`fleet stubs resolve` polls no forge itself (D130's own scope) -- a provider with no
+    durably-`MERGED` `PullRequestDraft` record is a usage error, not a silent no-op, since a
+    silent no-op here would look identical to "already resolved" and hide a real precondition
+    miss from the operator.
+
+    `resolver` requested but unused (`tests/test_build_e2e.py`'s own fixture docstring): any
+    `FakeBazel`-only test in this file that calls `_reach_active_stub_state` needs it, since a
+    missing `cli.RESOLVER_RUNNER` seam fails Phase 3's real dependency-resolution step on a host
+    lacking `uv` -- see `test_the_full_stub_lifecycle_...`'s own docstring for the full account.
+    """
+    _reach_active_stub_state(fleet, monorepo, filter_repo)
+    result = runner.invoke(app, [*base_args(fleet), "stubs", "resolve", _STUB_PROVIDER])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "no durably MERGED PullRequest record" in result.output, result.output
+
+
+def test_stubs_resolve_refuses_an_unknown_provider(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+) -> None:
+    """`resolver` requested but unused -- see the sibling test above for why."""
+    _reach_active_stub_state(fleet, monorepo, filter_repo)
+    result = runner.invoke(app, [*base_args(fleet), "stubs", "resolve", "no-such-repo"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "no repo 'no-such-repo'" in result.output, result.output
+
+
+def test_stubs_resolve_refuses_the_unbuilt_revalidation_flag(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+) -> None:
+    """`--revalidation` names a per-call policy override with no implementation anywhere in
+    `src/` (same gap `fleet resume --revalidation` refuses) -- accepting and silently ignoring
+    it would let an operator believe they had overridden the policy (Rule 11).
+
+    `resolver` requested but unused -- see `test_stubs_resolve_refuses_a_provider_with_no_merged_
+    pr`'s own docstring above for why."""
+    _reach_active_stub_state(fleet, monorepo, filter_repo)
+    result = runner.invoke(
+        app,
+        [*base_args(fleet), "stubs", "resolve", _STUB_PROVIDER, "--revalidation", "eager"],
+    )
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "--revalidation cannot be honoured" in result.output, result.output
+
+
+def test_stubs_resolve_dry_run_writes_nothing(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """`--dry-run` previews the would-be-superseded pairs and opens no `StateWriter` session."""
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+
+    fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task89-dry")
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        reopened = runner.invoke(
+            app,
+            [
+                *base_args(fleet),
+                "retry",
+                _STUB_PROVIDER,
+                "--reason",
+                "round VI task 89: dry-run coverage",
+            ],
+            catch_exceptions=False,
+        )
+        assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+        build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+        verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    pr_opened = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER], catch_exceptions=False
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+
+    async def _mark_provider_merged() -> None:
+        db_path = fleet / "state" / "fleet.db"
+        conn = await connect_ro(db_path)
+        try:
+            records = await _pr_records(conn, run_id)
+        finally:
+            await conn.close()
+        draft = next(
+            d for (repo_id, _contract_id), d in records.items() if repo_id == _STUB_PROVIDER
+        )
+        merged_draft = draft.model_copy(update={"state": PrState.MERGED})
+        async with StateWriter(db_path, owner="test-seed-task89-dry") as writer:
+            await _write_pr_record(writer, run_id, merged_draft, now=_now())
+
+    asyncio.run(_mark_provider_merged())
+
+    tasks_before = query(fleet, "SELECT COUNT(*) FROM tasks WHERE repo_id = ?", (_STUB_CONSUMER,))[
+        0
+    ][0]
+    result = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER, "--dry-run"],
+        catch_exceptions=False,
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    dry_run_payload = json.loads(result.stdout)
+    assert dry_run_payload["dry_run"] is True, dry_run_payload
+    assert dry_run_payload["would_supersede"] == [f"{_STUB_CONSUMER}→{_STUB_COORD_KEY}"], (
+        dry_run_payload
+    )
+
+    stub_after = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert stub_after == [("ACTIVE",)], "a dry run must write nothing -- the stub stays ACTIVE"
+    tasks_after = query(fleet, "SELECT COUNT(*) FROM tasks WHERE repo_id = ?", (_STUB_CONSUMER,))[
+        0
+    ][0]
+    assert tasks_after == tasks_before, "a dry run must mint no REVALIDATE task"
