@@ -6606,13 +6606,15 @@ async def _repropagate_terminal_providers(
     record of which repos are cross-wave-blocked; this sweep is the missing re-consultation of it.
 
     Cheap and a no-op in the common case (`SELECT DISTINCT ...` returns nothing when no provider
-    is on record as abandoned for this phase). For each match, re-invokes `propagate_blocked` —
-    the same, unchanged method the live containment call site uses — which inherits every safety
-    property already reviewed for it (UPDATE-only against `phases`, terminal-status skip, no
-    `BLOCKED -> BLOCKED` self-edge, union-not-replacement, idempotent per its own docstring). A
-    repo excluded by `--repo`/`only` never has a row for this sweep to find, because the pre-seed
-    pass that runs immediately before this sweep already scopes row creation to `only` — so this
-    helper needs no `only` parameter of its own.
+    is on record as abandoned for this phase). For each match, re-derives `blocked_by` using the
+    same `descendants`/`append_blocked_by` primitives `WaveScheduler.propagate_blocked` (the live
+    containment call site) uses — see the second stub-exemption note below for why this is no
+    longer a bare call to that method — inheriting every safety property already reviewed for
+    those primitives (UPDATE-only against `phases`, terminal-status skip, no `BLOCKED ->
+    BLOCKED` self-edge, union-not-replacement, idempotent per `propagate_blocked`'s own docstring).
+    A repo excluded by `--repo`/`only` never has a row for this sweep to find, because the
+    pre-seed pass that runs immediately before this sweep already scopes row creation to `only` —
+    so this helper needs no `only` parameter of its own.
 
     **`stub_blocked=True` is a hard skip, discovered by this task's own covering-set test run, not
     predicted by ADR-0130.** `orchestrator.reentry.stub_permits_removal` (§37 Blocker A,
