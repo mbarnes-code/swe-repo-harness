@@ -10678,8 +10678,9 @@ scope expansion of the task brief).
 
 ---
 
-## D130 — OPEN. `fleet stubs resolve` has zero CLI implementation — `cli.stubs_resolve` validates
-preconditions then unconditionally raises `CommandUnavailableError`
+## D130 — FIXED, LANDED (round VI task 89, `dee859c`). `fleet stubs resolve` has zero CLI
+implementation — `cli.stubs_resolve` validates preconditions then unconditionally raises
+`CommandUnavailableError`
 
 **Found by round VI task 85 (2026-09-08), while building the §12.37/§12.39 combined real-CLI
 stub-resolution fixture.** Verified free before allocating: form-agnostic sweep of
@@ -10732,3 +10733,45 @@ different mechanism). Wiring `fleet stubs resolve` (this D-number's own scope) r
 but is no longer sufficient on its own for §12.37 DONE — `docs/CRITERIA_PLAN.md` §37's done bar
 carries the corrected, fuller enumeration; this body is not rewritten, per this file's own
 "annotate, never rewrite" convention.
+
+**Fixed (round VI task 89, `dee859c`) — this D-number's own scope (the CLI verb has zero
+implementation) is closed; three of the four remaining `docs/CRITERIA_PLAN.md` §37 done-bar
+items are now also independently closed by the same task, though §12.37 itself is NOT flipped
+DONE (see that file's own updated §37 entry for the residual).** `cli.stubs_resolve` now reuses
+`_fire_t1_for_provider` unchanged, scoped to one operator-named provider, plus the D107 label
+rewrite — real supersede-and-enqueue, not a stub. A real defect was caught and fixed during
+implementation, not shipped: `_fire_t1_for_provider` never threaded `operator_triggered` to
+`orchestrator.stubs.supersede`/`plan_revalidation`, so under `stubs.revalidation: manual`
+neither `--sync` nor this verb could ever fire T1 (both functions require
+`operator_triggered=True` under that policy specifically to let this verb be the one live
+trigger, per their own docstrings) — fixed by adding the parameter (default `False`, so
+`--sync`'s two call sites are behaviourally unchanged) and threading `True` only from this verb.
+
+Of the four §37 done-bar items this file's own correction above named: **(1) D130's own wiring —
+closed** (this fix). **(3) atomicity — closed**:
+`tests/test_stub_resolution_task79.py::test_stubs_resolve_fires_t1_for_real_and_is_idempotent_
+and_atomic` simulates a crash mid-`t1_unit`-transaction (forcing `insert_revalidation_task_row`
+to raise after the stub `UPDATE` has run in the SAME `BEGIN IMMEDIATE` transaction) and asserts
+NEITHER write is durable afterward, then resumes with a real, uninterrupted call. **(4a) the
+exact-count clause — closed**: the same test asserts `COUNT(*) = 1` on the minted `REVALIDATE`
+task, not merely non-null. **(4b) the zero-new-work idempotent-repeat clause — closed for the
+repeat-trigger reading of it**: the same test's final section re-invokes `fleet stubs resolve`
+on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
+commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
+revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
+`_run_one_revalidation_task` (`cli.py:13733`) re-runs `VerifyPipelineWorker` directly against the
+already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
+there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
+SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
+structurally cannot produce a phase-2 commit), and "the revalidation_key is the proof" is what
+the exact-count-plus-idempotent-repeat assertions above already establish. This reading is
+disclosed as this task's own investigation, not a re-derivation confirmed against SPEC's
+drafting intent.
+
+**(2) stub creation via the real CLI, combined into this same resolution chain — still open**,
+and out of this task's own scope (its brief named exactly three residual pieces — atomicity,
+the exact count, and the idempotent-repeat assertion — matching (3)/(4a)/(4b) above, and did not
+name (2)). `docs/CRITERIA_PLAN.md`'s own §37 entry is the more complete, independently-corrected
+source for this item; §12.37 stays PARTLY ADDRESSED, not DONE, on that account. See this task's
+own report (`.superpowers/sdd/round-VI-criteria-closure/task-89-report.md`) for the full
+disclosure of the brief-vs-CRITERIA_PLAN discrepancy this task found and did not paper over.
