@@ -87,88 +87,25 @@ printf 'creating worktree %s on branch %s from %s\n' "$wt" "$branch" "$base"
 git -C "$primary" worktree add "$wt" -b "$branch" "$base"
 
 # ---------------------------------------------------------------------------------------
-# Provision what git-ignored state `git worktree add` cannot carry.
+# Provision what git-ignored state `git worktree add` cannot carry. Shared with
+# provision-existing.sh (the entry point for a worktree created some other way, e.g. by an
+# orchestrator's own dispatch tooling at a space-free scratch path) — see lib-provision.sh.
 # ---------------------------------------------------------------------------------------
 printf 'provisioning ignored assets\n'
-
-# tools/bin: the four wrapper SCRIPTS are tracked and arrive with the checkout; the three real
-# binaries are ignored by `tools/bin/*`. Symlinked — they are read-only executables.
-# `tools/bin/*` (no trailing slash) ignores the symlinks, so `git status` stays clean.
-for b in bazel ast-grep gh; do
-  if [ -e "$primary/tools/bin/$b" ]; then
-    ln -s "$primary/tools/bin/$b" "$wt/tools/bin/$b"
-    say "link tools/bin/$b"
-  fi
-done
-
-# The vendored toolchains (~2.2 GiB) are shared, NOT copied. The wrappers derive GOROOT/GOPATH/
-# GOCACHE/RUSTUP_HOME/CARGO_HOME from their own location, so the symlinks are all that is needed.
-#
-# The PARENT is a real directory and only the children are symlinks. This matters: .gitignore
-# says `tools/go/`, and a trailing-slash pattern matches only real directories — git treats a
-# symlink as a file, so `ln -s .../tools/go` would show up as an untracked entry.
-link_children() {
-  src=$1; dst=$2; shift 2
-  [ -d "$src" ] || return 0
-  mkdir -p "$dst"
-  for child in "$@"; do
-    [ -e "$src/$child" ] && ln -s "$src/$child" "$dst/$child"
-  done
-}
-link_children "$primary/tools/go"   "$wt/tools/go"   cache config env gopath sdk
-link_children "$primary/tools/rust" "$wt/tools/rust" cargo rustup
-say "link tools/go, tools/rust (shared GOCACHE/GOMODCACHE/CARGO_HOME — concurrency-safe)"
-
-# bazelisk: `downloads/` is a pure release-archive cache and is safe to share. `output/` is a
-# live Bazel --output_user_root (install base + MD5-keyed output bases + lock files); sharing one
-# across concurrent worktrees is exactly the reaping/locking collision this is meant to avoid, so
-# each worktree gets its own empty one.
-link_children "$primary/tools/bazelisk" "$wt/tools/bazelisk" downloads
-mkdir -p "$wt/tools/bazelisk/output"
-say "link tools/bazelisk/downloads (own tools/bazelisk/output)"
-
-# references/*/ (the third-party corpora) are NOT linked: `references/*/` is a trailing-slash
-# pattern for the same reason as above, and they are read-only citation material. Read the
-# primary's copy by absolute path if you need it.
+# shellcheck source=./lib-provision.sh
+. "$script_dir/lib-provision.sh"
+provision_worktree "$primary" "$wt"
 
 # ---------------------------------------------------------------------------------------
-# The venv.
+# Verify git status is clean. provision_worktree already checks `import fleet` resolves inside
+# the worktree and `fleet --help` runs; this check is specific to a FRESHLY created worktree
+# (an already-existing one provisioned via provision-existing.sh may legitimately be mid-work
+# and dirty, so that script does not run this check).
 # ---------------------------------------------------------------------------------------
-printf 'cloning .venv (hardlink copy, then absolute-path rewrite)\n'
-[ -d "$primary/.venv" ] || die "no $primary/.venv to clone"
-cp -al "$primary/.venv" "$wt/.venv"
-
-# Every file that names the primary by absolute path: console-script shebangs, the activate
-# scripts, pyvenv.cfg, and — the important one — _editable_impl_fleet.pth, which is a bare
-# absolute path to the primary's src/. `sed -i` writes a temp and renames, so each rewritten file
-# gets a fresh inode and the hardlink to the primary's copy is broken rather than followed.
-rewritten=0
-while IFS= read -r f; do
-  sed -i "s|$primary|$wt|g" -- "$f"
-  rewritten=$((rewritten + 1))
-done < <(grep -rlIF -- "$primary" "$wt/.venv" 2>/dev/null || true)
-say "rewrote $rewritten files"
-
-# ---------------------------------------------------------------------------------------
-# Verify. Deliberately NOT by running pytest: a full suite is ~9 minutes, and two concurrent
-# pytest sessions are unsafe on this host for disk reasons (see README.md).
-# ---------------------------------------------------------------------------------------
-printf 'verifying\n'
-
 status=$(git -C "$wt" status --porcelain)
 [ -z "$status" ] || die "worktree is not clean after provisioning:
 $status"
 say "git status clean"
-
-imported=$(cd "$wt" && ./.venv/bin/python -c 'import fleet, sys; sys.stdout.write(fleet.__file__)')
-case "$imported" in
-  "$wt"/*) say "import fleet -> $imported" ;;
-  *) die "import fleet resolved to '$imported', OUTSIDE the worktree — the editable-install
-  rewrite failed and this worktree would test the wrong source tree" ;;
-esac
-
-(cd "$wt" && ./.venv/bin/fleet --help >/dev/null) || die "fleet --help failed in $wt"
-say "fleet --help ok"
 
 digest=$(printf '%s' "$wt" | sha256sum | cut -c1-12)
 cat <<EOF
