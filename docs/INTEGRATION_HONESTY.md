@@ -8535,7 +8535,7 @@ task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never up
 so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
 that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
 finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
-fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13185`) already
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13195`) already
 implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
 durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
 and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
@@ -9334,7 +9334,10 @@ done and FakeBazel-proven, but its own real-Bazel proof needs the separate `rule
 (same as task 53's note above).
 
 **PARTLY ADDRESSED, widened further (round VI task 86, 2026-09-08) — Rust now covered; JS remains
-the only genuinely open gap.** Re-verified the constraint above fresh against this repo's actual
+the only genuinely open gap.** *(Superseded by round VI task 87's paragraph below, landed
+concurrently on a sibling branch and merged after this one — JS closed too as of that paragraph;
+left standing verbatim as the accurate record of what task 86 alone established.)* Re-verified the
+constraint above fresh against this repo's actual
 pin rather than trusting the citation: `settings.py:566` pins `rules_rust` at exactly `0.65.0`, and
 `rust/private/rust.bzl` fetched directly from the `0.65.0` tag
 (`https://raw.githubusercontent.com/bazelbuild/rules_rust/0.65.0/rust/private/rust.bzl`) confirms
@@ -9373,6 +9376,90 @@ regression cited above) is untouched by this task — out of scope, no attempt m
 unchanged for `NPM`, not a regression. Do not round the `<n> of 48` §12 count up on this account
 (same as task 53's/70's notes above) — this closes D112's Rust membership question but D112 itself
 stays PARTLY ADDRESSED until JS lands too.
+
+**JS (`NPM`) FIXED (round VI task 87).** The precedent above — "swapping `deps=` for `data=`...
+verifying `js_test` needs nothing else beyond that single-attribute fix, which was NOT verified
+here" — turned out NOT to transfer cleanly, exactly as flagged: fresh verification against the
+pinned `aspect_rules_js@3.4.0` tag (`js/private/js_binary.bzl`, `js_test = rule(attrs = dict(
+js_binary_lib.attrs, **{...}))`) found `js_test` has neither `deps` NOR `srcs` — the `srcs=`
+defect is new, D7's `js_binary` fix never had to face it, because a `js_binary`'s entry point is
+one of the UNIT's own `srcs` (already compiled by the unit's own `ts_project`), while a TEST file
+is compiled by nothing (`unit.test_srcs` is disjoint from `unit.srcs`). `js.py::test_targets()`
+now emits a second `ts_project` (`{name}_test_lib`, `testonly=True`) compiling the test source,
+and a `js_test` naming its compiled output via `data=[f":{name}_test_lib"]` — no `deps=`/`srcs=`
+at all. `declaration: True` is set on the test `ts_project` (matching the library one) not only
+for consistency: `aspect_rules_ts@3.10.0`'s own `ts_project` macro auto-emits a hidden
+`<name>_typecheck_test` `build_test` target whenever declaration emission is off, which pulled in
+a C++ toolchain resolution (`@apple_support`) this fix's own analysis proof never asked for —
+found live when a real `bazel build --nobuild` first failed on exactly that hidden target.
+`TEST_SRC_PARTITIONED_ECOSYSTEMS` (`ecosystems/base.py`) now also carries `NPM`, dispatching to a
+new `cli._is_js_test_src` (Jest's own default `testMatch` convention — `*.test.ts(x)`/
+`*.spec.ts(x)` by basename, or anything under `__tests__/`) via `cli._TEST_SRC_PREDICATES`.
+
+Proven at both tiers this entry's own precedent (task 53/70) established. **FakeBazel tier:**
+`tests/test_build_e2e.py::test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target` —
+old-fails/new-passes via the backup-file method (never `git stash`): pre-fix reproduces this
+entry's own pre-fix shape exactly (no `js_test(` in the body, the test file swallowed into the
+library `ts_project`'s own `srcs=[...]`); post-fix asserts a real `js_test(` plus a real
+`{name}_test_lib` `ts_project`, neither `deps` nor `srcs` naming the `js_test` block, and the
+library `ts_project`'s `srcs` no longer carrying the test file. **Real-Bazel tier (D7's own proof
+shape, widened):** `tests/test_bazel.py::test_real_bazel_analyses_the_generated_js_test` — TWO
+negative controls, not one (`deps=` re-spliced onto `js_test` fails real analysis with "no such
+attribute 'deps' in 'js_test' rule"; `srcs=` re-spliced fails with "no such attribute 'srcs' in
+'js_test' rule"), then the generated pair passes real `bazel build --nobuild` analysis and
+`bazel query 'labels(data, //<dest>:widgets_test)'` resolves to the compiled test's `ts_project`
+label, as Bazel itself resolved it — not as the adapter spelled it. `tests/test_bazel.py::
+test_real_bazel_analyses_the_generated_js_binary` (D7's own test) re-run alongside it, unchanged,
+confirming no regression to the sibling fix. `tests/test_ecosystems.py`'s JS unit test
+(`test_js_maps_a_scoped_npm_package_to_ts_targets`) updated for the new two-target
+`test_targets()` return shape (a `(ts_project, js_test)` tuple, not a one-element `js_test` alone)
+and re-verified 90/90 in that file. Full fast-tier regression across every file this task touched
+(`tests/test_build_e2e.py`, `tests/test_bazel.py`, `tests/test_ecosystems.py`, whole files, no
+`-k`, `-m "not integration"`): **201 passed, 0 failed.** `ruff format`/`ruff check`/`mypy` (no
+path arguments) all clean.
+
+**Merge note (round VI, controller, 2026-09-08): this paragraph was drafted on a branch cut before
+task 86's Rust fix landed, so its "Rust remains the ONLY open ecosystem slice" framing (accurate
+of that branch alone) is corrected here rather than left to stand false.** Both `CARGO` and `NPM`
+are now `TEST_SRC_PARTITIONED_ECOSYSTEMS` members — **every named ecosystem slice of D112 is now
+closed.** JVM's own real-Bazel proof remains separately blocked on D121's `rules_java` `bazel_dep`
+gap, as this entry already recorded above — that is the one genuinely open piece of D112 remaining.
+Do not round the `<n> of 48` §12 count up on this account — §12.11's Task B (`docs/
+CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, tracked there.
+
+**Correction, 2026-09-08 (round VI task 87 review, fix round 1).** The paragraph above describes
+`cli._is_js_test_src` as matching "`*.test.ts(x)`/`*.spec.ts(x)` by basename, or anything under
+`__tests__/`". That is what landed at `41369ad` and it was wrong twice; the sentence is left
+standing as the record of what that commit did, and both defects are corrected in the fix commit
+this paragraph heads. Neither was caught by that commit's own real-Bazel proof, and the reason is
+worth keeping: `bazel build --nobuild` is **analysis only**, so a `js_test` naming a wrong-but-
+existing label analyses green — the instrument could not move under either defect.
+
+* **`__tests__/` matched any suffix, and a matched non-source file was then LOST.** It is the one
+  predicate in `_TEST_SRC_PREDICATES` keyed on a directory rather than a basename, so unlike
+  `_is_python_test_src` (always `.py`) it could match a file `JsAdapter` does not compile. Such a
+  path left `unit.srcs` for `unit.test_srcs`, `test_sources()`'s `accepts_src` filter then dropped
+  it, and `non_source_files()` — which reads `unit.srcs` alone — could no longer see it either.
+  Measured both sides at `f45e75f` and `41369ad` over the same input: a Jest-default
+  `__tests__/__snapshots__/x.snap` was carried in the library `ts_project`'s `data=` before and
+  appeared **nowhere in the generated `BUILD.bazel`** after, against `base.py::non_source_files`'s
+  own stated contract ("Refused files are carried, not dropped"). The clause now requires
+  `.ts`/`.tsx`, which puts every refused file back in `srcs` where `non_source_files()` carries it.
+* **`entry_point` took `test_srcs[0]`, which is a SORT, not a choice.** `package_relative` sorts
+  and `_` (0x5F) precedes `s` (0x73), so in any repo with a `__tests__/` directory the entry point
+  was deterministically the alphabetically-first file there — a helper, or a fixture. The observed
+  artefact was `js_test(entry_point = "__tests__/fixture.json")`: green `bazel build`, a test
+  target Node cannot start, which is the exact failure the pre-task-87 `test_targets()` docstring
+  warned about and which that task's rewrite had deleted. `js.py::_test_entry_point` now requires
+  a compiled `.ts(x)` and prefers a `*.test.*`/`*.spec.*` basename, and the warning is restored.
+
+Proven by two new discriminators, each the unique discriminator of one of the above:
+`tests/test_ecosystems.py::test_js_picks_the_test_file_as_the_entry_point_not_the_first_path`
+(four cases, one per mutation, including the `.json`-first case `--nobuild` cannot see), and the
+`__tests__/helper.ts` + `__tests__/__snapshots__/index.test.ts.snap` pair added to
+`test_build_e2e.py`'s `acme-widgets-ts` fixture, which makes
+`test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target` fail on both defects. **This
+correction does not change the `<n> of 48` §12 count either way.**
 
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found

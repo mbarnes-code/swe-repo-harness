@@ -1235,6 +1235,43 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
         ),
         "tests/common/mod.rs": ("#[allow(dead_code)]\npub fn unused_helper() {}\n"),
     },
+    #: D112, round VI task 87: `acme-ui-ts`/`acme-report-ts` above (like every other JS fixture in
+    #: this file) ship zero `*.test.ts` files, so `test_sources()` has always returned `[]` for
+    #: every real-Bazel run this suite has ever done, exactly as `acme-widgets-py`/`-jvm` were for
+    #: Python/JVM. This is the first JS fixture with a real test file, named by the Jest-style
+    #: `*.test.ts` convention this task decided (`docs/INTEGRATION_HONESTY.md`'s `## D112` entry,
+    #: `_is_js_test_src` in `cli.py`). Zero declared dependencies, deliberately: `js.py`'s
+    #: `test_targets()` now emits a SECOND `ts_project` (`{name}_test_lib`) to compile the test
+    #: file before `js_test` can name its output as `entry_point` — a repo with an `@npm` hub would
+    #: exercise `_needs_npm_hub`/`workspace_deps` too, which is D10/D12 territory this fixture has
+    #: no need to re-prove.
+    #:
+    #: **The `__tests__/` pair is not decoration (round VI task 87 review, fix round 1).** Jest's
+    #: default layout puts helpers and `__snapshots__/*.snap` under `__tests__/`, and
+    #: `_is_js_test_src` is the one predicate keyed on a DIRECTORY rather than a basename — so
+    #: this is the only fixture shape that can express either bug the review found: the `.snap`
+    #: being silently dropped from the BUILD file entirely (it must stay carried as the library
+    #: `ts_project`'s `data`), and `entry_point` picking the alphabetically-first path — which
+    #: `__tests__/helper.ts` IS, since `package_relative` sorts and `_` (0x5F) < `s` (0x73) —
+    #: instead of the actual test. Remove either file and the covering test below certifies both
+    #: defects green.
+    "acme-widgets-ts": {
+        "package.json": json.dumps(
+            {"name": "acme-widgets-ts", "version": "0.1.0", "dependencies": {}}, indent=2
+        ),
+        "src/index.ts": (
+            "export function double(value: number): number {\n  return value * 2;\n}\n"
+        ),
+        "__tests__/helper.ts": "export const EXPECTED = 42;\n",
+        "__tests__/__snapshots__/index.test.ts.snap": "exports[`double doubles 21`] = `42`;\n",
+        "src/index.test.ts": (
+            "import { double } from './index';\n"
+            "\n"
+            "if (double(21) !== 42) {\n"
+            "  throw new Error('double(21) !== 42');\n"
+            "}\n"
+        ),
+    },
 }
 
 
@@ -3339,6 +3376,97 @@ def test_a_rust_repo_with_a_real_test_file_gets_a_real_rust_test_target(
     assert '"src/lib.rs"' in library_body, library_body
     assert '"tests/common/mod.rs"' in library_body, library_body
     assert '"tests/widgets.rs"' not in library_body, library_body
+
+
+def test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """D112 (round VI task 87), over `FakeBazel`: a JS/TS repo with a real `*.test.ts` gets a real
+    `js_test` target backed by a compiled `ts_project`, and the test file is NOT also part of the
+    library `ts_project`'s `srcs`.
+
+    **The discriminator.** Before this task's fix, `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+    (`ecosystems/base.py`) had no `NPM` member, so `_partition_test_srcs` always took its
+    `ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS` branch for JS units and returned
+    `(list(srcs), [])` unconditionally — `test_srcs` stayed `()`, `js.py:test_targets()`'s `if not
+    test_srcs: return []` guard always fired, and `generate_targets()`'s `ts_project` swallowed
+    `src/index.test.ts` into its own `srcs` instead (nothing partitioned it out, since `sources()`
+    reads `unit.srcs` verbatim). So pre-fix this assertion set is exactly reversed: no `js_test(`
+    in the body, and the test file present in the library `ts_project`'s `srcs=[...]` list. This
+    is the JS half of `D112` in `docs/INTEGRATION_HONESTY.md`, and this task's report records the
+    revert-and-rerun that proves it.
+
+    **Two targets, not one — the shape D7's precedent alone did not anticipate.** Unlike
+    Python/JVM, `js_test` cannot compile `.ts` itself (it is a `rules_js` *runtime* rule, exactly
+    like `js_binary`), so the fix also emits a `{name}_test_lib` `ts_project` compiling the test
+    file, and `js_test` depends on it via `data=` rather than `deps=`/`srcs=` — neither of which
+    exists on `js_test` (see `js.py::test_targets()`'s own docstring).
+
+    **Two further discriminators, added in fix round 1 after review found the first version of
+    this fix reintroduced the failure it existed to close.** Both need the fixture's `__tests__/`
+    pair and neither is expressible without it:
+
+    * `entry_point` must be `src/index.test.js`, NOT `__tests__/helper.js`. The pre-fix-round
+      selector took `test_srcs[0]`, and `package_relative` sorts, so `__tests__/…` won on every
+      repo with that directory — the emitted `js_test` ran a helper, or (with a `.json` fixture
+      first) a file Node cannot execute at all. `--nobuild` analysis is blind to this by
+      construction: the wrong label resolves perfectly well, so only an assertion on WHICH file
+      was selected can catch it, which is why it lives here and not only in `test_bazel.py`.
+    * `__tests__/__snapshots__/index.test.ts.snap` must still appear, carried as the library
+      `ts_project`'s `data`. The pre-fix-round `__tests__/` predicate matched it, moved it out of
+      `srcs` into `test_srcs`, and `test_sources()`'s `accepts_src` then dropped it while
+      `non_source_files()` (reading `unit.srcs` alone) could no longer see it — the file vanished
+      from the generated package entirely, against `base.py::non_source_files`'s own stated
+      contract that refused files are carried rather than dropped.
+    """
+    add_repos(fleet, ["acme-widgets-ts"])
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dest = relocations(filter_repo)["acme-widgets-ts"]
+    body = (build_worktree(fleet, "acme-widgets-ts") / dest / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert "js_test(" in body, body
+    assert 'name = "acme-widgets-ts_test"' in body, body
+    assert 'name = "acme-widgets-ts_test_lib"' in body, body
+    assert '"src/index.test.ts"' in body, body
+    # D7, widened: neither `deps` nor `srcs` may appear on the `js_test` block itself.
+    test_start = body.index("js_test(\n")
+    test_end = body.index("\n)", test_start) + len("\n)")
+    js_test_body = body[test_start:test_end]
+    assert "deps" not in js_test_body, js_test_body
+    assert "srcs" not in js_test_body, js_test_body
+    assert 'data = [\n        ":acme-widgets-ts_test_lib",\n    ],' in js_test_body, js_test_body
+
+    # The library `ts_project` still exists (`src/index.ts` is real library source) but its
+    # `srcs` no longer swallows the test file — the half a test asserting ONLY "a `js_test`
+    # exists" would miss entirely.
+    library_start = body.index("ts_project(")
+    library_body = body[library_start:test_start]
+    assert '"src/index.ts"' in library_body, library_body
+    assert '"src/index.test.ts"' not in library_body, library_body
+
+    # Fix round 1, discriminator 1: the entry point is the TEST, not the alphabetically-first
+    # path. `__tests__/helper.ts` sorts first and is what the pre-fix-round selector chose.
+    assert 'entry_point = "src/index.test.js"' in js_test_body, js_test_body
+    assert "__tests__" not in js_test_body, js_test_body
+    # ...and the helper is still COMPILED, just not run: dropping it would be the sibling defect.
+    lib_start = body.index('name = "acme-widgets-ts_test_lib"')
+    assert '"__tests__/helper.ts"' in body[lib_start:], body[lib_start:]
+
+    # Fix round 1, discriminator 2: a refused file under `__tests__/` is CARRIED, not dropped.
+    # `base.py::non_source_files` — "Refused files are carried, not dropped".
+    snap = '"__tests__/__snapshots__/index.test.ts.snap"'
+    assert snap in body, f"the snapshot vanished from the generated package entirely:\n{body}"
+    assert snap in library_body, (
+        "the snapshot must be carried by the LIBRARY ts_project's `data` (it is refused by "
+        f"`accepts_src`, so it can live nowhere else):\n{library_body}"
+    )
 
 
 def test_destinations_come_from_the_adapters_not_from_the_driver(

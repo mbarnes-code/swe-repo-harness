@@ -707,48 +707,51 @@ def reset_adapters() -> None:
 
 
 TEST_SRC_PARTITIONED_ECOSYSTEMS: Final[frozenset[Ecosystem]] = frozenset(
-    {Ecosystem.PYPI, Ecosystem.MAVEN, Ecosystem.GRADLE, Ecosystem.CARGO}
+    {Ecosystem.PYPI, Ecosystem.MAVEN, Ecosystem.GRADLE, Ecosystem.CARGO, Ecosystem.NPM}
 )
-"""D112 (round VI task 53, widened round VI task 70, widened round VI task 86): the ecosystems
-whose discovered `srcs` `cli._partition_test_srcs` splits into `(srcs, test_srcs)` before a
-`BuildUnit` exists. `test_targets()` already reads `test_sources()` correctly for every adapter,
-and a per-ecosystem test-file convention has now been decided for Python
-(`cli._is_python_test_src`), JVM — both `MAVEN` and `GRADLE`, `jvm.py`'s one adapter for two
-manifest formats (`cli._is_jvm_test_src`) — and Rust (`cli._is_rust_test_src`: a `.rs` file
-directly under `tests/`, Cargo's own integration-test convention).
+"""D112 (round VI task 53, widened round VI task 70 for JVM, round VI task 86 for Rust, round VI
+task 87 for JS): the ecosystems whose discovered `srcs` `cli._partition_test_srcs` splits into
+`(srcs, test_srcs)` before a `BuildUnit` exists. `test_targets()` already reads `test_sources()`
+correctly for every adapter, and a per-ecosystem test-file convention has now been decided for
+Python (`cli._is_python_test_src`), JVM (`cli._is_jvm_test_src`, both `MAVEN` and `GRADLE` —
+`jvm.py`'s one adapter for two manifest formats), Rust (`cli._is_rust_test_src`: a `.rs` file
+directly under `tests/`, Cargo's own integration-test convention), and JS
+(`cli._is_js_test_src`).
 
-**`CARGO` (Rust) needed its adapter reshaped before it could join this table, not just a
-predicate.** `rust.py::test_targets()` used to emit ONE `rust_test(crate = ":<lib>", srcs =
-test_srcs, ...)`, and `rules_rust`'s own `_rust_test_impl` (`rust/private/rust.bzl`, verified
-against the pinned `rules_rust@0.65.0` tag) hard-fails analysis the instant BOTH `crate` and a
-non-empty `srcs` are set on the SAME target: `"rust_test.crate and rust_test.srcs are mutually
-exclusive"`. Round VI task 86's fix split this into what Cargo itself already treats as two
-different things: the unconditional `crate = ":<lib>"` target stays (`#[cfg(test)]` unit tests
-compile as part of the library crate, never via `srcs=`) and each `tests/*.rs` integration-test
-file now gets its OWN separate `rust_test(srcs = [file], deps = [":<lib>", ...])` target — never
-combined with `crate=` on the same target, so the mutual-exclusivity check `_rust_test_impl` runs
-cannot fire. This is not a Bazel-ism worked around; it is the same split Cargo's own compiler
-already makes (each `tests/` file is its own independently-linked test binary).
+**Both `CARGO` and `NPM` needed their adapters reshaped before they could join this table, not
+just a predicate — each was a real, measured Bazel-analysis-time blocker in the adapter's OWN
+`test_targets()`, not merely an undecided file-naming convention, and adding either without first
+fixing its adapter would have turned a real `bazel build`/`bazel test` GREEN today into a hard
+analysis failure the moment a repo's walk matched a test-file predicate:**
 
-**`NPM` (JS) is the one ecosystem still deliberately NOT a member here — a real, measured
-Bazel-analysis-time blocker in the adapter's OWN `test_targets()`, not merely an undecided
-file-naming convention, and adding it without first fixing its adapter would turn a real
-`bazel build`/`bazel test` GREEN today into a hard analysis failure the moment a repo's walk
-matches a test-file predicate:**
+* **`CARGO`** (round VI task 86): `rust.py::test_targets()` used to emit ONE `rust_test(crate =
+  ":<lib>", srcs = test_srcs, ...)`, and `rules_rust`'s own `_rust_test_impl`
+  (`rust/private/rust.bzl`, verified against the pinned `rules_rust@0.65.0` tag) hard-fails
+  analysis the instant BOTH `crate` and a non-empty `srcs` are set on the SAME target:
+  `"rust_test.crate and rust_test.srcs are mutually exclusive"`. The fix split this into what
+  Cargo itself already treats as two different things: the unconditional `crate = ":<lib>"`
+  target stays (`#[cfg(test)]` unit tests compile as part of the library crate, never via
+  `srcs=`) and each `tests/*.rs` integration-test file now gets its OWN separate `rust_test(srcs =
+  [file], deps = [":<lib>", ...])` target — never combined with `crate=` on the same target, so
+  the mutual-exclusivity check `_rust_test_impl` runs cannot fire. This is not a Bazel-ism worked
+  around; it is the same split Cargo's own compiler already makes (each `tests/` file is its own
+  independently-linked test binary).
+* **`NPM`** (round VI task 87): `js.py::test_targets()` used to emit `js_test(srcs = test_srcs,
+  deps = [f":{name}", ...], ...)` — but neither attribute exists on `js_test`, which shares
+  `js_binary`'s `_ATTRS` base (`docs/INTEGRATION_HONESTY.md`'s `**D7 — FIXED, by deletion.**`
+  entry already found and fixed the sibling `deps=` defect in `js_binary`'s OWN target one
+  function up; `test_targets()`'s `js_test` was written with the same pre-D7 shape and, since
+  `test_srcs` had always been `()`, was never exercised — carrying the identical unfixed bug,
+  plus an `srcs=` defect of its own D7 never had to face, since `js_binary`'s entry point is one
+  of the unit's OWN `srcs` and a test file is compiled by nothing). `js.py::test_targets()` now
+  emits a `ts_project` compiling the test sources plus a `js_test` naming the compiled entry
+  point via `data=` — see that method's own docstring for the full account, including its
+  entry-point selection logic (`_test_entry_point`, preferring `*.test.*`/`*.spec.*` basenames
+  over blind first-file indexing).
 
-* **`NPM`**: `js.py::test_targets()` emits `js_test(srcs = test_srcs, deps = [f":{name}", ...],
-  ...)` — but `deps` is exactly the attribute `docs/INTEGRATION_HONESTY.md`'s `## D7` entry
-  already found `js_binary` (the sibling rules_js runtime rule) does NOT have
-  (`generate_targets()`'s own `js_binary` was fixed to use `data` instead, and its comment says so
-  in so many words). `test_targets()`'s `js_test` was written with the same `deps=` shape and has
-  never been exercised — `test_srcs` has always been `()` — so this is the same defect class,
-  unfixed, in a code path D7's fix never reached.
-
-Genuinely unreachable in this fleet's real-Bazel history: no test in this suite has ever built or
-run a generated `js_test` with a non-empty `srcs`, so this defect has never fired. Widening `NPM`'s
-membership here is a design decision about how to reshape `js.py::test_targets()` (`data=` instead
-of `deps=`, verified against whatever else `js_test` actually needs) — not something this table
-alone can paper over. See `docs/INTEGRATION_HONESTY.md`'s `## D112` entry.
+Both were genuinely unreachable in this fleet's real-Bazel history before their fixes: no test in
+this suite had ever built or run a generated `rust_test`/`js_test` with a non-empty `srcs`, so
+neither defect had ever fired. See `docs/INTEGRATION_HONESTY.md`'s `## D112` entry.
 
 A driver-side scoping table, not adapter capability data, so it is a flat constant here rather
 than an `EcosystemAdapter` `ClassVar`: §12.6/ADR-0100 forbid `cli.py` from naming `Ecosystem.PYPI`

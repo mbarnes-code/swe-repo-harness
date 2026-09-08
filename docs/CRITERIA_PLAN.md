@@ -738,6 +738,18 @@ literal `>= repos.baseline_test_count` clause for a sandboxed build, with no fur
 wiring owed. **Do not round up the `<n> of 48` count for §12.11 on this account alone** — Task B
 is built and proven, but gap 1 (JS/Rust/JVM slice) and gap 3 (`D116`) remain open regardless.
 
+**Gap 1 correction and narrowing (round VI task 87, 2026-09-08): "JS/Rust/JVM slice" above is
+now stale — JVM closed at round VI task 70 (this file was never updated for that landing; see
+`docs/INTEGRATION_HONESTY.md`'s `## D112` entry, which was), and this task closes the JS/`NPM`
+slice too.** `js.py::test_targets()`'s `deps=`/`srcs=` defect (the same class `**D7 — FIXED, by deletion.**` fixed for
+`js_binary`, plus a missing test-compilation step D7 never needed) is fixed and proven at both the
+FakeBazel and real-Bazel tiers — full account in `## D112`. **Gap 1 is now Rust-only.** Do not
+round up the `<n> of 48` count for §12.11 on this account — Task B's own real-Bazel proof still
+needs a nonzero test target through `real_build()`'s own path for a non-Python ecosystem (JVM's is
+separately blocked on `D121`; JS's is unblocked by this task but not yet exercised through
+`real_build()` itself — only through this task's own direct-adapter real-Bazel proof, matching D7's
+scope) and gap 3 (`D116`) remains open regardless.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.

@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import posixpath
 from collections.abc import Mapping, Sequence
+from fnmatch import fnmatch
 from typing import ClassVar, Final
 
 from fleet.ecosystems.base import (
@@ -764,28 +765,118 @@ class JsAdapter(EcosystemAdapter):
         return targets
 
     def test_targets(self, unit: BuildUnit) -> list[BuildTarget]:
-        """One `js_test` over the *compiled* test output, depending on the `ts_project`.
+        """A `ts_project` compiling the test sources, plus a `js_test` running the compiled entry
+        point via `data` — D112's JS slice (round VI task 87).
 
-        The entry point is the `.js` the transpiler emits, not the `.ts` on disk: `js_test` runs
-        Node, and pointing it at TypeScript produces a green `bazel build` and a test target that
-        cannot start.
+        **Two defects, not one, both unreachable until `test_srcs` had a real predicate feeding
+        it (round VI task 87 widened `TEST_SRC_PARTITIONED_ECOSYSTEMS` to `NPM` in the same
+        change).** `docs/INTEGRATION_HONESTY.md`'s `**D7 — FIXED, by deletion.**` entry found and
+        fixed `js_binary`'s
+        `deps=` — a `rules_js` *runtime* rule has no such attribute — and this method reused the
+        identical wrong shape one function up, unexercised (`test_srcs` was always `()`). That
+        precedent transfers directly: `js_test` shares `js_binary`'s `_ATTRS` base (`js_test =
+        rule(attrs = dict(js_binary_lib.attrs, **{"env_inherit": ..., "_lcov_merger": ...,
+        "_coverage_report": ...}))`, verified against the pinned `aspect_rules_js@3.4.0` tag's
+        `js/private/js_binary.bzl`), so `deps` is absent from `js_test` for the exact same reason.
+
+        **But `srcs` was ALSO wrong, and D7's fix never had to face it.** `js_binary`/`js_test`'s
+        shared `_ATTRS` has no `srcs` attribute either — verified against the same source — so
+        `BuildTarget(srcs=test_srcs, ...)` would have rendered a second nonexistent attribute
+        (`generators.py::render_target` emits `srcs = [...]` unconditionally whenever the list is
+        non-empty) and real Bazel would refuse the target with "no such attribute 'srcs' in
+        'js_test' rule" the moment it tried to instantiate it, one attribute past where the
+        `deps=` fix alone would have landed. **And unlike `js_binary`'s entry point — one of the
+        UNIT's own `srcs`, already compiled by the unit's own `:{name}` `ts_project` — a test file
+        is never compiled by anything: `unit.test_srcs` is disjoint from `unit.srcs`
+        (`cli._partition_test_srcs`), so `:{name}`'s `ts_project` never sees it.** `js_test`'s
+        `entry_point` names a `.js` file, so something has to transpile the `.ts` test source
+        first. The fix is therefore a second `ts_project` — `{name}_test_lib`, `testonly=True`,
+        `srcs=test_srcs`, depending on the unit's own library (for the module under test) and its
+        external labels (for whatever the test imports from `@npm`) — mirroring exactly what
+        `generate_targets()`'s `js_binary` already does for the unit's own entry point, just for
+        the test file's compilation instead of assuming one already exists.
+
+        **The entry point is the `.js` the transpiler emits, never a path off disk, and never a
+        file `ts_project` does not compile.** `js_test` runs Node: point it at TypeScript and you
+        get a green `bazel build` and a test target that cannot start — the warning this docstring
+        carried before round VI task 87 and which that task's own rewrite dropped, restored here
+        because the fix round below found the failure had come back by a wider door.
+
+        **`_test_entry_point`, not `test_srcs[0]` (round VI task 87 review, fix round 1).** Taking
+        the first element was measured wrong, not merely arbitrary: `package_relative` SORTS, and
+        `_` (0x5F) sorts before `s` (0x73), so in any repo carrying a `__tests__/` directory the
+        first element is deterministically the alphabetically-first file in THAT directory — a
+        fixture or a helper, essentially never the test. The reproduction that prompted this was a
+        generated `js_test(entry_point = "__tests__/fixture.json")`: a target real Bazel ANALYSES
+        green (the label resolves — it is a real source file) and which `bazel test` cannot start,
+        which is why `--nobuild` analysis, the proof this method's fix originally shipped with,
+        is structurally blind to it. So the selection now requires a compiled `.ts(x)` and prefers
+        a `*.test.*`/`*.spec.*` basename — Jest's own convention, the same one `cli._is_js_test_src`
+        applies on the way in. The two are deliberately NOT one shared constant: `cli.py` imports
+        only `ecosystems.base` and never a concrete adapter (§12.6/ADR-0100's confinement), so a
+        shared literal would have to cross that boundary; instead each states the convention and
+        `test_targets()` re-derives it from its OWN input rather than trusting the partitioner.
+
+        Still only ONE `js_test` per unit — a "one `js_test` per file" redesign stays out of
+        scope, exactly as task 86's Rust brief scoped an analogous question out of ITS fix. Every
+        discovered test file is still compiled (`{name}_test_lib`'s `srcs` keeps the whole list),
+        so a multi-file suite analyses correctly; only the selected file is *run*.
         """
         test_srcs = self.test_sources(unit)
         if not test_srcs:
             return []
+        entry = _test_entry_point(test_srcs)
+        if entry is None:
+            # Nothing compilable to name as `entry_point`, so there is no runnable `js_test` to
+            # emit and emitting one anyway is precisely the green-build/dead-test failure above.
+            # Unreachable from the driver — `cli._is_js_test_src` only routes `.ts(x)` here — so
+            # this is a guard on a direct caller, not a path the fleet's own walk produces, and
+            # the sources stay in `srcs`/`data` where the un-partitioned unit already had them.
+            return []
         name = target_name(unit)
+        test_lib_name = f"{name}_test_lib"
         return [
+            BuildTarget(
+                package=unit.dest,
+                name=test_lib_name,
+                rule="ts_project",
+                load_from="@aspect_rules_ts//ts:defs.bzl",
+                srcs=test_srcs,
+                deps=[f":{name}", *self.external_labels(unit)],
+                # `declaration: True` mirrors the library `ts_project` above, and here it is not
+                # only consistency: `aspect_rules_ts`'s own `ts_project` macro (verified against
+                # the pinned `aspect_rules_ts@3.10.0` tag's `ts/defs.bzl`) auto-emits a HIDDEN
+                # `<name>_typecheck_test` `build_test` target whenever declaration emission is
+                # off, which this adapter never asked for and which a `bazel build //<dest>/...`
+                # would then also analyse — verified live: dropping `declaration` here (leaving it
+                # at the rule's default `False`) makes a real `bazel build --nobuild //<dest>/...`
+                # try to resolve `widgets_test_lib_typecheck_test`, a target this adapter's own
+                # `BuildTarget` list never named.
+                attrs={
+                    "declaration": True,
+                    "tsconfig": f":{_TSCONFIG_TARGET}",
+                    "transpiler": "tsc",
+                },
+                testonly=True,
+                visibility=["//visibility:private"],
+            ),
             BuildTarget(
                 package=unit.dest,
                 name=f"{name}_test",
                 rule="js_test",
                 load_from="@aspect_rules_js//js:defs.bzl",
-                srcs=test_srcs,
-                deps=[f":{name}", *self.external_labels(unit)],
-                attrs={"entry_point": _js_output(test_srcs[0])},
+                # NO `deps`, NO `srcs` (D7, widened): `js_test` shares `js_binary`'s `_ATTRS` base
+                # and neither attribute exists on it. `data` is where the compiled test's JsInfo
+                # (and, transitively through it, the library's own JsInfo) belongs — exactly the
+                # `js_binary` shape above, pointed at the test compile unit instead of the unit's
+                # own primary target.
+                attrs={
+                    "entry_point": _js_output(entry),
+                    "data": [f":{test_lib_name}"],
+                },
                 testonly=True,
                 visibility=["//visibility:private"],
-            )
+            ),
         ]
 
     def toolchain_requirements(self) -> list[ToolchainRequirement]:
@@ -811,7 +902,44 @@ class JsAdapter(EcosystemAdapter):
 
 
 def _js_output(src: str) -> str:
-    """`src/main.ts` → `src/main.js`: the file `ts_project` emits for a TypeScript source."""
+    """`src/main.ts` → `src/main.js`: the file `ts_project` emits for a TypeScript source.
+
+    Returns a NON-TypeScript path unchanged, which is why `_test_entry_point` below has to filter
+    on the suffix rather than leaning on this: handed `__tests__/fixture.json` this answers
+    `__tests__/fixture.json`, and a `js_test` naming it analyses green and cannot start.
+    """
     if src.endswith((".ts", ".tsx")):
         return src.rsplit(".", maxsplit=1)[0] + ".js"
     return src
+
+
+_TEST_ENTRY_GLOBS: Final = ("*.test.ts", "*.test.tsx", "*.spec.ts", "*.spec.tsx")
+"""Jest's own default `testMatch` basenames — the same convention `cli._is_js_test_src` applies
+when it decides what enters `unit.test_srcs`, restated here rather than shared because `cli.py`
+imports only `ecosystems.base` and never a concrete adapter (§12.6/ADR-0100). Restating it is the
+cost of that boundary; `_test_entry_point` re-derives from its own input so the two can only
+disagree about which file RUNS, never about correctness of the emitted target."""
+
+
+def _test_entry_point(test_srcs: Sequence[str]) -> str | None:
+    """The one test source whose compiled `.js` becomes the `js_test`'s `entry_point`.
+
+    Two filters, in order, and the FIRST is the load-bearing one (round VI task 87 review, fix
+    round 1): the entry must be something `ts_project` actually transpiles, or `_js_output` hands
+    back the source path unchanged and the `js_test` names a file Node cannot execute. Among the
+    compilable ones, a Jest-convention basename wins over source order, because source order is
+    `package_relative`'s SORT and `_` (0x5F) < `s` (0x73) — so `__tests__/anything.ts` would
+    otherwise always beat `src/thing.test.ts`, making a helper the test binary's entry point.
+
+    `None` when nothing compilable is present; the caller emits no `js_test` rather than a target
+    that analyses green and dies at `bazel test`.
+    """
+    compilable = [src for src in test_srcs if src.endswith((".ts", ".tsx"))]
+    if not compilable:
+        return None
+    named = [
+        src
+        for src in compilable
+        if any(fnmatch(src.rsplit("/", 1)[-1], glob) for glob in _TEST_ENTRY_GLOBS)
+    ]
+    return (named or compilable)[0]

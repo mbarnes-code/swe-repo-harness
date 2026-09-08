@@ -10894,11 +10894,47 @@ def _is_rust_test_src(path: str) -> bool:
     return "/" not in path[len("tests/") :]
 
 
+def _is_js_test_src(path: str) -> bool:
+    """Jest's own default `testMatch` convention, restricted to what `JsAdapter.src_suffixes`
+    actually compiles: `*.test.ts(x)` / `*.spec.ts(x)` by basename, or a `.ts(x)` under a
+    `__tests__/` directory.
+
+    D112 (round VI task 87): `js.py`'s `test_targets()` now compiles `test_sources()` into a real
+    `js_test` (see that method's own docstring); this decides what counts as a JS/TS test file for
+    this fleet, mirroring `_is_python_test_src`'s role for Python and `_is_jvm_test_src`'s for JVM.
+    `.mts`/`.cts` are deliberately not matched here — `src_suffixes` accepts them but this fleet
+    has never seen one, and Jest's own default `testMatch` doesn't either; widening is a one-line
+    change if a real fixture needs it.
+
+    **The `__tests__/` clause requires a `.ts(x)` suffix, and that is a fix, not a tightening for
+    neatness (round VI task 87 review, fix round 1).** This is the ONE predicate in
+    `_TEST_SRC_PREDICATES` keyed on a *directory* rather than a basename, so unlike
+    `_is_python_test_src` (always `.py`) it can match a file the adapter does not compile — and a
+    matched path leaves `unit.srcs` for `unit.test_srcs`, where `test_sources()`'s `accepts_src`
+    filter then drops it while `non_source_files()` (which reads `unit.srcs` alone) can no longer
+    see it either. Measured: a Jest-default `__tests__/__snapshots__/x.snap` was carried in the
+    library `ts_project`'s `data=` before this predicate existed and appeared NOWHERE in the
+    generated `BUILD.bazel` after it — exactly the silent drop `base.py::non_source_files`'s own
+    docstring forbids ("Refused files are carried, not dropped"). Requiring the suffix keeps every
+    non-source file under `__tests__/` in `srcs`, where `non_source_files()` still carries it.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if "__tests__" in path.split("/")[:-1]:
+        return name.endswith((".ts", ".tsx"))
+    return (
+        fnmatch(name, "*.test.ts")
+        or fnmatch(name, "*.test.tsx")
+        or fnmatch(name, "*.spec.ts")
+        or fnmatch(name, "*.spec.tsx")
+    )
+
+
 _TEST_SRC_PREDICATES: Final[Mapping[str, Callable[[str], bool]]] = {
     "pypi": _is_python_test_src,
     "maven": _is_jvm_test_src,
     "gradle": _is_jvm_test_src,
     "cargo": _is_rust_test_src,
+    "npm": _is_js_test_src,
 }
 """`Ecosystem.value` → the predicate that decides whether one discovered source is a test file for
 that ecosystem — D112, round VI task 70's table-driven dispatch (mirrors
@@ -10923,18 +10959,16 @@ def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[lis
     Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` (round VI task 53: Python only;
     widened round VI task 70 to JVM/`MAVEN`+`GRADLE`; widened round VI task 86 to Rust/`CARGO`,
     once `rust.py:test_targets()` stopped combining `crate=` with a non-empty `srcs=` on the SAME
-    target — see that constant's docstring for the measured real-Bazel analysis-time failure this
-    predicate alone could not have fixed). JS/`NPM` is the one ecosystem still deliberately NOT a
-    member — see `TEST_SRC_PARTITIONED_ECOSYSTEMS`'s docstring for the measured real-Bazel
-    analysis-time failure (`js_test`'s `deps` reintroducing `docs/INTEGRATION_HONESTY.md`'s `## D7`)
-    a naive predicate for it would trigger. Every non-member ecosystem keeps its whole walk in
-    `srcs` exactly as before this task — `test_srcs` stays `()` for it, which is a no-op against
-    `test_sources()`'s existing (always empty) behavior. A table lookup rather than a
-    `Compare`/`Subscript` naming a bare member (round
-    VI task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two
-    adapter packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime
-    behavior. The per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same
-    table-lookup shape, keyed by `ecosystem.value` for the reason documented on that table.
+    target; widened round VI task 87 to JS/`NPM`, once `js.py:test_targets()` stopped emitting a
+    `js_test` naming attributes that rule doesn't have — see that constant's docstring for the
+    measured real-Bazel analysis-time failure each predicate alone could not have fixed). Every
+    non-member ecosystem keeps its whole walk in `srcs` exactly as before this task — `test_srcs`
+    stays `()` for it, which is a no-op against `test_sources()`'s existing (always empty)
+    behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round VI
+    task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two adapter
+    packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime behavior.
+    The per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same table-lookup
+    shape, keyed by `ecosystem.value` for the reason documented on that table.
     """
     if ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS:
         return list(srcs), []

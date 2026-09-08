@@ -385,8 +385,21 @@ def test_js_maps_a_scoped_npm_package_to_ts_targets() -> None:
     assert binary.attrs["data"] == [f":{library.name}"]
     assert library.deps == ["//ts/acme/tokens:tokens", "//ts/acme/ui:node_modules/react"]
 
-    (test,) = adapter.test_targets(unit)
+    # D112 (round VI task 87): `js_test` cannot compile `.ts` itself (no `srcs` attribute, like
+    # `js_binary`), so the test source is compiled by a SEPARATE `ts_project` (`{name}_test_lib`)
+    # first, and `js_test` names its output via `data=`, mirroring `js_binary`'s own D7 shape.
+    test_lib, test = adapter.test_targets(unit)
+    assert (test_lib.rule, test_lib.name, test_lib.testonly) == ("ts_project", "ui_test_lib", True)
+    assert test_lib.srcs == ["src/Button.spec.ts"]
+    assert test_lib.deps == [f":{library.name}", "//ts/acme/ui:node_modules/react"]
     assert (test.rule, test.name, test.testonly) == ("js_test", "ui_test", True)
+    # D7, widened: neither `deps` nor `srcs` exists on `js_test` (it shares `js_binary`'s
+    # `_ATTRS`); the compiled test's `ts_project` reaches the runtime via `data=` instead.
+    assert test.deps == []
+    assert test.srcs == []
+    assert test.attrs["data"] == [f":{test_lib.name}"]
+    assert test.attrs["entry_point"] == "src/Button.spec.js"
+
 
     # D10: `tsconfig = ":tsconfig"` on the library is a label into this package, and the target it
     # names is emitted beside it. Before, it named nothing and every generated TS package failed
@@ -412,6 +425,61 @@ def test_js_maps_a_scoped_npm_package_to_ts_targets() -> None:
     assert store.load_from == "@npm//:defs.bzl"
     assert store.visibility == [], "the macro takes no visibility attribute; passing one is a load"
     assert adapter.external_labels(unit) == [f"//{unit.dest}:{links.name}/react"]
+
+
+def test_js_picks_the_test_file_as_the_entry_point_not_the_first_path() -> None:
+    """`js_test.entry_point` names a COMPILED test, never merely the first `test_srcs` entry.
+
+    **Why this is its own test and not one more assertion above.** The test above has a single
+    test source, so its two candidate rules — "first element" and "the Jest-named one" — pick the
+    same file: it is a two-anchor case whose anchors coincide, and it passes unchanged under the
+    exact defect this one exists to catch. Only a unit with SEVERAL test sources, at least one of
+    them neither Jest-named nor compilable, can express it.
+
+    Each case below is the unique discriminator of one mutation (round VI task 87 review, fix
+    round 1):
+
+    * `helper` — `__tests__/helper.ts` sorts before `src/…` (`package_relative` sorts, `_` is
+      0x5F and `s` is 0x73), so `test_srcs[0]` selects a helper and the emitted `js_test` runs a
+      module with no assertions in it: green `bazel test`, nothing tested. Reddens
+      `_test_entry_point` → `test_srcs[0]`.
+    * `fixture` — a `.json` under `__tests__/` is accepted by `accepts_src` (rules_ts resolves
+      JSON), survives into `test_srcs`, and sorts first. `_js_output` returns a non-`.ts` path
+      UNCHANGED, so `test_srcs[0]` here yields `entry_point = "__tests__/fixture.json"`: a label
+      real Bazel resolves, analyses green, and cannot start under `bazel test`. This is the case
+      `--nobuild` analysis is structurally blind to, and the one actually observed in review.
+      Reddens both `test_srcs[0]` and dropping the `.endswith((".ts", ".tsx"))` filter.
+    * `nothing compilable` — no `js_test` at all rather than one naming a file Node cannot run.
+      Reddens `return (named or compilable or test_srcs)[0]`, the tempting fallback.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+
+    def entry_point_for(test_srcs: list[str]) -> str | None:
+        unit = BuildUnit(
+            unit_id="acme-ui",
+            ecosystem=Ecosystem.NPM,
+            dest="ts/acme/ui",
+            srcs=["ts/acme/ui/src/Button.ts"],
+            test_srcs=[f"ts/acme/ui/{src}" for src in test_srcs],
+            published=Coordinate(ecosystem=Ecosystem.NPM, group="@acme", name="ui"),
+        )
+        targets = adapter.test_targets(unit)
+        if not targets:
+            return None
+        _, test = targets
+        entry = test.attrs["entry_point"]
+        assert isinstance(entry, str)
+        return entry
+
+    # helper: sorts first, is compilable, but is not the test.
+    assert entry_point_for(["__tests__/helper.ts", "src/Button.spec.ts"]) == "src/Button.spec.js"
+    # fixture: sorts first and is not compilable at all — `_js_output` would pass it straight
+    # through as `entry_point`, which is the observed defect.
+    assert entry_point_for(["__tests__/fixture.json", "src/Button.test.ts"]) == "src/Button.test.js"
+    # nothing compilable: no runnable entry exists, so no `js_test` is emitted.
+    assert entry_point_for(["__tests__/fixture.json"]) is None
+    # no Jest-named file at all: fall back to a compilable one rather than emitting nothing.
+    assert entry_point_for(["__tests__/helper.ts"]) == "__tests__/helper.js"
 
 
 def test_a_first_party_sibling_is_linked_as_an_npm_package_not_only_as_a_label() -> None:
