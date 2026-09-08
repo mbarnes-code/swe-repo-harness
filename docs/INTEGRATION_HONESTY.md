@@ -8597,6 +8597,24 @@ lines below the check silently absorbs exactly that case, with no flag raised. T
 follow-on debt, not solved — `_rewrite_one_consumer_label`'s own docstring now states this
 precisely (fix round 1) rather than claiming mechanical equivalence.
 
+**Correction, 2026-09-08 (round VI task 81) — the C1 gate's two remaining disclosed nits (the fix
+round 1 docstring's own "Disclosed, not fixed here" paragraph in `_run_one_revalidation_task`) are
+now fixed, not merely disclosed.** Nit 1: a missing, unreadable, or unparseable committed
+`BUILD.bazel` used to read as `""` (no stub label found) and fail OPEN, letting the round proceed
+un-inspected; it now refuses via the SAME `_refuse_gate` path as a still-present stub label, with a
+distinct `reason: "build_file_missing"` in the finding payload so the two repair actions are never
+conflated. Nit 2: a permanently-refusing round used to loop PENDING -> claim -> refuse forever with
+no operator-visible signal; the `RevalidationLabelNotRewritten` finding now carries a
+`refused_count`/`first_refused_at` that survives across separate `fleet resume` invocations
+(task_id-keyed, read from the finding's own prior payload — no new schema column), and once
+`refused_count` reaches the task's own `tasks.max_attempts` (reused, not a bespoke parallel
+counter), a `revalidation_round_stuck_refusing` WARNING is logged. Proven by
+`tests/test_stub_resolution_task79.py::
+test_c1_gate_refuses_a_revalidate_round_whose_build_bazel_is_missing` and `::
+test_c1_gate_logs_a_distinct_warning_once_a_round_has_refused_max_attempts_times` (old-fails/new-
+passes against a backed-up pre-fix `cli.py`, task-81 report). I4's own narrowing above is
+UNTOUCHED by this round — a different, still-open disclosed gap.
+
 ## D108 — FIXED, LANDED (round VI task 79, `4ead8f9`). `StubDecision.consumer_status` has zero production readers — `_apply_stub_decisions`
 writes only `stubs`/`findings`, never `phases`
 
