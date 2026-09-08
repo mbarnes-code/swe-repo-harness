@@ -14073,3 +14073,60 @@ place with a dated marker per this project's own "annotate, never rewrite" disci
 §7, the `docs/INTEGRATION_HONESTY.md` status-heading convention) — the entry's overall verdict
 (OPEN; no CLI surface; no writer function; no production call site) remains correct and needs no
 other change.
+
+## ADR-0126 — D122: a contract's own PR record coexists with its owning repo's PR record via a
+compound in-memory key; no schema/index migration
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D122 (found by round VI task-71's fix round,
+2026-09-07) found that `_upsert_pr_record` (`src/fleet/cli.py`) computes its fingerprint as
+`_fingerprint(run_id, draft.repo_id, PR_RECORD_KIND)` — a pure function of `repo_id` and kind,
+with no `contract_id` component — and writes through `findings`' own unique index
+`ux_findings_ident` (`state/schema.sql:422`, `ON findings (run_id, IFNULL(repo_id, ''), kind,
+fingerprint)`). `PullRequestDraft.repo_id`'s own docstring states that for a contract PR this is
+the OWNING repo — so a contract's migration PR and its owning repo's own migration PR would share
+one `repo_id`, hence one fingerprint, hence one `findings` row: the second write silently
+overwrites the first. `_pr_records` (`cli.py`) then reads this table into a `dict[str,
+PullRequestDraft]` keyed by `repo_id`, so even if both rows somehow persisted, only one could ever
+be surfaced per repo. No production code path constructs a `PullRequestDraft` with `contract_id`
+set today (zero live call sites), so this is a disclosed gap ahead of any wiring task hitting it,
+not an observed defect.
+
+**Decision: extend the existing key shapes to include `contract_id`; no schema or index
+migration.** The unique index's columns (`run_id`, `repo_id`, `kind`, `fingerprint`) do not need
+to change — `fingerprint` is already an opaque value computed by `_fingerprint()`, so widening
+what feeds into it is sufficient and additive.
+
+1. `_fingerprint`'s call site in `_upsert_pr_record` gains `draft.contract_id` as an input:
+   `_fingerprint(run_id, draft.repo_id, PR_RECORD_KIND, draft.contract_id or "")`. A repo-owned PR
+   (`contract_id is None`) computes byte-identical to today's fingerprint (the empty-string
+   sentinel matches this project's existing `IFNULL(repo_id, '')` convention for "absent"), so
+   every existing call site and every existing test is unaffected. A contract's PR (`contract_id`
+   set) now gets a distinct fingerprint from its owning repo's own PR even though both share
+   `repo_id`, so both rows persist under `ux_findings_ident` without collision.
+2. `_pr_records`'s return type widens from `dict[str, PullRequestDraft]` (keyed by `repo_id`) to
+   `dict[tuple[str, str | None], PullRequestDraft]` (keyed by `(repo_id, contract_id)`). Every
+   existing caller passes/reads `contract_id=None` for a repo-owned PR, which is a mechanical,
+   type-checked rename at each call site — `mypy --strict` will flag every site that needs
+   updating; there is no way to silently miss one.
+3. No new column, no new table, no schema migration. `PullRequestDraft` already has (or gains, if
+   it does not yet — verify against current `HEAD` before assuming) a `contract_id: str | None`
+   field; if it does not exist yet, add it as an optional field defaulting to `None`, matching
+   every other optional identifying field on that model.
+
+**Why not a separate table or a compound DB column instead.** A second table would duplicate
+`findings`' write/read/audit machinery for a case that differs from an ordinary PR record only in
+having one more identifying dimension — this project's own Simplicity-First rule (CLAUDE.md Rule
+2) favors the additive, in-place widening over a parallel structure for a case with zero current
+call sites. A dedicated `contract_id` *column* on `findings` (rather than folding it into the
+opaque fingerprint) was considered and rejected: `findings` is a shared table serving many unrelated
+kinds, and adding a nullable column used by exactly one kind is a wider blast radius than widening
+one kind's own fingerprint computation and one kind's own read-side dict key.
+
+**Scope.** This ADR authorizes the mechanism above. It does **not** itself wire any production
+call site that constructs a `PullRequestDraft` with `contract_id` set — that remains genuinely
+unbuilt (D122's own disclosed scope), and is task-75's job.
+
+**Rulings not made here, left to task-75 if they arise:** whether `contract_id` needs its own
+index for read performance (no evidence of a performance concern exists; do not add one
+speculatively — CLAUDE.md Rule 2); whether any other reader of `_pr_records` beyond the ones
+`mypy --strict` finds needs special-casing.

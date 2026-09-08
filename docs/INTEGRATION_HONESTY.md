@@ -9602,6 +9602,13 @@ for whoever briefs the contract-PR-dispatch task (named but not itself designed 
 CLAUDE.md's Central Number Allocation rule and Guardrail 6 ("state exactly what you ran, including
 what you excluded").
 
+**Adjudicated 2026-09-08 (controller, ADR-0126) — design decision made, not yet built.** The
+fingerprint feeding `contracts`' PR record widens to include `contract_id` (empty-string sentinel
+when absent, matching this project's existing `IFNULL(repo_id, '')` convention), and
+`_pr_records`'s key widens from `repo_id` to `(repo_id, contract_id)` — no schema/index migration.
+Full rationale in `docs/DECISIONS.md` ADR-0126. Task-75 dispatched to build it. Status remains
+OPEN until task-75 lands and is reviewed.
+
 ## D123 — OPEN. A direct dependent of an RHI repo does not become `BLOCKED` at the TRANSFORM
 phase — cross-wave `blocked_by` propagation silently never reaches a not-yet-dispatched dependent
 
