@@ -10082,3 +10082,78 @@ closing it.
 - 3 Minor findings parked from task-72's review (an operator-facing finding payload gap, two
   currently-inert widened fields, one stale doc site inside an already-dated historical block) —
   cheap, mechanical, low priority relative to the above.
+
+## Round VI, thirtieth wave — D107/D104/D108/D129 bundle closed; D125 confirmed; 3 minors cleared
+
+The largest and highest-stakes single piece of work this session: dispatched research-44 to scope
+D107 (nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub placeholder to the
+real target once the stub resolves — the single largest unsized blocker remaining for
+§12.37/§12.14). The research corrected D107's own guessed trigger location and, more importantly,
+found that D104's already-3-piece-sized REVALIDATE-dispatch fix would be actively UNSAFE if built
+without D107 landing first — `verified_against_stubs` is a pure DB-state pass-through, not derived
+from real Bazel inspection, so a REVALIDATE round could legitimately promote a consumer to
+`SUCCEEDED` having been verified against a tree that still names a stub, and this is now a live
+production risk since an earlier wave made stub creation production-active. Ruled to bundle
+D107+D104+D108 into one task rather than split, given the concrete (not speculative) safety
+argument.
+
+**The bundle went through two full dispatch-review-fix cycles before landing**, exactly the
+rigor this stakes level demanded. The first landing built all four pieces (D107, D104's three
+sub-pieces, D108) plus self-caught a genuinely pre-existing, unrelated bug (D129, invalid Bazel
+query syntax in `bazel/query.py::rdeps_query`, blocking the task's own required real-Bazel proof)
+and an in-task regression fix. An opus-tier review found the bundle's central safety guarantee —
+that a REVALIDATE round must never run against a tree still naming a stub — was enforced by
+nothing: a failed label rewrite silently exited 0 into an unread log string, and the "negative
+proof" test meant to make this falsifiable never actually drove the claiming loop. A fix round
+added a real mechanical gate (reads the checked-out `BUILD.bazel` before dispatching verification,
+refuses the round if a stub label remains) and rewrote the negative-proof test to genuinely
+discriminate. **A second opus-tier review independently re-derived the fix's correctness with its
+own, stronger mutation** (deleting the whole gate rather than an `if False` guard) and went
+further than the implementer's own report by probing the resulting database state directly rather
+than trusting a log line — confirming the gate closes the exact hazard the bundling decision
+existed to prevent. Two small residual disclosures (a docstring that hadn't caught up to the new
+gate; a fail-open on a missing `BUILD.bazel` and no escalation for a permanently-refusing round,
+neither reopening the hazard) were fixed/disclosed directly rather than spending a third fix
+round. **D104, D107, D108, and D129 are now all `FIXED, LANDED` in full**, with the safety
+property an independently-verified mechanism rather than an assertion.
+
+Separately this wave: **D125 is now CONFIRMED** (a real, reproducible `xfail(strict=True)`
+regression fixture proves `_verify_impl`'s wave loop has the identical cross-wave `blocked_by`
+propagation gap D123 had) — measured, not yet fixed, correctly left out of scope for the
+measurement task that confirmed it. Three small Minor findings parked from an earlier review of
+§12.31/D111 Leg D's production wiring were also cleared (an operator-visibility gap in a finding
+payload, a previously-inert widened field now wired to the JSON output, and a stale doc claim).
+
+**A second instance of a new-file/`ruff format`/`# noqa` interaction hazard was found and fixed**
+(the first was task-72's `S607` case earlier this wave): reformatting a brand-new test file to
+close the lint-gate's pinned-baseline drift moved several `# noqa: F811` suppression comments off
+the lines the linter re-anchors its diagnostics to once a packed multi-parameter line is split
+across several lines by the formatter. Both instances were caught and fixed by re-running
+`ruff check` immediately after `ruff format`, never by trusting the formatter's own silence.
+
+**Status: main green.** Citation-hygiene, findings-kinds, the lint-gate baseline, mypy, and ruff
+all re-verified clean after every merge this wave. Real-Bazel headline tests for both the D107/
+D104/D108 bundle and D125's own confirmation fixture could not be independently executed by
+either reviewing agent — this host has had no network egress to `releases.bazel.build` throughout
+this wave, an environmental limitation both reviews disclosed precisely rather than working around
+or silently accepting. §12 count: D104/D107/D108/D129 closing does not by itself flip any §12
+criterion to DONE (§12.37 also needs the transitive-stub-stacking mechanism; §12.14 also needs
+D126 and the same stub-stacking mechanism) — consistent, disclosed Rule 13 process.
+
+**Remaining open criteria and exactly what closes each, cheapest/highest-leverage first:**
+- **D125** — confirmed, not yet designed. The fix shape almost certainly mirrors ADR-0127
+  (`_transform_impl`'s pre-seed pass) adapted to `_verify_impl`'s own PASS structure — likely a
+  cheap research pass given the precedent, but not yet dispatched.
+- **D126** — the `--wave`-scoped multi-invocation `blocked_by` residual (distinct from D125),
+  undesigned; no fixture exists proving what a fix would even need to guarantee across separate
+  invocations.
+- **§12.37/§12.14** — beyond D125/D126, the still-undesigned transitive-stub-stacking mechanism
+  (a second-layer dependent whose OWN provider is `DEGRADED`, not directly RHI) remains untouched
+  this entire session.
+- **§12.31** case (ii) — Leg C1 (owner-scoped `FILE_PATH`-collision design) and Leg C2's own
+  follow-through, both flagged by research-35 as real-but-non-gating, never dispatched.
+- **§12.43** case (ii) — the D55/D58 circuit-breaker gap (a rate-limiter/`BackendHealth`
+  distinction), genuinely unsized, needs its own dedicated design round; untouched this session.
+- 2 disclosed nits from the D107/D104/D108 bundle's final review (a fail-open on a missing
+  generated build file, no escalation ladder for a permanently-refusing REVALIDATE round) —
+  neither reopens the safety gap, both are cheap, low-priority follow-up.
