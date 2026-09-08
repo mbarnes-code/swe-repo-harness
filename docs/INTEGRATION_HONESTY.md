@@ -8476,6 +8476,23 @@ Splits into 3 pieces: (a) small `VerifyInput` field-threading, (b) the claiming 
 **Not dispatched this round** — see D107/D108, found by the same research pass, which make even
 this full 3-piece build land as tested-but-inert infrastructure on a real tree.
 
+**Correction, 2026-09-08 (controller, ADR-0128, research-44) — "tested-but-inert" understates the
+risk; a REVALIDATE claiming loop built without D107 first is actively UNSAFE, not merely inert,
+and this is now a live production risk, not a hypothetical.** `VerificationReport.
+verified_against_stubs` is a pure pass-through of `RdepverifyInput.verified_against_stubs`
+(`workers/rdepverify.py:123-128`), itself populated from a `stubs.state = 'ACTIVE'` query
+(`cli._active_stubs_by_consumer`) — not derived from inspecting what Bazel actually built. The
+instant a stub row flips to `SUPERSEDED` (T1), that query reads empty regardless of whether the
+consumer's committed `BUILD.bazel` was ever rewritten off the stub label. A REVALIDATE task built
+per this entry's own (b)/(c) sizing, without D107's rewrite landing first, would legitimately fire
+T2 (`RESOLVED`) on a build that never touched the real dependency — precisely the "ships work
+verified against nothing" failure SPEC §3.5.1 exists to prevent. This is no longer hypothetical:
+round VI task 69 removed all three `--stub-blocked` CLI refusals, so stub creation (and therefore
+a stub reaching `SUPERSEDED` via T1) is live in production today, not test-fixture-only as it was
+when this entry was first written. **Ruling: D104(b)/(c) must land bundled with D107 in one task
+(task-79), never merged separately** — see ADR-0128 judgment call 5 for the full reasoning and the
+rejected split alternative.
+
 ## D107 — OPEN. Nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub target to
 the real one once the stub resolves — SPEC §3.5.1 item 1 has zero production implementation
 

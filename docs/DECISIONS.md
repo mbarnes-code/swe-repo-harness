@@ -14424,3 +14424,197 @@ transition change needed" confirmation (judgment call 2), and the "must land at 
 not merely be resume-time-correct" reading of SPEC are each settled by reading the code and the
 SPEC text directly, not by a preference this ADR is guessing at.
 
+## ADR-0128 — D107: rewrite a consumer's `BUILD.bazel`/`MODULE.bazel` dependency label from a stub
+placeholder to the real target once the stub resolves, and land it bundled with D104/D108
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D107 entry (research-14, 2026-09-03) found that
+nothing anywhere performs the label rewrite SPEC §3.5.1 item 1 describes: once a stub's provider
+reaches `SUCCEEDED` with a `MERGED` PR (T1, `ACTIVE → SUPERSEDED`), the consumer's generated
+`BUILD.bazel`/`MODULE.bazel` still names `//third_party/stubs/<coord>` on the checked-in branch,
+and nothing ever rewrites it to the provider's real `//` label. D107's own entry left this entirely
+unsized ("Genuinely unsized here"), and D104's entry (the REVALIDATE task's execution/dispatch
+path) explicitly declines to be dispatched until D107 is scoped, because without it,
+`verified_against_stubs` "can never actually clear on a real tree."
+
+This ADR is research-44's scoping of D107, re-reading the landed stub-lifecycle code from tasks
+65–69 (this session) directly rather than trusting prior narrative summaries, per the dispatching
+brief's own instruction. Full citation trail: `.superpowers/sdd/round-VI-criteria-closure/
+research-44-report.md`.
+
+**Decision, in one sentence:** the label rewrite is triggered by the **same T1 event** D102 already
+wires (`cli._pr_sync_impl`'s `pr_merged` branch), it reuses **already-existing, unmodified
+machinery** for both halves of the work (`cli._unit_deps` for computing the correct label,
+`workers/buildgen.py`/`vcs/commits.py::guard`/`apply_and_commit` for rendering and committing it),
+and it must land **bundled with D104's remaining pieces and D108** in one task rather than split,
+because a REVALIDATE claiming-loop built without this rewrite is not merely inert — it is unsafe.
+
+---
+
+### Judgment call 1 — WHERE the rewrite runs
+
+**Decision: triggered from T1's own call site (`_pr_sync_impl`'s `pr_merged` branch), as async
+follow-on work in the same logical trigger, not as a step inside the REVALIDATE task's own
+execution.**
+
+D107's own ledger entry guessed "a new Phase-3 sub-step... presumably the same 'stub resolved'
+signal D104/T2 would need." Both halves of that guess are corrected by direct evidence:
+
+- `state/repository.py::insert_revalidation_task`'s own docstring states the REVALIDATE task's
+  `phase` is always `Phase.VERIFY` and it "re-runs exactly that check **against the provider's
+  now-real label**" — the REVALIDATE task's own scope is the Phase-4 recheck, *assuming* the label
+  is already real by the time it is claimed. It is not the vehicle that makes it real.
+- `orchestrator.stubs.settle_revalidation` (T2/T3) requires a `VerificationReport` the caller must
+  have already produced by building against the real dependency — it has no way to *cause* that
+  build to happen; it only judges an already-produced report.
+
+So the rewrite is not gated on T2 (a much later event — T2 only fires once a revalidation round has
+already passed) and it is not gated on the REVALIDATE task being claimed. It is gated on **T1**:
+the same "provider fixed and merged" event, fired from the same call site D102 already wired,
+immediately alongside `supersede()`/`plan_revalidation()`/the REVALIDATE task insert — as
+subsequent async work in that same function, not literally inside the `IMMEDIATE` SQL transaction
+(which cannot perform git/Bazel I/O).
+
+### Judgment call 2 — WHAT triggers it
+
+**Decision: exactly D102's existing T1 trigger. Not a new signal, not a separate call site.**
+
+Confirmed directly: D102's landing (`3cc679d`, round VI task 6) already builds `StubRecord`s for
+the merged provider's `ACTIVE` stubs, calls `supersede()`/`plan_revalidation()`, and writes the
+`stubs` UPDATE plus the `REVALIDATE` `tasks` INSERT in one transaction, inside `_pr_sync_impl`'s
+`pr_merged` branch. D107's rewrite is additional work fired from that same branch, for the same set
+of `consumer_repo_id`s `supersede()` already returns — no second detection pass over `stubs`/`edges`
+is needed.
+
+### Judgment call 3 — HOW it locates every consumer-side label
+
+**Decision: reuse `cli._unit_deps` unmodified as the label source; do not grep or pattern-match
+`BUILD.bazel` text, and do not add a new lookup keyed on `stub_coord_key`.**
+
+`_unit_deps` (`cli.py:8899-8990`) already computes the correct label for every consumer edge, keyed
+on live `stubs.state`: it queries `WHERE state = 'ACTIVE'` and redirects only a match; anything not
+`ACTIVE` (including `SUPERSEDED`, the state T1 just wrote) falls through to the ordinary internal
+resolution — the provider's real label. This is proven for a first-build scenario by
+`tests/test_build_e2e.py::test_a_superseded_stub_leaves_the_consumers_generated_dependency_on_the_real_label`.
+**The gap is not "compute the right label" — that already works. The gap is "re-invoke the render
+step for an already-built, already-published consumer, against its own PR branch, and commit the
+diff."** So D107's actual new code is:
+
+1. Cut a fresh worktree from `migrate/<consumer_repo_id>`'s tip, rebased onto the current
+   integration tip (mirroring `cli._promote_one_pr`'s rebase step, `cli.py:13845-13861`).
+2. Re-derive the `BuildUnit` for this one consumer exactly as `cli._plan_build` does
+   (`cli.py:10453-10502`): `_dest_sources`, `_external_coordinates`, and a freshly-called
+   `_unit_deps` (now reading the post-T1 `stubs` state, so the internal deps it returns already
+   carry the real label) — nothing cached from the original Phase-3 dispatch is reused, per
+   ADR-0024's "git holds the code state, SQLite holds a pointer" principle already established for
+   every other Phase-3 mutation in this tree.
+3. Run `workers/buildgen.py::BuildgenWorker`'s render step (unmodified) against that `BuildUnit`.
+4. Diff the rendered `BUILD.bazel`/`MODULE.bazel` against the worktree's current content and commit
+   through `vcs/commits.py::apply_and_commit` (judgment call 4 covers idempotency), with the
+   standard `Fleet-*` trailers, then `push_force_with_lease` onto `migrate/<consumer_repo_id>`
+   (mirroring `_promote_one_pr`'s push step) — never closing or re-opening the PR, never touching
+   `PrState` (SPEC's own text: "the draft is force-updated in place... `PrState` remains
+   `DRAFTED`").
+
+### Judgment call 4 — idempotency
+
+**Decision: reuse `vcs/commits.py::guard`/`apply_and_commit` verbatim rather than inventing a new
+content-hash check.** This project already has a phase-agnostic, tested primitive for exactly
+"idempotent patch application + `Fleet-*`-trailer commit, gated on Git alone" (the same ADR-0024
+principle SPEC's own step 2 invokes by name). Feeding it the diff between the worktree's current
+`BUILD.bazel`/`MODULE.bazel` bytes and the freshly-rendered bytes gets the `already_applied`
+behavior — a crash-and-retry, a second `fleet resume`, or a second `fleet stubs resolve` all
+resolve to the same commit or a no-op — for free, with no new mechanism. `BuildgenWorker`'s render
+is already proven byte-identical for identical inputs (§11.6), so a re-run naturally reproduces the
+same diff or none at all.
+
+### Judgment call 5 — relationship to D104 and D108, and sequencing
+
+**Decision: bundle D107 + D104(a) + D104(b) + D104(c)/D108 into one task (task-79), not split
+across tasks with an independent D104(b) landing.**
+
+D104's own sizing (research-14) splits into (a) `VerifyInput` field-threading, (b) the claiming
+loop + `settle_revalidation` caller, (c) the `consumer_status → phases` write (D108). Piece (a) is
+independent, low-risk plumbing that could land alone. Pieces (b) and (c) cannot:
+
+**A REVALIDATE claiming loop built without D107 first is not "tested-but-inert" — it is actively
+unsafe, and this is newly disclosed by this research, not previously stated in D104's own entry.**
+`VerificationReport.verified_against_stubs` is **not** derived by inspecting what Bazel actually
+built — it is a pure pass-through of `RdepverifyInput.verified_against_stubs`
+(`workers/rdepverify.py:426-427`), which the driver populates from `cli._active_stubs_by_consumer`
+(`cli.py:9224-9260`), a query filtered on `state = 'ACTIVE'`. The instant T1 flips a stub row to
+`SUPERSEDED`, that query stops returning it and `verified_against_stubs` reads `[]` — **regardless
+of whether the physical `BUILD.bazel` was ever rewritten.** A REVALIDATE task naively re-running
+`VerifyPipelineWorker` against the consumer's unmodified branch (still pointing at
+`//third_party/stubs/<coord>`) would produce a report reading `verified_against_stubs=[]` purely
+from DB state, and `settle_revalidation` would legitimately fire **T2 (`RESOLVED`)** on a build that
+never touched the real dependency — precisely the "ships work verified against nothing" failure
+§3.5.1 opens by naming as the reason a stub lifecycle exists at all.
+
+This is not a hypothetical risk to guard against defensively: **round VI task 69 removed all three
+`--stub-blocked` CLI refusals, so stub creation is live in production today**, not test-fixture-only
+as it was when D104's entry was written. A `stubs` row reaching `SUPERSEDED` via T1 is a real,
+reachable production state now.
+
+Given this, splitting D107 from D104(b) does not produce "half the value, safely" — it produces a
+component that is dangerous the first time it is exercised for real. The task brief therefore
+builds all four pieces as one unit: T1's trigger gains the label-rewrite-and-push step (D107);
+the REVALIDATE claiming loop (D104-a/b) is built to run strictly after a consumer's label is
+confirmed rewritten (never independently exercisable against a stub still pointing at
+`//third_party/stubs/...`); and the `consumer_status → phases` write (D104-c/D108) closes the loop
+so a T2/`RESOLVED` decision actually promotes the consumer, mirroring
+`SqliteStateRepository.stub_degrade_transform`'s (ADR-0124) transaction shape.
+
+**Alternative considered and rejected as the default, but named for the controller:** land D107
+alone first (reviewed, merged), with D104(a)/(b)/(c) as an explicit, EXPLICITLY BLOCKED follow-on
+task that names D107's landed commit as its precondition. This is safer in the narrow sense of
+smaller diffs per review, but it reproduces exactly the risk this ADR is trying to close if the
+"blocked until" note is ever missed or the follow-on is dispatched by someone who has not read this
+ADR — see "Open questions for the controller" below.
+
+### Judgment call 6 — scope explicitly deferred, not solved here
+
+**Decision: task-79 handles only the common case — no drift on `migrate/<consumer>` since the
+stubbed build besides the stub resolution itself.** SPEC §3.5.1 step 2 additionally describes
+detecting whether the consumer's branch needs a **full Phase-2 (TRANSFORM) re-run** because
+something else changed since the stubbed build (e.g., a rebase pulling in new upstream commits).
+That is a materially harder, more general re-entry/staleness question overlapping this project's
+existing demotion machinery (ADR-0077), and this research did not trace it far enough to design it
+responsibly here. The task brief requires task-79 to **assert** the common-case precondition
+(compare the consumer's last Phase-2 commit's tree to the branch's current tree, ADR-0024-style,
+and fail loudly — not silently guess — if they differ) rather than silently assume it always holds.
+The "branch moved" case is named as disclosed follow-on debt, not solved speculatively (CLAUDE.md
+§4's "name its debt" bar).
+
+### Judgment call 7 — where the new claiming loop lives
+
+**Decision: a new, dedicated claiming loop over `tasks WHERE kind = 'REVALIDATE' AND status =
+'PENDING'`, driven from a new `fleet resume` step — not a `WaveScheduler`/`wave_members`-based
+wave.** D104's own sizing already established this: `REVALIDATE` tasks sit outside `wave_members`
+entirely (confirmed: no `_run_revalidate_wave` exists, and none of the four `_run_*_wave` functions
+reference `TaskKind.REVALIDATE`), so they need their own driving loop rather than a fifth wave
+composition root. `state/repository.py::claim_task_by_id` (the same CAS D89's coarse-task claim
+lifecycle uses, `repository.py:1448-1459`) is the reusable claim primitive; `VerifyPipelineWorker`
+(unmodified, `cli.py:8131-8194`) is the reusable Phase-4 executor once claimed.
+
+**Not pinned here:** the exact `fleet resume` step number. §11.5 already has 8 numbered steps fully
+occupied; this research recommends inserting the new step **after step 6 (unblocking) and before
+step 7 (projection regeneration)**, so a revalidation round's effects land in the same regenerated
+projection, but leaves the precise renumbering and `docs/SPEC.md` §11.5 text edit to the task.
+
+---
+
+### Open questions for the controller
+
+1. **Bundle-vs-split (judgment call 5).** This ADR recommends bundling D107+D104+D108 into one
+   task given the safety coupling. The controller may instead prefer two staged tasks (D107 first,
+   reviewed and merged; D104/D108 explicitly gated on that commit) for smaller review surface. Both
+   shapes are described in the task brief; this is a genuine value judgment about review-size risk
+   vs. landing-a-dangerous-half risk, not a technical fact this research can settle unilaterally.
+2. **Correcting D104's ledger entry.** This research's §2 safety finding (a REVALIDATE loop built
+   alone is unsafe, not merely inert, now that task 69 has made stub creation live in production)
+   is new information D104's own `docs/INTEGRATION_HONESTY.md` entry does not currently state. Per
+   this research task's read-only constraint, the correction is not made here — the controller
+   should land a dated in-place marker on D104's entry (CLAUDE.md's "annotate, never rewrite"
+   convention) alongside whichever task lands the fix.
+3. **§11.5 step numbering** (judgment call 7) — left to the task, not pinned here.
+
