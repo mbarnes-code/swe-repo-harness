@@ -13286,6 +13286,22 @@ contract's `hoist_target_path` names does not exist in any integration worktree,
 `proto_library` would name sources that are not there. Publishing a contract's `BUILD.bazel` is
 blocked on content hoisting, which is an independent feature and stays out of Clause B.
 
+**Annotated 2026-09-08 (round VI task 95) — the PREMISE above is now false; the CONCLUSION still
+holds, and this paragraph is left unedited per this project's annotate-don't-rewrite convention.**
+`filter_repo.py`'s `HOISTED_CONTRACT_TRAILER` now HAS a production caller:
+`cli._ingest_contract_source`, wired as a new PASS 0 in `_build_impl` before the REPO ingest loop
+(round VI task 95's own ADR draft, this file). A `HOISTED`/`MIGRATED` contract's content is now
+genuinely committed onto `integration` at `hoist_target_path`, with the `Hoisted-Contract:`
+trailer, proven end to end with real `git-filter-repo`. **The conclusion is precisely NOT
+affected**: task 95 built the ingest caller only — it did not publish a contract's `BUILD.bazel`,
+did not give a contract a `phases` row, and did not admit CONTRACT nodes to any wave query (all
+three are still explicitly true, unchanged). PASS 2b (Clause B, this ADR) is still read-only and
+still stays out of publishing — see §5.2's own note in research-50-report.md and JC-4's disclosed
+duplication in task 95's ADR draft (this file), which is the reason a published `proto_library`
+still cannot safely name `hoist_target_path` as its only source: the owner's own unfiltered copy
+still lands on the branch too. Full account: `.superpowers/sdd/round-VI-criteria-closure/
+task-95-report.md`.
+
 This is safe to add beside the existing passes because every wave query in the tree already filters
 `node_kind = 'REPO'` (`_open_phase_waves`, `_gated_members`, `_wave_repos`, the ledger rollups,
 `state/projection.py`): a CONTRACT wave member is invisible to `fleet transform`/`fleet build`
@@ -15425,12 +15441,23 @@ re-confirmed unchanged at `81f27e3`). Building the cheaper per-owner-row alterna
 sketches (excluding the contract's own carrier paths from the owner's `RelocationSpec` via
 `--invert-paths` or a direct read of the `contracts` row being ingested) is out of this task's
 scope — it touches `_ingest_build_source`'s own REPO-side call, not the contract-side caller this
-task adds. **Disclosed defect, stated exactly**: a `HOISTED` contract's sources land on the
-`integration` branch TWICE after this task — once at `hoist_target_path` (this task's new merge),
-once again under the owner's own `dest` (the owner's pre-existing, unmodified ingest). Content is
-never lost and the two copies never collide (different destinations), so this does not corrupt the
-tree; it is a real duplication an operator or a later task should close. Tracked here rather than
-as a fresh D-number, since D111's own ledger already covers §12.31 case (ii) and its legs.
+task adds.
+
+**This is a real SPEC violation, not merely a layout preference — quoted exactly, not
+paraphrased.** `docs/SPEC.md:1270-1274` (§3.3 step 1, "The owner is ingested normally in its own
+(later) wave") states: *"The owner is ingested normally in its own (later) wave, with one
+subtraction: its relocation plan **excludes** every path already claimed by a `HOISTED` contract
+… The contract's commits therefore appear once, on the contract merge, and **are not duplicated
+onto the owner's merge**."* This task's shipped behavior produces exactly the outcome that
+sentence rules out: a `HOISTED` contract's sources land on the `integration` branch TWICE after
+this task — once at `hoist_target_path` (this task's new merge), once again under the owner's own
+`dest` (the owner's pre-existing, unmodified ingest, which subtracts nothing). Content is never
+lost and the two copies never collide (different destinations), so this does not corrupt the
+tree — but it is a real defect against SPEC's own literal text, not a cosmetic gap, and it is
+filed as one: **`D132`** (`docs/INTEGRATION_HONESTY.md`), `OPEN`, bounded, blocking nothing in
+this task's own scope. The scope call itself — build the ingest caller now, leave the subtraction
+for later — is unchanged and was reviewed and approved; what changed in this fix round is only
+that the resulting gap is now tracked as a defect rather than described as a preference.
 
 **JC-5 — ordering, and the `--wave`/`--repo` interaction.** **Resolved:** the new contract-ingest
 pass reuses the already-existing `_eligible_contract_units` (PASS 2b's own reader), which is

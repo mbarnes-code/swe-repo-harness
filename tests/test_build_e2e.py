@@ -6958,11 +6958,12 @@ def test_sqlite_is_readable_after_the_two_phases(
 # to prove the WIRING: a real `contracts` row, a real failing `fleet build` dispatch, and a real
 # database left with `status='FAILED'`, a `HoistBrokeOwner` finding, and `phases.attempts`
 # untouched. Building a REAL bazel package at `hoist_target_path` is a separate, much larger lift
-# this task does not need: nothing in `src/fleet` today (a disclosed, pre-existing D113/ADR-0119
-# scope boundary — "narrow read-only PASS 2b, nothing commits hoisted contract content") ever
-# populates `BuildUnit.contract_deps`, so no organic manifest-driven dependency on a hoisted
-# contract's package exists to fail against for real; the `contracts` row is seeded directly,
-# which is this file's own established convention for state a phase upstream of the one under
+# this task does not need: hoisted contract content is genuinely committed onto `integration` as
+# of round VI task 95 (`cli._ingest_contract_source`), but nothing in `src/fleet` today (a
+# disclosed, pre-existing D113/ADR-0119 scope boundary — PASS 2b stays a narrow read-only pass, no
+# publish) ever populates `BuildUnit.contract_deps`, so no organic manifest-driven dependency on a
+# hoisted contract's package exists to fail against for real; the `contracts` row is seeded
+# directly, which is this file's own established convention for state a phase upstream of the one
 # test does not itself organically produce (see e.g. the direct `INSERT INTO stubs` above).
 
 _HOIST_BREAK_CONTRACT_ID = "openapi:acme.shared"
