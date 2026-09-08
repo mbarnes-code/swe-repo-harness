@@ -23,6 +23,7 @@ This file proves, at the level BELOW `PhaseRunner` ordering (`tests/test_runner.
 from __future__ import annotations
 
 import ast
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -98,6 +99,53 @@ async def _task_row(
     assert len(rows) == 1, "exactly one coarse tasks row for this (run, repo, phase)"
     row = rows[0]
     return str(row[0]), str(row[1]), row[2], row[3], int(row[4]), str(row[5])
+
+
+def _init_transform_worktree(work_dir: Path, repo_id: str = REPO) -> Path:
+    """D91 fix: `_TransformClaimHook` now reads a REAL git anchor (`record_task_anchor`) at claim
+    time, so every test that constructs the hook needs a real `migrate/<repo_id>` checkout at
+    `work_dir/repo_id` — mirroring `TransformPipelineWorker`'s own `Git(ctx.workdir)` shape
+    (`ctx.workdir` IS `work_dir / repo_id`). Returns `work_dir` for convenience at call sites.
+    """
+    repo_path = work_dir / repo_id
+    repo_path.mkdir(parents=True, exist_ok=True)
+
+    def run(*args: str) -> None:
+        subprocess.run(  # noqa: S603
+            ["git", "-C", str(repo_path), *args],  # noqa: S607 - `git` from PATH, as every suite does
+            check=True,
+            capture_output=True,
+        )
+
+    run("init", "--initial-branch=main")
+    run("config", "user.email", "fleet@example.invalid")
+    run("config", "user.name", "Fleet Test")
+    (repo_path / "README").write_text("x\n")
+    run("add", "--all")
+    run("commit", "-m", "initial")
+    run("checkout", "-b", f"migrate/{repo_id}")
+    return work_dir
+
+
+def _branch_tip(work_dir: Path, repo_id: str = REPO) -> str:
+    """The real `migrate/<repo_id>` tip `record_task_anchor` should read at claim time."""
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(work_dir / repo_id), "rev-parse", f"migrate/{repo_id}"],  # noqa: S607
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+async def _task_pre_commit_sha(read_conn: aiosqlite.Connection) -> str | None:
+    async with read_conn.execute(
+        "SELECT pre_commit_sha FROM tasks WHERE run_id = ? AND repo_id = ? AND phase = ?",
+        (RUN, REPO, int(Phase.TRANSFORM)),
+    ) as cursor:
+        row = await cursor.fetchone()
+    assert row is not None, "the coarse tasks row must exist for this test's own seeding to hold"
+    return None if row[0] is None else str(row[0])
 
 
 def _payload() -> TransformInput:
@@ -242,14 +290,21 @@ async def test_claim_task_by_id_is_a_cas_a_second_claim_on_a_non_pending_row_los
 
 
 async def test_claim_hook_populates_target_paths_and_claims_running_before_dispatch(
-    wired: _Wired,
+    wired: _Wired, tmp_path: Path
 ) -> None:
     """A real hook call, exactly as `_run_transform_wave` wires it, against a fresh repo with NO
     prior coarse row: it must mint one (via `_coarse_task_id`, reused unchanged), populate
     `target_paths` with the payload's raw sources+targets, and claim it RUNNING — all before any
     `attempts` row exists.
+
+    D91 (`docs/INTEGRATION_HONESTY.md`): also the primary proof that `tasks.pre_commit_sha` gets a
+    real production writer. Before this fix `_TransformClaimHook.__call__` never touched the
+    column at all, so this same claim always left it NULL; the assertion below reads it back
+    against the REAL `migrate/<repo_id>` tip a fresh `git rev-parse` reports, not a mocked value —
+    a real per-unit anchor, matching what `record_task_anchor`'s own docstring promises.
     """
     _writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -257,6 +312,7 @@ async def test_claim_hook_populates_target_paths_and_claims_running_before_dispa
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     payload = _payload()
 
@@ -278,14 +334,20 @@ async def test_claim_hook_populates_target_paths_and_claims_running_before_dispa
     assert row is not None and row[0] == 0, (
         "the hook runs BEFORE the worker executes; no attempts row can exist yet"
     )
+    pre_commit_sha = await _task_pre_commit_sha(read_conn)
+    assert pre_commit_sha == _branch_tip(work_dir), (
+        "D91: the claim CAS must write tasks.pre_commit_sha to the REAL migrate/<repo_id> tip "
+        "read at claim time, not leave it NULL"
+    )
 
 
 async def test_claim_hook_reuses_the_same_row_the_sink_later_writes_attempts_against(
-    wired: _Wired,
+    wired: _Wired, tmp_path: Path
 ) -> None:
     """`_coarse_task_id`'s idempotent UPSERT is what makes calling it twice per dispatch (once
     from the hook, once from the sink) safe: both calls must resolve to the SAME task_id."""
     writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -293,6 +355,7 @@ async def test_claim_hook_reuses_the_same_row_the_sink_later_writes_attempts_aga
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
     task_id_from_hook, *_rest = await _task_row(read_conn)
@@ -310,10 +373,11 @@ async def test_claim_hook_reuses_the_same_row_the_sink_later_writes_attempts_aga
     )
 
 
-async def test_claim_hook_ignores_non_transform_phases(wired: _Wired) -> None:
+async def test_claim_hook_ignores_non_transform_phases(wired: _Wired, tmp_path: Path) -> None:
     """Defensive: the hook is wired only into the TRANSFORM `PhaseRunner`, but its own body also
     refuses a non-TRANSFORM phase rather than trusting the call site alone (Rule 11)."""
     _writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -321,6 +385,7 @@ async def test_claim_hook_ignores_non_transform_phases(wired: _Wired) -> None:
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
 
     await hook(repo_id=REPO, phase=Phase.BUILD, payload=_payload())
@@ -335,8 +400,11 @@ async def test_claim_hook_ignores_non_transform_phases(wired: _Wired) -> None:
 # ======================================================================================
 
 
-async def test_sink_resolves_a_running_row_to_done_on_ok_status(wired: _Wired) -> None:
+async def test_sink_resolves_a_running_row_to_done_on_ok_status(
+    wired: _Wired, tmp_path: Path
+) -> None:
     writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -344,6 +412,7 @@ async def test_sink_resolves_a_running_row_to_done_on_ok_status(wired: _Wired) -
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
     _, status_before, _, _, fence_before, _ = await _task_row(read_conn)
@@ -360,9 +429,10 @@ async def test_sink_resolves_a_running_row_to_done_on_ok_status(wired: _Wired) -
 
 
 async def test_sink_resolves_a_running_row_back_to_pending_with_fence_bump_on_non_ok(
-    wired: _Wired,
+    wired: _Wired, tmp_path: Path
 ) -> None:
     writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -370,6 +440,7 @@ async def test_sink_resolves_a_running_row_back_to_pending_with_fence_bump_on_no
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
 
@@ -410,7 +481,7 @@ async def test_sink_without_a_prior_claim_still_resolves_safely(wired: _Wired) -
 
 
 async def test_the_done_assertion_is_not_vacuous_a_row_never_resolved_is_not_done(
-    wired: _Wired,
+    wired: _Wired, tmp_path: Path
 ) -> None:
     """Rule 12 discriminator for the two happy-path tests above: a row the hook claimed but that
     the sink's resolution step never touched (what a mutation deleting that step would produce)
@@ -426,6 +497,7 @@ async def test_the_done_assertion_is_not_vacuous_a_row_never_resolved_is_not_don
     lifecycle.py` changed verdict — see the implementation report for the exact before/after.
     """
     _writer, read_conn, repo = wired
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -433,6 +505,7 @@ async def test_the_done_assertion_is_not_vacuous_a_row_never_resolved_is_not_don
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
 
@@ -473,7 +546,7 @@ class _CrashAfterFirstSubmit:
 
 
 async def test_a_crash_between_the_two_writer_units_leaves_post_commit_sha_written_and_task_running(
-    wired: _Wired,
+    wired: _Wired, tmp_path: Path
 ) -> None:
     """The ordering fix itself (found reviewing D89 Phase 2 Task B, corrected 2026-09-01):
     `_TransformSink.__call__` used to resolve the coarse row to DONE in a separate writer unit
@@ -487,6 +560,7 @@ async def test_a_crash_between_the_two_writer_units_leaves_post_commit_sha_writt
     """
     writer, read_conn, repo = wired
     await repo.upsert_phase(RUN, REPO, Phase.TRANSFORM, now=NOW)
+    work_dir = _init_transform_worktree(tmp_path / "work")
     hook = _TransformClaimHook(
         repository=repo,
         read_conn=read_conn,
@@ -494,6 +568,7 @@ async def test_a_crash_between_the_two_writer_units_leaves_post_commit_sha_writt
         owner=OWNER,
         clock=lambda: NOW,
         lease_ttl_s=600,
+        work_dir=work_dir,
     )
     await hook(repo_id=REPO, phase=Phase.TRANSFORM, payload=_payload())
     _, status_before, _, _, _, _ = await _task_row(read_conn)
