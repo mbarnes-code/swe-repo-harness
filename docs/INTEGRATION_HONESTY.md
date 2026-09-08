@@ -8408,8 +8408,9 @@ defect in this fix. See D103 below for the residual gaps this same landing surfa
 
 ---
 
-## D103 — OPEN. Two residual gaps surfaced by D102's landing: a narrow crash-window ordering gap
-in `_pr_sync_impl`, and `stubs.revalidation_task_id` (SPEC §3.5.1 step 4) is never written
+## D103 — FIXED, LANDED (round VI task 7, `6007423`/`2a5c2ac`). Two residual gaps surfaced by
+D102's landing: a narrow crash-window ordering gap in `_pr_sync_impl`, and
+`stubs.revalidation_task_id` (SPEC §3.5.1 step 4) is never written
 
 **Found by round VI task 6's post-hoc task-scoped review (2026-09-02)** — both self-disclosed by
 the review as fix-forward items, not by the implementer's own report. Verified free before
@@ -8453,6 +8454,35 @@ re-deriving it.
 **Not yet built, either gap:** neither is designed in detail here — this entry establishes both
 gaps exist and are now tracked, following D102's own precedent of disclosing a real gap without
 prescribing its exact implementation.
+
+**FIXED, LANDED (round VI task 7, 2026-09-02, `6007423`, merged `2a5c2ac`) — heading only updated
+2026-09-08 (round VI task 82); this paragraph corrects a stale field, not the body above, per
+`docs/INTEGRATION_HONESTY.md`'s own "status heading is a FIELD; the entry body is a RECORD" rule.**
+Both gaps were closed the SAME day this entry was filed, by a sibling lane (`agent/roundvi-task2`,
+task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never updated to reflect it,
+so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
+that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
+finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:12906`) already
+implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
+durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
+and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
+pre-UPDATE `revalidation_round` exactly as this entry's own "Not yet built" text for gap 2
+specifies. Task-82 wrote no source changes — re-implementing either gap would have been a
+duplicate, disconnected transaction (violating the "same transaction T1's own effect already runs
+in" requirement this entry itself states). Instead it independently re-derived the original
+implementer's own Rule-12 mutation claims rather than trusting them inherited: disabling the gap-1
+sweep loop (`continue` before `_fire_t1_for_provider`) reddens
+`test_pr_sync_sweeps_a_pre_merged_providers_stub_left_active_by_a_prior_crash` while
+`test_pr_sync_fires_t1_and_enqueues_a_revalidate_task_for_a_merged_providers_stub` (the
+newly-observed-merge control) stays green; disabling the `revalidation_task_id` UPDATE (`continue`
+before the `conn.execute`) reddens BOTH tests' `revalidation_task_id` assertions. Both mutations
+passed the zero-change gate (`git diff --numstat --no-index` against a backup file, never `git
+stash`) and were run with `fleet.__file__`/marker-in-source pinned to the mutating worktree before
+either result was trusted (CLAUDE.md Rule 12's interpreter-isolation guardrail) — reproduced in a
+detached worktree at `agent/roundvi-task82`, tree restored clean after each mutation. Whole-file
+`tests/test_pr_e2e.py` + `tests/test_stubs.py`: 65/65 passed, unmutated. Only this heading and this
+paragraph changed; no source edit was needed or made.
 
 ---
 
