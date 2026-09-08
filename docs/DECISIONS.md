@@ -14357,6 +14357,34 @@ rows returns nothing); this is disclosed rather than silently absorbed, per CLAU
 you ran" discipline, and task-76's worker must re-confirm this with a fresh grep against `HEAD` at
 implementation time rather than trusting this research's own read.
 
+### Disclosed, not a defect — a halted/breached TRANSFORM run now leaves `PENDING` rows for
+EVERY open wave, not only the one it reached (added round VI task 76 fix round 1, opus-tier
+review finding I1)
+
+Before this fix, a wall-clock-breached or otherwise halted `fleet transform` run's dispatch loop
+broke out of `for index in waves:` before a not-yet-reached wave's own lazy `upsert_phase` call
+ever ran — that wave's members had NO `phases` row at all, not merely a `PENDING` one. After this
+fix, the upfront pre-seed pass creates a row for every open wave's members before any wave
+dispatches, so a halted or breached run now leaves `PENDING` rows for every open wave's members,
+including waves the run never reached. This changes the TRANSFORM `phases` row COUNT for a halted
+run, and therefore `_transform_statuses`'/the JSON summary's `repos` count — identical in kind to
+what has always been true of `_build_impl`'s PASS 1 (its INGEST pass pre-seeds the whole eligible
+fleet upfront regardless of how far the run actually gets), so this is consistent with the
+project's own existing precedent, not a new defect.
+
+Measured directly: `tests/test_prepare_before_admit.py::
+test_a_breached_transform_wave_cuts_no_phase_anchor` stamps every wave's clock as already spent,
+drives wave 0 (breached, nothing admitted, no `_prepare_repo` call), and previously asserted
+`set(rows) == set(members)` where `rows` was every TRANSFORM `phases` row and `members` was only
+wave 0's — that exact-set equality held pre-fix because wave 1's members had no row yet. Post-fix,
+`rows` also contains wave 1's members (`PENDING`, never touched, since the breach halts the loop
+before wave 1 is ever reached) — re-run against the fixed code, the exact same fixture now reads
+`{'acme-lib-py': 'PENDING', 'acme-lib-ts': 'PENDING', 'acme-app-py': 'PENDING', 'acme-app-ts':
+'PENDING'}` (all four repos, not just wave 0's two). The test's assertion was narrowed to what it
+actually needs to prove — wave 0's members all got a row and none of them advanced past
+`PENDING` — rather than an exact-row-set equality that this disclosed behavior change correctly
+invalidates.
+
 ### Disclosed — `docs/CRITERIA_PLAN.md`'s §14 entry and `docs/INTEGRATION_HONESTY.md`'s D123
 heading are NOT edited by this research (read-only constraint)
 

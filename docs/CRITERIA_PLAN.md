@@ -899,6 +899,35 @@ closes clause (2)'s mechanism gap only. §12.14 stays OPEN: D123 (cross-wave `bl
 propagation) and clause (3)'s undesigned transitive-stub-stacking mechanism are unaffected and
 still block full closure. Do not round up the `<n> of 48` count from this landing alone.
 
+**Corrected, 2026-09-08 (round VI task 76 fix round, ADR-0127) — D123 is no longer an open gap.**
+`docs/INTEGRATION_HONESTY.md`'s D123 entry moved to `FIXED, LANDED (round VI task 76, `981abed`)`:
+`_transform_impl` now pre-seeds every wave's TRANSFORM `phases` row upfront, before any wave
+dispatches, so cross-wave `blocked_by` propagation reaches a later-wave dependent within one
+`fleet transform` invocation, per §12.14's own text. The remaining named gaps for §12.14 are
+narrower than the sentence above states: D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism —
+separately being worked, per ADR-0125/task-74) and the still-undesigned transitive-stub-stacking
+mechanism. D123's own fixed entry also discloses a shape it does NOT close (two separate
+`fleet transform --wave N` invocations rather than one invocation driving both waves) — that
+residual gap has no D-number of its own yet and is not counted as a third remaining item here
+since it is a narrower, disclosed limitation of the same D123 mechanism rather than an
+independent gap. The original sentence above is left in place per this file's own
+annotate-in-place convention.
+
+**Corrected, 2026-09-08 (round VI task 76 fix round 1, controller ruling) — the paragraph above
+overclaims.** An independent opus-tier review found, and the controller confirmed, that the
+"`--wave`-scoped multi-invocation residual" the paragraph above dismissed as "not counted as a
+third remaining item" is a real, independently re-measured gap, now allocated its own number:
+**D126**. `docs/INTEGRATION_HONESTY.md`'s D123 entry heading is corrected from `FIXED, LANDED` to
+`PARTLY ADDRESSED` — the single-`fleet transform`-invocation case (SPEC's literal wording,
+ADR-0127's actual target) is fixed and proven, but a `--wave`-scoped sequence of separate
+invocations still reproduces D123's original symptom exactly (`acme-app-py` ends `SUCCEEDED`/
+`blocked_by == '[]'` rather than `BLOCKED`). §12.14's remaining named gaps are therefore three,
+not two: D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism — separately being worked, per
+ADR-0125/task-74), **D126** (the `--wave`-scoped multi-invocation residual just allocated), and
+the still-undesigned transitive-stub-stacking mechanism. The prior paragraph's own "not counted as
+a third remaining item" sentence is superseded by this one; both are left in place per this file's
+annotate-in-place convention.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely
