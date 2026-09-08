@@ -9266,8 +9266,9 @@ positive path (corrected: all five are negative cases; the positive path is exer
 constructed text). Full fix-round account:
 `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`'s fix-round section.
 
-## D112 — PARTLY ADDRESSED. `BuildUnit.test_srcs` is never populated by any production ecosystem
-adapter — no adapter can ever emit a real nonzero test target
+## D112 — FIXED, LANDED (round VI task 87 merge, `26b065b`). `BuildUnit.test_srcs` is never
+populated by any production ecosystem adapter — no adapter can ever emit a real nonzero test
+target
 
 **Found by round VI task 38 (2026-09-03), while sizing §12.11 Task A's discriminator test.**
 Verified free before allocating: form-agnostic sweep found `D111` as the highest allocated number.
@@ -9490,6 +9491,24 @@ closed.** JVM's own real-Bazel proof remains separately blocked on D121's `rules
 gap, as this entry already recorded above — that is the one genuinely open piece of D112 remaining.
 Do not round the `<n> of 48` §12 count up on this account — §12.11's Task B (`docs/
 CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, tracked there.
+
+**Correction (round VI task 92, 2026-09-08, independent audit finding) — the merge note above's
+D121 citation was already stale the day it was written; annotated here rather than rewritten.**
+The merge note says JVM's real-Bazel proof "remains separately blocked on D121's `rules_java`
+`bazel_dep` gap." `D121` has read `FIXED, LANDED (round VI task 73, \`d9dd533\`, controller review
+pending)` since 2026-09-07T17:31:13Z — a full day before the merge note above was written
+(2026-09-08) — and `d9dd533` is an ancestor of current `HEAD`. So the named blocker no longer
+exists. **Say precisely what is true, not more and not less:** `tests/test_bazel.py::
+test_real_bazel_builds_the_generated_jvm_package` proves `rules_java` now loads under real Bazel
+(D121's own property), but it is not a `test_srcs`-driven `java_test` proof, so D112's JVM
+real-Bazel proof (a real `bazel test` on a `java_test` built from a real `test_srcs` list, the
+same shape task 53/86/87 each proved for Python/Rust/JS) does still appear to be **unwritten**.
+The correct wording is "not yet written, no longer blocked" — not "blocked on D121." This does not
+reopen D112 (production code populates `test_srcs` for all five real ecosystem members and the
+FakeBazel-tier proofs for JVM/Rust/JS all pass; the four real-Bazel fixtures that do exist —
+Python, Rust, and both JS ones — were independently re-run and pass on `main`), so the heading
+above is updated to `FIXED, LANDED` accordingly. Writing the still-missing JVM real-Bazel `test_srcs`
+proof, if ever wanted, is tracked as follow-on work, not as an open piece of D112 itself.
 
 **Correction, 2026-09-08 (round VI task 87 review, fix round 1).** The paragraph above describes
 `cli._is_js_test_src` as matching "`*.test.ts(x)`/`*.spec.ts(x)` by basename, or anything under
