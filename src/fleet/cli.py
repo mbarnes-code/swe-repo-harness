@@ -6590,6 +6590,8 @@ async def _repropagate_terminal_providers(
     run_id: str,
     phase: Phase,
     settings: FleetSettings,
+    *,
+    stub_blocked: bool = False,
 ) -> None:
     """D126 / ADR-0130: re-broadcast `blocked_by` against providers this run already knows are
     abandoned, once per invocation, before this invocation's own wave dispatch begins.
@@ -6611,7 +6613,49 @@ async def _repropagate_terminal_providers(
     repo excluded by `--repo`/`only` never has a row for this sweep to find, because the pre-seed
     pass that runs immediately before this sweep already scopes row creation to `only` — so this
     helper needs no `only` parameter of its own.
+
+    **`stub_blocked=True` is a hard skip, discovered by this task's own covering-set test run, not
+    predicted by ADR-0130.** `orchestrator.reentry.stub_permits_removal` (§37 Blocker A,
+    ADR-0113) is `fleet resume` step 6's OWN, already-reviewed rule for exactly this situation: the
+    moment `stub_blocked` is set, EVERY blocker with an RHI phase row is stub-eligible for removal
+    from EVERY one of its dependents' `blocked_by` — a fact purely about the blocker and the flag,
+    never about which dependent — because RHI is mechanically terminal and `stub_permits_removal`'s
+    own docstring says so explicitly. `fleet resume --stub-blocked` runs step 6 (which legitimately
+    clears such an entry) and then step 8 (a real `_transform_impl(stub_blocked=True)` call) in the
+    SAME invocation; without this guard, this sweep — reading the identical durable fact
+    (`phases.status`) but blind to the policy exemption — would fire immediately after step 6 and
+    silently re-block the exact repo step 6 just, correctly, freed, before it ever reaches the
+    dispatch that would let it discover its own stub trigger. That is not a narrower case of the
+    same defect this sweep exists to fix: `--stub-blocked` is a deliberate, sanctioned bypass of
+    blast containment for a specific, audited reason (a generated stub substitutes for the
+    abandoned provider), and re-imposing this sweep's containment over that policy would defeat the
+    escape hatch §37/ADR-0113 built. `_verify_impl`/`_build_impl` never pass `stub_blocked=True`
+    (ADR-0102: §37 Blocker A is wired only into TRANSFORM's `PhaseRunner`), so this guard is a
+    no-op for both and this parameter's default keeps every other caller's behavior unchanged.
+
+    **A second, independent stub exemption, also discovered by this task's own covering-set run:
+    a dependent already carrying an `ACTIVE` `stubs` row for the SPECIFIC provider being swept is
+    never (re-)blocked by it.** `_build_impl`'s own §37 Blocker C (`_unit_deps`'s stub redirect,
+    `_active_stub_facts`) lets a consumer build from an `ACTIVE` stub's pinned coordinate while its
+    real provider stays permanently `REQUIRES_HUMAN_INTERVENTION` — unlike Blocker A, this needs no
+    CLI flag at all; the stub's mere `ACTIVE` existence is the whole of the policy. Without this
+    exemption, a SECOND `fleet build` invocation over a consumer an operator (or a fixture) already
+    gave an `ACTIVE` stub would have this sweep re-block it before `_unit_deps` ever gets to
+    redirect it, defeating the same escape hatch from a different door. This is therefore NOT
+    reused via `WaveScheduler.propagate_blocked` unchanged (that method has no filter and ADR-0130
+    did not anticipate needing one) — the loop below reimplements `propagate_blocked`'s own body
+    exactly (`scheduler.descendants(...)` then `store.append_blocked_by(...)` per dependent,
+    sorted, self-edge skipped), adding only the one stub-coverage exclusion, so every other safety
+    property `propagate_blocked` already has (UPDATE-only, terminal-status skip,
+    union-not-replacement) is unchanged. Checked against BUILD's own regression fixture
+    (`tests/test_build_e2e.py::test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stubs_label`),
+    not merely reasoned about; applied uniformly to all three phases (not only BUILD) since the
+    exemption is a general fact about what an `ACTIVE` stub means for its own two named repos, not
+    a BUILD-specific one, and TRANSFORM/VERIFY are unaffected by it whenever no such row exists yet
+    (the common case).
     """
+    if stub_blocked:
+        return
     rows = await _rows(
         read_conn,
         "SELECT DISTINCT repo_id FROM phases "
@@ -6620,6 +6664,15 @@ async def _repropagate_terminal_providers(
     )
     if not rows:
         return
+    stub_covered = {
+        (str(consumer), str(provider))
+        for consumer, provider in await _rows(
+            read_conn,
+            "SELECT consumer_repo_id, provider_repo_id FROM stubs "
+            " WHERE run_id = ? AND state = 'ACTIVE'",
+            (run_id,),
+        )
+    }
     repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
     scheduler = WaveScheduler(
         run_id=run_id,
@@ -6630,8 +6683,15 @@ async def _repropagate_terminal_providers(
         clock=_now,
         descendants=ordering_descendants(await _ordering_pairs(read_conn, settings, run_id)),
     )
+    now = _now()
     for row in rows:
-        await scheduler.propagate_blocked(str(row[0]))
+        provider_id = str(row[0])
+        for dependent in sorted(set(scheduler.descendants(provider_id))):
+            if dependent == provider_id:
+                continue
+            if (dependent, provider_id) in stub_covered:
+                continue
+            await scheduler.store.append_blocked_by(run_id, dependent, provider_id, now=now)
 
 
 async def _transform_impl(
@@ -6720,8 +6780,12 @@ async def _transform_impl(
                 # pre-seed pass above only ever creates rows for waves THIS invocation drives, so
                 # a later-wave dependent admitted by a separate `--wave`-scoped invocation (or any
                 # `fleet resume` re-entry) would otherwise never learn its provider is abandoned.
+                # `stub_blocked=stub_blocked`: a `fleet resume --stub-blocked` continuation runs
+                # step 6's real `stub_permits_removal` unblock immediately before this call in the
+                # SAME invocation, and this sweep must not re-block what that step just, correctly,
+                # freed (see the helper's own docstring).
                 await _repropagate_terminal_providers(
-                    read_conn, writer, run_id, Phase.TRANSFORM, settings
+                    read_conn, writer, run_id, Phase.TRANSFORM, settings, stub_blocked=stub_blocked
                 )
                 for index in waves:
                     members = members_by_wave[index]
