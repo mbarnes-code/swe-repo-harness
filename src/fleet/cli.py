@@ -13345,11 +13345,17 @@ async def _run_one_revalidation_task(
     """D104(b): claim ONE `REVALIDATE` task and, on a won claim, run its round to completion.
 
     `VerifyPipelineWorker` (unmodified) is re-run against a **fresh checkout of `migrate/<repo_id>`
-    's current tip** -- D107's own rewrite (this same trigger's earlier step) is what makes that
-    tip's committed `BUILD.bazel` name the real label rather than the stub, and
-    `_active_stubs_by_consumer` (unmodified, `state = 'ACTIVE'` only) is what makes
-    `verified_against_stubs` read empty because the DB row genuinely moved to `SUPERSEDED`, not
-    merely because this loop stopped asking about it (ADR-0128's whole safety argument).
+    's current tip**. D107's own rewrite (this same trigger's earlier step) is SUPPOSED to make
+    that tip's committed `BUILD.bazel` name the real label rather than the stub -- but that step
+    is best-effort and can fail (a transient monorepo-checkout error, a rebase conflict, a refused
+    push), so this function does not trust it happened. **Below, before dispatching the worker,
+    this function reads the checked-out `BUILD.bazel` itself and refuses the round (fails the
+    task back to `PENDING`, writes a `RevalidationLabelNotRewritten` finding) if a stub label is
+    still present.** That gate -- not the trigger ordering alone -- is what makes
+    `verified_against_stubs` reading empty (`_active_stubs_by_consumer`, unmodified, `state =
+    'ACTIVE'` only) trustworthy: it is empty because the DB row genuinely moved to `SUPERSEDED`
+    AND the real dependency was actually built against, not merely because this loop stopped
+    asking about it (ADR-0128's whole safety argument, round VI task 79 fix round 1, C1).
     """
     claimed = await repository.claim_task_by_id(
         task_id, worker="fleet-resume-revalidate", now=now, lease_ttl_s=_REVALIDATE_LEASE_TTL_S
@@ -13452,6 +13458,15 @@ async def _run_one_revalidation_task(
         # property of THIS loop's own admission check, independent of whether the upstream
         # rewrite trigger actually succeeded, rather than a docstring claim resting on trigger
         # ordering alone.
+        # Disclosed, not fixed here (round VI task 79 re-review): a MISSING BUILD.bazel reads
+        # as "" -- no stub label found -- and fails OPEN rather than refusing the round. Not a
+        # live promotion path today (an empty `dest_path` also breaks `VerifyInput`, and a
+        # missing package makes a real Bazel build fail rather than silently pass), but the
+        # fail-open direction is a choice worth naming, not assuming. Separately: a permanently
+        # failing rewrite loops PENDING -> claim -> refuse indefinitely with no `attempts`
+        # ladder consumption and no escalation to REQUIRES_HUMAN_INTERVENTION (Rule 11) -- safer
+        # than silently promoting, but an operator has no automatic signal that a round has been
+        # stuck refusing forever versus merely not yet retried.
         build_path = wt / dest_path / "BUILD.bazel"
         build_text = (
             await asyncio.to_thread(build_path.read_text, "utf-8")
