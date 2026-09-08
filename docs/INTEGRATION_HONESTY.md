@@ -9910,7 +9910,8 @@ propagation gap and the undesigned transitive-stub-stacking mechanism are untouc
 (D104's separate, still-open `REVALIDATE`-dispatch gap is untouched) — see
 `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
 
-## D125 — FIXED, LANDED (round VI task 80, `74aedc4`). `_verify_impl`'s wave loop has the
+## D125 — PARTLY ADDRESSED (round VI task 80, `74aedc4`) — the single-invocation case is fixed;
+a `--wave`-scoped multi-invocation residual remains, see D126. `_verify_impl`'s wave loop has the
 same cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
 
 **Found by round VI research-43 (2026-09-08), while designing D123's fix (ADR-0127), as a
@@ -10028,9 +10029,22 @@ across the invocation boundary exactly as predicted. This is genuinely OUT OF SC
 did for D125 itself: fold it into D126's existing scope (retitle to cover both phases) or allocate
 a sibling D-number is a controller prioritization call, not a technical fact this task can settle.
 
-## D126 — OPEN. A `fleet transform --wave N` sequence spanning multiple separate invocations does
-not propagate `blocked_by` across invocation boundaries — the narrower residual of D123 that
-ADR-0127's same-invocation fix does not close
+**Controller ruling, 2026-09-08 (round VI task-80 review) — status corrected from `FIXED, LANDED`
+to `PARTLY ADDRESSED`, and the VERIFY-side residual folded into D126 rather than given a sibling
+number.** An independent opus-tier review of task-80's branch confirmed the fix above is real and
+correctly matches ADR-0129's design, but found the `FIXED, LANDED` heading overclaimed by the same
+measure D123's own heading was corrected against (round VI task-76 fix round 1): the
+`--wave`-scoped multi-invocation residual is CONFIRMED, not merely predicted, by this same entry's
+own measurement above. Mirroring D123's precedent exactly, this heading now reads `PARTLY
+ADDRESSED` — the single-`fleet verify`-invocation case is fixed and proven; the `--wave`-scoped
+residual is tracked below as part of **D126**, retitled to cover both TRANSFORM and VERIFY since
+both share the identical root cause (`_open_phase_waves` returning `(wave,)` when wave-scoped,
+`propagate_blocked`'s single call site) rather than being two independent defects. No new
+D-number allocated.
+
+## D126 — OPEN. A `--wave N`-scoped sequence of multiple separate `fleet transform` or
+`fleet verify` invocations does not propagate `blocked_by` across invocation boundaries — the
+narrower residual of D123/D125 that ADR-0127/ADR-0129's same-invocation fixes do not close
 
 **Found by an independent opus-tier review of round VI task-76's branch (2026-09-08), ruled on by
 the controller in that task's fix round 1 (this entry).** Verified free before allocating:
@@ -10086,6 +10100,21 @@ record, run once at the start of any invocation regardless of `--wave` scoping; 
 decision to change what `--wave` means (widen its own pre-seed domain fleet-wide). Either is real
 design work, not a mechanical fix. **Not dispatched this round** — this entry exists so the
 finding is not lost between rounds.
+
+**Retitled, 2026-09-08 (round VI task-80 review, controller ruling) — this entry now also covers
+`_verify_impl`.** Round VI task-80 confirmed, by direct measurement, that the identical residual
+reproduces for VERIFY: driving the same fixture across two separate CLI invocations (`fleet
+verify --wave 0` then `fleet verify --wave 1`) leaves `acme-app-py` reading `SUCCEEDED`/
+`blocked_by == '[]'` rather than `BLOCKED`, byte-for-byte the same shape measured above for
+TRANSFORM (`FIRST_EXIT=7, SECOND_EXIT=7`, final rows
+`[('acme-app-py','SUCCEEDED','[]'), ('acme-app-ts','SUCCEEDED','[]'),
+('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'), ('acme-lib-ts','SUCCEEDED','[]')]`). Root
+cause is the identical shared mechanism this entry already traces (`_open_phase_waves` returning
+`(wave,)` when wave-scoped; `propagate_blocked`'s single call site) — not a second, independent
+defect — so this is folded into D126's existing scope rather than given a sibling D-number, per
+this entry's own heading correction. `docs/INTEGRATION_HONESTY.md`'s D125 entry now reads
+`PARTLY ADDRESSED` accordingly, mirroring D123's own correction in round VI task-76 fix round 1.
+Fix remains **not yet built** for either phase.
 
 ## D129 — FIXED, LANDED (round VI task 79, `4ead8f9`). `bazel/query.py::rdeps_query`'s
 `affected_only=True` form was invalid Bazel query syntax, never exercised under a real `bazel

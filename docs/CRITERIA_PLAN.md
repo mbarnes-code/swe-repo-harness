@@ -951,6 +951,18 @@ confirmed VERIFY-side sibling of D126 (no D-number yet), and the still-undesigne
 transitive-stub-stacking mechanism. D125 itself is no longer a remaining gap for the
 single-invocation case.
 
+**Corrected, 2026-09-08 (round VI task-80 review, controller ruling) — the open controller
+question above is settled: folded into D126, not a sibling number; D125 downgraded to
+`PARTLY ADDRESSED`.** Mirroring D123's own correction (round VI task-76 fix round 1), an
+independent review found D125's `FIXED, LANDED` heading overclaimed given the VERIFY-side
+residual is now CONFIRMED rather than merely measured-as-a-side-effect. `docs/
+INTEGRATION_HONESTY.md`'s D125 heading now reads `PARTLY ADDRESSED`; D126's own heading is
+retitled to cover both `_transform_impl` and `_verify_impl`, since both share the identical root
+cause. §12.14's remaining named gaps, restated once more: D124 (separately worked), D126 (now
+covering the `--wave`-scoped multi-invocation residual for BOTH TRANSFORM and VERIFY), and the
+still-undesigned transitive-stub-stacking mechanism — three items, not four; the "VERIFY-side
+sibling of D126" line above is superseded by this paragraph.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely
