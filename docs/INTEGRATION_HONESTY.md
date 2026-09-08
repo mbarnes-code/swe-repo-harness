@@ -8535,7 +8535,7 @@ task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never up
 so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
 that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
 finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
-fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13159`) already
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13185`) already
 implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
 durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
 and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
