@@ -135,8 +135,12 @@ def _seed_run_and_repo(db_path: Path, *, run_id: str, repo_ids: tuple[str, ...])
         for repo_id in repo_ids:
             conn.execute(
                 "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
-                (repo_id, repo_id, f"https://example.invalid/{repo_id}",
-                 "2026-09-08T00:00:00+00:00"),
+                (
+                    repo_id,
+                    repo_id,
+                    f"https://example.invalid/{repo_id}",
+                    "2026-09-08T00:00:00+00:00",
+                ),
             )
     finally:
         conn.close()
@@ -236,7 +240,9 @@ async def test_reconcile_hoist_rollbacks_skips_the_revert_series_on_refused(
     settings = _settings(tmp_path)
 
     refused = UnhoistOutcome(
-        decision="REFUSED", contract_id="proto:demo", blast_set=("owner",),
+        decision="REFUSED",
+        contract_id="proto:demo",
+        blast_set=("owner",),
         blocking_repo_ids=("blocker",),
     )
     unhoist_calls: list[str] = []
@@ -244,16 +250,18 @@ async def test_reconcile_hoist_rollbacks_skips_the_revert_series_on_refused(
     monkeypatch.setattr(
         cli, "unhoist_contract", _unhoist_stub({"proto:demo": refused}, unhoist_calls)
     )
-    monkeypatch.setattr(
-        cli, "execute_hoist_rollback", _execute_stub({}, execute_calls)
-    )
+    monkeypatch.setattr(cli, "execute_hoist_rollback", _execute_stub({}, execute_calls))
 
     async with StateWriter(db_path, owner="test-reconcile") as writer:
         read_conn = await connect_ro(db_path)
         try:
             entries = await _reconcile_hoist_rollbacks(
-                read_conn, settings, writer=writer, run_id=RUN_ID,
-                forge=object(), now=NOW,  # type: ignore[arg-type]
+                read_conn,
+                settings,
+                writer=writer,
+                run_id=RUN_ID,
+                forge=object(),
+                now=NOW,  # type: ignore[arg-type]
             )
         finally:
             await read_conn.close()
@@ -274,12 +282,17 @@ async def test_reconcile_hoist_rollbacks_calls_the_revert_series_on_applied_with
     settings = _settings(tmp_path)
 
     applied = UnhoistOutcome(
-        decision="APPLIED", contract_id="proto:demo", blast_set=("owner", "consumer"),
+        decision="APPLIED",
+        contract_id="proto:demo",
+        blast_set=("owner", "consumer"),
         demoted_repo_ids=("consumer",),
     )
     committed = HoistRollbackOutcome(
-        decision="COMMITTED", contract_id="proto:demo", ordered_shas=("a" * 40,),
-        already_reverted_shas=(), newly_reverted_shas=("a" * 40,),
+        decision="COMMITTED",
+        contract_id="proto:demo",
+        ordered_shas=("a" * 40,),
+        already_reverted_shas=(),
+        newly_reverted_shas=("a" * 40,),
     )
     unhoist_calls: list[str] = []
     execute_calls: list[tuple[str, tuple]] = []
@@ -294,8 +307,12 @@ async def test_reconcile_hoist_rollbacks_calls_the_revert_series_on_applied_with
         read_conn = await connect_ro(db_path)
         try:
             entries = await _reconcile_hoist_rollbacks(
-                read_conn, settings, writer=writer, run_id=RUN_ID,
-                forge=object(), now=NOW,  # type: ignore[arg-type]
+                read_conn,
+                settings,
+                writer=writer,
+                run_id=RUN_ID,
+                forge=object(),
+                now=NOW,  # type: ignore[arg-type]
             )
         finally:
             await read_conn.close()
@@ -326,12 +343,17 @@ async def test_reconcile_hoist_rollbacks_processes_several_contracts_sequentiall
             decision="APPLIED", contract_id="proto:a", blast_set=("owner-a",)
         ),
         "proto:z": UnhoistOutcome(
-            decision="REFUSED", contract_id="proto:z", blast_set=("owner-z",),
+            decision="REFUSED",
+            contract_id="proto:z",
+            blast_set=("owner-z",),
             blocking_repo_ids=("x",),
         ),
     }
     rollback = HoistRollbackOutcome(
-        decision="COMMITTED", contract_id="proto:a", ordered_shas=(), already_reverted_shas=(),
+        decision="COMMITTED",
+        contract_id="proto:a",
+        ordered_shas=(),
+        already_reverted_shas=(),
         newly_reverted_shas=(),
     )
     order: list[str] = []
@@ -351,8 +373,12 @@ async def test_reconcile_hoist_rollbacks_processes_several_contracts_sequentiall
         read_conn = await connect_ro(db_path)
         try:
             entries = await _reconcile_hoist_rollbacks(
-                read_conn, settings, writer=writer, run_id=RUN_ID,
-                forge=object(), now=NOW,  # type: ignore[arg-type]
+                read_conn,
+                settings,
+                writer=writer,
+                run_id=RUN_ID,
+                forge=object(),
+                now=NOW,  # type: ignore[arg-type]
             )
         finally:
             await read_conn.close()
@@ -392,17 +418,29 @@ class _RealMergeForge:
         result = await asyncio.to_thread(_git_log_source_repo, self._monorepo, repo_id)
         line = result.stdout.strip().splitlines()[0]
         sha, iso = line.split("|", 1)
-        return PrStatus(url=url, state=PrState.MERGED, merged_at=datetime.fromisoformat(iso),
-                         merge_commit_sha=sha)
+        return PrStatus(
+            url=url,
+            state=PrState.MERGED,
+            merged_at=datetime.fromisoformat(iso),
+            merge_commit_sha=sha,
+        )
 
 
 def _git_log_source_repo(monorepo_path: Path, repo_id: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(  # noqa: S603
         [  # noqa: S607
-            "git", "-C", str(monorepo_path), "log", "integration", "--format=%H|%cI",
-            "--grep", f"^Source-Repo: {repo_id}$",
+            "git",
+            "-C",
+            str(monorepo_path),
+            "log",
+            "integration",
+            "--format=%H|%cI",
+            "--grep",
+            f"^Source-Repo: {repo_id}$",
         ],
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
 
 
@@ -410,18 +448,31 @@ def _seed_pr(
     db_path: Path, run_id: str, *, repo_id: str, url: str, contract_id: str | None = None
 ) -> None:
     draft = PullRequestDraft(
-        run_id=_uuid.UUID(run_id), repo_id=repo_id, contract_id=contract_id, wave_index=0,
-        branch=f"migrate/{repo_id}", title=f"[fleet] migrate {repo_id}", body="body",
-        source_url=f"https://example.invalid/{repo_id}", source_sha="a" * 40,
-        state=PrState.MERGED, url=url,
+        run_id=_uuid.UUID(run_id),
+        repo_id=repo_id,
+        contract_id=contract_id,
+        wave_index=0,
+        branch=f"migrate/{repo_id}",
+        title=f"[fleet] migrate {repo_id}",
+        body="body",
+        source_url=f"https://example.invalid/{repo_id}",
+        source_sha="a" * 40,
+        state=PrState.MERGED,
+        url=url,
     )
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
         conn.execute(
             "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
             "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
-            (run_id, repo_id, PR_RECORD_KIND, f"pr:{repo_id}", draft.model_dump_json(),
-             "2026-09-08T00:00:00+00:00"),
+            (
+                run_id,
+                repo_id,
+                PR_RECORD_KIND,
+                f"pr:{repo_id}",
+                draft.model_dump_json(),
+                "2026-09-08T00:00:00+00:00",
+            ),
         )
     finally:
         conn.close()
@@ -448,8 +499,14 @@ def _seed_contract_and_edges(
             "                   evidence_path, detected_at) "
             "VALUES (?, ?, 'REPO', ?, 'CONTRACT', ?, ?, 'CONTRACT_IMPL', 0.95, 0.95, "
             "        'x.yaml', ?)",
-            (_ekey("impl", owner, contract_id), run_id, owner, contract_id, contract_id,
-             "2026-09-08T00:00:00+00:00"),
+            (
+                _ekey("impl", owner, contract_id),
+                run_id,
+                owner,
+                contract_id,
+                contract_id,
+                "2026-09-08T00:00:00+00:00",
+            ),
         )
         conn.execute(
             "INSERT INTO edges (edge_key, run_id, src_kind, src_id, dst_kind, dst_id, "
@@ -457,8 +514,14 @@ def _seed_contract_and_edges(
             "                   evidence_path, detected_at) "
             "VALUES (?, ?, 'REPO', ?, 'CONTRACT', ?, ?, 'CONTRACT_CONSUME', 0.9, 0.9, "
             "        'x.yaml', ?)",
-            (_ekey("consume", consumer, contract_id), run_id, consumer, contract_id, contract_id,
-             "2026-09-08T00:00:00+00:00"),
+            (
+                _ekey("consume", consumer, contract_id),
+                run_id,
+                consumer,
+                contract_id,
+                contract_id,
+                "2026-09-08T00:00:00+00:00",
+            ),
         )
     finally:
         conn.close()
@@ -466,7 +529,8 @@ def _seed_contract_and_edges(
 
 def _phase_row(root: Path, repo_id: str, phase: int) -> tuple[str, int]:
     rows = e2e_query(
-        root, "SELECT status, attempts FROM phases WHERE repo_id = ? AND phase = ?",
+        root,
+        "SELECT status, attempts FROM phases WHERE repo_id = ? AND phase = ?",
         (repo_id, phase),
     )
     assert len(rows) == 1, rows
@@ -476,16 +540,28 @@ def _phase_row(root: Path, repo_id: str, phase: int) -> tuple[str, int]:
 def _integration_tip(monorepo_path: Path) -> str:
     result = subprocess.run(  # noqa: S603
         ["git", "-C", str(monorepo_path), "rev-parse", "integration"],  # noqa: S607
-        capture_output=True, text=True, check=True,
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return result.stdout.strip()
 
 
 def _revert_commits_on_integration(monorepo_path: Path, contract_id: str) -> list[str]:
     result = subprocess.run(  # noqa: S603
-        ["git", "-C", str(monorepo_path), "log", "integration", "--format=%H",  # noqa: S607
-         "--grep", f"^Fleet-Contract-Rollback-Id: {contract_id}$"],
-        capture_output=True, text=True, check=True,
+        [  # noqa: S607
+            "git",
+            "-C",
+            str(monorepo_path),
+            "log",
+            "integration",
+            "--format=%H",
+            "--grep",
+            f"^Fleet-Contract-Rollback-Id: {contract_id}$",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
     )
     return [line for line in result.stdout.strip().splitlines() if line]
 
@@ -521,7 +597,11 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
     assert consumer_transform_before[0] == "SUCCEEDED"
 
     _seed_contract_and_edges(
-        db_path, run_id, contract_id=_CONTRACT_ID, owner=owner, consumer=consumer,
+        db_path,
+        run_id,
+        contract_id=_CONTRACT_ID,
+        owner=owner,
+        consumer=consumer,
         target_path=_TARGET_PATH,
     )
     owner_url = f"https://forge.invalid/{owner}/pull/1"
@@ -534,7 +614,8 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
 
     fake_bazel = _bazel_seam_failing_one_dest(
         fleet / "artifacts" / "fake-bazel-task72",
-        fail_dest=DESTINATIONS[owner], fail_stderr=_STDERR,
+        fail_dest=DESTINATIONS[owner],
+        fail_stderr=_STDERR,
     )
     monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
 
@@ -606,7 +687,11 @@ def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contrac
     db_path = fleet / "state" / "fleet.db"
 
     _seed_contract_and_edges(
-        db_path, run_id, contract_id=_CONTRACT_ID, owner=owner, consumer=consumer,
+        db_path,
+        run_id,
+        contract_id=_CONTRACT_ID,
+        owner=owner,
+        consumer=consumer,
         target_path=_TARGET_PATH,
     )
     owner_url = f"https://forge.invalid/{owner}/pull/1"
@@ -620,7 +705,8 @@ def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contrac
 
     fake_bazel = _bazel_seam_failing_one_dest(
         fleet / "artifacts" / "fake-bazel-task72-noanchor",
-        fail_dest=DESTINATIONS[owner], fail_stderr=_STDERR,
+        fail_dest=DESTINATIONS[owner],
+        fail_stderr=_STDERR,
     )
     monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
 
@@ -673,7 +759,11 @@ def test_a_second_fleet_build_invocation_is_idempotent_and_makes_no_new_commits(
     db_path = fleet / "state" / "fleet.db"
 
     _seed_contract_and_edges(
-        db_path, run_id, contract_id=_CONTRACT_ID, owner=owner, consumer=consumer,
+        db_path,
+        run_id,
+        contract_id=_CONTRACT_ID,
+        owner=owner,
+        consumer=consumer,
         target_path=_TARGET_PATH,
     )
     owner_url = f"https://forge.invalid/{owner}/pull/1"
@@ -684,7 +774,8 @@ def test_a_second_fleet_build_invocation_is_idempotent_and_makes_no_new_commits(
     forge = _RealMergeForge(monorepo, {owner_url: owner, consumer_url: consumer})
     monkeypatch.setattr(cli, "_forge", lambda settings: forge)
     fake_bazel = _bazel_seam_failing_one_dest(
-        fleet / "artifacts" / "fake-bazel-task72-idem", fail_dest=DESTINATIONS[owner],
+        fleet / "artifacts" / "fake-bazel-task72-idem",
+        fail_dest=DESTINATIONS[owner],
         fail_stderr=_STDERR,
     )
     monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
@@ -736,14 +827,18 @@ def test_a_real_fleet_build_refuses_the_rollback_and_never_calls_the_revert_seri
     """
     _ = (filter_repo, resolver, gazelle)
     transformed(fleet)
-    owner = "acme-app-py"       # the contract's owner; unrelated to the blocker/consumer pair
-    consumer = "acme-lib-ts"    # the blast-set member
-    blocker = "acme-app-ts"     # real DECLARED_DEP dependent of `consumer`, MERGED, not blast_set
+    owner = "acme-app-py"  # the contract's owner; unrelated to the blocker/consumer pair
+    consumer = "acme-lib-ts"  # the blast-set member
+    blocker = "acme-app-ts"  # real DECLARED_DEP dependent of `consumer`, MERGED, not blast_set
     run_id = str(e2e_query(fleet, "SELECT run_id FROM runs")[0][0])
     db_path = fleet / "state" / "fleet.db"
 
     _seed_contract_and_edges(
-        db_path, run_id, contract_id=_CONTRACT_ID, owner=owner, consumer=consumer,
+        db_path,
+        run_id,
+        contract_id=_CONTRACT_ID,
+        owner=owner,
+        consumer=consumer,
         target_path=_TARGET_PATH,
     )
     owner_url = f"https://forge.invalid/{owner}/pull/1"
@@ -760,7 +855,8 @@ def test_a_real_fleet_build_refuses_the_rollback_and_never_calls_the_revert_seri
 
     monkeypatch.setattr(cli, "execute_hoist_rollback", _explode)
     fake_bazel = _bazel_seam_failing_one_dest(
-        fleet / "artifacts" / "fake-bazel-task72-refused", fail_dest=DESTINATIONS[owner],
+        fleet / "artifacts" / "fake-bazel-task72-refused",
+        fail_dest=DESTINATIONS[owner],
         fail_stderr=_STDERR,
     )
     monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
@@ -775,7 +871,8 @@ def test_a_real_fleet_build_refuses_the_rollback_and_never_calls_the_revert_seri
         "no git revert may land when the rollback is REFUSED"
     )
     refused = e2e_query(
-        fleet, "SELECT payload FROM findings WHERE kind = 'HoistRollbackRefused' AND run_id = ?",
+        fleet,
+        "SELECT payload FROM findings WHERE kind = 'HoistRollbackRefused' AND run_id = ?",
         (run_id,),
     )
     assert len(refused) == 1
