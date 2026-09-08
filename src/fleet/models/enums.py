@@ -301,6 +301,44 @@ def degrade_for_stub(
     return new, StubDegradation(repo_id=repo_id, phase=phase, reason=reason, from_status=old)
 
 
+STUB_CONSUMER_STATUS_KIND: Final[str] = "StubConsumerStatusApplied"
+"""The `findings.kind` every D108 (round VI task 79, ADR-0128) `consumer_status -> phases`
+correction writes. Same audit discipline as `STUB_DEGRADED_KIND`/`PHASE_DEMOTED_KIND`: a write
+that promotes a `DEGRADED` consumer to `SUCCEEDED` (T2, every sibling stub `RESOLVED`) or escalates
+it to `REQUIRES_HUMAN_INTERVENTION` (T3 `STUB_DIVERGED`) is a fact an operator must be told, not
+merely a status bit — mirroring `StubDegradation`'s own reasoning in the opposite direction."""
+
+
+@dataclass(frozen=True, slots=True)
+class StubConsumerStatusChange:
+    """The audit record for one `DEGRADED -> {SUCCEEDED, REQUIRES_HUMAN_INTERVENTION}` consumer
+    promotion/escalation (D108, ADR-0128), returned by `SqliteStateRepository.
+    apply_stub_consumer_status` *alongside* the new status — mirrors `StubDegradation` exactly,
+    for the same reason: a caller cannot end up holding the new status without the finding it
+    owes. Unlike `StubDegradation`/`PhaseDemotion`, this is not gated by its own `transition()`
+    door: `RepoStatus.DEGRADED`'s `ALLOWED_TRANSITIONS` entry already names both
+    `RepoStatus.SUCCEEDED` and `RepoStatus.REQUIRES_HUMAN_INTERVENTION` as ordinary, unconditional
+    edges (§3.5.1's own "DEGRADED is resolvable" invariant) — there is no silent door to close
+    here, only the audit trail this dataclass supplies."""
+
+    repo_id: str
+    phase: Phase
+    reason: str          # `StubDecision.detail`, verbatim — why the consumer's status moved
+    to_status: RepoStatus
+    from_status: RepoStatus = RepoStatus.DEGRADED
+
+    def payload(self) -> dict[str, object]:
+        """The `findings.payload` body, shaped for `cli._note_finding(kind=
+        STUB_CONSUMER_STATUS_KIND)` (mirrors `StubDegradation.payload()`)."""
+        return {
+            "repo_id": self.repo_id,
+            "phase": int(self.phase),
+            "from_status": self.from_status.value,
+            "to_status": self.to_status.value,
+            "reason": self.reason,
+        }
+
+
 class StubState(StrEnum):
     """Lifecycle of one `stubs` row (§3.5.1). Four states, four transitions, no state without
     an inbound transition. RESOLVED and ABANDONED are terminal."""

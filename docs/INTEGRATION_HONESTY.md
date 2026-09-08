@@ -1439,7 +1439,7 @@ asserts on `EdgeRow` in memory passes.
 **FIXED, 2026-09-03 (round VI task 31, commit `d4cfc3e`, merge `31357cd`).** The brief this task
 was dispatched against assumed `EdgeRow` already carried `retargeted_from_repo_id` — investigation
 found that was false: that field belongs to `DependencyEdge` (`models/graph.py:141`), a
-structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:357`) had no such
+structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:359-381`) had no such
 field at all. The real fix touched three things, not one: (1) added the field to `EdgeRow`
 itself, (2) added it to `insert_edges`'s SQL column list and params (now sixteen columns, not
 fifteen), (3) updated both production call sites (`_persist_scan_edges`, `_persist_contract_edges`
@@ -7403,7 +7403,7 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2615-2683`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2735-2803`) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (repointed fresh below, moved repeatedly by round VI
@@ -8428,7 +8428,7 @@ prescribing its exact implementation.
 
 ---
 
-## D104 — OPEN. `TaskKind.REVALIDATE` has no execution/dispatch path anywhere, and `settle_revalidation`
+## D104 — FIXED, LANDED (round VI task 79, `4ead8f9`). `TaskKind.REVALIDATE` has no execution/dispatch path anywhere, and `settle_revalidation`
 (T2/T3) has zero production call sites — the same "defined, unit-tested, zero callers" shape D102
 found and fixed for T1, one layer downstream
 
@@ -8493,7 +8493,52 @@ when this entry was first written. **Ruling: D104(b)/(c) must land bundled with 
 (task-79), never merged separately** — see ADR-0128 judgment call 5 for the full reasoning and the
 rejected split alternative.
 
-## D107 — OPEN. Nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub target to
+**FIXED, 2026-09-08 (round VI task 79, `4ead8f9`, ADR-0128).** Landed bundled with D107/D108 per
+the ruling directly above. D104(a): `VerifyInput.revalidation_round` (previously always 0) threads
+into `RdepverifyInput` of the same name. D104(b): a new claiming loop over `tasks WHERE
+kind = 'REVALIDATE' AND status = 'PENDING'` (`state/repository.py::claim_task_by_id`, not a
+`WaveScheduler` wave), driven from a new `fleet resume` step between step 6 (unblocking) and step
+7 (projection regen), re-runs `VerifyPipelineWorker` unmodified against the consumer's
+now-rewritten `migrate/<consumer>` tip (D107, below) and calls `settle_revalidation`
+(`cli._run_revalidation_claims_impl`/`_run_one_revalidation_task`). D104(c) is D108's own fix, see
+that entry. The safety property this entry's own correction demanded — a REVALIDATE loop must
+never observe a stub still pointing at the stub label while reading `verified_against_stubs` as
+empty — is proven both positively (the real-Bazel headline test) and as a falsifiable negative
+(`tests/test_stub_resolution_task79.py::
+test_a_revalidate_round_without_d107s_rewrite_reads_false_empty_verified_against_stubs`, which
+reproduces the exact hazard when D107's rewrite is skipped, per this task's own Rule-12 brief).
+
+**Correction, 2026-09-08 (fix round 1, opus-tier review, C1/I2/I3) — the paragraph above
+overclaimed both the safety property and the negative-proof test's coverage; both are now fixed
+for real, and this correction records what changed.** (C1, Critical) The claim above was false as
+landed: the "safety property" was a docstring/SPEC sentence, not an enforced mechanism —
+`_rewrite_superseded_consumer_labels` runs best-effort from `_pr_sync_impl` and every failure mode
+(a transiently unavailable monorepo checkout, drift, a rebase conflict, a render failure, a
+refused push) became a `"FAILED: ..."` string nothing downstream checked, so a REVALIDATE task
+claimed after such a failure would build against a tree still naming a stub with nothing refusing
+it. **Fixed**: `cli._run_one_revalidation_task` now reads the checked-out `BUILD.bazel` before
+dispatching `VerifyPipelineWorker` and refuses the round (task -> `PENDING`, a
+`RevalidationLabelNotRewritten` finding naming the consumer and the still-present stub label) if a
+`//third_party/stubs/...` label is still present — a real, mechanical gate, independent of
+whether the upstream rewrite trigger succeeded. (I3) The test named above,
+`test_a_revalidate_round_without_d107s_rewrite_reads_false_empty_verified_against_stubs`, did NOT
+prove what this paragraph claimed: it asserted only `_active_stubs_by_consumer`'s DB-derived
+`fidelity == {}`, a characterization of one query that passes identically whether or not D107 (or
+now the C1 gate) exists — it never drove the claiming loop at all. **Replaced** by
+`test_c1_gate_refuses_a_revalidate_round_whose_committed_tree_still_names_a_stub_label`, which
+plants a real stub-labeled `BUILD.bazel` commit on `migrate/<consumer>`, drives the REAL
+`_run_revalidation_claims_impl`, and asserts the round is refused (task `PENDING`, the finding
+written, the stub still `SUPERSEDED` not `RESOLVED`) — proven a genuine discriminator by an
+old-fails/new-passes run (with the C1 gate disabled via a copied-aside file: `settled:
+verdict=PASS decisions=1`, i.e. the consumer is silently promoted despite the stub label still
+present — the concrete C1 hazard, reproduced; with the gate: refused, as asserted). Also added:
+`cli._pr_sync_lines` now surfaces a failed rewrite in `fleet pr --sync`'s own human-readable
+output (previously silent — exit 0 with the failure visible only in the JSON `label_rewrites`
+payload nothing rendered), proven by `test_pr_sync_lines_surfaces_a_failed_label_rewrite`/
+`test_pr_sync_lines_is_silent_when_every_rewrite_succeeded`. **`FIXED, LANDED` stands** — the
+review's own words once this gate and test exist for real.
+
+## D107 — FIXED, LANDED (round VI task 79, `4ead8f9`). Nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub target to
 the real one once the stub resolves — SPEC §3.5.1 item 1 has zero production implementation
 
 **Found by research-14 (2026-09-03), while sizing D104.** Verified free before allocating:
@@ -8518,7 +8563,41 @@ triggers it (presumably the same "stub resolved" signal D104/T2 would need), and
 every consumer-side label referencing a given stub. Genuinely unsized here — that design choice is
 not made in this entry.
 
-## D108 — OPEN. `StubDecision.consumer_status` has zero production readers — `_apply_stub_decisions`
+**FIXED, 2026-09-08 (round VI task 79, `4ead8f9`, ADR-0128).** `cli._rewrite_superseded_consumer_
+labels`/`_rewrite_one_consumer_label`, fired from `_pr_sync_impl`'s existing T1 trigger (D102) for
+every distinct `consumer_repo_id` `supersede()` returns: cuts a fresh worktree from the consumer's
+`migrate/<repo>`, rebases onto the current `integration` tip, re-derives the `BuildUnit`
+(`_unit_deps` reused unmodified — the redirect logic itself was already correct per task 13's
+Blocker C), re-renders via `BuildgenWorker` unmodified, and commits+pushes the diff via
+`vcs/commits.py::guard`/`apply_and_commit` with the standard `Fleet-*` trailers. The ADR-0128
+precondition check (comparing the branch's tree to its "last Phase-2 commit") does not correspond
+to this codebase's actual `migrate/<repo>` topology — `vcs/filter_repo.py::ingest()` (D115)
+force-moves the branch to Phase 3's own merge commit on every ingest, not a Phase-2 commit — and
+is replaced with a check that every commit unique to `migrate/<consumer>` relative to
+`integration` is either none or one of this function's own prior rewrites, disclosed in the
+function's docstring and the task-79 report. Proven end to end under REAL Bazel (no seam) by
+`tests/test_stub_resolution_task79.py::
+test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test`, which reads the
+label off the actual committed `migrate/<consumer>` file and confirms via a real `bazel query`
+that the real provider's label — not the stub's — is what the analysed graph names.
+`test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label` and `test_d107_is_idempotent_
+on_replay` prove the rewrite and its idempotency directly.
+
+**Correction, 2026-09-08 (fix round 1, opus-tier review, I4) — "is replaced with a check that..."
+above overclaimed an EQUIVALENCE the replacement check does not have; corrected to a disclosed
+narrowing.** The literal ADR-0128/SPEC pseudocode comparison this paragraph replaces was correctly
+identified as wrong (D115's topology, as stated above) — that correction stands. But the
+replacement (every commit unique to `migrate/<consumer>` relative to `integration` must be none or
+one of this function's own prior rewrites) is NARROWER than what judgment call 6 asked for, not a
+like-for-like substitute: it can only see commits unique to `migrate/<consumer>`, so it is
+STRUCTURALLY BLIND to drift that arrives already inside `integration` itself — e.g. a rebase
+pulling in new upstream commits before this rewrite runs, which is the ADR's own named example of
+what this check should catch. `_rewrite_one_consumer_label`'s unconditional `rebase(base)` two
+lines below the check silently absorbs exactly that case, with no flag raised. This is disclosed
+follow-on debt, not solved — `_rewrite_one_consumer_label`'s own docstring now states this
+precisely (fix round 1) rather than claiming mechanical equivalence.
+
+## D108 — FIXED, LANDED (round VI task 79, `4ead8f9`). `StubDecision.consumer_status` has zero production readers — `_apply_stub_decisions`
 writes only `stubs`/`findings`, never `phases`
 
 **Found by research-14 (2026-09-03), while sizing D104.** Verified free before allocating:
@@ -8540,6 +8619,17 @@ unmodified would silently swallow them.
 **Not yet built:** the `phases`-write call site for `consumer_status`. Trivial in isolation, but
 correctly scoped as part of whichever future task wires D104's T2/T3 transitions in (D104-c above),
 not dispatched standalone — there is nothing for it to act on until D104 lands.
+
+**FIXED, 2026-09-08 (round VI task 79, `4ead8f9`, ADR-0128).** `SqliteStateRepository.
+apply_stub_consumer_status` writes the `phases` CAS (mirroring `stub_degrade_transform`'s ADR-0124
+transaction shape in the opposite direction, `DEGRADED -> {SUCCEEDED, REQUIRES_HUMAN_
+INTERVENTION}`), called from the new D104(b) REVALIDATE claiming loop for exactly the two
+`StubDecision` kinds this entry names (T2 all_clear, T3 `STUB_DIVERGED`) whenever `decision.
+consumer_status is not RepoStatus.DEGRADED`. A `StubConsumerStatusApplied` finding records the
+correction, mirroring `StubDegraded`'s own audit discipline. Proven end to end (FakeBazel) by
+`tests/test_stub_resolution_task79.py::
+test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes`. Landed bundled with
+D104/D107 per ADR-0128 judgment call 5 — see D104's own entry above for why splitting was rejected.
 
 ---
 
@@ -8934,7 +9024,7 @@ whatever Leg C1 would additionally need. Full details:
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2552-2559`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
+(`cli.py:2565-2602`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
 re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123
@@ -9958,3 +10048,44 @@ record, run once at the start of any invocation regardless of `--wave` scoping; 
 decision to change what `--wave` means (widen its own pre-seed domain fleet-wide). Either is real
 design work, not a mechanical fix. **Not dispatched this round** — this entry exists so the
 finding is not lost between rounds.
+
+## D129 — FIXED, LANDED (round VI task 79, `4ead8f9`). `bazel/query.py::rdeps_query`'s
+`affected_only=True` form was invalid Bazel query syntax, never exercised under a real `bazel
+query` anywhere in this tree before this task
+
+**Found by round VI task 79, while building D104(b)'s own required real-Bazel proof (this
+project's own repeated lesson: FakeBazel-only testing has masked real gaps here specifically, most
+recently D121).** Verified free before allocating: form-agnostic sweep of `docs/
+INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md`/`docs/SPEC.md` for `\bD[0-9]+\b`
+found `D126` as the highest allocated number.
+
+**The gap, as measured.** `rdeps_query(dest, affected_only=True)` rendered
+`f"rdeps(//..., set({kind_rule_query(dest)}))"` = `rdeps(//..., set(kind(rule, //<dest>/...)))`.
+`set()` is Bazel query's LITERAL-LABEL-LIST constructor (`set(//a //b //c)`); it does not accept a
+nested query expression as its argument. A real `bazel query` on this string fails:
+`ERROR: ... syntax error at '( rule ,'` — reproduced in a throwaway single-package Bazel workspace
+with zero harness code involved, isolating the defect to the query STRING itself rather than to
+anything downstream. `rdeps()`'s own second argument already accepts an arbitrary query expression
+directly, so `kind(rule, //<dest>/...)` needed no `set()` wrapper at all. `grep -rn` across
+`tests/` found no test anywhere that ran this string through a real `bazel query` before this
+task — every prior test (`tests/test_bazel.py::
+test_the_affected_only_query_is_intersected_with_this_repos_rules` and others) asserted the STRING
+`rdeps_query` returns, never that Bazel would accept it, and no real-Bazel Phase-4 `verify` test
+existed in this tree at all (confirmed: `grep -rn "def test_.*real_bazel" tests/test_build_e2e.py
+tests/test_pr_e2e.py` matches no `verify`-phase test).
+
+**Consequence.** Every real (non-`FakeBazel`) invocation of `verify.affected_only: true` (the
+CONFIGURED DEFAULT) against the real `bazel` binary would fail with a Bazel query syntax error,
+not merely narrow its rdeps universe — an ordinary Phase 4 `fleet verify` dispatch, not specific to
+stub revalidation. This had never been observed because no test in this tree drove Phase 4's own
+`RdepverifyWorker` against a real `bazel` binary before round VI task 79's own D104(b) proof needed
+one.
+
+**FIXED in the same commit.** `rdeps_query`'s `affected_only=True` branch now renders
+`f"rdeps(//..., {kind_rule_query(dest)})"` — no `set()` wrapper. `tests/test_bazel.py`'s two string
+assertions updated to match; `tests/test_stub_resolution_task79.py::
+test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test` is the real-Bazel
+regression proof (a real `bazel build` + `bazel test` + `bazel query` all succeed against the
+rewritten tree under this fix). Unrelated to D107/D104/D108 otherwise — fixed here only because it
+directly blocked this task's own required real-Bazel proof (CLAUDE.md's Rule 11 disclosure, not a
+scope expansion of the task brief).

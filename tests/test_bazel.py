@@ -809,7 +809,9 @@ def test_the_affected_only_query_is_intersected_with_this_repos_rules() -> None:
     attempts is ~3 000 invocations; a full `//...` build at each is the cost explosion that ends
     the run. `affected_only=false` restores the full closure for a final gate run."""
     assert kind_rule_query("java/acme") == "kind(rule, //java/acme/...)"
-    assert rdeps_query("java/acme") == "rdeps(//..., set(kind(rule, //java/acme/...)))"
+    # D129 (round VI task 79): `set(...)` around `kind_rule_query(...)` was invalid Bazel query
+    # syntax (confirmed against a real `bazel query`) and is no longer emitted.
+    assert rdeps_query("java/acme") == "rdeps(//..., kind(rule, //java/acme/...))"
     assert rdeps_query("java/acme", affected_only=False) == "rdeps(//..., //java/acme/...)"
     assert direct_rdeps_query("java/acme").endswith(", 1)")
 
@@ -937,7 +939,7 @@ def test_a_capped_closure_is_disclosed_not_silent() -> None:
     labels = [f"//pkg{i:05d}:lib" for i in range(3000)]
     direct = labels[:12]
     closure = select_tested_targets(
-        labels, query="rdeps(//..., set(kind(rule, //java/acme/...)))",
+        labels, query="rdeps(//..., kind(rule, //java/acme/...))",
         direct=direct, limit=2000, sample_n=500,
     )
     assert closure.truncated
