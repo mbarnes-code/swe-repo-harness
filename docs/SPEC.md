@@ -7794,3 +7794,86 @@ Stated so scope creep has to argue against a written line. The harness explicitl
     scope; convert to git first.
 12. **Optimize the monorepo layout.** `layout()` is deterministic and total, not clever. It will
     not infer a better package taxonomy than the coordinates the repos already publish.
+
+## 15. QA/QC and Real-Repo Pilot Phase
+
+**Customer directive, recorded 2026-09-08 (ADR-0131).** This section defines a completion gate
+*in addition to* §12 — reaching 48/48 on §12's Success Criteria makes the harness feature-complete
+against its own acceptance bar, but does not by itself make the project customer-done. The project
+is complete only when §12 is 48/48 **and** both phases below pass, and the second phase is
+reported to the customer before completion is declared.
+
+### 15.1 QA/QC Phase
+
+Runs after §12 reaches 48/48. Re-verifies the acceptance bar end-to-end rather than trusting the
+cumulative checkpoint trail that produced it:
+
+1. A fresh, full re-derivation of the §12 Rollup (`docs/CRITERIA_PLAN.md`) against `main` at the
+   commit being certified — not carried forward from any prior wave's checkpoint (Guardrail 6,
+   CLAUDE.md §"Measurement, Stand-In & Audit Discipline").
+2. The full test suite green per §6's existing bar: `xfail: 0` (modulo disclosed, D-numbered
+   exceptions), a clean `bazel disk` line, `mypy --strict` clean with no path arguments, `ruff
+   check`/`ruff format --check` clean, run from a location that does not silently narrow scope.
+3. A Rule-12-style mutation audit sweep over every changed-in-this-project source file, not only
+   the files touched by the most recent round — confirming test strength holds project-wide, not
+   just at the wave that last touched a given file.
+4. An independent review pass (a reviewer who did not implement the closure being certified) with
+   zero unresolved blocking findings.
+
+Any regression found during this phase re-opens the specific §12 criterion(s) it affects; it does
+not block the other 47.
+
+### 15.2 Real-Repo Pilot Phase
+
+Runs after 15.1 passes. Exercises the full pipeline (scan → sequence → transform → build → verify
+→ PR) against real repositories, not fixtures — the class of defect a unit/fixture-level proof
+structurally cannot surface (real branch topology, real file sizes, real ecosystem drift) gets one
+dedicated pass before completion is declared.
+
+**Environment.** The pilot runs against **copies** of repositories from the customer's Gitea
+instance, checked out into an **isolated virtual environment** dedicated to the pilot. The
+harness never reads from or writes to the production Gitea instance during the pilot: repos are
+snapshotted (bare-clone or `git bundle`) into the sandbox once, up front, and every `fleet`
+write — scans, transforms, PR drafts, pushes — targets the sandboxed copies only. A pilot run
+that touches production Gitea, even read-only beyond the initial snapshot, is a defect in the
+pilot harness itself, not an acceptable shortcut.
+
+**Sample.** Default starting sample: 5-10 repos drawn from the existing corpus (spanning the
+ecosystems the harness already has adapters for — at minimum one Python-only, one TS-only, and
+one repo carrying a shared contract/proto), scaled up in a second pass once the first sample's
+`REQUIRES_HUMAN_INTERVENTION` rate and finding volume are known. **This sample size and selection
+are assumptions, not a customer-specified number** — recorded per Rule 1 and open to revision at
+pilot kickoff.
+
+**LLM backend.** The pilot's LLM-role calls route through the harness's existing `ModelClient`
+protocol and backend registry (§7, ADR-0023) — a pilot run adds one backend registry entry, not a
+new abstraction. That entry points at **one dedicated Spark host**, configured to serve
+`nvidia/nemotron-3-super-120b-a12b` (customer-specified model) via the Spark's local inference
+stack. Provisioning that host — selecting which of the two Sparks, installing/serving the model,
+and confirming a health check — is infrastructure work outside this repository's workspace and
+outside what a subagent can do unsupervised (no passwordless sudo on either Spark, per the
+customer's global environment notes); it is a pilot **prerequisite**, tracked as a checklist item
+below, not something `fleet` or its subagents provision themselves.
+
+**Operational constraint.** The pilot must not run concurrently with any Hermes work or other
+vLLM workload on either Spark — it will occupy the dedicated host's inference capacity for the
+duration of the run. Confirm exclusivity before starting, not just at kickoff.
+
+**Pilot prerequisites (infrastructure, not harness work):**
+- [ ] Select and provision one Spark for the pilot; confirm it is not otherwise in use.
+- [ ] Install/serve `nvidia/nemotron-3-super-120b-a12b` on that Spark; confirm a health check.
+- [ ] Add the corresponding `ModelClient` backend registry entry and local-only pilot profile
+      (mirroring §12.41's existing local-only-profile precedent).
+- [ ] Stand up the isolated virtual environment and snapshot the pilot's repo sample into it.
+
+**Exit criteria.** The pilot phase passes when, against the full sample: every repo reaches a
+terminal state (`SUCCEEDED`, `DEGRADED` with a disclosed reason, or `REQUIRES_HUMAN_INTERVENTION`
+with a disclosed reason — never a silent hang or crash); no write of any kind lands outside the
+sandboxed copies (checked directly against the production Gitea instance, not assumed); and a
+pilot report is produced comparing what the pilot observed against the §12 criteria it exercises
+— naming any real-repo behavior that a fixture-level §12 proof did not anticipate. A pilot finding
+against a `FIXED, LANDED` D-number reopens that D-number; it does not retroactively invalidate the
+fixture-level test that originally closed it, since both can be simultaneously true (Rule 12's
+"a validated instrument can still be blind to the defect you are hunting" applies here directly —
+a fixture-level pass and a real-repo miss are not a contradiction, they are two different
+instruments with two different blind spots).

@@ -15021,3 +15021,50 @@ helper" sizing (judgment call 2), BUILD's structural immunity (judgment call 3),
 scheduler/transition/reentry change needed" confirmation (judgment call 4) are each settled by
 reading the code fresh and re-applying ADR-0127/ADR-0129's own already-reviewed reasoning, not by a
 preference this ADR is guessing at.
+
+## ADR-0131 — Add `docs/SPEC.md` §15: QA/QC and Real-Repo Pilot Phase as a customer completion
+gate beyond §12
+
+> Number `0131` verified as the next free ADR number at time of writing (`grep -noE "ADR-01[0-9]{2}"
+> docs/DECISIONS.md docs/INTEGRATION_HONESTY.md docs/CRITERIA_PLAN.md` → highest `0130`), per
+> CLAUDE.md's central-number-allocation rule.
+
+**This is a customer directive, not an agent recommendation** (per CLAUDE.md's Directive
+Authority & Lineage guardrail) — recorded 2026-09-08 in response to the customer's question of
+whether §12 reaching 48/48 constitutes "done," and their explicit request for a QA/QC pass and a
+real-repo pilot using copies of their own Gitea repos before completion is declared.
+
+**Decision.** `docs/SPEC.md` gains a new §15, additive to and never modifying §12's text or count
+(so this ADR does not trigger Rule 14 — no §12 criterion's wording, count, or scope changed). §15
+defines two sequential gates: 15.1 a QA/QC re-verification pass (fresh §12 Rollup re-derivation,
+full test-suite green, a project-wide Rule-12 mutation audit, independent review), and 15.2 a
+real-repo pilot running the full pipeline against sandboxed copies of the customer's Gitea repos,
+with LLM calls for the pilot routed to one dedicated Spark host serving
+`nvidia/nemotron-3-super-120b-a12b` through the existing `ModelClient` backend registry (§7,
+ADR-0023) — no new abstraction, one registry entry.
+
+**Assumptions recorded per Rule 1 (industry-standard defaults picked to avoid blocking; open to
+revision at pilot kickoff, not yet decided by the customer):**
+1. Pilot sample size/selection: 5-10 repos on the first pass, spanning at least Python-only,
+   TS-only, and one shared-contract repo, scaled up once the first pass's finding volume is known.
+2. Which of the two Spark hosts is dedicated to the pilot: unassigned: to be selected by the
+   customer at pilot kickoff, since both are otherwise idle per the customer's own statement.
+3. The exact local-inference serving stack and version on that Spark: not specified here; §15.2's
+   prerequisite checklist tracks this as an infrastructure task, not a harness concern.
+
+**Why this is out of scope for the harness's own subagents to execute unsupervised.** Provisioning
+a Spark host (installing/serving a new model) requires `sudo`/`systemctl` on a machine with no
+passwordless sudo for this account, per the customer's own standing environment rule ("hand any
+sudo/systemctl/chown to the user to run via `!`"). §15.2 tracks this as a customer/ops
+prerequisite checklist, not a `fleet`-automated step — consistent with §"Server Safety & OS
+Sandbox Rules" (workspace containment: this repository's read/write scope, not remote hosts).
+
+**Why a new section, not a 49th §12 criterion.** §12 is a single, internally-consistent acceptance
+bar whose count and text changes are governed by Rule 14's disclosed-adjudication requirement,
+specifically to prevent undisclosed scope drift (the 39→48 growth this project already lived
+through once). The QA/QC and pilot phases are a *different kind* of gate — they re-verify §12's
+own claims against real-world conditions rather than adding new acceptance text to verify — so
+housing them as §15 keeps §12 stable as the object being re-verified, and keeps Rule 13's "which
+§12 criterion does this round move" bookkeeping unambiguous: research/build rounds targeting the
+7 open §12 criteria are unaffected by this addition, and §15 work is separately book-kept once it
+starts.
