@@ -8508,6 +8508,36 @@ empty — is proven both positively (the real-Bazel headline test) and as a fals
 test_a_revalidate_round_without_d107s_rewrite_reads_false_empty_verified_against_stubs`, which
 reproduces the exact hazard when D107's rewrite is skipped, per this task's own Rule-12 brief).
 
+**Correction, 2026-09-08 (fix round 1, opus-tier review, C1/I2/I3) — the paragraph above
+overclaimed both the safety property and the negative-proof test's coverage; both are now fixed
+for real, and this correction records what changed.** (C1, Critical) The claim above was false as
+landed: the "safety property" was a docstring/SPEC sentence, not an enforced mechanism —
+`_rewrite_superseded_consumer_labels` runs best-effort from `_pr_sync_impl` and every failure mode
+(a transiently unavailable monorepo checkout, drift, a rebase conflict, a render failure, a
+refused push) became a `"FAILED: ..."` string nothing downstream checked, so a REVALIDATE task
+claimed after such a failure would build against a tree still naming a stub with nothing refusing
+it. **Fixed**: `cli._run_one_revalidation_task` now reads the checked-out `BUILD.bazel` before
+dispatching `VerifyPipelineWorker` and refuses the round (task -> `PENDING`, a
+`RevalidationLabelNotRewritten` finding naming the consumer and the still-present stub label) if a
+`//third_party/stubs/...` label is still present — a real, mechanical gate, independent of
+whether the upstream rewrite trigger succeeded. (I3) The test named above,
+`test_a_revalidate_round_without_d107s_rewrite_reads_false_empty_verified_against_stubs`, did NOT
+prove what this paragraph claimed: it asserted only `_active_stubs_by_consumer`'s DB-derived
+`fidelity == {}`, a characterization of one query that passes identically whether or not D107 (or
+now the C1 gate) exists — it never drove the claiming loop at all. **Replaced** by
+`test_c1_gate_refuses_a_revalidate_round_whose_committed_tree_still_names_a_stub_label`, which
+plants a real stub-labeled `BUILD.bazel` commit on `migrate/<consumer>`, drives the REAL
+`_run_revalidation_claims_impl`, and asserts the round is refused (task `PENDING`, the finding
+written, the stub still `SUPERSEDED` not `RESOLVED`) — proven a genuine discriminator by an
+old-fails/new-passes run (with the C1 gate disabled via a copied-aside file: `settled:
+verdict=PASS decisions=1`, i.e. the consumer is silently promoted despite the stub label still
+present — the concrete C1 hazard, reproduced; with the gate: refused, as asserted). Also added:
+`cli._pr_sync_lines` now surfaces a failed rewrite in `fleet pr --sync`'s own human-readable
+output (previously silent — exit 0 with the failure visible only in the JSON `label_rewrites`
+payload nothing rendered), proven by `test_pr_sync_lines_surfaces_a_failed_label_rewrite`/
+`test_pr_sync_lines_is_silent_when_every_rewrite_succeeded`. **`FIXED, LANDED` stands** — the
+review's own words once this gate and test exist for real.
+
 ## D107 — FIXED, LANDED (round VI task 79, `4ead8f9`). Nothing rewrites a consumer's `BUILD.bazel` dependency label from a stub target to
 the real one once the stub resolves — SPEC §3.5.1 item 1 has zero production implementation
 
@@ -8552,6 +8582,20 @@ label off the actual committed `migrate/<consumer>` file and confirms via a real
 that the real provider's label — not the stub's — is what the analysed graph names.
 `test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label` and `test_d107_is_idempotent_
 on_replay` prove the rewrite and its idempotency directly.
+
+**Correction, 2026-09-08 (fix round 1, opus-tier review, I4) — "is replaced with a check that..."
+above overclaimed an EQUIVALENCE the replacement check does not have; corrected to a disclosed
+narrowing.** The literal ADR-0128/SPEC pseudocode comparison this paragraph replaces was correctly
+identified as wrong (D115's topology, as stated above) — that correction stands. But the
+replacement (every commit unique to `migrate/<consumer>` relative to `integration` must be none or
+one of this function's own prior rewrites) is NARROWER than what judgment call 6 asked for, not a
+like-for-like substitute: it can only see commits unique to `migrate/<consumer>`, so it is
+STRUCTURALLY BLIND to drift that arrives already inside `integration` itself — e.g. a rebase
+pulling in new upstream commits before this rewrite runs, which is the ADR's own named example of
+what this check should catch. `_rewrite_one_consumer_label`'s unconditional `rebase(base)` two
+lines below the check silently absorbs exactly that case, with no flag raised. This is disclosed
+follow-on debt, not solved — `_rewrite_one_consumer_label`'s own docstring now states this
+precisely (fix round 1) rather than claiming mechanical equivalence.
 
 ## D108 — FIXED, LANDED (round VI task 79, `4ead8f9`). `StubDecision.consumer_status` has zero production readers — `_apply_stub_decisions`
 writes only `stubs`/`findings`, never `phases`
@@ -8980,7 +9024,7 @@ whatever Leg C1 would additionally need. Full details:
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2564-2601`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
+(`cli.py:2565-2602`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
 re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123

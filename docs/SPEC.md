@@ -4281,6 +4281,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   with the DEGRADED->{SUCCEEDED, REQUIRES_
                                                   --   HUMAN_INTERVENTION} CAS write in the same
                                                   --   transaction)
+                                                  -- | 'RevalidationLabelNotRewritten' (fix round
+                                                  --   1, task 79, ADR-0128: the C1 gate refusing
+                                                  --   a claimed REVALIDATE round whose committed
+                                                  --   BUILD.bazel still names a stub label,
+                                                  --   naming the consumer and the label(s))
                                                   -- | 'BaselineRed' (baseline_build red, §9)
                                                   -- | 'RuleConflict' | 'RuleOscillation' (§7.4)
                                                   -- | 'UnmergedDependency' (§3.4 step 5)
@@ -7365,10 +7370,18 @@ and can be run as a dry-run health check (`fleet resume --dry-run`).
 > consumer promoted to `SUCCEEDED` via the `consumer_status -> phases` write below) land in the
 > SAME regenerated `migration_state.json`, exactly the reasoning step 6's own text gives for its
 > position. Each claimed task re-runs `VerifyPipelineWorker` (unmodified) against the consumer's
-> `migrate/<consumer>` tip — by construction already carrying the real dependency label, never
-> the stub's, because the label rewrite below (item 1) fires from the SAME T1 trigger and lands
-> before a REVALIDATE task minted in the same transaction is ever claimed — and calls
-> `settle_revalidation` with the result. **Unlike `stub_reconcile`, this step is skipped under
+> `migrate/<consumer>` tip, which the label rewrite below (item 1) — fired from the SAME T1
+> trigger, before this task is ever claimed — is *intended* to have already put the real
+> dependency label onto. **Corrected 2026-09-08 (fix round 1, opus-tier review, C1): this is not
+> guaranteed "by construction."** The rewrite runs best-effort from `_pr_sync_impl` and can fail
+> (a transiently unavailable monorepo checkout, drift, a rebase conflict, a render failure, a
+> refused push) with no upstream signal that blocks this step from claiming the task anyway. The
+> real guarantee is a MECHANICAL GATE in this step itself: before dispatching
+> `VerifyPipelineWorker`, it reads the checked-out `BUILD.bazel` and refuses the round (task back
+> to `PENDING`, a `RevalidationLabelNotRewritten` finding naming the consumer and the still-
+> present stub label) if a `//third_party/stubs/...` label is still present — never trusting
+> trigger ordering alone. Only past that gate does it call `settle_revalidation` with the result.
+> **Unlike `stub_reconcile`, this step is skipped under
 > `--dry-run`**: it performs real git and Bazel I/O (a fresh worktree, an actual `bazel build`/
 > `bazel test`), not the "no network call, free as a health check" property this section's
 > preamble claims for steps 1-7 — an Agent Recommendation, not a SPEC-mandated distinction pinned

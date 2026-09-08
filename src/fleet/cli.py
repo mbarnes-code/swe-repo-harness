@@ -68,6 +68,7 @@ from fleet.bazel.generators import (
     stub_failing_target,
 )
 from fleet.bazel.layout import (
+    STUB_ROOT,
     LayoutNode,
     ReservedDestError,
     layout,
@@ -12986,23 +12987,29 @@ async def _rewrite_one_consumer_label(
     does not solve).
 
     **Precondition check, corrected from the ADR's own literal pseudocode against the ACTUALLY
-    landed branch topology (disclosed in this task's report, not silently substituted).**
-    ADR-0128 judgment call 6 (and SPEC §3.5.1 step 2's own pseudocode) describes comparing
-    `migrate/<consumer>`'s current tree to its own "last Phase-2 commit"'s tree. Empirically,
-    `migrate/<consumer>` in the MONOREPO (the branch this function rebases and pushes, per
-    `_promote_one_pr`'s own identical precedent) is NOT a Phase-2 branch at all:
+    landed branch topology — and itself a DISCLOSED NARROWING, not an equivalent check (fix round
+    1, opus-tier review, I4).** ADR-0128 judgment call 6 (and SPEC §3.5.1 step 2's own pseudocode)
+    describes comparing `migrate/<consumer>`'s current tree to its own "last Phase-2 commit"'s
+    tree. Empirically, `migrate/<consumer>` in the MONOREPO (the branch this function rebases and
+    pushes, per `_promote_one_pr`'s own identical precedent) is NOT a Phase-2 branch at all:
     `vcs/filter_repo.py::ingest()` (D115) force-moves it to point at Phase 3's own MERGE commit
     on every ingest (`await git.create_branch(f"migrate/{source.repo_id}", merge_sha,
     force=True)`), so its tip's tree is the whole monorepo's tree at that point, not this one
     repo's — a literal trailer/tree comparison against "the last Fleet-Phase: 2 commit" would
     reject the ordinary, undrifted, never-before-rewritten case as "drift" on every single
-    consumer, every time. The mechanically equivalent check for what this codebase actually
-    does: every commit unique to `migrate/<consumer>` relative to `integration` (`git rev-list
-    integration..migrate/<consumer>`) must be either NONE (the common case: ingest's merge commit
-    is already folded into `integration`) or a PRIOR round of this exact function's own rewrite
-    (identified by its `Fleet-Phase` trailer, always `int(Phase.BUILD)` here) — anything else is
-    a commit this task does not understand landing on the branch between ingest and now, and is
-    the drift case ADR-0128 judgment call 6 defers rather than solves.
+    consumer, every time. That correction is right, but the check this function runs instead —
+    every commit unique to `migrate/<consumer>` relative to `integration` (`git rev-list
+    integration..migrate/<consumer>`) must be either NONE or a PRIOR round of this exact
+    function's own rewrite — is NARROWER than what the ADR asked for, not a like-for-like
+    replacement: it can only see commits unique to `migrate/<consumer>`, so it is STRUCTURALLY
+    BLIND to drift that arrives already inside `integration` itself — e.g. a rebase pulling in
+    new upstream commits before this rewrite runs, the ADR's own named example of what judgment
+    call 6 should catch. Such drift is silently absorbed: the unconditional `rebase(base)` two
+    lines below this docstring re-renders against whatever `integration` currently contains,
+    with no flag raised. This is disclosed follow-on debt, not solved here — re-rendering against
+    current sources is arguably no worse than doing nothing (SPEC §3.5.1 step 2's general
+    Phase-2-staleness handling is itself out of this task's scope per ADR-0128 judgment call 6),
+    but a reviewer should not read this function as closing that gap.
     """
     branch = f"migrate/{consumer_repo_id}"
     base = settings.config.run.monorepo_branch
@@ -13372,6 +13379,55 @@ async def _run_one_revalidation_task(
 
         await writer.submit(unit)
 
+    async def refuse_stub_still_present(stub_labels: Sequence[str]) -> str:
+        """C1 (fix round 1, opus-tier review): the mechanical gate ADR-0128's whole safety
+        argument needs, made real rather than a docstring claim. Fails the task back to
+        `PENDING` (retryable -- a later `fleet pr --sync`/`fleet resume` may yet land the
+        rewrite this round needed) and writes a `RevalidationLabelNotRewritten` finding naming
+        the consumer and the still-present stub label(s), in the SAME transaction, so a refused
+        round is never silent."""
+        detail = (
+            f"{repo_id!r}: committed BUILD.bazel at {dest_path}/BUILD.bazel still names stub "
+            f"label(s) {stub_labels} -- D107's rewrite for this round did not land (or landed "
+            "only partially); refusing rather than promoting a consumer verified against a "
+            "tree that still names a stub"
+        )
+
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "UPDATE tasks SET status = 'PENDING', claimed_by = NULL, "
+                "       lease_expires_at = NULL, fence_token = fence_token + 1 "
+                " WHERE task_id = ? AND status = 'RUNNING'",
+                (task_id,),
+            )
+            await conn.execute(
+                "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, "
+                "                      payload, created_at) "
+                "VALUES (?, ?, 'RevalidationLabelNotRewritten', 'warn', ?, ?, ?) "
+                "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+                "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+                (
+                    run_id,
+                    repo_id,
+                    _fingerprint(run_id, repo_id, task_id, "RevalidationLabelNotRewritten"),
+                    redact_text(
+                        json.dumps(
+                            {
+                                "repo_id": repo_id,
+                                "task_id": task_id,
+                                "dest": dest_path,
+                                "stub_labels": list(stub_labels),
+                            },
+                            sort_keys=True,
+                        )
+                    ),
+                    _iso(now),
+                ),
+            )
+
+        await writer.submit(unit)
+        return f"FAILED: {detail}"
+
     branch = f"migrate/{repo_id}"
     wt = revalidate_root / repo_id
     if await asyncio.to_thread(wt.exists):
@@ -13386,6 +13442,30 @@ async def _run_one_revalidation_task(
         return await fail_back_to_pending(f"could not cut a worktree from {branch!r}: {exc}")
 
     try:
+        # C1 (fix round 1): the mechanical gate. `_rewrite_superseded_consumer_labels` runs
+        # best-effort from `_pr_sync_impl`'s T1 trigger and every failure mode (monorepo
+        # unavailable, drift detected, rebase conflict, a render failure, a refused push)
+        # becomes a "FAILED: ..." string that nothing upstream of this loop checks. Reading the
+        # checked-out `BUILD.bazel` here -- BEFORE dispatching `VerifyPipelineWorker`, and
+        # inside this SAME `try`/`finally` so a refusal still cleans up the worktree -- is what
+        # makes "a REVALIDATE round never runs against a tree that still names a stub" a
+        # property of THIS loop's own admission check, independent of whether the upstream
+        # rewrite trigger actually succeeded, rather than a docstring claim resting on trigger
+        # ordering alone.
+        build_path = wt / dest_path / "BUILD.bazel"
+        build_text = (
+            await asyncio.to_thread(build_path.read_text, "utf-8")
+            if await asyncio.to_thread(build_path.exists)
+            else ""
+        )
+        stub_needle = f'"//{STUB_ROOT}/'
+        if stub_needle in build_text:
+            still_stubbed = sorted(
+                {segment.split('"', 1)[0] for segment in build_text.split(stub_needle)[1:]}
+            )
+            stub_labels = [f"//{STUB_ROOT}/{label}" for label in still_stubbed]
+            return await refuse_stub_still_present(stub_labels)
+
         stub_facts = await _active_stubs_by_consumer(read_conn, run_id)
         fidelity = stub_facts.get(repo_id, {})
         round_index = _round_index_from_revalidation_key(revalidation_key_value)
@@ -13805,10 +13885,28 @@ def _pr_sync_lines(result: Mapping[str, object]) -> list[str]:
     polled = cast(Sequence[str], result["polled"])
     merged = cast(Sequence[str], result["merged"])
     closed = cast(Sequence[str], result["closed"])
+    # D107 (fix round 1, should-fix): a rewrite failure previously exited 0 with nothing visible
+    # in this command's own human-readable output -- `label_rewrites` was written to the JSON
+    # payload only, which `_pr_sync_lines` never rendered and no test asserted. Surfaced here so
+    # an operator watching a plain (non-`--json`) `fleet pr --sync` sees it immediately, rather
+    # than only discovering it later via the C1 gate's own `RevalidationLabelNotRewritten`
+    # finding the next time the REVALIDATE task is claimed.
+    label_rewrites = cast(Mapping[str, str], result.get("label_rewrites") or {})
+    failed_rewrites = {
+        repo_id: outcome
+        for repo_id, outcome in label_rewrites.items()
+        if outcome.startswith("FAILED:")
+    }
     return [
         f"pr --sync: polled {len(polled)} open PR(s); {len(merged)} newly MERGED, "
         f"{len(closed)} CLOSED",
         *(f"  merged {repo}" for repo in merged),
+        *(
+            [f"  {len(failed_rewrites)} label rewrite(s) FAILED (see label_rewrites for detail):"]
+            + [f"    {repo}: {outcome}" for repo, outcome in sorted(failed_rewrites.items())]
+            if failed_rewrites
+            else []
+        ),
     ]
 
 
