@@ -29,6 +29,8 @@ from fleet.cli import (
     OrderedRevertEntry,
     RollbackAnchorError,
     _ordered_revert_shas,
+    _pr_records,
+    _write_pr_record,
     execute_hoist_rollback,
 )
 from fleet.llm.roles import SPEC_ROLE_TIERS
@@ -36,7 +38,7 @@ from fleet.models.enums import PrState
 from fleet.models.tasks import PullRequestDraft
 from fleet.sandbox.worktree import WorktreeManager
 from fleet.settings import FleetSettings
-from fleet.state.db import connect_ro, initialize_database
+from fleet.state.db import StateWriter, connect_ro, initialize_database
 from fleet.util.proc import run
 from fleet.vcs.commits import FleetTrailers, revert_and_commit
 from fleet.vcs.filter_repo import IntegrationMutex
@@ -623,9 +625,10 @@ async def test_ordered_revert_shas_finds_the_contracts_own_draft_by_scanning_not
 
     read_conn = await connect_ro(db_path)
     try:
-        # A keyed lookup on `contract_id` (the WRONG mechanism this task's research ruled out)
-        # would find nothing at `records[CONTRACT_ID]` -- `_pr_records` is keyed by `repo_id`
-        # (`OWNER_REPO`), never by `contract_id`. This proves the scan is what actually works.
+        # A keyed lookup on `contract_id` alone (the WRONG mechanism this task's research ruled
+        # out) would find nothing at `records[CONTRACT_ID]` -- `_pr_records` is keyed by
+        # `(repo_id, contract_id)` (ADR-0126/D122, task-75), never by `contract_id` alone. This
+        # proves the scan is what actually works.
         entries = await _ordered_revert_shas(
             read_conn, RUN_ID, forge, contract_id=CONTRACT_ID, blast_set=("blast-a",)
         )
@@ -1006,3 +1009,78 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
     assert calls["n"] == 2, "the conflict must be reached on the SECOND (real) revert call"
     assert await git.resolve("REVERT_HEAD") is None, "abort_revert() must have run before the raise"
     assert await git.is_dirty() is False
+
+
+# --------------------------------------------------------------------------------------
+# Round VI task-75 (D122, ADR-0126): a contract's own PR record coexists with its owning
+# repo's own PR record, rather than one silently overwriting the other in `findings`.
+#
+# This is the Rule-12 (CLAUDE.md) old-fails/new-passes discriminator: with the fix in place
+# (`_upsert_pr_record`'s fingerprint widened to include `draft.contract_id or ""`, `_pr_records`
+# keyed by `(repo_id, contract_id)`), both drafts persist and are separately addressable. Stash
+# the fix (`git stash push -- src/fleet/cli.py`) and this exact test fails: the second
+# `_write_pr_record` call silently overwrites the first via `findings`' own `ux_findings_ident`
+# unique index (same `run_id`/`repo_id`/`kind`/fingerprint), so only one of the two rows survives
+# and `_pr_records` returns exactly one entry instead of two.
+# --------------------------------------------------------------------------------------
+
+
+def _pr_draft(*, repo_id: str, contract_id: str | None, url: str, body: str) -> PullRequestDraft:
+    return PullRequestDraft(
+        run_id=uuid.UUID(RUN_ID),
+        repo_id=repo_id,
+        contract_id=contract_id,
+        wave_index=0,
+        branch=f"migrate/{repo_id}",
+        title=f"[fleet] migrate {repo_id}",
+        body=body,
+        source_url=f"https://example.invalid/{repo_id}",
+        source_sha="a" * 40,
+        state=PrState.OPEN,
+        url=url,
+    )
+
+
+async def test_a_contracts_own_pr_record_coexists_with_its_owning_repos_own_pr_record(
+    db_path: Path,
+) -> None:
+    """ADR-0126/D122: `PullRequestDraft.repo_id`'s own docstring says a contract's PR is
+    attributed to the OWNING repo, so a contract's own migration PR and that repo's OWN
+    migration PR share one `repo_id`. Before this fix, `_upsert_pr_record`'s fingerprint was a
+    pure function of `(run_id, repo_id, kind)` -- identical for both drafts -- so the SECOND
+    `_write_pr_record` call silently overwrote the FIRST via `findings`' own `ux_findings_ident`
+    unique index, and `_pr_records`'s `repo_id`-only key could surface only one of the two even
+    if both rows had somehow persisted. After the fix, the fingerprint also folds in
+    `contract_id or ""`, so the two drafts occupy DISTINCT `findings` rows, and `_pr_records`
+    keys them `(repo_id, contract_id)` so both are addressable at once.
+    """
+    _seed_run(db_path)
+    owner_draft = _pr_draft(
+        repo_id=OWNER_REPO,
+        contract_id=None,
+        url="https://forge.invalid/owner/pull/1",
+        body="the owning repo's OWN migration PR",
+    )
+    contract_draft = _pr_draft(
+        repo_id=OWNER_REPO,
+        contract_id=CONTRACT_ID,
+        url="https://forge.invalid/owner/pull/2",
+        body="the hoisted contract's OWN migration PR, attributed to its owning repo",
+    )
+
+    async with StateWriter(db_path, owner="test-d122") as writer:
+        await _write_pr_record(writer, RUN_ID, owner_draft, now=T0)
+        await _write_pr_record(writer, RUN_ID, contract_draft, now=T0)
+
+    read_conn = await connect_ro(db_path)
+    try:
+        records = await _pr_records(read_conn, RUN_ID)
+    finally:
+        await read_conn.close()
+
+    assert len(records) == 2, (
+        "both the owning repo's own PR record and its contract's own PR record must persist as "
+        f"TWO separate rows, not one overwriting the other -- got {records!r}"
+    )
+    assert records.get((OWNER_REPO, None)) == owner_draft, records
+    assert records.get((OWNER_REPO, CONTRACT_ID)) == contract_draft, records

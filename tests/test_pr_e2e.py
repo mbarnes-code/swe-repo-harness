@@ -1128,10 +1128,15 @@ def test_the_run_digest_moves_when_a_cycle_break_decision_moves_and_not_otherwis
 # ---------------------------------------------------------------------------------------
 
 
-def pr_records_through_the_module(root: Path) -> dict[str, Any]:
-    """`cli._pr_records`, via the real reader -- never by re-parsing `findings` by hand here."""
+def pr_records_through_the_module(root: Path) -> dict[tuple[str, str | None], Any]:
+    """`cli._pr_records`, via the real reader -- never by re-parsing `findings` by hand here.
 
-    async def read() -> dict[str, Any]:
+    Keyed `(repo_id, contract_id)` (ADR-0126/D122, task-75), matching the real reader -- every
+    record this fixture ever seeds is repo-owned (`contract_id=None`), so a caller here looks up
+    `(repo_id, None)`.
+    """
+
+    async def read() -> dict[tuple[str, str | None], Any]:
         conn = await connect_ro(root / "state" / "fleet.db")
         try:
             return await cli._pr_records(conn, run_id_of(root))
@@ -1192,12 +1197,13 @@ def test_an_atomic_wave_scc_ships_one_pr_shared_by_every_member(
     )
 
     records = pr_records_through_the_module(fleet)
-    assert set(members) <= set(records), records  # both SCC members got their own record
-    urls = {records[member].url for member in members}
+    member_keys = {(member, None) for member in members}
+    assert member_keys <= set(records), records  # both SCC members got their own record
+    urls = {records[key].url for key in member_keys}
     assert len(urls) == 1, "every member's PullRequestDraft.url must be the SAME url"
-    scc_ids = {records[member].scc_id for member in members}
+    scc_ids = {records[key].scc_id for key in member_keys}
     assert scc_ids == {finding.scc_id}, scc_ids
-    member_sets = {tuple(sorted(records[member].member_repo_ids)) for member in members}
+    member_sets = {tuple(sorted(records[key].member_repo_ids)) for key in member_keys}
     assert member_sets == {tuple(members)}, member_sets
 
     phase_urls = dict(query(fleet, "SELECT repo_id, pr_url FROM phases WHERE phase = 4"))
