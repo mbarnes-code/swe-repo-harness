@@ -9609,9 +9609,10 @@ when absent, matching this project's existing `IFNULL(repo_id, '')` convention),
 Full rationale in `docs/DECISIONS.md` ADR-0126. Task-75 dispatched to build it. Status remains
 OPEN until task-75 lands and is reviewed.
 
-## D123 — FIXED, LANDED (round VI task 76, `981abed`). A direct dependent of an RHI repo does not
-become `BLOCKED` at the TRANSFORM phase — cross-wave `blocked_by` propagation silently never
-reaches a not-yet-dispatched dependent
+## D123 — PARTLY ADDRESSED (round VI task 76, `981abed`) — the single-invocation case is fixed;
+a narrower `--wave`-scoped multi-invocation residual remains, see D126. A direct dependent of an
+RHI repo does not become `BLOCKED` at the TRANSFORM phase — cross-wave `blocked_by` propagation
+silently never reaches a not-yet-dispatched dependent
 
 **Found by round VI task 69's own task-scoped review (2026-09-07), independently reproduced on
 unmodified `main` (`c01fe46`) with zero task-69 code involved.** Verified free before allocating:
@@ -9644,7 +9645,7 @@ visible to every dependent's `blocked_by` column regardless of which wave the de
 scheduled in, not only dependents in the same or an earlier wave. No task briefed yet; this is the
 controller's next dispatch candidate for §12.14.
 
-**Fixed, 2026-09-08 (round VI task 76, ADR-0127, `981abed`).** `_transform_impl`'s wave loop now
+**Fixed for the SAME-invocation case, 2026-09-08 (round VI task 76, ADR-0127, `981abed`) — see the dated paragraph below for the narrower residual this does NOT close.** `_transform_impl`'s wave loop now
 pre-seeds every wave's TRANSFORM `phases` row for the whole invocation domain upfront, before any
 wave dispatches — mirroring `_build_impl`'s already-correct PASS 1 (ADR-0127 judgment call 1); no
 change was needed to `WaveScheduler.admit()`, `SqliteSchedulerStore.append_blocked_by`,
@@ -9659,9 +9660,29 @@ docstring) — two SEPARATE `fleet transform --wave N` invocations — still exh
 because `propagate_blocked` has exactly one call site (`orchestrator/runner.py`'s
 `PhaseRunner._contain`, fired once at the RHI transition) and a provider that already went RHI in
 an earlier, separate invocation never re-fires containment in a later invocation's own pre-seed
-pass. Also out of this task's scope: `_verify_impl` has the byte-for-byte identical structural
-pattern (ADR-0127 judgment call 3) and is flagged there for the controller to allocate a fresh
-D-number — not fixed here.
+pass. This residual is now tracked separately as **D126** (below), per the controller's ruling in
+round VI task-76 fix round 1 — see that entry for the fix-round's own independent reproduction.
+Also out of this task's scope: `_verify_impl` has the byte-for-byte identical structural pattern
+(ADR-0127 judgment call 3) — already allocated **D125** (above) by the controller while landing
+ADR-0127, not fixed here.
+
+**Controller ruling, 2026-09-08 (round VI task-76 fix round 1) — status corrected from `FIXED,
+LANDED` to `PARTLY ADDRESSED`.** An independent opus-tier review of task-76's branch confirmed the
+fix above is real and correctly matches ADR-0127's design, but found the prior `FIXED, LANDED`
+heading overclaimed by not distinguishing two genuinely different cases. §12 item 14's own literal
+wording ("a repo in `REQUIRES_HUMAN_INTERVENTION` marks exactly its transitive dependents ...
+`BLOCKED`") is written as describing ONE continuous run — ADR-0127's actual target, and the case
+`981abed`'s fix and its regression test cover. **The single-`fleet transform`-invocation case is
+fixed and proven:** driving both `acme-lib-py`'s and `acme-app-py`'s waves through one `fleet
+transform` call now correctly leaves the dependent `BLOCKED`. **A `--wave`-scoped sequence of
+separate invocations still reproduces the identical original symptom** — `acme-app-py` ends
+`SUCCEEDED` / `blocked_by == '[]']` rather than `BLOCKED` — independently re-measured by the fix
+round (`fleet transform --wave 0` then `fleet transform --wave 1`, real dispatch, no hand-seeding:
+`FIRST_EXIT=7, SECOND_EXIT=7, ROWS=[('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'),
+('acme-lib-ts','SUCCEEDED','[]'), ('acme-app-py','SUCCEEDED','[]'),
+('acme-app-ts','SUCCEEDED','[]')]`). Tracked separately as **D126** (below); the heading and this
+paragraph are the correction, the fix description above is left as written since it is accurate
+for what it covers.
 
 ## D124 — OPEN. No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
 repo to `SUCCEEDED` — `fleet retry` does not exist, and `ALLOWED_TRANSITIONS` has no edge out of
@@ -9739,3 +9760,62 @@ structural suspicion.
 mirroring ADR-0127's shape adapted to `_verify_impl`'s own PASS structure. **Not dispatched this
 round** — the controller is deferring this to a future round to avoid over-extending the current
 wave; this entry exists so the finding is not lost between rounds.
+
+## D126 — OPEN. A `fleet transform --wave N` sequence spanning multiple separate invocations does
+not propagate `blocked_by` across invocation boundaries — the narrower residual of D123 that
+ADR-0127's same-invocation fix does not close
+
+**Found by an independent opus-tier review of round VI task-76's branch (2026-09-08), ruled on by
+the controller in that task's fix round 1 (this entry).** Verified free before allocating:
+form-agnostic sweep found `D125` as the highest allocated number.
+
+**The gap, as independently re-measured (round VI task-76 fix round 1, not merely copied from the
+review).** Same fixture D123 used (`acme-lib-py` claims its own module with a rule that matches
+nothing, `acme-app-py` a direct dependent scheduled into a later wave), driven across TWO SEPARATE
+CLI invocations rather than one: `fleet transform --wave 0` (real dispatch, `acme-lib-py` reaches
+`REQUIRES_HUMAN_INTERVENTION` for real, no hand-seeding), then a second, separate `fleet transform
+--wave 1`. Measured: `FIRST_EXIT=7, SECOND_EXIT=7, ROWS=
+[('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'), ('acme-lib-ts','SUCCEEDED','[]'),
+('acme-app-py','SUCCEEDED','[]'), ('acme-app-ts','SUCCEEDED','[]')]` — `acme-app-py` ends
+`SUCCEEDED` with `blocked_by == '[]'`, never `BLOCKED`, reproducing D123's exact original symptom
+even though D123's own fix (`981abed`) is present on the branch/commit this was measured against.
+
+**Root cause, as traced (task-76's own reasoning, independently confirmed by the review).**
+`_open_transform_waves` (`src/fleet/cli.py`) delegates to `_open_phase_waves`, which returns
+exactly `(wave,)` — and nothing else — when `wave is not None`. ADR-0127's pre-seed pass computes
+`members_by_wave` by iterating only `waves`, so a `--wave 0`-scoped invocation's pre-seed pass
+touches ONLY wave 0's members; wave 1's members (`acme-app-py`) get no `phases` row at all during
+that invocation. `acme-lib-py`'s RHI transition, and its one and only call to
+`WaveScheduler.propagate_blocked` (`orchestrator/runner.py`'s `PhaseRunner._contain` is the sole
+call site in `src/fleet/`), happens entirely inside the FIRST invocation, before `acme-app-py`'s
+row exists in either invocation. The second, separate `--wave 1` invocation's own pre-seed pass
+then creates `acme-app-py`'s row fresh at `PENDING` — but nothing re-fires containment for the
+already-terminal, already-exited `acme-lib-py`, because there is no second call site to do so.
+`acme-app-py` is admitted and dispatched as an ordinary unblocked repo.
+
+**Why this is a narrower, genuinely different case from D123's now-fixed one, not a sign the fix
+is wrong.** §12 item 14's own literal wording ("a repo in `REQUIRES_HUMAN_INTERVENTION` marks
+exactly its transitive dependents ... `BLOCKED`") is phrased as describing ONE continuous run —
+ADR-0127's actual target, closed by `981abed`, and the case
+`tests/test_transform_e2e.py::test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run`
+proves. A `--wave`-scoped sequence of separate invocations is a materially different shape: each
+invocation is its own `_transform_impl` call with its own pre-seed domain, and nothing in
+ADR-0127's design (or SPEC's wording) claims to unify state across separate invocation boundaries
+— that would need either a resume-time/wave-open-time re-derivation of `blocked_by` against
+already-terminal providers, or widening the pre-seed pass to cover the whole fleet's plan
+regardless of `--wave` scoping (which would itself change `--wave`'s documented semantics and is a
+design decision, not a bugfix).
+
+**Consequence.** An operator driving TRANSFORM one wave at a time via repeated `--wave N`
+invocations (rather than one unscoped `fleet transform` call) does not get real-time
+blast-containment across those invocations — a later-wave dependent of an earlier invocation's
+abandoned provider is admitted and dispatched as if nothing happened, exactly as D123 originally
+measured. `tests/test_pr_e2e.py::_seed_blocked` hand-seeds around exactly this gap today (its
+docstring, corrected in round VI task-76 fix round 1, explains why).
+
+**Not yet built:** the fix — most likely a `fleet resume`-time or wave-open-time re-derivation of
+`blocked_by` against every already-terminal (`REQUIRES_HUMAN_INTERVENTION`) provider still on
+record, run once at the start of any invocation regardless of `--wave` scoping; or an explicit
+decision to change what `--wave` means (widen its own pre-seed domain fleet-wide). Either is real
+design work, not a mechanical fix. **Not dispatched this round** — this entry exists so the
+finding is not lost between rounds.
