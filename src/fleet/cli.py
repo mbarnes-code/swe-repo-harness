@@ -3963,11 +3963,17 @@ def _coordinate(coord_key: str, version_spec: object) -> Coordinate:
 # --------------------------------------------------------------------------------------
 # §12.31 Leg D slice 1 — persisted un-hoist: blast-set demotion + downstream-merge refusal
 # (round VI task 65, ADR-0122 Decisions 1/2/3/6). DB + in-memory-graph only, no git — the
-# revert-series execution (Decisions 4/5) and the production wiring from whichever leg produces
-# the triggering `HoistBrokeOwner` finding are both separate future tasks. `unhoist_contract` is
-# not called from anywhere in production yet — the same standalone shape Leg B's
-# `revert_and_commit` shipped in (`research-35-report.md` line 126: "a standalone, proven...
-# primitive with zero call sites outside its own tests").
+# revert-series execution (Decisions 4/5) is `execute_hoist_rollback`, below. CORRECTED (fix
+# round, task-72 controller review I1): the production wiring this comment used to call a
+# separate future task is BUILT now (round VI task 72, ADR-0122 Decision 7) —
+# `_reconcile_hoist_rollbacks`, near `execute_hoist_rollback` below, is `_build_impl`'s call site
+# for every `HoistBrokeOwner` finding a run names, and `unhoist_contract` IS called from
+# production through it. The residual gap (fix round, task-72 controller review I2): no
+# production writer sets `contract_id` on a `PullRequestDraft` yet (D122), so
+# `execute_hoist_rollback`'s anchor scan always finds no contract-owned draft to resume from and
+# raises `RollbackAnchorError` for any contract whose blast set is non-empty — caught per contract
+# at the `_reconcile_hoist_rollbacks` call site, which records a `HoistRollbackFailed` finding and
+# lets the rest of the run proceed, rather than aborting the whole build.
 # --------------------------------------------------------------------------------------
 
 HOIST_ROLLBACK_DEMOTION_FINDING_KIND: Final = "HoistRollbackDemotion"
@@ -3980,6 +3986,18 @@ HOIST_ROLLBACK_REFUSED_FINDING_KIND: Final = "HoistRollbackRefused"
 """SPEC §3.1 6c-H's refusal clause (ADR-0122 Decision 6): written INSTEAD of every other write
 when a blast-set member's `MERGED` PR has a transitively-`MERGED` downstream dependent — the
 whole rollback is refused, nothing is demoted, `contracts.status` is left exactly as it was."""
+
+HOIST_ROLLBACK_FAILED_FINDING_KIND: Final = "HoistRollbackFailed"
+"""New kind (fix round, task-72 controller review I2): written by `_reconcile_hoist_rollbacks`
+when `unhoist_contract` or `execute_hoist_rollback` raises for ONE contract, most commonly
+`RollbackAnchorError` — no production writer sets `contract_id` on a `PullRequestDraft` yet
+(D122), so `execute_hoist_rollback`'s anchor scan always finds no contract-owned draft to resume
+from on a real fleet. Distinct from `HoistRollbackRefused` (a settled REFUSED decision from
+`unhoist_contract` itself, no exception involved) and from `HoistRollbackDemotion` (a successful
+per-repo demotion record) — neither shape fits an exception raised mid-rollback. Scopes the
+failure to this ONE contract: the rest of `_reconcile_hoist_rollbacks`'s loop over other
+contracts, and the rest of `_build_impl`, still proceed rather than the whole invocation
+aborting for an unrelated repo."""
 
 
 async def _unhoist_blast_set(
@@ -4124,6 +4142,48 @@ async def _write_hoist_rollback_demotion_findings(
     await writer.submit(unit)
 
 
+async def _write_hoist_rollback_failed_finding(
+    writer: StateWriter, run_id: str, contract_id: str, exc: BaseException, *, now: datetime
+) -> None:
+    """One `HoistRollbackFailed` row per contract whose rollback attempt raised (fix round,
+    task-72 controller review I2). `repo_id` is `NULL`, mirroring `_write_hoist_rollback_refused_
+    finding`'s own rationale (ADR-0122 Decision 6): a rollback attempt failing is a property of
+    the whole contract, not of any one repo. UPSERTs on `ux_findings_ident` — this call covers
+    exactly one contract, so a plain per-row upsert is correct and safe to re-run: a repeated
+    `fleet resume` that hits the identical failure re-derives the identical fingerprint and
+    payload (both are pure functions of `contract_id`/`type(exc)`/`str(exc)`, none of which
+    carries a timestamp or other per-call noise), updating the same row rather than accumulating
+    duplicates."""
+    finding = GraphFinding(
+        kind=HOIST_ROLLBACK_FAILED_FINDING_KIND,
+        severity="error",
+        repo_id=None,
+        payload={
+            "contract_id": contract_id,
+            "error_type": type(exc).__name__,
+            "detail": str(exc),
+        },
+    )
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.execute(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, NULL, ?, ?, ?, ?, ?) "
+            "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+            "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+            (
+                run_id,
+                HOIST_ROLLBACK_FAILED_FINDING_KIND,
+                finding.severity,
+                finding.fingerprint,
+                redact_text(json.dumps(dict(finding.payload), sort_keys=True)),
+                _iso(now),
+            ),
+        )
+
+    await writer.submit(unit)
+
+
 async def unhoist_contract(
     read_conn: aiosqlite.Connection,
     settings: FleetSettings,
@@ -4134,9 +4194,11 @@ async def unhoist_contract(
     now: datetime,
 ) -> UnhoistOutcome:
     """§3.1 6c-H's rollback procedure, DB/graph half only (ADR-0122 Decisions 1/2/3/6; no git —
-    Decisions 4/5 and the production trigger are separate future tasks per this function's own
-    module-comment banner above). Takes an already-identified `contract_id` as an explicit
-    parameter and is called from nowhere in production yet.
+    Decisions 4/5 are `execute_hoist_rollback`, below). Takes an already-identified `contract_id`
+    as an explicit parameter. CORRECTED (fix round, task-72 controller review I1): this is now
+    called from production, through `_reconcile_hoist_rollbacks` (round VI task 72, ADR-0122
+    Decision 7) — see that function's own docstring and the module-comment banner above for the
+    residual gap (no production writer sets `contract_id` on a `PullRequestDraft` yet, D122).
 
     **Not one `StateWriter` unit end to end — a disclosed deviation from that instruction, forced
     by a real deadlock hazard rather than chosen for style.** `SqliteStateRepository.
@@ -4300,9 +4362,15 @@ async def unhoist_contract(
 # §12.31/D111 Leg D slice 2 (round VI task 71, ADR-0122 Decisions 4/5): the git-mechanics
 # revert-series execution that runs AFTER `unhoist_contract` (slice 1, above) consumes its
 # `APPLIED` output. `unhoist_contract` itself does no git, by its own docstring; this is that git.
-# A standalone, unit-tested primitive with zero call sites outside its own tests, exactly the
-# shape task-59 (Leg B, `vcs.commits.revert_and_commit`) and task-65 (slice 1) both shipped in —
-# production wiring is a separate future task per ADR-0122's own "Consequences" paragraph.
+# CORRECTED (fix round, task-72 controller review I1): this comment used to call itself a
+# standalone primitive with zero call sites outside its own tests, production wiring left as a
+# separate future task per ADR-0122's own "Consequences" paragraph. That wiring is BUILT now
+# (round VI task 72, ADR-0122 Decision 7) — `_reconcile_hoist_rollbacks`, right below, is the
+# production call site, invoked from `_build_impl`. The residual: no production writer sets
+# `contract_id` on a `PullRequestDraft` yet (D122), so the anchor scan below always raises
+# `RollbackAnchorError` for a contract whose blast set is non-empty on a real fleet — caught per
+# contract at the `_reconcile_hoist_rollbacks` call site (task-72 fix round, controller review
+# I2), which records a `HoistRollbackFailed` finding rather than aborting the whole build.
 # --------------------------------------------------------------------------------------
 
 
@@ -4652,11 +4720,20 @@ class HoistRollbackReconciliationEntry:
     """One contract's outcome from one `_reconcile_hoist_rollbacks` pass. `rollback` is `None`
     exactly when `unhoist.decision == "REFUSED"` — `execute_hoist_rollback` (task 71) is never
     called on that branch (CLAUDE.md D44 precedent: the shape itself says whether the second call
-    happened, not a sentinel inside a settled value)."""
+    happened, not a sentinel inside a settled value) — OR when `error` is set (fix round, task-72
+    controller review I2): `unhoist_contract` or `execute_hoist_rollback` raised for this
+    contract, the exception is caught in `_reconcile_hoist_rollbacks`'s own loop rather than
+    aborting the whole pass, and a `HoistRollbackFailed` finding is recorded. `unhoist` is
+    POPULATED with the settled `APPLIED` outcome when `error` is set and the raise happened in
+    `execute_hoist_rollback` (the realistic case today — `RollbackAnchorError`, since D122 means
+    no `PullRequestDraft` carries `contract_id` in production yet); it is `None` only if
+    `unhoist_contract` itself raised before returning. D44 precedent still holds: the shape names
+    which calls actually completed, never a sentinel buried inside a settled value."""
 
     contract_id: str
-    unhoist: UnhoistOutcome
+    unhoist: UnhoistOutcome | None
     rollback: HoistRollbackOutcome | None
+    error: str | None = None
 
 
 async def _hoist_broke_contract_ids(
@@ -4705,35 +4782,63 @@ async def _reconcile_hoist_rollbacks(
     "one thing at a time" shape for a run-level reconciliation pass, even though
     `IntegrationMutex` inside `execute_hoist_rollback` would serialize the real git commits anyway.
 
-    **Fail loud, not per-contract isolated (Rule 11).** Neither callee's exceptions
-    (`RollbackAnchorError`, `HoistRollbackConflictError`) are caught here: a genuine precondition
-    failure or should-never-happen race aborts this whole pass rather than being swallowed so a
-    later contract can proceed. This task's brief did not ask for per-contract isolation, and
-    inventing one would be a design decision beyond "pure call-site wiring" — see this task's own
-    report for the disclosed consequence (a contract whose own migration PR was never dispatched
-    with `contract_id` set, D122, raises `RollbackAnchorError` here today, which is a pre-existing
-    gap this task does not fix).
+    **Fail loud for the ONE contract, not the whole pass — corrected (fix round, task-72
+    controller review I2).** This docstring's first landing read "neither callee's exceptions are
+    caught here: a genuine precondition failure aborts this whole pass" and called that a
+    deliberate choice within scope. An independent review traced the real consequence: in
+    production, no `PullRequestDraft` is EVER constructed with `contract_id` set (D122 — measured,
+    not assumed), so `execute_hoist_rollback`'s anchor scan always finds no contract-owned draft
+    and raises `RollbackAnchorError` for any contract whose blast set is non-empty. Uncaught, that
+    exception did not merely fail this pass — it propagated out of `_build_impl` and aborted the
+    ENTIRE `fleet build`/`fleet resume` invocation, including every OTHER, unrelated repo in the
+    same run that has nothing to do with the failing contract. Before task 72, the identical
+    real-world scenario (a hoisted contract breaks a build) recorded a `HoistBrokeOwner` finding
+    and the build finished normally; task 72's own wiring turned that into a whole-run crash. The
+    fix: each contract's `unhoist_contract` → `execute_hoist_rollback` sequence runs in its OWN
+    `try`/`except` — a failure on contract A must not prevent contract B's rollback from being
+    attempted — catching `(GitError, WorktreeError)`, the union of exception types this git-
+    mechanics pipeline's own documented failure surface can raise (`RollbackAnchorError`,
+    `HoistRollbackConflictError`, and the underlying `GitCommandError`/`GitRefError`/
+    `ForgeError`/`LockTimeoutError`/`WorktreeError` a real git/forge/worktree call inside it can
+    raise) — and recording a `HoistRollbackFailed` finding rather than re-raising. This is NOT
+    "hiding an error" (Rule 11): it scopes the failure to the actual blast radius (one contract)
+    instead of an unrelated crash of every other repo in the run. A genuinely unexpected exception
+    OUTSIDE that documented surface (a real programming bug, a corrupted DB state) is still not
+    caught here and still aborts the whole pass, exactly as before.
     """
     entries: list[HoistRollbackReconciliationEntry] = []
     for contract_id in await _hoist_broke_contract_ids(read_conn, run_id):
-        unhoist = await unhoist_contract(
-            read_conn, settings, writer=writer, run_id=run_id, contract_id=contract_id, now=now
-        )
-        if unhoist.decision == "REFUSED":
+        unhoist: UnhoistOutcome | None = None
+        try:
+            unhoist = await unhoist_contract(
+                read_conn, settings, writer=writer, run_id=run_id, contract_id=contract_id, now=now
+            )
+            if unhoist.decision == "REFUSED":
+                entries.append(
+                    HoistRollbackReconciliationEntry(
+                        contract_id=contract_id, unhoist=unhoist, rollback=None
+                    )
+                )
+                continue
+            rollback = await execute_hoist_rollback(
+                read_conn,
+                settings,
+                run_id=run_id,
+                contract_id=contract_id,
+                blast_set=unhoist.blast_set,
+                forge=forge,
+            )
+        except (GitError, WorktreeError) as exc:
+            await _write_hoist_rollback_failed_finding(writer, run_id, contract_id, exc, now=now)
             entries.append(
                 HoistRollbackReconciliationEntry(
-                    contract_id=contract_id, unhoist=unhoist, rollback=None
+                    contract_id=contract_id,
+                    unhoist=unhoist,
+                    rollback=None,
+                    error=str(exc),
                 )
             )
             continue
-        rollback = await execute_hoist_rollback(
-            read_conn,
-            settings,
-            run_id=run_id,
-            contract_id=contract_id,
-            blast_set=unhoist.blast_set,
-            forge=forge,
-        )
         entries.append(
             HoistRollbackReconciliationEntry(
                 contract_id=contract_id, unhoist=unhoist, rollback=rollback
@@ -11683,6 +11788,27 @@ async def _build_impl(
                 # place both `fleet build` and `fleet resume`'s Phase 3 continuation pass through
                 # (`_continue_impl` calls `_build_impl` directly for `Phase.BUILD`), so the check
                 # lives here once rather than being duplicated at both callers.
+                #
+                # DISCLOSED GAP, not a stated boundary (fix round, task-72 controller review M1,
+                # Should-fix): this line only runs if the wave loop above returns normally or
+                # `break`s on `report.exit_code is not None`. An exception raised INSIDE the wave
+                # loop (e.g. `WaveNotReadyError` escaping its own narrower catch above,
+                # `RootFileDomainDriftError`) skips this call entirely for this invocation --
+                # recovery then depends on a future `fleet resume` re-entering `Phase.BUILD`,
+                # which is not guaranteed. Wrapping the wave loop in a `try`/`finally` so this
+                # call always runs was attempted and set aside: the loop above is a single
+                # ~300-line sequential block with its own nested `except WaveNotReadyError`
+                # already handling one specific precondition failure, several comments in it
+                # already flag a structurally similar residual ("deferred defect, not a stated
+                # boundary" -- the unguarded PASS-2 git mutation, above), and the exact set of
+                # exception types the loop can currently raise is not enumerated anywhere in this
+                # function. Running `_reconcile_hoist_rollbacks`'s own real git-mutation
+                # (`execute_hoist_rollback`'s revert commits under `IntegrationMutex`) from a
+                # `finally` at a moment the run is failing for a DIFFERENT, unaudited reason risks
+                # a git mutation against a monorepo checkout whose state relative to the original
+                # failure was never characterized -- broader scope than this fix round's mandate
+                # (I2's per-contract isolation). Left as a disclosed gap; see this task's own
+                # fix-round report for the full reasoning.
                 await _reconcile_hoist_rollbacks(
                     read_conn,
                     settings,
@@ -11691,6 +11817,11 @@ async def _build_impl(
                     forge=_forge(settings),
                     now=_now(),
                 )
+                # Disclosed (fix round, task-72 controller review I3): this call can demote a
+                # repo's `phases` rows -- BUILD included -- back to `PENDING` before the read
+                # below, so `statuses`/`violations` reflect POST-rollback state for any repo this
+                # pass demoted, not its pre-rollback SUCCEEDED -- judged the correct order
+                # (reporting stale pre-rollback statuses would be worse), not a design change.
                 statuses = await _phase_statuses(read_conn, run_id, Phase.BUILD)
                 violations = _build_criterion(plans, evidence, statuses)
             finally:

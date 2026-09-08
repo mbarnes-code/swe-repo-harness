@@ -549,9 +549,7 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
         "one revert per blast-set entry that was actually MERGED: the contract's own hoist "
         f"(owner) and the consumer -- got {revert_shas}"
     )
-    assert forge.calls == sorted([owner_url, consumer_url]) or set(forge.calls) == {
-        owner_url, consumer_url,
-    }
+    assert set(forge.calls) == {owner_url, consumer_url}
 
     consumer_transform_after = _phase_row(fleet, consumer, 2)
     assert consumer_transform_after == ("PENDING", consumer_transform_before[1]), (
@@ -571,6 +569,89 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
         (run_id,),
     )
     assert [row[0] for row in demotion_findings] == [consumer]
+
+
+@pytest.mark.integration
+def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contract_only(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo,  # noqa: F811
+    resolver,  # noqa: F811
+    gazelle,  # noqa: F811
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Fix round (task-72 controller review I2): the REAL production shape — no `PullRequestDraft`
+    anywhere carries `contract_id` (D122; measured, not assumed — no call site in `src/fleet`
+    constructs one). Every other test in this module hand-seeds `contract_id` on the owner's own
+    PR record, which is what let the original landing's tests all hit the `APPLIED`/`COMMITTED`
+    success path and never exercise this one.
+
+    Without that hand-seeding, `_ordered_revert_shas`'s scan for a contract-owned draft finds
+    nothing, so `execute_hoist_rollback` raises `RollbackAnchorError`. Before this fix round, that
+    exception propagated uncaught out of `_reconcile_hoist_rollbacks` and `_build_impl`, and
+    `runner.invoke(..., catch_exceptions=False)` (this suite's own `build()` helper) re-raised it
+    straight out of the test — an unrelated repo (`acme-lib-ts`, given NO edge to the contract at
+    all, so it is never a blast-set member regardless of what `execute_hoist_rollback` does) would
+    never even get its own status reported, because the WHOLE invocation crashed. After this fix,
+    `build()` returns normally: `contracts.status` still reads `FAILED` (`unhoist_contract`'s own
+    effect, unaffected — it never raises here), no revert commit lands, a `HoistRollbackFailed`
+    finding records why, and the unrelated repo's own BUILD phase still reaches `SUCCEEDED`.
+    """
+    _ = (filter_repo, resolver, gazelle)
+    transformed(fleet)
+    owner = "acme-app-ts"
+    consumer = "acme-lib-py"
+    unrelated = "acme-lib-ts"
+    run_id = str(e2e_query(fleet, "SELECT run_id FROM runs")[0][0])
+    db_path = fleet / "state" / "fleet.db"
+
+    _seed_contract_and_edges(
+        db_path, run_id, contract_id=_CONTRACT_ID, owner=owner, consumer=consumer,
+        target_path=_TARGET_PATH,
+    )
+    owner_url = f"https://forge.invalid/{owner}/pull/1"
+    consumer_url = f"https://forge.invalid/{consumer}/pull/1"
+    # The realistic production shape (fix round I2): NO `contract_id` on the owner's own draft.
+    _seed_pr(db_path, run_id, repo_id=owner, url=owner_url)
+    _seed_pr(db_path, run_id, repo_id=consumer, url=consumer_url)
+
+    forge = _RealMergeForge(monorepo, {owner_url: owner, consumer_url: consumer})
+    monkeypatch.setattr(cli, "_forge", lambda settings: forge)
+
+    fake_bazel = _bazel_seam_failing_one_dest(
+        fleet / "artifacts" / "fake-bazel-task72-noanchor",
+        fail_dest=DESTINATIONS[owner], fail_stderr=_STDERR,
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
+
+    # The discriminator itself: this call must not raise. Pre-fix, `RollbackAnchorError`
+    # propagates uncaught through `catch_exceptions=False` and fails this test with a traceback
+    # instead of a normal `Result` — see this task's fix-round report for the old-fails proof.
+    build(fleet, "--no-sandbox")
+
+    assert e2e_query(
+        fleet, "SELECT status FROM contracts WHERE contract_id = ?", (_CONTRACT_ID,)
+    ) == [("FAILED",)], "unhoist_contract's own DB/graph write is unaffected by the later raise"
+
+    assert _revert_commits_on_integration(monorepo, _CONTRACT_ID) == [], (
+        "no anchor to resume from means no revert commit may land"
+    )
+
+    failed_findings = e2e_query(
+        fleet,
+        "SELECT payload FROM findings WHERE kind = 'HoistRollbackFailed' AND run_id = ?",
+        (run_id,),
+    )
+    assert len(failed_findings) == 1, failed_findings
+    failed_payload = json.loads(failed_findings[0][0])
+    assert failed_payload["contract_id"] == _CONTRACT_ID
+    assert failed_payload["error_type"] == "RollbackAnchorError"
+
+    unrelated_build = _phase_row(fleet, unrelated, 3)
+    assert unrelated_build[0] == "SUCCEEDED", (
+        f"an UNRELATED repo with no edge to the contract must complete normally -- got "
+        f"{unrelated_build}"
+    )
 
 
 @pytest.mark.integration
