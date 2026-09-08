@@ -627,8 +627,12 @@ def test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_i
     run_id = ? AND repo_id = ? AND phase = ?`) — zero rows exist to touch, so the write silently
     no-ops, and `acme-app-py` is later admitted into wave 1 as an ordinary unblocked repo and
     reads back `SUCCEEDED` / `blocked_by == '[]'`. This is D123's own measurement, and the
-    old-fails/new-passes proof for this exact assertion (via `git stash` on `src/fleet/cli.py`) is
-    recorded in this task's report (`.superpowers/sdd/round-VI-criteria-closure/task-76-report.md`).
+    old-fails/new-passes proof for this exact assertion (via a scratchpad file-swap against
+    `git show HEAD:src/fleet/cli.py` -- `git stash` was deliberately NOT used, since
+    `refs/stash` is shared across every worktree of this repo and a first attempt at this
+    proof picked up a sibling lane's concurrent stash entry on pop; see `CLAUDE.md`'s
+    disclosed guardrail) is recorded in this task's report
+    (`.superpowers/sdd/round-VI-criteria-closure/task-76-report.md`).
 
     **After the fix**, every wave's TRANSFORM `phases` row for this invocation's whole domain is
     pre-seeded before any wave dispatches (mirroring `_build_impl`'s PASS 1), so `acme-app-py`'s

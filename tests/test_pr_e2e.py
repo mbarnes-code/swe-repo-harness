@@ -1901,20 +1901,33 @@ def _seed_blocked(root: Path, *, repo_id: str, blocked_by: list[str]) -> None:
     `SqliteSchedulerStore.append_blocked_by` — the real writer this test could not reach through.
 
     **Why this is necessary rather than a shortcut for something a real dispatch could do.**
-    `_transform_impl`'s wave loop creates each wave's `phases` rows LAZILY, at the top of that
-    wave's OWN iteration (`for index in waves: ... upsert_phase(...) ... await _run_transform_
-    wave(...)`) — so by the time `PhaseRunner._contain` -> `propagate_blocked` ->
-    `append_blocked_by` runs for a provider abandoned in an EARLIER wave, a dependent in a LATER
-    wave has no `phases` row yet for `append_blocked_by` (an UPDATE-only write, "every non-
-    SUCCEEDED phase of a repo") to touch. Measured directly, twice: once with both waves driven in
-    ONE `fleet transform` call and once across two separate `fleet transform --wave N` calls —
-    `acme-app-py` reached `SUCCEEDED` with `blocked_by == '[]'` both times, never `BLOCKED`, after
-    a REAL `_PROVIDER_FAILS_RULE`-driven failure of `acme-lib-py`. This is a genuine, pre-existing
-    structural gap in `_transform_impl` (BUILD's own `_eligible_build_units`/upfront full-domain
-    `upsert_phase` INGEST pass does not have it, which is why `tests/test_build_e2e.py`'s "Blocker
-    C" fixture can drive the SAME shape through two real `build()` calls with no seed at all) — not
-    introduced by this leg, not fixed by it (out of scope), reported to the controller in this
-    task's report rather than patched here.
+    **Corrected, round VI task 76 fix round 1 (ADR-0127/D123, D126) — the claim this paragraph
+    used to make is now only half true.** `_transform_impl`'s wave loop no longer creates each
+    wave's `phases` rows lazily: round VI task 76 fixed D123 by pre-seeding every wave's TRANSFORM
+    row upfront, before any wave dispatches, mirroring `_build_impl`'s PASS 1. That fix closes the
+    SAME-invocation case this paragraph used to describe — driving both `acme-lib-py`'s and
+    `acme-app-py`'s waves through ONE `fleet transform` call (no `--wave`) now correctly leaves
+    `acme-app-py` `BLOCKED` with `blocked_by == ["acme-lib-py"]`
+    (`tests/test_transform_e2e.py::
+    test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run`).
+
+    THIS test still needs the hand-seed below, though, because it drives `--wave 0` specifically
+    (see the real dispatch a few lines down this file): the pre-seed pass is scoped to the CURRENT
+    invocation's own `--wave`-scoped domain (`_open_transform_waves` returns exactly `(wave,)`
+    when `wave` is not `None`), so a `--wave 0` call's pre-seed pass never touches wave 1's
+    members at all — `acme-app-py` has no `phases` row after this test's own `--wave 0` call,
+    regardless of what `propagate_blocked` computes for `acme-lib-py`'s abandonment. This
+    narrower, still-open residual is tracked as **D126** (`docs/INTEGRATION_HONESTY.md`) — D123's
+    own discovery measured it directly, twice, before the fix (once with both waves driven in ONE
+    `fleet transform` call, now fixed above; once across two separate `fleet transform --wave N`
+    calls, the same shape this test's own single `--wave 0` call exercises, still open as D126):
+    `acme-app-py` reached `SUCCEEDED` with `blocked_by == '[]'` in both cases, never `BLOCKED`,
+    after a REAL `_PROVIDER_FAILS_RULE`-driven failure of `acme-lib-py`. This is a genuine,
+    structural gap in `_transform_impl`'s `--wave`-scoped semantics (BUILD's own
+    `_eligible_build_units`/upfront full-domain `upsert_phase` INGEST pass has no `--wave` filter
+    to narrow, which is why `tests/test_build_e2e.py`'s "Blocker C" fixture can drive the SAME
+    shape through two real `build()` calls with no seed at all) — not introduced by this leg, not
+    fixed by it (out of scope; tracked as D126 for a future round, not patched here).
 
     `acme-lib-py` itself is NOT hand-seeded: it reaches `REQUIRES_HUMAN_INTERVENTION` for real,
     through a real `fleet transform --wave 0` dispatch, in this test — so the evidence `fleet
