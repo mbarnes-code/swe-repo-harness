@@ -14103,6 +14103,20 @@ what feeds into it is sufficient and additive.
    every existing call site and every existing test is unaffected. A contract's PR (`contract_id`
    set) now gets a distinct fingerprint from its owning repo's own PR even though both share
    `repo_id`, so both rows persist under `ux_findings_ident` without collision.
+
+   **Corrected, 2026-09-08 (round VI task-75's own review) — the "byte-identical" claim above is
+   false, measured directly.** `_fingerprint(*parts: str)` joins with `"\x00".join(parts)`;
+   appending an empty 4th part (`contract_id or ""`) still adds a trailing `\x00` separator, so
+   `sha256("run\x00repo\x00PR")` ≠ `sha256("run\x00repo\x00PR\x00")` — the fingerprint for a
+   repo-owned PR genuinely changes under this ADR, it does not stay byte-identical. Practical
+   blast radius is narrow and does not affect any current test or production path: within one run
+   the fingerprint is computed consistently by whichever code version is live, so a record's own
+   upserts stay self-consistent: the only real exposure is a code upgrade occurring *mid-run*
+   against an already-populated `state.db`, which would orphan a pre-upgrade row under its old
+   fingerprint rather than update it in place (a `findings`-table hygiene residue, not a
+   correctness break — `_pr_records`' read side still surfaces the newer, correct row going
+   forward). No code change is required for this; this note exists so the original sentence is not
+   read as still true.
 2. `_pr_records`'s return type widens from `dict[str, PullRequestDraft]` (keyed by `repo_id`) to
    `dict[tuple[str, str | None], PullRequestDraft]` (keyed by `(repo_id, contract_id)`). Every
    existing caller passes/reads `contract_id=None` for a repo-owned PR, which is a mechanical,
