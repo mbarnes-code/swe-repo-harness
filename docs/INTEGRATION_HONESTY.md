@@ -9560,8 +9560,9 @@ criterion names JVM/Bazel real-analysis directly (checked `docs/SPEC.md` and
 `docs/CRITERIA_PLAN.md`); this is an infrastructure/blocker fix (unblocks JVM real-Bazel analysis
 generally), consistent with research-41's own read.
 
-## D122 — OPEN. A contract's own PR record and its owning repo's own PR record cannot coexist —
-one silently overwrites the other via `findings`' own `ux_findings_ident` unique index.
+## D122 — FIXED, LANDED (round VI task 75, `a9636b8`, controller review pending). A contract's own
+PR record and its owning repo's own PR record cannot coexist — one silently overwrites the other
+via `findings`' own `ux_findings_ident` unique index.
 
 **Found by round VI task 71's controller-review fix round (2026-09-07), while disclosing why
 `execute_hoist_rollback` (`cli.py`, ADR-0122 Decisions 4/5) is currently unreachable via
@@ -9608,6 +9609,38 @@ when absent, matching this project's existing `IFNULL(repo_id, '')` convention),
 `_pr_records`'s key widens from `repo_id` to `(repo_id, contract_id)` — no schema/index migration.
 Full rationale in `docs/DECISIONS.md` ADR-0126. Task-75 dispatched to build it. Status remains
 OPEN until task-75 lands and is reviewed.
+
+**FIXED, LANDED 2026-09-08 (round VI task 75, `a9636b8`).** Built exactly as ADR-0126 specified:
+`_upsert_pr_record`'s fingerprint call site gained `draft.contract_id or ""` as a 4th argument
+(`_fingerprint`'s signature is already `*parts: str`, so no signature change was needed — checked
+every other call site first, per this task's own brief); `_pr_records`'s return type widened from
+`dict[str, PullRequestDraft]` to `dict[tuple[str, str | None], PullRequestDraft]`, keyed
+`(repo_id, contract_id)`. `PullRequestDraft.contract_id` already existed on `models/tasks.py`
+(ADR-0019) — no model change was needed, matching one of ADR-0126's own disclosed possibilities.
+Every call site `mypy --strict` flagged was updated (`execute_hoist_rollback`'s and
+`_ordered_revert_shas`'s repo-owned lookups, `_pr_sync_impl`'s poll set and D103 gap-1 sweep,
+`_pr_impl`'s eligibility/promotion lookups, `_emit_prs`/`_promote_prs`/`_emit_one_pr`/
+`_regenerate_pr_body`'s threaded `Mapping` parameter, `_stub_reconcile_inputs`'s provider-facts
+lookup, `_apply_stub_reconcile`'s consumer-HELD update) — all as `(x, None)`, since no production
+call site sets `contract_id` yet, exactly as ADR-0126 anticipated. One defect the type checker
+could not see (the return dict is typed `dict[str, object]`) surfaced only via the full-file test
+run: `_pr_sync_impl`'s JSON-facing `"polled"`/`"terminal"` lists were built from `sorted(pollable)`
+/ `set(records) - set(pollable)`, which silently started sorting the raw `(repo_id, contract_id)`
+tuple keys once the type changed, breaking `test_pr_sync_sweeps_a_pre_merged_providers_stub_left_
+active_by_a_prior_crash` (`tests/test_pr_e2e.py`) — fixed by projecting onto the `repo_id`
+component before building those two lists. Rule-12 discriminator:
+`tests/test_hoist_rollback_git.py::test_a_contracts_own_pr_record_coexists_with_its_owning_repos_
+own_pr_record` writes two `PullRequestDraft` rows sharing one `repo_id` (one `contract_id=None`,
+one set) through `_write_pr_record` and reads both back through `_pr_records` — reverting
+`src/fleet/cli.py` to its pre-fix state makes this exact test fail (`_pr_records` returns exactly
+one entry, the second draft silently overwrote the first); restoring the fix makes it pass, both
+present, addressable by `(repo_id, contract_id)`. No production call site was added that
+constructs a `PullRequestDraft` with `contract_id` set (still zero, as ADR-0126 scoped) — wiring
+one remains a future task's job. Full test files run whole, no `-k`: `tests/test_cli.py` (194),
+`tests/test_hoist_rollback_git.py` (13, +1 new), `tests/test_pr_e2e.py` (25),
+`tests/test_event_stream_wiring.py` (6) — 238 total, identical to the 237-passing baseline plus
+exactly the one new discriminator test. `mypy --strict src/fleet/` and `ruff check`/
+`ruff format --check` (on every line this task touched) both clean.
 
 ## D123 — OPEN. A direct dependent of an RHI repo does not become `BLOCKED` at the TRANSFORM
 phase — cross-wave `blocked_by` propagation silently never reaches a not-yet-dispatched dependent
