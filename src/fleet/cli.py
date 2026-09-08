@@ -10872,10 +10872,33 @@ def _is_jvm_test_src(path: str) -> bool:
     return path.startswith(_JVM_TEST_SOURCE_ROOTS)
 
 
+def _is_rust_test_src(path: str) -> bool:
+    """Cargo's own integration-test convention: a `.rs` file directly under `tests/` at the crate
+    root.
+
+    D112 (round VI task 86): unlike `#[cfg(test)]` unit tests, which compile as part of the
+    library crate itself and are never in `test_srcs` (`rust.py:test_targets()`'s unconditional
+    `crate = ":<lib>"` target covers those), Cargo compiles each `tests/*.rs` file as its OWN
+    independently-linked test binary — that split is exactly why `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+    could not simply add `CARGO` with a naive predicate (see that constant's docstring): a
+    `rust_test` cannot combine `crate=` with a non-empty `srcs=`, so only files matched HERE ever
+    reach `srcs=`.
+
+    **Only DIRECT children of `tests/`.** A file under `tests/<subdir>/...` is a helper module a
+    top-level integration test file `mod`-includes (e.g. `tests/common/mod.rs`); Cargo itself does
+    not compile it as its own test binary, and neither does this predicate — counting it here would
+    emit a `rust_test` Bazel target for a file that is not one.
+    """
+    if not path.startswith("tests/"):
+        return False
+    return "/" not in path[len("tests/") :]
+
+
 _TEST_SRC_PREDICATES: Final[Mapping[str, Callable[[str], bool]]] = {
     "pypi": _is_python_test_src,
     "maven": _is_jvm_test_src,
     "gradle": _is_jvm_test_src,
+    "cargo": _is_rust_test_src,
 }
 """`Ecosystem.value` → the predicate that decides whether one discovered source is a test file for
 that ecosystem — D112, round VI task 70's table-driven dispatch (mirrors
@@ -10898,13 +10921,16 @@ def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[lis
     """Split a unit's discovered sources into `(srcs, test_srcs)` for one ecosystem — D112.
 
     Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` (round VI task 53: Python only;
-    widened round VI task 70 to JVM/`MAVEN`+`GRADLE`). Rust/`CARGO` and JS/`NPM` are deliberately
-    NOT members — see that constant's docstring for the two measured real-Bazel analysis-time
-    failures (Rust: `rust_test.crate`/`rust_test.srcs` mutual exclusivity; JS: `js_test`'s `deps`
-    reintroducing `docs/INTEGRATION_HONESTY.md`'s `## D7`) a naive predicate for either would
-    trigger. Every non-member ecosystem keeps its whole walk in `srcs` exactly as before this task —
-    `test_srcs` stays `()` for it, which is a no-op against `test_sources()`'s existing (always
-    empty) behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round
+    widened round VI task 70 to JVM/`MAVEN`+`GRADLE`; widened round VI task 86 to Rust/`CARGO`,
+    once `rust.py:test_targets()` stopped combining `crate=` with a non-empty `srcs=` on the SAME
+    target — see that constant's docstring for the measured real-Bazel analysis-time failure this
+    predicate alone could not have fixed). JS/`NPM` is the one ecosystem still deliberately NOT a
+    member — see `TEST_SRC_PARTITIONED_ECOSYSTEMS`'s docstring for the measured real-Bazel
+    analysis-time failure (`js_test`'s `deps` reintroducing `docs/INTEGRATION_HONESTY.md`'s `## D7`)
+    a naive predicate for it would trigger. Every non-member ecosystem keeps its whole walk in
+    `srcs` exactly as before this task — `test_srcs` stays `()` for it, which is a no-op against
+    `test_sources()`'s existing (always empty) behavior. A table lookup rather than a
+    `Compare`/`Subscript` naming a bare member (round
     VI task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two
     adapter packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime
     behavior. The per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same

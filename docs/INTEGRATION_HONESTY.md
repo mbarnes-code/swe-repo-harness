@@ -9333,6 +9333,47 @@ done and FakeBazel-proven, but its own real-Bazel proof needs the separate `rule
 `bazel_dep` fix flagged above first.** Do not round the `<n> of 48` §12 count up on this account
 (same as task 53's note above).
 
+**PARTLY ADDRESSED, widened further (round VI task 86, 2026-09-08) — Rust now covered; JS remains
+the only genuinely open gap.** Re-verified the constraint above fresh against this repo's actual
+pin rather than trusting the citation: `settings.py:566` pins `rules_rust` at exactly `0.65.0`, and
+`rust/private/rust.bzl` fetched directly from the `0.65.0` tag
+(`https://raw.githubusercontent.com/bazelbuild/rules_rust/0.65.0/rust/private/rust.bzl`) confirms
+`_rust_test_impl`'s `if ctx.attr.crate and ctx.attr.srcs: fail(...)` at line 352-353 verbatim as
+task 70's paragraph above cites it. `rust.py::test_targets()` no longer combines `crate=` with a
+non-empty `srcs=` on one target: the unconditional `crate = ":<lib>"` unit-test target is
+unchanged (still `srcs=[]`, still covers `#[cfg(test)]` tests compiled inside the library), and
+each file `cli._is_rust_test_src` matches (Cargo's own `tests/*.rs` convention — a `.rs` file
+DIRECTLY under `tests/`, excluding nested helper modules like `tests/common/mod.rs` a top-level
+test file `mod`-includes) now gets its OWN separate `rust_test(srcs=[file], deps=[":<lib>", ...])`
+target. `Ecosystem.CARGO` is now a `TEST_SRC_PARTITIONED_ECOSYSTEMS` member.
+
+Proven at both tiers this task's brief required, unlike JVM's still-incomplete real-Bazel half
+above. FakeBazel tier: `tests/test_build_e2e.py::
+test_a_rust_repo_with_a_real_test_file_gets_a_real_rust_test_target` — two separate `rust_test(`
+blocks render (`body.count("rust_test(") == 2`), the `crate=` block carries no `srcs=`, the
+integration-test block carries no `crate=`, and the nested `tests/common/mod.rs` helper gets no
+target of its own and stays in `rust_library`'s `srcs` instead. Real-Bazel tier (the proof D112's
+own text says a green Python-only assertion cannot give): a new fixture, `acme-widgets-rust`
+(zero external crates, so no `crate.from_cargo`/`MODULE.bazel.lock` machinery is even invoked —
+`workspace_deps()` returns `[]` when `external_coordinates` is empty), with a REAL `#[test] fn`
+asserting a real value (not a bare script) in `tests/widgets.rs`. `bazel test
+//rust/acme-widgets-rust:acme-widgets-rust_widgets_test` PASSES against the real toolchain —
+`Traceback`-style checks aside, the test log shows the assertion actually ran, and a
+`--test_output=errors` empty-stderr-on-a-failure shape would have caught a vacuous target. Both
+tiers pass old-fails/new-passes: reverting `rust.py`/`base.py`/`cli.py` to their pre-fix state
+(backup-file method, not `git stash`, per CLAUDE.md Rule 12) reproduces the pre-fix defect exactly
+as the JVM/Python precedents' reports record it — the FakeBazel test's discriminating assertions
+(`body.count("rust_test(") == 2`, `srcs = [` absent from the `crate=` block) fail RED against the
+unmodified pre-fix adapter (which emits one combined `rust_test(crate=..., srcs=test_srcs, ...)`
+block once `CARGO` is a `TEST_SRC_PARTITIONED_ECOSYSTEMS` member — which it was not, pre-fix,
+making `test_srcs` empty and the assertions fail differently but still RED) and GREEN after.
+
+**Remaining under D112, narrowed: JS only.** `js.py::test_targets()`'s `deps=` defect (the D7
+regression cited above) is untouched by this task — out of scope, no attempt made, `test_srcs=()`
+unchanged for `NPM`, not a regression. Do not round the `<n> of 48` §12 count up on this account
+(same as task 53's/70's notes above) — this closes D112's Rust membership question but D112 itself
+stays PARTLY ADDRESSED until JS lands too.
+
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found
 

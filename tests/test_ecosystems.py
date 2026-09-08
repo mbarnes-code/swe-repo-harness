@@ -600,9 +600,16 @@ def test_rust_maps_a_crate_to_rust_targets() -> None:
 
     **Why:** `crate_root` must be explicit. With both files present and no root attribute,
     `rules_rust` picks one by convention and compiles the binary's `main` into the library —
-    a link error whose message names neither file. And `rust_test` takes `crate =`, not `srcs =`:
-    Rust unit tests live *inside* the crate, so a separate compilation reports green while
-    running none of them.
+    a link error whose message names neither file. And the unit-test `rust_test` takes `crate =`,
+    not `srcs =`: Rust unit tests live *inside* the crate, so a separate compilation reports green
+    while running none of them.
+
+    **D112 (round VI task 86):** `tests/roundtrip.rs` — a real Cargo integration-test file — must
+    land on its OWN `rust_test(srcs=[...])` target, never combined with the `crate=` unit-test
+    target: `rules_rust`'s `_rust_test_impl` hard-fails Bazel analysis the instant `crate` and a
+    non-empty `srcs` are both set on the same target, so this is the actual discriminator between
+    the pre-fix shape (one combined target) and the post-fix shape (two separate targets) — a
+    single `(test,) = adapter.test_targets(unit)` unpack would have stayed green under either.
     """
     adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
     assert adapter.monorepo_dir == "rust"
@@ -627,10 +634,58 @@ def test_rust_maps_a_crate_to_rust_targets() -> None:
     assert library.deps == ["//rust/acme-core:acme-core", "@crates//:serde"]
     assert (binary.rule, binary.attrs["crate_root"]) == ("rust_binary", "src/main.rs")
 
-    (test,) = adapter.test_targets(unit)
-    assert test.attrs["crate"] == ":acme-store"
+    unit_test, integration_test = adapter.test_targets(unit)
+    assert (unit_test.rule, unit_test.name) == ("rust_test", "acme-store_test")
+    assert unit_test.attrs["crate"] == ":acme-store"
+    assert unit_test.srcs == [], "crate= and a non-empty srcs= are mutually exclusive to Bazel"
+
+    assert (integration_test.rule, integration_test.name) == (
+        "rust_test",
+        "acme-store_roundtrip_test",
+    )
+    assert integration_test.srcs == ["tests/roundtrip.rs"]
+    assert "crate" not in integration_test.attrs, (
+        "crate= alongside a non-empty srcs= is the exact rules_rust@0.65.0 analysis-time failure "
+        "D112's Rust slice exists to avoid"
+    )
+    assert integration_test.deps == [":acme-store", "//rust/acme-core:acme-core", "@crates//:serde"]
+
     (dep,) = adapter.workspace_deps(unit)
     assert dep.attrs["cargo_lockfile"] == "//:Cargo.lock"
+
+
+def test_rust_test_targets_emits_one_per_file_never_combining_crate_with_srcs() -> None:
+    """`test_targets()` never puts a nonempty `srcs` on the SAME target as `crate=` — the exact
+    shape `rules_rust@0.65.0`'s `_rust_test_impl` hard-fails Bazel analysis over — however many
+    integration-test files `test_sources(unit)` hands it (here: two, so the discriminator is
+    "N files in ⇒ N separate targets out", not just "at least one target has no `crate`").
+
+    `cli._is_rust_test_src`'s own DIRECT-children-of-`tests/` restriction (a `tests/common/mod.rs`
+    helper module is not its own Cargo test binary) is exercised at the `cli._partition_test_srcs`
+    layer, which is where it runs in production (`BuildUnit.test_srcs` arrives here already
+    partitioned) — this adapter-level test constructs `unit.test_srcs` directly, so it is the
+    wrong layer to re-assert that restriction; see `tests/test_build_e2e.py`'s Rust D112 fixture
+    for the end-to-end proof that a nested helper file gets no `rust_test` target of its own.
+    """
+    adapter = ecosystems.for_ecosystem(Ecosystem.CARGO)
+    unit = _unit(
+        "acme-store",
+        Ecosystem.CARGO,
+        "rust/acme-store",
+        srcs=["src/lib.rs"],
+        test_srcs=["tests/roundtrip.rs", "tests/widgets.rs"],
+    )
+    targets = adapter.test_targets(unit)
+    assert len(targets) == 3, targets  # one crate= unit-test target + one per integration file
+    for target in targets:
+        assert not (target.attrs.get("crate") and target.srcs), (
+            "crate= combined with a non-empty srcs= on one target",
+            target,
+        )
+    integration = {t.name: t for t in targets if t.srcs}
+    assert set(integration) == {"acme-store_roundtrip_test", "acme-store_widgets_test"}, targets
+    assert integration["acme-store_roundtrip_test"].srcs == ["tests/roundtrip.rs"]
+    assert integration["acme-store_widgets_test"].srcs == ["tests/widgets.rs"]
 
 
 def test_unknown_falls_back_visibly_instead_of_raising() -> None:

@@ -255,28 +255,53 @@ class RustAdapter(EcosystemAdapter):
         return targets
 
     def test_targets(self, unit: BuildUnit) -> list[BuildTarget]:
-        """One `rust_test` with `crate = ":<lib>"`.
+        """One `rust_test` with `crate = ":<lib>"` for in-crate `#[cfg(test)]` unit tests, plus
+        one SEPARATE `rust_test(srcs = [file], deps = [":<lib>", ...])` per Cargo integration-test
+        file (D112, round VI task 86) — never combined on the same target.
 
-        `crate =` rather than `srcs =` because Rust unit tests live *inside* the crate behind
-        `#[cfg(test)]`: compiling the test sources as a separate crate would leave every
-        `#[cfg(test)] mod tests` in `src/` untested while reporting a green `bazel test`.
+        `crate =` rather than `srcs =` for the unit-test target because Rust unit tests live
+        *inside* the crate behind `#[cfg(test)]`: compiling the test sources as a separate crate
+        would leave every `#[cfg(test)] mod tests` in `src/` untested while reporting a green
+        `bazel test`. And `crate=`/`srcs=` can never both be set on one target: `rules_rust`'s own
+        `_rust_test_impl` (`rust/private/rust.bzl`, verified against the pinned
+        `rules_rust@0.65.0` tag) hard-fails analysis the instant both are non-empty — `"rust_test.
+        crate and rust_test.srcs are mutually exclusive"` — which is why `test_sources(unit)`
+        (Cargo's own `tests/*.rs` convention, `cli._is_rust_test_src`) drives a SEPARATE target per
+        file instead of widening this one's `srcs`. This is not a Bazel workaround; it is the same
+        split Cargo itself already makes — each `tests/` file compiles as its own independently
+        linked test binary, never folded into the library crate the way a `#[cfg(test)]` block is.
         """
         name = target_name(unit)
+        deps = self.dep_labels(unit)
         test_srcs = self.test_sources(unit)
-        if not test_srcs and not self.sources(unit):
-            return []
-        return [
-            BuildTarget(
-                package=unit.dest,
-                name=f"{name}_test",
-                rule="rust_test",
-                load_from="@rules_rust//rust:defs.bzl",
-                srcs=test_srcs,
-                attrs={"crate": f":{name}", "edition": _EDITION},
-                testonly=True,
-                visibility=["//visibility:private"],
+        targets: list[BuildTarget] = []
+        if self.sources(unit):
+            targets.append(
+                BuildTarget(
+                    package=unit.dest,
+                    name=f"{name}_test",
+                    rule="rust_test",
+                    load_from="@rules_rust//rust:defs.bzl",
+                    attrs={"crate": f":{name}", "edition": _EDITION},
+                    testonly=True,
+                    visibility=["//visibility:private"],
+                )
             )
-        ]
+        for test_src in test_srcs:
+            targets.append(
+                BuildTarget(
+                    package=unit.dest,
+                    name=_integration_test_target_name(name, test_src),
+                    rule="rust_test",
+                    load_from="@rules_rust//rust:defs.bzl",
+                    srcs=[test_src],
+                    deps=[f":{name}", *deps],
+                    attrs={"edition": _EDITION},
+                    testonly=True,
+                    visibility=["//visibility:private"],
+                )
+            )
+        return targets
 
     def toolchain_requirements(self) -> list[ToolchainRequirement]:
         """A pinned `rustc`. Rust's edition and toolchain move fast enough that "whatever is on
@@ -356,6 +381,22 @@ def _member_manifest(unit: BuildUnit) -> str:
         'version = "0.0.0"\n'
         f'edition = "{_EDITION}"\n'
     )
+
+
+def _integration_test_target_name(base: str, test_src: str) -> str:
+    """`<crate>_<file>_test` — one Bazel target name per Cargo integration-test file.
+
+    Sanitized the same way `_crate_name` sanitizes a published name (non-alphanumeric → `_`):
+    a `rust_test` target name is a Bazel label component, not a filesystem path, and `test_src`
+    here is always `tests/<file>.rs` (`cli._is_rust_test_src`), so only the file's own stem needs
+    sanitizing — the `tests/` prefix and `.rs` suffix carry no information once split into their
+    own target.
+    """
+    stem = test_src.rsplit("/", maxsplit=1)[-1]
+    if stem.endswith(".rs"):
+        stem = stem[: -len(".rs")]
+    ident = "".join(ch if ch.isalnum() else "_" for ch in stem)
+    return f"{base}_{ident}_test"
 
 
 def _crate_name(unit: BuildUnit) -> str:
