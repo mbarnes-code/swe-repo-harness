@@ -4,14 +4,27 @@ One isolated checkout per development subagent, so `git add` / `git commit` in o
 sweep up another lane's staged work.
 
 ```sh
-tools/worktree/new-worktree.sh  <task-id> [base-ref]   # create + provision + verify
-tools/worktree/land-worktree.sh <task-id>               # rebase onto main + ff-only merge (§6)
-tools/worktree/rm-worktree.sh   <task-id> [--force] [--delete-branch]
+tools/worktree/new-worktree.sh        <task-id> [base-ref]     # create + provision + verify
+tools/worktree/land-worktree.sh       <task-id>                 # rebase onto main + ff-only merge (§6)
+tools/worktree/rm-worktree.sh         <task-id> [--force] [--delete-branch]
+tools/worktree/provision-existing.sh  <worktree-path> [primary] # provision a worktree you did NOT create with new-worktree.sh
 ```
 
 A brief can then say **"work in `/home/redmage/swe repo harness worktrees/wt-<task-id>`"** and
 that directory is ready: clean `git status`, its own branch, a working `.venv`, the vendored
 toolchains, and its own `BAZEL_ROOT`.
+
+**If your worktree was created some other way** (an orchestrator's own dispatch tooling, a
+manual `git worktree add`, a worktree at a scratchpad path with no space in it) — run
+`tools/worktree/provision-existing.sh <path-to-your-worktree>` once, from anywhere. It provisions
+in place: symlinks `tools/bin/{bazel,ast-grep,gh}`, `tools/go`, `tools/rust`, `tools/bazelisk`,
+and clones+rewrites `.venv`, the same as `new-worktree.sh` does for a worktree it creates itself
+(they share the provisioning code in `lib-provision.sh`). Idempotent — safe to re-run. Round VI
+tasks 90, 94 and 98 each independently hit real-Bazel/real-git-filter-repo fixtures failing with
+`git-filter-repo is not on PATH` / `'uv' is not installed` in exactly this situation and fixed it
+by hand; this script is that fix, made reusable. Unlike `new-worktree.sh`, it does not refuse a
+space-free worktree path (see §3) — it warns instead, since a space-free scratchpad path is the
+common case for how tasks actually get dispatched in this project, not an edge case to reject.
 
 ---
 
