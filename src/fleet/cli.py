@@ -308,6 +308,7 @@ from fleet.vcs.filter_repo import (
     RelocationSpec,
     SnapshotRef,
     SourceProvenance,
+    default_source_paths,
     ingest,
     integration_snapshot,
     relocate,
@@ -4014,6 +4015,21 @@ per-repo demotion record) — neither shape fits an exception raised mid-rollbac
 failure to this ONE contract: the rest of `_reconcile_hoist_rollbacks`'s loop over other
 contracts, and the rest of `_build_impl`, still proceed rather than the whole invocation
 aborting for an unrelated repo."""
+
+CONTRACT_INGEST_FAILED_FINDING_KIND: Final = "ContractIngestFailed"
+"""New kind (round VI task 95, §12.31 case (ii) prerequisite, ADR draft): written when
+`_ingest_contract_source` raises for ONE HOISTED/MIGRATED contract — a missing owner mirror, a
+`git-filter-repo` failure, or any other §3.3 step 1 ingest error. `repo_id` is `NULL`, the same
+rationale as `HoistRollbackFailed`/`ContractBindingUnavailable`: a failed ingest is a property of
+the contract, not of any one repo. Scopes the failure to this ONE contract — the rest of the
+contract-ingest pass, and the rest of `_build_impl`, still proceed. **Disclosed, not fixed by this
+finding**: unlike a build-time `HoistBrokeOwner`, an ingest-time failure does NOT flip
+`contracts.status` to `FAILED` and does NOT trigger `unhoist_contract`'s rollback machinery — that
+linkage is out of this task's scope (research-50-report.md's task 2, not built here). The
+contract's DB row stays `HOISTED`/`MIGRATED`, PASS 2b still emits a `BuildPlan` for it (metadata
+only, no tree read), and the owner/consumers still ingest and build normally — "the run still
+completes" (ADR-0119) is preserved, but a stale `HOISTED` row with no real merge on `integration`
+is a known, disclosed gap this finding exists to surface to an operator rather than hide."""
 
 
 async def _unhoist_blast_set(
@@ -8593,6 +8609,21 @@ class _BuildIngest:
 
 
 @dataclass(frozen=True, slots=True)
+class _ContractIngest:
+    """One HOISTED/MIGRATED contract's §3.3 step 1 result — the CONTRACT-node sibling of
+    `_BuildIngest` (round VI task 95, ADR draft). Not consumed by PASS 2b today (that pass reads
+    only `contracts`/`wave_members` metadata, never a worktree); kept for the same reason
+    `_BuildIngest` is — a durable, typed record of what actually landed, for logging and for the
+    rollback anchor task 2 builds next."""
+
+    contract_id: str
+    hoist_target_path: str
+    merge_sha: str
+    owner_sha: str
+    already_ingested: bool
+
+
+@dataclass(frozen=True, slots=True)
 class _BuildPlan:
     """One repo's Phase 3 plan: the tree that was merged, the ref that names it, and the unit.
 
@@ -10705,6 +10736,178 @@ async def _ingest_build_source(
     )
 
 
+def _contract_source_prefix(paths: Sequence[str]) -> str:
+    """The `<common-prefix>` half of `--path-rename '<common-prefix>:<hoist_target_path>/'`
+    (`docs/SPEC.md:1259-1274`, §3.3 step 1), computed rather than declared — SPEC does not define
+    it when the owner's carriers share no directory (round VI task 95, ADR draft, JC-3).
+
+    The shared DIRECTORY of every carrier path, via `os.path.commonpath` over each path's
+    `dirname` (never the paths themselves — `commonpath` of one bare path returns the path
+    including its filename, which would strip the filename too). Falls back to the empty prefix
+    when the carriers share no directory (`commonpath(["", ...]) == ""`, verified rather than
+    special-cased): git-filter-repo's own `--path-rename ':<dest>/'` idiom — the exact form
+    `_ingest_build_source` already uses for a whole-repo relocation — nests every surviving path
+    under `<dest>/` at its own relative location rather than refusing the contract outright. A
+    HOISTED contract has already passed §3.1 5b's extractability ladder; refusing it here, at
+    Phase 3, over a layout preference rather than a correctness defect, would silently narrow an
+    already-committed decision. The cost, stated rather than hidden: carriers with no common
+    directory land one directory level deeper than SPEC's own single-shared-prefix example
+    (`<hoist_target_path>/<original/relative/path>` instead of a flattened form) — never lost,
+    never collided, just nested.
+
+    **Trailing slash, deliberately.** `git-filter-repo` refuses a `--path-rename OLD:NEW` whose
+    two sides disagree on whether they name a directory (`git_filter_repo.py`'s own validation:
+    "if OLD_NAME and NEW_NAME... [one] ends with a slash then both must") — measured directly
+    against this host's binary, not assumed. `filter_repo_argv` always renders the NEW side with
+    one (`dest_path.rstrip('/') + '/'`), so a non-empty OLD side must carry one too, or a
+    single-file contract (whose `dirname` has no trailing slash of its own) fails every real
+    `git-filter-repo` invocation with exactly that error.
+    """
+    dirnames = sorted({Path(p).parent.as_posix() for p in paths})
+    prefix = os.path.commonpath(dirnames) if dirnames else ""
+    return f"{prefix}/" if prefix else ""
+
+
+async def _ingest_contract_source(
+    settings: FleetSettings,
+    *,
+    run_id: str,
+    cnode: ContractNode,
+    monorepo: Git,
+    lock_dir: Path,
+) -> _ContractIngest:
+    """§3.3 step 1's INGEST for ONE `HOISTED`/`MIGRATED` contract (ADR-0011 as amended by
+    ADR-0019; round VI task 95, ADR draft) — the CONTRACT-node sibling of `_ingest_build_source`.
+
+    **Why this clones the owner's MIRROR and not a `migrate/<repo>` branch, unlike
+    `_ingest_build_source`.** SPEC's own words are literal: a contract's "history comes from its
+    **owning repo's mirror**" (`docs/SPEC.md:1259`), not from the Phase-2-transformed worktree a
+    repo's own ingest reads. That is also the only choice available causally, not merely the
+    literal one: SPEC requires the owner to be "ingested normally in its own (LATER) wave" and the
+    fixture proof (`tests/test_sequence_e2e.py::cycle_fleet`) measures a HOISTED contract's own
+    wave strictly before its owner's — so at the moment THIS function runs, the owner's Phase 2
+    worktree may not exist yet. The mirror (written at `fleet scan`, independent of wave order)
+    is the one tree that is always there.
+
+    1. Resolve the owner's mirror via `RepoEvidence.for_repo` (Rule 8: reuse the one expression
+       that knows git mirrors live a level down, rather than re-deriving `.../git/<slug>.git` a
+       fourth time — `orchestrator/reentry.py`'s own docstring names the three existing spellings
+       and the hazard of a fifth that disagrees).
+    2. A **throwaway** `--no-local` clone of the mirror's default branch (the branch its `HEAD`
+       already names — a `--mirror` clone preserves `HEAD` as a symbolic ref, so no separate
+       `repos.default_branch` lookup is needed here).
+    3. The relocation plan applied to history by `git-filter-repo`: `--path` per carrier path
+       (`default_source_paths`'s first production caller — the normaliser was written for this and
+       had zero callers until now), `--path-rename '<prefix>:<hoist_target_path>/'` with the
+       prefix `_contract_source_prefix` computes (JC-3).
+    4. `git merge --allow-unrelated-histories` into the integration branch with the ADR-0011
+       `Source-Repo:`/`Source-Sha:` trailers PLUS `Hoisted-Contract: <contract_id>`
+       (`SourceProvenance.contract_id`), under `IntegrationMutex` — the same single-writer merge
+       queue every repo's own ingest uses, so this contract's merge is serialized against every
+       other merge including its own owner's (later) one.
+
+    `branch_name=f"migrate/contract-{slug(contract_id)}"` (JC-2): a hoisted contract's
+    `SourceProvenance.repo_id` is its OWNER's id (SPEC requires `Source-Repo:` to name the owner),
+    and `ingest()` force-moves `f"migrate/{source.repo_id}"` by default — passing the owner's
+    unqualified `repo_id` here would silently point `migrate/<owner>` at the CONTRACT's merge
+    until the owner's own later ingest overwrote it again. A distinct branch name means the two
+    ingests never contend over one ref, even transiently.
+
+    Raises `BuildStepUnavailableError` for a contract this host cannot ingest — a missing mirror,
+    or a `HOISTED`/`MIGRATED` row with no carrier paths of its own owner's — as a named
+    per-contract failure (caught by the caller and recorded as a `ContractIngestFailed` finding,
+    mirroring `_ingest_build_source`'s own per-repo contract). `git-filter-repo`'s absence surfaces
+    as `FilterRepoUnavailableError` from `relocate()`, unchanged.
+    """
+    if cnode.hoist_target_path is None or cnode.owning_repo_id is None:
+        # Unreachable in practice — `ContractNode._hoistable_is_substantiated` already requires
+        # both whenever `extractable`, and `_eligible_contract_units` filters to HOISTED/MIGRATED,
+        # which that same validator requires to be `extractable`. Narrows the type for the type
+        # checker and fails loud on a violated internal invariant (CLAUDE.md §12.6), exactly as
+        # PASS 2b's identical check on the same fields already does.
+        raise ValueError(
+            f"{cnode.contract_id}: {cnode.status.value} with no hoist_target_path/owning_repo_id"
+        )
+    owner_paths = default_source_paths(
+        [
+            entry["path"]
+            for entry in cnode.source_paths
+            if entry.get("repo_id") == cnode.owning_repo_id
+        ]
+    )
+    if not owner_paths:
+        raise BuildStepUnavailableError(
+            f"{cnode.contract_id}: no source_paths carried by its own owner "
+            f"{cnode.owning_repo_id!r}; §3.3 step 1 filters the mirror down to the contract's "
+            "carrier paths, and there is nothing to filter for without at least one"
+        )
+
+    cache_dir = (settings.root / settings.config.run.cache_dir).resolve()
+    work_dir = (settings.root / settings.config.run.work_dir).resolve()
+    mirror = RepoEvidence.for_repo(
+        cnode.owning_repo_id, cache_dir=cache_dir, work_dir=work_dir, dest=""
+    ).mirror
+    if not await asyncio.to_thread(mirror.exists):
+        raise BuildStepUnavailableError(
+            f"{cnode.contract_id}: no mirror at {mirror} for owning repo "
+            f"{cnode.owning_repo_id!r}; §3.3 step 1 reads the contract's history off the owner's "
+            "mirror, and `fleet scan` is what writes it"
+        )
+    owner_mirror = Git(mirror)
+    owner_tip = await owner_mirror.resolve("HEAD")
+    if owner_tip is None:
+        raise BuildStepUnavailableError(
+            f"{cnode.contract_id}: {mirror} has no HEAD to ingest from"
+        )
+
+    clone_dir = (
+        (settings.root / settings.config.run.cache_dir).resolve()
+        / "ingest"
+        / run_id
+        / "contracts"
+        / slug(cnode.contract_id)
+    )
+    if await asyncio.to_thread(clone_dir.exists):
+        await asyncio.to_thread(shutil.rmtree, clone_dir)
+    await asyncio.to_thread(clone_dir.parent.mkdir, parents=True, exist_ok=True)
+    await Git(clone_dir.parent).exec(
+        ["clone", "--no-local", "--single-branch", str(mirror), str(clone_dir)],
+        timeout_s=1800.0,
+    )
+
+    await relocate(
+        clone_dir,
+        RelocationSpec(
+            dest_path=cnode.hoist_target_path,
+            source_paths=owner_paths,
+            source_prefix=_contract_source_prefix(owner_paths),
+            replace_text=resolve_replace_text(
+                settings.root, settings.config.redaction.history_scrub_file
+            ),
+        ),
+        runner=FILTER_REPO_RUNNER or proc_run,
+    )
+
+    result = await ingest(
+        monorepo,
+        source_dir=clone_dir,
+        source=SourceProvenance(
+            repo_id=cnode.owning_repo_id, sha=owner_tip, contract_id=cnode.contract_id
+        ),
+        run_id=run_id,
+        integration_branch=settings.config.run.monorepo_branch,
+        mutex=IntegrationMutex(lock_dir, run_id),
+        branch_name=f"migrate/contract-{slug(cnode.contract_id)}",
+    )
+    return _ContractIngest(
+        contract_id=cnode.contract_id,
+        hoist_target_path=cnode.hoist_target_path,
+        merge_sha=result.merge_sha,
+        owner_sha=owner_tip,
+        already_ingested=result.already_present,
+    )
+
+
 async def _wave_snapshot(
     settings: FleetSettings, *, run_id: str, monorepo: Git, lock_dir: Path
 ) -> SnapshotRef:
@@ -11685,6 +11888,53 @@ async def _build_impl(
                             repo_id,
                             facts.get(repo_id, _RepoFacts(None, Ecosystem.UNKNOWN)),
                             overrides,
+                        )
+                # ---- PASS 0: INGEST every HOISTED/MIGRATED contract's content, before any --
+                # ---- REPO ingest (§12.31 case (ii) prerequisite; round VI task 95) ----------
+                #
+                # SPEC §3.3 step 4: a hoisted contract "is a graph source, so nothing precedes
+                # it" — its own PR lands before the fleet's. Unconditionally before the REPO loop
+                # below rather than interleaved by `wave_index`: every contract's own wave is
+                # already strictly earlier than its owner's (`cycle_fleet` fixture proof,
+                # `tests/test_sequence_e2e.py`), and no contract's ingest depends on any REPO's
+                # prior ingest, so running the whole contract set first is simplest and correct.
+                # DB-derived and ignores `--wave`/`--repo`, the same rule the REPO pass follows
+                # (`_eligible_build_units`'s own docstring) — reused via `_eligible_contract_units`
+                # rather than re-querying (PASS 2b's own caller, below). A contract that fails to
+                # ingest does NOT abandon the run: it is recorded as a `ContractIngestFailed`
+                # finding and the rest of the fleet — including that contract's own owner and
+                # consumers — still proceeds (ADR-0119's "the run still completes").
+                contract_ingests: dict[str, _ContractIngest] = {}
+                for cnode in await _eligible_contract_units(read_conn, run_id) if waves else ():
+                    try:
+                        contract_ingests[cnode.contract_id] = await _ingest_contract_source(
+                            settings,
+                            run_id=run_id,
+                            cnode=cnode,
+                            monorepo=monorepo,
+                            lock_dir=lock_dir,
+                        )
+                    except (
+                        BuildStepUnavailableError,
+                        FilterRepoUnavailableError,
+                        IngestError,
+                        GitError,
+                        OSError,
+                    ) as exc:
+                        await _note_finding(
+                            writer,
+                            run_id,
+                            None,
+                            kind=CONTRACT_INGEST_FAILED_FINDING_KIND,
+                            payload={
+                                "contract_id": cnode.contract_id,
+                                "hoist_target_path": cnode.hoist_target_path,
+                                "owning_repo_id": cnode.owning_repo_id,
+                                "detail": str(exc),
+                            },
+                            severity="error",
+                            now=_now(),
+                            fingerprint_parts=(run_id, cnode.contract_id, "ingest"),
                         )
                 # ---- PASS 1: INGEST the whole eligible fleet, before the first build ------
                 #

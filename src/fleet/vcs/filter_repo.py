@@ -408,9 +408,18 @@ async def merge_source(
 
     A crashed merge is recovered here, not in SQLite: if `MERGE_HEAD` exists the previous attempt
     died mid-merge, and `git merge --abort` is the Git-local repair (§3.2 step 6).
+
+    **The foxtrot guard (round VI task 95, ADR draft, JC-7).** `git revert -m 1` of this merge
+    (§12.31 case (ii)) is correct only when parent 1 is the integration tip this merge started
+    from — true by construction, because this function always merges FROM the branch `git` has
+    checked out, but nothing asserted it before this. Asserted here rather than left implicit:
+    cheap (one more `rev-parse`), applies to every caller (a hoisted contract's merge as much as a
+    repo's), and turns a silent `-m 1` miscount into a loud `IngestError` at the moment the merge
+    is made rather than a wrong revert discovered later.
     """
     if await git.merge_in_progress():
         await git.exec(["merge", "--abort"], check=False)
+    pre_merge_tip = await git.rev_parse("HEAD")
     await git.exec(
         [
             "merge",
@@ -423,7 +432,15 @@ async def merge_source(
         ],
         with_identity=True,
     )
-    return await git.rev_parse("HEAD")
+    merge_sha = await git.rev_parse("HEAD")
+    parent1 = await git.rev_parse(f"{merge_sha}^1")
+    if parent1 != pre_merge_tip:
+        raise IngestError(
+            f"merge {merge_sha} first parent {parent1} != the pre-merge integration tip "
+            f"{pre_merge_tip}; a future `git revert -m 1` of this merge (§12.31 case (ii)) "
+            "depends on parent order, and this merge did not preserve it"
+        )
+    return merge_sha
 
 
 async def ingest(
@@ -435,6 +452,7 @@ async def ingest(
     integration_branch: str = "integration",
     source_ref: str = "HEAD",
     mutex: IntegrationMutex | None = None,
+    branch_name: str | None = None,
 ) -> IngestResult:
     """The whole §3.3 step 1 sequence for ONE node, under the integration mutex.
 
@@ -442,6 +460,14 @@ async def ingest(
     `source_dir` is the already-filtered throwaway clone. Order is fixed and the mutex spans all of
     it: idempotency check → local fetch → merge → snapshot. The snapshot is cut *before* the lock
     is released so the tip a build was promised cannot have moved by the time it reads it.
+
+    `branch_name` (round VI task 95, ADR draft, JC-2): defaults to `f"migrate/{source.repo_id}"`,
+    unchanged for every existing (REPO) caller. A hoisted CONTRACT's `SourceProvenance.repo_id` is
+    its **owner's** id (SPEC requires `Source-Repo:` to name the owner) — force-moving
+    `migrate/<owner>` at the contract's merge sha would silently point that branch at the wrong
+    commit until the owner's own (later) ingest overwrites it again. Callers ingesting a contract
+    must pass a distinct name (e.g. `f"migrate/contract-{slug(contract_id)}"`) so the two ingests
+    never fight over one branch, even transiently.
     """
     current = await git.current_branch()
     if current != integration_branch:
@@ -450,12 +476,13 @@ async def ingest(
             f"{current or 'a detached HEAD'} checked out; merging elsewhere would strand the "
             "merge commit off the integration branch"
         )
+    branch = branch_name or f"migrate/{source.repo_id}"
     lock = mutex or IntegrationMutex(await _common_dir(git), run_id)
     async with lock:
         existing = await already_ingested(git, integration_branch, source)
         if existing is not None:
             snapshot = await integration_snapshot(git, run_id, tip=integration_branch)
-            await git.create_branch(f"migrate/{source.repo_id}", existing, force=True)
+            await git.create_branch(branch, existing, force=True)
             return IngestResult(
                 merge_sha=existing, snapshot=snapshot, already_present=True, source=source
             )
@@ -463,7 +490,7 @@ async def ingest(
         rev = await fetch_local(git, source_dir, source_ref=source_ref, dest_ref=incoming)
         merge_sha = await merge_source(git, rev=rev, source=source)
         snapshot = await integration_snapshot(git, run_id, tip=integration_branch)
-        await git.create_branch(f"migrate/{source.repo_id}", merge_sha, force=True)
+        await git.create_branch(branch, merge_sha, force=True)
         return IngestResult(
             merge_sha=merge_sha, snapshot=snapshot, already_present=False, source=source
         )

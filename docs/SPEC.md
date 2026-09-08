@@ -4399,6 +4399,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'ContractBindingUnavailable'
                                                   --     -- cli.py `_note_finding`; §13 row 31,
                                                   --     §12.34 Clause B (ADR-0119)
+                                                  -- | 'ContractIngestFailed'
+                                                  --     -- cli.py `_note_finding`, called from
+                                                  --     `_build_impl` PASS 0; §12.31 case (ii)
+                                                  --     prerequisite (round VI task 95, ADR
+                                                  --     draft)
                                                   -- | 'PullRequest' | 'VerificationReport'
                                                   -- | 'OperatorAbort' | 'StubAbandoned'
                                                   -- | 'WaveBudgetRaised' | 'RunBudgetRaised'

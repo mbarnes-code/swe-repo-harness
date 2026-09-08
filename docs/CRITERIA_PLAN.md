@@ -1929,6 +1929,34 @@ revert commit has landed via this path outside a test that hand-seeds `contract_
 `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here (out of this task's
 own scope — see `.superpowers/sdd/round-VI-criteria-closure/task-77-report.md`).
 
+**Update, round VI task 95 (research-50's "task 1", a prerequisite, NOT a closing task — this
+criterion's status is intentionally left unchanged by this update).** `_ingest_contract_source`
+(`src/fleet/cli.py`), wired as a new PASS 0 in `_build_impl`, is now a real production caller for
+SPEC §3.3 step 1's already-built contract-merge primitives (`RelocationSpec.source_paths`/
+`source_prefix`, `SourceProvenance.contract_id`, `already_ingested`, `merge_source`'s
+`--allow-unrelated-histories` merge) — before this task, those primitives had zero production
+callers (research-50-report.md §2.1). A `HOISTED`/`MIGRATED` contract's content is now genuinely
+committed to `integration` with the `Hoisted-Contract: <contract_id>` trailer, proven end to end
+with REAL `git-filter-repo` (not the fast-tier `FakeFilterRepo`) against the organic
+`CYCLE_FLEET` hoist fixture — `tests/test_build_e2e.py::
+test_a_hoisted_contracts_content_is_really_merged_with_the_trailer`. Full account and the eight
+resolved judgment calls: ADR-DRAFT (task 95) in `docs/DECISIONS.md` (placeholder number, pending
+controller allocation), `.superpowers/sdd/round-VI-criteria-closure/task-95-report.md`.
+**This does NOT close case (ii) or this criterion.** `_ordered_revert_shas` still anchors on
+`PullRequestDraft.contract_id` (D122's still-open gap), not on this task's new
+`Hoisted-Contract:` trailer — re-anchoring it is research-50's "task 2", deliberately NOT built
+here (building it before task 1 would have reverted an owner's whole repo import and called it a
+contract rollback; now that task 1 exists, task 2 is unblocked and should be dispatched next). Two
+disclosed, bounded gaps this task leaves open: (a) the owner-side subtraction (SPEC's own "the
+owner's relocation plan excludes every path already claimed by a HOISTED contract") is not built,
+so a hoisted contract's sources land on `integration` twice (once at `hoist_target_path`, once
+under the owner's own `dest`) — never lost, never colliding, a real duplication rather than a
+correctness defect; (b) §12.31(ii)'s own "a re-sequenced SCC that falls through to `EDGE_BREAK` or
+`ATOMIC_WAVE`" clause has zero test coverage (`tests/test_graph_cycles.py` still has zero `FAILED`
+occurrences, re-measured at this task's own base `81f27e3`) — the mechanism appears to exist by
+construction but this was not run, a candidate item for a future task per research-50 §5.3.
+`docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
