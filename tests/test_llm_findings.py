@@ -53,6 +53,7 @@ from fleet.orchestrator.findings import (
     CAPABILITY_DRIFT,
     LlmFindingSink,
 )
+from fleet.orchestrator.retry import RetryPolicy
 from fleet.settings import FleetConfig
 from fleet.state import db as dbmod
 from fleet.state.db import StateWriter, connect_ro, initialize_database
@@ -210,6 +211,9 @@ async def _build(
                 lease_owner="test-host:test-cid:1:boot",
                 clock=lambda: NOW,
                 llm_policy=CallPolicy(max_targets_per_call=4),
+                # Zero delay: a test proving an entire §11.8 backoff schedule is exhausted must
+                # not spend the real wall-clock seconds that production-tuned schedule reuses.
+                retry_policy=RetryPolicy(backoff_base_s=0.0, backoff_cap_s=0.0),
             )
             yield Harness(ctx=ctx, read_conn=read_conn, backend=backend)
         finally:
@@ -495,11 +499,21 @@ async def test_the_finding_reports_the_partial_trigger_set_it_actually_holds(
 
     It still refuses `"complete"`: the target that EXHAUSTS the tier never reports its own
     trigger, so completeness is structurally unreachable until `TierUnavailable` carries them.
+
+    **Post-ADR-0132: a single 429 no longer fails over at all** — `_call_target`'s own backoff arm
+    absorbs it on the SAME target. This test now scripts fake-1 returning `RATE_LIMIT` through its
+    ENTIRE backoff schedule (`RetryPolicy().max_transient_retries + 1` = 5 raises: the initial
+    attempt plus every retry the default policy allows) before fake-2 answers — that exhaustion IS
+    the "qualifying failure" §12.43 case (ii) names, and is what still produces exactly one
+    `RATE_LIMIT` failover trigger for fake-1.
     """
+    exhausted_backoff = [TransportError("429 slow down", trigger="RATE_LIMIT")] * (
+        RetryPolicy().max_transient_retries + 1
+    )
     backend = ScriptedBackend(
         HONEST_CAPS,
         script=[
-            TransportError("429 slow down", trigger="RATE_LIMIT"),
+            *exhausted_backoff,
             BackendReply(
                 text=Verdict(summary="ok").model_dump_json(),
                 usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),

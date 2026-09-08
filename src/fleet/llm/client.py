@@ -6,11 +6,13 @@ framework, no `base_url`, no model string crosses this line — a backend adapte
 
 The protocols and payload models below are SPEC §7.7 verbatim. `LadderModelClient` is the
 reference implementation of `ModelClient`: role → tier → ordered `BackendTarget`s, capability
-negotiation, budget re-check per target, truncation retry, budgeted repair, failover, and
-progress-only streaming. §8 eventually splits routing / negotiation / health tracking into
-`routing.py`, `negotiate.py` and `failover.py`; the pure functions here (`negotiate`,
-`promised_mode`, `estimate_cost_usd`) are the seams those modules take over, and `RoleRouter` is
-already a Protocol so `routing.py` plugs in without this file changing.
+negotiation, budget re-check per target, same-target RATE_LIMIT backoff, truncation retry,
+budgeted repair, health-gated failover, and progress-only streaming. **`llm/failover.py`'s
+`BackendHealth` (ADR-0132) is the first of §8's eventual split to land** — the per-target §11.8
+circuit-breaker STATE lives there; `complete()` here still owns the dispatch loop that consults
+it. Routing and negotiation remain future splits: the pure functions here (`negotiate`,
+`promised_mode`, `estimate_cost_usd`) are the seams `routing.py`/`negotiate.py` would take over,
+and `RoleRouter` is already a Protocol so `routing.py` plugs in without this file changing.
 """
 
 from __future__ import annotations
@@ -21,12 +23,19 @@ import pkgutil
 import time
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from importlib import import_module
-from typing import ClassVar, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, ClassVar, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field, ValidationError, model_validator
 
+from fleet.llm.failover import BackendHealth, BackendHealthTransition
 from fleet.models.enums import FailureClass, ModelTier, StructuredOutputMode
 from fleet.models.tasks import BackendTarget, ModelCapabilities, Price, TokenUsage
+
+if TYPE_CHECKING:  # avoid a real import-time cycle: orchestrator/retry.py imports FinishReason
+    # from THIS module at its own module scope, so a top-level `from fleet.orchestrator.retry
+    # import RetryPolicy` here would be circular. Resolved at runtime by `_default_retry_policy`'s
+    # deferred import, executed only once `fleet.llm.client` has finished loading.
+    from fleet.orchestrator.retry import RetryPolicy
 
 FinishReason = Literal["stop", "length", "refusal", "tool_call", "filtered"]
 """Why generation stopped, as the transport reported it. Carried out of the backend because the
@@ -525,12 +534,28 @@ class CallPolicy(BaseModel):
     default_max_output_tokens: int = Field(default=4096, gt=0)
     default_timeout_s: float = Field(default=120.0, gt=0.0)
     heartbeat_interval_s: float = Field(default=5.0, ge=0.0)
+    open_after_failures: int = Field(default=3, ge=1)
+    """§11.8's `BackendHealth` breaker: consecutive qualifying failures (never a single 429 —
+    see `llm/failover.py`'s module docstring) before a target is marked `DOWN`. Mirrors
+    `llm.failover.open_after_failures`'s own default."""
+    cooldown_s: float = Field(default=120.0, ge=0.0)
+    """§11.8: seconds a `DOWN` target is skipped before its one `HALF_OPEN` probe. Mirrors
+    `llm.failover.cooldown_s`'s own default."""
+
+
+def _default_retry_policy() -> RetryPolicy:
+    """Deferred import — see the `TYPE_CHECKING` block's comment for why a top-level one would
+    cycle. `RetryPolicy()`'s own defaults are §11.8's: `DEFAULT_MAX_TRANSIENT_RETRIES`,
+    `DEFAULT_BACKOFF_BASE_S`, `DEFAULT_BACKOFF_CAP_S` — reused, not reinvented (ADR-0132)."""
+    from fleet.orchestrator.retry import RetryPolicy
+
+    return RetryPolicy()
 
 
 class LadderModelClient:
     """The reference `ModelClient`. Everything it talks to is injected: a `RoleRouter`, a mapping
-    of registered `ModelBackend`s, two event sinks, and a clock. There is no vendor import here
-    and no code path that reaches for one."""
+    of registered `ModelBackend`s, four event sinks, a clock and a retry policy. There is no
+    vendor import here and no code path that reaches for one."""
 
     def __init__(
         self,
@@ -541,6 +566,8 @@ class LadderModelClient:
         on_drift: Callable[[CapabilityDrift], None] | None = None,
         on_failover: Callable[[BackendFailover], None] | None = None,
         on_llm_call: Callable[[LlmCall], None] | None = None,
+        on_health_transition: Callable[[BackendHealthTransition], None] | None = None,
+        retry_policy: RetryPolicy | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._router = router
@@ -550,6 +577,15 @@ class LadderModelClient:
         self._on_failover = on_failover
         self._on_llm_call = on_llm_call
         self._clock = clock
+        self._retry_policy = retry_policy or _default_retry_policy()
+        # §11.8's breaker: one per client, matching its own "in-memory, per-run" contract — a
+        # fresh `LadderModelClient` (what a resumed run constructs) starts every target at UP.
+        self._health = BackendHealth(
+            open_after_failures=self._policy.open_after_failures,
+            cooldown_s=self._policy.cooldown_s,
+            clock=clock,
+            on_transition=on_health_transition,
+        )
 
     # -- public surface ------------------------------------------------------------------------
 
@@ -574,9 +610,14 @@ class LadderModelClient:
         tried: list[str] = []
         last: LlmError | None = None
         for index, target in enumerate(targets):
+            tried.append(f"{target.backend}:{target.model_id}")
+            if not self._health.may_call(target, route.tier):
+                # DOWN and not yet eligible for its one HALF_OPEN probe (§11.8, ADR-0132): skip
+                # straight to the next target, exactly like an immediate failover — no call, no
+                # budget check, no drift check against an endpoint we are not going to use.
+                continue
             backend = self._backend_for(target)
             caps = merge_capabilities(backend.declared_capabilities(target), target)
-            tried.append(f"{target.backend}:{target.model_id}")
 
             # Re-checked HERE, per target: the next target may be dearer than the one that just
             # failed, so a budget cleared once is not a budget cleared for the ladder (§11.2).
@@ -608,9 +649,18 @@ class LadderModelClient:
                 trigger: FailoverTrigger = (
                     "SCHEMA_UNSATISFIED" if isinstance(exc, SchemaUnsatisfied) else exc.trigger
                 )
+                if isinstance(exc, TransportError):
+                    # A QUALIFYING failure (§11.8, ADR-0132): by the time a TransportError
+                    # reaches here, `_call_target`'s own backoff arm has already absorbed every
+                    # RATE_LIMIT it could and CONNECTION/SERVER_ERROR never had one to absorb —
+                    # this is never fired for a single 429 mid-backoff. SchemaUnsatisfied never
+                    # counts: it is a negotiation-ladder problem (§7.7), not evidence the
+                    # endpoint is unreachable.
+                    self._health.record_failure(target, route.tier)
                 if index + 1 < len(targets):
                     self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
                 continue
+            self._health.record_success(target, route.tier)
             # ADR-0107, §11.8: `index` at the point `_call_target` succeeded IS the failover-hop
             # count for this call — 0 for the first target, 1 for one hop, etc. Stamped only when
             # non-zero so the common (zero-hop) case allocates nothing extra.
@@ -802,26 +852,45 @@ class LadderModelClient:
         timeout_s: float,
         budget: CallBudget | None,
     ) -> ModelResponse[T]:
-        """One target's whole life: truncation raises, budgeted repairs, and validation. The order
-        of the two guards is the point — `length` is checked FIRST, before the reply is ever handed
-        to Pydantic (§13 row 47)."""
+        """One target's whole life: same-target `RATE_LIMIT` backoff, truncation raises, budgeted
+        repairs, and validation. The order of the length/refusal guards is the point — `length` is
+        checked FIRST, before the reply is ever handed to Pydantic (§13 row 47)."""
         base = _prepare_messages(messages, caps, schema, mode)
         conversation = list(base)
         repairs = 0
         truncations = 0
+        rate_limit_retries = 0
         cap = max_output_tokens
         input_tokens = estimate_input_tokens(messages)
 
         while True:
             call_started = self._clock()
-            reply = await backend.invoke(
-                target,
-                conversation,
-                schema if mode is not StructuredOutputMode.PROMPTED else None,
-                mode,
-                max_output_tokens=cap,
-                timeout_s=timeout_s,
-            )
+            try:
+                reply = await backend.invoke(
+                    target,
+                    conversation,
+                    schema if mode is not StructuredOutputMode.PROMPTED else None,
+                    mode,
+                    max_output_tokens=cap,
+                    timeout_s=timeout_s,
+                )
+            except TransportError as exc:
+                # §11.8/ADR-0132: the SAME-target backoff-retry arm, for RATE_LIMIT only —
+                # CONNECTION and SERVER_ERROR have nothing to back off for (a dead socket does
+                # not answer sooner for waiting, and a 5xx has already spent the SDK's own
+                # `max_retries` budget per backend), so both propagate immediately exactly as
+                # before. Reusing `orchestrator/retry.py`'s `RetryPolicy.backoff_delay` and
+                # `max_transient_retries` rather than inventing new jitter math (ADR-0132
+                # judgment call 1). Exhausting this bound is the "entire §11.8 backoff schedule"
+                # §12.43 case (ii) names — a QUALIFYING failure `complete()` reports to
+                # `BackendHealth`, never fired for a single absorbed 429.
+                if exc.trigger != "RATE_LIMIT":
+                    raise
+                if rate_limit_retries >= self._retry_policy.max_transient_retries:
+                    raise
+                rate_limit_retries += 1
+                await asyncio.sleep(self._retry_policy.backoff_delay(rate_limit_retries))
+                continue  # SAME target, SAME conversation. No repair spent, no failover (yet).
             # "Measure around the actual provider call" (§12.18): THIS invocation, not the
             # ladder walk `complete()` may still be doing and not the retry loop this method is
             # in the middle of — each iteration here is its own billed request.

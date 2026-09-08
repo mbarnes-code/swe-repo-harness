@@ -1,19 +1,22 @@
 """`LlmFindingSink` — the persistence half of the LLM layer's diagnostics (§7.7, §11.8, §13).
 
-`LadderModelClient` **computes** four things it deliberately cannot store: a `CapabilityDrift`
+`LadderModelClient` **computes** things it deliberately cannot store: a `CapabilityDrift`
 (a reply produced at a lower structured-output rung than the profile promised, §13 row 37), a
 `BackendFailover` (§11.8's `backend_failover` event), an `LlmCall` (§12.18's `llm_call` event,
-one per actual provider call) and, when every target for a tier is spent, a `TierUnavailable`
-(§13 row 40). The client owns no database handle and must not acquire one — it is the module
-with no vendor import and no I/O beyond the backend call, and that is what makes it testable
-offline. So it accepts three sinks (`on_drift`, `on_failover`, `on_llm_call`) and calls them.
+one per actual provider call), a `BackendHealthTransition` (§11.8's circuit-breaker state changes,
+ADR-0132) and, when every target for a tier is spent, a `TierUnavailable` (§13 row 40). The client
+owns no database handle and must not acquire one — it is the module with no vendor import and no
+I/O beyond the backend call, and that is what makes it testable offline. So it accepts four sinks
+(`on_drift`, `on_failover`, `on_llm_call`, `on_health_transition`) and calls them.
 
 **Until this module existed nobody supplied `on_drift`/`on_failover`.** `orchestrator/context.py`
 built the client with neither, so `_emit_drift` and `_emit_failover` returned at their `is None`
 guards and every drift and every failover the fleet ever computed was discarded — a silent local
 server that dropped guided JSON showed up as nothing at all. This is the sink, wired once per run
 where the client is assembled, which is the only place that knows both the client and the writer.
-`on_llm_call` is the same shape, added later (§12.18) once the sink already existed.
+`on_llm_call` is the same shape, added later (§12.18) once the sink already existed, and
+`on_health_transition` is the same shape again, added with `llm/failover.py::BackendHealth` itself
+(ADR-0132) rather than left to repeat D59's whole thesis a fourth time.
 
 Three design points, each of which is load-bearing rather than taste:
 
@@ -58,6 +61,7 @@ if TYPE_CHECKING:
     import aiosqlite
 
     from fleet.llm.client import BackendFailover, CapabilityDrift, LlmCall
+    from fleet.llm.failover import BackendHealthTransition
     from fleet.models.enums import ModelTier, Phase
     from fleet.obs.events import EventEmitter
     from fleet.state.db import StateWriter
@@ -65,6 +69,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BACKEND_FAILOVER_EVENT",
+    "BACKEND_HEALTH_TRANSITION_EVENT",
     "BACKEND_UNAVAILABLE",
     "CAPABILITY_DRIFT",
     "LLM_CALL_EVENT",
@@ -84,6 +89,10 @@ BACKEND_FAILOVER_EVENT: Final = "backend_failover"
 #: `events.event` for §12.18. One per completed `backend.invoke()` — see `LlmCall`'s docstring
 #: (client.py) for why it is not one per `complete()` or per `_call_target()`.
 LLM_CALL_EVENT: Final = "llm_call"
+
+#: `events.event` for §11.8's `BackendHealth` breaker (ADR-0132). One per STATE CHANGE, never per
+#: call that stayed UP — see `BackendHealthTransition`'s own docstring (`llm/failover.py`).
+BACKEND_HEALTH_TRANSITION_EVENT: Final = "backend_health_transition"
 
 #: Carried in every `BackendUnavailable` payload. Prose in a row is normally a smell; here it is
 #: the point — the row's own name overstates what the harness measured, and the operator reading
@@ -193,6 +202,13 @@ class LlmFindingSink:
     conflicts on `(run_id, event_uid)`, so a re-buffered record after a cancelled flush must reuse
     its uid or double-count on retry."""
 
+    _health_transitions: list[tuple[BackendHealthTransition, str]] = field(
+        default_factory=list, init=False, repr=False
+    )
+    """`(event, event_uid)`, same idempotency reasoning as `_failovers`/`_llm_calls`. §11.8's
+    breaker (ADR-0132) — buffered here alongside the other three sinks `LadderModelClient`
+    already computes and nobody used to persist (D59's whole thesis, one sink over)."""
+
     _triggers: dict[str, dict[str, str]] = field(default_factory=dict, init=False, repr=False)
     """`{tier: {"<backend>:<model_id>": trigger}}`. **Keyed by TIER first, and that is the whole
     point.** `SPEC_ROLE_TIERS` (`llm/roles.py:65-77`) routes the twelve roles across HEAVY,
@@ -234,10 +250,21 @@ class LlmFindingSink:
         """
         self._llm_calls.append((call, str(uuid.uuid4())))
 
+    def on_health_transition(self, event: BackendHealthTransition) -> None:
+        """`LadderModelClient(on_health_transition=...)`. Same synchronous-buffer contract as the
+        three above — fires from `llm/failover.py::BackendHealth._transition`, once per STATE
+        CHANGE (never per call that stayed `UP`), on the hot path."""
+        self._health_transitions.append((event, str(uuid.uuid4())))
+
     @property
     def pending(self) -> int:
         """How much is buffered. Diagnostics and tests; never a control-flow input."""
-        return len(self._drifts) + len(self._failovers) + len(self._llm_calls)
+        return (
+            len(self._drifts)
+            + len(self._failovers)
+            + len(self._llm_calls)
+            + len(self._health_transitions)
+        )
 
     def observed_triggers(self, tier: ModelTier | None = None) -> dict[str, dict[str, str]]:
         """`{tier: {"<backend>:<model_id>": "<FailoverTrigger>"}}`, optionally narrowed to one tier.
@@ -280,9 +307,11 @@ class LlmFindingSink:
         drifts, self._drifts = self._drifts, []
         failovers, self._failovers = self._failovers, []
         llm_calls, self._llm_calls = self._llm_calls, []
+        health_transitions, self._health_transitions = self._health_transitions, []
         written = 0
         unsent_failovers = 0
         unsent_calls = 0
+        unsent_transitions = 0
         try:
             if drifts:
                 written += await self._write_drifts(drifts)
@@ -297,10 +326,16 @@ class LlmFindingSink:
                 await self._write_llm_call(call, event_uid)
                 unsent_calls += 1
                 written += 1
+            while unsent_transitions < len(health_transitions):
+                transition, event_uid = health_transitions[unsent_transitions]
+                await self._write_health_transition(transition, event_uid)
+                unsent_transitions += 1
+                written += 1
         except BaseException:
             self._drifts[:0] = drifts
             self._failovers[:0] = failovers[unsent_failovers:]
             self._llm_calls[:0] = llm_calls[unsent_calls:]
+            self._health_transitions[:0] = health_transitions[unsent_transitions:]
             raise
         return written
 
@@ -413,6 +448,35 @@ class LlmFindingSink:
                 "output_tokens": call.output_tokens,
                 "cost_usd": call.cost_usd,
                 "latency_ms": call.latency_ms,
+            },
+            event_uid=event_uid,
+            now=self.clock(),
+        )
+
+    async def _write_health_transition(
+        self, transition: BackendHealthTransition, event_uid: str
+    ) -> None:
+        """One `backend_health_transition` event (§11.8, ADR-0132). Through `self.emitter`, same
+        reasoning as `_write_llm_call`: this sink's payloads are LLM-adjacent, so redaction and
+        `logs/events-<run_id>.jsonl` both go through the one boundary that provides them.
+
+        `level` is `"warn"` for `DOWN` (an operator-actionable state — the target is being
+        skipped) and `"info"` for `HALF_OPEN`/`UP` (routine recovery, not itself actionable).
+        """
+        if self.emitter is None:
+            return
+        await self.emitter.emit(
+            BACKEND_HEALTH_TRANSITION_EVENT,
+            level="warn" if transition.to_state == "DOWN" else "info",
+            repo_id=None,  # fleet-level: a target's health is not a property of one repo
+            phase=None,
+            payload={
+                "tier": str(transition.tier),
+                "backend": transition.backend,
+                "model_id": transition.model_id,
+                "from_state": transition.from_state,
+                "to_state": transition.to_state,
+                "reason": transition.reason,
             },
             event_uid=event_uid,
             now=self.clock(),

@@ -47,6 +47,7 @@ from fleet.models.enums import Phase, TransformTier
 from fleet.obs.events import EventEmitter, errors_jsonl_path, events_jsonl_path
 from fleet.obs.log import get_logger
 from fleet.orchestrator.findings import LlmFindingSink
+from fleet.orchestrator.retry import RetryPolicy
 from fleet.settings import FleetConfig, LlmSection
 from fleet.workers.base import WorkerContext
 
@@ -123,16 +124,22 @@ def call_policy_for(llm: LlmSection) -> CallPolicy:
       many targets", and §11.8 fails closed when it "is reached without a validated
       response". `failover.enabled: false` is §9's "a tier uses only its first target; a
       dead target is fatal", which is exactly one target walked and then `TierUnavailable`.
+    * `llm.failover.open_after_failures`/`.cooldown_s` — **mapped as of ADR-0132**, closing
+      §12.43 case (ii). `llm/failover.py::BackendHealth` now exists and reads these two off
+      `CallPolicy`, not off `LlmSection` directly (same injection discipline as the other two
+      leaves above: `CallPolicy`'s own docstring says it exists "so a test does not have to
+      load config").
 
-    §11.8's `open_after_failures` and `cooldown_s` are deliberately NOT mapped: they
-    describe the per-target three-state `BackendHealth` that `llm/failover.py` does not
-    exist to hold yet, and `CallPolicy` cannot express a circuit breaker. Faking them onto
-    a field that means something else would be worse than leaving them visibly unwired.
-    `on_tier_exhausted` has one value, `halt`, which is what the client already does.
+    `on_tier_exhausted` has exactly one legal value, `halt`, which is what the client already
+    does unconditionally — the same shape as `stubs.on_budget_exhausted`'s single `hold` value,
+    and left unmapped for the identical reason: there is no second value for a field to select
+    between, so reading it into `CallPolicy` would add a call site with no behavior riding on it.
     """
     return CallPolicy(
         max_schema_repairs=llm.max_schema_repairs,
         max_targets_per_call=(llm.failover.max_targets_per_call if llm.failover.enabled else 1),
+        open_after_failures=llm.failover.open_after_failures,
+        cooldown_s=float(llm.failover.cooldown_s),
     )
 
 
@@ -193,6 +200,12 @@ class RunContext:
     distinction is the whole of this field's history: it was declared and consumed and
     never once assigned, so every `llm.failover.*` value an operator wrote was echoed back
     by `fleet config` and read by nothing."""
+    retry_policy: RetryPolicy | None = None
+    """An EXPLICIT override of the §11.8 same-target `RATE_LIMIT` backoff `LadderModelClient`
+    reuses from `orchestrator/retry.py` (ADR-0132). `None` — every real `RunContext(` site in
+    `cli.py` — means the client's own default (`RetryPolicy()`: real jitter, real seconds).
+    Injectable purely for test speed: a test proving a target's ENTIRE §11.8 backoff schedule is
+    exhausted must not spend the real wall-clock seconds that production-tuned schedule reuses."""
     harness_version: str = ""
     root: Path | None = None
     """The workspace root §8 puts `logs/` under — `settings.root` at every real `RunContext(`
@@ -247,6 +260,8 @@ class RunContext:
             on_drift=sink.on_drift,
             on_failover=sink.on_failover,
             on_llm_call=sink.on_llm_call,
+            on_health_transition=sink.on_health_transition,
+            retry_policy=self.retry_policy,
         )
         store = (
             SqliteLlmCacheStore(writer=self.writer, read_conn=self.read_conn)
