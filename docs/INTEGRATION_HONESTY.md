@@ -9636,9 +9636,9 @@ visible to every dependent's `blocked_by` column regardless of which wave the de
 scheduled in, not only dependents in the same or an earlier wave. No task briefed yet; this is the
 controller's next dispatch candidate for §12.14.
 
-## D124 — FIXED, LANDED (round VI task 74, `489cc0d`, controller review pending). No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
-repo to `SUCCEEDED` — `fleet retry` does not exist, and `ALLOWED_TRANSITIONS` has no edge out of
-that status
+## D124 — FIXED, LANDED (round VI task 74, `489cc0d`, controller review pending). No CLI surface
+exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`) repo to `SUCCEEDED` — `fleet retry`
+does not exist, and `ALLOWED_TRANSITIONS` has no edge out of that status
 
 **Found by round VI task 69's own task-scoped review (2026-09-07).** Verified free before
 allocating (immediately after D123, same investigation): form-agnostic sweep found `D123` as the
@@ -9689,15 +9689,35 @@ mechanism.
 exactly) and `state.repository.SqliteStateRepository.reopen_to_pending` (mirrors
 `stub_degrade_transform`'s transaction shape — CAS-guarded, audit finding in the same `BEGIN
 IMMEDIATE`, raises `RepositoryError` on zero or multiple RHI rows rather than silently picking one)
-back a new `fleet retry <repo> --reason <text> [--dry-run]` CLI command (ADR-0125). A real
-end-to-end fixture (`tests/test_cli.py::
-test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succeeded`) proves ADR-0125
-judgment call 5's central empirical claim: a repo reopened via `fleet retry`, driven to a genuine
-`SUCCEEDED` (disclosed shortcut in the test's own docstring: a direct SQL write standing in for the
-real VERIFY worker, the same shortcut this suite's own step-5/6 fixtures already use elsewhere),
-then a SECOND `fleet resume` clears a dependent's `blocked_by` and returns it to `PENDING` in a
-freshly appended synthetic wave — with zero changes to `orchestrator/reentry.py`. This closes this
-entry's own scope in full: CLI surface, writer function, production call site all now exist and
-are tested. It does **not** by itself close §12.14 (D123's cross-wave `blocked_by` propagation gap
-and the undesigned transitive-stub-stacking mechanism are untouched) or §12.37 (D104's separate,
-still-open `REVALIDATE`-dispatch gap is untouched) — see `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
+back a new `fleet retry <repo> --reason <text> [--dry-run]` CLI command (ADR-0125).
+
+**Correction (2026-09-08, fix round 1, task-74, opus-tier review).** This paragraph originally
+claimed one end-to-end fixture proved "ADR-0125 judgment call 5's central empirical claim" as a
+single whole. That claim's central empirical question has TWO independent halves — the
+`still_blocking`/step-6 `blocked_by`-clearing half, and the `phase_floor`/step-5 freshly-reopened-
+row half — and the original fixture only exercised the first: it wrote the reopened phase straight
+to `SUCCEEDED` by direct SQL *before* the first `fleet resume` call, so at resume time the repo was
+already all-`SUCCEEDED` and `phase_floor` hit its `frontier is None` early return without ever
+running a real backward walk on a genuinely-`PENDING`, freshly-reopened row. Two separate fixtures
+now prove the two halves separately, exactly as they must be: `tests/test_cli.py::
+test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succeeded` (unchanged, still
+correct for what it actually proves) proves the `still_blocking`/step-6 half — via the real
+`SqliteSchedulerStore.append_blocked_by` writer, a repo reopened via `fleet retry`, driven to a
+genuine `SUCCEEDED` (disclosed shortcut in the test's own docstring: a direct SQL write standing in
+for the real VERIFY worker, the same shortcut this suite's own step-5/6 fixtures already use
+elsewhere), then a SECOND `fleet resume` clears a dependent's `blocked_by` and returns it to
+`PENDING` in a freshly appended synthetic wave. `tests/test_cli.py::
+test_fleet_retry_reopens_a_genuinely_pending_rhi_phase_and_resume_recomputes_the_real_floor` (new,
+fix round 1) proves the other half: the reopened VERIFY phase is left genuinely `PENDING` (never
+pre-set to `SUCCEEDED`), so `fleet resume`'s step 5 meets a live, unsettled frontier and actually
+runs the backward walk — measured result: the floor lands at `BUILD`, `BUILD` is demoted
+`SUCCEEDED -> PENDING` with a `PhaseDemoted` finding, and VERIFY (already `PENDING` from the retry,
+never `SUCCEEDED`) is correctly left untouched by the demotion. Both fixtures together confirm the
+reviewer's own independent measurement: ADR-0125 judgment call 5's claim is TRUE — zero changes to
+`orchestrator/reentry.py` were needed for either half.
+
+This closes this entry's own scope in full: CLI surface, writer function, production call site all
+now exist and are tested. It does **not** by itself close §12.14 (D123's cross-wave `blocked_by`
+propagation gap and the undesigned transitive-stub-stacking mechanism are untouched) or §12.37
+(D104's separate, still-open `REVALIDATE`-dispatch gap is untouched) — see
+`docs/CRITERIA_PLAN.md`'s §14/§37 entries.

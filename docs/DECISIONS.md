@@ -14073,3 +14073,35 @@ place with a dated marker per this project's own "annotate, never rewrite" disci
 §7, the `docs/INTEGRATION_HONESTY.md` status-heading convention) — the entry's overall verdict
 (OPEN; no CLI surface; no writer function; no production call site) remains correct and needs no
 other change.
+
+---
+
+### Addendum (2026-09-08, fix round 1, task-74, controller ruling) — `attempts` is not reset on
+reopen, disclosed rather than changed
+
+An independent opus-tier review of the landed fix (`489cc0d`/`0102091`) found that
+`_REOPEN_PHASE_SQL` correctly mirrors `_DEMOTE_PHASE_SQL`/`_STUB_DEGRADE_PHASE_SQL` by touching
+only `status`/`updated_at` — but the consequence was never decided or written down anywhere: a
+repo already at `phases.attempts == max_attempts` when reopened via `fleet retry` re-escalates
+straight back to `REQUIRES_HUMAN_INTERVENTION` on its very next phase failure, regardless of
+`max_attempts`, because `complete_phase`'s escalation test (`attempts + 1 >= max_attempts`) reads
+the ladder counter `reopen_to_pending` never touches.
+
+**Controller ruling: keep the current behavior — do not reset `attempts` on reopen.** This is a
+deliberate decision, not a gap. Resetting the ladder would be a second, separate design decision
+beyond what judgment call 2 above scoped (a dedicated writer mirroring `degrade_for_stub()`
+exactly — `degrade_for_stub()`/`StubDegradation` do not touch `attempts` either), and the
+conservative default for a production state-transition mechanism is to not silently grant extra
+retries beyond what was originally configured. Each `fleet retry` call is already itself
+auditable (`--reason` required, an `OperatorReopened` finding written), so an operator who needs
+more attempts than the original ladder allowed can call `fleet retry` again after each subsequent
+escalation, each time leaving its own audit trail — the ladder is not silently widened, it is
+spent again, visibly, one `fleet retry` at a time. This mirrors `RESUME_DEMOTE` (ADR-0077) and
+`STUB_DEGRADE` (ADR-0124), neither of which resets any escalation counter either.
+
+Disclosed in the `fleet retry` CLI docstring (operator-facing `--help` text) and proven by
+`tests/test_repository.py::test_reopen_to_pending_does_not_reset_attempts_so_a_reopened_repo_can_re_escalate`
+(round VI task-74 fix round 1): a repo driven to `REQUIRES_HUMAN_INTERVENTION` through a real
+ladder exhaustion (genuine `complete_phase` escalations, not a direct status write), reopened via
+`reopen_to_pending`, then failed once more lands back at `REQUIRES_HUMAN_INTERVENTION` with
+`attempts` still at the ceiling — not reset and not incremented past it by the reopen itself.

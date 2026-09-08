@@ -14105,7 +14105,6 @@ def retry(
 ) -> None:
     """Reopen one abandoned (`REQUIRES_HUMAN_INTERVENTION`) repo's phase to `PENDING` (§12.14).
 
-    **This is an Agent Recommendation realized from ADR-0125, not a mandate invented here.**
     `fleet retry` performs ONLY the reopen: the RHI phase row becomes `PENDING` and one audited
     `OperatorReopened` finding is written, through the same `OPERATOR_REOPEN` door
     `models.enums.transition()` has carried since this project's initial commit. It does **not**
@@ -14116,7 +14115,10 @@ def retry(
     and a LATER `fleet resume` call clears the repo from any dependent's `blocked_by` once it
     lands back at `SUCCEEDED` — step 6 runs before step 8 in the same invocation, so the one
     `fleet resume` that re-lands the phase cannot also clear its own dependents in that same pass
-    (the same residue ADR-0089 §4 already discloses for `demote()`).
+    (the same residue ADR-0089 §4 already discloses for `demote()`). It also does **not** reset
+    the phase's `attempts` count (ADR-0125 addendum): a repo already at `max_attempts` when
+    reopened re-escalates straight back to `REQUIRES_HUMAN_INTERVENTION` on its very next phase
+    failure — call `fleet retry` again after each such escalation for another attempt.
     """
     opts = _options(ctx)
     with _mapped_errors():
@@ -14194,6 +14196,9 @@ async def _retry_impl(
                 raise UsageError(f"fleet retry {repo!r} refused: {exc}") from exc
         finally:
             await read_conn.close()
+
+    with suppress(Exception):  # a projection is an OUTPUT; it must not fail the retry
+        await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
 
     return {
         "dry_run": False,

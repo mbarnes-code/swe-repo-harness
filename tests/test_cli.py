@@ -1087,6 +1087,67 @@ def test_retry_dry_run_changes_nothing(workspace: Path) -> None:
     assert status == ("REQUIRES_HUMAN_INTERVENTION",), "the dry-run preview must write nothing"
 
 
+def test_retry_refreshes_the_projection_immediately(workspace: Path) -> None:
+    """I2 (round VI task-74 fix round 1, opus review): `fleet retry` was the only state-mutating
+    CLI command that never refreshed `migration_state.json` -- `scan`, `transform`, `build`,
+    `verify`, `quarantine`, `abort` and `resume` all call `project_once(...,
+    DEFAULT_PROJECTION_PATH)` after their state write; `_retry_impl` did not, so
+    `migration_state.json` did not reflect the new `PENDING` status (or did not exist at all in a
+    fresh workspace) until some unrelated later command happened to run.
+
+    Asserted with NO other command run in between the retry and the read, so a projection some
+    later command produced cannot masquerade as this one's.
+    """
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+    assert not (workspace / "migration_state.json").exists(), (
+        "setup check: nothing has projected yet"
+    )
+
+    result = runner.invoke(
+        app, [*base_args(workspace), "retry", "acme-commons", "--reason", "upstream fixed it"]
+    )
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    assert (workspace / "migration_state.json").exists(), (
+        "fleet retry must refresh the projection, mirroring every other state-mutating command"
+    )
+    published = json.loads((workspace / "migration_state.json").read_text())
+    assert published["repos"]["acme-commons"]["status"] == "PENDING", (
+        "the projection must reflect the reopened phase's new status, not the pre-retry RHI, "
+        "and must reflect it now -- not after some later, unrelated command"
+    )
+
+
+def test_retry_translates_a_repository_error_into_a_usage_error(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """M5: `_retry_impl`'s `except RepositoryError -> UsageError` translation, exercised for the
+    first time. Every existing CLI test reaches the CLI's own `rhi_rows` pre-check first (zero or
+    multiple RHI rows are refused there, before `SqliteStateRepository.reopen_to_pending` is ever
+    called), so nothing previously drove this branch. `reopen_to_pending`'s own genuine
+    in-transaction CAS-miss race is exercised directly at the repository layer in
+    `tests/test_repository.py::test_reopen_to_pending_raises_on_a_row_that_moved_inside_the_transaction`
+    -- reproducing that exact race through the CLI would need the same connection-level
+    monkeypatch one layer further down, so this test drives the SAME translation the more direct
+    way: the write call itself raises `RepositoryError`.
+    """
+    from fleet.state.repository import RepositoryError, SqliteStateRepository
+
+    db = workspace / "state" / "fleet.db"
+    _put_consumer_at_rhi(db, "acme-commons")
+
+    async def exploding(self: SqliteStateRepository, *args: object, **kwargs: object) -> object:
+        raise RepositoryError("synthetic: row moved under the transaction")
+
+    monkeypatch.setattr(SqliteStateRepository, "reopen_to_pending", exploding)
+
+    result = runner.invoke(app, [*base_args(workspace), "retry", "acme-commons", "--reason", "x"])
+    assert result.exit_code == ExitCode.USAGE, result.output
+    assert "fleet retry 'acme-commons' refused" in result.output
+    assert "synthetic: row moved under the transaction" in result.output
+
+
 def _seed_wave(
     conn: sqlite3.Connection, run_id: str, index: int, members: Sequence[str], *, ceiling: float
 ) -> None:
@@ -1251,6 +1312,83 @@ def test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succe
     assert wave_synthetic == 1, (
         "the appended wave is the `waves.synthetic = 1` shape (§11.5 step 6)"
     )
+
+
+def test_fleet_retry_reopens_a_genuinely_pending_rhi_phase_and_resume_recomputes_the_real_floor(
+    workspace: Path,
+) -> None:
+    """**ADR-0125 judgment call 5's OTHER half** (round VI task-74 fix round 1, I1, opus-tier
+    review): the `phase_floor`/step-5 half.
+    `test_fleet_retry_reopens_p_then_a_later_resume_clears_c_once_p_relands_succeeded` above
+    proves the `still_blocking`/step-6 half; this test proves the one D124's original fixture
+    (`489cc0d`) never actually exercised.
+
+    That original fixture pre-wrote the reopened phase straight to `SUCCEEDED` by direct SQL
+    *before* the first `fleet resume` call, so at resume time the repo was already
+    all-`SUCCEEDED` and `phase_floor` hit its `frontier is None` early return without ever
+    computing a real backward walk. This test reopens the RHI phase and leaves it genuinely
+    `PENDING` -- the actual state `fleet retry` produces -- so `fleet resume`'s step 5 meets a
+    live, unsettled frontier and must actually walk backward through `evidence_holds`.
+
+    Fixture shape mirrors `_step5_landed_fleet` exactly (SCAN/TRANSFORM/BUILD `SUCCEEDED`,
+    `post_commit_sha` on TRANSFORM+BUILD both pointing at the same anchor, no `BUILD.bazel` on
+    disk, so TRANSFORM's evidence holds and BUILD's does not) except VERIFY starts at
+    `REQUIRES_HUMAN_INTERVENTION`, not `PENDING`, and only becomes `PENDING` through a real
+    `fleet retry` call. Measured result, asserted below: the floor lands at `BUILD`, `BUILD` is
+    demoted `SUCCEEDED -> PENDING` with one `PhaseDemoted` finding, and VERIFY (already `PENDING`
+    from the retry, never `SUCCEEDED`) is untouched by the demotion -- `demotable_phases` does not
+    name a phase that was never `SUCCEEDED`, even though it sits at/above the floor.
+    """
+    _step5_mirror(workspace)
+    worktree, anchor = _arbitration_worktree(workspace)
+    _step5_seed(
+        workspace / "state" / "fleet.db",
+        statuses={1: "SUCCEEDED", 2: "SUCCEEDED", 3: "SUCCEEDED",
+                  4: "REQUIRES_HUMAN_INTERVENTION"},
+        post_commit_sha={2: anchor, 3: anchor},
+    )
+    assert not (worktree / "java" / STEP5_REPO / "BUILD.bazel").exists()
+    db = workspace / "state" / "fleet.db"
+
+    retried = runner.invoke(
+        app, [*base_args(workspace), "retry", STEP5_REPO, "--reason", "fixed upstream"]
+    )
+    assert retried.exit_code == ExitCode.SUCCESS, retried.output
+    rows_after_retry = _step5_rows(db)
+    assert rows_after_retry[4][0] == "PENDING", "the retry itself must land VERIFY at PENDING"
+
+    resumed = runner.invoke(app, [*base_args(workspace), "--json", "resume", "--no-continue"])
+    assert resumed.exit_code == ExitCode.SUCCESS, resumed.output
+    report = json.loads(resumed.stdout)["reentry_floors"]
+
+    assert report["applied"] is True
+    assert [entry["repo_id"] for entry in report["demoted"]] == [STEP5_REPO], (
+        "phase_floor never ran a real backward walk on the freshly-reopened row -- the "
+        "`frontier is None` early return fired instead"
+    )
+    entry = report["demoted"][0]
+    assert entry["floor"] == "BUILD"
+    assert entry["phases"] == ["BUILD"], (
+        "VERIFY was never SUCCEEDED, so demotable_phases must not name it even though it is "
+        "at/above the floor"
+    )
+
+    rows = _step5_rows(db)
+    assert rows[3][0] == "PENDING", "BUILD demoted back for want of evidence"
+    assert rows[4][0] == "PENDING", "VERIFY stayed PENDING -- the retry's own write, untouched"
+
+    conn = sqlite3.connect(db)
+    try:
+        demoted = conn.execute(
+            "SELECT COUNT(*) FROM findings WHERE run_id = ? AND kind = 'PhaseDemoted'", (RUN_ID,)
+        ).fetchone()[0]
+        reopened = conn.execute(
+            "SELECT repo_id FROM findings WHERE kind = 'OperatorReopened'"
+        ).fetchone()
+    finally:
+        conn.close()
+    assert demoted == 1
+    assert reopened == (STEP5_REPO,)
 
 
 # --------------------------------------------------------------------------------------

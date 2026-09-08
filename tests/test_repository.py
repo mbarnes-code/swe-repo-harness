@@ -2821,7 +2821,12 @@ async def test_reopen_to_pending_raises_when_multiple_rhi_rows_exist(
     `orchestrator.reentry.phase_floor` returns `None` the moment it sees one), but CLAUDE.md
     Rule 12's mutation discipline requires proving the guard actually fires rather than merely
     asserting it can't happen -- so this fixture deliberately constructs the "impossible" case
-    directly through the public write API (two independent `complete_phase` escalations)."""
+    directly through the public write API: two independent `_settle_phase(..., attempts=1,
+    max_attempts=8)` calls, each a single real `complete_phase(status=REQUIRES_HUMAN_
+    INTERVENTION)` write (the status is the direct target, not the escalation `complete_phase`
+    computes on its own PENDING-hand-back branch -- no ladder is actually exhausted here; see
+    `test_reopen_to_pending_does_not_reset_attempts_so_a_reopened_repo_can_re_escalate` below for
+    a fixture that drives a genuine ladder exhaustion)."""
     store, _writer = demotion_bed
     await _settle_phase(
         store, REPO, Phase.BUILD, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
@@ -2897,4 +2902,75 @@ async def test_reopen_to_pending_raises_on_a_row_that_moved_inside_the_transacti
     assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, (
         "the whole unit rolled back, including the injected race write -- not merely the real "
         "UPDATE's own effect"
+    )
+
+
+async def test_reopen_to_pending_does_not_reset_attempts_so_a_reopened_repo_can_re_escalate(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """I3 (round VI task-74 fix round 1, opus review + controller ruling): `reopen_to_pending`
+    restores `status` but deliberately does NOT reset `attempts` -- disclosed in ADR-0125's
+    addendum and the `fleet retry` CLI docstring, not a silent gap. A repo already at
+    `attempts == max_attempts` when reopened re-escalates straight back to
+    `REQUIRES_HUMAN_INTERVENTION` on its very next phase failure, regardless of `max_attempts`.
+
+    **The ladder is exhausted through REAL `complete_phase(status=PENDING)` calls, not a direct
+    status write**, so `attempts` is a value the ladder itself produced (CLAUDE.md Rule 12) and
+    the escalation branch (`escalate = status is PENDING and attempts + 1 >= max_attempts`) is
+    genuinely exercised -- the sibling fixture
+    (`test_reopen_to_pending_raises_when_multiple_rhi_rows_exist`, M6) settles its rows directly
+    at `REQUIRES_HUMAN_INTERVENTION` and never exercises this branch at all.
+    """
+    store, _writer = demotion_bed
+    max_attempts = 3
+    await store.upsert_phase(RUN, REPO, Phase.BUILD, now=NOW, max_attempts=max_attempts)
+
+    # Exhaust the real ladder: `max_attempts` genuine PENDING-hand-back completions, the last of
+    # which crosses `attempts + 1 >= max_attempts` and escalates to RHI in the same statement.
+    status: RepoStatus | None = None
+    for _ in range(max_attempts):
+        fence = await store.acquire_phase_lease(
+            RUN, REPO, Phase.BUILD, owner=WORKER, now=NOW, lease_ttl_s=300
+        )
+        assert fence is not None
+        status = await store.complete_phase(
+            RUN, REPO, Phase.BUILD, fence=fence, status=RepoStatus.PENDING, now=NOW
+        )
+
+    row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert row is not None
+    assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, "setup check: ladder exhausted"
+    assert row.attempts == max_attempts, "setup check: attempts landed at the ceiling"
+    assert status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+
+    # The operator reopens it.
+    record = await store.reopen_to_pending(RUN, REPO, reason="fixed upstream", now=NOW)
+    assert record.to_status is RepoStatus.PENDING
+
+    reopened_row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert reopened_row is not None
+    assert reopened_row.status is RepoStatus.PENDING
+    assert reopened_row.attempts == max_attempts, (
+        "reopen must NOT reset attempts -- this is I3's disclosed, deliberate behavior"
+    )
+
+    # One more real failure re-escalates straight back to RHI -- `attempts` was never reset, so
+    # `attempts + 1 >= max_attempts` (3 + 1 >= 3) is true on the very next completion.
+    fence = await store.acquire_phase_lease(
+        RUN, REPO, Phase.BUILD, owner=WORKER, now=NOW, lease_ttl_s=300
+    )
+    assert fence is not None
+    final_status = await store.complete_phase(
+        RUN, REPO, Phase.BUILD, fence=fence, status=RepoStatus.PENDING, now=NOW
+    )
+    assert final_status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, (
+        "a repo already at max_attempts re-escalates on its very next failure after reopen"
+    )
+
+    final_row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert final_row is not None
+    assert final_row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    assert final_row.attempts == max_attempts + 1, (
+        "attempts still only ever increments -- one more real completion, one more increment, "
+        "never reset back to the ceiling by the reopen"
     )
