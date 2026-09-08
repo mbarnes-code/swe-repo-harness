@@ -12183,9 +12183,7 @@ def _report_payload(output: VerifyOutput) -> dict[str, object]:
 def _build_lines(result: Mapping[str, object]) -> list[str]:
     degraded = cast("list[str]", result["adapter_unavailable"])
     blocked = cast("list[str]", result["withheld"])
-    reconciliations = cast(
-        "list[Mapping[str, object]]", result["hoist_rollback_reconciliations"]
-    )
+    reconciliations = cast("list[Mapping[str, object]]", result["hoist_rollback_reconciliations"])
     lines = [
         f"run {result['run_id']}: {result['succeeded']} built, {result['failed']} needing a "
         f"human over {result['repos']} repo(s) in wave(s) {result['waves']}"
