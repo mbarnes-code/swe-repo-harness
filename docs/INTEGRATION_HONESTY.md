@@ -10827,6 +10827,25 @@ source for this item; §12.37 stays PARTLY ADDRESSED, not DONE, on that account.
 own report (`.superpowers/sdd/round-VI-criteria-closure/task-89-report.md`) for the full
 disclosure of the brief-vs-CRITERIA_PLAN discrepancy this task found and did not paper over.
 
+**(2) closed (round VI task 97).** `tests/test_stub_resolution_task79.py::
+test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end_from_real_creation`
+reaches the `ACTIVE`/`PUBLISHED_ARTIFACT` stub state via a genuine `fleet resume --stub-blocked`
+dispatch (not `_insert_stub_row`) — real `fleet transform --wave 0` lands `acme-lib-py`
+`REQUIRES_HUMAN_INTERVENTION` for real, `acme-app-py` is hand-seeded `BLOCKED` only for the
+same disclosed, unrelated D126 reason `tests/test_pr_e2e.py::
+test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` already
+discloses, then `fleet resume --stub-blocked` fires the real trigger-detection/creation path —
+and continues, in the SAME fixture, into a real `fleet retry` + a real, rule-cleared
+`fleet transform`/`build`/`verify` (landing the provider `SUCCEEDED`), a real `fleet pr`, a real
+merge-driven `fleet pr --sync` (T1), and a real `fleet resume` REVALIDATE claiming loop, reaching
+`RESOLVED`/`SUCCEEDED`/`equivalence == 'FULL'`, plus a real idempotency re-trigger (`--sync`
+replay, second `resume`, `fleet stubs resolve`). Rule-12 mutation: `orchestrator.stubs.
+detect_stub_triggers` forced to `return ()` reddens this test at the very next assertion (the
+consumer's TRANSFORM status reading `SUCCEEDED` instead of `DEGRADED`, since no trigger fired) —
+confirmed the mutation actually changed the file (`diff -q` against a pre-mutation backup) before
+trusting the red, then restored and re-confirmed green. §12.37's own remaining done-bar item is
+now closed; see `docs/CRITERIA_PLAN.md`'s §37 entry for the resulting DONE verdict.
+
 ## D131 — FIXED, LANDED (round VI task 93, `bd229a3`, merged `658f0a8`). §12.14's transitive
 stub-stacking mechanism (§3.5 item 4's "whole descendant set") was undesigned, and a live defect
 followed from the gap: a second-layer dependent of a `DEGRADED` provider carried no `stubs` row,

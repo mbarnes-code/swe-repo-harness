@@ -2357,6 +2357,8 @@ available" branch has no code and the config key stays in `KNOWN_INERT`
 **Done bar:** met. Any further work here is enhancement, not closure.
 
 ## 37. Stub lifecycle — only way out of DEGRADED
+**DONE (round VI task 97, 2026-09-08) — see the "Update, round VI task 97" paragraph at the end
+of this entry for the closing piece; everything below this line is kept as history.**
 **OPEN — PARTLY ADDRESSED (2026-08-30). D80 landed (resume-time reconciliation), but the
 criterion's own literal text requires more than D80 covers.** SPEC.md item 37's full scenario
 starts with `--stub-blocked` actually creating a `stubs` row (`state='ACTIVE'`,
@@ -2800,6 +2802,88 @@ residual, precisely scoped: combine an existing real `--stub-blocked` stub-creat
 with the existing real merge/`--sync`/`resume`/`stubs resolve` chain into one fixture (or a
 sibling reusing both fixtures' scaffolding, per this file's own prior note that "the two
 fixtures' setups are compatible in shape").
+
+**Update, round VI task 97 (2026-09-08) — item (2), the sole remaining done-bar residual, is
+closed. §12.37 flips to DONE.** Re-read `docs/SPEC.md`'s §12.37 literal text, this file's own
+§37 entry, and D130's entry in `docs/INTEGRATION_HONESTY.md` fresh at this task's own `HEAD`
+before starting (per this task's brief) — the framing above, including task 89's own account of
+what remained, held unchanged.
+
+`tests/test_stub_resolution_task79.py::
+test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end_from_real_creation` is the
+combined fixture item (2) asks for: it reaches the `ACTIVE`/`PUBLISHED_ARTIFACT` stub state via a
+real `fleet resume --stub-blocked` dispatch (not `_insert_stub_row`) and continues, in the SAME
+fixture, all the way through resolution:
+
+1. Real `fleet transform --wave 0` lands `acme-lib-py` `REQUIRES_HUMAN_INTERVENTION` for real
+   (`_PROVIDER_FAILS_RULE`, three genuine `RULE_MISS` attempts) -- exactly `tests/test_pr_e2e.py::
+   test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real`'s own
+   setup, reused rather than re-derived. `acme-app-py` is hand-seeded `BLOCKED` at TRANSFORM only
+   for that same test's own disclosed, unrelated reason (D126, a `--wave`-scoping gap in
+   `_transform_impl`'s pre-seed pass, orthogonal to stub creation itself).
+2. A real `fleet resume --stub-blocked` call unblocks `acme-app-py` and re-dispatches its
+   TRANSFORM phase with the trigger armed -- `orchestrator.stubs.detect_stub_triggers` fires for
+   real, producing a genuine `stubs` row (asserted by an exact-row read, not a count) and a real
+   `DEGRADED` phase-2 row. A real `fleet build`/`fleet verify` (no seeding) carry it to a genuine
+   `STUB_LIMITED` `VerificationReport`. This closes §12.37's own opening clause in full for the
+   first time in this repo's test suite -- every prior test proving the REST of §12.37 (this
+   file's `test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end`, and D130's own
+   atomicity test) started from a hand-seeded `ACTIVE` row instead.
+3. `fleet retry acme-lib-py` reopens its RHI'd TRANSFORM row; clearing `_PROVIDER_FAILS_RULE`
+   (`write_rules(fleet)`, no bodies -- a pure relocation, mirroring `tests/test_transform_e2e.py`'s
+   own "the first pass is a pure relocation: no rule set had been authored yet" precedent) before
+   a real, `--repo`-scoped `fleet transform` re-dispatch is what makes the very next attempt
+   SUCCEED rather than re-escalate straight back to RHI (`fleet retry` does not reset
+   `phases.attempts`, ADR-0125 addendum) -- a real `fleet build --repo`/`fleet verify --repo` then
+   land the provider `SUCCEEDED` through Phase 4.
+4. A real `fleet pr --repo acme-lib-py` opens the provider's PR; `forge.merge(...)` + a real
+   `fleet pr --sync` discovers the merge, fires T1 for real, and D107's rewrite runs
+   synchronously in the same call -- the actual committed `migrate/acme-app-py:.../BUILD.bazel`
+   is read off disk and asserted to carry the real label, not the stub's.
+5. A real `fleet resume` runs the REVALIDATE claiming loop and settles PASS, reaching
+   `RESOLVED`/`SUCCEEDED`/`equivalence == 'FULL'`.
+6. Idempotency (not strictly required to close item (2), included for extra rigor: this is the
+   first test where the STARTING stub row is itself real, so it is a genuinely new datapoint that
+   idempotency survives a real-CLI creation, not only a hand-seeded one): a replay `fleet pr
+   --sync`, a second `fleet resume`, and `fleet stubs resolve` each add zero further scoped
+   `tasks`/`stubs`/`attempts` rows.
+
+**Why atomicity/exact-count/idempotency (items (3)/(4)) are not re-proven inside this same test,
+and why that is not a gap.** `docs/CRITERIA_PLAN.md`'s own done-bar above lists all four items as
+"each independently dispatchable" -- not one monolithic fixture. Items (1)/(3)/(4) are already
+closed, through the real `_fire_t1_for_provider` mechanism `fleet stubs resolve` and `fleet pr
+--sync` both call, by `tests/test_stub_resolution_task79.py::
+test_stubs_resolve_fires_t1_for_real_and_is_idempotent_and_atomic` (round VI task 89). Proving the
+SAME underlying transaction atomic a second time, through a different caller, would exercise no
+code path task 89's test does not already exercise (both callers share `_fire_t1_for_provider`
+unchanged) -- CLAUDE.md's own mutation-testing discipline (Rule 12) treats a mutation that cannot
+discriminate as worthless, and duplicating a proof under a caller that changes nothing about the
+mechanism being proven is the test-suite analogue. This task's own fixture instead proves the ONE
+thing no existing test did: that the *entry* into this whole chain -- the stub's creation --
+survives being real rather than hand-seeded, through to a real resolution.
+
+**Rule-12 mutation, run against this task's own fixture.** `orchestrator.stubs.
+detect_stub_triggers` forced to `return ()` (its very first statement) reddens the test at the
+next assertion after the real `fleet resume --stub-blocked` call: `acme-app-py`'s TRANSFORM
+status reads `SUCCEEDED` (no stub, ordinary continuation) instead of `DEGRADED`. Confirmed the
+mutation genuinely changed the file (`diff -q` against a pre-mutation backup, not `git diff`
+against `HEAD`, since this file lives in a worktree that may already differ from `HEAD`) before
+trusting the red; restored and re-confirmed green afterward. No production code needed changing
+-- the real `--stub-blocked` mechanism (Blockers A/B/C, round VI tasks 10/12/13; the
+stub-creation-logic bundle, round VI tasks 67/69) already worked correctly through the real CLI,
+so this task allocates no new D-number.
+
+**§12.37, in full, is now proven end to end through real CLI dispatches, taken together across
+this file's own test suite:** creation (this task's new test) chained into the retry/merge/sync/
+resume/RESOLVED chain (this task's new test, reusing the pattern `test_the_full_stub_lifecycle_
+resolves_through_the_real_cli_end_to_end` established), same-transaction atomicity and an exact
+`REVALIDATE`-row count (D130's own atomicity test, round VI task 89), the idempotent-repeat
+clause across all three named triggers (both tests, independently), and the vacuous-by-
+construction reading of the literal "already_applied event... keyed on revalidation_key"
+sub-phrase (investigated and disclosed by round VI task 89, not re-investigated here). **§12.37
+is DONE.** §12.39 is untouched by this task (per its own separate entry above, it needs cases
+(i)/(ii) driven through the real claiming loop against a genuine stub-rot scenario, which this
+task's brief did not ask for and this task did not attempt) -- its own status is unchanged.
 
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of

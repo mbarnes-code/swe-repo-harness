@@ -68,7 +68,9 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     verify,
 )
 from tests.test_pr_e2e import (  # noqa: F401  (fixtures used by injection)
+    _PROVIDER_FAILS_RULE,
     FakeForge,
+    _seed_blocked,
     forge,
 )
 from tests.test_transform_e2e import (  # noqa: F401  (fixtures used by injection)
@@ -1319,6 +1321,311 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     # the stub is already RESOLVED, not ACTIVE, so `_stub_supersede_inputs`' own scoping makes
     # this a real no-op, matching SPEC's literal text ("adds no further rows") for the reason it
     # actually asks for.
+    resolve_attempt = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert resolve_attempt.exit_code == ExitCode.SUCCESS, resolve_attempt.output
+    resolve_payload = json.loads(resolve_attempt.stdout)
+    assert resolve_payload["superseded"] == [], resolve_payload
+    assert _scoped_counts() == before, ("stubs resolve", _scoped_counts(), before)
+
+
+# ---------------------------------------------------------------------------------------
+# Round VI task 97 -- `docs/CRITERIA_PLAN.md` §37's done-bar item (2): a real `--stub-blocked`
+# CREATION dispatch, combined into the SAME continuous fixture as the merge/`--sync`/`resume`/
+# `stubs resolve` RESOLUTION chain the two tests above already prove. Closes the ONE residual
+# `test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end`'s own docstring (F2)
+# discloses: that test's `stubs` row is hand-seeded via `_insert_stub_row`, never produced by a
+# real CLI dispatch. This test's `stubs` row is produced by a real `fleet resume --stub-blocked`
+# call instead -- everything else, start to finish, is a real CLI invocation.
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end_from_real_creation(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    bazel: FakeBazel,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """§12.37's literal scenario, driven end to end through real CLI verbs THROUGHOUT --
+    including the opening `--stub-blocked` creation step, closing `docs/CRITERIA_PLAN.md`
+    §37's done-bar item (2).
+
+    Creation half (steps 1-2): identical setup to `tests/test_pr_e2e.py::
+    test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real`
+    (that test's own docstring explains why `acme-app-py` must be hand-seeded `BLOCKED` rather
+    than reached by a real dispatch -- D126, a genuine, disclosed, `--wave`-scoping structural
+    gap unrelated to stub creation itself; `acme-lib-py` reaches `REQUIRES_HUMAN_INTERVENTION`
+    for real, through a real `fleet transform --wave 0` dispatch against `_PROVIDER_FAILS_RULE`):
+
+    1. A real `fleet resume --stub-blocked` unblocks `acme-app-py` and re-dispatches its
+       TRANSFORM phase for real, with the trigger armed -- the REAL `--stub-blocked` CLI
+       dispatch SPEC's literal text opens with, producing a genuine `ACTIVE`/`PUBLISHED_ARTIFACT`
+       `stubs` row (not `_insert_stub_row`).
+    2. A real `fleet build`/`fleet verify` carry `acme-app-py` through to a genuine
+       `STUB_LIMITED`/`DEGRADED` `VerificationReport` off that real row.
+
+    Resolution half (steps 3-7): the same chain `test_the_full_stub_lifecycle_resolves_
+    through_the_real_cli_end_to_end` above already proves, adapted for `acme-lib-py`'s own
+    failure point being TRANSFORM (phase 2) rather than BUILD (phase 3) -- `fleet retry` reopens
+    whichever phase is `REQUIRES_HUMAN_INTERVENTION` (§12.14), so only the repair step (clearing
+    the RULE_MISS-inducing rule before the real re-dispatch) differs from that test's own step 2.
+
+    3. `fleet retry acme-lib-py` + clearing `_PROVIDER_FAILS_RULE` + a real
+       `fleet transform --repo acme-lib-py` land the provider `SUCCEEDED` at TRANSFORM;
+       `fleet build --repo`/`fleet verify --repo` land it `SUCCEEDED` through Phase 4.
+    4. A real `fleet pr --repo acme-lib-py` opens the provider's PR against `FakeForge`.
+    5. `forge.merge("acme-lib-py")` + a real `fleet pr --sync` DISCOVERS the merge, fires T1
+       (`orchestrator.stubs.supersede`) for real, and D107's rewrite runs synchronously in the
+       same call.
+    6. A real `fleet resume` runs the REVALIDATE claiming loop and settles PASS, reaching
+       RESOLVED/SUCCEEDED/`equivalence == 'FULL'`.
+    7. Idempotency: a replay (`fleet pr --sync` again), a second `fleet resume`, and
+       `fleet stubs resolve` are each driven for real and add no further scoped `tasks`/`stubs`/
+       `attempts` rows.
+    """
+    branch = f"migrate/{_STUB_CONSUMER}"
+
+    # --- 1/2. real --stub-blocked creation, identical to test_stub_blocked_creation_reaches_
+    # degraded_through_the_real_cli_and_feeds_t1_for_real's own setup. ---
+    write_rules(fleet, _PROVIDER_FAILS_RULE)
+    scanned(fleet)
+    first = transform(fleet, "--wave", "0", json_output=False)
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+    provider_status = dict(
+        query(
+            fleet,
+            "SELECT repo_id, status FROM phases WHERE phase = 2 AND repo_id = ?",
+            (_STUB_PROVIDER,),
+        )
+    )
+    assert provider_status[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", provider_status
+
+    _seed_blocked(fleet, repo_id=_STUB_CONSUMER, blocked_by=[_STUB_PROVIDER])
+
+    resumed = runner.invoke(app, [*base_args(fleet), "--json", "resume", "--stub-blocked"])
+    assert resumed.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, resumed.output
+    resume_payload = json.loads(resumed.stdout)
+    assert resume_payload["unblocked_dependents"]["unblocked"] == [
+        {
+            "repo_id": _STUB_CONSUMER,
+            "removed": [_STUB_PROVIDER],
+            "remaining": [],
+            "floor": "TRANSFORM",
+        }
+    ], resume_payload["unblocked_dependents"]
+
+    transform_statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
+    assert transform_statuses[_STUB_CONSUMER] == "DEGRADED", transform_statuses
+    assert transform_statuses[_STUB_PROVIDER] == "REQUIRES_HUMAN_INTERVENTION", transform_statuses
+
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    stub_rows = query(
+        fleet,
+        "SELECT state, stub_fidelity, consumer_repo_id, provider_repo_id "
+        "  FROM stubs WHERE run_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_COORD_KEY),
+    )
+    assert stub_rows == [("ACTIVE", "PUBLISHED_ARTIFACT", _STUB_CONSUMER, _STUB_PROVIDER)], (
+        stub_rows
+    )
+
+    built = build(fleet, "--no-sandbox", json_output=False)
+    assert built.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, built.output
+    dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
+    build_statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert build_statuses[_STUB_CONSUMER] == "DEGRADED", build_statuses
+    assert _STUB_PROVIDER not in build_statuses, "the RHI provider must never reach BUILD"
+
+    verified_result = verify(fleet, json_output=False)
+    assert verified_result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, verified_result.output
+    consumer_phase4_before = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_before == [("DEGRADED",)], consumer_phase4_before
+    report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert report_row, "the real fleet verify must persist a VerificationReport (§3.4 step 3)"
+    pre_report = json.loads(str(report_row[0][0]))["report"]
+    assert pre_report["equivalence"] == "STUB_LIMITED", pre_report
+    assert pre_report["verified_against_stubs"] == [_STUB_COORD_KEY], pre_report
+
+    # --- 3. fleet retry + a real, fixed fleet transform/build/verify land the provider
+    # SUCCEEDED through Phase 4 -- the RULE_MISS rule that earned it REQUIRES_HUMAN_INTERVENTION
+    # above must be cleared first, or the very next attempt (attempts is NOT reset by retry,
+    # ADR-0125 addendum) would immediately re-fail and re-escalate straight back to RHI. ---
+    reopened = runner.invoke(
+        app,
+        [
+            *base_args(fleet),
+            "retry",
+            _STUB_PROVIDER,
+            "--reason",
+            "round VI task 97: cleared the RULE_MISS rule, real fix",
+        ],
+        catch_exceptions=False,
+    )
+    assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+
+    write_rules(fleet)  # no rule set left -> a pure relocation, matching test_transform_e2e.py's
+    # own "the first pass is a pure relocation: no rule set had been authored yet" precedent.
+    # Exit code intentionally NOT asserted SUCCESS: matching the precedent this file's own
+    # test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end sets for its
+    # equivalent --repo-scoped calls, the CLI's aggregate exit code reflects the WHOLE run's
+    # phase rows, including acme-app-py's still-DEGRADED Phase 2 row from step 1 above
+    # (unrelated to this --repo acme-lib-py dispatch) -- the fact that matters is the
+    # PROVIDER's own row, asserted directly below.
+    transform(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    provider_phase2_after = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 2",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase2_after == [("SUCCEEDED",)], provider_phase2_after
+
+    build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+    verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    provider_phase4 = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase4 == [("SUCCEEDED",)], provider_phase4
+
+    # --- 4. a real fleet pr opens the provider's own PR. ---
+    pr_opened = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+    pr_rows = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert pr_rows, "fleet pr must open a real PullRequest record for the provider"
+    assert json.loads(str(pr_rows[0][0]))["state"] in ("OPEN", "DRAFTED"), pr_rows
+
+    # --- 5. a real PR-merge-driven fleet pr --sync T1 trigger. ---
+    forge.merge(_STUB_PROVIDER)
+    synced = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert synced.exit_code == ExitCode.SUCCESS, synced.output
+    sync_payload = json.loads(synced.stdout)
+    assert _STUB_PROVIDER in sync_payload["merged"], sync_payload
+
+    stub_after_sync = query(
+        fleet,
+        "SELECT state, revalidation_task_id FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_after_sync] == ["SUPERSEDED"], stub_after_sync
+    assert stub_after_sync[0][1], "D103 gap 2: revalidation_task_id must be stamped by real T1"
+
+    assert sync_payload["label_rewrites"].get(_STUB_CONSUMER, "").startswith("committed "), (
+        sync_payload
+    )
+    after_rewrite = _git_show(monorepo, f"{branch}:{dest_consumer}/BUILD.bazel")
+    assert f'"{_PROVIDER_LABEL}"' in after_rewrite, after_rewrite
+    assert f'"{_STUB_LABEL}"' not in after_rewrite, after_rewrite
+
+    # --- 6. a real fleet resume runs the REVALIDATE claiming loop. ---
+    resumed_final = runner.invoke(
+        app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+    )
+    resume_final_payload = json.loads(resumed_final.stdout)
+    claims = resume_final_payload["revalidation_claims"]
+    assert claims is not None, resume_final_payload
+    outcomes = claims["outcomes"]
+    assert len(outcomes) == 1, outcomes
+    outcome = next(iter(outcomes.values()))
+    assert outcome.startswith("settled: verdict=PASS"), outcome
+
+    stub_final = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_final] == ["RESOLVED"], stub_final
+
+    consumer_phase4_after = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_after == [("SUCCEEDED",)], consumer_phase4_after
+
+    post_report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert post_report_row, post_report_row
+    post_report = json.loads(str(post_report_row[0][0]))["report"]
+    assert post_report["equivalence"] == "FULL", post_report
+    assert post_report["verified_against_stubs"] == [], post_report
+
+    d108_findings = query(
+        fleet,
+        "SELECT kind FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'StubConsumerStatusApplied'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert d108_findings, "D108 must write an audited StubConsumerStatusApplied finding"
+
+    # --- 7. idempotency: three real re-triggers, scoped to this stub's own consumer/provider
+    # pair for the same reason test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_
+    # to_end scopes its own equivalent check above (an unscoped fleet resume also drives §11.5
+    # step 8's ordinary continuation for acme-lib-ts/acme-app-ts, which is real, unrelated
+    # progress, not a defect in the stub machinery this test exists to prove idempotent). ---
+    def _scoped_counts() -> tuple[int, int, int]:
+        tasks_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM tasks WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        stubs_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM stubs WHERE consumer_repo_id = ? AND provider_repo_id = ?",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        attempts_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM attempts WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        return int(tasks_n), int(stubs_n), int(attempts_n)
+
+    before = _scoped_counts()
+
+    replay = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert replay.exit_code == ExitCode.SUCCESS, replay.output
+    assert _scoped_counts() == before, ("replay", _scoped_counts(), before)
+
+    resumed_again = runner.invoke(
+        app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+    )
+    resumed_again_payload = json.loads(resumed_again.stdout)
+    assert resumed_again_payload["revalidation_claims"]["outcomes"] == {}, resumed_again_payload[
+        "revalidation_claims"
+    ]
+    assert _scoped_counts() == before, ("second resume", _scoped_counts(), before)
+
     resolve_attempt = runner.invoke(
         app,
         [*base_args(fleet), "--json", "stubs", "resolve", _STUB_PROVIDER],
