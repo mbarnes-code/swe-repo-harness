@@ -890,6 +890,15 @@ single-hop, `PUBLISHED_ARTIFACT`-only case only. Closing §12.14 in full additio
 (cross-wave `blocked_by` propagation), D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism), and a
 new, undesigned transitive-stub-stacking mechanism — none of which is briefed yet.
 
+**Update, round VI task 74 (2026-09-07, `489cc0d`) — D124 is now FIXED.** `fleet retry` exists
+(`src/fleet/cli.py`), backed by `models.enums.reopen_abandoned`/`OperatorReopen` and
+`state.repository.SqliteStateRepository.reopen_to_pending` (ADR-0125), with an end-to-end fixture
+proving clause (2)'s re-run-to-`SUCCEEDED` mechanism actually clears a dependent's `blocked_by` on
+a later `fleet resume` — see `docs/INTEGRATION_HONESTY.md`'s D124 entry for the fix detail. This
+closes clause (2)'s mechanism gap only. §12.14 stays OPEN: D123 (cross-wave `blocked_by`
+propagation) and clause (3)'s undesigned transitive-stub-stacking mechanism are unaffected and
+still block full closure. Do not round up the `<n> of 48` count from this landing alone.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely

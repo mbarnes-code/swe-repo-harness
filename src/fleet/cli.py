@@ -267,6 +267,7 @@ from fleet.state.repository import (
     EdgeRow,
     FloorSnapshotStaleError,
     RejectedApproachRow,
+    RepositoryError,
     SqliteStateRepository,
     SymbolRow,
     insert_revalidation_task_row,
@@ -14138,6 +14139,127 @@ async def _quarantine_impl(
         "phases_skipped": skipped,
         "dependents_blocked": blocked,
         "dependents": dependents,
+    }
+
+
+# --------------------------------------------------------------------------------------
+# fleet retry — reopen an abandoned repo through the audited OPERATOR_REOPEN door (§12.14,
+# ADR-0125)
+# --------------------------------------------------------------------------------------
+
+
+@app.command()
+def retry(
+    ctx: typer.Context,
+    repo: Annotated[
+        str, typer.Argument(help="repo_id to reopen from REQUIRES_HUMAN_INTERVENTION.")
+    ],
+    reason: Annotated[str, typer.Option("--reason", help="Required; recorded verbatim.")],
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Reopen one abandoned (`REQUIRES_HUMAN_INTERVENTION`) repo's phase to `PENDING` (§12.14).
+
+    `fleet retry` performs ONLY the reopen: the RHI phase row becomes `PENDING` and one audited
+    `OperatorReopened` finding is written, through the same `OPERATOR_REOPEN` door
+    `models.enums.transition()` has carried since this project's initial commit. It does **not**
+    itself re-run any work — exactly as `demote()` does not re-run anything either — and it does
+    **not** itself clear any dependent's `blocked_by`: a subsequent `fleet resume` (or the
+    ordinary `fleet transform`/`build`/`verify` commands) re-enters the reopened phase through
+    §11.5 step 8's existing floor/continuation logic with no new code (ADR-0125 judgment call 5),
+    and a LATER `fleet resume` call clears the repo from any dependent's `blocked_by` once it
+    lands back at `SUCCEEDED` — step 6 runs before step 8 in the same invocation, so the one
+    `fleet resume` that re-lands the phase cannot also clear its own dependents in that same pass
+    (the same residue ADR-0089 §4 already discloses for `demote()`). It also does **not** reset
+    the phase's `attempts` count (ADR-0125 addendum): a repo already at `max_attempts` when
+    reopened re-escalates straight back to `REQUIRES_HUMAN_INTERVENTION` on its very next phase
+    failure — call `fleet retry` again after each such escalation for another attempt.
+    """
+    opts = _options(ctx)
+    with _mapped_errors():
+        path = _require_db(opts)
+        _check_schema_version(path)
+        result = _run(_retry_impl(opts, path, repo=repo, reason=reason, dry_run=dry_run))
+        _emit(
+            opts,
+            result,
+            [
+                f"{'would reopen' if dry_run else 'reopened'} {repo} "
+                f"(phase {result['phase']}) -> PENDING"
+            ],
+        )
+
+
+async def _retry_impl(
+    opts: GlobalOptions, path: Path, *, repo: str, reason: str, dry_run: bool
+) -> dict[str, object]:
+    if not reason.strip():
+        raise UsageError(
+            "--reason is required and must not be empty (§12.14): it is the audit record"
+        )
+
+    conn = await connect_ro(path)
+    try:
+        run_id = await _resolve_run(conn, opts)
+        known = await _rows(conn, "SELECT repo_id FROM repos WHERE repo_id = ?", (repo,))
+        if not known:
+            raise UsageError(f"no repo {repo!r} in {path}: `fleet status` lists the fleet")
+        rhi_rows = await _rows(
+            conn,
+            "SELECT phase FROM phases WHERE run_id = ? AND repo_id = ? "
+            "  AND status = 'REQUIRES_HUMAN_INTERVENTION'",
+            (run_id, repo),
+        )
+    finally:
+        await conn.close()
+
+    # Read here for the SAME reason `_quarantine_impl` reads `phase_rows` outside its writer:
+    # the write path (`SqliteStateRepository.reopen_to_pending`) re-reads and re-checks this
+    # exact fact inside its own transaction and is the one that actually enforces it — this read
+    # only lets `--dry-run` preview which phase would be reopened, and lets a genuinely wrong
+    # invocation fail before a `StateWriter` session is even opened.
+    if not rhi_rows:
+        raise UsageError(
+            f"{repo!r} is not at REQUIRES_HUMAN_INTERVENTION in run {run_id}: `fleet retry` only "
+            "reopens an abandoned repo (§12.14) -- `fleet status` reports its actual phase status"
+        )
+    if len(rhi_rows) > 1:
+        raise UsageError(
+            f"{repo!r} has {len(rhi_rows)} REQUIRES_HUMAN_INTERVENTION phase rows in run "
+            f"{run_id}, expected exactly one -- this is a structural surprise ADR-0125 treats as "
+            "refusing loudly rather than silently picking one; investigate before retrying"
+        )
+    phase = Phase(int(rhi_rows[0][0]))
+
+    if dry_run:
+        return {
+            "dry_run": True,
+            "run_id": run_id,
+            "repo": repo,
+            "phase": phase.name,
+            "reason": reason,
+        }
+
+    now = _now()
+    async with StateWriter(path, owner="fleet-retry") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            try:
+                record = await repository.reopen_to_pending(run_id, repo, reason=reason, now=now)
+            except RepositoryError as exc:
+                raise UsageError(f"fleet retry {repo!r} refused: {exc}") from exc
+        finally:
+            await read_conn.close()
+
+    with suppress(Exception):  # a projection is an OUTPUT; it must not fail the retry
+        await project_once(path, run_id=UUID(run_id), path=DEFAULT_PROJECTION_PATH)
+
+    return {
+        "dry_run": False,
+        "run_id": run_id,
+        "repo": repo,
+        "phase": record.phase.name,
+        "reason": reason,
     }
 
 

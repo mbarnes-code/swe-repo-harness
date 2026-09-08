@@ -385,6 +385,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   every `INSERT INTO findings` in src/:
                                                   -- | 'PhaseDemoted'  -- state/repository.py,
                                                   --     §11.5 step 5, one row per demoted phase
+                                                  -- | 'OperatorReopened' -- state/repository.py,
+                                                  --     reopen_to_pending, ADR-0125/§12.14: the
+                                                  --     audit write paired with the RHI->PENDING
+                                                  --     CAS write `fleet retry` performs, in the
+                                                  --     same transaction
                                                   -- | 'EmptyRepo' | 'SubmodulePresent'
                                                   --     -- workers/clone.py, through the scan
                                                   --     persist and the §3.1 gate

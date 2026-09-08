@@ -69,8 +69,10 @@ from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 import aiosqlite
 
 from fleet.models.enums import (
+    OPERATOR_REOPENED_KIND,
     PHASE_DEMOTED_KIND,
     STUB_DEGRADED_KIND,
+    OperatorReopen,
     Phase,
     PhaseDemotion,
     RepoStatus,
@@ -78,6 +80,7 @@ from fleet.models.enums import (
     TaskKind,
     degrade_for_stub,
     demote,
+    reopen_abandoned,
     transition,
 )
 from fleet.obs.redact import redact_text
@@ -575,6 +578,10 @@ class StateRepository(ReadOnlyRepository, Protocol):
         self, run_id: str, repo_id: str, *, phase: Phase, now: datetime
     ) -> StubDegradation | None: ...
 
+    async def reopen_to_pending(
+        self, run_id: str, repo_id: str, *, reason: str, now: datetime
+    ) -> OperatorReopen: ...
+
     async def clear_blocked_by(
         self,
         run_id: str,
@@ -997,6 +1004,32 @@ def _stub_degradation_fingerprint(run_id: str, repo_id: str, phase: Phase) -> st
     """Semantic identity of one stub degradation: this repo, this phase, in this run (mirrors
     `_demotion_fingerprint`)."""
     return sha256_text("\x00".join((run_id, repo_id, STUB_DEGRADED_KIND, str(int(phase)))))
+
+
+# --------------------------------------------------------------------------------------
+# §12.14 -- the operator-reopen write (ADR-0125, D124's fix)
+# --------------------------------------------------------------------------------------
+
+#: The reopen itself. Same shape as `_DEMOTE_PHASE_SQL`/`_STUB_DEGRADE_PHASE_SQL`: the CAS is
+#: `AND status = 'REQUIRES_HUMAN_INTERVENTION'` -- a row that moved between the SELECT and this
+#: UPDATE inside the same `BEGIN IMMEDIATE` matches zero rows rather than being silently
+#: overwritten, which should be structurally impossible (a repo has at most one RHI row at a
+#: time) and is a `RepositoryError` if it ever happens.
+_REOPEN_PHASE_SQL: Final = (
+    "UPDATE phases SET status = ?, updated_at = ? "
+    " WHERE run_id = ? AND repo_id = ? AND phase = ? "
+    "   AND status = 'REQUIRES_HUMAN_INTERVENTION'"
+)
+
+
+def _reopen_fingerprint(run_id: str, repo_id: str, phase: Phase) -> str:
+    """Semantic identity of one operator reopen: this repo, this phase, in this run (mirrors
+    `_demotion_fingerprint`/`_stub_degradation_fingerprint`). A repo can only ever have one RHI
+    row at a time, so this is not the multi-phase collapse hazard `PhaseDemotion.payload()`'s
+    docstring warns about -- the fingerprint still carries `phase` for the same idempotency
+    reason `_demotion_fingerprint` does (a second `fleet retry` against the same already-reopened
+    phase converges on the same finding row rather than minting a new one)."""
+    return sha256_text("\x00".join((run_id, repo_id, OPERATOR_REOPENED_KIND, str(int(phase)))))
 
 
 # --------------------------------------------------------------------------------------
@@ -1977,6 +2010,93 @@ class SqliteStateRepository:
                     STUB_DEGRADED_KIND,
                     "warn",
                     _stub_degradation_fingerprint(run_id, repo_id, phase),
+                    redact_text(json.dumps(record.payload(), sort_keys=True)),
+                    stamp,
+                ),
+            )
+            return record
+
+        return await self._writer.submit(unit)
+
+    async def reopen_to_pending(
+        self, run_id: str, repo_id: str, *, reason: str, now: datetime
+    ) -> OperatorReopen:
+        """§12.14 (ADR-0125, D124's fix): `REQUIRES_HUMAN_INTERVENTION -> PENDING`, in ONE
+        transaction, for the one phase `fleet retry <repo_id>` names.
+
+        Mirrors `stub_degrade_transform`'s transaction shape exactly, with one structural
+        difference that follows from `reopen_abandoned`'s own contract: this method RAISES
+        rather than returning `None` on a non-qualifying repo. `fleet retry` is an operator
+        naming one specific repo and asserting "this one is fixed" -- not a speculative call made
+        unconditionally over rows that usually do not qualify (`stub_degrade_transform`'s shape)
+        -- so a repo that is not actually `REQUIRES_HUMAN_INTERVENTION` is the operator's premise
+        being wrong, and `RepositoryError` is how that surfaces to `cli._retry_impl`, which
+        translates it into a `UsageError` (CLAUDE.md Rule 11).
+
+        Both facts this write's decision needs -- how many of the repo's `phases` rows are
+        `REQUIRES_HUMAN_INTERVENTION`, and which phase that is -- are read inside this same
+        transaction, mirroring `stub_degrade_transform`'s discipline of never trusting a snapshot
+        taken outside the transaction that acts on it.
+
+        **Exactly one qualifying row is required.** Zero: `repo_id` is not actually abandoned --
+        raise. More than one: a structural surprise (ADR-0125 judgment call 3) -- the generic
+        completion loop stops advancing a repo the instant one phase reaches RHI
+        (`orchestrator.reentry.phase_floor` returns `None` the moment it sees one), so a second,
+        independent RHI row on the same repo should be impossible; raise rather than silently
+        picking one.
+
+        Returns the `OperatorReopen` record the write produced.
+        """
+        stamp = _iso(now)
+
+        async def unit(conn: aiosqlite.Connection) -> OperatorReopen:
+            async with conn.execute(_DEMOTE_SELECT_SQL, (run_id, repo_id)) as cursor:
+                rows = await cursor.fetchall()
+            rhi = [
+                Phase(int(row[0]))
+                for row in rows
+                if RepoStatus(str(row[1])) is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+            ]
+            if not rhi:
+                raise RepositoryError(
+                    f"reopen_to_pending: {repo_id!r} in run {run_id} has no "
+                    "REQUIRES_HUMAN_INTERVENTION phase row -- nothing for `fleet retry` to reopen"
+                )
+            if len(rhi) > 1:
+                raise RepositoryError(
+                    f"reopen_to_pending: {repo_id!r} in run {run_id} has {len(rhi)} "
+                    "REQUIRES_HUMAN_INTERVENTION phase rows, expected exactly one -- refusing "
+                    "rather than silently picking one (ADR-0125 judgment call 3)"
+                )
+            phase = rhi[0]
+
+            new_status, record = reopen_abandoned(
+                RepoStatus.REQUIRES_HUMAN_INTERVENTION,
+                repo_id=repo_id,
+                phase=phase,
+                reason=reason,
+            )
+            cursor = await conn.execute(
+                _REOPEN_PHASE_SQL,
+                (str(new_status), stamp, run_id, repo_id, int(phase)),
+            )
+            if cursor.rowcount != 1:
+                # The SELECT above, in this same BEGIN IMMEDIATE, already confirmed exactly one
+                # row is REQUIRES_HUMAN_INTERVENTION at this exact key -- a mismatch here means
+                # it moved between the two reads inside one transaction, which should be
+                # structurally impossible.
+                raise RepositoryError(
+                    f"reopen_to_pending: UPDATE matched {cursor.rowcount} rows for "
+                    f"phases({run_id}, {repo_id}, phase={int(phase)}), expected exactly 1"
+                )
+            await conn.execute(
+                _DEMOTE_FINDING_SQL,
+                (
+                    run_id,
+                    repo_id,
+                    OPERATOR_REOPENED_KIND,
+                    "warn",
+                    _reopen_fingerprint(run_id, repo_id, phase),
                     redact_text(json.dumps(record.payload(), sort_keys=True)),
                     stamp,
                 ),

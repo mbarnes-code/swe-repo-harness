@@ -32,9 +32,11 @@ from aiosqlite.context import contextmanager as aiosqlite_contextmanager
 from pydantic import BaseModel
 
 from fleet.models.enums import (
+    OPERATOR_REOPENED_KIND,
     PHASE_DEMOTED_KIND,
     STUB_DEGRADED_KIND,
     EdgeKind,
+    OperatorReopen,
     Phase,
     RepoStatus,
     StubDegradation,
@@ -2729,3 +2731,246 @@ async def test_stub_degrade_transform_is_idempotent_on_a_repeat_call(
     finally:
         conn.close()
     assert count == 1, "a repeat call must not duplicate the audit finding"
+
+
+# ======================================================================================
+# §12.14 -- the operator-reopen write (ADR-0125, D124's fix, round VI task 74)
+# ======================================================================================
+
+
+async def test_reopen_to_pending_fires_for_a_single_rhi_row(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """The positive case: one phase is `REQUIRES_HUMAN_INTERVENTION` -> `PENDING`, with an
+    `OperatorReopen` record naming that exact phase and reason."""
+    store, _writer = demotion_bed
+    await _settle_phase(
+        store, REPO, Phase.VERIFY, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
+    )
+
+    record = await store.reopen_to_pending(
+        RUN, REPO, reason="upstream published a fixed release", now=NOW
+    )
+
+    assert isinstance(record, OperatorReopen)
+    assert record.repo_id == REPO
+    assert record.phase is Phase.VERIFY
+    assert record.from_status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    assert record.to_status is RepoStatus.PENDING
+    assert record.reason == "upstream published a fixed release"
+
+    row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+    assert row is not None
+    assert row.status is RepoStatus.PENDING
+
+
+async def test_reopen_to_pending_writes_the_phase_row_and_a_finding_in_one_call(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter], db_path: Path
+) -> None:
+    """The write itself, read back through a plain `sqlite3` connection (mirrors
+    `test_stub_degrade_transform_writes_the_phase_row_and_a_finding_in_one_call`): `phases.status`
+    reads `PENDING` and exactly one `findings` row of kind `OperatorReopened` exists, in the SAME
+    call."""
+    store, _writer = demotion_bed
+    await _settle_phase(
+        store, REPO, Phase.VERIFY, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
+    )
+
+    record = await store.reopen_to_pending(RUN, REPO, reason="fixed", now=NOW)
+    assert record is not None
+
+    conn = sqlite3.connect(db_path)
+    try:
+        status = conn.execute(
+            "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+            (RUN, REPO, int(Phase.VERIFY)),
+        ).fetchone()
+        findings = conn.execute(
+            "SELECT kind, repo_id, payload FROM findings WHERE run_id = ? AND kind = ?",
+            (RUN, OPERATOR_REOPENED_KIND),
+        ).fetchall()
+    finally:
+        conn.close()
+    assert status == ("PENDING",)
+    assert len(findings) == 1
+    assert findings[0][0] == OPERATOR_REOPENED_KIND
+    assert findings[0][1] == REPO
+    assert "fixed" in findings[0][2]
+
+
+async def test_reopen_to_pending_raises_when_no_rhi_row_exists(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """The operator's premise ("this repo is abandoned and fixed") is wrong when nothing is
+    `REQUIRES_HUMAN_INTERVENTION` -- `fleet retry`'s whole point is an explicit, named, single-
+    repo assertion, so this raises rather than silently no-op'ing (unlike
+    `stub_degrade_transform`'s speculative-call shape, which returns `None` instead)."""
+    store, _writer = demotion_bed
+    await _settle_phase(store, REPO, Phase.VERIFY, status=RepoStatus.SUCCEEDED, attempts=1)
+
+    with pytest.raises(RepositoryError, match="has no REQUIRES_HUMAN_INTERVENTION phase row"):
+        await store.reopen_to_pending(RUN, REPO, reason="fixed", now=NOW)
+
+
+async def test_reopen_to_pending_raises_when_multiple_rhi_rows_exist(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """A structural surprise ADR-0125 judgment call 3 treats as worth refusing loudly: two
+    independent `REQUIRES_HUMAN_INTERVENTION` rows on the same repo should be impossible (the
+    generic completion loop stops advancing a repo the instant one phase reaches RHI --
+    `orchestrator.reentry.phase_floor` returns `None` the moment it sees one), but CLAUDE.md
+    Rule 12's mutation discipline requires proving the guard actually fires rather than merely
+    asserting it can't happen -- so this fixture deliberately constructs the "impossible" case
+    directly through the public write API: two independent `_settle_phase(..., attempts=1,
+    max_attempts=8)` calls, each a single real `complete_phase(status=REQUIRES_HUMAN_
+    INTERVENTION)` write (the status is the direct target, not the escalation `complete_phase`
+    computes on its own PENDING-hand-back branch -- no ladder is actually exhausted here; see
+    `test_reopen_to_pending_does_not_reset_attempts_so_a_reopened_repo_can_re_escalate` below for
+    a fixture that drives a genuine ladder exhaustion)."""
+    store, _writer = demotion_bed
+    await _settle_phase(
+        store, REPO, Phase.BUILD, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
+    )
+    await _settle_phase(
+        store, REPO, Phase.VERIFY, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
+    )
+
+    with pytest.raises(RepositoryError, match=r"has 2 REQUIRES_HUMAN_INTERVENTION phase rows"):
+        await store.reopen_to_pending(RUN, REPO, reason="fixed", now=NOW)
+
+    # Refusing loudly must mean refusing to write anything -- neither row moved.
+    build_row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    verify_row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+    assert build_row is not None and build_row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    assert verify_row is not None and verify_row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+
+
+async def test_reopen_to_pending_raises_on_a_row_that_moved_inside_the_transaction(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The CAS guard `reopen_to_pending`'s own docstring calls "structurally impossible" --
+    proven to actually fire (CLAUDE.md Rule 12), not merely trusted to exist because the
+    docstring says so.
+
+    **Disclosed gap this test does not close**: `stub_degrade_transform`, whose transaction shape
+    this method mirrors, has no direct test of its own analogous CAS-miss path -- a `grep` for a
+    monkeypatched race against `_STUB_DEGRADE_PHASE_SQL` in this file returns nothing. Closing
+    that gap is out of this task's scope (it predates ADR-0125); this test closes the equivalent
+    gap for the new method only.
+
+    A single connection's SELECT-then-UPDATE inside one `BEGIN IMMEDIATE` cannot race a SECOND
+    connection -- SQLite's own locking serializes them, and `state/db.py`'s single-writer slot
+    means there is no second writer connection to race with in this process anyway. The only way
+    to exercise this guard is to have something else on the SAME connection write the row between
+    the two statements, which is what the monkeypatch below does: it intercepts the SELECT
+    `reopen_to_pending` issues and, immediately after it returns, uses the SAME connection to
+    flip the row to `SUCCEEDED` before control returns to the method's own code. The CAS `UPDATE
+    ... AND status = 'REQUIRES_HUMAN_INTERVENTION'` then matches zero rows, and the whole
+    transaction (including the injected write) rolls back per `state/db.py`'s
+    `_run_in_immediate`.
+    """
+    store, _writer = demotion_bed
+    await _settle_phase(
+        store, REPO, Phase.VERIFY, status=RepoStatus.REQUIRES_HUMAN_INTERVENTION, attempts=1
+    )
+
+    real_execute = aiosqlite.Connection.execute
+
+    async def racing(
+        conn: aiosqlite.Connection, sql: str, parameters: object = None
+    ) -> aiosqlite.Cursor:
+        cursor = await real_execute(conn, sql, parameters)
+        if sql.startswith("SELECT phase, status FROM phases"):
+            await real_execute(
+                conn,
+                "UPDATE phases SET status = 'SUCCEEDED' "
+                " WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                (RUN, REPO, int(Phase.VERIFY)),
+            )
+        return cursor
+
+    monkeypatch.setattr(
+        aiosqlite.Connection, "execute", aiosqlite_contextmanager(racing)
+    )
+
+    with pytest.raises(RepositoryError, match="UPDATE matched 0 rows"):
+        await store.reopen_to_pending(RUN, REPO, reason="fixed", now=NOW)
+
+    row = await store.get_phase(RUN, REPO, Phase.VERIFY)
+    assert row is not None
+    assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, (
+        "the whole unit rolled back, including the injected race write -- not merely the real "
+        "UPDATE's own effect"
+    )
+
+
+async def test_reopen_to_pending_does_not_reset_attempts_so_a_reopened_repo_can_re_escalate(
+    demotion_bed: tuple[SqliteStateRepository, StateWriter],
+) -> None:
+    """I3 (round VI task-74 fix round 1, opus review + controller ruling): `reopen_to_pending`
+    restores `status` but deliberately does NOT reset `attempts` -- disclosed in ADR-0125's
+    addendum and the `fleet retry` CLI docstring, not a silent gap. A repo already at
+    `attempts == max_attempts` when reopened re-escalates straight back to
+    `REQUIRES_HUMAN_INTERVENTION` on its very next phase failure, regardless of `max_attempts`.
+
+    **The ladder is exhausted through REAL `complete_phase(status=PENDING)` calls, not a direct
+    status write**, so `attempts` is a value the ladder itself produced (CLAUDE.md Rule 12) and
+    the escalation branch (`escalate = status is PENDING and attempts + 1 >= max_attempts`) is
+    genuinely exercised -- the sibling fixture
+    (`test_reopen_to_pending_raises_when_multiple_rhi_rows_exist`, M6) settles its rows directly
+    at `REQUIRES_HUMAN_INTERVENTION` and never exercises this branch at all.
+    """
+    store, _writer = demotion_bed
+    max_attempts = 3
+    await store.upsert_phase(RUN, REPO, Phase.BUILD, now=NOW, max_attempts=max_attempts)
+
+    # Exhaust the real ladder: `max_attempts` genuine PENDING-hand-back completions, the last of
+    # which crosses `attempts + 1 >= max_attempts` and escalates to RHI in the same statement.
+    status: RepoStatus | None = None
+    for _ in range(max_attempts):
+        fence = await store.acquire_phase_lease(
+            RUN, REPO, Phase.BUILD, owner=WORKER, now=NOW, lease_ttl_s=300
+        )
+        assert fence is not None
+        status = await store.complete_phase(
+            RUN, REPO, Phase.BUILD, fence=fence, status=RepoStatus.PENDING, now=NOW
+        )
+
+    row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert row is not None
+    assert row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, "setup check: ladder exhausted"
+    assert row.attempts == max_attempts, "setup check: attempts landed at the ceiling"
+    assert status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+
+    # The operator reopens it.
+    record = await store.reopen_to_pending(RUN, REPO, reason="fixed upstream", now=NOW)
+    assert record.to_status is RepoStatus.PENDING
+
+    reopened_row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert reopened_row is not None
+    assert reopened_row.status is RepoStatus.PENDING
+    assert reopened_row.attempts == max_attempts, (
+        "reopen must NOT reset attempts -- this is I3's disclosed, deliberate behavior"
+    )
+
+    # One more real failure re-escalates straight back to RHI -- `attempts` was never reset, so
+    # `attempts + 1 >= max_attempts` (3 + 1 >= 3) is true on the very next completion.
+    fence = await store.acquire_phase_lease(
+        RUN, REPO, Phase.BUILD, owner=WORKER, now=NOW, lease_ttl_s=300
+    )
+    assert fence is not None
+    final_status = await store.complete_phase(
+        RUN, REPO, Phase.BUILD, fence=fence, status=RepoStatus.PENDING, now=NOW
+    )
+    assert final_status is RepoStatus.REQUIRES_HUMAN_INTERVENTION, (
+        "a repo already at max_attempts re-escalates on its very next failure after reopen"
+    )
+
+    final_row = await store.get_phase(RUN, REPO, Phase.BUILD)
+    assert final_row is not None
+    assert final_row.status is RepoStatus.REQUIRES_HUMAN_INTERVENTION
+    assert final_row.attempts == max_attempts + 1, (
+        "attempts still only ever increments -- one more real completion, one more increment, "
+        "never reset back to the ceiling by the reopen"
+    )
