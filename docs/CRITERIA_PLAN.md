@@ -1624,8 +1624,16 @@ count-agnostic write path (a plain list comprehension with no repo/edge-count br
 independently re-verified by task-scoped review, not assumed.
 
 ## 31. Wrong contract hoist detected and rolled back
-**OPEN — mechanism doesn't exist — NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI,
-research-22).** `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
+**OPEN — PARTIALLY CLOSED (round VI task 96, 2026-09-08): case (i) closed (Leg A, task 55); case
+(ii)'s rollback-TARGET mechanism now closed under this round's scoped/adjudicated trigger (the
+`git revert -m 1` of the contract's own `Hoisted-Contract:` merge, never the owner's); case (ii)'s
+LITERAL trigger ("a hoist whose contract wave fails `bazel build`") remains adjudication pending
+(dated marker at `docs/SPEC.md` §12.31), and its "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" /
+"phases.attempts unchanged for every SCC member" clauses remain untested — see the task-96 update
+below for the precise breakdown. Do not read this line as DONE; two real sub-questions remain
+open.** *(Superseded initial framing, kept for history: "mechanism doesn't exist —
+NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI, research-22)" — every leg below this
+line has since landed except the two named above.)* `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
 Zero `git revert` call sites exist in the entire codebase. `_hoist_contracts` is a pure in-memory
 trial simulation with no rollback branch (audit row 31). `--forbid-hoist` (`cli.py:2875`) is
 parsed only to be explicitly refused with exit 2 — stubbed, not wired.
@@ -1958,6 +1966,56 @@ defect against SPEC's own text, filed as **`D132`** (`docs/INTEGRATION_HONESTY.m
 occurrences, re-measured at this task's own base `81f27e3`) — the mechanism appears to exist by
 construction but this was not run, a candidate item for a future task per research-50 §5.3.
 `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here.
+
+**Update, round VI task 96 (2026-09-08, research-50's "task 2" — the actual closing task for case
+(ii)'s rollback-TARGET mechanism).** `cli._ordered_revert_shas` re-anchored: the contract's own
+revert entry is now found by `vcs.commits.find_contract_hoist_merge` (new), which reads the real
+`Hoisted-Contract: <contract_id>` trailer task 95's `_ingest_contract_source` stamps — git's own
+trailer parser over the whole of `integration`, never a `PullRequestDraft` (D122's still-open gap
+is now irrelevant to this anchor) and never a SQLite row, matching §12.31(ii)'s own "not by a
+SQLite row" text under BOTH grammatical readings research-50 §1.1 identified. This closes a real,
+previously-undiscovered correctness gap, not merely a missing wire: every existing test that hit
+the "success" branch did so by hand-seeding `contract_id` onto the OWNING repo's own
+`PullRequestDraft`, which research-50-report.md §2.3 measured meant those tests actually reverted
+the owner's WHOLE repo-migration merge and called it a contract rollback — worse than the
+`RollbackAnchorError` failure mode it replaced. All such tests (2 in
+`tests/test_hoist_rollback_wiring.py`, ~9 in `tests/test_hoist_rollback_git.py`) are rewritten to
+seed a REAL trailer-carrying merge instead (`_seed_hoist_merge`/`_merge_hoist`, matching each
+file's own established hand-seed-the-precondition convention), and now assert the reverted sha
+really is the contract's own merge and really is NOT the owner's.
+
+**Proof, scoped under this round's controller ruling (§12.31(ii)'s literal "contract wave fails
+`bazel build`" trigger is adjudication pending — see the dated marker at `docs/SPEC.md` §12.31,
+added in this same commit, and `docs/INTEGRATION_HONESTY.md` D111's matching update).**
+`tests/test_build_e2e.py::
+test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_merge` drives a REAL
+organic hoist (task 95's own `CYCLE_FLEET` proof vehicle) through a REAL CONSUMER
+(`acme-billing`, a REPO-kind wave) `bazel build` failure whose stderr names the hoisted package —
+the closest reachable analogue to the unreachable literal trigger — and asserts, against real git
+objects, that the resulting rollback reverts exactly the contract's `Hoisted-Contract:` merge
+(cross-checked two ways: `contract_rollback_shas_in_range`'s trailer-plus-body read, and a raw
+`git log --grep`), that the owner's own `migrate/acme-identity` merge is untouched (different sha,
+different branch, unchanged as a commit object), and that the revert commit's own diff is confined
+to the hoisted contract's target path.
+
+**Mutation-tested (CLAUDE.md Rule 12), the whole battery (23 tests: 12 in
+`tests/test_hoist_rollback_git.py`, 9 in `tests/test_hoist_rollback_wiring.py`, 2 in
+`tests/test_build_e2e.py`) reproducibly REDDENS against the pre-task-96 `cli.py`/`vcs/commits.py`/
+`vcs/git.py` and GREENS against the fix**, verified via a byte-diff against a pre-mutation backup
+(never `HEAD`, never `git stash` — this round's concurrent-lane constraint) both before mutating
+and after restoring; `ruff check` and `mypy` (whole-manifest, no path args) clean on every changed
+file.
+
+**What this task does NOT close — read precisely, do not overclaim.** (a) The literal
+contract-wave trigger stays adjudication pending — a future round must decide whether to build
+contract-wave dispatch at all (ADR-0119's own deliberate `node_kind='REPO'` scoping would need
+revisiting). (b) §12.31(ii)'s "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" and "`phases.attempts`
+unchanged for every SCC member" clauses remain untested — unchanged from task 95's own disclosure
+above; this task did not drive a re-sequence after a contract goes `FAILED` and was not sized to.
+(c) D132 (task 95's owner-side-duplication defect) is untouched and stays `OPEN`. **This criterion
+stays `OPEN` overall** — see the status line at the top of this section for the precise breakdown.
+`docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`, with a dated update recording this leg.
+Full account: `.superpowers/sdd/round-VI-criteria-closure/task-96-report.md`.
 
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
@@ -2774,10 +2832,10 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14025`, repointed +250 by round VI task 95's own additions
+`_run_one_revalidation_task` (`cli.py:14040`, repointed +15 by round VI task 96's own additions
 earlier in the file — pure insertion, confirmed by exact-line-content match against the current
-tree; round VI task 93's own repoint is superseded, per this file's annotate-in-place convention,
-not deleted) was read directly: it re-runs
+tree; round VI task 95's own repoint (`cli.py:14025`) is superseded, per this file's
+annotate-in-place convention, not deleted) was read directly: it re-runs
 `VerifyPipelineWorker`
 against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
 at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —

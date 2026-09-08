@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import re
 import sqlite3
 import subprocess
 import uuid as _uuid
@@ -567,6 +568,69 @@ def _revert_commits_on_integration(monorepo_path: Path, contract_id: str) -> lis
     return [line for line in result.stdout.strip().splitlines() if line]
 
 
+_REVERTS_COMMIT_RE = re.compile(r"This reverts commit ([0-9a-f]{7,40})\.")
+"""Verbatim copy of `vcs.commits._REVERTS_COMMIT_RE` (Decision 5's own revert-body text) -- this
+module's own house style (`_revert_commits_on_integration` above) reads git directly via
+`subprocess`, so this mirrors that rather than reaching into the async `Git` class for one grep."""
+
+
+def _reverted_original_shas(monorepo_path: Path, contract_id: str) -> set[str]:
+    """The set of ORIGINAL shas a hoist-rollback series reverted, read from each revert commit's
+    OWN body (`revert_and_commit`'s "This reverts commit <sha>." text) -- never assumed from the
+    revert commits' own count alone, so a test can assert WHICH shas were reverted, not merely how
+    many."""
+    revert_shas = _revert_commits_on_integration(monorepo_path, contract_id)
+    originals: set[str] = set()
+    for sha in revert_shas:
+        body = _sh(monorepo_path, "log", "-1", "--format=%b", sha)
+        match = _REVERTS_COMMIT_RE.search(body)
+        if match:
+            originals.add(match.group(1))
+    return originals
+
+
+def _sh(monorepo_path: Path, *args: str) -> str:
+    result = subprocess.run(  # noqa: S603
+        ["git", "-C", str(monorepo_path), *args],  # noqa: S607
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    return result.stdout.strip()
+
+
+def _seed_hoist_merge(monorepo_path: Path, *, contract_id: str, owner_repo_id: str) -> str:
+    """A real merge commit on `integration` carrying `Source-Repo:`/`Hoisted-Contract:` trailers
+    -- the SAME shape `vcs.filter_repo.ingest()` produces for a real hoisted-contract merge
+    (round VI task 95's `_ingest_contract_source`), so `vcs.commits.find_contract_hoist_merge`
+    (round VI task 96) finds it exactly as it would find a real one.
+
+    This module's own convention (established by `_seed_contract_and_edges`/`_seed_pr`) is to
+    hand-seed the DB-side precondition state directly rather than driving a real `fleet scan`/
+    `sequence` to produce it organically -- this is that SAME convention applied to the git side,
+    now that round VI task 96 re-anchored the rollback path off a real git trailer instead of a
+    `PullRequestDraft`. Before this task, this fixture anchored the contract's own entry by
+    hand-seeding `contract_id` onto the OWNER's own `PullRequestDraft` (see this module's header
+    docstring's own account of what that meant); after this task, `_seed_pr`'s `contract_id`
+    parameter is unused by any test in this file, and this function is the real anchor instead.
+    """
+    branch = f"seed-hoist-{contract_id.replace(':', '-')}"
+    _sh(monorepo_path, "checkout", "-q", "-b", branch)
+    marker = monorepo_path / "contracts" / contract_id.replace(":", "-") / "seed.txt"
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text("hoisted (seeded, round VI task 96)\n", encoding="utf-8")
+    _sh(monorepo_path, "add", "-A")
+    _sh(monorepo_path, "commit", "-m", "seeded hoist content")
+    _sh(monorepo_path, "checkout", "-q", "integration")
+    message = (
+        "merge contract hoist (seeded)\n\n"
+        f"Source-Repo: {owner_repo_id}\nSource-Sha: {'0' * 40}\n"
+        f"Hoisted-Contract: {contract_id}\n"
+    )
+    _sh(monorepo_path, "merge", "-q", "--no-ff", "-m", message, branch)
+    return _sh(monorepo_path, "rev-parse", "integration")
+
+
 @pytest.mark.integration
 def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
     fleet: Path,  # noqa: F811
@@ -586,6 +650,16 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
     because it has NO real dependency relationship with the owner (an independent ecosystem in
     this fixture) — so its blast-set membership comes ENTIRELY from the hand-seeded
     `CONTRACT_CONSUME` edge below, isolating what this test is actually proving.
+
+    **Re-anchored (round VI task 96, §12.31 case (ii)'s closing task).** Before this task, the
+    contract's own revert entry was found by hand-seeding `contract_id` onto the OWNER's own
+    `PullRequestDraft` — which research-50-report.md §2.3 measured as the WRONG mechanism: on a
+    real fleet nothing ever sets that field (D122), and even here it worked only because the
+    "contract's own merge" and "the owner's own repo-migration merge" were, in that old design,
+    literally the SAME row. `_seed_hoist_merge` below now seeds a REAL, SEPARATE git merge
+    carrying the `Hoisted-Contract:` trailer — this module's own established convention
+    (hand-seed the precondition state directly, per `_seed_contract_and_edges`) applied to the
+    git side — so the owner's own PR seed below no longer carries `contract_id` at all.
     """
     _ = (filter_repo, resolver, gazelle)
     transformed(fleet)
@@ -605,9 +679,15 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
         consumer=consumer,
         target_path=_TARGET_PATH,
     )
+    hoist_merge_sha = _seed_hoist_merge(monorepo, contract_id=_CONTRACT_ID, owner_repo_id=owner)
     owner_url = f"https://forge.invalid/{owner}/pull/1"
     consumer_url = f"https://forge.invalid/{consumer}/pull/1"
-    _seed_pr(db_path, run_id, repo_id=owner, url=owner_url, contract_id=_CONTRACT_ID)
+    # The owner's own repo-migration PR is a genuinely SEPARATE row from the contract's hoist
+    # merge now (`contract_id` unset) -- its own `Source-Repo:` merge, landed for real by PASS 1
+    # inside the SAME `build()` call below, is what `forge.view(owner_url)` would resolve if it
+    # were ever called; it must NOT be, since `owner` is excluded from the blast-set loop by
+    # structure (round VI task 96, `_ordered_revert_shas`'s owner-skip).
+    _seed_pr(db_path, run_id, repo_id=owner, url=owner_url)
     _seed_pr(db_path, run_id, repo_id=consumer, url=consumer_url)
 
     forge = _RealMergeForge(monorepo, {owner_url: owner, consumer_url: consumer})
@@ -628,10 +708,22 @@ def test_a_real_fleet_build_wires_a_real_hoist_rollback_end_to_end(
 
     revert_shas = _revert_commits_on_integration(monorepo, _CONTRACT_ID)
     assert len(revert_shas) == 2, (
-        "one revert per blast-set entry that was actually MERGED: the contract's own hoist "
-        f"(owner) and the consumer -- got {revert_shas}"
+        "one revert per blast-set entry that was actually MERGED: the contract's own SEEDED "
+        f"hoist merge and the consumer's real PR -- got {revert_shas}"
     )
-    assert set(forge.calls) == {owner_url, consumer_url}
+    # The owner's URL is never queried -- the contract's own anchor comes from git now, and the
+    # owner is excluded from the blast-set loop by structure, before any `forge.view()` call.
+    assert set(forge.calls) == {consumer_url}
+
+    reverted_originals = _reverted_original_shas(monorepo, _CONTRACT_ID)
+    assert hoist_merge_sha in reverted_originals, (
+        "the SEEDED hoist merge must be one of the two reverted originals"
+        f" -- got {reverted_originals!r}"
+    )
+    owner_merge_sha = _sh(monorepo, "rev-parse", f"migrate/{owner}")
+    assert owner_merge_sha not in reverted_originals, (
+        "the owner's own repo-migration merge must NEVER be reverted"
+    )
 
     consumer_transform_after = _phase_row(fleet, consumer, 2)
     assert consumer_transform_after == ("PENDING", consumer_transform_before[1]), (
@@ -662,14 +754,16 @@ def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contrac
     gazelle,  # noqa: F811
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Fix round (task-72 controller review I2): the REAL production shape — no `PullRequestDraft`
-    anywhere carries `contract_id` (D122; measured, not assumed — no call site in `src/fleet`
-    constructs one). Every other test in this module hand-seeds `contract_id` on the owner's own
-    PR record, which is what let the original landing's tests all hit the `APPLIED`/`COMMITTED`
-    success path and never exercise this one.
+    """Fix round (task-72 controller review I2): the REAL production shape — no
+    `Hoisted-Contract:` merge landed for this hand-seeded contract at all (round VI task 96
+    re-anchored the anchor query itself off that trailer; before task 96, this docstring instead
+    named the OLD mechanism's equivalent gap — no `PullRequestDraft` anywhere carries
+    `contract_id`, D122). Every OTHER test in this module now calls `_seed_hoist_merge` to land
+    that real merge; this is the one test that deliberately omits it, to exercise the "no anchor
+    at all" branch.
 
-    Without that hand-seeding, `_ordered_revert_shas`'s scan for a contract-owned draft finds
-    nothing, so `execute_hoist_rollback` raises `RollbackAnchorError`. Before this fix round, that
+    Without that seeded merge, `find_contract_hoist_merge` finds nothing, so
+    `execute_hoist_rollback` raises `RollbackAnchorError`. Before task 72's own fix round, that
     exception propagated uncaught out of `_reconcile_hoist_rollbacks` and `_build_impl`, and
     `runner.invoke(..., catch_exceptions=False)` (this suite's own `build()` helper) re-raised it
     straight out of the test — an unrelated repo (`acme-lib-ts`, given NO edge to the contract at
@@ -793,7 +887,11 @@ def test_a_second_fleet_build_invocation_is_idempotent_and_makes_no_new_commits(
 ) -> None:
     """Simulates a second `fleet build`/`fleet resume` invocation over the SAME durable run
     (identical `HoistBrokeOwner` finding still present, contract already `FAILED`, revert already
-    committed): re-running the wiring must make no new commits and must not error."""
+    committed): re-running the wiring must make no new commits and must not error.
+
+    Round VI task 96: re-anchored on a real SEEDED `Hoisted-Contract:` merge (`_seed_hoist_merge`)
+    rather than a `PullRequestDraft.contract_id` hack -- see the sibling end-to-end test's own
+    docstring for the full account of why."""
     transformed(fleet)
     owner = "acme-app-ts"
     consumer = "acme-lib-py"
@@ -808,9 +906,10 @@ def test_a_second_fleet_build_invocation_is_idempotent_and_makes_no_new_commits(
         consumer=consumer,
         target_path=_TARGET_PATH,
     )
+    _seed_hoist_merge(monorepo, contract_id=_CONTRACT_ID, owner_repo_id=owner)
     owner_url = f"https://forge.invalid/{owner}/pull/1"
     consumer_url = f"https://forge.invalid/{consumer}/pull/1"
-    _seed_pr(db_path, run_id, repo_id=owner, url=owner_url, contract_id=_CONTRACT_ID)
+    _seed_pr(db_path, run_id, repo_id=owner, url=owner_url)
     _seed_pr(db_path, run_id, repo_id=consumer, url=consumer_url)
 
     forge = _RealMergeForge(monorepo, {owner_url: owner, consumer_url: consumer})

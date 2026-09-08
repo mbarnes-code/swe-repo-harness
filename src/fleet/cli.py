@@ -296,6 +296,7 @@ from fleet.vcs.commits import (
     apply_and_commit,
     contract_rollback_shas_in_range,
     discard_task,
+    find_contract_hoist_merge,
     find_task_commit,
     patch_id,
     record_task_anchor,
@@ -4451,84 +4452,87 @@ async def _ordered_revert_shas(
     run_id: str,
     forge: Forge,
     *,
+    monorepo: Git,
+    integration_branch: str,
     contract_id: str,
     blast_set: Sequence[str],
 ) -> tuple[OrderedRevertEntry, ...]:
     """ADR-0122 Decision 4 point 1: the contract's own merge sha, plus every already-`MERGED`
-    blast-set member's merge sha, ordered reverse-chronologically by `PrStatus.merged_at` (most
-    recently merged reverted first — this is what avoids gratuitous revert conflicts between the
-    reverts themselves). A blast-set member whose PR is not yet `MERGED` contributes nothing (there
-    is nothing to revert for it).
+    blast-set member's merge sha, ordered reverse-chronologically by merge time (most recently
+    merged reverted first — this is what avoids gratuitous revert conflicts between the reverts
+    themselves). A blast-set member whose PR is not yet `MERGED` contributes nothing (there is
+    nothing to revert for it).
 
-    **Measured, this round (research-40): no `merge_commit_sha` for a MERGED PR is durably
-    persisted anywhere in this codebase** — `PullRequestDraft` (`models/tasks.py`) has no such
-    field; `_stub_reconcile_impl`'s PR-poll loop writes `merge_commit_sha` only into a `pr_merged`
-    **event**, and nothing in `src/` reads events by kind (write-only telemetry). So every entry's
-    sha and merge timestamp are resolved FRESH via `Forge.view()`, mirroring
-    `push_force_with_lease`'s own documented pattern ("D94's eventual caller always reads a real
-    tip back from `Forge.view()` first").
+    **Re-anchored (round VI task 96, §12.31 case (ii)'s closing task) off the `Hoisted-Contract:`
+    trailer `vcs.filter_repo.ingest()` stamps, never off a `PullRequestDraft`.** The FIRST landing
+    of this function (task 71) found the contract's own entry by scanning every PR record for
+    `draft.contract_id == contract_id` — but D122 (task 75, re-confirmed unchanged by research-50
+    and by this task's own re-measurement) established that no production call site ever
+    constructs a `PullRequestDraft` with `contract_id` set, so that scan always returned `None` on
+    a real fleet and the anchor always fell through to `RollbackAnchorError`. Worse: every TEST
+    that exercised the "success" branch did so by hand-seeding `contract_id` on the OWNING repo's
+    OWN `PullRequestDraft` — the SAME row `records.get((owner_repo_id, None))` would also resolve
+    — so what actually got reverted "as the contract's hoist" was the owner's WHOLE repo-migration
+    merge (`Source-Repo: <owner>`, no `Hoisted-Contract:` trailer at all), never any contract
+    content. research-50-report.md §2.3 measured this exactly and named it "a green test over a
+    WRONG mechanism, not merely an empty one." Round VI task 95 built the real merge this was
+    always supposed to find (`cli._ingest_contract_source`, `Hoisted-Contract: <contract_id>`);
+    this task finds THAT commit instead, with `vcs.commits.find_contract_hoist_merge` — git's own
+    trailer parser over `integration_branch`, never a SQLite row (§12.31(ii)'s own "not by a
+    SQLite row" text) and never a PR draft. `owning_repo_id` rides on the same commit's
+    `Source-Repo:` trailer, so the owner-repo dedup below (the ORIGINAL reason this function had
+    an "owner_repo_id" concept at all — task 71/72's fix round, still needed) costs no second
+    read, git or SQL, and is no longer contingent on the two entries happening to be the identical
+    row.
 
-    **The contract's own PR record is NOT reachable via `records.get(contract_id)` — confirmed
-    directly, not assumed.** `PullRequestDraft.repo_id`'s own docstring: "For a contract PR this is
-    the OWNING repo, so the PR stays attributable to a code-owner without a contract needing a
-    `phases` row" — `contract_id` is a SEPARATE, optional field on that SAME draft (ADR-0019).
-    `_pr_records`'s dict is keyed by `(repo_id, contract_id)` (ADR-0126/D122, task-75) — every
-    OTHER lookup in this codebase reads an ordinary repo-owned draft, keyed `(repo_id, None)`,
-    since no production call site sets `contract_id`. So the contract's own draft is found
-    by scanning every record for `draft.contract_id == contract_id`, never by a keyed lookup on
-    `contract_id` itself. **Also measured, this round: nothing in `src/fleet/` currently
-    constructs a `PullRequestDraft` with `contract_id` set** — `_emit_one_pr`'s `PrwriterInput`
-    call never passes it, so contract PRs are not yet wired into `fleet pr`'s production path at
-    all (a gap for whichever future task wires contract PR dispatch, not this one). This function's
-    scan is correct against the model's own declared contract regardless of whether anything
-    populates it yet; see this task's report for the full citation trail.
+    **Every OTHER blast-set member's merge sha is still resolved via `Forge.view()`, unchanged.**
+    Consumers' PRs are ordinary repo-owned migration PRs with no `Hoisted-Contract:` trailer of
+    their own — there is nothing on `integration` to grep for them, and `merge_commit_sha` for a
+    MERGED PR is still not durably persisted anywhere else in this codebase (research-40's
+    measurement, unaffected by this task). So every non-contract entry's sha and merge timestamp
+    are still resolved fresh via `Forge.view()`, mirroring `push_force_with_lease`'s own documented
+    pattern ("D94's eventual caller always reads a real tip back from `Forge.view()` first").
 
-    **Fix round (controller review, C1): the owning repo is deduplicated against the contract's
-    own draft, not appended a second time.** The FIRST landing of this function appended the
-    contract's own draft (found by the scan above) AND `records.get(repo_id)` for every
-    `blast_set` member unconditionally — but Decision 2's own blast-set query always includes the
-    owning repo (its `CONTRACT_IMPL` edge is exactly what the query selects on), and the owning
-    repo's PR record IS the contract's own draft (same row, same `repo_id`). Counting it twice
-    produced two `OrderedRevertEntry` rows for the IDENTICAL merge sha, and the real pass then
-    tried to revert that sha a second time after the first had already landed — a real,
-    end-to-end-reproduced defect (a partial series committed, `REVERT_HEAD` left set on the shared
-    checkout), not merely a theoretical one. See
-    `test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts_own_draft`.
+    **The owner is still skipped from the blast-set loop, for a related but now DIFFERENT reason
+    than task 71/72's original dedup.** Decision 2's own blast-set query selects on
+    `CONTRACT_IMPL`/`CONTRACT_CONSUME` edges, and the owner necessarily holds a `CONTRACT_IMPL`
+    edge to its own hoisted contract — so the owner is structurally always a blast-set member.
+    Under this re-anchor the owner's OWN repo-migration PR (if one exists) is now a GENUINELY
+    DIFFERENT commit from the contract's hoist merge (no more accidental double-counting of one
+    row). Reverting it anyway would still be wrong: JC-4 (task 95's ADR draft, D132) discloses that
+    the owner-side path-subtraction §3.3 step 1 specifies is NOT built, so the owner's own
+    migration PR carries the FULL repo content including the hoisted paths (duplicated, never
+    lost) rather than the SPEC-intended subtracted set — reverting it would undo an unrelated,
+    otherwise-legitimate repo migration and is exactly the "revert an owner's whole repo import and
+    call it a contract rollback" failure mode research-50 §3.2 (Option B) warned against. §12.31
+    case (ii)'s own text names reverting only "the contract merge" (singular) — not a blast-set
+    sweep of every member's own PR — so skipping the owner here is the minimal-blast-radius
+    reading, not a shortcut.
     """
-    records = await _pr_records(read_conn, run_id)
-    candidates: list[tuple[str | None, PullRequestDraft]] = []
-    contract_draft = next(
-        (draft for draft in records.values() if draft.contract_id == contract_id), None
+    hoist_merge = await find_contract_hoist_merge(
+        monorepo, branch=integration_branch, contract_id=contract_id
     )
-    if contract_draft is not None:
-        candidates.append((None, contract_draft))
-    # Fix round (controller review C1): the contract's OWNING repo is structurally always a
-    # blast-set member -- Decision 2's own query selects on `CONTRACT_IMPL`/`CONTRACT_CONSUME`
-    # edges, and the owner necessarily holds a `CONTRACT_IMPL` edge to its own hoisted contract.
-    # `PullRequestDraft.repo_id` for the contract's draft IS that owning repo (its own docstring),
-    # so counting it a second time via a per-repo lookup here would revert the identical merge sha
-    # twice. Skip it here rather than dedup after the fact.
-    #
-    # ADR-0126/D122 (task-75): `_pr_records` is now keyed by `(repo_id, contract_id)`, not
-    # `repo_id` alone, so a genuinely SEPARATE repo-owned draft for `owner_repo_id` (contract_id
-    # `None`) could in principle coexist beside `contract_draft` (contract_id set) without
-    # colliding. No production call site constructs such a second draft today (confirmed, same
-    # measurement as D122's own) -- wiring one is out of this task's scope (and
-    # `execute_hoist_rollback`'s own scope note above), so this `continue` still drops
-    # `owner_repo_id` unconditionally rather than distinguishing the two rows; a future
-    # contract-PR-dispatch task that adds a real owner-repo draft here must revisit this skip.
-    owner_repo_id = contract_draft.repo_id if contract_draft is not None else None
+    records = await _pr_records(read_conn, run_id)
+    candidates: list[tuple[str, PullRequestDraft]] = []
+    owner_repo_id = hoist_merge.owning_repo_id if hoist_merge is not None else None
     for repo_id in blast_set:
         if repo_id == owner_repo_id:
             continue
-        # Repo-owned lookup: `(repo_id, None)`. `repo_id` here is never `owner_repo_id` (skipped
-        # above), and no production call site sets `contract_id` on any other blast-set member's
-        # draft, so this is always the row that exists for an ordinary consumer.
+        # Repo-owned lookup: `(repo_id, None)`. No production call site sets `contract_id` on any
+        # blast-set member's draft (D122), so this is always the row that exists for an ordinary
+        # consumer.
         draft = records.get((repo_id, None))
         if draft is not None:
             candidates.append((repo_id, draft))
 
     entries: list[OrderedRevertEntry] = []
+    if hoist_merge is not None:
+        entries.append(
+            OrderedRevertEntry(
+                repo_id=None, merge_sha=hoist_merge.merge_sha, merged_at=hoist_merge.merged_at
+            )
+        )
+
     for entry_repo_id, draft in candidates:
         if draft.state is not PrState.MERGED or draft.url is None:
             # `url` is `str | None` on the model (unset before a PR is actually opened) — a
@@ -4630,8 +4634,23 @@ async def execute_hoist_rollback(
     on the same tip is Decision 4 point 4's should-never-happen race and raises
     `HoistRollbackConflictError` (Rule 11) rather than returning a settled value.
     """
+    # `monorepo_path` (the second tuple element) is unused here: `_reap_worktree_manager` below
+    # derives its own `repo_dir` identically from `settings` (M6 fix round), so this function no
+    # longer needs its own copy. Moved ABOVE `_ordered_revert_shas` (round VI task 96): that call
+    # now needs a `Git` handle itself, to find the contract's own hoist merge by trailer rather
+    # than by `PullRequestDraft` -- no behavior change for the worktree-management half below,
+    # which still reads `monorepo`/`lock_dir` no earlier than it always did.
+    monorepo, _monorepo_path, lock_dir = await _monorepo_checkout(settings)
+    branch = settings.config.run.monorepo_branch
+
     ordered = await _ordered_revert_shas(
-        read_conn, run_id, forge, contract_id=contract_id, blast_set=blast_set
+        read_conn,
+        run_id,
+        forge,
+        monorepo=monorepo,
+        integration_branch=branch,
+        contract_id=contract_id,
+        blast_set=blast_set,
     )
     ordered_shas = tuple(entry.merge_sha for entry in ordered)
     if not ordered_shas:
@@ -4646,17 +4665,13 @@ async def execute_hoist_rollback(
     contract_entry = next((entry for entry in ordered if entry.repo_id is None), None)
     if contract_entry is None:
         raise RollbackAnchorError(
-            f"contract {contract_id!r}: no MERGED PR draft resolvable for the contract's own "
-            "hoist migration -- ADR-0122 Decision 4/5's precondition is that the contract's own "
-            "hoist is already merged (Leg C2/`unhoist_contract`'s own APPLIED outcome already "
-            "assumes this), so there is no safe anchor for Decision 5's resume query"
+            f"contract {contract_id!r}: no merge on {branch!r} carries a "
+            "`Hoisted-Contract:` trailer for this contract -- ADR-0122 Decision 4/5's "
+            "precondition is that the contract's own hoist is already merged "
+            "(Leg C2/`unhoist_contract`'s own APPLIED outcome already assumes this), so there is "
+            "no safe anchor for Decision 5's resume query (round VI task 96: this anchor is git, "
+            "never a `PullRequestDraft` or a SQLite row)"
         )
-
-    # `monorepo_path` (the second tuple element) is unused here: `_reap_worktree_manager` below
-    # derives its own `repo_dir` identically from `settings` (M6 fix round), so this function no
-    # longer needs its own copy.
-    monorepo, _monorepo_path, lock_dir = await _monorepo_checkout(settings)
-    branch = settings.config.run.monorepo_branch
 
     already_reverted = await contract_rollback_shas_in_range(
         monorepo, pre_commit_sha=contract_entry.merge_sha, branch=branch, contract_id=contract_id

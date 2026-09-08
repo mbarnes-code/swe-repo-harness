@@ -7701,7 +7701,10 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5688`) — the `pre_dispatch` hook that claims a TRANSFORM coarse
+`_TransformClaimHook` (`cli.py:5703`, repointed +15 by round VI task 96's own earlier additions —
+pure insertion, confirmed by exact-line-content match against the current tree; round VI task 95's
+own repoint (`cli.py:5688`) is superseded, per this file's annotate-in-place convention, not
+deleted) — the `pre_dispatch` hook that claims a TRANSFORM coarse
 `tasks` row RUNNING, the exact "moves the task row to RUNNING" moment `vcs/commits.py`'s
 `record_task_anchor` docstring already names as `tasks.pre_commit_sha`'s intended write site
 (§3.2 step 6.5) — now reads the real `migrate/<repo>` tip via `record_task_anchor` (read from git
@@ -9248,11 +9251,11 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2568-2605`, repointed +1 again by round VI task 95's own `default_source_paths` import
-addition above it (`from fleet.vcs.filter_repo import (...)`) — pure insertion, confirmed by
-exact-line-content match against the current tree; round VI task 93's own +1 repoint is
-superseded, per this file's annotate-in-place convention, not deleted), the ONLY production
-feeder of `carry_over_committed`'s `committed` argument,
+(`cli.py:2569-2606`, repointed +1 again by round VI task 96's own `find_contract_hoist_merge`
+import addition above it (`from fleet.vcs.commits import (...)`) — pure insertion, confirmed by
+exact-line-content match against the current tree; round VI task 95's own +1 repoint
+(`cli.py:2568-2605`) is superseded, per this file's annotate-in-place convention, not deleted), the
+ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
 re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123
@@ -9279,6 +9282,71 @@ and the overstated claim above that the five real quoted bazel strings prove the
 positive path (corrected: all five are negative cases; the positive path is exercised only by
 constructed text). Full fix-round account:
 `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`'s fix-round section.
+
+**Update, 2026-09-08 (round VI task 96) — Leg D slice 2's anchor re-built (research-50's "task
+2"); the heading stays `OPEN`, one clause narrower.** `cli._ordered_revert_shas` previously found
+the contract's own revert entry by scanning `PullRequestDraft`s for `contract_id ==` the failed
+contract — a field D122 (task 75) already measured no production call site ever sets, so on a
+real fleet that scan always found nothing and `execute_hoist_rollback` always raised
+`RollbackAnchorError`, caught per contract (task 72 fix round I2) as a `HoistRollbackFailed`
+finding rather than a real revert. Worse (research-50-report.md §2.3): every EXISTING test that
+exercised the "success" branch did so by hand-seeding `contract_id` on the OWNING repo's OWN
+`PullRequestDraft` — since that draft's `repo_id` IS the owner, what those tests actually reverted
+"as the contract's hoist" was the owner's WHOLE repo-migration merge, never any contract content.
+Re-anchored on `vcs.commits.find_contract_hoist_merge` (new), which reads the
+`Hoisted-Contract: <contract_id>` trailer round VI task 95's `_ingest_contract_source` stamps on
+a REAL merge — git's own trailer parser, over the whole of `integration_branch` (unscoped, unlike
+`scoped_range`'s phase-anchored guard queries, for the same reason `vcs.filter_repo.
+already_ingested` is also unscoped: idempotency/discovery across arbitrarily many earlier
+phases). `owning_repo_id` rides on the same commit's `Source-Repo:` trailer, so the owner-skip in
+the blast-set loop (task 71/72's original dedup, whose ORIGINAL reason — the owner's PR record and
+the contract's own draft being the identical row — no longer applies) now costs no second read,
+git or SQL, and is structurally correct rather than coincidental. `execute_hoist_rollback`'s
+`_monorepo_checkout` call moved earlier in the function (now needed to search the trailer at all),
+disclosed as a minor precondition-ordering change with no real-world effect (a contract that
+reached `unhoist_contract`'s `APPLIED` outcome was, by that outcome's own precondition, already
+`HOISTED` — i.e. already ingested, i.e. the monorepo already exists).
+
+**Proof, real end to end, closing under this round's controller-scoped trigger.** §12.31(ii)'s
+literal trigger — "a hoist whose **contract wave** fails `bazel build`" — is architecturally
+unreachable today (every dispatch-side wave reader filters `node_kind='REPO'`, ADR-0119's own
+safety argument); this round's controller ruled (`.superpowers/sdd/round-VI-criteria-closure/
+progress.md`, dated entry preceding task 95's dispatch) that the closing task's proof target is
+instead the closest reachable analogue — a REPO-kind **consumer** wave failing downstream of a bad
+hoist merge — with the literal contract-wave trigger left **adjudication pending** (a dated marker
+is added at `docs/SPEC.md` §12.31 in this same commit, per Rule 14). `tests/test_build_e2e.py::
+test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_merge` drives exactly
+that: a REAL organic hoist (task 95's `CYCLE_FLEET` fixture) through a REAL consumer
+(`acme-billing`) build failure whose stderr names the hoisted package, and asserts — against real
+git objects — that the resulting rollback reverts exactly the contract's own `Hoisted-Contract:`
+merge (found two ways: `contract_rollback_shas_in_range`'s own trailer-plus-body read, and a raw
+`git log --grep`), never the owner's own `migrate/acme-identity` merge (a different sha, on a
+different branch, itself untouched as a commit object), and that the revert commit's own diff
+touches only paths under the hoisted contract's target path. Also re-proven at the unit level with
+9 rewritten/added real-git tests in `tests/test_hoist_rollback_git.py` (a new `_merge_hoist` helper
+constructs a real trailer-carrying merge in place of the old hand-seeded-PR-draft recipe) and 2
+existing real end-to-end tests in `tests/test_hoist_rollback_wiring.py` adapted the same way (a new
+`_seed_hoist_merge` helper, matching that module's own established hand-seed-the-precondition
+convention). **Mutation-tested (CLAUDE.md Rule 12): the whole battery (23 tests total) reproducibly
+REDDENS against the pre-task-96 code** (`AttributeError: 'Git' object has no attribute
+'commit_time'` / `RollbackAnchorError` surfacing where a revert was expected) **and GREENS against
+the fix**, verified via a byte-diff against a pre-mutation backup (not `HEAD`, not `git stash`, per
+this round's concurrent-lane constraints) both before mutating and after restoring.
+
+**What remains open — case (ii) is closer, not closed, and the criterion as a whole stays `OPEN`.**
+(a) The literal contract-wave trigger is **adjudication pending**, not resolved — a future round
+must decide whether contract-wave dispatch should ever be built (SPEC.md's own dated marker, this
+commit). (b) §12.31(ii)'s own "a re-sequenced SCC that falls through to `EDGE_BREAK` or
+`ATOMIC_WAVE`" clause and its "`phases.attempts` unchanged for every SCC member" clause remain
+untested (research-50-report.md §5.3's finding, re-confirmed unchanged at this task's own base:
+`tests/test_graph_cycles.py` still has zero `FAILED` occurrences) — the mechanism appears to exist
+by construction (`graph/cycles.py`'s hoist-candidate predicate excludes any non-`EXTRACTABLE`
+contract) but this task did not drive a re-sequence to prove it, and was not sized to. (c) D132
+(task 95's disclosed owner-side-duplication defect) is unaffected by this task and stays `OPEN`.
+Case (i) (Leg A) and the rollback-TARGET mechanism of case (ii) are now both genuinely closed;
+what is left is the trigger adjudication and the re-sequence clause. `docs/CRITERIA_PLAN.md`'s §31
+entry is updated in the same commit with the precise breakdown. Full account:
+`.superpowers/sdd/round-VI-criteria-closure/task-96-report.md`.
 
 ## D112 — FIXED, LANDED (round VI task 87 merge, `26b065b`). `BuildUnit.test_srcs` is never
 populated by any production ecosystem adapter — no adapter can ever emit a real nonzero test
@@ -10807,10 +10875,10 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14023`, repointed +248 by round VI task 95's own additions
+`_run_one_revalidation_task` (`cli.py:14038`, repointed +15 by round VI task 96's own additions
 earlier in the file — pure insertion, confirmed by exact-line-content match against the current
-tree; round VI task 93's own repoint is superseded, per this file's annotate-in-place convention,
-not deleted) re-runs `VerifyPipelineWorker` directly against the
+tree; round VI task 95's own repoint (`cli.py:14023`) is superseded, per this file's
+annotate-in-place convention, not deleted) re-runs `VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
 there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
 SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
