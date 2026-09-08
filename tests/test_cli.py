@@ -9028,6 +9028,351 @@ async def test_detect_transform_stub_triggers_keys_on_the_edges_own_coordinate(
     ), "a multi-coordinate provider must yield one trigger per edge-named coordinate"
 
 
+# --------------------------------------------------------------------------------------
+# §12.14 / §3.5 item 4 (D131, round VI task 93) — transitive stub-stacking: (M1) the inheritance
+# branch in `detect_stub_triggers`/`_detect_transform_stub_triggers`, and (M2) `_pr_impl`'s
+# admission-gate widening for a `DEGRADED` dependency. research-49 measured the pre-fix defect by
+# reading the code: a second-layer dependent `D` of a `DEGRADED` (not RHI) direct provider `C`
+# carried no `stubs` row, so its persisted `VerificationReport.equivalence` read `FULL` — a false
+# claim over a chain that ran through a stub — and its PR was `HELD` forever (`C`'s own draft
+# never reaches `MERGED`). These tests reproduce that defect through the REAL code paths
+# (`_detect_transform_stub_triggers`'s real SQL query, `_create_stub_records`'s real writer,
+# `VerificationReport`'s own real `_derive_equivalence`, and `_pr_candidates`/`_pr_impl`'s real
+# admission gate) rather than asserting against hand-built model instances.
+# --------------------------------------------------------------------------------------
+
+
+async def _seed_transitive_stub_fixture(db_path: Path, *, now: datetime) -> None:
+    """Three real repos over a REAL two-hop chain: `acme-provider` (`P`, forced RHI at TRANSFORM
+    via a raw write — the same shape `_seed_stub_trigger_fixture` above already uses, since
+    `propagate_blocked` has no stub-awareness and cannot produce this state standalone),
+    `acme-consumer` (`C`, a direct dependent of `P` over a REAL edge), and
+    `acme-second-consumer` (`D`, a direct dependent of `C` over a SECOND real edge). `D` has NO
+    edge to `P` at all — that absence is what makes `D`'s own inheritance genuinely second-layer
+    rather than a disguised direct case.
+    """
+    import aiosqlite
+
+    from fleet.models.enums import EdgeKind, NodeKind
+    from fleet.models.graph import edge_key_for
+    from fleet.state.db import connect_ro, initialize_database
+    from fleet.state.repository import EdgeRow, SqliteStateRepository
+
+    await initialize_database(db_path)
+    async with StateWriter(db_path, owner="test-d131-transitive-stub-fixture") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                RUN_ID, started_at=now, config_sha256="a" * 64, harness_version="0.1.0"
+            )
+            for repo_id in ("acme-provider", "acme-consumer", "acme-second-consumer"):
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}.git", now=now
+                )
+            await repo.upsert_phase(
+                RUN_ID, "acme-provider", Phase.TRANSFORM, now=now, max_attempts=3
+            )
+
+            provider_edge = EdgeRow(
+                edge_key=edge_key_for(
+                    src_kind=NodeKind.REPO,
+                    src_id="acme-consumer",
+                    dst_kind=NodeKind.REPO,
+                    dst_ref="maven:com.acme:provider",
+                    kind=EdgeKind.DECLARED_DEP,
+                    evidence_path="pom.xml",
+                    evidence_line=1,
+                ),
+                run_id=RUN_ID,
+                src_id="acme-consumer",
+                dst_id="acme-provider",
+                dst_coord_key="maven:com.acme:provider",
+                kind=EdgeKind.DECLARED_DEP,
+                base_confidence=1.0,
+                confidence=0.9,
+                evidence_path="pom.xml",
+                evidence_line=1,
+                detected_at=now.isoformat(),
+            )
+            consumer_edge = EdgeRow(
+                edge_key=edge_key_for(
+                    src_kind=NodeKind.REPO,
+                    src_id="acme-second-consumer",
+                    dst_kind=NodeKind.REPO,
+                    dst_ref="maven:com.acme:consumer",
+                    kind=EdgeKind.DECLARED_DEP,
+                    evidence_path="pom.xml",
+                    evidence_line=1,
+                ),
+                run_id=RUN_ID,
+                src_id="acme-second-consumer",
+                dst_id="acme-consumer",
+                dst_coord_key="maven:com.acme:consumer",
+                kind=EdgeKind.DECLARED_DEP,
+                base_confidence=1.0,
+                confidence=0.9,
+                evidence_path="pom.xml",
+                evidence_line=1,
+                detected_at=now.isoformat(),
+            )
+            await repo.insert_edges([provider_edge, consumer_edge])
+
+            async def unit(conn: aiosqlite.Connection) -> None:
+                await conn.execute(
+                    "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                    "  owner_repo_id, first_seen_at) "
+                    "VALUES ('maven:com.acme:provider', 'maven', 'com.acme', 'provider', "
+                    "  '2.0.0', 'acme-provider', ?)",
+                    (now.isoformat(),),
+                )
+                await conn.execute(
+                    "INSERT INTO coordinates (coord_key, ecosystem, grp, name, version, "
+                    "  owner_repo_id, first_seen_at) "
+                    "VALUES ('maven:com.acme:consumer', 'maven', 'com.acme', 'consumer', "
+                    "  '1.0.0', 'acme-consumer', ?)",
+                    (now.isoformat(),),
+                )
+                await conn.execute(
+                    "UPDATE phases SET status = 'REQUIRES_HUMAN_INTERVENTION' "
+                    " WHERE run_id = ? AND repo_id = 'acme-provider' AND phase = ?",
+                    (RUN_ID, int(Phase.TRANSFORM)),
+                )
+
+            await writer.submit(unit)
+        finally:
+            await read_conn.close()
+
+
+async def test_detect_transform_stub_triggers_inherits_for_a_real_second_layer_dependent(
+    tmp_path: Path,
+) -> None:
+    """(M1), through the REAL SQL query and the REAL writer, over the REAL two-hop chain
+    `_seed_transitive_stub_fixture` builds: `acme-second-consumer` (`D`) has no edge to
+    `acme-provider` (`P`) at all — its ONLY edge is to `acme-consumer` (`C`), which is not
+    itself RHI. Before `C`'s own stub exists, `D` gets NOTHING (the pre-fix defect,
+    reproduced): `orchestrator.stubs.detect_stub_triggers`'s pre-existing direct-RHI branch
+    finds no RHI provider for `D` at all. Once `C`'s real `stubs` row is created (mirroring the
+    same wave-boundary induction the real wave loop performs), `D`'s OWN wave detection pass
+    inherits a trigger naming `P`/`P`'s own `coord_key` — never `C`, and never `D`'s own edge
+    coordinate (`maven:com.acme:consumer`)."""
+    from fleet.cli import _create_stub_records, _detect_transform_stub_triggers
+    from fleet.orchestrator.stubs import StubTrigger
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 8, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "base" / "fleet.db"
+    await _seed_transitive_stub_fixture(db_path, now=now)
+
+    async with StateWriter(db_path, owner="test-d131-detect") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            # `D`'s own wave detection pass, BEFORE `C` carries any stub — the pre-fix shape: no
+            # RHI provider for `D`, and (pre-M1) no inheritance mechanism either. Both before and
+            # after this fix, this call alone finds nothing for `D` — `C` is not RHI and does not
+            # YET carry an ACTIVE stub, so there is nothing to inherit.
+            too_early = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-second-consumer"]
+            )
+            assert too_early == (), (
+                "D must find nothing before C's own stub exists, fix or no fix"
+            )
+
+            # `C`'s own wave detection + creation — unmodified code, proven by the tests above.
+            c_triggers = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-consumer"]
+            )
+            assert c_triggers == (
+                StubTrigger(
+                    consumer_repo_id="acme-consumer",
+                    provider_repo_id="acme-provider",
+                    coord_key="maven:com.acme:provider",
+                ),
+            ), c_triggers
+            await _create_stub_records(
+                read_conn,
+                writer,
+                run_id=RUN_ID,
+                triggers=c_triggers,
+                max_revalidation_rounds=2,
+                now=now,
+            )
+
+            # THE assertion this task exists to prove: `D`'s own LATER wave now inherits a
+            # trigger off `C`'s just-created row — copied provenance, `P` named directly.
+            d_triggers = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-second-consumer"]
+            )
+        finally:
+            await read_conn.close()
+
+    assert d_triggers == (
+        StubTrigger(
+            consumer_repo_id="acme-second-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+    ), (
+        "D must inherit a trigger naming the ORIGINAL provider P (never the intermediate C, "
+        f"and never D's own edge coordinate) — got {d_triggers!r}"
+    )
+
+
+async def test_pr_impl_admits_a_second_layer_dependent_and_reports_stub_limited_not_full(
+    tmp_path: Path,
+) -> None:
+    """(M2) plus the consequence M1 sets up for it: BEFORE this task's fix, `D` (§12.14's
+    second-layer dependent) has no `stubs` row (M1 missing) and `_pr_impl`'s admission gate has
+    no `DEGRADED`-satisfies-the-gate case (M2 missing) — `D` would read `equivalence == 'FULL'`
+    (false) and stay `HELD` on `C` forever, since `C`'s own draft PR never reaches `MERGED`.
+    This test drives the REAL `_detect_transform_stub_triggers` / `_create_stub_records` (M1) so
+    `D` carries its own real, inherited `ACTIVE` `stubs` row, then drives the REAL
+    `_pr_candidates` / `_pr_impl(dry_run=True)` (M2) — proving `D` is admitted (not held) and its
+    RE-DERIVED report (`_report_with_stubs`, unmodified) reads `STUB_LIMITED`, never `FULL`."""
+    import aiosqlite
+
+    from fleet.cli import (
+        GlobalOptions,
+        _create_stub_records,
+        _detect_transform_stub_triggers,
+        _pr_candidates,
+        _pr_impl,
+        _record_verification,
+    )
+    from fleet.settings import FleetSettings
+    from fleet.state.db import connect_ro
+
+    now = datetime(2026, 9, 8, tzinfo=UTC)
+    write_config(tmp_path)
+    settings = FleetSettings.load(tmp_path / "config")
+
+    db_path = tmp_path / "base" / "fleet.db"
+    await _seed_transitive_stub_fixture(db_path, now=now)
+
+    async with StateWriter(db_path, owner="test-d131-pr-gate") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            c_triggers = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-consumer"]
+            )
+            await _create_stub_records(
+                read_conn,
+                writer,
+                run_id=RUN_ID,
+                triggers=c_triggers,
+                max_revalidation_rounds=2,
+                now=now,
+            )
+            d_triggers = await _detect_transform_stub_triggers(
+                read_conn, settings, RUN_ID, ["acme-second-consumer"]
+            )
+            await _create_stub_records(
+                read_conn,
+                writer,
+                run_id=RUN_ID,
+                triggers=d_triggers,
+                max_revalidation_rounds=2,
+                now=now,
+            )
+
+            # `_pr_candidates`' own required shape: a VERIFY `phases` row, `wave_members`, and a
+            # persisted `VerificationReport` finding for every candidate repo. `C`'s VERIFY status
+            # is DEGRADED — exactly the durable fact `state.repository.stub_degrade_transform`
+            # (unmodified, already proven in `tests/test_repository.py`) would have written given
+            # C's own real stub row above; `D`'s own VERIFY status is left SUCCEEDED here
+            # DELIBERATELY, to isolate this test to the gate/report consequence of D's INHERITED
+            # stub row alone, rather than re-proving `stub_degrade_transform`'s own (unmodified)
+            # per-dispatched-member sweep a second time.
+            async def unit(conn: aiosqlite.Connection) -> None:
+                for wave_index in (1, 2):
+                    await conn.execute(
+                        "INSERT INTO waves (run_id, wave_index, computed_at) VALUES (?, ?, ?)",
+                        (RUN_ID, wave_index, now.isoformat()),
+                    )
+                for repo_id, wave_index, status in (
+                    ("acme-consumer", 1, "DEGRADED"),
+                    ("acme-second-consumer", 2, "SUCCEEDED"),
+                ):
+                    await conn.execute(
+                        "INSERT INTO phases (run_id, repo_id, phase, status, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?)",
+                        (RUN_ID, repo_id, int(Phase.VERIFY), status, now.isoformat()),
+                    )
+                    await conn.execute(
+                        "INSERT INTO wave_members (run_id, wave_index, node_kind, node_id) "
+                        "VALUES (?, ?, 'REPO', ?)",
+                        (RUN_ID, wave_index, repo_id),
+                    )
+                    await conn.execute(
+                        "UPDATE repos SET head_sha = ? WHERE repo_id = ?",
+                        ("a" * 40, repo_id),
+                    )
+
+            await writer.submit(unit)
+
+            # The REAL rdepverify inputs a VERIFY worker would have been handed for each repo —
+            # `_active_stubs_by_consumer` is unmodified, pre-existing code (confirmed by
+            # research-49 to have no first-layer filter); its OWN real output is what makes D's
+            # persisted report genuinely STUB_LIMITED rather than an asserted one.
+            from fleet.cli import _active_stubs_by_consumer
+
+            per_consumer = await _active_stubs_by_consumer(read_conn, RUN_ID)
+            for repo_id in ("acme-consumer", "acme-second-consumer"):
+                stubs_for_repo = per_consumer.get(repo_id, {})
+                report = VerificationReport(
+                    run_id=uuid.UUID(RUN_ID),
+                    repo_id=repo_id,
+                    build_ok=True,
+                    test_ok=True,
+                    verdict="PASS",
+                    verified_against_stubs=sorted(stubs_for_repo),
+                    stub_fidelity=stubs_for_repo,
+                )
+                await _record_verification(
+                    writer, RUN_ID, repo_id, report, seed="", now=now
+                )
+        finally:
+            await read_conn.close()
+
+    read_conn = await connect_ro(db_path)
+    try:
+        candidates, unverified = await _pr_candidates(read_conn, settings, RUN_ID, None, None)
+    finally:
+        await read_conn.close()
+    assert unverified == (), unverified
+    by_repo = {c.repo_id: c for c in candidates}
+    d_candidate = by_repo["acme-second-consumer"]
+    assert d_candidate.report.equivalence is Equivalence.STUB_LIMITED, (
+        f"D's persisted VerificationReport must read STUB_LIMITED (it ran through C's "
+        f"stub-degraded build), not {d_candidate.report.equivalence!r} — a FULL claim here is "
+        "the exact false-equivalence defect this task closes"
+    )
+    assert d_candidate.report.verified_against_stubs == ["maven:com.acme:provider"], (
+        d_candidate.report.verified_against_stubs
+    )
+
+    result = await _pr_impl(
+        GlobalOptions(),
+        settings,
+        db_path,
+        run_id=RUN_ID,
+        wave=None,
+        only=None,
+        ready=False,
+        dry_run=True,
+    )
+    held = cast(dict[str, list[str]], result["held"])
+    eligible = cast(list[str], result["eligible"])
+    assert "acme-second-consumer" not in held, (
+        f"D must be admitted because its direct provider C is DEGRADED — held={held!r}"
+    )
+    assert "acme-second-consumer" in eligible, eligible
+
+
 async def test_create_stub_records_inserts_a_valid_row_for_both_fidelities(
     tmp_path: Path,
 ) -> None:

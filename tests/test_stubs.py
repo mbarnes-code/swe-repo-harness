@@ -43,6 +43,7 @@ from fleet.orchestrator.reentry import BlockerState
 from fleet.orchestrator.stubs import (
     AbandonReason,
     HeldStub,
+    InheritedStubFact,
     InvalidStubTransition,
     ProviderFacts,
     RevalidationPolicy,
@@ -616,6 +617,96 @@ def test_detect_stub_triggers_ignores_a_provider_absent_from_provider_states() -
     `stub_permits_removal`'s own fail-closed default for an unresolvable name."""
     edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
     assert detect_stub_triggers(["acme-consumer"], edges, {}) == ()
+
+
+# --------------------------------------------------------------------------------------
+# §12.14 / §3.5 item 4 (D131, round VI task 93) — (M1) the INHERITANCE branch: a second-layer
+# dependent `D` whose direct provider `C` is not itself RHI, but IS itself an ACTIVE stub
+# consumer, inherits a trigger copied off C's own existing row (never off the edge, never
+# naming C).
+# --------------------------------------------------------------------------------------
+
+
+def test_detect_stub_triggers_inherits_off_a_direct_providers_own_active_stub() -> None:
+    """The positive case: `D` is dispatched this wave with an edge to `C` (NOT RHI); `C` itself
+    carries one ACTIVE, `PUBLISHED_ARTIFACT` stub naming original provider `P`. `D`'s inherited
+    trigger must name `P`/`P`'s own `coord_key` — copied off the existing row — never `C` and
+    never the edge's own `coord_key` (`maven:com.acme:consumer`, deliberately different from the
+    inherited one so a caller that fell back to the edge would be caught red-handed here)."""
+    edges = [("acme-consumer", "acme-second-consumer", "maven:com.acme:consumer")]
+    states = {"acme-consumer": BlockerState(phase_statuses=frozenset({RepoStatus.DEGRADED}))}
+    facts = {
+        "acme-consumer": (
+            InheritedStubFact(
+                provider_repo_id="acme-provider",
+                coord_key="maven:com.acme:provider",
+                fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+            ),
+        )
+    }
+    found = detect_stub_triggers(["acme-second-consumer"], edges, states, facts)
+    assert found == (
+        StubTrigger(
+            consumer_repo_id="acme-second-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+    )
+
+
+def test_detect_stub_triggers_inheritance_excludes_empty_failing() -> None:
+    """Discriminating mutation (§3.5 item 2's stated exception): the SAME fixture, but `C`'s own
+    stub is `EMPTY_FAILING` — an empty target fails `C`'s own BUILD, so there is nothing live to
+    inherit past it, and `D` gets no trigger at all (old-passes/new-fails against the test
+    above: only `fidelity` changed)."""
+    edges = [("acme-consumer", "acme-second-consumer", "maven:com.acme:consumer")]
+    states = {"acme-consumer": BlockerState(phase_statuses=frozenset({RepoStatus.DEGRADED}))}
+    facts = {
+        "acme-consumer": (
+            InheritedStubFact(
+                provider_repo_id="acme-provider",
+                coord_key="maven:com.acme:provider",
+                fidelity=StubFidelity.EMPTY_FAILING,
+            ),
+        )
+    }
+    assert detect_stub_triggers(["acme-second-consumer"], edges, states, facts) == ()
+
+
+def test_detect_stub_triggers_inheritance_never_fires_ahead_of_the_direct_rhi_branch() -> None:
+    """Discriminating mutation: a direct RHI provider takes precedence over an (impossible in
+    practice, but defensively checked) inherited fact keyed on the SAME provider id — proves the
+    direct branch's own `continue` short-circuits before the inheritance loop, so a provider that
+    is BOTH recorded RHI and (spuriously) carries an inherited fact never double-emits."""
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
+    states = {"acme-provider": _rhi_state()}
+    facts = {
+        "acme-provider": (
+            InheritedStubFact(
+                provider_repo_id="acme-other-provider",
+                coord_key="maven:com.acme:other",
+                fidelity=StubFidelity.PUBLISHED_ARTIFACT,
+            ),
+        )
+    }
+    found = detect_stub_triggers(["acme-consumer"], edges, states, facts)
+    assert found == (
+        StubTrigger(
+            consumer_repo_id="acme-consumer",
+            provider_repo_id="acme-provider",
+            coord_key="maven:com.acme:provider",
+        ),
+    ), "the direct RHI branch must win outright, never both branches at once"
+
+
+def test_detect_stub_triggers_inheritance_defaults_to_empty_and_changes_nothing() -> None:
+    """Backward compatibility: every pre-existing caller (and every test above this section)
+    passes no fourth argument at all — `None` must behave exactly like an empty mapping, so this
+    is the SAME fixture as `test_detect_stub_triggers_does_not_fire_when_the_provider_is_not_rhi`
+    with the parameter omitted entirely."""
+    edges = [("acme-provider", "acme-consumer", "maven:com.acme:provider")]
+    states = {"acme-provider": BlockerState(phase_statuses=frozenset({RepoStatus.SUCCEEDED}))}
+    assert detect_stub_triggers(["acme-consumer"], edges, states) == ()
 
 
 def test_build_stub_record_published_artifact() -> None:

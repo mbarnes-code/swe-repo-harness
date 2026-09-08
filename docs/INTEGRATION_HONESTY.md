@@ -9236,8 +9236,9 @@ whatever Leg C1 would additionally need. Full details:
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2566-2603`, repointed +1 by round VI task 83's D91 fix adding one import above it — pure
-insertion, confirmed by exact-line-content match against the current tree), the ONLY production
+(`cli.py:2567-2604`, repointed +1 again by round VI task 93's own import addition above it — pure
+insertion, confirmed by exact-line-content match against the current tree; round VI task 83's own
++1 repoint is superseded, per this file's annotate-in-place convention, not deleted), the ONLY production
 feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
@@ -10779,7 +10780,9 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:13733`) re-runs `VerifyPipelineWorker` directly against the
+`_run_one_revalidation_task` (`cli.py:13775`, repointed by round VI task 93's own additions
+earlier in the file — pure insertion, confirmed by exact-line-content match) re-runs
+`VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
 there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
 SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
@@ -10795,3 +10798,153 @@ name (2)). `docs/CRITERIA_PLAN.md`'s own §37 entry is the more complete, indepe
 source for this item; §12.37 stays PARTLY ADDRESSED, not DONE, on that account. See this task's
 own report (`.superpowers/sdd/round-VI-criteria-closure/task-89-report.md`) for the full
 disclosure of the brief-vs-CRITERIA_PLAN discrepancy this task found and did not paper over.
+
+## D131 — FIXED, LANDED (round VI task 93, this task's own commits). §12.14's transitive
+stub-stacking mechanism (§3.5 item 4's "whole descendant set") was undesigned, and a live defect
+followed from the gap: a second-layer dependent of a `DEGRADED` provider carried no `stubs` row,
+so its persisted `VerificationReport.equivalence` read `FULL` (false — the chain ran through a
+stub) and its PR was `HELD` forever.
+
+**Found by research-49 (this round's research subagent), confirmed fresh by task 93 against the
+tree at `81f27e3`.** research-49 re-sized this item from "undesigned, no precedent" (the framing
+`docs/CRITERIA_PLAN.md`'s §14 entry carried since round VI task 69) to MEDIUM: three of the five
+behaviours SPEC §3.5 item 4 requires already fell out of existing, unmodified code —
+`cli._active_stubs_by_consumer` has no first-layer filter (an inherited row produces
+`STUB_LIMITED` with zero new code once it exists), `state.repository.SqliteStateRepository.
+stub_degrade_transform` runs over every dispatched member (a no-op unless that repo carries a
+qualifying row), and `cli._fire_t1_for_provider` already supersedes every consumer's row naming a
+fixed provider in one transaction (inherited rows carry `provider_repo_id = P`, so they are swept
+by the same call). No closure algorithm is needed either: `orchestrator.stubs.detect_stub_
+triggers` already runs once per wave, over that wave's own dispatched members, and `stubs` rows
+are durable — a per-layer, direct-providers-only check computes the full transitive descendant
+set by induction across wave boundaries, the same shape Bazel's `IncompatibleTargetChecker` uses
+(direct-deps only, transitivity emergent from recursive evaluation) rather than a computed
+`rdeps` closure.
+
+**Verified free before allocating**: form-agnostic union sweep (`\bD[0-9]+\b`) of
+`docs/INTEGRATION_HONESTY.md`, `docs/SPEC.md`, `docs/PROGRESS.md`, `docs/CRITERIA_PLAN.md`, and
+`docs/DECISIONS.md` found `D130` as the highest number appearing anywhere; `D131` was unclaimed
+in every file. (`D127`/`D128` do not appear in any of the five files at all — not reused, per
+CLAUDE.md's Central Number Allocation rule: "take the next free number as one past the measured
+maximum, never one past a range read in a document.")
+
+**The gap, as measured.** `orchestrator.stubs.detect_stub_triggers` (`src/fleet/orchestrator/
+stubs.py`) fired only where the direct provider of a dispatched consumer carried
+`RepoStatus.REQUIRES_HUMAN_INTERVENTION` in its `phase_statuses`. A second-layer dependent `D` of
+a consumer `C` that itself carries an `ACTIVE` stub (because `C`'s own direct provider `P` is
+RHI) has a direct provider (`C`) that is merely `DEGRADED`, not RHI — so `D` got no trigger, no
+`stubs` row, and transformed/built/verified as an ordinary repo. Confirmed with a real, two-hop
+fixture through the actual CLI functions (`tests/test_cli.py::
+test_detect_transform_stub_triggers_inherits_for_a_real_second_layer_dependent`'s own
+`too_early` assertion reproduces exactly this: `D`'s wave detection pass, run before `C`'s own
+stub row exists, returns `()` regardless of the fix — the defect is that it ALSO returned `()`
+after `C`'s row existed, pre-fix, which the same test's post-`C`-creation assertion catches).
+Separately, `_pr_impl`'s admission gate (`src/fleet/cli.py`, inside `_pr_impl`'s per-unit loop)
+held any dependency whose own `PullRequestDraft` was not `state == 'MERGED'`, with no exception
+for `DEGRADED` — so even had `D` carried a stub row, its PR would stay `HELD` forever once its
+one and only "unmet dependency" (`C`) never reaches `MERGED` (a `DEGRADED` repo's PR is
+deliberately never promoted past `DRAFTED`/`HELD`, by design — §13 row 45).
+
+**Fixed (round VI task 93, this task's own commits).** Two changes, exactly as research-49 scoped
+them (M1 then M2), landed together — deliberately not independently safe in either order alone,
+see below:
+
+**(M1) `orchestrator.stubs.detect_stub_triggers`** gained a new `active_stub_facts_by_provider`
+parameter (`Mapping[str, Sequence[InheritedStubFact]] | None`, defaulting to `None`/empty — every
+pre-existing caller and test is unaffected) and a second, disjoint branch: when a dispatched
+consumer's direct provider is NOT itself RHI, the function now checks whether that provider is
+itself named as a consumer in `active_stub_facts_by_provider` (i.e. itself an active stub
+consumer). If so, for each such fact (excluding `EMPTY_FAILING`, per §3.5 item 2's stated
+exception — an empty target fails the intermediate's own BUILD, so there is nothing live to
+inherit past it), it emits a `StubTrigger` whose `provider_repo_id`/`coord_key` are copied
+VERBATIM off that existing fact — never off the edge, never naming the intermediate — keeping
+provenance on the original abandoned repo `r`, exactly as SPEC's own text requires ("provenance
+stays on `r`, never on the intermediate"). `cli._detect_transform_stub_triggers` gained a
+sibling query, `cli._active_stub_facts_by_provider` (keyed by CONSUMER, carrying
+`provider_repo_id` — the one field the pre-existing `_active_stubs_by_consumer` projection drops,
+since it only needs `stub_fidelity` for its own caller), and passes its result through. Because
+this runs once per wave over durable `stubs` rows, a trigger created for one repo becomes, in a
+LATER wave, an entry the SAME query reads for that repo's own dependents — per-layer inheritance
+computes the whole transitive descendant set by induction across wave boundaries with no new
+closure algorithm, exactly as research-49 predicted.
+
+**(M2) `_pr_impl`'s admission gate** (`src/fleet/cli.py`, the `blocking` set-comprehension inside
+the per-unit loop) now also treats a dependency whose OWN `RepoStatus` is `DEGRADED` as
+satisfying the gate unconditionally — `status_by_repo.get(dep) is not RepoStatus.DEGRADED` is a
+new conjunct alongside the pre-existing `MERGED`-PR check — matching SPEC §12.14's third sentence
+verbatim ("a `DEGRADED` provider satisfies the dependent-admission gate, the one case besides
+`SUCCEEDED` with a `MERGED` PR that does"). Scoped to exactly `RepoStatus.DEGRADED`, never "any
+un-merged provider" (research-49's own named risk for this half): a repo that is merely
+`PENDING`/`BLOCKED`/anything else still blocks normally.
+
+**Why M1 and M2 had to land together, not independently.** M2 alone (no M1) would let a
+second-layer dependent's draft PR OPEN with a false `FULL` equivalence claim still on it — the
+exact defect this D-number exists to close, just relocated from "PR held forever" to "PR shipped
+with a lie". §12.38's `--ready` refusal (`cli._refuse_unresolved_stubs`) does NOT independently
+catch this: it reads every `ACTIVE`/`SUPERSEDED` `stubs` row keyed on `consumer_repo_id` directly,
+so it refuses `D` only because M1 gives `D` its own inherited row — without M1, `D` has no stub
+row and `--ready` would find nothing to refuse. M1 alone (no M2) would correctly give `D` a stub
+row and a correct `STUB_LIMITED` report, but `D`'s PR would still be held forever by the
+unwidened gate — the mechanism would compute the right answer and never let anyone see it. Task
+93 verified `--ready`'s continued refusal is a genuine, unaffected consequence of M1 rather than
+independently re-derived: `_refuse_unresolved_stubs`'s query is untouched by this fix, and its
+`WHERE state IN ('ACTIVE','SUPERSEDED')` predicate matches `D`'s own inherited row identically to
+`C`'s directly-created one.
+
+**Regression proof (old-fails/new-passes, per CLAUDE.md Rule 12).** Two new real, through-the-CLI
+fixtures, both added in `tests/test_cli.py` (a real two-hop chain — `acme-provider` (RHI) →
+`acme-consumer` (a real `ACTIVE` stub consumer) → `acme-second-consumer` (the second-layer
+dependent), driven through the actual `_detect_transform_stub_triggers`/`_create_stub_records`/
+`_pr_candidates`/`_pr_impl` functions and real SQLite, never a hand-built `StubTrigger`/
+`VerificationReport` asserted against itself):
+- `test_detect_transform_stub_triggers_inherits_for_a_real_second_layer_dependent` — proves (M1):
+  `acme-second-consumer`'s own wave detection pass, run AFTER `acme-consumer`'s real stub row is
+  created, returns a `StubTrigger` naming `acme-provider`/`maven:com.acme:provider` (the ORIGINAL
+  provider's own coordinate — deliberately different from `acme-second-consumer`'s own edge
+  coordinate, `maven:com.acme:consumer`, so a caller that fell back to the edge would be caught
+  red-handed).
+- `test_pr_impl_admits_a_second_layer_dependent_and_reports_stub_limited_not_full` — proves (M2)
+  plus the consequence M1 sets up for it: with `acme-consumer`'s VERIFY status `DEGRADED` and
+  `acme-second-consumer`'s own inherited stub row in place, `_pr_candidates`' persisted
+  `VerificationReport.equivalence` for `acme-second-consumer` reads `STUB_LIMITED` (via
+  `VerificationReport`'s own real `_derive_equivalence`, fed `_active_stubs_by_consumer`'s own
+  real output — never asserted directly), and `_pr_impl(dry_run=True)` reports it `eligible`, not
+  `held`.
+- Both were confirmed genuinely discriminating by the backup-file method (never `git stash`, per
+  CLAUDE.md): `src/fleet/orchestrator/stubs.py` and `src/fleet/cli.py` were reverted to `HEAD`
+  (`81f27e3`, this task's own base — no other commit had landed in this worktree) with the new
+  test files left in place, and both new tests failed pre-fix — the first with an empty tuple
+  where the inherited `StubTrigger` is expected, the second with `acme-second-consumer` in
+  `held` (blocked by `acme-consumer`, whose PR was never `MERGED`) and its persisted equivalence
+  reading `Equivalence.FULL`. Restoring the fix made both pass. Four pure-function tests were
+  also added to `tests/test_stubs.py` covering `detect_stub_triggers`'s new branch directly
+  (positive inheritance with provenance copied off the existing fact; `EMPTY_FAILING` exclusion;
+  the direct-RHI branch's own precedence over a spurious inherited fact on the same provider id;
+  and the new parameter's `None`-default backward compatibility) — all pass, and the full
+  `tests/test_stubs.py`/`tests/test_cli.py`/`tests/test_pr_e2e.py` suites (275 tests) pass
+  together with no regression.
+
+**Open design questions research-49 raised, and their disposition here.** (1) "Revalidates the
+stack in topological order" (§3.5 item 4's last clause) — `_fire_t1_for_provider` still mints
+revalidation plans in `sorted(by_consumer)` order, unchanged by this fix; this task did not touch
+revalidation ordering and the question remains genuinely open (not adjudicated here — out of
+this fix's scope, which is trigger DETECTION and admission, not revalidation SEQUENCING). (2) The
+`EMPTY_FAILING` exception's observable (dependents stay `BLOCKED`, no repo becomes `DEGRADED`) —
+addressed by this fix's own exclusion in (M1); the first-layer half (an `EMPTY_FAILING`-provider
+consumer failing at BUILD, which is a different route to `BLOCKED`) was pre-existing and
+untouched. (3) Naming the responsible root in operator output (Bazel issue #18707's failure mode)
+— NOT addressed by this task: the inherited row already names `P` in `provider_repo_id` (the
+data is there, per M1's own provenance-copy guarantee), but rendering it distinctly in `fleet
+status`/the PR body (so an operator sees "blocked transitively via C" rather than a bare stub
+banner) was out of this task's scope and is not claimed here. (4) "Blast radius of (M2)" — closed
+by this task's own scoping (`RepoStatus.DEGRADED` only, never "any un-merged provider") and by
+the `--ready`-refusal cross-check above.
+
+**Does NOT close.** research-49's open question (3) above (naming the transitive root in operator
+output) remains unaddressed — a future task, if one is opened for it, should NOT re-open D131 to
+do so; it is a separate, additive UX improvement, not a correctness gap in the mechanism this
+D-number covers. Revalidation ordering (open question 1) is likewise untouched and unclaimed.
+
+**`docs/CRITERIA_PLAN.md`'s §14 entry updated in the same commit**, moving §12.14 to DONE: the
+two remaining named gaps that entry tracked (D124, separately fixed in round VI task 74, and the
+transitive-stub-stacking mechanism) are both now closed.

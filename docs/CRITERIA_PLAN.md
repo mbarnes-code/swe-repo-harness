@@ -857,6 +857,8 @@ named — not a weaker "an exception can happen somewhere" substitute.
 **Done bar:** met in full. Nothing remains open for §12.13.
 
 ## 14. Blast containment + escape hatch
+**DONE (round VI task 93, D131) — status field updated 2026-09-08; see the "Corrected,
+2026-09-08 (round VI task 93)" paragraph below the done-bar restatements for the closing fix.**
 **OPEN — misattributed to D50 until 2026-09-01 (round X), corrected.** (a) and (b) — containment
 and `fleet resume` unblocking — used to be described here as "fully covered through real e2e
 paths" and the done bar as "identical to §37's" — **both corrected by the controller, round VI
@@ -1007,6 +1009,40 @@ correctly `BLOCKED` by the same-invocation live containment PASS 1 gives full vi
 `PARTLY ADDRESSED` back to `FIXED, LANDED`, since the residual each was downgraded for is exactly
 what this fix closes. §12.14's remaining named gaps, restated once more: D124 (separately worked)
 and the still-undesigned transitive-stub-stacking mechanism — two items, not three.
+
+**Corrected, 2026-09-08 (round VI task 93) — the transitive-stub-stacking mechanism is now
+FIXED, LANDED. §12.14 is DONE.** research-49 (this round's research subagent) re-sized the
+mechanism from "undesigned, no precedent" to MEDIUM: three of the five behaviours SPEC §3.5 item
+4 requires already fell out of existing code (`_active_stubs_by_consumer` has no first-layer
+filter; `stub_degrade_transform` runs over every dispatched member; `_fire_t1_for_provider`
+already supersedes every consumer's row in one transaction), and no closure algorithm was needed
+— per-layer inheritance over topologically-ordered waves computes the transitive descendant set
+by induction, the same shape Bazel's own `IncompatibleTargetChecker` uses. research-49 also found
+a **currently live defect**, not just a gap: a second-layer dependent of a `DEGRADED` (not RHI)
+provider carried no `stubs` row, so its persisted `VerificationReport.equivalence` read `FULL` (a
+false claim over a chain that ran through a stub) and its PR was `HELD` forever, since its direct
+provider's own draft PR never reaches `MERGED`. Task 93 confirmed this defect fresh against the
+tree at `81f27e3` and closed it with the two missing pieces research-49 named, exactly as scoped
+— **allocated D131** (verified free — max measured across `docs/INTEGRATION_HONESTY.md`,
+`docs/SPEC.md`, `docs/PROGRESS.md`, `docs/CRITERIA_PLAN.md`, and `docs/DECISIONS.md` was D130):
+(M1) a new inheritance branch in `orchestrator.stubs.detect_stub_triggers` — when a wave's
+dispatched consumer's direct provider is not itself RHI but IS itself an ACTIVE stub consumer,
+the consumer inherits a trigger copied verbatim off that existing row (`provider_repo_id`/
+`coord_key`/`fidelity` — never reconstructed, never naming the intermediate), `EMPTY_FAILING`
+excluded per §3.5 item 2's stated exception; and (M2) a scoped widening of `_pr_impl`'s
+admission gate (`src/fleet/cli.py`, the `blocking` set inside the per-unit loop) — a dependency
+whose own `RepoStatus` is `DEGRADED` now satisfies the gate unconditionally, alongside the
+pre-existing `SUCCEEDED` + `MERGED`-PR case, exactly as SPEC's third sentence states ("a
+`DEGRADED` provider satisfies the dependent-admission gate"). §12.38's `--ready` refusal
+(`_refuse_unresolved_stubs`) is unaffected and stays closed against the widened gate: it reads
+every `ACTIVE`/`SUPERSEDED` `stubs` row keyed on `consumer_repo_id` directly, independent of the
+admission-gate code path, and (M1) is what makes it correctly refuse the inherited dependent too
+— the two pieces are not independently safe; M2 without M1 would let a false-`FULL` PR through
+`--ready` with no stub row to catch it, which is why the task built and tested both together, not
+in either order alone. See `docs/INTEGRATION_HONESTY.md`'s new D131 entry for the fix detail and
+the regression proof. §12.14's `blocking` list is now empty: D124 and D126 were closed in
+earlier rounds (task 74, task 84), and the transitive-stub-stacking mechanism is closed here.
+**§12.14 is DONE in full.**
 
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
@@ -2674,7 +2710,9 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:13733`) was read directly: it re-runs `VerifyPipelineWorker`
+`_run_one_revalidation_task` (`cli.py:13775`, repointed by round VI task 93 — pure insertion
+earlier in the file, confirmed by exact-line-content match) was read directly: it re-runs
+`VerifyPipelineWorker`
 against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
 at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —
 "zero new phase-2 commits" holds vacuously by construction, and "the revalidation_key is the
