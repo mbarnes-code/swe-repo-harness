@@ -6634,7 +6634,7 @@ async def _repropagate_terminal_providers(
     longer a bare call to that method — inheriting every safety property already reviewed for
     those primitives (UPDATE-only against `phases`, terminal-status skip, no `BLOCKED ->
     BLOCKED` self-edge, union-not-replacement, idempotent per `propagate_blocked`'s own docstring).
-    This helper needs no `only` parameter of its own. **Corrected, fix round 1 (F7) — the reason is
+    This helper needs no `only` parameter of its own. **Corrected, fix round 2 (F7) — the reason is
     not "a repo excluded by `--repo` never has a row"; that premise is false.** A row for a repo
     outside THIS invocation's `only` can already exist, durably, from an EARLIER, unscoped (or
     differently-scoped) invocation, and this sweep's SELECT reads `phases` with no `only` filter at
@@ -6660,12 +6660,12 @@ async def _repropagate_terminal_providers(
     same defect this sweep exists to fix: `--stub-blocked` is a deliberate, sanctioned bypass of
     blast containment for a specific, audited reason (a generated stub substitutes for the
     abandoned provider), and re-imposing this sweep's containment over that policy would defeat the
-    escape hatch ADR-0113 §37 built (corrected citation, fix round 1 F6 — an earlier version of
+    escape hatch ADR-0113 §37 built (corrected citation, fix round 2 F6 — an earlier version of
     this sentence wrongly cited ADR-0102, which is D89 Phase 2 Task A, an unrelated correction).
     `_transform_impl` is the only caller with an operator-facing `--stub-blocked` CLI flag of its
     own; `_verify_impl`/`_build_impl` have no such flag either (ADR-0113 §37 Blocker A's trigger
     detection is wired only into TRANSFORM's `PhaseRunner`), but BOTH now accept this same
-    `stub_blocked` parameter too (fix round 1 F3), threaded from `_continue_impl`'s own
+    `stub_blocked` parameter too (fix round 2 F3), threaded from `_continue_impl`'s own
     `resume()`-supplied flag — because `_continue_impl` can drive BUILD or VERIFY, not only
     TRANSFORM, as the SAME `fleet resume --stub-blocked` invocation's re-entry after step 6 frees a
     repo, and their sweeps need the identical guard for the identical reason. This parameter's
@@ -6693,7 +6693,7 @@ async def _repropagate_terminal_providers(
     a BUILD-specific one, and TRANSFORM/VERIFY are unaffected by it whenever no such row exists yet
     (the common case).
 
-    **Disclosed scope limit (fix round 1, F8): this exemption is keyed on a DIRECT `(consumer,
+    **Disclosed scope limit (fix round 2, F8): this exemption is keyed on a DIRECT `(consumer,
     provider)` `stubs` pair; `scheduler.descendants(...)` is transitive.** A two-hop dependent of an
     abandoned provider — one that is itself a dependent of the DIRECTLY stub-covered consumer,
     rather than of the provider itself — has no `stubs` row of its own naming that provider and is
@@ -6749,7 +6749,7 @@ async def _repropagate_terminal_providers(
                 blocked.add(dependent)
         if blocked:
             # Mirrors `PhaseRunner._contain`'s own `blocked_by_propagated` event exactly (F5,
-            # fix round 1) — the live containment call site logs this the moment it happens
+            # fix round 2) — the live containment call site logs this the moment it happens
             # within one process; this sweep is the only place that logs it across a process
             # boundary, so leaving it silent would make a re-propagation across invocations the
             # one blast-containment event with no operator-visible trace at all.
@@ -11522,7 +11522,7 @@ async def _build_impl(
     fails, so what widened is *when* the merge happens, not *whether* an unbuilt repo can be on
     the branch.
 
-    `stub_blocked` (round VI task-84 fix round 1, ADR-0113 §37): unlike `_transform_impl`'s own
+    `stub_blocked` (round VI task-84 fix round 2, ADR-0113 §37): unlike `_transform_impl`'s own
     same-named parameter, this one is NOT operator-facing — `fleet build` itself has no
     `--stub-blocked` flag and never will (Blocker A's trigger detection is TRANSFORM-only), so
     every direct `build()` call site keeps the default `False` unchanged. It exists solely so
@@ -11530,7 +11530,7 @@ async def _build_impl(
     `_repropagate_terminal_providers` sweep: a repo `_unblock_dependents` (§11.5 step 6) just freed
     from `BLOCKED` via `stub_permits_removal` can re-enter BUILD here, in the SAME `fleet resume
     --stub-blocked` invocation, and without this the sweep would silently re-block it before this
-    delegate's own wave loop ever dispatches it (fix round 1's F3 finding — see the sweep call
+    delegate's own wave loop ever dispatches it (fix round 2's F3 finding — see the sweep call
     site's own comment below and `docs/DECISIONS.md`'s ADR-0130 addendum).
     """
     log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
@@ -11880,20 +11880,21 @@ async def _build_impl(
                 # provider that went RHI in an earlier, already-exited invocation already has
                 # every dependent's row visible to THIS invocation's own live containment call —
                 # the SELECT below CAN return a row on a later invocation (the provider is still
-                # genuinely RHI; corrected, round VI task-84 fix round 1 — an earlier version of
+                # genuinely RHI; corrected, round VI task-84 fix round 2 — an earlier version of
                 # this comment overclaimed the SELECT itself as a no-op). What is a no-op is the
                 # WRITE: the dependent was already correctly `BLOCKED` by live containment inside
                 # the SAME invocation the provider went RHI in, so `append_blocked_by`'s illegal
                 # `BLOCKED -> BLOCKED` self-edge silently skips it (see
                 # `tests/test_build_e2e.py::
-                # test_the_build_side_defensive_sweep_is_a_provable_no_op`, which now drives two
-                # real invocations and asserts the SELECT is non-zero on the second while the
-                # write is inert). Kept anyway so BUILD does not read as though
-                # it lacks a pattern the other two phases both need, at the cost of one cheap
-                # SELECT. `stub_blocked=stub_blocked`: see this function's own docstring and F3's
-                # fix-round-1 correction — BUILD's sweep needs the identical stub_permits_removal
-                # exemption TRANSFORM's does, because `_continue_impl` can drive this delegate in
-                # the SAME `fleet resume --stub-blocked` invocation as step 6's real unblock.
+                # test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new`
+                # (renamed fix round 3), which drives two real invocations and asserts the SELECT
+                # is non-zero on the second while the write is inert). Kept anyway so BUILD does
+                # not read as though it lacks a pattern the other two phases both need, at the
+                # cost of one cheap SELECT. `stub_blocked=stub_blocked`: see this function's own
+                # docstring and F3's fix-round-2 correction — BUILD's sweep needs the identical
+                # stub_permits_removal exemption TRANSFORM's does, because `_continue_impl` can
+                # drive this delegate in the SAME `fleet resume --stub-blocked` invocation as
+                # step 6's real unblock.
                 await _repropagate_terminal_providers(
                     read_conn, writer, run_id, Phase.BUILD, settings, stub_blocked=stub_blocked
                 )
@@ -12223,14 +12224,14 @@ async def _verify_impl(
 ) -> dict[str, object]:
     """Phase 4 steps 1-3 over one fleet, wave by wave, through the real composition.
 
-    `stub_blocked` (round VI task-84 fix round 1, ADR-0113 §37): NOT operator-facing, exactly like
+    `stub_blocked` (round VI task-84 fix round 2, ADR-0113 §37): NOT operator-facing, exactly like
     `_build_impl`'s own same-named parameter and for the identical reason — `fleet verify` has no
     `--stub-blocked` flag, so every direct `verify()` call site keeps the default `False`
     unchanged. It exists solely so `_continue_impl` can thread `resume()`'s own flag into this
     delegate's `_repropagate_terminal_providers` sweep, for the same reason `_build_impl`'s
     docstring gives: a repo `_unblock_dependents` just freed can re-enter VERIFY here, in the SAME
     `fleet resume --stub-blocked` invocation, and without this the sweep would silently re-block
-    it (fix round 1's F3 finding).
+    it (fix round 2's F3 finding).
     """
     log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     config = settings.config
@@ -12293,7 +12294,7 @@ async def _verify_impl(
                 # pre-seed pass above only ever creates rows for waves THIS invocation drives, so
                 # a later-wave dependent admitted by a separate `--wave`-scoped invocation (or any
                 # `fleet resume` re-entry) would otherwise never learn its provider is abandoned.
-                # `stub_blocked=stub_blocked`: fix round 1's F3 finding — see this function's own
+                # `stub_blocked=stub_blocked`: fix round 2's F3 finding — see this function's own
                 # docstring and `_build_impl`'s identical parameter.
                 await _repropagate_terminal_providers(
                     read_conn, writer, run_id, Phase.VERIFY, settings, stub_blocked=stub_blocked
@@ -12665,7 +12666,7 @@ async def _continue_impl(
     SAME `fleet resume --stub-blocked` invocation — so the flag has to reach this delegate for the
     freed repo's real dispatch to run the stub-creation trigger, not plain un-stubbed work.
 
-    **Corrected, round VI task-84 fix round 1 (D126/ADR-0130, F3).** This paragraph used to claim
+    **Corrected, round VI task-84 fix round 2 (D126/ADR-0130, F3).** This paragraph used to claim
     `_build_impl`/`_verify_impl` "need no such parameter... and neither ever took one" — true when
     written (about `stub_degrade_transform`, a genuinely TRANSFORM-only correction), but D126's own
     new `_repropagate_terminal_providers` sweep, added to all three delegates, needed the identical

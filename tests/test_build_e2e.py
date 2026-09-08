@@ -2602,7 +2602,7 @@ def test_a_build_failure_is_structured_and_does_not_take_its_siblings_down(
     assert f"{DESTINATIONS['acme-lib-ts']}/BUILD.bazel" in listed, listed
 
 
-def test_the_build_side_defensive_sweep_is_a_provable_no_op(
+def test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new(
     fleet: Path,  # noqa: F811
     monorepo: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2611,7 +2611,7 @@ def test_the_build_side_defensive_sweep_is_a_provable_no_op(
     """D126 / ADR-0130 judgment call 3 (controller ruling, task-84): `_build_impl` also gets
     `_repropagate_terminal_providers`'s sweep, for defensive uniformity.
 
-    **Corrected, round VI task-84 fix round 1 (opus-tier review, F2) — the earlier version of this
+    **Corrected, round VI task-84 fix round 2 (opus-tier review, F2) — the earlier version of this
     test drove only ONE `build()` call, over a leaf failure (`acme-app-ts`, no dependent) — a
     fixture in which the sweep's own SELECT is trivially, structurally guaranteed to read zero
     rows (nothing has failed yet at the point in a FIRST invocation where the sweep runs, before
@@ -2701,7 +2701,7 @@ def test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation(
     monkeypatch: pytest.MonkeyPatch,
     resolver: FakeResolver,
 ) -> None:
-    """D126 / ADR-0130 fix round 1 (F3, opus-tier review): `_continue_impl` can drive BUILD in
+    """D126 / ADR-0130 fix round 2 (F3, opus-tier review): `_continue_impl` can drive BUILD in
     the SAME `fleet resume --stub-blocked` invocation as step 6's real unblock (`orchestrator.
     reentry.stub_permits_removal`), so `_build_impl`'s own sweep needs the identical `stub_blocked`
     exemption `_transform_impl`'s already had, or it silently re-blocks a dependent step 6 had just
