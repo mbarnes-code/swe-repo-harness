@@ -2320,6 +2320,31 @@ def test_real_bazel_analyses_the_generated_js_test(
     assert resolved.returncode == 0, resolved.stderr[-2000:]
     assert f"//{dest}:widgets_test_lib" in resolved.stdout.split(), resolved.stdout
 
+    # **`entry_point` must resolve to a GENERATED file, and that word is the whole assertion**
+    # (round VI task 87 review, fix round 1). The review found this test's `--nobuild` analysis
+    # structurally blind to a `js_test(entry_point = "__tests__/fixture.json")` — a label that
+    # resolves, analyses green, and cannot start under Node. What separates the two is not
+    # whether the label exists but WHAT KIND of file it names: the correct entry point is a
+    # `ts_project` output (`generated file`), while every form of the defect names something
+    # already on disk (`source file`). `--output=label_kind` is the cheapest quantity that
+    # cannot stay unchanged under the defect, so it is asserted here rather than left to the
+    # unit tier alone — `tests/test_ecosystems.py::
+    # test_js_picks_the_test_file_as_the_entry_point_not_the_first_path` still carries the
+    # WHICH-file half, which no analysis-time query can decide.
+    entry = _bazel(
+        bazel_startup_argv,
+        "query",
+        "--output=label_kind",
+        f"labels(entry_point, //{dest}:widgets_test)",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    assert entry.returncode == 0, entry.stderr[-2000:]
+    assert entry.stdout.split() == ["generated", "file", f"//{dest}:src/index.test.js"], (
+        "the js_test's entry_point must be the ts_project's compiled output, not a file already "
+        f"on disk (a `source file` here is the defect this assertion exists for): {entry.stdout}"
+    )
+
 
 # ---------------------------------------------------------------------------------------
 # the reaper itself — the mechanism the session finisher depends on

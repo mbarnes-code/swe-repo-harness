@@ -8535,7 +8535,7 @@ task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never up
 so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
 that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
 finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
-fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13159`) already
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13195`) already
 implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
 durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
 and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
@@ -9378,6 +9378,40 @@ path arguments) all clean.
 real-Bazel proof still separately blocked on D121's `rules_java` `bazel_dep` gap, as this entry
 already recorded above). Do not round the `<n> of 48` §12 count up on this account — §12.11's
 Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, tracked there.
+
+**Correction, 2026-09-08 (round VI task 87 review, fix round 1).** The paragraph above describes
+`cli._is_js_test_src` as matching "`*.test.ts(x)`/`*.spec.ts(x)` by basename, or anything under
+`__tests__/`". That is what landed at `41369ad` and it was wrong twice; the sentence is left
+standing as the record of what that commit did, and both defects are corrected in the fix commit
+this paragraph heads. Neither was caught by that commit's own real-Bazel proof, and the reason is
+worth keeping: `bazel build --nobuild` is **analysis only**, so a `js_test` naming a wrong-but-
+existing label analyses green — the instrument could not move under either defect.
+
+* **`__tests__/` matched any suffix, and a matched non-source file was then LOST.** It is the one
+  predicate in `_TEST_SRC_PREDICATES` keyed on a directory rather than a basename, so unlike
+  `_is_python_test_src` (always `.py`) it could match a file `JsAdapter` does not compile. Such a
+  path left `unit.srcs` for `unit.test_srcs`, `test_sources()`'s `accepts_src` filter then dropped
+  it, and `non_source_files()` — which reads `unit.srcs` alone — could no longer see it either.
+  Measured both sides at `f45e75f` and `41369ad` over the same input: a Jest-default
+  `__tests__/__snapshots__/x.snap` was carried in the library `ts_project`'s `data=` before and
+  appeared **nowhere in the generated `BUILD.bazel`** after, against `base.py::non_source_files`'s
+  own stated contract ("Refused files are carried, not dropped"). The clause now requires
+  `.ts`/`.tsx`, which puts every refused file back in `srcs` where `non_source_files()` carries it.
+* **`entry_point` took `test_srcs[0]`, which is a SORT, not a choice.** `package_relative` sorts
+  and `_` (0x5F) precedes `s` (0x73), so in any repo with a `__tests__/` directory the entry point
+  was deterministically the alphabetically-first file there — a helper, or a fixture. The observed
+  artefact was `js_test(entry_point = "__tests__/fixture.json")`: green `bazel build`, a test
+  target Node cannot start, which is the exact failure the pre-task-87 `test_targets()` docstring
+  warned about and which that task's rewrite had deleted. `js.py::_test_entry_point` now requires
+  a compiled `.ts(x)` and prefers a `*.test.*`/`*.spec.*` basename, and the warning is restored.
+
+Proven by two new discriminators, each the unique discriminator of one of the above:
+`tests/test_ecosystems.py::test_js_picks_the_test_file_as_the_entry_point_not_the_first_path`
+(four cases, one per mutation, including the `.json`-first case `--nobuild` cannot see), and the
+`__tests__/helper.ts` + `__tests__/__snapshots__/index.test.ts.snap` pair added to
+`test_build_e2e.py`'s `acme-widgets-ts` fixture, which makes
+`test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target` fail on both defects. **This
+correction does not change the `<n> of 48` §12 count either way.**
 
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found

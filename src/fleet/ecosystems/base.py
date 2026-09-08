@@ -735,7 +735,8 @@ Widening `CARGO`'s membership here is a design decision about how to reshape `ru
 
 **`NPM` was the identical shape and is now FIXED (round VI task 87).** `js.py::test_targets()`
 used to emit `js_test(srcs = test_srcs, deps = [f":{name}", ...], ...)` — both attributes absent
-from `js_test`, which shares `js_binary`'s `_ATTRS` base (`docs/INTEGRATION_HONESTY.md`'s `## D7`
+from `js_test`, which shares `js_binary`'s `_ATTRS` base (`docs/INTEGRATION_HONESTY.md`'s
+`**D7 — FIXED, by deletion.**`
 entry already found and fixed the sibling `deps=` defect in `js_binary`'s OWN target one function
 up; `test_targets()`'s `js_test` was written with the same pre-D7 shape and, since `test_srcs` had
 always been `()`, was never exercised — carrying the identical unfixed bug, plus an `srcs=` defect

@@ -10874,7 +10874,7 @@ def _is_jvm_test_src(path: str) -> bool:
 
 def _is_js_test_src(path: str) -> bool:
     """Jest's own default `testMatch` convention, restricted to what `JsAdapter.src_suffixes`
-    actually compiles: `*.test.ts(x)` / `*.spec.ts(x)` by basename, or anything under a
+    actually compiles: `*.test.ts(x)` / `*.spec.ts(x)` by basename, or a `.ts(x)` under a
     `__tests__/` directory.
 
     D112 (round VI task 87): `js.py`'s `test_targets()` now compiles `test_sources()` into a real
@@ -10883,10 +10883,22 @@ def _is_js_test_src(path: str) -> bool:
     `.mts`/`.cts` are deliberately not matched here — `src_suffixes` accepts them but this fleet
     has never seen one, and Jest's own default `testMatch` doesn't either; widening is a one-line
     change if a real fixture needs it.
+
+    **The `__tests__/` clause requires a `.ts(x)` suffix, and that is a fix, not a tightening for
+    neatness (round VI task 87 review, fix round 1).** This is the ONE predicate in
+    `_TEST_SRC_PREDICATES` keyed on a *directory* rather than a basename, so unlike
+    `_is_python_test_src` (always `.py`) it can match a file the adapter does not compile — and a
+    matched path leaves `unit.srcs` for `unit.test_srcs`, where `test_sources()`'s `accepts_src`
+    filter then drops it while `non_source_files()` (which reads `unit.srcs` alone) can no longer
+    see it either. Measured: a Jest-default `__tests__/__snapshots__/x.snap` was carried in the
+    library `ts_project`'s `data=` before this predicate existed and appeared NOWHERE in the
+    generated `BUILD.bazel` after it — exactly the silent drop `base.py::non_source_files`'s own
+    docstring forbids ("Refused files are carried, not dropped"). Requiring the suffix keeps every
+    non-source file under `__tests__/` in `srcs`, where `non_source_files()` still carries it.
     """
     name = path.rsplit("/", 1)[-1]
     if "__tests__" in path.split("/")[:-1]:
-        return True
+        return name.endswith((".ts", ".tsx"))
     return (
         fnmatch(name, "*.test.ts")
         or fnmatch(name, "*.test.tsx")
