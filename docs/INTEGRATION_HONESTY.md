@@ -6874,7 +6874,35 @@ defined at `:7140`.)*
 
 ---
 
-## D85 — OPEN (the fix is in flight, not landed: lane W7's round-G patch to `tests/test_lint_gate.py` was uncommitted when this entry was written; `main` was `f6a2e4e` and the newest commit touching that file was still `352c514`). The lint gate fails 3 of 4 checks in every detached worktree and passes in the primary, because `_ruff()` asks where this checkout's virtualenv *would be* instead of whether `ruff` runs — the certification environment and the working environment diverge, and the instrument reports the divergence as the defect
+## D85 — FIXED, LANDED (`b76c041`). The lint gate failed 3 of 4 checks in every detached worktree and passed in the primary, because `_ruff()` asked where this checkout's virtualenv *would be* instead of whether `ruff` runs — the certification environment and the working environment diverged, and the instrument reported the divergence as the defect
+
+> **Editorial correction (2026-09-08), audit task D85 — the heading above now reads `FIXED, LANDED
+> (`b76c041`)`, not `OPEN`.** The heading previously read *"OPEN (the fix is in flight, not landed:
+> lane W7's round-G patch to `tests/test_lint_gate.py` was uncommitted when this entry was written;
+> `main` was `f6a2e4e` and the newest commit touching that file was still `352c514`)"* — quoted here
+> verbatim per this file's own convention, so a sweep for it finds this correction and not a
+> survival. That was accurate of `f6a2e4e`'s certification environment and is left as an accurate
+> record below; it is stale as a live status. `git log --oneline -- tests/test_lint_gate.py` shows
+> W7's patch landed as `b76c041`, dated 2026-08-25 17:22:39 +0000 — fourteen minutes after
+> `f6a2e4e` (2026-08-25 17:08:19 +0000), and an ancestor of current `HEAD`. Re-read: `_ruff()`
+> (`tests/test_lint_gate.py`) now tries `sysconfig.get_path("scripts")` and
+> `Path(sys.executable).parent` in addition to PATH, before failing — genuinely probing whether
+> `ruff` runs in the environment executing the suite, not merely where this checkout's `.venv`
+> would sit. Reproduced fresh in a genuinely detached `git worktree add --detach` (own scratch
+> subdirectory, not the primary checkout): `pytest tests/test_lint_gate.py`, no `-k`, no node IDs,
+> nothing applied → **6 passed, 1 failed** (was **3 failed, 1 passed** at `f6a2e4e`). The one
+> failure is `test_ruff_format_check_dirty_count_matches_the_pinned_baseline`, a *different*,
+> already-pinned baseline check (module docstring: "deliberately a BASELINE, not a clean-format
+> gate") — 125 dirty files in this fresh worktree vs. the 123 pinned from the primary checkout,
+> traced to `.superpowers/sdd/.gitignore`, an **untracked** local convenience file
+> (`git status --ignored` shows `!!`) present only in the primary working tree, which excludes
+> `.superpowers/sdd/round-VI-criteria-closure/` from `ruff format`'s whole-repo scan there and is
+> naturally absent from any fresh worktree. That is a distinct, disclosed environment-dependent
+> baseline-reproducibility gap in a different check, not a recurrence of D85's `_ruff()` mechanism —
+> not diagnosed or fixed here; the D85 heading is updated on D85's own evidence only. Per this
+> file's "Status vocabulary, used strictly" block: the heading is a status **field**, updated on
+> fix; the body immediately below is the historical **record** and is left exactly as W7/W8 wrote
+> it.
 
 **Found, fixed and measured by lane W7 (round G) at `f6a2e4e`; recorded here by lane W8, which
 re-derived every figure it uses in its own separate detached worktree at `f6a2e4e` — a second
