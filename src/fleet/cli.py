@@ -297,6 +297,7 @@ from fleet.vcs.commits import (
     discard_task,
     find_task_commit,
     patch_id,
+    record_task_anchor,
     revert_and_commit,
 )
 from fleet.vcs.filter_repo import (
@@ -5682,6 +5683,18 @@ class _TransformClaimHook:
     Reuses `_coarse_task_id` UNCHANGED (same helper `_TransformSink` calls again after the
     worker returns) — `upsert_task`'s idempotent UPSERT guarantees both calls resolve to the
     SAME row, so there is nothing new to mint here, only to populate and claim.
+
+    D91 (`docs/INTEGRATION_HONESTY.md`): also reads `migrate/<repo_id>`'s current tip via
+    `record_task_anchor` (`vcs/commits.py`) and writes it into `tasks.pre_commit_sha` in the
+    SAME claim CAS (§3.2 step 6.5) — the one real per-task anchor value this codebase computes,
+    now persisted instead of staying in-process-only. Read from git rather than copied from
+    `payload.phase_pre_commit_sha`: on a retried dispatch, earlier units of THIS SAME coarse row
+    may already have landed commits, so the live tip and the phase anchor can differ — copying
+    the phase anchor is exactly the bug the two distinct anchors exist to prevent (see
+    `record_task_anchor`'s own docstring). The worktree is guaranteed to exist by this point —
+    CLONE cut it before TRANSFORM ever dispatches — so `Git(work_dir / repo_id)` mirrors exactly
+    how `TransformPipelineWorker`'s own steps construct their `Git` client (`ctx.workdir`, which
+    IS `work_dir / repo_id`).
     """
 
     def __init__(
@@ -5693,6 +5706,7 @@ class _TransformClaimHook:
         owner: str,
         clock: Callable[[], datetime],
         lease_ttl_s: int,
+        work_dir: Path,
     ) -> None:
         self._repository = repository
         self._read = read_conn
@@ -5700,6 +5714,7 @@ class _TransformClaimHook:
         self._owner = owner
         self._clock = clock
         self._lease_ttl_s = lease_ttl_s
+        self._work_dir = work_dir
 
     async def __call__(
         self, *, repo_id: str, phase: Phase, payload: TransformInput
@@ -5714,8 +5729,14 @@ class _TransformClaimHook:
             return
         target_paths = [*payload.sources, *payload.targets]
         await self._repository.set_task_target_paths(task_id, target_paths)
+        git = Git(self._work_dir / repo_id)
+        anchor = await record_task_anchor(git, payload.branch)
         await self._repository.claim_task_by_id(
-            task_id, worker=self._owner, now=self._clock(), lease_ttl_s=self._lease_ttl_s
+            task_id,
+            worker=self._owner,
+            now=self._clock(),
+            lease_ttl_s=self._lease_ttl_s,
+            pre_commit_sha=anchor,
         )
 
 
@@ -6442,6 +6463,7 @@ async def _run_transform_wave(
         owner=ctx.lease_owner,
         clock=ctx.clock,
         lease_ttl_s=ctx.lease_ttl_s,
+        work_dir=ctx.work_dir,
     )
     sampler = _host_memory_sampler(settings, run_id)
     runner = PhaseRunner(

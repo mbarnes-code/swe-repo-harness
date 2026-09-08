@@ -7403,7 +7403,9 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2735-2803`) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2755-2823`, repointed +20 by round VI task 83's D91
+   fix growing `claim_task_by_id` above it — pure insertion, confirmed by exact-line-content
+   match against the current tree) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (repointed fresh below, moved repeatedly by round VI
@@ -9024,7 +9026,9 @@ whatever Leg C1 would additionally need. Full details:
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2565-2602`), the ONLY production feeder of `carry_over_committed`'s `committed` argument,
+(`cli.py:2566-2603`, repointed +1 by round VI task 83's D91 fix adding one import above it — pure
+insertion, confirmed by exact-line-content match against the current tree), the ONLY production
+feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
 re-hoisting a contract that had just broken a build (precisely the `REJECTED` treatment ADR-0123
