@@ -50,6 +50,7 @@ from fleet.llm.client import (
     Message,
     StructuredOutputMode,
     TierUnavailable,
+    TransportError,
 )
 from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter, Role
 from fleet.models.enums import (
@@ -434,6 +435,54 @@ def make_router() -> LlmRouter:
     )
 
 
+class FailoverBackend(ScriptedBackend):
+    """Like `ScriptedBackend`, but the target named `fail_model_id` raises a CONNECTION
+    `TransportError` on its FIRST call only; every other call (including a later call to that
+    same target) answers normally. §12.43 case (i)'s vehicle: a genuine backend hop through the
+    real router -> `CachingModelClient` -> `LadderModelClient` -> backend chain, not a hand-built
+    `TokenUsage`/`FakeClient` stand-in (research-49 items 5/6)."""
+
+    def __init__(self, fail_model_id: str) -> None:
+        super().__init__()
+        self._fail_model_id = fail_model_id
+        self._failed_once = False
+
+    async def invoke(
+        self,
+        target: BackendTarget,
+        messages: Sequence[Message],
+        schema: dict[str, object] | None,
+        mode: StructuredOutputMode,
+        *,
+        max_output_tokens: int,
+        timeout_s: float,
+    ) -> BackendReply:
+        if target.model_id == self._fail_model_id and not self._failed_once:
+            self._failed_once = True
+            self.calls.append(target.model_id)
+            raise TransportError("connection refused by fake-1", trigger="CONNECTION")
+        return await super().invoke(
+            target, messages, schema, mode, max_output_tokens=max_output_tokens,
+            timeout_s=timeout_s,
+        )
+
+
+def make_two_target_workhorse_router() -> LlmRouter:
+    """`make_router()`'s single-target shape, except WORKHORSE (`transform_repair`'s tier, §12.43
+    case (i)'s own role) resolves to TWO priced `fake` targets — the ladder a `FailoverBackend`
+    hop actually needs to walk. Every other tier keeps exactly one target, unchanged from
+    `make_router()`."""
+    primary = BackendTarget(
+        backend="fake", model_id="fake-1", price=Price(in_per_mtok=1.0, out_per_mtok=2.0)
+    )
+    standby = BackendTarget(
+        backend="fake", model_id="fake-2", price=Price(in_per_mtok=1.0, out_per_mtok=2.0)
+    )
+    targets = dict.fromkeys(ModelTier, (primary,))
+    targets[ModelTier.WORKHORSE] = (primary, standby)
+    return LlmRouter(dict(SPEC_ROLE_TIERS), targets, profile="test")
+
+
 @dataclass(slots=True)
 class Harness:
     repo: SqliteStateRepository
@@ -585,6 +634,7 @@ async def _build(
     max_usd: float,
     reservation_ttl_s: float | None = None,
     router: LlmRouter | None = None,
+    backend: ScriptedBackend | None = None,
 ) -> AsyncIterator[Harness]:
     path = tmp_path / "state" / "fleet.db"
     await initialize_database(path)
@@ -607,7 +657,7 @@ async def _build(
                 wait_poll_s=0.01,
                 reservation_ttl_s=reservation_ttl_s,
             )
-            backend = ScriptedBackend()
+            backend = backend if backend is not None else ScriptedBackend()
             limits = Limits(
                 git_net=asyncio.Semaphore(8),
                 subprocess=asyncio.Semaphore(16),
@@ -2621,6 +2671,99 @@ async def test_a_local_profile_run_writes_a_non_empty_backend_on_every_row_at_ze
                 "call is NOT a cache hit (models/tasks.py's cost_usd comment, §11.2)"
             )
             assert row.cost_usd == pytest.approx(0.0)
+
+
+# ======================================================================================
+# §12.43 case (i): the two sub-assertions research-49 found with ZERO test coverage anywhere in
+# the suite -- `phases.attempts` unchanged and `transient_retries` unchanged across an induced
+# backend failover (round VI task 94, research-49 report item 3).
+# ======================================================================================
+
+
+async def test_an_induced_connection_failover_leaves_phases_attempts_and_transient_retries_unchanged(  # noqa: E501
+    tmp_path: Path,
+) -> None:
+    """SPEC §12.43 case (i): "a `WORKHORSE` first target that refuses connections makes the run
+    complete on its second target, with `attempts.llm_failovers = 1`, `phases.attempts`
+    **unchanged**, `transient_retries` unchanged, one `backend_failover` event naming both
+    targets and trigger `CONNECTION`, and the resulting `llm_cache` row carrying the *second*
+    target's `backend` and `model_id`."
+
+    Before this task, "`phases.attempts` unchanged" and "`transient_retries` unchanged" under a
+    failover had ZERO tests anywhere (research-49 report item 3): `tests/test_sequence_e2e.py:833`
+    asserts `phases.attempts` unchanged for §12.31, an unrelated scenario, and `transient_retries`
+    never appeared in a failover context at all.
+
+    "Unchanged" here means what an ORDINARY, no-failover dispatch would also produce: one call to
+    `LadderModelClient.complete()` walking two targets internally is still exactly ONE dispatch as
+    far as the runner's own ladder/retry bookkeeping is concerned (ADR-0014's amendment) --
+    `phases.attempts` bumps by the same ONE it would for a zero-hop call, and `transient_retries`
+    (`orchestrator/retry.py`'s own budget, bumped only by `RetryPolicy.decide()` on a FAILED
+    dispatch) is never even consulted, because the call returns SUCCESS to the worker.
+
+    Driven through the real `RunContext` wiring
+    (`test_run_context_hands_workers_a_client_they_can_actually_call`'s router ->
+    `CachingModelClient` -> `LadderModelClient` -> backend chain) via a real `PhaseRunner.run_wave`
+    dispatch, with a genuinely induced CONNECTION failover (`FailoverBackend`) -- not the hand-built
+    `TokenUsage(llm_failovers=...)` `tests/test_llm_backend_failover_attribution.py` feeds its
+    sinks, and not the `FakeClient(answered_by=STANDBY)` stub `tests/test_llm_cache.py:354-372`
+    drives (research-49 items 5 and 6) -- so the persisted `attempts.llm_failovers` and
+    `llm_cache` assertions below close those two approximations as a side effect of proving the
+    two zero-coverage ones for real.
+    """
+    router = make_two_target_workhorse_router()
+    backend = FailoverBackend(fail_model_id="fake-1")
+    async for harness in _build(
+        tmp_path, FleetConfig(), max_usd=1000.0, router=router, backend=backend
+    ):
+        await _seed(harness, "repo-a")
+        await harness.plan(("repo-a",))
+        BEHAVIOURS["repo-a"] = [asks_the_model_and_bills_it()]
+
+        report = await harness.runner(sink=_local_profile_sink(harness)).run_wave(0)
+
+        assert report.halt is None
+        assert backend.calls == ["fake-1", "fake-2"], (
+            "both targets must actually have been walked, or the assertions below are vacuous"
+        )
+
+        status, attempts, transient_retries, failure_class, last_error = (
+            await harness.phase_row("repo-a")
+        )
+        assert status == "SUCCEEDED"
+        assert attempts == 1, (
+            "phases.attempts must read exactly the ONE dispatch this was, not one increment per "
+            "backend hop the ladder walked inside it"
+        )
+        assert transient_retries == 0, (
+            "a backend failover never reaches RetryPolicy.decide() -- the call SUCCEEDED, so the "
+            "runner's own transient-infra retry budget is never even consulted"
+        )
+        assert failure_class is None
+        assert last_error is None
+
+        rows = [r async for r in harness.repo.iter_attempts(RUN)]
+        assert len(rows) == 1, "one attempt row, or the fixture did not actually dispatch"
+        row = rows[0]
+        assert row.llm_backend == "fake"
+        assert row.llm_failovers == 1, (
+            "attempts.llm_failovers = 1, from a REAL induced CONNECTION failover -- research-49 "
+            "item 5's hand-built-TokenUsage approximation, closed here with the real dispatch path"
+        )
+
+        async with harness.read_conn.execute(
+            "SELECT backend, model_id, tier FROM llm_cache WHERE role = ?",
+            (Role.TRANSFORM_REPAIR.value,),
+        ) as cursor:
+            cache_rows = await cursor.fetchall()
+        assert len(cache_rows) == 1, "one cache MISS write for the one call that actually answered"
+        cache_backend, cache_model_id, cache_tier = cache_rows[0]
+        assert (cache_backend, cache_model_id) == ("fake", "fake-2"), (
+            "the llm_cache row must carry the SECOND (answering) target's identity, not the "
+            "first target that failed over -- research-49 item 6, previously only proven via a "
+            "hand-built FakeClient(answered_by=STANDBY) stub in tests/test_llm_cache.py"
+        )
+        assert cache_tier == str(ModelTier.WORKHORSE)
 
 
 # ======================================================================================
