@@ -15277,3 +15277,51 @@ No other genuine value judgment was found. The two-piece fix shape and why both 
 required together (judgment call 1), the "one task" sizing (judgment call 2), and the "no
 schema/transition change" confirmation (judgment call 3) are each settled by reading the code and
 SPEC text fresh, not by a preference this ADR is guessing at.
+
+---
+
+### Addendum (round VI task 92, 2026-09-08, independent audit finding) — the `HALF_OPEN` probe has
+THREE outcomes, not two; the decision text above is left standing as history, not rewritten
+
+Judgment call 1's decision paragraph above states the probe's contract as "exactly one call is let
+through and its outcome decides `UP` (reset) or back to `DOWN` (cooldown restarts)" — accurate of
+the design as landed by the task this ADR was drafted for, and now stale: task 88's review round
+(one round after this ADR landed) found a real wedge bug in that two-outcome model and fixed it by
+adding a third resolution, `BackendHealth.abandon_probe` (`src/fleet/llm/failover.py:165-192`).
+
+**The bug the addition closes.** With only `record_success`/`record_failure` as exits, any
+`HALF_OPEN` probe that resolved via a third path — `SchemaUnsatisfied`, `OutputTruncated`,
+`ModelRefused`, `BudgetExhausted`, `UnknownBackend`, a cancellation, or anything else
+`complete()`'s `except BaseException` catch-all sees — left the target wedged at `HALF_OPEN`
+**forever**: `may_call` returns `False` unconditionally for `HALF_OPEN`, and neither remaining exit
+method ever fires for these outcomes, so every future call from every worker sharing that client
+silently skips a target nothing was actually wrong with, for the rest of the process. Worse than
+never building the breaker at all.
+
+**The fix.** `abandon_probe(target, tier)` is a no-op unless the target is `HALF_OPEN`; otherwise
+it transitions `HALF_OPEN -> DOWN` with reason `"probe abandoned (non-connectivity outcome);
+cooldown NOT restarted"` and — the load-bearing difference from `record_failure`'s own `HALF_OPEN`
+branch — leaves `down_since` **unchanged**. None of the outcomes `abandon_probe` handles is
+connectivity evidence, so extending the cooldown for them would itself be the "throttling alone"
+over-inference §11.8 forbids, aimed at a new class of non-signal; leaving `down_since` alone means
+the very next call to that target is immediately eligible to probe again, rather than being
+punished for a reason that says nothing about reachability. `client.py:643-679` calls
+`abandon_probe` from two exit doors: the `SchemaUnsatisfied` arm of the existing
+`except (SchemaUnsatisfied, TransportError)` clause, and unconditionally from a new
+`except BaseException` arm that calls it before re-raising.
+
+**Why this belongs here and not only in the module docstring.** CLAUDE.md's "Documents Are Inputs
+to Future Edits" guardrail: a reconciler reading this ADR alone as the design of record — the usual
+way an ADR gets read months later — could "fix" the code to match the two-outcome text above and
+delete `abandon_probe`, or make it restart the cooldown like `record_failure`'s `HALF_OPEN` branch
+does, reintroducing the exact wedge bug review caught. This addendum is the guard against that.
+
+Proof this is landed and covered, not merely proposed: `tests/test_llm_failover.py::
+test_schema_unsatisfied_during_a_half_open_probe_abandons_it_to_down_not_wedged` and
+`tests/test_llm_failover.py::test_a_propagating_exception_during_a_half_open_probe_still_abandons_it_to_down`,
+both asserting the transition sequence `["DOWN","HALF_OPEN","DOWN","HALF_OPEN","UP"]` — i.e. that
+after the abandon, the very next call probes again with the clock unmoved, the `down_since`-
+preserving property this addendum describes. Independently re-verified (round VI task 92): both
+tests pass on `main`, and two adversarial mutations of `abandon_probe` (a no-op variant; a
+cooldown-reset variant matching `record_failure`'s branch) each reproduce and redden exactly these
+two tests.

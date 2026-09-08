@@ -10346,7 +10346,20 @@ that one citation to something more durable than a hand-maintained line number.
 **Status: main green.** Citation-hygiene/findings-kinds re-verified 74/74 after every merge, ruff
 and mypy clean throughout (130 source files after `llm/failover.py`'s addition), `test_ecosystems.py`
 92/92 and the real-Bazel D112 fixtures (Rust, JS, plus the earlier Python) all independently
-re-confirmed passing directly on `main`, not merely on a branch.
+re-confirmed passing directly on `main`, not merely on a branch. **Editorial correction
+(2026-09-08), round VI task 92 (independent audit finding) — this sentence's own cited run does
+not support it; annotated here, not rewritten.** The scratch run cited beside this sentence was a
+**fast-tier** run that deselected 23 integration-marked tests, including the real-Bazel Rust
+fixture, and the two `tests/test_build_e2e.py` tests it calls "real-Bazel" are, by their own
+docstrings, run **over `FakeBazel`**, not real Bazel; the real-Bazel **JS** fixture actually lives
+in `tests/test_bazel.py`, which that run never touched. The underlying state is nonetheless fine:
+independently re-run directly on `main` with `bazel` on `PATH`, all four real-Bazel fixtures pass —
+`tests/test_build_e2e.py::test_a_python_test_target_runs_and_passes_under_a_real_bazel`,
+`tests/test_build_e2e.py::test_a_rust_integration_test_target_runs_and_passes_under_a_real_bazel`,
+`tests/test_bazel.py::test_real_bazel_analyses_the_generated_js_test`, and `tests/test_bazel.py::
+test_real_bazel_analyses_the_generated_js_binary` (the last two flaky-then-green on a cold
+repository cache, a `nodejs.org` fetch, not a generator defect). Only this sentence's naming of the
+instrument that produced the evidence was wrong.
 
 **§12 count: NOT re-measured this wave — deliberately disclosed rather than guessed.** This wave's
 work plausibly moves §12.43 to DONE (case (ii) was described as its last named blocker) and
