@@ -684,7 +684,7 @@ def test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_i
     # second fixture for a gap this task does not claim to close.
 
 
-def test_a_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation(
+def test_a_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation(
     fleet: Path,
 ) -> None:
     """D126 / ADR-0130 (task-84): the residual the test above's own comment names as NOT fixed by

@@ -1490,14 +1490,14 @@ def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave
         assert statuses[survivor] == ("SUCCEEDED", []), statuses
 
 
-def test_a_verify_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation(
+def test_a_verify_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation(
     fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:
     """D126 / ADR-0130 (task-84): the VERIFY-side residual ADR-0129's own judgment call 3 flagged
     as real-but-out-of-scope — the SAME fixture the test above uses, driven across TWO SEPARATE
     `fleet verify --wave N` invocations rather than one invocation driving both waves. Mirrors
     `tests/test_transform_e2e.py::
-    test_a_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation`
+    test_a_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation`
     as closely as `fleet verify`'s own gated PASS structure allows.
 
     Phase 3 (`build()`) is driven to a clean `SUCCEEDED` for every repo FIRST, so `_gated_members`'s
@@ -2609,25 +2609,60 @@ def test_the_build_side_defensive_sweep_is_a_provable_no_op(
     resolver: FakeResolver,
 ) -> None:
     """D126 / ADR-0130 judgment call 3 (controller ruling, task-84): `_build_impl` also gets
-    `_repropagate_terminal_providers`'s sweep, for defensive uniformity, but the ADR's own
-    analysis (research-46-report.md §3, "why BUILD does not exhibit this residual") says it must
-    be a pure no-op given `_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1:
-    every invocation already pre-seeds every open wave's BUILD row before dispatch, so nothing can
-    ever be `REQUIRES_HUMAN_INTERVENTION` on record from a PRIOR invocation's provider that this
-    invocation's own live containment could not already reach.
+    `_repropagate_terminal_providers`'s sweep, for defensive uniformity.
 
-    Per CLAUDE.md's guardrail against trusting a clean result without validating what the
-    instrument actually observed, this does not merely assert the surrounding test stays green.
-    It wraps `cli._rows` to intercept every call whose SQL is the sweep's own distinctive
-    `SELECT DISTINCT repo_id ... status = 'REQUIRES_HUMAN_INTERVENTION'` query and records how
-    many rows each call returned, over this file's own existing RHI-producing fixture shape
-    (mirrors `test_a_build_failure_is_structured_and_does_not_take_its_siblings_down`'s own
-    drive: `acme-app-ts` reaches BUILD `REQUIRES_HUMAN_INTERVENTION` for real via a real `bazel
-    build` exit 34). Two things are asserted, not one: `calls` is non-empty (the sweep's SELECT
-    genuinely ran — the instrument fired, so a silent/broken sweep cannot pass this by never being
-    exercised), and every observed call returned zero rows (the no-op claim, measured rather than
-    assumed).
+    **Corrected, round VI task-84 fix round 1 (opus-tier review, F2) — the earlier version of this
+    test drove only ONE `build()` call, over a leaf failure (`acme-app-ts`, no dependent) — a
+    fixture in which the sweep's own SELECT is trivially, structurally guaranteed to read zero
+    rows (nothing has failed yet at the point in a FIRST invocation where the sweep runs, before
+    the wave loop). That proved the SELECT is reachable-and-zero in a case where a non-zero
+    reading was never possible, which is CLAUDE.md's own "validate what the instrument watches"
+    guardrail failing in the direction it warns against — measured directly by an independent
+    review, which drove a real second `build()` invocation over a real PROVIDER/DEPENDENT pair
+    (mirrors this file's own `_STUB_PROVIDER`/`_STUB_CONSUMER`, `acme-lib-py`/`acme-app-py`, minus
+    any stub row) and got `SWEEP_ROWCOUNTS_INVOCATION1=[0, 0]` then
+    `SWEEP_ROWCOUNTS_INVOCATION2=[1]` — the SELECT genuinely returns a row on the second
+    invocation, because `acme-lib-py` really is still `REQUIRES_HUMAN_INTERVENTION` on record.**
+
+    **The true, narrower claim (ADR-0130's own actual rationale) is that the WRITE is redundant,
+    not that the SELECT is a no-op.** `acme-app-py`'s BUILD row is already correctly `BLOCKED` by
+    the FIRST invocation's own live containment (`_eligible_build_units`'s whole-fleet,
+    `--wave`-independent PASS 1 already gave it a row before `acme-lib-py` ever dispatched, so
+    `PhaseRunner._contain` found it and blocked it for real, in that SAME invocation). The SECOND
+    invocation's sweep finds `acme-lib-py` still RHI (a real, non-zero SELECT) and attempts to
+    write `blocked_by` again, but `append_blocked_by`'s illegal `BLOCKED -> BLOCKED` self-edge
+    silently skips it — the row's `status`/`blocked_by` are unchanged, which is what this test now
+    asserts directly rather than inferring from an unreachable zero.
+
+    Now drives TWO real `build()` invocations over `_STUB_PROVIDER`/`_STUB_CONSUMER` (no stub row
+    — the plain D126 case, not §37 Blocker C's). The `cli._rows` spy is installed only AFTER the
+    first `build()` returns (so it observes exactly the second invocation's sweep, the one the
+    "provable no-op" claim is actually about — the first invocation's own SELECT is asserted
+    unreachable-and-zero by construction above, not re-instrumented here) and asserts the SELECT's
+    row count is non-zero at least once (reachability: `acme-lib-py` really is still RHI on
+    record), while `acme-app-py`'s `(status, blocked_by)` is byte-identical before and after the
+    second invocation (the write, not merely the read, is inert).
     """
+    fake = FakeBazel(
+        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS[_STUB_PROVIDER]): 34}
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake)
+    monkeypatch.setattr(cli, "FILTER_REPO_RUNNER", FakeFilterRepo())
+
+    transformed(fleet)
+    first = build(fleet, "--no-sandbox")
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+
+    before = {
+        repo_id: (status, blocked_by)
+        for repo_id, status, blocked_by in query(
+            fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 3"
+        )
+    }
+    assert before[_STUB_PROVIDER][0] == "REQUIRES_HUMAN_INTERVENTION", before
+    assert before[_STUB_CONSUMER][0] == "BLOCKED", before
+    before_consumer = before[_STUB_CONSUMER]
+
     seen: list[int] = []
     original_rows = cli._rows
 
@@ -2639,18 +2674,107 @@ def test_the_build_side_defensive_sweep_is_a_provable_no_op(
 
     monkeypatch.setattr(cli, "_rows", spy)
 
+    second = build(fleet, "--no-sandbox")
+    assert second.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, second.output
+
+    assert seen, "the sweep's own SELECT never ran on the second invocation — instrument silent"
+    assert any(count > 0 for count in seen), (
+        "the SELECT read zero every time on a second invocation over a genuinely still-RHI "
+        f"provider — the reachability this test exists to prove did not hold: {seen}"
+    )
+
+    after = {
+        repo_id: (status, blocked_by)
+        for repo_id, status, blocked_by in query(
+            fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 3"
+        )
+    }
+    assert after[_STUB_CONSUMER] == before_consumer, (
+        "the sweep's WRITE was not inert -- acme-app-py's (status, blocked_by) moved even though "
+        f"it was already correctly BLOCKED: before={before_consumer} after={after[_STUB_CONSUMER]}"
+    )
+
+
+def test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: FakeResolver,
+) -> None:
+    """D126 / ADR-0130 fix round 1 (F3, opus-tier review): `_continue_impl` can drive BUILD in
+    the SAME `fleet resume --stub-blocked` invocation as step 6's real unblock (`orchestrator.
+    reentry.stub_permits_removal`), so `_build_impl`'s own sweep needs the identical `stub_blocked`
+    exemption `_transform_impl`'s already had, or it silently re-blocks a dependent step 6 had just
+    correctly freed — measured directly by an independent review, using this exact fixture shape.
+
+    Mirrors this file's own Blocker C fixture (`acme-lib-py`/`acme-app-py`) minus any `ACTIVE`
+    stub row, plus the same raw-SQL step-6 stand-in `test_an_active_stub_redirects_...` uses (this
+    file's fixtures do not drive a real `fleet resume`, per that test's own disclosed reason — but
+    `fleet build` has no `--stub-blocked` CLI flag at all, so the ONLY way to exercise the
+    `stub_blocked=True` value `_continue_impl` threads is to call the exact function it calls,
+    `_repropagate_terminal_providers`, directly with that value — which is what this test does,
+    rather than approximating it through the CLI).
+
+    Two calls, not one: `stub_blocked=False` (the plain `fleet build` path, and this task's own
+    fix-round-0 behavior) DOES re-block the freed repo — the bug this fix round exists to close,
+    reproduced directly rather than assumed — and `stub_blocked=True` (the real `_continue_impl`
+    path) does NOT.
+    """
     fake = FakeBazel(
-        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS["acme-app-ts"]): 34}
+        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS[_STUB_PROVIDER]): 34}
     )
     monkeypatch.setattr(cli, "BAZEL_RUNNER", fake)
     monkeypatch.setattr(cli, "FILTER_REPO_RUNNER", FakeFilterRepo())
 
     transformed(fleet)
-    result = build(fleet, "--no-sandbox")
-    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+    first = build(fleet, "--no-sandbox")
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
 
-    assert seen, "the sweep's own SELECT never ran — instrument silent, not merely no-op"
-    assert all(count == 0 for count in seen), seen
+    run_id = str(query(fleet, "SELECT run_id FROM runs")[0][0])
+    statuses = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert statuses[_STUB_CONSUMER] == "BLOCKED", statuses
+
+    def _free_consumer() -> None:
+        conn = sqlite3.connect(fleet / "state" / "fleet.db")
+        try:
+            conn.execute(
+                "UPDATE phases SET status = 'PENDING', blocked_by = '[]' "
+                " WHERE run_id = ? AND repo_id = ? AND phase = 3",
+                (run_id, _STUB_CONSUMER),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    settings = FleetSettings.load(fleet / "config")
+    db_path = fleet / "state" / "fleet.db"
+
+    async def _sweep(*, stub_blocked: bool) -> None:
+        async with cli.StateWriter(db_path, owner="test") as writer:
+            read_conn = await cli.connect_ro(db_path)
+            try:
+                await cli._repropagate_terminal_providers(
+                    read_conn, writer, run_id, cli.Phase.BUILD, settings,
+                    stub_blocked=stub_blocked,
+                )
+            finally:
+                await read_conn.close()
+
+    # Unguarded (`stub_blocked=False`): reproduces the bug directly. Run via `asyncio.run` in a
+    # plain (non-`async def`) test, never inside an already-running loop: `build()`/`transformed()`
+    # above go through `runner.invoke`, which itself calls `asyncio.run` internally, so an
+    # `async def` test here would raise "asyncio.run() cannot be called from a running event loop"
+    # the moment this function's own event loop tried to nest inside pytest-asyncio's.
+    _free_consumer()
+    asyncio.run(_sweep(stub_blocked=False))
+    after_unguarded = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert after_unguarded[_STUB_CONSUMER] == "BLOCKED", after_unguarded
+
+    # Guarded (`stub_blocked=True`, the real `_continue_impl` value): the fix.
+    _free_consumer()
+    asyncio.run(_sweep(stub_blocked=True))
+    after_guarded = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 3"))
+    assert after_guarded[_STUB_CONSUMER] == "PENDING", after_guarded
 
 
 # ---------------------------------------------------------------------------------------
