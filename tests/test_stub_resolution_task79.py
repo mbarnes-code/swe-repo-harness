@@ -1024,7 +1024,21 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     resolver: FakeResolver,  # noqa: F811
     forge: FakeForge,  # noqa: F811
 ) -> None:
-    """§12.37's full literal scenario, driven end to end through real CLI verbs.
+    """§12.37's literal scenario, driven end to end through real CLI verbs -- with ONE
+    disclosed exception (see immediately below).
+
+    **Disclosed, not silently narrowed (round VI task 85 fix round 1, F2): the `stubs` row
+    itself is hand-seeded, not produced by a real `--stub-blocked` CLI dispatch.**
+    `_reach_active_stub_state` (below) reaches its `ACTIVE`/`PUBLISHED_ARTIFACT` stub state via
+    `_insert_stub_row` -- a raw `INSERT INTO stubs` -- exactly as `test_d107_...`/`test_d108_...`
+    above already do, not via `_create_stub_records`/a real `fleet transform --stub-blocked` (or
+    `fleet resume --stub-blocked`) dispatch. §12.37's own opening clause literally requires `C`
+    "migrated with `--stub-blocked`"; no test in this file drives stub CREATION through the real
+    CLI (`tests/test_pr_e2e.py::
+    test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` does,
+    for the CREATION half alone, but stops before combining with D107/REVALIDATE). Everything
+    from the hand-seeded `ACTIVE` row onward in THIS test is real: the `STUB_LIMITED`/`DEGRADED`
+    consequence of that row (step 1 below) is driven for real, as is every later step.
 
     Setup (unchanged from every test above): `_reach_active_stub_state` leaves `acme-lib-py`
     `REQUIRES_HUMAN_INTERVENTION` at Phase 3 and `acme-app-py` `DEGRADED` at Phase 3 with an
@@ -1035,7 +1049,9 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     1. A REAL `fleet verify --repo acme-app-py` -- not a hand-seeded Phase 4 row -- produces
        the consumer's own genuine `STUB_LIMITED` `VerificationReport` and `DEGRADED` Phase 4
        row (task 69's `_eligible_build_units`/`_gated_members` widening + `stub_degrade_
-       transform`), matching §12.37's own opening clause in full.
+       transform`) off the hand-seeded stub row (see the disclosure above): this is the
+       real-CLI CONSEQUENCE of §12.37's opening clause, not a from-scratch proof of the clause's
+       own `--stub-blocked` creation half.
     2. `fleet retry acme-lib-py` (§12.14's audited reopen door) + a REAL `fleet build --repo`
        + `fleet verify --repo` land the provider `SUCCEEDED` through Phase 4 -- needed for
        `fleet pr` to have anything to ship (§3.4 step 4's own Phase-4 eligibility gate).
@@ -1059,8 +1075,11 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     branch = f"migrate/{_STUB_CONSUMER}"
 
     # --- 1. a REAL fleet verify for the consumer: genuine STUB_LIMITED report + DEGRADED
-    # Phase 4 row, matching §12.37's opening clause in full (not a hand-seeded row like
-    # test_d108's own auxiliary check above discloses doing). ---
+    # Phase 4 row (not a hand-seeded PHASE row like test_d108's own auxiliary check above
+    # discloses doing). DISCLOSED (F2, fix round 1): this is the real-CLI CONSEQUENCE of
+    # §12.37's opening clause, driven off the hand-seeded STUBS row `_reach_active_stub_state`
+    # plants (see this test's own docstring) -- not a from-scratch proof of the clause's own
+    # `--stub-blocked` creation half, which no test in this file drives. ---
     fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task85")
     cli.BAZEL_RUNNER = fake_green
     try:
@@ -1184,9 +1203,16 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
     outcome = next(iter(outcomes.values()))
     assert outcome.startswith("settled: verdict=PASS"), outcome
     # `stub_reconcile` (which runs BEFORE the claiming loop in the SAME `fleet resume` call)
-    # must not have abandoned the row -- D106's `_stub_awaiting_revalidation` protection.
-    assert stub_after_sync[0][0] not in resume_payload["stub_reconcile"]["abandoned"], (
-        resume_payload["stub_reconcile"]
+    # must not have abandoned the row -- D106's `_stub_awaiting_revalidation` protection. This
+    # row was superseded by an EARLIER, separate command (the `--sync` call above, not THIS
+    # `fleet resume` call), so it is protected via `excluded_awaiting_revalidation`, not via
+    # `excluded_superseded_this_call` (D105's SAME-call protection, which is what a plain
+    # `fleet resume --repoll-prs` would exercise instead -- not this test's own shape).
+    stub_pair_key = f"{_STUB_CONSUMER}→{_STUB_COORD_KEY}"
+    stub_reconcile_report = resume_payload["stub_reconcile"]
+    assert stub_pair_key not in stub_reconcile_report["abandoned"], stub_reconcile_report
+    assert stub_pair_key in stub_reconcile_report["excluded_awaiting_revalidation"], (
+        stub_reconcile_report
     )
 
     stub_final = query(

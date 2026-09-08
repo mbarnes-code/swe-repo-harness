@@ -2572,33 +2572,61 @@ whether the helper function it calls names that parameter too. All nine `FakeBaz
 this file now pass (the tenth, the real-Bazel integration test, needs a real `bazel` binary this
 sandbox does not have and was not touched).
 
-**Why §12.37 is NOT flipped to DONE despite this closing every gap the brief named: SPEC's own
-literal idempotency clause names THREE triggers — "a replay, a `fleet resume`, and a `fleet
-stubs resolve`" — and the third has zero implementation.** `cli.stubs_resolve` validates its
+**Why §12.37 is NOT flipped to DONE: this closes every gap the brief NAMED (its own 5-item list),
+but that list is not SPEC item 37's complete literal clause set — a fix-round-1 opus-tier review
+found three more sub-clauses beyond the one below, and the fixture's own docstring now discloses
+all of them (see `tests/test_stub_resolution_task79.py`'s own F2 disclosure).** SPEC's literal
+idempotency clause names THREE triggers — "a replay, a `fleet resume`, and a `fleet stubs
+resolve`" — and the third has zero implementation. `cli.stubs_resolve` validates its
 preconditions and then unconditionally calls `cli._unavailable("stubs resolve", ...)`, raising
 `CommandUnavailableError` before touching any state-mutating code at all (confirmed by driving it
-for real in this task's own fixture, not assumed). The fixture's own idempotency assertions do
-pass for all three triggers (no `tasks`/`stubs`/`attempts` row is added, scoped to the stub's own
-consumer/provider pair to avoid a confound from `fleet resume`'s own unrelated §11.5 step-8
-continuation for OTHER repos in the fixture), but for the third trigger this is true for a
-WEAKER reason than SPEC's literal text presumes: SPEC's clause presumes the trigger actually runs
-its resolution logic and finds nothing left to do, and `fleet stubs resolve` never reaches that
-logic at all. This is not new-mechanism work — D63 (`docs/INTEGRATION_HONESTY.md`) already
-establishes the pattern for exactly this class of gap ("the gap is a missing driver in this file,
-not a missing worker body"): the manual-T1-trigger logic this verb's own docstring names
-("supersede a provider's ACTIVE stubs and enqueue revalidation") already exists and is already
-exercised for real by this SAME task's fixture, via the `--sync`-driven path — `stubs_resolve`
-needs only a CLI driver wired to it, sized comparably to D91's own "give `tasks.pre_commit_sha` a
-real production writer" (round VI task 83), not a new design or ADR.
+for real in this task's own fixture, not assumed; allocated **D130**,
+`docs/INTEGRATION_HONESTY.md`). The fixture's own idempotency assertions do pass for all three
+triggers (no `tasks`/`stubs`/`attempts` row is added, scoped to the stub's own consumer/provider
+pair to avoid a confound from `fleet resume`'s own unrelated §11.5 step-8 continuation for OTHER
+repos in the fixture), but for the third trigger this is true for a WEAKER reason than SPEC's
+literal text presumes: SPEC's clause presumes the trigger actually runs its resolution logic and
+finds nothing left to do, and `fleet stubs resolve` never reaches that logic at all.
 
-**Done bar (revised, narrow): wire `fleet stubs resolve` to the existing T1 machinery
+**Correction (fix round 1, 2026-09-08) — D130's own body originally called this "the single,
+precisely-scoped residual"; that was wrong, corrected there (annotated, not rewritten) and here.**
+Re-reading `docs/SPEC.md:7671`'s full literal clause list against the fixture found THREE more
+unasserted sub-clauses, independent of D130: (a) the `stubs` row itself is hand-seeded via
+`_insert_stub_row` (a raw `INSERT INTO stubs`) inside `_reach_active_stub_state`, never produced by
+a real `--stub-blocked` CLI dispatch — no test in `tests/test_stub_resolution_task79.py` drives
+stub CREATION through the real CLI, only its real-CLI consequences (`tests/test_pr_e2e.py::
+test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` drives
+CREATION alone, never combined with D107/REVALIDATE); (b) the same-transaction atomicity clause —
+SPEC's own text: "asserted by killing the process immediately after and confirming on resume that
+state and task agree" — has no kill/resume anywhere in the fixture; (c) "enqueues exactly **one**
+`tasks` row of `kind='REVALIDATE'`" is asserted only as `revalidation_task_id IS NOT NULL`, never
+as an exact count; (d) "zero new phase-2 commits on `migrate/C`, zero LLM calls, and an
+`already_applied` event... the `revalidation_key` is the proof" is not asserted at all (the
+fixture's own `already_applied` string, asserted by `test_d107_is_idempotent_on_replay` above,
+is D107's rewrite-replay event — a different mechanism from item 37's phase-2-commit-count claim).
+
+**Done bar (revised, complete — supersedes the fix-round-0 "wire `fleet stubs resolve`" framing,
+which named only D130's own gap): four independent pieces, each independently dispatchable, none
+requiring new production logic beyond D130's own CLI-wiring (a-d below reuse machinery this task's
+fixture already exercises for real).**
+(1) **D130 itself** — wire `fleet stubs resolve` to the existing T1 machinery
 (`_fire_t1_for_provider`'s manual-trigger shape, or a thin wrapper over it) so it performs the
-supersede-and-enqueue its own docstring already promises, then this exact fixture's idempotency
-block (c) can be strengthened from "the command errors safely" to "the command runs its logic and
-finds nothing to do" — at which point §12.37's literal text is met in full and this criterion may
-move to DONE.** Everything else the brief asked for — the real T1 trigger, the real-CLI REVALIDATE
-loop, RESOLVED/SUCCEEDED/FULL, and two of the three idempotency triggers — is now proven end to
-end and does not need to be re-derived by that follow-on task.
+supersede-and-enqueue its own docstring already promises.
+(2) **Stub creation via the real CLI** — extend this fixture (or add a sibling test) to reach the
+`ACTIVE` stub state via a real `fleet transform --stub-blocked` (or `fleet resume --stub-blocked`)
+dispatch, matching `test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_
+for_real`'s own setup, THEN continue into this task's real merge/`--sync`/`resume` chain — the two
+fixtures' setups are compatible in shape; combining them is test-only work.
+(3) **Atomicity** — add a kill-and-resume step immediately after T1's transaction (or the
+REVALIDATE settle transaction) fires, and assert state/task agreement on the resumed read, per
+SPEC's own literal proof method.
+(4) **Exact counts and the zero-cost/`already_applied`/`revalidation_key` claims** — assert
+`COUNT(*) = 1` on the minted `REVALIDATE` task (not merely non-null), and assert the REVALIDATE
+round itself produces zero new `migrate/C` phase-2 commits, zero LLM calls, and its own
+`already_applied`-shaped event, keyed on `revalidation_key` — distinct from D107's own
+`already_applied` (item (d) above must not conflate the two).
+Only once (1)-(4) all close does §12.37's literal text hold in full; wiring D130 alone is
+necessary but was wrongly stated as sufficient in this file's own pre-fix-round-1 text.
 
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
