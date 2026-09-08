@@ -520,7 +520,13 @@ class StateRepository(ReadOnlyRepository, Protocol):
     async def set_task_target_paths(self, task_id: str, target_paths: Sequence[str]) -> None: ...
 
     async def claim_task_by_id(
-        self, task_id: str, *, worker: str, now: datetime, lease_ttl_s: int
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        now: datetime,
+        lease_ttl_s: int,
+        pre_commit_sha: str | None = None,
     ) -> bool: ...
 
     # -- primitive 1: the claim --------------------------------------------------------
@@ -1484,7 +1490,13 @@ class SqliteStateRepository:
         await self._writer.submit(unit)
 
     async def claim_task_by_id(
-        self, task_id: str, *, worker: str, now: datetime, lease_ttl_s: int
+        self,
+        task_id: str,
+        *,
+        worker: str,
+        now: datetime,
+        lease_ttl_s: int,
+        pre_commit_sha: str | None = None,
     ) -> bool:
         """One CAS on a KNOWN task_id. Unlike `claim_next_task`'s queue-pop, this claims the
         specific row the caller already minted (via `upsert_task`) — there is no candidate
@@ -1493,20 +1505,28 @@ class SqliteStateRepository:
         Moves `status` PENDING -> **RUNNING** directly (not `claim_next_task`'s `'CLAIMED'`):
         `_ARBITRATED_TASKS_SQL` (cli.py) scans for `status = 'RUNNING'`, and this is the one
         write in the whole tree that is meant to make a REWRITE coarse row a real arbitration
-        candidate for the first time (D89 Phase 1 deliberately never did).
+        candidate for the first time (D89 Phase 1 deliberately never did). Round VI task 79 added
+        a second caller (the REVALIDATE claiming loop, `cli._run_one_revalidation_task`) — the
+        sentence this replaces ("nothing else claims a TRANSFORM coarse row today") no longer
+        held even when it was written, since REVALIDATE is a different `kind`, not TRANSFORM.
 
-        Returns whether the CAS won. Nothing else claims a TRANSFORM coarse row today, so this
-        should always be `True` here — but Rule 11 says report `False` rather than assert, since
+        D91 (`docs/INTEGRATION_HONESTY.md`): `pre_commit_sha`, optional and `None` by default, is
+        this task's own rollback anchor (`tasks.pre_commit_sha`, §3.2 step 6.5) — the tip of
+        `migrate/<repo>` at claim time, distinct from `phases.pre_commit_sha`. Passing `None`
+        leaves the column NULL, exactly as every claim did before this parameter existed, so an
+        existing caller that does not (yet) have a real anchor value to give is unaffected.
+
+        Returns whether the CAS won. Rule 11 says report `False` rather than assert, since
         an unmet expectation is a fact for the caller to act on, not a caller-side unreachable.
         """
         sql = (
             "UPDATE tasks "
             "   SET status = 'RUNNING', claimed_by = ?, lease_expires_at = ?, "
-            "       fence_token = fence_token + 1 "
+            "       pre_commit_sha = ?, fence_token = fence_token + 1 "
             " WHERE task_id = ? AND status = 'PENDING' "
             "RETURNING task_id"
         )
-        params = (worker, _shift(now, lease_ttl_s), task_id)
+        params = (worker, _shift(now, lease_ttl_s), pre_commit_sha, task_id)
 
         async def unit(conn: aiosqlite.Connection) -> bool:
             async with conn.execute(sql, params) as cursor:

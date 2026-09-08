@@ -56,15 +56,22 @@ import json
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
-from fleet.cli import _arbitration_lines, _reconcile_tasks_with_git
+from fleet.cli import (
+    TransformInput,
+    _arbitration_lines,
+    _reconcile_tasks_with_git,
+    _TransformClaimHook,
+)
 from fleet.models.enums import Phase
 from fleet.settings import FleetSettings
-from fleet.state.db import SCHEMA_PATH
+from fleet.state.db import SCHEMA_PATH, StateWriter, connect_ro
+from fleet.state.repository import SqliteStateRepository
 from fleet.util.proc import ProcResult, run
 from fleet.vcs import commits as C
 from fleet.vcs.git import Git
@@ -230,6 +237,32 @@ def _seed(
         conn.close()
 
 
+def _seed_run_repo_phase(db_path: Path, *, phase_anchor: str) -> None:
+    """The `runs`/`repos`/`phases` third of `_seed` above, WITHOUT a `tasks`/`attempts` row —
+    for D91's downstream-consequence test, which needs the coarse `tasks` row (and its
+    `pre_commit_sha`) minted by a REAL `_TransformClaimHook` claim, not fabricated by this file's
+    raw-SQL fixture (CLAUDE.md Rule 9)."""
+    conn = sqlite3.connect(db_path, isolation_level=None)
+    try:
+        conn.execute(
+            "INSERT INTO runs (run_id, started_at, config_sha256, harness_version) "
+            "VALUES (?, ?, ?, ?)",
+            (RUN_ID, NOW_ISO, "a" * 64, "0.1.0"),
+        )
+        conn.execute(
+            "INSERT INTO repos (repo_id, name, url, updated_at) VALUES (?, ?, ?, ?)",
+            (REPO, REPO, f"https://example.invalid/{REPO}", NOW_ISO),
+        )
+        conn.execute(
+            "INSERT INTO phases (run_id, repo_id, phase, status, pre_commit_sha, max_attempts, "
+            "                    updated_at) "
+            "VALUES (?, ?, ?, 'PENDING', ?, 3, ?)",
+            (RUN_ID, REPO, int(PHASE), phase_anchor, NOW_ISO),
+        )
+    finally:
+        conn.close()
+
+
 def _phases_row(db_path: Path) -> tuple[str, str | None]:
     conn = sqlite3.connect(db_path, isolation_level=None)
     try:
@@ -384,6 +417,80 @@ async def test_zero_units_landed_uses_existing_discard_path(fx: _Fixture) -> Non
     # the worktree tip is back at the task anchor — discard_task really ran
     tip = await fx.git.rev_parse(fx.branch)
     assert tip == fx.phase_anchor
+
+
+async def test_a_real_claim_hook_anchor_lets_the_discard_path_fire_instead_of_hanging_unresolved(
+    fx: _Fixture,
+) -> None:
+    """D91 (`docs/INTEGRATION_HONESTY.md`) — the downstream consequence, proven end to end rather
+    than by seeding `tasks.pre_commit_sha` directly (as `test_zero_units_landed_uses_existing_
+    discard_path` above does): before this fix, NOTHING in production ever wrote the column, so a
+    crashed REWRITE coarse row with zero units landed had `task_anchor is None` and
+    `_reconcile_tasks_with_git` always took its `_unresolved` branch ("the task row carries no
+    `pre_commit_sha` to reset to") — the row stayed `RUNNING` forever, never reaching `discarded`.
+
+    This drives the REAL `_TransformClaimHook` (the one place D91's fix landed) to claim the row,
+    exactly as `_run_transform_wave` wires it, and only THEN calls `_reconcile_tasks_with_git` —
+    no unit's commit exists yet, so this is the zero-landed crash scenario, and the real anchor
+    the hook wrote is what should let the discard path fire instead of `unresolved`.
+    """
+    _seed_run_repo_phase(fx.db_path, phase_anchor=fx.phase_anchor)
+    work_root = (fx.settings.root / fx.settings.config.run.work_dir).resolve()
+    now = datetime(2026, 9, 1, 12, 0, 0, tzinfo=UTC)
+
+    async with StateWriter(fx.db_path, owner="d91-consequence-test-writer") as writer:
+        read_conn = await connect_ro(fx.db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            hook = _TransformClaimHook(
+                repository=repo,
+                read_conn=read_conn,
+                run_id=RUN_ID,
+                owner="test-owner",
+                clock=lambda: now,
+                lease_ttl_s=600,
+                work_dir=work_root,
+            )
+            payload = TransformInput(
+                repo_id=REPO,
+                branch=fx.branch,
+                phase_pre_commit_sha=fx.phase_anchor,
+                dest_path="libs/com/acme/commons",
+                sources=(UNIT_A,),
+                targets=(UNIT_B,),
+            )
+            await hook(repo_id=REPO, phase=PHASE, payload=payload)
+        finally:
+            await read_conn.close()
+
+    status_before, claimed_by_before, fence_before = _tasks_row(fx.db_path)
+    assert (status_before, claimed_by_before, fence_before) == ("RUNNING", "test-owner", 1), (
+        "the real hook must have actually claimed the row before reconciliation runs"
+    )
+
+    report = await _reconcile_tasks_with_git(
+        fx.settings, fx.db_path, RUN_ID, horizons=HORIZONS, dry_run=False
+    )
+
+    assert report["unresolved"] == [], (
+        "D91: with a real per-task anchor now on the row, this must NOT fall into `unresolved` "
+        "— that is the exact hang this fix closes"
+    )
+    assert report["landed"] == []
+    assert report["partially_landed"] == []
+    discarded = report["discarded"]
+    assert isinstance(discarded, list) and len(discarded) == 1, (
+        "zero units landed + a real anchor must reach the discard branch, a genuine terminal "
+        "verdict, instead of leaving the row exactly as it was"
+    )
+
+    status, claimed_by, fence = _tasks_row(fx.db_path)
+    assert (status, claimed_by) == ("PENDING", None), (
+        "discarded is re-claimable PENDING, not the RUNNING-forever hang D91 describes"
+    )
+    assert fence == 2, "discard_task's fence bump: claimed at 1, reset bumps to 2"
+    tip = await fx.git.rev_parse(fx.branch)
+    assert tip == fx.phase_anchor, "the worktree tip is back at the task anchor — discard_task ran"
 
 
 # ======================================================================================

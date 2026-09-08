@@ -2924,6 +2924,12 @@ making the criterion's stated text false. D91 stays OPEN and unrelated-to-§45 f
 concern — do not fold its production fix into a future §45 re-visit; §45 needs no further work.
 **Done bar:** met in full. Nothing remains open for §12.45.
 
+**Marker 2026-09-08 (round VI task 83) — D91 is now FIXED, LANDED (`adc029e`), which does not
+change this entry's own conclusion.** This paragraph's "D91 stays OPEN" was true when written and
+is kept as the historical record; §45's closure never depended on D91's status either way (the
+paragraph's own logic was "unrelated-to-§45... its own concern" regardless of open/fixed), so
+fixing D91 changes nothing here. See `docs/INTEGRATION_HONESTY.md`'s D91 entry for the fix.
+
 ## 46. Model-layer invariants
 **DONE (round Z, 2026-09-01) — all 13 sub-clauses now covered.** 8 were already solidly covered
 (illegal transitions raise, abandoned-reopen gating, stale-lease rejection, reap-in-flight
