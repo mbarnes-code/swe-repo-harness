@@ -178,7 +178,9 @@ def _supersede_stub_row(fleet: Path, run_id: str) -> None:  # noqa: F811
 
 
 def test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label(
-    fleet: Path, monorepo: Path, filter_repo: FakeFilterRepo  # noqa: F811
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
 ) -> None:
     """The literal proof item 3 of the brief asks for. `BuildgenWorker`'s own render step runs
     unseamed (it invokes no `bazel`/`git-filter-repo` at all); only the ORIGINAL provider-failure
@@ -217,7 +219,9 @@ def test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label(
 
 
 def test_d107_is_idempotent_on_replay(
-    fleet: Path, monorepo: Path, filter_repo: FakeFilterRepo  # noqa: F811
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
 ) -> None:
     """Item 7 of the brief: replaying the rewrite (crash-and-retry / a second `fleet resume`)
     must report `already_applied` and land NO duplicate commit."""
@@ -249,10 +253,6 @@ def test_d107_is_idempotent_on_replay(
     assert _git_log_count(monorepo, branch) == count_after_first, "a replay must land no commit"
 
 
-
-
-
-
 # ---------------------------------------------------------------------------------------
 # 4/5 — D104(b)/D108: the REVALIDATE claiming loop, driven against the REAL rewritten tree
 # under a REAL `bazel build` + `bazel test` (no seam) — the headline real-Bazel proof.
@@ -280,8 +280,14 @@ def _remove_orphaned_stub_package(monorepo: Path, consumer_repo_id: str) -> None
     wt = monorepo.parent / "cleanup-scratch"
     subprocess.run(  # noqa: S603
         [  # noqa: S607
-            "git", "-C", str(monorepo), "worktree", "add", "--force",
-            str(wt), f"migrate/{consumer_repo_id}",
+            "git",
+            "-C",
+            str(monorepo),
+            "worktree",
+            "add",
+            "--force",
+            str(wt),
+            f"migrate/{consumer_repo_id}",
         ],
         check=True,
         capture_output=True,
@@ -303,7 +309,11 @@ def _remove_orphaned_stub_package(monorepo: Path, consumer_repo_id: str) -> None
             }
             subprocess.run(  # noqa: S603
                 [  # noqa: S607
-                    "git", "-C", str(wt), "commit", "-m",
+                    "git",
+                    "-C",
+                    str(wt),
+                    "commit",
+                    "-m",
                     "test-only: drop the orphaned stub package",
                 ],
                 check=True,
@@ -313,7 +323,13 @@ def _remove_orphaned_stub_package(monorepo: Path, consumer_repo_id: str) -> None
     finally:
         subprocess.run(  # noqa: S603
             [  # noqa: S607
-                "git", "-C", str(monorepo), "worktree", "remove", "--force", str(wt),
+                "git",
+                "-C",
+                str(monorepo),
+                "worktree",
+                "remove",
+                "--force",
+                str(wt),
             ],
             check=False,
             capture_output=True,
@@ -337,7 +353,7 @@ def _insert_revalidate_task(
             "INSERT INTO tasks (task_id, run_id, repo_id, phase, kind, revalidation_key, "
             "                   dest_path, max_attempts, ladder, created_at) "
             "VALUES (?, ?, ?, 4, 'REVALIDATE', ?, ?, 3, "
-            "        '[null,\"EVIDENCE_ONLY\",\"EVIDENCE_PLUS_REJECTED_APPROACHES\"]', ?)",
+            '        \'[null,"EVIDENCE_ONLY","EVIDENCE_PLUS_REJECTED_APPROACHES"]\', ?)',
             (
                 task_id,
                 run_id,
@@ -408,7 +424,8 @@ def test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test
     # the PROVIDER's own row, asserted directly below.
     build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER)
     provider_status = query(
-        fleet, "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 3",
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 3",
         (run_id, _STUB_PROVIDER),
     )
     assert provider_status[0][0] == "SUCCEEDED", provider_status
@@ -468,10 +485,18 @@ def test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test
     query_wt = monorepo.parent / "post-revalidate-query"
     subprocess.run(  # noqa: S603
         [  # noqa: S607
-            "git", "-C", str(monorepo), "worktree", "add", "--detach", "--force",
-            str(query_wt), f"migrate/{_STUB_CONSUMER}",
+            "git",
+            "-C",
+            str(monorepo),
+            "worktree",
+            "add",
+            "--detach",
+            "--force",
+            str(query_wt),
+            f"migrate/{_STUB_CONSUMER}",
         ],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     try:
         queried = subprocess.run(  # noqa: S603
@@ -489,7 +514,8 @@ def test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test
     finally:
         subprocess.run(  # noqa: S603
             ["git", "-C", str(monorepo), "worktree", "remove", "--force", str(query_wt)],  # noqa: S607
-            check=False, capture_output=True,
+            check=False,
+            capture_output=True,
         )
     assert queried.returncode == 0, queried.stderr[-4000:]
     assert _PROVIDER_LABEL in queried.stdout, queried.stdout
@@ -506,10 +532,10 @@ def test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test
     assert [row[0] for row in stub_state] == ["SUPERSEDED"], stub_state
 
 
-
-
 def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
-    fleet: Path, monorepo: Path, filter_repo: FakeFilterRepo  # noqa: F811
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
 ) -> None:
     """Test-proof item 5 (D108): once the REVALIDATE claiming loop's round PASSes, the consumer's
     `phases` VERIFY row reaches `SUCCEEDED` and `stubs.state` reaches `RESOLVED`.
@@ -560,8 +586,8 @@ def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
 
         result = asyncio.run(
             _run_revalidation_claims_impl(
-            settings, fleet / "state" / "fleet.db", run_id, now=cli._now()
-        )
+                settings, fleet / "state" / "fleet.db", run_id, now=cli._now()
+            )
         )
         outcome = result["outcomes"][task_id]
         assert outcome.startswith("settled: verdict=PASS"), outcome
@@ -605,7 +631,9 @@ def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
 
 
 def _plant_stub_labeled_build_file(
-    monorepo: Path, consumer_repo_id: str, dest: str  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    consumer_repo_id: str,
+    dest: str,
 ) -> None:
     """Commits a `BUILD.bazel` naming `_STUB_LABEL` directly onto `migrate/<consumer_repo_id>`
     — simulating the exact state the brief's C1 finding describes: a stub whose `stubs` row has
@@ -617,8 +645,14 @@ def _plant_stub_labeled_build_file(
     wt = monorepo.parent / "plant-stub-label"
     subprocess.run(  # noqa: S603
         [  # noqa: S607
-            "git", "-C", str(monorepo), "worktree", "add", "--force",
-            str(wt), f"migrate/{consumer_repo_id}",
+            "git",
+            "-C",
+            str(monorepo),
+            "worktree",
+            "add",
+            "--force",
+            str(wt),
+            f"migrate/{consumer_repo_id}",
         ],
         check=True,
         capture_output=True,
@@ -627,17 +661,21 @@ def _plant_stub_labeled_build_file(
         build_dir = wt / dest
         build_dir.mkdir(parents=True, exist_ok=True)
         (build_dir / "BUILD.bazel").write_text(
-            'py_library(\n'
+            "py_library(\n"
             '    name = "acme_app_py",\n'
             '    srcs = ["acme_app_py/main.py"],\n'
             f'    deps = ["{_STUB_LABEL}"],\n'
-            ')\n',
+            ")\n",
             encoding="utf-8",
         )
         git(wt, "add", "-A")
         subprocess.run(  # noqa: S603
             [  # noqa: S607
-                "git", "-C", str(wt), "commit", "-m",
+                "git",
+                "-C",
+                str(wt),
+                "commit",
+                "-m",
                 "test-only: plant a stub-labeled BUILD.bazel (simulates a failed D107 rewrite)",
             ],
             check=True,
@@ -656,7 +694,13 @@ def _plant_stub_labeled_build_file(
     finally:
         subprocess.run(  # noqa: S603
             [  # noqa: S607
-                "git", "-C", str(monorepo), "worktree", "remove", "--force", str(wt),
+                "git",
+                "-C",
+                str(monorepo),
+                "worktree",
+                "remove",
+                "--force",
+                str(wt),
             ],
             check=False,
             capture_output=True,
@@ -664,7 +708,9 @@ def _plant_stub_labeled_build_file(
 
 
 def test_c1_gate_refuses_a_revalidate_round_whose_committed_tree_still_names_a_stub_label(
-    fleet: Path, monorepo: Path, filter_repo: FakeFilterRepo  # noqa: F811
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
 ) -> None:
     """C1 (fix round 1, opus-tier review): the mechanical gate this brief demanded, proven as a
     real discriminator. A consumer's stub is superseded (T1's own DB effect) but the committed
