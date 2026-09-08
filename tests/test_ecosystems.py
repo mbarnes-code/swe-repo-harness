@@ -385,8 +385,20 @@ def test_js_maps_a_scoped_npm_package_to_ts_targets() -> None:
     assert binary.attrs["data"] == [f":{library.name}"]
     assert library.deps == ["//ts/acme/tokens:tokens", "//ts/acme/ui:node_modules/react"]
 
-    (test,) = adapter.test_targets(unit)
+    # D112 (round VI task 87): `js_test` cannot compile `.ts` itself (no `srcs` attribute, like
+    # `js_binary`), so the test source is compiled by a SEPARATE `ts_project` (`{name}_test_lib`)
+    # first, and `js_test` names its output via `data=`, mirroring `js_binary`'s own D7 shape.
+    test_lib, test = adapter.test_targets(unit)
+    assert (test_lib.rule, test_lib.name, test_lib.testonly) == ("ts_project", "ui_test_lib", True)
+    assert test_lib.srcs == ["src/Button.spec.ts"]
+    assert test_lib.deps == [f":{library.name}", "//ts/acme/ui:node_modules/react"]
     assert (test.rule, test.name, test.testonly) == ("js_test", "ui_test", True)
+    # D7, widened: neither `deps` nor `srcs` exists on `js_test` (it shares `js_binary`'s
+    # `_ATTRS`); the compiled test's `ts_project` reaches the runtime via `data=` instead.
+    assert test.deps == []
+    assert test.srcs == []
+    assert test.attrs["data"] == [f":{test_lib.name}"]
+    assert test.attrs["entry_point"] == "src/Button.spec.js"
 
     # D10: `tsconfig = ":tsconfig"` on the library is a label into this package, and the target it
     # names is emitted beside it. Before, it named nothing and every generated TS package failed

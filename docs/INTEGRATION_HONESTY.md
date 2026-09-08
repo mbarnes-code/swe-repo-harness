@@ -9333,6 +9333,52 @@ done and FakeBazel-proven, but its own real-Bazel proof needs the separate `rule
 `bazel_dep` fix flagged above first.** Do not round the `<n> of 48` §12 count up on this account
 (same as task 53's note above).
 
+**JS (`NPM`) FIXED (round VI task 87).** The precedent above — "swapping `deps=` for `data=`...
+verifying `js_test` needs nothing else beyond that single-attribute fix, which was NOT verified
+here" — turned out NOT to transfer cleanly, exactly as flagged: fresh verification against the
+pinned `aspect_rules_js@3.4.0` tag (`js/private/js_binary.bzl`, `js_test = rule(attrs = dict(
+js_binary_lib.attrs, **{...}))`) found `js_test` has neither `deps` NOR `srcs` — the `srcs=`
+defect is new, D7's `js_binary` fix never had to face it, because a `js_binary`'s entry point is
+one of the UNIT's own `srcs` (already compiled by the unit's own `ts_project`), while a TEST file
+is compiled by nothing (`unit.test_srcs` is disjoint from `unit.srcs`). `js.py::test_targets()`
+now emits a second `ts_project` (`{name}_test_lib`, `testonly=True`) compiling the test source,
+and a `js_test` naming its compiled output via `data=[f":{name}_test_lib"]` — no `deps=`/`srcs=`
+at all. `declaration: True` is set on the test `ts_project` (matching the library one) not only
+for consistency: `aspect_rules_ts@3.10.0`'s own `ts_project` macro auto-emits a hidden
+`<name>_typecheck_test` `build_test` target whenever declaration emission is off, which pulled in
+a C++ toolchain resolution (`@apple_support`) this fix's own analysis proof never asked for —
+found live when a real `bazel build --nobuild` first failed on exactly that hidden target.
+`TEST_SRC_PARTITIONED_ECOSYSTEMS` (`ecosystems/base.py`) now also carries `NPM`, dispatching to a
+new `cli._is_js_test_src` (Jest's own default `testMatch` convention — `*.test.ts(x)`/
+`*.spec.ts(x)` by basename, or anything under `__tests__/`) via `cli._TEST_SRC_PREDICATES`.
+
+Proven at both tiers this entry's own precedent (task 53/70) established. **FakeBazel tier:**
+`tests/test_build_e2e.py::test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target` —
+old-fails/new-passes via the backup-file method (never `git stash`): pre-fix reproduces this
+entry's own pre-fix shape exactly (no `js_test(` in the body, the test file swallowed into the
+library `ts_project`'s own `srcs=[...]`); post-fix asserts a real `js_test(` plus a real
+`{name}_test_lib` `ts_project`, neither `deps` nor `srcs` naming the `js_test` block, and the
+library `ts_project`'s `srcs` no longer carrying the test file. **Real-Bazel tier (D7's own proof
+shape, widened):** `tests/test_bazel.py::test_real_bazel_analyses_the_generated_js_test` — TWO
+negative controls, not one (`deps=` re-spliced onto `js_test` fails real analysis with "no such
+attribute 'deps' in 'js_test' rule"; `srcs=` re-spliced fails with "no such attribute 'srcs' in
+'js_test' rule"), then the generated pair passes real `bazel build --nobuild` analysis and
+`bazel query 'labels(data, //<dest>:widgets_test)'` resolves to the compiled test's `ts_project`
+label, as Bazel itself resolved it — not as the adapter spelled it. `tests/test_bazel.py::
+test_real_bazel_analyses_the_generated_js_binary` (D7's own test) re-run alongside it, unchanged,
+confirming no regression to the sibling fix. `tests/test_ecosystems.py`'s JS unit test
+(`test_js_maps_a_scoped_npm_package_to_ts_targets`) updated for the new two-target
+`test_targets()` return shape (a `(ts_project, js_test)` tuple, not a one-element `js_test` alone)
+and re-verified 90/90 in that file. Full fast-tier regression across every file this task touched
+(`tests/test_build_e2e.py`, `tests/test_bazel.py`, `tests/test_ecosystems.py`, whole files, no
+`-k`, `-m "not integration"`): **201 passed, 0 failed.** `ruff format`/`ruff check`/`mypy` (no
+path arguments) all clean.
+
+**JS is now closed under D112; Rust (`CARGO`) remains the ONLY open ecosystem slice** (JVM's own
+real-Bazel proof still separately blocked on D121's `rules_java` `bazel_dep` gap, as this entry
+already recorded above). Do not round the `<n> of 48` §12 count up on this account — §12.11's
+Task B (`docs/CRITERIA_PLAN.md`) is the criterion-closing work this unblocks, tracked there.
+
 ## D113 — OPEN. §12.34 Clause B (`ContractBindingUnavailable`/`unbound_contract_kinds`) needs a
 design leg before any dispatch — bigger than first estimated, one live blocker found
 

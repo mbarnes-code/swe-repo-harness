@@ -1204,6 +1204,31 @@ POLYGLOT_REPOS: dict[str, dict[str, str]] = {
             "}\n"
         ),
     },
+    #: D112, round VI task 87: `acme-ui-ts`/`acme-report-ts` above (like every other JS fixture in
+    #: this file) ship zero `*.test.ts` files, so `test_sources()` has always returned `[]` for
+    #: every real-Bazel run this suite has ever done, exactly as `acme-widgets-py`/`-jvm` were for
+    #: Python/JVM. This is the first JS fixture with a real test file, named by the Jest-style
+    #: `*.test.ts` convention this task decided (`docs/INTEGRATION_HONESTY.md`'s `## D112` entry,
+    #: `_is_js_test_src` in `cli.py`). Zero declared dependencies, deliberately: `js.py`'s
+    #: `test_targets()` now emits a SECOND `ts_project` (`{name}_test_lib`) to compile the test
+    #: file before `js_test` can name its output as `entry_point` — a repo with an `@npm` hub would
+    #: exercise `_needs_npm_hub`/`workspace_deps` too, which is D10/D12 territory this fixture has
+    #: no need to re-prove.
+    "acme-widgets-ts": {
+        "package.json": json.dumps(
+            {"name": "acme-widgets-ts", "version": "0.1.0", "dependencies": {}}, indent=2
+        ),
+        "src/index.ts": (
+            "export function double(value: number): number {\n  return value * 2;\n}\n"
+        ),
+        "src/index.test.ts": (
+            "import { double } from './index';\n"
+            "\n"
+            "if (double(21) !== 42) {\n"
+            "  throw new Error('double(21) !== 42');\n"
+            "}\n"
+        ),
+    },
 }
 
 
@@ -3237,6 +3262,63 @@ def test_a_jvm_repo_with_a_real_test_file_gets_a_real_java_test_target(
     library_body = body[library_start:test_start]
     assert '"src/main/java/com/acme/widgets/Widget.java"' in library_body, library_body
     assert "WidgetTest.java" not in library_body, library_body
+
+
+def test_a_js_repo_with_a_real_test_file_gets_a_real_js_test_target(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    bazel: FakeBazel,
+    filter_repo: FakeFilterRepo,
+) -> None:
+    """D112 (round VI task 87), over `FakeBazel`: a JS/TS repo with a real `*.test.ts` gets a real
+    `js_test` target backed by a compiled `ts_project`, and the test file is NOT also part of the
+    library `ts_project`'s `srcs`.
+
+    **The discriminator.** Before this task's fix, `TEST_SRC_PARTITIONED_ECOSYSTEMS`
+    (`ecosystems/base.py`) had no `NPM` member, so `_partition_test_srcs` always took its
+    `ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS` branch for JS units and returned
+    `(list(srcs), [])` unconditionally — `test_srcs` stayed `()`, `js.py:test_targets()`'s `if not
+    test_srcs: return []` guard always fired, and `generate_targets()`'s `ts_project` swallowed
+    `src/index.test.ts` into its own `srcs` instead (nothing partitioned it out, since `sources()`
+    reads `unit.srcs` verbatim). So pre-fix this assertion set is exactly reversed: no `js_test(`
+    in the body, and the test file present in the library `ts_project`'s `srcs=[...]` list. This
+    is the JS half of `D112` in `docs/INTEGRATION_HONESTY.md`, and this task's report records the
+    revert-and-rerun that proves it.
+
+    **Two targets, not one — the shape D7's precedent alone did not anticipate.** Unlike
+    Python/JVM, `js_test` cannot compile `.ts` itself (it is a `rules_js` *runtime* rule, exactly
+    like `js_binary`), so the fix also emits a `{name}_test_lib` `ts_project` compiling the test
+    file, and `js_test` depends on it via `data=` rather than `deps=`/`srcs=` — neither of which
+    exists on `js_test` (see `js.py::test_targets()`'s own docstring).
+    """
+    add_repos(fleet, ["acme-widgets-ts"])
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    dest = relocations(filter_repo)["acme-widgets-ts"]
+    body = (build_worktree(fleet, "acme-widgets-ts") / dest / "BUILD.bazel").read_text(
+        encoding="utf-8"
+    )
+    assert "js_test(" in body, body
+    assert 'name = "acme-widgets-ts_test"' in body, body
+    assert 'name = "acme-widgets-ts_test_lib"' in body, body
+    assert '"src/index.test.ts"' in body, body
+    # D7, widened: neither `deps` nor `srcs` may appear on the `js_test` block itself.
+    test_start = body.index("js_test(\n")
+    test_end = body.index("\n)", test_start) + len("\n)")
+    js_test_body = body[test_start:test_end]
+    assert "deps" not in js_test_body, js_test_body
+    assert "srcs" not in js_test_body, js_test_body
+    assert 'data = [\n        ":acme-widgets-ts_test_lib",\n    ],' in js_test_body, js_test_body
+
+    # The library `ts_project` still exists (`src/index.ts` is real library source) but its
+    # `srcs` no longer swallows the test file — the half a test asserting ONLY "a `js_test`
+    # exists" would miss entirely.
+    library_start = body.index("ts_project(")
+    library_body = body[library_start:test_start]
+    assert '"src/index.ts"' in library_body, library_body
+    assert '"src/index.test.ts"' not in library_body, library_body
 
 
 def test_destinations_come_from_the_adapters_not_from_the_driver(

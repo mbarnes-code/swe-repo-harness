@@ -10872,10 +10872,34 @@ def _is_jvm_test_src(path: str) -> bool:
     return path.startswith(_JVM_TEST_SOURCE_ROOTS)
 
 
+def _is_js_test_src(path: str) -> bool:
+    """Jest's own default `testMatch` convention, restricted to what `JsAdapter.src_suffixes`
+    actually compiles: `*.test.ts(x)` / `*.spec.ts(x)` by basename, or anything under a
+    `__tests__/` directory.
+
+    D112 (round VI task 87): `js.py`'s `test_targets()` now compiles `test_sources()` into a real
+    `js_test` (see that method's own docstring); this decides what counts as a JS/TS test file for
+    this fleet, mirroring `_is_python_test_src`'s role for Python and `_is_jvm_test_src`'s for JVM.
+    `.mts`/`.cts` are deliberately not matched here — `src_suffixes` accepts them but this fleet
+    has never seen one, and Jest's own default `testMatch` doesn't either; widening is a one-line
+    change if a real fixture needs it.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if "__tests__" in path.split("/")[:-1]:
+        return True
+    return (
+        fnmatch(name, "*.test.ts")
+        or fnmatch(name, "*.test.tsx")
+        or fnmatch(name, "*.spec.ts")
+        or fnmatch(name, "*.spec.tsx")
+    )
+
+
 _TEST_SRC_PREDICATES: Final[Mapping[str, Callable[[str], bool]]] = {
     "pypi": _is_python_test_src,
     "maven": _is_jvm_test_src,
     "gradle": _is_jvm_test_src,
+    "npm": _is_js_test_src,
 }
 """`Ecosystem.value` → the predicate that decides whether one discovered source is a test file for
 that ecosystem — D112, round VI task 70's table-driven dispatch (mirrors
@@ -10898,17 +10922,17 @@ def _partition_test_srcs(ecosystem: Ecosystem, srcs: Sequence[str]) -> tuple[lis
     """Split a unit's discovered sources into `(srcs, test_srcs)` for one ecosystem — D112.
 
     Scoped to `ecosystems.base.TEST_SRC_PARTITIONED_ECOSYSTEMS` (round VI task 53: Python only;
-    widened round VI task 70 to JVM/`MAVEN`+`GRADLE`). Rust/`CARGO` and JS/`NPM` are deliberately
-    NOT members — see that constant's docstring for the two measured real-Bazel analysis-time
-    failures (Rust: `rust_test.crate`/`rust_test.srcs` mutual exclusivity; JS: `js_test`'s `deps`
-    reintroducing `docs/INTEGRATION_HONESTY.md`'s `## D7`) a naive predicate for either would
-    trigger. Every non-member ecosystem keeps its whole walk in `srcs` exactly as before this task —
-    `test_srcs` stays `()` for it, which is a no-op against `test_sources()`'s existing (always
-    empty) behavior. A table lookup rather than a `Compare`/`Subscript` naming a bare member (round
-    VI task 62, D120, ADR-0100): §12.6's confinement gate forbids the latter outside the two
-    adapter packages, and `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime
-    behavior. The per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same
-    table-lookup shape, keyed by `ecosystem.value` for the reason documented on that table.
+    widened round VI task 70 to JVM/`MAVEN`+`GRADLE`; widened round VI task 87 to JS/`NPM`).
+    Rust/`CARGO` is deliberately NOT a member — see that constant's docstring for the measured
+    real-Bazel analysis-time failure (`rust_test.crate`/`rust_test.srcs` mutual exclusivity) a
+    naive predicate would trigger. Every non-member ecosystem keeps its whole walk in `srcs`
+    exactly as before this task — `test_srcs` stays `()` for it, which is a no-op against
+    `test_sources()`'s existing (always empty) behavior. A table lookup rather than a
+    `Compare`/`Subscript` naming a bare member (round VI task 62, D120, ADR-0100): §12.6's
+    confinement gate forbids the latter outside the two adapter packages, and
+    `TEST_SRC_PARTITIONED_ECOSYSTEMS` is the compliant shape, same runtime behavior. The
+    per-ecosystem predicate dispatch below `_TEST_SRC_PREDICATES` is the same table-lookup shape,
+    keyed by `ecosystem.value` for the reason documented on that table.
     """
     if ecosystem not in TEST_SRC_PARTITIONED_ECOSYSTEMS:
         return list(srcs), []

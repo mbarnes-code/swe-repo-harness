@@ -764,28 +764,91 @@ class JsAdapter(EcosystemAdapter):
         return targets
 
     def test_targets(self, unit: BuildUnit) -> list[BuildTarget]:
-        """One `js_test` over the *compiled* test output, depending on the `ts_project`.
+        """A `ts_project` compiling the test sources, plus a `js_test` running the compiled entry
+        point via `data` — D112's JS slice (round VI task 87).
 
-        The entry point is the `.js` the transpiler emits, not the `.ts` on disk: `js_test` runs
-        Node, and pointing it at TypeScript produces a green `bazel build` and a test target that
-        cannot start.
+        **Two defects, not one, both unreachable until `test_srcs` had a real predicate feeding
+        it (round VI task 87 widened `TEST_SRC_PARTITIONED_ECOSYSTEMS` to `NPM` in the same
+        change).** `docs/INTEGRATION_HONESTY.md`'s `## D7` entry found and fixed `js_binary`'s
+        `deps=` — a `rules_js` *runtime* rule has no such attribute — and this method reused the
+        identical wrong shape one function up, unexercised (`test_srcs` was always `()`). That
+        precedent transfers directly: `js_test` shares `js_binary`'s `_ATTRS` base (`js_test =
+        rule(attrs = dict(js_binary_lib.attrs, **{"env_inherit": ..., "_lcov_merger": ...,
+        "_coverage_report": ...}))`, verified against the pinned `aspect_rules_js@3.4.0` tag's
+        `js/private/js_binary.bzl`), so `deps` is absent from `js_test` for the exact same reason.
+
+        **But `srcs` was ALSO wrong, and D7's fix never had to face it.** `js_binary`/`js_test`'s
+        shared `_ATTRS` has no `srcs` attribute either — verified against the same source — so
+        `BuildTarget(srcs=test_srcs, ...)` would have rendered a second nonexistent attribute
+        (`generators.py::render_target` emits `srcs = [...]` unconditionally whenever the list is
+        non-empty) and real Bazel would refuse the target with "no such attribute 'srcs' in
+        'js_test' rule" the moment it tried to instantiate it, one attribute past where the
+        `deps=` fix alone would have landed. **And unlike `js_binary`'s entry point — one of the
+        UNIT's own `srcs`, already compiled by the unit's own `:{name}` `ts_project` — a test file
+        is never compiled by anything: `unit.test_srcs` is disjoint from `unit.srcs`
+        (`cli._partition_test_srcs`), so `:{name}`'s `ts_project` never sees it.** `js_test`'s
+        `entry_point` names a `.js` file, so something has to transpile the `.ts` test source
+        first. The fix is therefore a second `ts_project` — `{name}_test_lib`, `testonly=True`,
+        `srcs=test_srcs`, depending on the unit's own library (for the module under test) and its
+        external labels (for whatever the test imports from `@npm`) — mirroring exactly what
+        `generate_targets()`'s `js_binary` already does for the unit's own entry point, just for
+        the test file's compilation instead of assuming one already exists.
+
+        Only `test_srcs[0]` becomes the `js_test`'s `entry_point`: this preserves the existing
+        one-entry-point selection this method already made pre-fix (never verified, since
+        `test_srcs` was always empty) rather than introducing a new "one `js_test` per file" design
+        — that redesign is out of this fix's scope, exactly as task 86's Rust brief scoped an
+        analogous "one `rust_test` per file" question out of ITS fix. Every discovered test file is
+        still compiled (`{name}_test_lib`'s `srcs` keeps the whole list), so a multi-file test
+        suite analyses correctly; only one file is ever actually *run* as the test binary's entry.
         """
         test_srcs = self.test_sources(unit)
         if not test_srcs:
             return []
         name = target_name(unit)
+        test_lib_name = f"{name}_test_lib"
         return [
+            BuildTarget(
+                package=unit.dest,
+                name=test_lib_name,
+                rule="ts_project",
+                load_from="@aspect_rules_ts//ts:defs.bzl",
+                srcs=test_srcs,
+                deps=[f":{name}", *self.external_labels(unit)],
+                # `declaration: True` mirrors the library `ts_project` above, and here it is not
+                # only consistency: `aspect_rules_ts`'s own `ts_project` macro (verified against
+                # the pinned `aspect_rules_ts@3.10.0` tag's `ts/defs.bzl`) auto-emits a HIDDEN
+                # `<name>_typecheck_test` `build_test` target whenever declaration emission is
+                # off, which this adapter never asked for and which a `bazel build //<dest>/...`
+                # would then also analyse — verified live: dropping `declaration` here (leaving it
+                # at the rule's default `False`) makes a real `bazel build --nobuild //<dest>/...`
+                # try to resolve `widgets_test_lib_typecheck_test`, a target this adapter's own
+                # `BuildTarget` list never named.
+                attrs={
+                    "declaration": True,
+                    "tsconfig": f":{_TSCONFIG_TARGET}",
+                    "transpiler": "tsc",
+                },
+                testonly=True,
+                visibility=["//visibility:private"],
+            ),
             BuildTarget(
                 package=unit.dest,
                 name=f"{name}_test",
                 rule="js_test",
                 load_from="@aspect_rules_js//js:defs.bzl",
-                srcs=test_srcs,
-                deps=[f":{name}", *self.external_labels(unit)],
-                attrs={"entry_point": _js_output(test_srcs[0])},
+                # NO `deps`, NO `srcs` (D7, widened): `js_test` shares `js_binary`'s `_ATTRS` base
+                # and neither attribute exists on it. `data` is where the compiled test's JsInfo
+                # (and, transitively through it, the library's own JsInfo) belongs — exactly the
+                # `js_binary` shape above, pointed at the test compile unit instead of the unit's
+                # own primary target.
+                attrs={
+                    "entry_point": _js_output(test_srcs[0]),
+                    "data": [f":{test_lib_name}"],
+                },
                 testonly=True,
                 visibility=["//visibility:private"],
-            )
+            ),
         ]
 
     def toolchain_requirements(self) -> list[ToolchainRequirement]:

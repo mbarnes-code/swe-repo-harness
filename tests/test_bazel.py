@@ -2198,6 +2198,129 @@ def test_real_bazel_analyses_the_generated_js_binary(
     assert f"//{dest}:app" in data.stdout.split(), data.stdout
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(shutil.which("bazel") is None, reason="bazel is not installed on this host")
+def test_real_bazel_analyses_the_generated_js_test(
+    bazel_workspace: Path, bazel_startup_argv: tuple[str, ...], bazel_registry_args: tuple[str, ...]
+) -> None:
+    """D112 (round VI task 87): the `js_test` (plus the `{name}_test_lib` `ts_project` compiling
+    its test source) the JS adapter now emits must be a target real Bazel accepts — the SAME
+    proof shape as `test_real_bazel_analyses_the_generated_js_binary` above, for the sibling
+    defect `js.py::test_targets()` carried unexercised (`test_srcs` had always been `()`).
+
+    **Two negative controls, not one — this is where the precedent stopped being a straight
+    transplant.** `js_test` shares `js_binary`'s missing-`deps` attribute (control 1, identical to
+    D7's own). But `js_binary`'s entry point is one of the UNIT's own `srcs`, already compiled by
+    the unit's own `ts_project`, so `data=[":name"]` was the whole fix there; a TEST file is
+    compiled by nothing until this fix's new `{name}_test_lib` target exists, and `js_test` also
+    has no `srcs` attribute (control 2) — a defect `js_binary`'s shape never had, since it never
+    tried to declare one.
+    """
+    adapter = JsAdapter()
+    dest = "ts/acme/widgets"
+    unit = BuildUnit(
+        unit_id="acme-widgets",
+        ecosystem=Ecosystem.NPM,
+        dest=dest,
+        srcs=[f"{dest}/src/index.ts"],
+        test_srcs=[f"{dest}/src/index.test.ts"],
+        published=Coordinate(ecosystem=Ecosystem.NPM, group="acme", name="widgets"),
+    )
+    targets = [*adapter.generate_targets(unit), *adapter.test_targets(unit)]
+    package = bazel_workspace / dest
+    (package / "src").mkdir(parents=True)
+    (package / "src" / "index.ts").write_text(
+        "export function double(value: number): number {\n  return value * 2;\n}\n", "utf-8"
+    )
+    (package / "src" / "index.test.ts").write_text(
+        "import { double } from './index';\n"
+        "if (double(21) !== 42) {\n"
+        "  throw new Error('double(21) !== 42');\n"
+        "}\n",
+        "utf-8",
+    )
+    (package / "tsconfig.json").write_text('{"compilerOptions": {"declaration": true}}\n', "utf-8")
+    (bazel_workspace / "MODULE.bazel").write_text(
+        render_module_bazel(
+            [],
+            module_name="acme_monorepo",
+            ruleset_versions=dict(BuildSection().ruleset_versions),
+            toolchains=adapter.toolchain_requirements(),
+            targets=targets,
+        ),
+        encoding="utf-8",
+    )
+    (bazel_workspace / "BUILD.bazel").write_text("", encoding="utf-8")
+    generated = render_build_bazel(targets)
+    assert 'name = "widgets_test_lib"' in generated, generated
+    assert 'js_test(\n    name = "widgets_test",' in generated, generated
+    assert "deps" not in generated.split("js_test(", 1)[1].split("\n)", 1)[0], generated
+    assert "srcs" not in generated.split("js_test(", 1)[1].split("\n)", 1)[0], generated
+
+    data_attr = '    data = [\n        ":widgets_test_lib",\n    ],'
+    assert data_attr in generated, generated
+
+    # Negative control 1: the D7-class `deps=` defect, re-spliced onto the js_test block.
+    with_deps = generated.replace(data_attr, f'    deps = [":widgets_test_lib"],\n{data_attr}')
+    assert with_deps != generated, generated
+    (package / "BUILD.bazel").write_text(with_deps, encoding="utf-8")
+    broken_deps = _bazel(
+        bazel_startup_argv,
+        "build",
+        "--nobuild",
+        f"//{dest}:all",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(broken_deps, bazel_registry_args)
+    assert broken_deps.returncode != 0, broken_deps.stdout
+    assert "no such attribute 'deps' in 'js_test' rule" in broken_deps.stderr, broken_deps.stderr[
+        -3000:
+    ]
+
+    # Negative control 2: the SRCS defect this fix ALSO had to close, and which D7's own
+    # `js_binary` fix never faced (see this test's own docstring).
+    with_srcs = generated.replace(data_attr, f'    srcs = ["src/index.test.ts"],\n{data_attr}')
+    assert with_srcs != generated, generated
+    (package / "BUILD.bazel").write_text(with_srcs, encoding="utf-8")
+    broken_srcs = _bazel(
+        bazel_startup_argv,
+        "build",
+        "--nobuild",
+        f"//{dest}:all",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(broken_srcs, bazel_registry_args)
+    assert broken_srcs.returncode != 0, broken_srcs.stdout
+    assert "no such attribute 'srcs' in 'js_test' rule" in broken_srcs.stderr, broken_srcs.stderr[
+        -3000:
+    ]
+
+    (package / "BUILD.bazel").write_text(generated, encoding="utf-8")
+    analysed = _bazel(
+        bazel_startup_argv,
+        "build",
+        "--nobuild",
+        f"//{dest}:all",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    _fail_if_registry_unreachable(analysed, bazel_registry_args)
+    assert analysed.returncode == 0, analysed.stderr[-3000:]
+
+    # The edge `data` expresses, as Bazel resolved it — not as we spelled it.
+    resolved = _bazel(
+        bazel_startup_argv,
+        "query",
+        f"labels(data, //{dest}:widgets_test)",
+        cwd=bazel_workspace,
+        registry=bazel_registry_args,
+    )
+    assert resolved.returncode == 0, resolved.stderr[-2000:]
+    assert f"//{dest}:widgets_test_lib" in resolved.stdout.split(), resolved.stdout
+
+
 # ---------------------------------------------------------------------------------------
 # the reaper itself — the mechanism the session finisher depends on
 # ---------------------------------------------------------------------------------------
