@@ -10484,3 +10484,42 @@ regression proof (a real `bazel build` + `bazel test` + `bazel query` all succee
 rewritten tree under this fix). Unrelated to D107/D104/D108 otherwise — fixed here only because it
 directly blocked this task's own required real-Bazel proof (CLAUDE.md's Rule 11 disclosure, not a
 scope expansion of the task brief).
+
+---
+
+## D130 — OPEN. `fleet stubs resolve` has zero CLI implementation — `cli.stubs_resolve` validates
+preconditions then unconditionally raises `CommandUnavailableError`
+
+**Found by round VI task 85 (2026-09-08), while building the §12.37/§12.39 combined real-CLI
+stub-resolution fixture.** Verified free before allocating: form-agnostic sweep of
+`docs/INTEGRATION_HONESTY.md`/`docs/DECISIONS.md`/`docs/CRITERIA_PLAN.md` for `\bD[0-9]+\b` found
+`D129` as the highest allocated number.
+
+**The gap, as measured.** `cli.stubs_resolve` validates its preconditions and then unconditionally
+calls `cli._unavailable("stubs resolve", ...)`, raising `CommandUnavailableError` before touching
+any state-mutating code — confirmed by task-85's own fixture, which drives the real CLI command and
+asserts exactly this (exit 1, `"cannot run"` in output, zero new rows written). This is not a new
+finding in isolation: D63's own "Residual, NOT fixed here" paragraph already discloses the same
+underlying non-implementation as an aside while fixing a different, narrower thing (the verb's
+error-message truthfulness) — D63 never owned wiring the verb itself, and no other D-number does
+either.
+
+**Consequence.** `docs/SPEC.md` §12.37's literal text requires the stub-resolution idempotency
+clause's third trigger to be `fleet stubs resolve` — "triggering the resolution... three more times
+... adds no further rows" presumes the trigger actually runs its resolution logic and finds nothing
+left to do. Because `stubs_resolve` never reaches that logic, task-85's proof for this one
+sub-clause is real (the command genuinely adds zero rows) but weaker than the literal text asks for
+— it proves the command is a no-op by being unimplemented, not by being idempotent. This is the
+single, precisely-scoped residual keeping §12.37 at PARTLY ADDRESSED rather than DONE after task-85
+otherwise closed all four other named gaps (real `fleet retry`, a real merge-driven `fleet pr --sync`
+T1 trigger, the REVALIDATE claiming loop via real `fleet resume`, and reaching
+`RESOLVED`/`SUCCEEDED`/`equivalence == 'FULL'` under `FakeBazel`, per the task's own accepted scope
+boundary).
+
+**Not yet built.** Wire `fleet stubs resolve` to the existing T1 machinery
+(`_stub_supersede_inputs`/`supersede`/`plan_revalidation`, or whatever the current manual-trigger
+call path is — re-derive fresh, do not trust this sentence's naming without checking) — the
+manual-trigger resolution logic the verb's own docstring promises already exists and is already
+exercised via `_pr_sync_impl`'s `--sync` path; this is CLI-driver wiring, not new-mechanism, per
+task-85's own assessment. Estimated small/cheap, comparable to the D107/D104/D108 bundle's own
+smallest piece (D108).
