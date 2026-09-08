@@ -183,7 +183,14 @@ def test_a_breached_transform_wave_cuts_no_phase_anchor(fleet: Path) -> None:  #
 
     assert result.exit_code == ExitCode.WAVE_WALL_CLOCK_EXHAUSTED, result.output
     rows = dict(query(fleet, "SELECT repo_id, status FROM phases WHERE phase = 2"))
-    assert set(rows) == set(members), rows
+    # D123/ADR-0127 (round VI task 76): TRANSFORM now pre-seeds EVERY open wave's members upfront,
+    # before any wave dispatches -- not only the driven wave's -- so `rows` also carries wave 1's
+    # members here (also freshly PENDING: the breach halts the dispatch loop before wave 1 is ever
+    # reached, so nothing in it advances past its own pre-seeded row either). This test's own claim
+    # is about wave 0 specifically -- every wave-0 member got a phase row and none of them advanced
+    # past PENDING -- not that wave 0's members are the only rows that exist.
+    assert set(members) <= set(rows), rows
+    assert {rows[repo_id] for repo_id in members} == {"PENDING"}, rows
     assert set(rows.values()) == {"PENDING"}, rows
     assert [
         row for row in query(fleet, "SELECT repo_id, attempts FROM phases WHERE phase = 2")
