@@ -292,6 +292,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'ContractHoistOverride' | 'ContractNotShared'
                                                   -- | 'HoistBrokeOwner' | 'HoistRollbackDemotion'
                                                   -- | 'HoistRollbackRefused'
+                                                  -- | 'HoistRollbackFailed' -- cli.py,
+                                                  --     _write_hoist_rollback_failed_finding,
+                                                  --     fix round task 72 controller review I2:
+                                                  --     one row per contract whose rollback
+                                                  --     attempt raised, repo_id NULL
                                                   -- | 'StubDegraded' -- state/repository.py,
                                                   --     stub_degrade_transform, ADR-0124: the audit
                                                   --     write paired with the SUCCEEDED->DEGRADED
@@ -372,6 +377,16 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --   method, one per Phase 3 build failure
                                                   --   attributed to a watched hoist target path,
                                                   --   repo_id the failing repo.
+                                                  --   'HoistRollbackFailed' was added 2026-09-08
+                                                  --   (fix round, task 72 controller review I2,
+                                                  --   PRODUCTION-SAFETY regression fix): it has a
+                                                  --   live INSERT in cli.py, function
+                                                  --   _write_hoist_rollback_failed_finding, one
+                                                  --   per contract whose unhoist_contract or
+                                                  --   execute_hoist_rollback call raised, repo_id
+                                                  --   NULL for the same reason as
+                                                  --   HoistRollbackRefused above. Declared with a
+                                                  --   live writer from the start, never no-Python.
                                                   --   No Contract/Hoist kind remains no-Python.
                                                   --   The REST of the DECLARED list is emitted
                                                   --   from cli.py, several through a VARIABLE

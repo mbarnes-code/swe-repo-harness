@@ -13629,6 +13629,17 @@ mechanism — Decisions 1, 2, 3, and 6). Two further slices — the git-mechanic
 execution (Decisions 4/5) and the production wiring from whichever leg (C1/C2) produces the
 triggering finding — are named as separate future tasks, not designed away by omission.
 
+**Corrected 2026-09-08 (fix round, task-72 controller review I1) — both slices are now built,
+this paragraph's own claim left in place as the historical record of what was true at ADR-0122's
+own writing.** The git-mechanics slice (Decisions 4/5) landed as `cli.execute_hoist_rollback`,
+round VI task 71. The production wiring (Decision 7) landed as `cli._reconcile_hoist_rollbacks`,
+called from `_build_impl`, round VI task 72. Residual, disclosed by task-72's own fix round
+(controller review I2): no production writer sets `contract_id` on a `PullRequestDraft` yet
+(D122), so `execute_hoist_rollback`'s anchor scan always raises `RollbackAnchorError` for a
+contract whose blast set is non-empty on a real fleet — caught per contract at the
+`_reconcile_hoist_rollbacks` call site, which records a `HoistRollbackFailed` finding and lets
+the rest of the run proceed, rather than aborting the whole build.
+
 ## ADR-0123 — §12.31 / D111 Leg C2: `carry_over_committed` treats a `FAILED` contract like
 `HOISTED`/`MIGRATED` (sticky), not like `REJECTED` (dropped, re-derived)
 
