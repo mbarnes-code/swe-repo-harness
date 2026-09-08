@@ -10267,3 +10267,106 @@ passing directly on `main`.
 - `docs/CRITERIA_PLAN.md`'s §37 section itself needs the stale "unbuilt NEW-MECHANISM" text
   corrected to reflect the worker's existing production status, independent of building the
   combined test fixture above.
+
+## Round VI, thirty-second wave (2026-09-08) — D112 fully closed (Rust + JS slices), §12.43 case
+(ii) closed via ADR-0132, §12.37/§12.39 narrowed to one small residual (D130)
+
+Second dispatch round of this session's continuation, following research-47's fresh §12 Rollup
+(42/48, open set: §11, §14, §31, §37, §39, §43). Picked the two highest-leverage, best-scoped
+targets research-47 identified — the §12.37/§12.39 combined real-CLI fixture (TEST-ONLY, no design
+needed) and §12.43's D55/D58 circuit-breaker gap (needed one research/design pass) — plus D112's
+two remaining ecosystem slices (Rust, JS), both flagged real-but-scoped rather than "mechanical."
+Full detail, including every review cycle and fix round, lives in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; this checkpoint records headline outcomes.
+
+**D112 is now fully closed across every ecosystem slice** (Python, JVM, Rust, JS all populate
+`BuildUnit.test_srcs` correctly). Rust needed a real adapter reshape, not a predicate: `rust_test`'s
+`crate=`/`srcs=` mutual exclusivity (a genuine `rules_rust@0.65.0` analysis-time hard-fail) is now
+avoided by construction — the unconditional `crate=` unit-test target stays, and each `tests/*.rs`
+integration file gets its own separate target, mirroring Cargo's own compiler convention, proven
+against the real pinned toolchain. JS needed an even larger reshape than assumed: `js_test` lacked
+`srcs` as well as `deps` (the D7 precedent covered only `deps`), so test files were never compiled
+by anything — fixed with a compiled `ts_project` test-lib plus entry-point selection preferring
+`*.test.*`/`*.spec.*` basenames over blind first-file indexing. That JS fix went through two real
+bugs found in review (silent loss of non-source files like Jest snapshots under a `__tests__/`
+directory clause; a genuine correctness bug where alphabetical sort could deterministically pick a
+non-executable file as the test's entry point — green `bazel build`, a target that cannot start)
+before landing clean. Both branches independently widened the same shared table/docstring in
+`ecosystems/base.py` and needed a real, by-hand merge conflict resolution (not a checkout-ours/
+-theirs shortcut) — documented in the merge commit, including one now-false claim on the JS
+branch ("Rust is the only remaining open slice," true when written, stale once Rust's own fix had
+already landed) caught and corrected as an explicit merge-time annotation rather than silently
+overwritten.
+
+**§12.43 case (ii) closed via ADR-0132.** The gap was two interlocking, previously-missing pieces —
+a same-target backoff-retry for a 429 (reusing an already-existing but unwired `orchestrator/
+retry.py` primitive) feeding a new `llm/failover.py::BackendHealth` circuit breaker (in-memory,
+per-run, no persistence, per §11.8's explicit "re-probes rather than inheriting a stale verdict"
+requirement) — confirmed neither piece works alone (building the breaker without the backoff-
+exhaustion signal reproduces the exact "throttling mistaken for an outage" failure §13 row 43
+forbids). Confirmed a LIVENESS gap, not soundness: every failure path already terminated safely in
+the existing `TierUnavailable` → exit 8 → `PENDING` mechanism; this fix changes only when it fires
+and whether the operator-facing message is honest. Review caught one real, worse-than-pre-fix bug
+before landing: a `HALF_OPEN` probe resolving as anything other than success/`TransportError` (the
+ordinary, caught `SchemaUnsatisfied` outcome, among others) permanently wedged the target with no
+cooldown ever re-opening it — under real wave-level concurrency, one unlucky probe could silently
+kill a target for every worker in a wave for the rest of the run. Fixed and independently
+re-verified via two of the reviewer's own mutations (a no-op variant and a cooldown-reset variant),
+confirming both the fix's presence and its specific preserve-`down_since` behavior are genuinely
+tested.
+
+**§12.37/§12.39 narrowed to a single small, precisely-scoped residual, correctly not over-claimed
+as DONE.** One combined, real-CLI fixture now proves 4 of 5 gaps SPEC's literal text names: a real
+`fleet retry`, a real merge-driven `fleet pr --sync` T1 trigger, the REVALIDATE claiming loop via
+real `fleet resume`, and reaching `RESOLVED`/`SUCCEEDED`/`equivalence == 'FULL'` (under `FakeBazel`,
+an accepted scope boundary). The 5th gap — genuinely new, not previously tracked — is that
+`fleet stubs resolve` has zero CLI implementation at all (`cli.stubs_resolve` unconditionally
+raises `CommandUnavailableError` before any state mutation); allocated **D130**. The fix round
+also caught and corrected a subtler problem: the done-bar text as first written would have let a
+future task wire D130 alone and wrongly flip §12.37 to DONE, when SPEC's literal clauses actually
+need at least 3 more independent pieces proven (same-transaction atomicity via a kill/resume proof,
+an exact one-`REVALIDATE`-row count, a zero-new-commits/zero-LLM-calls assertion) — corrected before
+merge, exactly the Rule 13/14 failure mode this project's guardrails exist to stop.
+
+**Two process incidents this wave, both caught and handled rather than silently absorbed:**
+1. A platform opus-tier rate limit hit mid-batch, failing 3 concurrent review/fix dispatches at
+   once. Recovered by resuming what could be resumed and redispatching the rest on sonnet,
+   disclosed as a deliberate model-tier fallback for the affected work, not a silent substitution.
+2. A controller routing mistake sent one fix round to a task's REVIEWER agent instead of its
+   implementer; the agent completed the fix (it had full branch context) but correctly
+   self-disclosed doing so rather than presenting self-reviewed work as independently verified —
+   caught, and a genuinely fresh, independent review was dispatched before that work was trusted.
+
+**Fifth instance this session of a recurring citation-drift class** (the same `_fire_t1_for_provider`
+line-number citation in D103's correction paragraph, repeatedly rotted by `cli.py` growing above
+it across five separate merges/fix-rounds this session) — each caught immediately by the citation-
+hygiene gate and fixed in one line, but frequent enough now to flag as a hardening candidate: pin
+that one citation to something more durable than a hand-maintained line number.
+
+**Status: main green.** Citation-hygiene/findings-kinds re-verified 74/74 after every merge, ruff
+and mypy clean throughout (130 source files after `llm/failover.py`'s addition), `test_ecosystems.py`
+92/92 and the real-Bazel D112 fixtures (Rust, JS, plus the earlier Python) all independently
+re-confirmed passing directly on `main`, not merely on a branch.
+
+**§12 count: NOT re-measured this wave — deliberately disclosed rather than guessed.** This wave's
+work plausibly moves §12.43 to DONE (case (ii) was described as its last named blocker) and
+narrows §12.37/§12.39 without closing either — but per Rule 13's own discipline, the headline
+`<n> of 48` is not updated here without a fresh, direct re-derivation against `docs/SPEC.md`'s
+current text, which this checkpoint has not performed. The next round should open with that
+re-measurement before picking its own next target.
+
+**Remaining open criteria (as of the last full measurement, research-47, pending this wave's own
+re-verification):**
+- **§12.43** — plausibly now DONE (case (ii) closed this wave); needs direct re-confirmation, not
+  assumed.
+- **§12.37/§12.39** — one small residual: wire `fleet stubs resolve` (D130) to the existing T1
+  machinery (CLI-driver wiring, not new-mechanism, per task-85's own assessment) — cheapest
+  remaining path to closing up to 2 criteria.
+- **§12.14** — down to its single remaining named gap: the still-undesigned transitive-stub-
+  stacking mechanism (a second-layer dependent whose own provider is `DEGRADED`, not directly RHI).
+  Untouched this session, no precedent to mirror.
+- **§12.31** case (ii) — Leg C1 (owner-scoped `FILE_PATH`-collision design, never designed) and Leg
+  C2's `contract_id`-wiring gap (unsized), both real-but-non-gating, never dispatched.
+- **§12.11** — D112 fully closed as of this wave (see above); §12.11's own remaining gap is Task B,
+  the sandboxed real-Docker combination fixture flagged since round V as needing supervised
+  dispatch (subagents can hang on live Docker invocations) — not attempted this session.
