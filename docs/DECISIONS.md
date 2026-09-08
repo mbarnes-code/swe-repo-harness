@@ -14618,3 +14618,227 @@ projection, but leaves the precise renumbering and `docs/SPEC.md` §11.5 text ed
    convention) alongside whichever task lands the fix.
 3. **§11.5 step numbering** (judgment call 7) — left to the task, not pinned here.
 
+# ADR-0129 — D125: `_verify_impl` pre-seeds every gated wave's VERIFY `phases` row upfront,
+adapting ADR-0127's `_transform_impl` shape to VERIFY's own predecessor-phase gating
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D125 entry (round VI research-43, confirmed by round
+VI task 78, `xfail(strict=True)` regression fixture
+`tests/test_build_e2e.py::test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent`)
+found that `_verify_impl`'s wave loop has the byte-for-byte same lazy, per-wave `upsert_phase`
+shape `_transform_impl` had before ADR-0127's fix (D123): a direct VERIFY-phase dependent
+scheduled into a later wave than its now-`REQUIRES_HUMAN_INTERVENTION` (RHI) provider never gets
+`blocked_by` populated within one `fleet verify` invocation. §12.14's blast-containment clause is
+provably false for VERIFY dispatch today, independently of D123/ADR-0127's TRANSFORM-only fix.
+Measured (task 78, real dispatch, no hand-seeding): `{'acme-lib-py':
+('REQUIRES_HUMAN_INTERVENTION', []), 'acme-lib-ts': ('SUCCEEDED', []), 'acme-app-py':
+('SUCCEEDED', []), 'acme-app-ts': ('SUCCEEDED', [])}` — `acme-app-py` (wave 1, direct dependent)
+should read `('BLOCKED', ['acme-lib-py'])`.
+
+**Why this is a new ADR, not an addendum to ADR-0127.** ADR-0127's own "Judgment call 3" explicitly
+declined to decide this ("Not decided here — flagged for the controller... this ADR and task-76 do
+not touch `_verify_impl` in any way"), and every existing "Addendum" in `docs/DECISIONS.md`
+(ADR-0125's, `attempts`-not-reset; the review-finding paragraph appended to ADR-0123/D124's own
+entry) records a controller ruling on a review finding about work **already landed**, not a
+forward design for **not-yet-built** work on a different function. D125 also gets its own
+ledger entry, keyed by its own D-number, the same way D123 (ADR-0127), D122 (ADR-0126), D107
+(ADR-0128) each got a dedicated ADR — a reader searching for "D125" should land on a self-contained
+design, not a sub-section of a document whose own text says "not decided here." Finally, this ADR
+is not a verbatim transplant: root-cause tracing found one genuine structural difference (below)
+that ADR-0127 never had to reason about, which is enough substance to warrant its own record rather
+than a short addendum note.
+
+**Root cause, re-traced fresh against current `HEAD` (line numbers re-verified, not trusted from
+D125's own entry or research-43, both of which cite older ranges).** `_verify_impl`'s wave loop
+(`src/fleet/cli.py:12028–12043`) creates each wave's VERIFY `phases` row lazily:
+
+```python
+for index in waves:
+    members, blocked = await _gated_members(
+        read_conn, run_id, index, only, predecessor=Phase.BUILD
+    )
+    withheld.update(blocked)
+    if not members:
+        continue
+    driven.append(index)
+    for repo_id in members:
+        await repository.upsert_phase(run_id, repo_id, Phase.VERIFY, now=_now(), max_attempts=MAX_ATTEMPTS)
+    ...
+    report = await _run_verify_wave(...)   # containment can fire IN HERE
+```
+
+The mechanism is identical to D123's: `PhaseRunner._contain` → `WaveScheduler.propagate_blocked` →
+`SqliteSchedulerStore.append_blocked_by` fires synchronously the moment a VERIFY-phase member
+reaches RHI, with the full, wave-independent descendant set already correctly computed —
+`append_blocked_by` is UPDATE-only, and a dependent scheduled into a later wave has no VERIFY
+`phases` row yet, so the write silently touches zero rows. No scheduler/transition-edge change is
+needed here either, for exactly ADR-0127 judgment call 2's reasons, re-confirmed by reading
+`WaveScheduler.admit()`/`status_of` and `ALLOWED_TRANSITIONS` fresh: neither has any wave-scoping
+logic or caching this fix would invalidate.
+
+**The one real structural difference from `_transform_impl`: `_gated_members`, not `_wave_repos`.**
+`_transform_impl` has no predecessor-phase gate — Phase 1 (SCAN) is complete for the whole fleet
+before any TRANSFORM wave dispatches, so ADR-0127's pre-seed pass could safely call the ungated
+`_wave_repos` for every member of every open wave. `_verify_impl` is different: it gates each
+wave's members on the PREVIOUS phase's (`Phase.BUILD`) own per-repo verdict via `_gated_members`
+(`src/fleet/cli.py:11154–11188`), which explicitly documents "a repo that has not met [BUILD
+SUCCEEDED or DEGRADED] must get **no phase row at all**" — because `WaveScheduler.admit()` treats
+a missing row identically to an explicit `PENDING` one, and creating a row prematurely for a repo
+this phase is not yet allowed to touch would misrepresent what has actually happened. A naive
+copy-paste of ADR-0127's shape (looping `_wave_repos` and `upsert_phase`-ing every raw wave member)
+would violate this invariant: it would create VERIFY phase rows for repos whose BUILD phase has
+not yet succeeded, contradicting `_gated_members`'s own documented contract.
+
+**This gating need is not new to this project — `_build_impl`'s own PASS 1 already solves it, and
+is the closer precedent.** `_build_impl` (`src/fleet/cli.py:11374–11384`) computes `eligible =
+await _eligible_build_units(read_conn, run_id)` — a query gated on the PRECEDING phase (TRANSFORM
+`SUCCEEDED`/`DEGRADED`) via a SQL `JOIN` — and calls `upsert_phase` only over that gated `eligible`
+set, before any wave dispatches. `_eligible_build_units`'s own docstring names the exact same
+concern `_gated_members` documents for VERIFY: gate the pre-seed on the predecessor phase's
+verdict, or strand/misrepresent a not-yet-eligible repo. **VERIFY's fix should mirror `_build_impl`
+in this one respect (gate the pre-seed) while mirroring `_transform_impl`/ADR-0127 in the other
+(scope the pre-seed to this invocation's own `waves`/`only` domain, not the whole fleet — see
+"Not addressed here: a VERIFY-side D126 residual" below for why NOT going further and copying
+`_build_impl`'s whole-fleet-regardless-of-`--wave` scope matters).**
+
+---
+
+### Judgment call 1 — the fix's shape: transplant `_wave_repos`, or adapt to `_gated_members`?
+
+**Decision: adapt.** Inside `_verify_impl`, immediately after `waves = await _open_phase_waves
+(read_conn, run_id, Phase.VERIFY, wave)` and before the `for index in waves:` dispatch loop:
+
+1. Compute `gated_by_wave: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {}`, populated by
+   calling `await _gated_members(read_conn, run_id, index, only, predecessor=Phase.BUILD)` once
+   per `index in waves` — the identical call and identical `only`/`predecessor` scoping the
+   dispatch loop already uses, just hoisted earlier and memoized so the dispatch loop does not
+   recompute it (BUILD's phase status cannot change during a `fleet verify` invocation — VERIFY
+   never writes `Phase.BUILD` rows — so calling `_gated_members` upfront for every open wave
+   returns identical `(members, blocked)` pairs to calling it lazily per-wave; re-confirm this
+   assumption by reading `_verify_impl` end to end at implementation time, per CLAUDE.md's "a
+   finding is a hypothesis" discipline, rather than trusting this ADR).
+2. For every `repo_id` in every wave's `members` half only (never the `blocked` half — that is
+   the whole point of the adaptation), call `await repository.upsert_phase(run_id, repo_id,
+   Phase.VERIFY, now=_now(), max_attempts=MAX_ATTEMPTS)` — the identical call already made inside
+   the dispatch loop today, just moved here, run once for the whole gated domain this invocation
+   will process, before any wave dispatches.
+3. The dispatch loop (`for index in waves:`) reads `members, blocked = gated_by_wave[index]`
+   instead of calling `_gated_members` again, and its own `for repo_id in members: await
+   repository.upsert_phase(...)` block is DELETED (redundant — the row already exists from step 2
+   for every admitted member, and `upsert_phase`'s `ON CONFLICT DO UPDATE SET max_attempts =
+   excluded.max_attempts, updated_at = excluded.updated_at` never touches `status`/`blocked_by`).
+   `withheld.update(blocked)` stays exactly where it is today, in the dispatch loop, unpacking the
+   precomputed tuple instead of a freshly computed one — this is a pure reordering, not a change
+   to what `withheld` ever contained.
+
+**Why not transplant ADR-0127's shape verbatim (looping `_wave_repos`, ignoring gating):** it would
+create a VERIFY `phases` row for a repo whose BUILD phase has not yet succeeded — directly
+contradicting `_gated_members`'s own documented "no phase row at all" contract for a not-yet-ready
+repo, and potentially misrepresenting a repo's VERIFY eligibility to anything that later reads
+"does this repo have a VERIFY row" as a proxy for "has this repo reached VERIFY" (no such reader
+was found in this ADR's own reading of `src/fleet/`, but the invariant is `_gated_members`'s own
+stated one and this fix has no reason to weaken it).
+
+**Why not widen to `_build_impl`'s own whole-fleet, `--wave`-independent scope:** see "Not
+addressed here" below — that shape is what `_eligible_build_units` uses for a DIFFERENT reason
+(root-file coverage), and copying it for VERIFY's phase-row pre-seed would silently widen what
+`--wave` means for VERIFY, which is exactly the kind of undisclosed semantic change CLAUDE.md's
+"a `--wave`/`--repo` are dispatch filters and nothing else" precedent (quoted in
+`_eligible_build_units`'s own docstring) exists to prevent for a phase's row-creation domain.
+ADR-0127's TRANSFORM fix deliberately chose the narrower, `waves`/`only`-scoped shape for the exact
+same reason ("does not widen what this invocation processes, only when the rows... get created")
+— this ADR keeps that same boundary for VERIFY, accepting the same residual (below) TRANSFORM's
+fix also left open, rather than inventing a wider, undiscussed one.
+
+### Judgment call 2 — does this change `WaveScheduler.admit()`, `ALLOWED_TRANSITIONS`, or
+`orchestrator/reentry.py`?
+
+**Decision: no, confirmed by reading, identically to ADR-0127 judgment call 2.** `admit()`
+partitions members into `blocked`/`settled`/`candidates` purely from a fresh `status_of(repo_id)`
+read; it has no wave-scoping logic to invalidate. `ALLOWED_TRANSITIONS[RepoStatus.PENDING]` already
+contains `RepoStatus.BLOCKED`. `orchestrator/reentry.py`'s `still_blocking`/`plan_unblocking` are
+lazy readers driven only from `fleet resume` and require no change: once this fix makes a
+later-wave VERIFY dependent's `blocked_by` correct at VERIFY time, `fleet resume`'s existing
+removal machinery works over it identically to any other blocked repo, VERIFY or otherwise.
+
+### Judgment call 3 — is a VERIFY-side D126 residual (the `--wave`-scoped multi-invocation gap) in
+scope for this fix?
+
+**Decision: no, out of scope — same disposition as D126 itself for TRANSFORM, and this ADR does
+not allocate a new D-number for it.** `_open_phase_waves` (`src/fleet/cli.py:6201–6219`) is the
+SAME shared function `_open_transform_waves` delegates to, and it returns exactly `(wave,)` when
+`wave is not None` for VERIFY exactly as it does for TRANSFORM. This ADR's own pre-seed pass
+(judgment call 1) computes `gated_by_wave` by iterating only `waves` — so a `--wave 0`-scoped
+`fleet verify` invocation's pre-seed pass touches only wave 0's gated members; wave 1's members get
+no VERIFY row at all during that invocation, by the identical mechanism D126 traced for TRANSFORM.
+A provider that reaches RHI in a first, separate `fleet verify --wave 0` invocation will not have
+its RHI status re-propagated to a dependent admitted in a later, separate `fleet verify --wave 1`
+invocation — the same shape, for the same reason (`propagate_blocked` has exactly one call site,
+fired once at the RHI transition, and nothing re-fires it for an already-terminal provider in a
+later invocation).
+
+**Why this is genuinely out of scope for D125's fix, not a gap this ADR is leaving silently:**
+- D126 itself remains **OPEN and undesigned** even for TRANSFORM, where it was found by
+  independent review. This project's own precedent (D123/D126's controller ruling, round VI
+  task-76 fix round 1) is to track the multi-invocation residual under its own D-number, separate
+  from the single-invocation fix, precisely so the single-invocation fix stays reviewable at its
+  own size and does not silently inherit undesigned scope. This ADR keeps that same separation.
+- Fixing the multi-invocation case requires either a resume-time/wave-open-time re-derivation of
+  `blocked_by` against every already-terminal provider still on record, or a deliberate widening of
+  what `--wave` means (fleet-wide pre-seed, `_build_impl`-style) — both are real design decisions
+  (D126's own "Not yet built" paragraph says exactly this), not a mechanical extension of this fix.
+- Allocating a distinct D-number for "D126, but for VERIFY" is a controller call, not this ADR's
+  to make (mirroring exactly how ADR-0127 flagged D125 itself as "OPEN QUESTION FOR CONTROLLER"
+  rather than self-allocating it) — see "Open questions for the controller" below.
+
+**This was verified, not merely reasoned by analogy:** the task-80 brief this ADR pairs with
+requires the worker to actually run the two-invocation (`fleet verify --wave 0` then `fleet verify
+--wave 1`) scenario against the fixed code and report what it measures, rather than leaving this
+paragraph's prediction untested — the TRANSFORM-side D126 was found by an independent review
+AFTER task-76 shipped specifically because task-76's own brief left the equivalent check as
+optional reasoning rather than a required measurement; this ADR does not repeat that gap.
+
+### Disclosed, not a defect — `phases.updated_at`'s new meaning for VERIFY rows
+
+Identical in kind to ADR-0127's own disclosure for TRANSFORM. Before this fix, a VERIFY row's
+`updated_at` reflected the moment that wave was actually dispatched (and gated ready). After this
+fix, it reflects the moment `_verify_impl` began planning its domain (before wave 0 dispatches) —
+for every member that was ALREADY gate-ready at that moment (i.e., not later becoming ready only
+after a later wave dispatches — which cannot happen mid-invocation since VERIFY never writes BUILD
+rows). No test found in `tests/test_build_e2e.py` (VERIFY's e2e suite lives there, not in a
+separate `test_verify_e2e.py` — confirmed by directory listing) asserts `phases.updated_at`
+reflects per-wave VERIFY dispatch timing specifically (`grep -n "updated_at" tests/test_build_e2e.py`
+returns no VERIFY-phase-specific hit as of this ADR's own read); the task-80 worker must re-confirm
+this fresh at implementation time.
+
+### Disclosed, not a defect — a halted/breached VERIFY run may now leave `PENDING` rows for every
+gate-ready open wave, not only the one it reached
+
+Same class of change ADR-0127 disclosed for TRANSFORM (added in that ADR's fix round 1, opus-tier
+review finding I1). **This class is already tolerant in the one existing test that would see it:**
+`tests/test_prepare_before_admit.py::test_a_breached_verify_wave_cuts_no_worktree` asserts `assert
+set(statuses.values()) <= {"PENDING"}, statuses` — a subset-of-values check, not an exact row-set
+equality — so it stays green whether the pre-seed pass creates 1 wave's worth of rows or every open
+wave's gate-ready rows (its own predecessor, `build(fleet, "--no-sandbox")`, drives every repo to
+BUILD `SUCCEEDED` first, so nothing is withheld in that fixture and every open wave's members would
+get a pre-seeded row). Re-confirm this by actually running that test before and after the fix
+(Rule 12's discipline: read the actual result, do not infer it from this paragraph) rather than
+trusting this ADR's own reading of the assertion's looseness.
+
+---
+
+### Open questions for the controller
+
+1. **A VERIFY-side D126 residual is real** (judgment call 3), by the same shared-code-path
+   mechanism D126 already names for TRANSFORM, and this ADR does not allocate a D-number for it.
+   The task-80 brief requires the worker to measure (not merely reason about) whether it
+   reproduces for VERIFY and report the result; the controller should decide, once that
+   measurement lands, whether to fold it into D126's existing scope (retitle to cover both phases)
+   or allocate a sibling D-number — a prioritization judgment, not a technical fact this ADR can
+   settle.
+
+No other genuine value judgment was found. The fix shape (judgment call 1's adaptation to
+`_gated_members`), the "no scheduler/transition/reentry change needed" confirmation (judgment call
+2), and the "D126-for-VERIFY is out of scope, tracked separately" disposition (judgment call 3) are
+each settled by reading the code and re-applying ADR-0127's own already-reviewed reasoning, not by
+a preference this ADR is guessing at.
+
