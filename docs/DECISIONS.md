@@ -14948,6 +14948,27 @@ no-op in every case. `scheduler.py:280-282`'s own docstring already states the i
 them") — this fix is the first thing that actually exercises that guarantee across a process
 boundary.
 
+**Corrected, 2026-09-08 (round VI task-84 fix round 1, opus-tier review) — "reusing
+`WaveScheduler.propagate_blocked` completely unchanged" does NOT hold for the BUILD-phase call
+site as landed.** This judgment call's own opening sentence, and its numbered step 2 above, both
+state the fix calls `propagate_blocked` unchanged for every phase. Implementation surfaced a case
+this ADR did not anticipate: `_build_impl`'s §37 Blocker C (`_unit_deps`'s stub redirect,
+`_active_stub_facts`) lets a consumer build from an `ACTIVE` stub while its real provider stays
+permanently `REQUIRES_HUMAN_INTERVENTION`, and `propagate_blocked` has no way to exclude such a
+consumer — calling it unchanged would re-block a dependent Blocker C's own, separate, already-
+reviewed mechanism had legitimately exempted. The landed code (`src/fleet/cli.py`'s
+`_repropagate_terminal_providers`, task-84 `6ab0277`) therefore does NOT call `propagate_blocked`;
+it reimplements that method's body (`descendants(...)` then `store.append_blocked_by(...)`, sorted,
+self-edge skipped) with one added exclusion — any `(dependent, provider)` pair already covered by
+an `ACTIVE` `stubs` row — applied uniformly across all three phases. **A future reconciler reading
+only this judgment call's original prose, not the D126 ledger entry, must not "fix" the code back
+to a bare `propagate_blocked` call** — doing so silently reintroduces the Blocker C break this
+correction exists to prevent. See `docs/INTEGRATION_HONESTY.md`'s D126 entry for the full
+regression-fixture proof and `docs/CRITERIA_PLAN.md`/that entry for the disclosed residual (the
+exclusion is keyed on a DIRECT stub pair; a transitive, two-hop dependent whose own provider is
+only indirectly stub-covered is not yet handled — folded into the already-named undesigned
+transitive-stub-stacking mechanism, not a new gap this correction claims to close).
+
 ### Judgment call 2 — one task (shared helper) or a split, mirroring D107/D104/D108's own decision
 
 **Decision: one task.** Unlike D123/D125, which needed genuinely different pre-seed *adaptations*

@@ -963,7 +963,7 @@ covering the `--wave`-scoped multi-invocation residual for BOTH TRANSFORM and VE
 still-undesigned transitive-stub-stacking mechanism — three items, not four; the "VERIFY-side
 sibling of D126" line above is superseded by this paragraph.
 
-**Corrected, 2026-09-08 (round VI task 84, ADR-0130, `3044479`/`6ab0277`) — D126 is now FIXED for both
+**Corrected, 2026-09-08 (round VI task 84, ADR-0130, `3044479`/`6ab0277`/`62b2049`) — D126 is now FIXED for both
 phases; D123/D125 upgraded back to `FIXED, LANDED` accordingly.** A single shared helper,
 `_repropagate_terminal_providers`, is called once from `_transform_impl` and once from
 `_verify_impl` (and, defensively, from `_build_impl`, per the controller's ruling on ADR-0130
