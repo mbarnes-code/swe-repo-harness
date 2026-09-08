@@ -7466,7 +7466,7 @@ place, do not rewrite what round P wrote.
 > `:703-710`→`:704-711` (the non-retryable-TERMINATE dispatch block). `tests/test_integration_honesty_citations.py`
 > back to 54/54 whole-file, no `-k`, after the correction.
 
-## D91 — OPEN. `tasks.pre_commit_sha` has no production writer anywhere in `src/fleet/`, so §12.15(i) and §12.45(i) cannot currently be exercised against a real production-populated value
+## D91 — FIXED, LANDED (`adc029e`, round VI task 83). `tasks.pre_commit_sha` has no production writer anywhere in `src/fleet/`, so §12.15(i) and §12.45(i) cannot currently be exercised against a real production-populated value
 
 **Found reviewing D89 Phase 2 Task B (2026-09-01, round U fix wave), while checking the hazard
 mechanism ADR-0102's "Cost if wrong", ADR-0103's opening paragraph, and the D89 Task-A ledger
@@ -7591,6 +7591,69 @@ that one column without making the criterion's stated text false. This defect's 
 `OPEN` — nothing above is changed by this note, which records only that another entry read and
 adjudicated this sentence, so a reader arriving here directly sees the same context a reader
 arriving via `docs/CRITERIA_PLAN.md` sees.
+
+**Fixed, 2026-09-08 (round VI task 83, `adc029e`).** Fresh re-derivation (mandatory per this
+task's brief, given this entry's own staleness disclosure above) confirmed the gap as this entry
+describes it, with two shape changes since it was last written: a second `INSERT INTO tasks` site
+now exists (`insert_revalidation_task_row`, for `REVALIDATE` tasks) and `claim_task_by_id` now has
+a second caller (`cli._run_one_revalidation_task`, round VI task 79's REVALIDATE claiming loop,
+ADR-0128) — both out of scope for this fix, since neither has an existing computed anchor value to
+wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only from
+`workers/rewrite.py::land_patches`); §12.15(i)/§12.45(i) do not depend on REVALIDATE (§12.15(i)'s
+scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
+boundary does not block the criteria this defect names.
+
+`_TransformClaimHook` (`cli.py:5673`) — the `pre_dispatch` hook that claims a TRANSFORM coarse
+`tasks` row RUNNING, the exact "moves the task row to RUNNING" moment `vcs/commits.py`'s
+`record_task_anchor` docstring already names as `tasks.pre_commit_sha`'s intended write site
+(§3.2 step 6.5) — now reads the real `migrate/<repo>` tip via `record_task_anchor` (read from git
+at claim time, not copied from `payload.phase_pre_commit_sha`, matching that function's own "the
+two distinct anchors exist to prevent" contract: on a retried dispatch, earlier units of the same
+coarse row may already have landed, so the live tip and the phase anchor can differ) and threads
+it through `claim_task_by_id`'s new optional `pre_commit_sha` parameter
+(`state/repository.py:1492`) into the same claim CAS. The parameter defaults to `None`, so the
+pre-existing REVALIDATE caller above is unaffected — it still leaves the column `NULL`, exactly as
+every claim did before this parameter existed. No `INSERT INTO tasks` change was needed: the
+column already defaults `NULL` by omission (`state/schema.sql`), matching every other optional
+column's (`status`/`claimed_by`/`fence_token`) existing handling — the D91-era instruction to "add
+`pre_commit_sha` to the `INSERT INTO tasks` column list" would have been inconsistent with that
+established convention.
+
+**Proof (CLAUDE.md Rule 12, backup-file method, never `git stash`).** A standalone probe script
+(`probe_d91.py`, this task's own scratch dir) sets up a real SQLite state DB and a real
+`migrate/<repo>` git worktree, drives a real `_TransformClaimHook` claim exactly as
+`_run_transform_wave` wires it, and reads `tasks.pre_commit_sha` back. Run against the pre-fix
+code (confirmed via `git diff --no-index` to genuinely differ from the fix, not a no-op revert):
+`has_work_dir parameter: False` / `tasks.pre_commit_sha: None` — a real claim leaves the column
+NULL, reproducing this defect's own "Consequence" paragraph directly. Restored to the fix: the
+same probe reads `tasks.pre_commit_sha` equal to the real `migrate/<repo>` branch tip a fresh
+`git rev-parse` reports.
+`tests/test_d89_phase2_claim_lifecycle.py::test_claim_hook_populates_target_paths_and_claims_running_before_dispatch`
+carries the same assertion as a permanent regression test. The downstream consequence — the actual
+hang this defect describes — is proven end to end, real hook then real reconciliation, in
+`tests/test_d89_phase2_reconciliation.py::test_a_real_claim_hook_anchor_lets_the_discard_path_fire_instead_of_hanging_unresolved`:
+a real `_TransformClaimHook` claim followed by a real `_reconcile_tasks_with_git` call with zero
+units landed now reaches the `discard_task` branch (`report["unresolved"] == []`, one `discarded`
+entry, fence bumped 1→2, worktree tip reset to the anchor) instead of the `task_anchor is None`
+`_unresolved` branch this defect's own "Consequence" paragraph describes as the permanent hang.
+Both proofs' old-fails/new-passes discriminators were confirmed against a genuine mutation
+(`git diff --no-index` against the pre-fix backup showed real, non-trivial diffs on both touched
+production files, never a zero-change no-op).
+
+Full covering set (derived by grepping for callers of `_reconcile_tasks_with_git`,
+`claim_task_by_id`, `_TransformClaimHook`, `upsert_task`, `record_task_anchor`, and
+`_run_transform_wave` — CLAUDE.md §6's covering-set discipline, run whole, no `-k` filter): 331
+passed, 2 skipped (`gh` unavailable), 0 failed. `ruff check src/ tests/` clean. `mypy` (no path
+arguments) clean, 129 source files. `tests/test_integration_honesty_citations.py`: 70/70 — two
+unrelated citations this change's own line-shift rotted (`record_attempt`,
+`cli._committed_contracts`, both well outside this entry) were repointed in place above, confirmed
+by exact-line-content match against the current tree, per this file's own established convention
+for incidental drift. **Not re-verified in this fix**: this entry's OWN historical correction
+paragraphs above carry bare (non-gate-checked) sub-citations already disclosed as stale by an
+earlier round (`:12347`/`:12389`/`:12335-12343`/`:12360-12376`) — those predate this task by
+several thousand lines of intervening `cli.py` growth and are out of this fix's scope; the
+automated citation gate does not check them (disclosed in place, above), and neither the fix nor
+this addendum changes that disclosure.
 
 ## D92 — FIXED, LANDED (`7cd6647`, round GG task 1). `PrState.HELD` is declared and documented but never written anywhere in `src/fleet/`
 

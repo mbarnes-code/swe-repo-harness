@@ -55,6 +55,14 @@ it — the test below says so at the assertion site rather than silently reporti
 covers nothing, and does not require the column to be non-empty the way the other four are
 required to be (see `_NEEDS_NONEMPTY` below).
 
+**Marker 2026-09-08 (round VI task 83) — D91 is now FIXED, LANDED (`adc029e`): a real completed
+fixture run's TRANSFORM coarse `tasks` rows now carry a real, non-NULL `pre_commit_sha`.** The
+sentence above ("the column is NULL on every row") was true when written and is kept as the
+historical record of the finding this file made. The test below needed no change: it was already
+written to assert 40-hex format only over non-NULL values and never asserted the column stays
+empty, so it is unaffected either way — this was verified by re-running it after the fix (still
+green) rather than assumed.
+
 **Correction to the round-BB brief's citation for `run_digest`.** The brief pointed at
 `cli.py:10481-10545` and called it `fleet resume --digest`. Reading that function (and `fleet
 resume`'s own option list, `cli.py:11029` onward) shows `--digest` is a `fleet status` option
