@@ -14948,7 +14948,7 @@ no-op in every case. `scheduler.py:280-282`'s own docstring already states the i
 them") — this fix is the first thing that actually exercises that guarantee across a process
 boundary.
 
-**Corrected, 2026-09-08 (round VI task-84 fix round 1, opus-tier review) — "reusing
+**Corrected, 2026-09-08 (round VI task-84 fix round 2, opus-tier review) — "reusing
 `WaveScheduler.propagate_blocked` completely unchanged" does NOT hold for the BUILD-phase call
 site as landed.** This judgment call's own opening sentence, and its numbered step 2 above, both
 state the fix calls `propagate_blocked` unchanged for every phase. Implementation surfaced a case
@@ -14993,6 +14993,22 @@ uses. Checked directly (research-46-report.md §3), not assumed from precedent. 
 still choose to add the same sweep to `_build_impl` for defensive uniformity (it would be a pure
 no-op given the above, at the cost of one more cheap `SELECT` per invocation) — this ADR does not
 mandate it, and leaves it as the implementing task's own call, not a controller-blocking decision.
+
+**Corrected, 2026-09-08 (round VI task-84 fix round 3, opus-tier re-review) — "it would be a pure
+no-op" is FALSE and was measured false in this same task's own fix round 2.** A second real
+invocation over a genuinely still-`REQUIRES_HUMAN_INTERVENTION` provider makes the SELECT return a
+non-zero row (measured `[1]`, `tests/test_build_e2e.py::
+test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new`, formerly named
+`test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new` — the SELECT is reachable and non-zero,
+not a no-op). What IS a no-op, and is the true, narrower claim this paragraph should have made, is
+the WRITE: `_eligible_build_units`'s whole-fleet PASS 1 already gives the same-invocation live
+containment full visibility, so by the time a LATER invocation's sweep finds the still-abandoned
+provider, the dependent is already correctly `BLOCKED` and `append_blocked_by`'s illegal `BLOCKED
+-> BLOCKED` self-edge silently skips the redundant write. See `docs/INTEGRATION_HONESTY.md`'s D126
+entry (fix round 2's own correction, and this fix round's sweep for the same false claim) for the
+full measurement. This correction exists because F1's own reconciler hazard — a document a future
+reader "fixes" the code back to match — applies to this sentence exactly as it did to judgment call
+1's "reuse `propagate_blocked` unchanged" claim; both are corrected in the same round.
 
 ### Judgment call 4 — does this change `WaveScheduler.admit()`, `ALLOWED_TRANSITIONS`, or
 `orchestrator/reentry.py`?

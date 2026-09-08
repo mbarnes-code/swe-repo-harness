@@ -8528,7 +8528,7 @@ task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never up
 so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
 that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
 finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
-fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:12928`) already
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13158`) already
 implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
 durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
 and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
@@ -10294,7 +10294,7 @@ existing ADR-0127/ADR-0129 pre-seed pass and before its `for index in waves:` di
 begins. Per the controller's ruling on ADR-0130 judgment call 3, the identical call was also added
 to `_build_impl` for defensive uniformity, even though BUILD was never exposed to this residual
 (`_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1 already gives every invocation
-full row visibility) — **corrected, round VI task-84 fix round 1 (opus-tier review, F2): the
+full row visibility) — **corrected, round VI task-84 fix round 2 (opus-tier review, F2): the
 SELECT is NOT a no-op** (a second invocation over a still-abandoned provider genuinely returns a
 row — measured, below); **the WRITE is**, because the dependent was already correctly `BLOCKED` by
 the first invocation's own live containment, and `append_blocked_by`'s illegal `BLOCKED ->
@@ -10313,7 +10313,7 @@ result), both reproduce this entry's own cited numbers byte-for-byte
 (`('acme-app-py','SUCCEEDED','[]')`); against the fix, both correctly assert
 `('acme-app-py', 'BLOCKED', ['acme-lib-py'])`, with the two non-dependent survivors
 (`acme-lib-ts`/`acme-app-ts`) unaffected in every run. `tests/test_build_e2e.py::
-test_the_build_side_defensive_sweep_is_a_provable_no_op` (**corrected, fix round 1** — the
+test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new` (**corrected, fix round 2** — the
 original version drove only one `build()` call over a leaf failure with no dependent, a fixture in
 which the SELECT is trivially, structurally unreachable-as-non-zero; that proved nothing, per
 CLAUDE.md's own "validate what the instrument watches" guardrail, and an independent review
@@ -10394,7 +10394,9 @@ entry and the code itself had not caught:
   new-passes confirmed, `KeyError` against the fix-round-1 code) and `tests/test_build_e2e.py::
   test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation` (the guard, both
   branches, against real state).
-- **F2 (false claim + vacuous test).** The original `test_the_build_side_defensive_sweep_is_a_provable_no_op`
+- **F2 (false claim + vacuous test).** The original test (then named
+  `test_the_build_side_defensive_sweep_is_a_provable_no_op` — renamed in fix round 3, per its own
+  finding below, to `test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new`)
   drove only ONE `build()` call over a leaf failure with no dependent — a fixture in which the
   sweep's SELECT is structurally guaranteed to read zero (nothing has failed yet at the point a
   FIRST invocation's sweep runs), so the test proved nothing about reachability. Corrected: the

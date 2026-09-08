@@ -971,8 +971,12 @@ judgment call 3), re-broadcasting `blocked_by` against any provider already dura
 `REQUIRES_HUMAN_INTERVENTION` on record at the start of every invocation, closing the
 process-boundary gap `_open_phase_waves`' `(wave,)`-only return left open. See
 `docs/INTEGRATION_HONESTY.md`'s D126 entry for the full fix description and regression proof
-(old-fails/new-passes, both phases, plus a direct instrumented confirmation that the `_build_impl`
-sweep is a provable no-op). `docs/INTEGRATION_HONESTY.md`'s D123 and D125 headings both move from
+(old-fails/new-passes, both phases, plus a direct instrumented confirmation that a later
+invocation's `_build_impl` sweep genuinely reads a non-zero row — **corrected, round VI task-84
+fix round 3: the earlier "the sweep is a provable no-op" phrasing here was false and is retracted**
+— what is actually redundant is the WRITE, not the SELECT, because the dependent is already
+correctly `BLOCKED` by the same-invocation live containment PASS 1 gives full visibility to).
+`docs/INTEGRATION_HONESTY.md`'s D123 and D125 headings both move from
 `PARTLY ADDRESSED` back to `FIXED, LANDED`, since the residual each was downgraded for is exactly
 what this fix closes. §12.14's remaining named gaps, restated once more: D124 (separately worked)
 and the still-undesigned transitive-stub-stacking mechanism — two items, not three.
