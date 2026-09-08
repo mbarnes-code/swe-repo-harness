@@ -1441,22 +1441,6 @@ def test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7(
     assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "D125 (docs/INTEGRATION_HONESTY.md): `_verify_impl`'s wave loop (cli.py, `for index in "
-        "waves: ... for repo_id in members: await repository.upsert_phase(..., Phase.VERIFY, "
-        "...)`) still creates each wave's VERIFY `phases` row LAZILY, per-wave, exactly the shape "
-        "`_transform_impl` had before ADR-0127's fix -- it was never given `_build_impl`'s PASS 1 "
-        "upfront pre-seed. So `acme-app-py`'s wave-1 VERIFY row does not exist yet when "
-        "`acme-lib-py`'s REQUIRES_HUMAN_INTERVENTION transition fires `propagate_blocked` during "
-        "wave 0, the UPDATE-only `append_blocked_by` write silently no-ops, and `acme-app-py` is "
-        "later admitted into wave 1 as an ordinary unblocked repo. strict=True pins the target "
-        "state SPEC 12.14's blast-containment clause describes -- deleting this xfail (never "
-        "loosening it) is how the eventual fix (mirroring ADR-0127, adapted to `_verify_impl`) "
-        "proves itself."
-    ),
-)
 def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent(
     fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:

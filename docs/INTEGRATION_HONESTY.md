@@ -9910,8 +9910,9 @@ propagation gap and the undesigned transitive-stub-stacking mechanism are untouc
 (D104's separate, still-open `REVALIDATE`-dispatch gap is untouched) — see
 `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
 
-## D125 — OPEN, CONFIRMED (round VI task 78). `_verify_impl`'s wave loop has the same cross-wave
-`blocked_by` propagation gap D123 found in `_transform_impl`
+## D125 — PARTLY ADDRESSED (round VI task 80, `74aedc4`) — the single-invocation case is fixed;
+a `--wave`-scoped multi-invocation residual remains, see D126. `_verify_impl`'s wave loop has the
+same cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
 
 **Found by round VI research-43 (2026-09-08), while designing D123's fix (ADR-0127), as a
 byproduct of reading `_transform_impl` alongside its siblings — not independently investigated
@@ -9990,9 +9991,60 @@ wave's VERIFY `phases` row upfront, before any wave dispatches, mirroring ADR-01
 investigated here — out of this task's own scope, which was measurement only. No task dispatched
 yet for the fix; this entry's confirmation is what makes it dispatch-ready.
 
-## D126 — OPEN. A `fleet transform --wave N` sequence spanning multiple separate invocations does
-not propagate `blocked_by` across invocation boundaries — the narrower residual of D123 that
-ADR-0127's same-invocation fix does not close
+**FIXED, 2026-09-08 (round VI task 80, ADR-0129).** `_verify_impl` (`src/fleet/cli.py`) now
+pre-seeds every open wave's VERIFY `phases` row upfront, before any wave dispatches, adapting
+ADR-0127's `_transform_impl` shape to VERIFY's own predecessor-phase gate: a
+`gated_by_wave: dict[int, tuple[tuple[str, ...], tuple[str, ...]]]` is computed by calling
+`_gated_members(..., predecessor=Phase.BUILD)` once per open wave (memoized, hoisted above the
+dispatch loop), then `upsert_phase` runs once over every wave's `members` half ONLY (never the
+`blocked`/withheld half — `_gated_members`'s own documented invariant that a repo not yet
+BUILD-ready must get no VERIFY phase row at all is preserved). The dispatch loop's own
+`_gated_members` call and its redundant `upsert_phase` loop were deleted; `withheld.update(blocked)`
+unpacks the precomputed tuple, unchanged in behavior. Full design in `docs/DECISIONS.md`'s
+ADR-0129. Regression-proof: `tests/test_build_e2e.py::
+test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent`'s
+`xfail(strict=True)` marker is removed; the test now genuinely PASSES —
+`acme-app-py` reads `('BLOCKED', ['acme-lib-py'])`, `acme-lib-py` reads
+`REQUIRES_HUMAN_INTERVENTION`, and the two non-dependent survivors (`acme-lib-ts`, `acme-app-ts`)
+read `('SUCCEEDED', [])`, confirming the fix blocks exactly the true descendant. Old-fails/
+new-passes discriminator run (pre-fix code restored from `HEAD`, same un-xfail'd test): FAILS,
+reproducing D125's own measured symptom byte-for-byte (`acme-app-py` reads `('SUCCEEDED', [])`).
+`tests/test_prepare_before_admit.py::test_a_breached_verify_wave_cuts_no_worktree` was run before
+and after the fix and stays green both times, confirming ADR-0129's prediction that its
+subset-of-values assertion is unaffected.
+
+**Disclosed, same date — a VERIFY-side D126 residual is CONFIRMED real by direct measurement, not
+merely predicted.** ADR-0129's judgment call 3 predicted that a `--wave`-scoped sequence of
+SEPARATE `fleet verify` invocations (mirroring D126's own TRANSFORM-side shape) would still exhibit
+this defect, because the pre-seed pass above is scoped to each invocation's own `waves` domain
+(`_open_phase_waves` returns exactly `(wave,)` when `--wave` is given). Measured directly (round VI
+task 80, same fixture, driven across two separate CLI invocations: `fleet verify --wave 0` then a
+second, separate `fleet verify --wave 1`): `FIRST_EXIT=7, SECOND_EXIT=7`, final `phases` rows
+`[('acme-app-py','SUCCEEDED','[]'), ('acme-app-ts','SUCCEEDED','[]'),
+('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'), ('acme-lib-ts','SUCCEEDED','[]')]` —
+`acme-app-py` again reads `SUCCEEDED`/`blocked_by == []`, never `BLOCKED`, reproducing the defect
+across the invocation boundary exactly as predicted. This is genuinely OUT OF SCOPE for this fix
+(same disposition as D126 itself for TRANSFORM) and is **not being allocated a new D-number here**
+— it is named as an open question for the controller's next dispatch round, exactly as ADR-0127
+did for D125 itself: fold it into D126's existing scope (retitle to cover both phases) or allocate
+a sibling D-number is a controller prioritization call, not a technical fact this task can settle.
+
+**Controller ruling, 2026-09-08 (round VI task-80 review) — status corrected from `FIXED, LANDED`
+to `PARTLY ADDRESSED`, and the VERIFY-side residual folded into D126 rather than given a sibling
+number.** An independent opus-tier review of task-80's branch confirmed the fix above is real and
+correctly matches ADR-0129's design, but found the `FIXED, LANDED` heading overclaimed by the same
+measure D123's own heading was corrected against (round VI task-76 fix round 1): the
+`--wave`-scoped multi-invocation residual is CONFIRMED, not merely predicted, by this same entry's
+own measurement above. Mirroring D123's precedent exactly, this heading now reads `PARTLY
+ADDRESSED` — the single-`fleet verify`-invocation case is fixed and proven; the `--wave`-scoped
+residual is tracked below as part of **D126**, retitled to cover both TRANSFORM and VERIFY since
+both share the identical root cause (`_open_phase_waves` returning `(wave,)` when wave-scoped,
+`propagate_blocked`'s single call site) rather than being two independent defects. No new
+D-number allocated.
+
+## D126 — OPEN. A `--wave N`-scoped sequence of multiple separate `fleet transform` or
+`fleet verify` invocations does not propagate `blocked_by` across invocation boundaries — the
+narrower residual of D123/D125 that ADR-0127/ADR-0129's same-invocation fixes do not close
 
 **Found by an independent opus-tier review of round VI task-76's branch (2026-09-08), ruled on by
 the controller in that task's fix round 1 (this entry).** Verified free before allocating:
@@ -10048,6 +10100,21 @@ record, run once at the start of any invocation regardless of `--wave` scoping; 
 decision to change what `--wave` means (widen its own pre-seed domain fleet-wide). Either is real
 design work, not a mechanical fix. **Not dispatched this round** — this entry exists so the
 finding is not lost between rounds.
+
+**Retitled, 2026-09-08 (round VI task-80 review, controller ruling) — this entry now also covers
+`_verify_impl`.** Round VI task-80 confirmed, by direct measurement, that the identical residual
+reproduces for VERIFY: driving the same fixture across two separate CLI invocations (`fleet
+verify --wave 0` then `fleet verify --wave 1`) leaves `acme-app-py` reading `SUCCEEDED`/
+`blocked_by == '[]'` rather than `BLOCKED`, byte-for-byte the same shape measured above for
+TRANSFORM (`FIRST_EXIT=7, SECOND_EXIT=7`, final rows
+`[('acme-app-py','SUCCEEDED','[]'), ('acme-app-ts','SUCCEEDED','[]'),
+('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'), ('acme-lib-ts','SUCCEEDED','[]')]`). Root
+cause is the identical shared mechanism this entry already traces (`_open_phase_waves` returning
+`(wave,)` when wave-scoped; `propagate_blocked`'s single call site) — not a second, independent
+defect — so this is folded into D126's existing scope rather than given a sibling D-number, per
+this entry's own heading correction. `docs/INTEGRATION_HONESTY.md`'s D125 entry now reads
+`PARTLY ADDRESSED` accordingly, mirroring D123's own correction in round VI task-76 fix round 1.
+Fix remains **not yet built** for either phase.
 
 ## D129 — FIXED, LANDED (round VI task 79, `4ead8f9`). `bazel/query.py::rdeps_query`'s
 `affected_only=True` form was invalid Bazel query syntax, never exercised under a real `bazel
