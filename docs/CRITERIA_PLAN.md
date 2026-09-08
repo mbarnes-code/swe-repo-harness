@@ -2821,13 +2821,30 @@ stays green).
 **Done bar:** met in full. Nothing remains open for §12.42.
 
 ## 43. Failover layered, bounded, fail-closed
-**OPEN — case (ii) is the sole remaining blocker, everything else in this entry closed.** Case
-(ii) is entirely absent, blocked on D55/D58's circuit-breaker gap (explicitly out of round-Y's
-size class, needs its own dedicated round). `llm_failovers` recording (D62) closed round Y task 4
-(ADR-0107): `TokenUsage.llm_failovers` is stamped from `LadderModelClient.complete()`'s own
-retry-loop index, wired through `AttemptRow`/`record_attempt`, with a §12.43-case-(i)-shaped test
-in `tests/test_llm_backend_failover_attribution.py` proving the CONNECTION-trigger shape. The two
-independently-actionable status/message tests this entry previously named closed round X task 1.
+**Case (ii) closed (round VI task 88, ADR-0132, `6d5c721`) — pending controller confirmation
+that this closes §12.43 as a whole; the arithmetic below is this task's own claim, not a
+`<n> of 48` headline update.** Case (ii)'s literal text ("a target that returns 429 through its
+entire §11.8 backoff schedule is marked DOWN after `open_after_failures`, is not called again
+until `cooldown_s` has elapsed, and one `HALF_OPEN` probe restores it — asserted against a
+recorded call log, so a busy-loop against a throttled endpoint fails the test") is proven by
+`tests/test_llm_failover.py` (8 tests, `FakeBackend.calls` as the recorded call log) plus the
+exhausted-backoff fixture in `tests/test_llm_findings.py`: a single 429 never reaches the
+breaker (same-target backoff absorbs it); exhausting the entire backoff schedule is exactly one
+qualifying failure; the target is then skipped with ZERO further calls (the busy-loop the
+criterion names, directly asserted against the call log); after `cooldown_s` exactly one
+`HALF_OPEN` probe is let through, a success resets to `UP` and a failure restarts the cooldown;
+`BackendHealth` does not persist across a fresh `LadderModelClient` (§11.8's own "re-probes
+rather than inheriting a stale verdict"); `TierUnavailable`/exit-8 is unaffected for a genuinely
+exhausted tier. New `llm/failover.py::BackendHealth`, wired into `llm/client.py`'s dispatch loop
+and `_call_target`'s same-target `RATE_LIMIT` backoff arm — see ADR-0132 and D55's Status
+update in `docs/INTEGRATION_HONESTY.md` for the full design and disclosed residuals (the halt
+STRING at `orchestrator/runner.py:640` is unchanged, and the proactive token-bucket/AIMD half of
+D55's broader framing remains open — neither is this criterion's literal text). `llm_failovers`
+recording (D62) closed round Y task 4 (ADR-0107): `TokenUsage.llm_failovers` is stamped from
+`LadderModelClient.complete()`'s own retry-loop index, wired through `AttemptRow`/
+`record_attempt`, with a §12.43-case-(i)-shaped test in `tests/test_llm_backend_failover_
+attribution.py` proving the CONNECTION-trigger shape. The two independently-actionable
+status/message tests this entry previously named closed round X task 1.
 **`TierUnavailable`'s message-provenance/tier-attribution honesty fields (D78) closed round Y
 task 3**: `WorkerError` gained a `tier` field, `_error_for` populates it from a real
 `TierUnavailable`, `PhaseRunner._drive` forwards it into `record_backend_unavailable` —
@@ -2836,7 +2853,9 @@ always `"run"`, independently confirmed by task review inferring the closure str
 diff's own data flow (no separate end-to-end test drives a real `TierUnavailable` through the
 whole `_drive` path in one run; the two halves — `_error_for` populates, `_drive` forwards — are
 proven separately, which is sufficient since neither has untested branching between them).
-**Done bar (remaining):** case (ii) only — the D55/D58 circuit-breaker gap.
+**Done bar (remaining):** none named by this task; a reviewer re-deriving §12.43's case list
+against the landed tests is the closure this criterion still needs before the controller's own
+`<n> of 48` count moves.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
