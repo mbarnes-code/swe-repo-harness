@@ -9994,3 +9994,91 @@ wave should aim to close at least one criterion outright, not just narrow furthe
 - **§12.39** — shares §12.37's done bar exactly; see above.
 - **§12.43** (case ii) — the D55/D58 circuit-breaker gap, still needs its own dedicated round; not
   touched this wave.
+
+## Round VI, twenty-ninth wave — D122/D123/D124 closure cluster, §12.31 Leg D fully wired
+
+Dispatched research-43 (design D123's fix) plus tasks 72 (§12.31/D111 Leg D production wiring),
+74 (D124's `fleet retry` CLI), 75 (D122's PR-record persistence fix), 76 (D123's cross-wave
+`blocked_by` propagation fix) — four workers plus one research pass, sequenced across several
+rounds of task-scoped review and fix rounds per the SDD skill's own loop discipline. Every task
+in this wave self-caught or had review-caught at least one real, disclosed issue before merge;
+none landed on a first pass without a fix round.
+
+**D122 and D124 are now FIXED, LANDED in full.** D122 (a contract's PR record colliding with its
+owning repo's own PR record under one fingerprint) closed via ADR-0126's additive, no-migration
+fingerprint/key widening — task-75's own review caught the controller's own ADR making a false
+"byte-identical" claim (corrected in place, narrow blast radius, no code change needed). D124
+(no CLI surface or legal transition edge to re-run an abandoned repo) closed via `fleet retry`,
+reusing an `OPERATOR_REOPEN` transition door that had existed since the project's initial commit
+but was never wired to any writer or CLI command (ADR-0125) — task-74's fix round added the
+missing `phase_floor`-path proof its original fixture never exercised, and disclosed rather than
+silently changed the retry-ladder's `attempts`-not-reset behavior.
+
+**D123 is now PARTLY ADDRESSED, corrected down from an initial overclaim of FIXED, LANDED.**
+`_transform_impl`'s wave loop now pre-seeds every wave's TRANSFORM `phases` row upfront (mirroring
+`_build_impl`'s already-correct PASS 1, per ADR-0127) — this closes the single-`fleet transform`-
+invocation cross-wave blast-containment case SPEC's literal text targets, real and proven by a
+regression fixture. An opus-tier review independently measured that a `--wave`-scoped sequence of
+SEPARATE invocations still reproduces the identical original symptom — a narrower, genuinely
+distinct residual, now tracked as **D126** (OPEN, undesigned). A second, structurally-identical
+but unmeasured suspicion in `_verify_impl`'s own wave loop was disclosed and allocated as **D125**
+(OPEN, no fixture run yet) rather than silently assumed away.
+
+**§12.31/D111 Leg D is now fully code-complete AND wired to a real production call site**
+(`unhoist_contract` → `execute_hoist_rollback`, triggered from `_build_impl` after its wave loop,
+covering both `fleet build` and `fleet resume`). An opus-tier review found this wiring, as first
+landed, would have introduced a real production regression: no production code path ever sets
+`contract_id` on a `PullRequestDraft` today, so `execute_hoist_rollback` always raises
+`RollbackAnchorError` for a contract with a non-empty blast set — uncaught, this would abort an
+entire `fleet build`/`fleet resume` invocation (every unrelated repo included) for a scenario that
+previously just recorded a finding and continued. Fixed via per-contract exception isolation (a
+new `HoistRollbackFailed` finding per failed contract, the rest of the build proceeds normally),
+verified via a real MRO/`issubclass` check that the exception is genuinely caught, not merely
+plausibly, and a Rule-12 discriminator with no hand-seeded `contract_id` — the true production
+shape. §12.31 case (ii) itself stays OPEN pending Leg C1/C2's own remaining work (unchanged this
+wave, never dispatched).
+
+**A new, previously-undocumented git hazard was found and corroborated independently by two
+separate lanes:** `refs/stash` is shared across every worktree of one repository, not scoped
+per-worktree — a `git stash pop` in one lane's worktree can silently return a SIBLING lane's
+stash entry. Caught before any damage landed both times (task-75 and task-76 each hit it
+independently, task-76 first, task-75 corroborating from the other side with matching SHAs). Now
+a standing `CLAUDE.md` guardrail: never use `git stash` under concurrent worktrees, use a
+copied-aside file or a patch file instead.
+
+Landed 3 new ADRs this wave (0126, 0127) plus a disclosure addendum to ADR-0125, and one new
+CLAUDE.md guardrail bullet. 6 merges to `main`, 5 of them requiring manual conflict resolution
+(the recurring "concurrent lanes append to the same end-of-file position" shape this project has
+hit repeatedly — resolved every time by anchoring each side's content to the entry it actually
+continues, in chronological order, never by accepting either side's raw diff3 position).
+
+**Status: main green.** Citation-hygiene (74/74 combined with findings-kinds), mypy, ruff, and
+targeted regression sweeps all re-verified clean after every merge this wave, including a lint-
+gate drift caught and fixed post-review (a new test file joining the pinned ruff-format-dirty
+baseline, plus a genuine `ruff format`/`# noqa` interaction gotcha where reformatting moved a
+suppression comment off the line the linter re-anchored its diagnostic to). §12 count: unchanged
+in COUNT this wave (still tracked at 41 of 48 as of the prior wave's checkpoint, not re-measured
+end-to-end this wave — per Rule 13, this wave's own targets were named D-numbers and a Leg's
+production wiring, not a full-criterion closure, and that disclosure stands rather than rounding
+up). D122 and D124 closing in full does not by itself flip any §12 criterion to DONE, since
+neither was ever the sole remaining blocker for one; D123's partial fix narrows §12.14 without
+closing it.
+
+**Remaining open criteria and exactly what closes each, cheapest/highest-leverage first:**
+- **§12.37/§12.14** — D104 (`TaskKind.REVALIDATE` has no dispatch path) is sized into 3 pieces by
+  research-14 but was explicitly held pending D107; D107 (nothing rewrites a consumer's
+  `BUILD.bazel` dependency label from a stub target to the real one once it resolves) is
+  genuinely unsized and needs its own research/ADR pass before D104 can be dispatched without
+  landing as tested-but-inert infrastructure; D108 (a trivial `phases`-write, bundled with D104's
+  own build, not standalone). §12.14 additionally needs D126 (the `--wave`-scoped `blocked_by`
+  residual, undesigned) and the still-undesigned transitive-stub-stacking mechanism.
+- **§12.31** case (ii) — Leg C1 (owner-scoped `FILE_PATH`-collision design) and Leg C2's own
+  follow-through, both flagged by research-35 as real-but-non-gating, never dispatched.
+- **§12.43** case (ii) — the D55/D58 circuit-breaker gap (a rate-limiter/`BackendHealth`
+  distinction), genuinely unsized, needs its own dedicated design round; not touched this wave or
+  the prior one.
+- **D125** — needs a fixture confirming or refuting the `_verify_impl` structural suspicion before
+  it can be sized at all.
+- 3 Minor findings parked from task-72's review (an operator-facing finding payload gap, two
+  currently-inert widened fields, one stale doc site inside an already-dated historical block) —
+  cheap, mechanical, low priority relative to the above.
