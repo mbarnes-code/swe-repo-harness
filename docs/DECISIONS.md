@@ -14842,3 +14842,182 @@ No other genuine value judgment was found. The fix shape (judgment call 1's adap
 each settled by reading the code and re-applying ADR-0127's own already-reviewed reasoning, not by
 a preference this ADR is guessing at.
 
+
+---
+
+## ADR-0130 — D126: `_transform_impl`/`_verify_impl` re-propagate `blocked_by` against
+already-terminal providers at the start of every invocation
+
+> Draft produced by research-46 for the controller to land. ADR number `0130` is the next free
+> number as measured at research-46's own time of writing (`grep -noE "ADR-01[0-9]{2}"
+> docs/DECISIONS.md docs/INTEGRATION_HONESTY.md docs/CRITERIA_PLAN.md` → highest `0129`) — per
+> CLAUDE.md's central-number-allocation rule, the controller must re-verify this is still free at
+> dispatch time before landing, since other lanes may allocate concurrently.
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D126 (opus-tier review of round VI task-76's branch,
+folded to cover both TRANSFORM and VERIFY by the task-80 controller ruling) found that
+ADR-0127/ADR-0129's same-invocation cross-wave `blocked_by` fixes do not close a narrower, distinct
+case: a `--wave N`-scoped sequence of SEPARATE `fleet transform`/`fleet verify` invocations (or,
+this ADR adds, any later, separate re-entry into `_transform_impl`/`_verify_impl` at all —
+including `fleet resume`) still reproduces the ORIGINAL D123/D125 symptom. Re-measured fresh at
+current `HEAD` (`803b004`) by research-46, byte-for-byte identical to the ledger's own cited
+numbers, for BOTH phases (see research-46-report.md §1 for the full numbers and worktree
+methodology). D126 remains `OPEN`, undesigned, before this ADR.
+
+**Root cause, traced fresh.** `WaveScheduler.propagate_blocked`
+(`orchestrator/scheduler.py:522-539`) has exactly one call site in `src/fleet/`:
+`PhaseRunner._contain` (`orchestrator/runner.py:1194-1201`), fired once, synchronously, at the
+moment a repo's live dispatch writes it to `REQUIRES_HUMAN_INTERVENTION`. Its target write,
+`SchedulerStore.append_blocked_by` (`scheduler.py:274-322`), is UPDATE-only against
+`phases WHERE run_id = ? AND repo_id = ?` — a dependent with no row yet is silently untouched.
+ADR-0127/ADR-0129 guarantee that row exists **before dispatch, within one process**, by pre-seeding
+every wave that SAME invocation will drive. But `_open_phase_waves` (`cli.py:6201-6219`) returns
+exactly `(wave,)` when `wave is not None` — a `--wave`-scoped invocation's pre-seed pass only ever
+touches its own requested wave(s). A provider's RHI transition and its one live `propagate_blocked`
+call both happen, and finish, inside whichever process reached them first; nothing in a LATER
+process, whose own pre-seed pass creates a fresh row for a wave that process is now handling, ever
+re-invokes `propagate_blocked` for an already-terminal provider from a process that has already
+exited. Full derivation, including why BUILD is structurally unaffected (its whole-fleet,
+`--wave`-independent PASS 1 incidentally already gives every invocation full row visibility): see
+research-46-report.md §2-3.
+
+**Why this is a new ADR, not an addendum to ADR-0127 or ADR-0129** (mirroring exactly how
+research-45 reasoned ADR-0129 itself needed to be a new ADR rather than an addendum to ADR-0127):
+1. Both prior ADRs explicitly declined to decide this. ADR-0127 didn't yet know D126 existed
+   (allocated later, in task-76's own fix round). ADR-0129's judgment call 3 states outright: "out
+   of scope... not this ADR's to make" and defers the D-number/scope decision to the controller.
+2. This project's existing "Addendum" sections (ADR-0125's `attempts`-not-reset note; the review
+   finding appended to ADR-0123/D124's entry) record a controller ruling on a review finding about
+   work **already landed** — not forward design for **not-yet-built** work.
+3. D126 already carries its own D-number and its own `docs/INTEGRATION_HONESTY.md` entry, spanning
+   two phases. A reader searching "D126" should land on a self-contained design, not a subsection of
+   a document whose own text says "not this ADR's to make."
+4. Not a verbatim transplant of either prior ADR's fix: the fix shape is genuinely different (a
+   re-propagation sweep against an already-durable record, not a pre-seed-earlier-in-the-loop
+   pattern) — see research-46-report.md §3 for why the transplant does not work here. That
+   difference is substantive enough to warrant its own record.
+
+---
+
+### Judgment call 1 — the fix's shape: re-propagation sweep vs. new persistent table vs. widening
+the pre-seed pass fleet-wide
+
+**Decision: a bounded, idempotent re-propagation sweep, reusing `WaveScheduler.propagate_blocked`
+completely unchanged, run once per invocation immediately after the existing (ADR-0127/0129)
+upfront pre-seed pass and before wave dispatch begins.** No new schema, no new column, no new table.
+`phases.status = 'REQUIRES_HUMAN_INTERVENTION'` already IS the durable, invocation-independent
+record of "which repos are cross-wave-blocked and why" — this fix adds the missing step that
+consults it against freshly-created rows, rather than inventing a new place to store the same fact.
+
+Concretely, in both `_transform_impl` (after `cli.py:6656-6667`'s pre-seed block, before
+`for index in waves:` at `6668`) and `_verify_impl` (after `cli.py:12046-12060`'s pre-seed block,
+before `for index in waves:` at `12061`):
+
+1. `SELECT DISTINCT repo_id FROM phases WHERE run_id = ? AND phase = ? AND status =
+   'REQUIRES_HUMAN_INTERVENTION'`, `phase` bound to this call's own `Phase.TRANSFORM`/
+   `Phase.VERIFY`.
+2. For each match, `await scheduler.propagate_blocked(repo_id)` — the identical method, unchanged,
+   the live `_contain` call site already uses, constructed the same way both `_run_transform_wave`
+   (`cli.py:6420-6432`) and `_run_verify_wave` (`cli.py:11096-11106`) already construct it
+   (`store=SqliteSchedulerStore(writer=writer, read_conn=read_conn)`,
+   `descendants=ordering_descendants(await _ordering_pairs(read_conn, settings, run_id))`).
+
+**Why not a new persistent table.** The brief's own item 3 offered this as one candidate shape. It
+would duplicate a fact already durably recorded (`phases.status`) into a second place, creating a
+new place for the two to drift — exactly the shape CLAUDE.md's Architectural Guardrail 4 (state
+management boundaries) and Rule 2 (simplicity first) both warn against. Nothing about this defect
+is a missing fact; it is a missing read of an existing one.
+
+**Why not widen the pre-seed pass to cover the whole fleet regardless of `--wave`** (mirroring
+`_build_impl`'s PASS 1 shape). Rejected for the same reason ADR-0129 already rejected it for VERIFY
+specifically: it would silently change what `--wave` means as a dispatch filter — a real, deliberate
+semantic boundary (`--wave`/`--repo` scope what THIS invocation drives, never what rows exist) this
+fix must not cross. It would also not even fully solve the problem in general — see
+research-46-report.md §3's "why BUILD is unaffected" analysis, which shows the whole-fleet shape's
+immunity is closer to incidental than to a general solution to "a provider goes RHI in a process
+that has already exited."
+
+**Why re-invoking `propagate_blocked` on every invocation is safe** (not merely convenient): it
+inherits, unchanged, every safety property that method and `append_blocked_by` already have and
+this project has already reviewed twice (ADR-0127/ADR-0129's own review rounds) — UPDATE-only
+against existing rows, terminal-status skip, no `BLOCKED → BLOCKED` self-edge in
+`ALLOWED_TRANSITIONS` (`models/enums.py:41`), and union-not-replacement semantics. Re-running it
+against an already-correctly-blocked repo, a not-yet-existing row, or an already-terminal repo is a
+no-op in every case. `scheduler.py:280-282`'s own docstring already states the intended property
+("idempotent, so a resume that re-derives propagation writes the same rows rather than doubling
+them") — this fix is the first thing that actually exercises that guarantee across a process
+boundary.
+
+### Judgment call 2 — one task (shared helper) or a split, mirroring D107/D104/D108's own decision
+
+**Decision: one task.** Unlike D123/D125, which needed genuinely different pre-seed *adaptations*
+(`_wave_repos` vs `_gated_members`, because TRANSFORM has no predecessor-phase gate and VERIFY
+does), D126's fix is structurally IDENTICAL for both phases — same query shape (parametrized only
+by `Phase`), same reused `propagate_blocked` call, same construction of `store`/`descendants` both
+call sites already perform, same insertion point relative to each phase's own already-landed
+pre-seed pass. A single shared helper (suggested shape: `async def
+_repropagate_terminal_providers(read_conn, writer, run_id, phase, settings) -> None`), called once
+from `_transform_impl` and once from `_verify_impl`, is the natural, minimal-diff, single-review-
+surface implementation. Research-44's D107/D104/D108 split existed because those pieces had
+genuinely different call sites, safety profiles, and sizes; none of that applies here.
+
+### Judgment call 3 — does `_build_impl` need this fix too?
+
+**Decision: not required by this ADR — disclosed as structurally unaffected, not silently
+skipped.** `_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1 already pre-seeds
+every open wave's BUILD row on every invocation regardless of `--wave` scoping, so a provider that
+goes RHI in one invocation already has full visibility into every row it could ever need to block,
+in that same invocation — durably, via the same `append_blocked_by` write this ADR's sweep also
+uses. Checked directly (research-46-report.md §3), not assumed from precedent. An implementer MAY
+still choose to add the same sweep to `_build_impl` for defensive uniformity (it would be a pure
+no-op given the above, at the cost of one more cheap `SELECT` per invocation) — this ADR does not
+mandate it, and leaves it as the implementing task's own call, not a controller-blocking decision.
+
+### Judgment call 4 — does this change `WaveScheduler.admit()`, `ALLOWED_TRANSITIONS`, or
+`orchestrator/reentry.py`?
+
+**Decision: no, confirmed by reading, identically to ADR-0127/ADR-0129's own judgment call 2s.**
+This fix adds a new CALLER of already-existing, already-correct machinery; it changes no method's
+own logic. `admit()`/`status_of` still read `phases` fresh with no wave-scoping to invalidate.
+`ALLOWED_TRANSITIONS` is unchanged. `orchestrator/reentry.py`'s `phase_floor`/`still_blocking` are
+unchanged and, per research-46-report.md §5, were specifically checked and found NOT to already
+cover this gap on their own (a repo that was never given a `blocked_by` entry is invisible to
+step 6's recompute) — which is exactly why this fix is needed at all, rather than something resume
+would eventually self-heal.
+
+---
+
+### Disclosed — this is a SOUNDNESS gap, not merely a liveness gap
+
+Per the brief's item 5, stated explicitly and not left ambiguous the way D126's current one-line
+ledger description leaves it: the multi-invocation gap does not merely leave a repo stuck or
+under-scheduled. A dependent slipping through is genuinely ADMITTED, DISPATCHED, and driven to a
+real terminal `SUCCEEDED` verdict, against a provider the run already knows is abandoned — a wrong
+result is PERSISTED, not merely delayed. And it is PERMANENT: neither of `fleet resume`'s two
+re-entry mechanisms (`phase_floor`, evidence-based and per-repo; `still_blocking`, recompute-only
+over EXISTING `blocked_by` entries) ever revisits a repo that was never blocked in the first place —
+checked directly against both mechanisms' actual domains (research-46-report.md §5), not assumed.
+No adversarial input or rare dispatch path is required to trigger this: `--wave N` is a first-class,
+documented CLI flag on both `fleet transform` and `fleet verify`
+(`typer.Option("--wave")`, `cli.py:2856/2870/2919/2959/4955/12685`), and re-invoking either command
+a second time on an existing run is entirely ordinary operator usage. Recommend treating this as
+urgent for dispatch-priority purposes, though that priority call itself remains the controller's
+per Rule 13/`docs/CRITERIA_PLAN.md`, not this ADR's to make.
+
+---
+
+### Open questions for the controller
+
+1. **ADR number confirmation** — `0130` was free at research-46's own time of writing; re-verify
+   before landing (concurrent lanes may have allocated since).
+2. **Whether `_build_impl` also gets the defensive sweep** (judgment call 3) — a real but
+   low-stakes implementer/controller call, not a technical fact this ADR settles.
+3. **Dispatch priority relative to the still-undesigned transitive-stub-stacking mechanism** (the
+   other remaining §12.14/§12.37 blocker named in `docs/CRITERIA_PLAN.md`) — a prioritization
+   judgment, not something this research is positioned to rule on.
+
+No other genuine value judgment was found. The fix shape (judgment call 1), the "one task, shared
+helper" sizing (judgment call 2), BUILD's structural immunity (judgment call 3), and the "no
+scheduler/transition/reentry change needed" confirmation (judgment call 4) are each settled by
+reading the code fresh and re-applying ADR-0127/ADR-0129's own already-reviewed reasoning, not by a
+preference this ADR is guessing at.
