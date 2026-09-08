@@ -12025,14 +12025,31 @@ async def _verify_impl(
                 await repository.open_budget_ledger(
                     run_id, max_usd=settings.config.budgets.run_max_cost_usd, now=_now()
                 )
+                # D125 / ADR-0129: pre-seed EVERY wave's VERIFY `phases` row for this invocation's
+                # whole GATED domain, upfront, before any wave dispatches — adapting ADR-0127's
+                # TRANSFORM fix to VERIFY's own predecessor-phase gate. `append_blocked_by`
+                # (scheduler.py) is UPDATE-only: if a later-wave dependent's phase row does not
+                # exist yet at the moment an earlier wave's provider reaches
+                # REQUIRES_HUMAN_INTERVENTION, `propagate_blocked`'s write silently touches zero
+                # rows and the dependent is admitted unblocked. Unlike `_transform_impl` (no
+                # predecessor gate — SCAN is complete fleet-wide before TRANSFORM dispatches),
+                # VERIFY gates each wave's members on BUILD's own per-repo verdict via
+                # `_gated_members`, which documents that a not-yet-BUILD-ready repo must get **no**
+                # phase row at all. So the pre-seed calls `_gated_members` (not the ungated
+                # `_wave_repos`) per wave and upserts only the `members` half — never `blocked` —
+                # preserving that invariant. BUILD's phase status cannot change during a `fleet
+                # verify` invocation (VERIFY never writes Phase.BUILD rows), so calling
+                # `_gated_members` upfront for every open wave returns identical pairs to calling
+                # it lazily per-wave; `upsert_phase`'s `ON CONFLICT DO UPDATE` never touches
+                # `status`/`blocked_by`, so this changes nothing about what gets dispatched, only
+                # when the row exists to be written into.
+                gated_by_wave: dict[int, tuple[tuple[str, ...], tuple[str, ...]]] = {}
                 for index in waves:
-                    members, blocked = await _gated_members(
+                    gated_by_wave[index] = await _gated_members(
                         read_conn, run_id, index, only, predecessor=Phase.BUILD
                     )
-                    withheld.update(blocked)
-                    if not members:
-                        continue
-                    driven.append(index)
+                for index in waves:
+                    members, _blocked = gated_by_wave[index]
                     for repo_id in members:
                         await repository.upsert_phase(
                             run_id,
@@ -12041,6 +12058,12 @@ async def _verify_impl(
                             now=_now(),
                             max_attempts=MAX_ATTEMPTS,
                         )
+                for index in waves:
+                    members, blocked = gated_by_wave[index]
+                    withheld.update(blocked)
+                    if not members:
+                        continue
+                    driven.append(index)
                     # D84: same class, same remedy as `_transform_impl`'s prepare loop, but the
                     # guard is read once per wave and consulted below rather than wrapping the
                     # loop — and that is REQUIRED, not a preference. A breached wave's observable
