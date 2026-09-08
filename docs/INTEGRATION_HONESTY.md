@@ -10799,7 +10799,7 @@ source for this item; §12.37 stays PARTLY ADDRESSED, not DONE, on that account.
 own report (`.superpowers/sdd/round-VI-criteria-closure/task-89-report.md`) for the full
 disclosure of the brief-vs-CRITERIA_PLAN discrepancy this task found and did not paper over.
 
-## D131 — FIXED, LANDED (round VI task 93, this task's own commits). §12.14's transitive
+## D131 — FIXED, LANDED (round VI task 93, `bd229a3`, merged `658f0a8`). §12.14's transitive
 stub-stacking mechanism (§3.5 item 4's "whole descendant set") was undesigned, and a live defect
 followed from the gap: a second-layer dependent of a `DEGRADED` provider carried no `stubs` row,
 so its persisted `VerificationReport.equivalence` read `FULL` (false — the chain ran through a
