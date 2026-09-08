@@ -963,6 +963,24 @@ covering the `--wave`-scoped multi-invocation residual for BOTH TRANSFORM and VE
 still-undesigned transitive-stub-stacking mechanism — three items, not four; the "VERIFY-side
 sibling of D126" line above is superseded by this paragraph.
 
+**Corrected, 2026-09-08 (round VI task 84, ADR-0130, `3044479`/`6ab0277`/`62b2049`) — D126 is now FIXED for both
+phases; D123/D125 upgraded back to `FIXED, LANDED` accordingly.** A single shared helper,
+`_repropagate_terminal_providers`, is called once from `_transform_impl` and once from
+`_verify_impl` (and, defensively, from `_build_impl`, per the controller's ruling on ADR-0130
+judgment call 3), re-broadcasting `blocked_by` against any provider already durably
+`REQUIRES_HUMAN_INTERVENTION` on record at the start of every invocation, closing the
+process-boundary gap `_open_phase_waves`' `(wave,)`-only return left open. See
+`docs/INTEGRATION_HONESTY.md`'s D126 entry for the full fix description and regression proof
+(old-fails/new-passes, both phases, plus a direct instrumented confirmation that a later
+invocation's `_build_impl` sweep genuinely reads a non-zero row — **corrected, round VI task-84
+fix round 3: the earlier "the sweep is a provable no-op" phrasing here was false and is retracted**
+— what is actually redundant is the WRITE, not the SELECT, because the dependent is already
+correctly `BLOCKED` by the same-invocation live containment PASS 1 gives full visibility to).
+`docs/INTEGRATION_HONESTY.md`'s D123 and D125 headings both move from
+`PARTLY ADDRESSED` back to `FIXED, LANDED`, since the residual each was downgraded for is exactly
+what this fix closes. §12.14's remaining named gaps, restated once more: D124 (separately worked)
+and the still-undesigned transitive-stub-stacking mechanism — two items, not three.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely

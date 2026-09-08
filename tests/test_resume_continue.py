@@ -282,6 +282,41 @@ async def test_the_driver_hands_every_delegate_the_glob_and_the_whole_run(
         assert kwargs["run_id"] == "run-1"
 
 
+async def test_stub_blocked_reaches_every_delegate_not_only_transform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """D126 / ADR-0130 fix round 1 (F3, opus-tier review): `resume()`'s `stub_blocked` flag must
+    reach `_build_impl`/`_verify_impl` too, not only `_transform_impl` — corrected from this
+    module's own prior claim (`_continue_impl`'s docstring used to say `_build_impl`/`_verify_impl`
+    "need no such parameter... and neither ever took one," true only about `stub_degrade_transform`
+    and false the moment D126's `_repropagate_terminal_providers` sweep needed the identical
+    `stub_permits_removal` exemption in all three delegates).
+
+    `_continue_impl` can drive BUILD or VERIFY in the SAME `fleet resume --stub-blocked` invocation
+    as step 6's real unblock, just as readily as TRANSFORM — a repo `_unblock_dependents` frees can
+    be floored at any of the three — so an unguarded BUILD/VERIFY sweep would silently re-block it
+    before its own wave loop ever dispatches it
+    (`tests/test_build_e2e.py::
+    test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation` proves that
+    end-to-end against real state; this test proves the narrower, cheaper fact that `_continue_impl`
+    actually WIRES the flag through, for all three phases, not just TRANSFORM).
+
+    Unique discriminator of: `stub_blocked=stub_blocked` reverting to a default (or omitted
+    keyword) on either the BUILD or the VERIFY delegate call.
+    """
+    calls: list[Any] = []
+    await _drive(
+        monkeypatch,
+        {"acme-v": Phase.VERIFY, "acme-t": Phase.TRANSFORM, "acme-b": Phase.BUILD},
+        trace=calls,
+        stub_blocked=True,
+    )
+    delegated = [entry for entry in calls if entry != "MUTEX"]
+    assert {phase for phase, _ in delegated} == {Phase.TRANSFORM, Phase.BUILD, Phase.VERIFY}
+    for phase, kwargs in delegated:
+        assert kwargs["stub_blocked"] is True, (phase, kwargs)
+
+
 async def test_the_driver_really_drives_the_phases_above_the_only_floor_there_is(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

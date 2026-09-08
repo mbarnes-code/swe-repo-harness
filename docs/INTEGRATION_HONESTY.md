@@ -8528,7 +8528,7 @@ task-scoped review APPROVED at `2a5c2ac`) — but the heading above was never up
 so this entry read OPEN for six days while the fix sat on `main`. Task-82 was dispatched against
 that stale OPEN heading to build "gap 1" and "gap 2"; its first read-first step (CLAUDE.md: "a
 finding is a hypothesis... and it perishes between filing and fix") re-derived both call sites
-fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:12928`) already
+fresh against current `HEAD` and found `_fire_t1_for_provider` (`src/fleet/cli.py:13159`) already
 implements exactly what "Not yet built" above describes for both gaps: gap 1's post-loop sweep over
 durably-`MERGED` PR records with a still-`ACTIVE` stub (`_pr_sync_impl`, D103 gap-1 sweep comment)
 and gap 2's `UPDATE stubs SET revalidation_task_id = ?` inside T1's own transaction, keyed on the
@@ -9892,9 +9892,10 @@ one remains a future task's job. Full test files run whole, no `-k`: `tests/test
 exactly the one new discriminator test. `mypy --strict src/fleet/` and `ruff check`/
 `ruff format --check` (on every line this task touched) both clean.
 
-## D123 — PARTLY ADDRESSED (round VI task 76, `981abed`) — the single-invocation case is fixed;
-a narrower `--wave`-scoped multi-invocation residual remains, see D126. A direct dependent of an
-RHI repo does not become `BLOCKED` at the TRANSFORM phase — cross-wave `blocked_by` propagation
+## D123 — FIXED, LANDED (round VI task 76 `981abed` + round VI task 84 `3044479`/`6ab0277`/`62b2049`,
+ADR-0130) — both the single-invocation case and the `--wave`-scoped multi-invocation residual
+(formerly tracked separately as D126) are now closed. A direct dependent of an RHI repo does not
+become `BLOCKED` at the TRANSFORM phase — cross-wave `blocked_by` propagation
 silently never reaches a not-yet-dispatched dependent
 
 **Found by round VI task 69's own task-scoped review (2026-09-07), independently reproduced on
@@ -9966,6 +9967,17 @@ round (`fleet transform --wave 0` then `fleet transform --wave 1`, real dispatch
 ('acme-app-ts','SUCCEEDED','[]')]`). Tracked separately as **D126** (below); the heading and this
 paragraph are the correction, the fix description above is left as written since it is accurate
 for what it covers.
+
+**FIXED, 2026-09-08 (round VI task 84, ADR-0130, `3044479`/`6ab0277`/`62b2049`) — the `--wave`-scoped multi-invocation
+residual tracked as D126 is now closed; see D126's own entry below for the full fix description
+and regression proof.** `_transform_impl` now calls a new shared helper,
+`_repropagate_terminal_providers`, immediately after its existing pre-seed pass and before wave
+dispatch begins, which re-broadcasts `blocked_by` against any provider already durably
+`REQUIRES_HUMAN_INTERVENTION` on record — closing the gap this entry's own "Controller ruling"
+paragraph above disclosed as NOT fixed by `981abed`. This entry's heading is corrected from
+`PARTLY ADDRESSED` to `FIXED, LANDED` accordingly; every paragraph above is left as written, since
+each was accurate for the state of the code at the time it was written (CLAUDE.md's "annotate, do
+not rewrite" convention).
 
 ## D124 — FIXED, LANDED (round VI task 74, `489cc0d`, controller review pending). No CLI surface
 exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`) repo to `SUCCEEDED` — `fleet retry`
@@ -10053,9 +10065,10 @@ propagation gap and the undesigned transitive-stub-stacking mechanism are untouc
 (D104's separate, still-open `REVALIDATE`-dispatch gap is untouched) — see
 `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
 
-## D125 — PARTLY ADDRESSED (round VI task 80, `74aedc4`) — the single-invocation case is fixed;
-a `--wave`-scoped multi-invocation residual remains, see D126. `_verify_impl`'s wave loop has the
-same cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
+## D125 — FIXED, LANDED (round VI task 80 `74aedc4` + round VI task 84 `3044479`/`6ab0277`/`62b2049`,
+ADR-0130) — both the single-invocation case and the `--wave`-scoped multi-invocation residual
+(formerly tracked separately as D126) are now closed. `_verify_impl`'s wave loop has the same
+cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
 
 **Found by round VI research-43 (2026-09-08), while designing D123's fix (ADR-0127), as a
 byproduct of reading `_transform_impl` alongside its siblings — not independently investigated
@@ -10185,9 +10198,19 @@ both share the identical root cause (`_open_phase_waves` returning `(wave,)` whe
 `propagate_blocked`'s single call site) rather than being two independent defects. No new
 D-number allocated.
 
-## D126 — OPEN. A `--wave N`-scoped sequence of multiple separate `fleet transform` or
-`fleet verify` invocations does not propagate `blocked_by` across invocation boundaries — the
-narrower residual of D123/D125 that ADR-0127/ADR-0129's same-invocation fixes do not close
+**FIXED, 2026-09-08 (round VI task 84, ADR-0130, `3044479`/`6ab0277`/`62b2049`) — the `--wave`-scoped multi-invocation
+residual tracked as D126 is now closed for VERIFY as well as TRANSFORM; see D126's own entry below
+for the full fix description and regression proof.** `_verify_impl` now calls the same shared
+helper `_transform_impl` calls, `_repropagate_terminal_providers`, immediately after its own
+existing gated pre-seed pass and before wave dispatch begins. This entry's heading is corrected
+from `PARTLY ADDRESSED` to `FIXED, LANDED` accordingly; every paragraph above is left as written,
+since each was accurate for the state of the code at the time it was written (CLAUDE.md's
+"annotate, do not rewrite" convention).
+
+## D126 — FIXED, LANDED (round VI task 84, `3044479`/`6ab0277`/`62b2049`, ADR-0130). A `--wave N`-scoped
+sequence of multiple separate `fleet transform` or `fleet verify` invocations does not propagate
+`blocked_by` across invocation boundaries — the narrower residual of D123/D125 that
+ADR-0127/ADR-0129's same-invocation fixes do not close
 
 **Found by an independent opus-tier review of round VI task-76's branch (2026-09-08), ruled on by
 the controller in that task's fix round 1 (this entry).** Verified free before allocating:
@@ -10258,6 +10281,161 @@ defect — so this is folded into D126's existing scope rather than given a sibl
 this entry's own heading correction. `docs/INTEGRATION_HONESTY.md`'s D125 entry now reads
 `PARTLY ADDRESSED` accordingly, mirroring D123's own correction in round VI task-76 fix round 1.
 Fix remains **not yet built** for either phase.
+
+**FIXED, 2026-09-08 (round VI task 84, `3044479`, ADR-0130).** A single shared helper,
+`_repropagate_terminal_providers(read_conn, writer, run_id, phase, settings)` (`src/fleet/cli.py`),
+implements ADR-0130's judgment call 1 exactly: `SELECT DISTINCT repo_id FROM phases WHERE run_id
+= ? AND phase = ? AND status = 'REQUIRES_HUMAN_INTERVENTION'`, then `await
+scheduler.propagate_blocked(repo_id)` for each match — the identical, unchanged
+`WaveScheduler.propagate_blocked` the live `PhaseRunner._contain` call site already uses,
+constructed the same way `_run_transform_wave`/`_run_verify_wave` already construct it. Called
+once from `_transform_impl` and once from `_verify_impl`, immediately after each function's
+existing ADR-0127/ADR-0129 pre-seed pass and before its `for index in waves:` dispatch loop
+begins. Per the controller's ruling on ADR-0130 judgment call 3, the identical call was also added
+to `_build_impl` for defensive uniformity, even though BUILD was never exposed to this residual
+(`_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1 already gives every invocation
+full row visibility) — **corrected, round VI task-84 fix round 2 (opus-tier review, F2): the
+SELECT is NOT a no-op** (a second invocation over a still-abandoned provider genuinely returns a
+row — measured, below); **the WRITE is**, because the dependent was already correctly `BLOCKED` by
+the first invocation's own live containment, and `append_blocked_by`'s illegal `BLOCKED ->
+BLOCKED` self-edge silently skips the redundant write. See below for the corrected measurement.
+
+Regression proof, old-fails/new-passes via the backup-file method (never `git stash`, per
+CLAUDE.md's disclosed guardrail on `refs/stash` being repo-wide across concurrent worktrees):
+`tests/test_transform_e2e.py::
+test_a_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation`
+and `tests/test_build_e2e.py::
+test_a_verify_provider_rhi_in_an_earlier_invocation_blocks_a_dependent_in_a_later_invocation`
+each drive the same fixture this entry's own measurements used, across two SEPARATE `--wave`-scoped
+CLI invocations. Against the pre-fix code (`cli.py` restored from a pre-fix backup file, diffed
+against the post-fix backup to confirm the mutation genuinely changed the file before trusting the
+result), both reproduce this entry's own cited numbers byte-for-byte
+(`('acme-app-py','SUCCEEDED','[]')`); against the fix, both correctly assert
+`('acme-app-py', 'BLOCKED', ['acme-lib-py'])`, with the two non-dependent survivors
+(`acme-lib-ts`/`acme-app-ts`) unaffected in every run. `tests/test_build_e2e.py::
+test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new` (**corrected, fix round 2** — the
+original version drove only one `build()` call over a leaf failure with no dependent, a fixture in
+which the SELECT is trivially, structurally unreachable-as-non-zero; that proved nothing, per
+CLAUDE.md's own "validate what the instrument watches" guardrail, and an independent review
+measured the reachable case directly) now drives TWO real `build()` invocations over a genuine
+provider/dependent pair (`acme-lib-py`/`acme-app-py`, no stub row), instruments `cli._rows` to
+intercept the BUILD-side sweep's own distinctive SELECT starting after the first invocation, and
+asserts two things: the SELECT's row count is non-zero at least once on the second invocation
+(`[1]`, matching the review's own `SWEEP_ROWCOUNTS_INVOCATION2=[1]` measurement byte-for-byte —
+reachability is real, not assumed), and `acme-app-py`'s `(status, blocked_by)` is byte-identical
+before and after that second invocation (the WRITE, not the SELECT, is what is actually inert).
+`tests/test_transform_e2e.py::
+test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run`,
+`tests/test_build_e2e.py::
+test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent`, and
+`tests/test_prepare_before_admit.py`'s three breach fixtures were all re-run and stay green,
+confirming this fix does not regress the already-fixed single-invocation cases (D123/D125) or the
+D84 breach-handling behavior ADR-0127/ADR-0129 disclosed.
+
+**Fix round 1, same date (`6ab0277`) — two real conflicts with §37's stub-based escape hatches,
+found by this task's own required covering-set run (CLAUDE.md §6), neither anticipated by
+ADR-0130.** Running the full covering set rather than only the new fixtures surfaced two
+pre-existing tests this sweep broke, both because the sweep re-derives `blocked_by` purely from
+`phases.status = REQUIRES_HUMAN_INTERVENTION` — a fact §37's own, already-reviewed machinery
+deliberately overrides in two different ways this sweep did not know about:
+
+1. **TRANSFORM / §37 Blocker A (ADR-0113).** `fleet resume --stub-blocked` runs step 6
+   (`orchestrator.reentry.stub_permits_removal`: once `stub_blocked` is set, EVERY blocker with an
+   RHI phase row is stub-eligible for removal from EVERY dependent's `blocked_by` — a fact purely
+   about the blocker and the flag, not the dependent) and then step 8's real
+   `_transform_impl(stub_blocked=True)` continuation, in the SAME invocation. The sweep, blind to
+   this policy, fired immediately after step 6 and silently re-blocked the exact repo step 6 had
+   just correctly freed, before it could ever reach the dispatch that lets it discover its own
+   stub trigger — broke `tests/test_pr_e2e.py::
+   test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real`.
+   Fixed: `_repropagate_terminal_providers` now takes `stub_blocked: bool = False` and is a hard
+   no-op when set, mirroring `stub_permits_removal`'s own predicate exactly.
+2. **BUILD / §37 Blocker C.** `_unit_deps`'s stub redirect (`_active_stub_facts`) lets a consumer
+   build from an `ACTIVE` stub's pinned coordinate while its real provider stays permanently RHI —
+   no CLI flag involved; the stub's mere `ACTIVE` existence is the whole of the policy. The sweep's
+   unconditional re-block defeated this the moment a consumer already had an `ACTIVE` stub for its
+   abandoned provider — broke `tests/test_build_e2e.py::
+   test_an_active_stub_redirects_the_consumers_generated_dependency_to_the_stubs_label`. Fixed: the
+   sweep now excludes any `(dependent, provider)` pair already covered by an `ACTIVE` `stubs` row
+   before writing `blocked_by`, which required reimplementing `propagate_blocked`'s own body
+   (`descendants` + `append_blocked_by`, sorted, self-edge skipped) with that one added exclusion
+   rather than calling `propagate_blocked` unchanged — the one place this fix genuinely departs
+   from ADR-0130's judgment call 1 as written, disclosed here rather than silently done. Applied
+   uniformly across all three phases (the exemption is a fact about what an `ACTIVE` stub means,
+   not a BUILD-specific one); TRANSFORM/VERIFY are unaffected by it in the existing suite, since no
+   such row exists yet at the moment either of their sweeps runs in any fixture this project has.
+
+Both fixes verified old-fails/new-passes via the same backup-file method: reverting to the
+fix-round-0 code (`3044479`) reproduces both failures byte-for-byte, and this task's own two new
+D126 fixtures were re-run against the fix-round-1 code and still pass. The full covering set
+(`tests/test_transform_e2e.py`, `tests/test_build_e2e.py`, `tests/test_prepare_before_admit.py`,
+`tests/test_resume_continue.py`, `tests/test_resume_unblocking.py`, `tests/test_pr_e2e.py`) was
+re-run whole, no `-k`, after this round; the only other failures observed are 11 pre-existing
+`tests/test_build_e2e.py` real-toolchain tests requiring a locally-registered `cargo`/`bazel`
+network-mirror setup this sandbox does not have — confirmed unrelated by reproducing one
+(`test_two_rust_repos_in_one_wave_both_build`) identically against the pre-D126 code with the
+identical `tools/bin` PATH.
+
+**Fix round 2, 2026-09-08 (`62b2049`) — opus-tier review, blocking findings F1-F4 and minor
+findings F5-F8, all addressed.** An independent review of fix round 1's branch found one more
+real, undisclosed bug (F3) and three disclosure/documentation defects (F1, F2, F6-F8 minor) this
+entry and the code itself had not caught:
+
+- **F3 (real bug, the same class as F3's own TRANSFORM/BUILD pair above).** `_verify_impl`/
+  `_build_impl` had NO `stub_blocked` parameter of their own — only `_transform_impl` did — so
+  `_continue_impl` could not thread `resume()`'s flag to their sweeps at all. `fleet resume
+  --stub-blocked` can drive BUILD or VERIFY, not only TRANSFORM, in the SAME invocation as step
+  6's real `stub_permits_removal` unblock, and an unguarded sweep silently re-blocked what step 6
+  had just correctly freed — measured directly by the review. Fixed: both now take `stub_blocked:
+  bool = False` (still not operator-facing — `fleet build`/`fleet verify` have no such CLI flag,
+  so every direct call site is unaffected) and `_continue_impl` threads its own flag to all three
+  delegates. Proven two ways: `tests/test_resume_continue.py::
+  test_stub_blocked_reaches_every_delegate_not_only_transform` (the wiring itself — old-fails/
+  new-passes confirmed, `KeyError` against the fix-round-1 code) and `tests/test_build_e2e.py::
+  test_the_build_side_sweep_respects_stub_blocked_from_a_resume_continuation` (the guard, both
+  branches, against real state).
+- **F2 (false claim + vacuous test).** The original test (then named
+  `test_the_build_side_defensive_sweep_is_a_provable_no_op` — renamed in fix round 3, per its own
+  finding below, to `test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new`)
+  drove only ONE `build()` call over a leaf failure with no dependent — a fixture in which the
+  sweep's SELECT is structurally guaranteed to read zero (nothing has failed yet at the point a
+  FIRST invocation's sweep runs), so the test proved nothing about reachability. Corrected: the
+  test now drives TWO real invocations over a genuine provider/dependent pair and asserts the
+  SELECT reads non-zero on the second (`[1]`, matching the review's own independent
+  `SWEEP_ROWCOUNTS_INVOCATION2=[1]` measurement byte-for-byte) while the dependent's `(status,
+  blocked_by)` stays unchanged — the WRITE, not the SELECT, is what is actually inert. The two
+  sentences above and `_build_impl`'s own code comment are corrected to match.
+- **F1.** `docs/DECISIONS.md`'s ADR-0130 judgment call 1 now carries a dated in-place correction:
+  its own prose still said "reuse `propagate_blocked` completely unchanged," which the BUILD-side
+  stub exclusion (fix round 1) already contradicted in the landed code — a future reconciler
+  reading only the ADR could have "fixed" the code back to a bare call and silently reintroduced
+  the Blocker C break.
+- **F6-F8 (minor, all in the sweep's own docstring/comments).** F6: a wrong citation (`ADR-0102`,
+  D89 Phase 2 Task A, unrelated) corrected to `ADR-0113`. F7: a false reason for needing no `only`
+  parameter ("a repo excluded by `--repo` never has a row") replaced with the true one (rows
+  persist from earlier, unscoped invocations; `--repo`/`--wave` scope dispatch, never which rows a
+  durable write path may touch — `PhaseRunner._contain` already writes cross-repo). F8: disclosed
+  that the `ACTIVE`-stub exclusion is keyed on a DIRECT `(consumer, provider)` pair, not the
+  transitive closure `scheduler.descendants()` actually walks — a two-hop dependent of an
+  indirectly stub-covered provider is not yet handled, folded into the already-named undesigned
+  transitive-stub-stacking mechanism rather than claimed as closed. F5 (also minor): the
+  reimplemented sweep now logs `blocked_by_propagated` (matching `PhaseRunner._contain`'s own
+  event) whenever it actually blocks a dependent, so a cross-invocation re-propagation is no
+  longer the one blast-containment event with no operator-visible trace.
+- **Also corrected: the once-only `tests/test_resume_unblocking.py::
+  test_the_source_order_matches_the_behaviour_above` failure this task's own report first
+  disclosed as an unexplained flake.** The review identified the actual mechanism: that test's
+  `inspect.getsource(fleet_cli._resume_impl)` reads `cli.py` from disk via `linecache`, and this
+  task's own backup-file mutation-testing methodology (the sanctioned alternative to `git stash`,
+  per CLAUDE.md) swaps that exact file on disk — a benign methodology artifact when a swap
+  overlaps a live pytest session reading the same file, not a code defect. No further
+  investigation needed; the task-84 report's own disclosure is corrected to name this mechanism.
+
+Full covering set (`tests/test_transform_e2e.py`, `tests/test_build_e2e.py`,
+`tests/test_prepare_before_admit.py`, `tests/test_resume_continue.py`,
+`tests/test_resume_unblocking.py`, `tests/test_pr_e2e.py`) re-run whole, no `-k`, after this round;
+`ruff format`/`ruff check`/`mypy` (no path arguments) all clean — see task-84's own report for the
+fresh numbers.
 
 ## D129 — FIXED, LANDED (round VI task 79, `4ead8f9`). `bazel/query.py::rdeps_query`'s
 `affected_only=True` form was invalid Bazel query syntax, never exercised under a real `bazel
