@@ -9609,8 +9609,9 @@ when absent, matching this project's existing `IFNULL(repo_id, '')` convention),
 Full rationale in `docs/DECISIONS.md` ADR-0126. Task-75 dispatched to build it. Status remains
 OPEN until task-75 lands and is reviewed.
 
-## D123 — OPEN. A direct dependent of an RHI repo does not become `BLOCKED` at the TRANSFORM
-phase — cross-wave `blocked_by` propagation silently never reaches a not-yet-dispatched dependent
+## D123 — FIXED, LANDED (round VI task 76, `981abed`). A direct dependent of an RHI repo does not
+become `BLOCKED` at the TRANSFORM phase — cross-wave `blocked_by` propagation silently never
+reaches a not-yet-dispatched dependent
 
 **Found by round VI task 69's own task-scoped review (2026-09-07), independently reproduced on
 unmodified `main` (`c01fe46`) with zero task-69 code involved.** Verified free before allocating:
@@ -9642,6 +9643,25 @@ run before or independent of each wave's own lazy `upsert_phase`, so a provider'
 visible to every dependent's `blocked_by` column regardless of which wave the dependent is
 scheduled in, not only dependents in the same or an earlier wave. No task briefed yet; this is the
 controller's next dispatch candidate for §12.14.
+
+**Fixed, 2026-09-08 (round VI task 76, ADR-0127, `981abed`).** `_transform_impl`'s wave loop now
+pre-seeds every wave's TRANSFORM `phases` row for the whole invocation domain upfront, before any
+wave dispatches — mirroring `_build_impl`'s already-correct PASS 1 (ADR-0127 judgment call 1); no
+change was needed to `WaveScheduler.admit()`, `SqliteSchedulerStore.append_blocked_by`,
+`propagate_blocked`, `ALLOWED_TRANSITIONS`, or `orchestrator/reentry.py` (judgment call 2,
+re-confirmed by reading, not assumed). `tests/test_transform_e2e.py::
+test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run` proves the
+same-invocation shape this entry measured now holds, with an old-fails/new-passes check against
+the pre-fix code reproducing this entry's own measured numbers exactly
+(`('acme-app-py','SUCCEEDED','[]')`). **Disclosed, not closed by this fix:** the OTHER shape this
+entry's own "Measured directly, twice" discovery recorded (`tests/test_pr_e2e.py::_seed_blocked`'s
+docstring) — two SEPARATE `fleet transform --wave N` invocations — still exhibits the defect,
+because `propagate_blocked` has exactly one call site (`orchestrator/runner.py`'s
+`PhaseRunner._contain`, fired once at the RHI transition) and a provider that already went RHI in
+an earlier, separate invocation never re-fires containment in a later invocation's own pre-seed
+pass. Also out of this task's scope: `_verify_impl` has the byte-for-byte identical structural
+pattern (ADR-0127 judgment call 3) and is flagged there for the controller to allocate a fresh
+D-number — not fixed here.
 
 ## D124 — OPEN. No CLI surface exists to re-run an abandoned (`REQUIRES_HUMAN_INTERVENTION`)
 repo to `SUCCEEDED` — `fleet retry` does not exist, and `ALLOWED_TRANSITIONS` has no edge out of

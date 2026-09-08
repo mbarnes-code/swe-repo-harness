@@ -890,6 +890,20 @@ single-hop, `PUBLISHED_ARTIFACT`-only case only. Closing §12.14 in full additio
 (cross-wave `blocked_by` propagation), D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism), and a
 new, undesigned transitive-stub-stacking mechanism — none of which is briefed yet.
 
+**Corrected, 2026-09-08 (round VI task 76 fix round, ADR-0127) — D123 is no longer an open gap.**
+`docs/INTEGRATION_HONESTY.md`'s D123 entry moved to `FIXED, LANDED (round VI task 76, `981abed`)`:
+`_transform_impl` now pre-seeds every wave's TRANSFORM `phases` row upfront, before any wave
+dispatches, so cross-wave `blocked_by` propagation reaches a later-wave dependent within one
+`fleet transform` invocation, per §12.14's own text. The remaining named gaps for §12.14 are
+narrower than the sentence above states: D124 (`fleet retry`/re-run-to-`SUCCEEDED` mechanism —
+separately being worked, per ADR-0125/task-74) and the still-undesigned transitive-stub-stacking
+mechanism. D123's own fixed entry also discloses a shape it does NOT close (two separate
+`fleet transform --wave N` invocations rather than one invocation driving both waves) — that
+residual gap has no D-number of its own yet and is not counted as a third remaining item here
+since it is a narrower, disclosed limitation of the same D123 mechanism rather than an
+independent gap. The original sentence above is left in place per this file's own
+annotate-in-place convention.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely
