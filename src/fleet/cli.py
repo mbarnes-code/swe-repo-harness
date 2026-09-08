@@ -212,6 +212,7 @@ from fleet.orchestrator.scheduler import (
 )
 from fleet.orchestrator.stubs import (
     HeldStub,
+    InheritedStubFact,
     ProviderFacts,
     RevalidationPlan,
     RevalidationPolicy,
@@ -9265,6 +9266,15 @@ async def _detect_transform_stub_triggers(
     CONDITIONS, since reusing `_ordering_pairs` itself is no longer possible once `dst_coord_key`
     is required. `_read_blocker_states` is the existing per-repo `phases`-status query (there is
     no `repos.status` column); the decision itself is `orchestrator.stubs.detect_stub_triggers`.
+
+    **(M1, §3.5 item 4 / D131) also reads every ACTIVE `stubs` row of this run, keyed by its own
+    CONSUMER, and hands it to `detect_stub_triggers` as `active_stub_facts_by_provider`** — this
+    is what lets a second-layer-and-beyond dependent (whose direct provider is itself `DEGRADED`,
+    not RHI, but is itself an active stub consumer) inherit a trigger this wave, copied off that
+    existing row. A dedicated query rather than reusing `_active_stubs_by_consumer` (§37 Leg 3):
+    that function drops `provider_repo_id`, keeping only `stub_fidelity` per coordinate, which is
+    enough to derive `equivalence` but not enough to name the ORIGINAL abandoned repo — the one
+    fact this inheritance branch must copy forward, never reconstruct.
     """
     kinds = tuple(str(kind) for kind in settings.config.graph.dag_edge_kinds)
     placeholders = ",".join("?" for _ in kinds)
@@ -9281,7 +9291,39 @@ async def _detect_transform_stub_triggers(
     edges = [(str(row[1]), str(row[0]), str(row[2])) for row in rows]
     provider_ids = {provider_id for provider_id, _, _ in edges}
     states = await _read_blocker_states(conn, run_id, provider_ids)
-    return _detect_stub_triggers(dispatched_repo_ids, edges, states)
+    inherited_facts = await _active_stub_facts_by_provider(conn, run_id)
+    return _detect_stub_triggers(dispatched_repo_ids, edges, states, inherited_facts)
+
+
+async def _active_stub_facts_by_provider(
+    conn: aiosqlite.Connection, run_id: str
+) -> dict[str, tuple[InheritedStubFact, ...]]:
+    """Every ACTIVE `stubs` row of this run, keyed by its own CONSUMER — the shape (M1)'s
+    inheritance branch needs: "is repo X (some OTHER edge's direct provider) itself an active
+    stub consumer, and if so, off which original provider/coordinate/fidelity?"
+
+    Sibling of `_active_stub_facts` (keyed by `stub_coord_key`, for the BUILD-phase render) and
+    `_active_stubs_by_consumer` (keyed by consumer, `stub_fidelity` only, for `VerifyInput`) —
+    this is the third projection of the same `state = 'ACTIVE'` predicate, carrying the one field
+    neither of those two keeps: `provider_repo_id`, without which the inheritance branch could not
+    copy provenance onto the original abandoned repo rather than the intermediate.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, provider_repo_id, stub_coord_key, stub_fidelity FROM stubs "
+        " WHERE run_id = ? AND state = 'ACTIVE'",
+        (run_id,),
+    )
+    out: dict[str, list[InheritedStubFact]] = {}
+    for row in rows:
+        out.setdefault(str(row[0]), []).append(
+            InheritedStubFact(
+                provider_repo_id=str(row[1]),
+                coord_key=str(row[2]),
+                fidelity=StubFidelity(str(row[3])),
+            )
+        )
+    return {consumer: tuple(facts) for consumer, facts in out.items()}
 
 
 async def _create_stub_records(
@@ -14632,12 +14674,15 @@ async def _pr_impl(
 
     Eligibility is the ADR-0011 stacking rule read off INGESTED state: a unit ships only when
     every EXTERNAL ordering dependency (intra-SCC edges are filtered at `_pr_candidates` — they
-    are not a real precedence constraint once the members share one not-yet-opened PR) has a
-    `PullRequestDraft` whose state is `MERGED`. Anything else is HELD — reported, not failed, and
-    not shipped — because the dependency may merge in five minutes and burning a repo's attempt on
-    someone else's review latency is what `pr.merge_wait_timeout_s` exists to bound. The worker
-    then applies the same rule a second time against what the forge says right now, which is the
-    difference between "observed" and "assumed" that §3.4 step 5 is written to enforce.
+    are not a real precedence constraint once the members share one not-yet-opened PR) EITHER has
+    a `PullRequestDraft` whose state is `MERGED`, OR is itself `RepoStatus.DEGRADED` (§12.14/§3.5
+    item 4, D131) — the one other case the gate admits, so a `DEGRADED` stack of draft PRs ships
+    together instead of trading one blocked subtree for a blocked subtree plus one stranded
+    draft. Anything else is HELD — reported, not failed, and not shipped — because the dependency
+    may merge in five minutes and burning a repo's attempt on someone else's review latency is
+    what `pr.merge_wait_timeout_s` exists to bound. The worker then applies the same rule a
+    second time against what the forge says right now, which is the difference between
+    "observed" and "assumed" that §3.4 step 5 is written to enforce.
     """
     log_configure(level=opts.log_level, json_path=events_jsonl_path(settings.root, run_id))
     conn = await connect_ro(path)
@@ -14652,6 +14697,15 @@ async def _pr_impl(
     held: dict[str, list[str]] = {}
     scc_incomplete: dict[str, list[str]] = {}
     promotable: list[tuple[tuple[_PrCandidate, ...], str, PullRequestDraft]] = []
+    # (M2, §3.5 item 4 / D131) — the admission-gate widening. `status_by_repo` names every
+    # candidate's OWN `RepoStatus`, so the gate below can recognise the one case besides
+    # `SUCCEEDED` + a `MERGED` PR that SPEC §12.14 says satisfies it: "a `DEGRADED` provider
+    # satisfies the dependent-admission gate". Scoped to exactly `RepoStatus.DEGRADED` — never
+    # "any un-merged provider" — so §12.38's `--ready` refusal (unaffected by this gate, which
+    # only governs OPENING a draft) still holds: a dependent that ships because ITS OWN direct
+    # provider is `DEGRADED` inherits that provider's stub row via (M1) above and so still
+    # carries its own ACTIVE `stubs` row, which `_refuse_unresolved_stubs` still finds.
+    status_by_repo = {candidate.repo_id: candidate.status for candidate in candidates}
     for unit in _pr_units(candidates):
         scc = unit[0].scc
         member_ids = {candidate.repo_id for candidate in unit}
@@ -14705,6 +14759,7 @@ async def _pr_impl(
                 for candidate in unit
                 for dep in candidate.dependencies
                 if dep not in member_ids
+                and status_by_repo.get(dep) is not RepoStatus.DEGRADED
                 and (
                     (dep, None) not in records
                     or records[(dep, None)].state is not PrState.MERGED

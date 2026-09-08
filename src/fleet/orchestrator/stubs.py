@@ -814,10 +814,29 @@ class StubTrigger:
     coord_key: str
 
 
+@dataclass(frozen=True, slots=True)
+class InheritedStubFact:
+    """One ACTIVE `stubs` row a would-be DIRECT provider itself carries as a CONSUMER — i.e. that
+    direct provider is itself transitively downstream of some abandoned repo `r` (§3.5 item 4's
+    "whole descendant set", D131/§12.14).
+
+    `provider_repo_id`/`coord_key`/`fidelity` are copied VERBATIM off that existing row by the
+    caller, never reconstructed here — the same "copy, don't rebuild" discipline `StubTrigger`'s
+    own docstring already uses for the direct-RHI case, extended one hop further so the mark stays
+    on the ORIGINAL abandoned repo `r`, never the intermediate (§3.5 item 4: "provenance stays on
+    `r`, never on the intermediate").
+    """
+
+    provider_repo_id: RepoId
+    coord_key: str
+    fidelity: StubFidelity
+
+
 def detect_stub_triggers(
     dispatched_repo_ids: Iterable[str],
     edges: Iterable[tuple[str, str, str]],
     provider_states: Mapping[str, BlockerState],
+    active_stub_facts_by_provider: Mapping[str, Sequence[InheritedStubFact]] | None = None,
 ) -> tuple[StubTrigger, ...]:
     """§37 Leg 1 step 1: which of `dispatched_repo_ids` need a stub this wave, and for which
     coordinate.
@@ -855,25 +874,58 @@ def detect_stub_triggers(
     anticipated: `_transform_impl` does not call it at all when the flag is off, so this
     function's own gating-free contract still holds — nothing here changed, only the caller's
     reachability.
+
+    **`active_stub_facts_by_provider` — the (M1) inheritance branch, §3.5 item 4 / D131.** Keyed
+    by repo id, this names every ACTIVE `stubs` row THAT repo itself carries as a CONSUMER — i.e.
+    it answers "is this edge's direct provider itself transitively downstream of an abandoned
+    repo?" A second-layer-and-beyond dependent whose direct provider is not itself RHI (so the
+    first branch above finds nothing) but IS itself an active stub consumer inherits a trigger
+    copied from that EXISTING row — `provider_repo_id`/`coord_key`/`fidelity` come from the row,
+    never from this edge and never naming the intermediate — so the mark stays on the original
+    abandoned repo `r` exactly as §3.5 item 4 requires. `EMPTY_FAILING` facts are excluded: an
+    empty target fails the intermediate's own BUILD (SPEC's stated exception — "no repo becomes
+    `DEGRADED`"), so there is nothing live to inherit past it. Needs **no closure algorithm**: this
+    function already runs once per wave, over that wave's own dispatched members, and `stubs` rows
+    are durable — a trigger created here for one repo becomes, in a LATER wave, an entry
+    `active_stub_facts_by_provider` reads for THAT repo's own dependents, so per-layer inheritance
+    computes the full transitive descendant set by induction across wave boundaries. Defaults to
+    empty (existing callers over cached fixtures need not change): a `None`/empty mapping makes
+    this branch find nothing, identical to today's behaviour.
     """
     dispatched = set(dispatched_repo_ids)
+    inherited_facts = active_stub_facts_by_provider or {}
     seen: set[tuple[str, str, str]] = set()
     found: list[StubTrigger] = []
     for provider_id, consumer_id, coord_key in edges:
         if consumer_id not in dispatched:
             continue
         state = provider_states.get(provider_id)
-        if state is None or RepoStatus.REQUIRES_HUMAN_INTERVENTION not in state.phase_statuses:
+        if state is not None and RepoStatus.REQUIRES_HUMAN_INTERVENTION in state.phase_statuses:
+            key = (consumer_id, provider_id, coord_key)
+            if key not in seen:
+                seen.add(key)
+                found.append(
+                    StubTrigger(
+                        consumer_repo_id=consumer_id,
+                        provider_repo_id=provider_id,
+                        coord_key=coord_key,
+                    )
+                )
             continue
-        key = (consumer_id, provider_id, coord_key)
-        if key in seen:
-            continue
-        seen.add(key)
-        found.append(
-            StubTrigger(
-                consumer_repo_id=consumer_id, provider_repo_id=provider_id, coord_key=coord_key
+        for fact in inherited_facts.get(provider_id, ()):
+            if fact.fidelity is StubFidelity.EMPTY_FAILING:
+                continue
+            key = (consumer_id, fact.provider_repo_id, fact.coord_key)
+            if key in seen:
+                continue
+            seen.add(key)
+            found.append(
+                StubTrigger(
+                    consumer_repo_id=consumer_id,
+                    provider_repo_id=fact.provider_repo_id,
+                    coord_key=fact.coord_key,
+                )
             )
-        )
     return tuple(
         sorted(found, key=lambda t: (t.consumer_repo_id, t.provider_repo_id, t.coord_key))
     )
