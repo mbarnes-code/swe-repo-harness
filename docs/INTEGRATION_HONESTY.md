@@ -3582,8 +3582,9 @@ and nothing else.
 
 ---
 
-**D55 — OPEN. A pure 429 walks a tier and reaches a halt that tells the operator every backend
-target is `DOWN` — a state with no representation anywhere in `src/`.** Verified against `7a8bfbb`;
+**D55 — PARTLY ADDRESSED (`6d5c721`); see Status at the end of this entry. A pure 429 walks a
+tier and reaches a halt that tells the operator every backend target is `DOWN` — a state with no
+representation anywhere in `src/`.** Verified against `7a8bfbb`;
 **re-verified OPEN on `main` at `6a41840`**, where the halt string is `orchestrator/runner.py:640`,
 the two comment carriers are `models/enums.py` (`FailureClass.BACKEND_UNAVAILABLE`'s trailing
 comment — `:383` at that anchor, `:390` at `f9cb3f9`) and `orchestrator/retry.py:196` (unmoved), and
@@ -3672,6 +3673,53 @@ determined.**
 **Would a test catch it? No.** A test would have to drive a rate-limited transport through a full
 tier and assert on the halt's *claim*, and the round found none. The suite is green on `main` at
 1575 passed.
+
+**Status — PARTLY ADDRESSED, 2026-09-08 (round VI task 88, ADR-0132, `6d5c721`).** Everything
+above records what was true when it was written and is left standing. What changed:
+
+* **`DOWN` now has a representation in `src/`.** `llm/failover.py::BackendHealth` is a real
+  per-target three-state breaker (`UP`/`DOWN`/`HALF_OPEN`), held once per `LadderModelClient`.
+  `llm/client.py::_call_target` gained a bounded same-target backoff-retry arm for
+  `RATE_LIMIT` (reusing `orchestrator/retry.py`'s existing jitter/backoff primitive), and
+  `complete()`'s target loop now calls `BackendHealth.record_failure` only on a QUALIFYING
+  failure — a connection-level/5xx `TransportError`, or a `RATE_LIMIT` that has exhausted its
+  entire backoff schedule — never on a single absorbed 429. This is §12.43 case (ii)'s literal
+  text, proven by 8 tests in `tests/test_llm_failover.py` (old-fails/new-passes, backup-file
+  method) plus the exhausted-backoff proof in `tests/test_llm_findings.py`.
+* **What this closes, precisely.** The specific mechanism this entry names — a target that is
+  merely throttled reaching the same halt as a genuine outage, on the strength of ONE 429 — is
+  closed: a single 429 (or several, each absorbed) is retried on the SAME target and never even
+  reaches the failover layer, so it cannot contribute to a tier exhausting. A target that
+  answers 429 through its entire backoff schedule, `open_after_failures` times, IS now marked
+  `DOWN` and drives the same `TierUnavailable`/exit-8 halt as before — which is §11.8's own
+  design (case (ii)'s acceptance bar), not a residual instance of this defect: sustained,
+  unrecovering throttling is meant to eventually read as unavailability.
+* **What is NOT closed, disclosed rather than silently left.** (1) `orchestrator/runner.py:739`'s
+  halt STRING is untouched in substance (only the comment above it was corrected, fix round 1) —
+  it still reads `"...is DOWN"` unconditionally on any
+  `TierUnavailable`, including the narrower edge case where a tier exhausts via `max_targets_
+  per_call` before any individual target's `consecutive_failures` reaches `open_after_failures`
+  (e.g. `open_after_failures=3` with each of 3 targets failing once) — that halt still fires
+  with nothing in `BackendHealth` actually marking anyone `DOWN`. ADR-0132 judgment call 3
+  explicitly left this wording change to implementer judgment, not mandated it; task 88 did not
+  take it up, and Rule 14's build-to-the-literal-wording discipline is why. (2) The broader §13
+  row 43 framing this entry's title carries — "no rate limiter exists at all" — remains open:
+  the proactive token-bucket/AIMD half (`llm.rate_limit.rpm`/`tpm`/`aimd.*`) is unbuilt — 8
+  genuine LEAF fields under that prefix are `KNOWN_INERT` (`honor_retry_after`, `defaults.rpm`,
+  `defaults.tpm`, `targets.rpm`, `targets.tpm`, `aimd.shrink_factor`, `aimd.grow_every_s`,
+  `aimd.floor`), plus 2 section-level entries for the same reason (`llm.rate_limit`,
+  `llm.rate_limit.aimd`) — 10 `KNOWN_INERT` entries total under the prefix, re-counted directly
+  against `tests/test_config_keys_are_read.py` rather than inherited from research-48's
+  unattributed "8". Per ADR-0132's own explicit scoping (§12.43(ii)'s literal text is entirely
+  about the reactive breaker, not proactive pacing). A sustained, uniform throttle across every
+  target in a tier — one no backoff schedule ever resolves — still eventually halts the run at
+  exit 8, which is correct per §11.8 but is the scenario an AIMD controller would instead have
+  prevented by lowering concurrency.
+* **Observability, beyond the call-log assertion §12.43(ii) requires.** A `backend_health_
+  transition` event now records every `UP`→`DOWN`/`DOWN`→`HALF_OPEN`/`HALF_OPEN`→`UP`/
+  `HALF_OPEN`→`DOWN` change, through the same buffer-then-flush sink (`LlmFindingSink`) D55's
+  own "Partly addressed" reporting-machinery paragraph above already established — the natural
+  place to consume it, per ADR-0132's own judgment call 3 question.
 
 ---
 
@@ -3855,6 +3903,21 @@ true when it was written and is left standing. What changed:
 > would be the mirror-image error this project names: it is still true, and stays recorded as
 > such. The behavioural check that replaces this entry's rotted `git grep` detector is
 > `tests/test_run_context_llm_policy.py`, already named in the Status paragraph above.
+
+> **Editorial correction (2026-09-08), round VI task 88, ADR-0132 (`6d5c721`) — 2 of the 3
+> "structurally cannot express" leaves above are no longer true, and D55's own entry is where
+> the mechanism landed.** `llm/failover.py::BackendHealth` now exists, so `CallPolicy` genuinely
+> can express part of the circuit breaker: `open_after_failures` and `cooldown_s` are read off
+> it by `BackendHealth`'s own constructor args, and `call_policy_for` maps both. Re-verified with
+> the same scan this file uses: those two leaves are no longer `KNOWN_INERT` in
+> `tests/test_config_keys_are_read.py`. **`on_tier_exhausted` alone remains, and this paragraph
+> does not close it** — it is `Literal["halt"]`, a single legal value, so there is no second
+> value for a read of it to select between; it is recorded as still `KNOWN_INERT` for the same
+> reason `stubs.on_budget_exhausted` is, not because the breaker is missing. This does not change
+> this entry's own heading (still `PARTLY ADDRESSED (`1963ca9`)`) or its title's literal claim,
+> which was always about `llm_policy`'s wiring path rather than about `llm/failover.py`'s
+> existence — that is D55's claim, and D55's own entry (this file) now carries the fuller Status
+> update for the circuit breaker itself.
 
 ---
 

@@ -157,14 +157,25 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # floor. Qualified as `aimd.floor` below.
         "fleet.yaml:llm.rate_limit.aimd.floor",             # settings.py:644
         #
-        # --- §11.8 failover: the circuit breaker's three tuning keys ----------------------
-        # `orchestrator/context.py::call_policy_for` maps `failover.enabled` and
-        # `failover.max_targets_per_call` onto the `CallPolicy` the client walks (2026-08-22),
-        # but that opens no circuit: nothing counts failures, nothing cools down, nothing
-        # halts. `CallPolicy` cannot express a per-target `BackendHealth`, and §11.8's
-        # `llm/failover.py` does not exist, so these three stay inert.
-        "fleet.yaml:llm.failover.open_after_failures",     # settings.py:661
-        "fleet.yaml:llm.failover.cooldown_s",              # settings.py:662
+        # --- §11.8 failover: the circuit breaker's tuning keys -----------------------------
+        # (`llm.failover.open_after_failures` and `.cooldown_s` used to sit here, with the
+        # mechanism spelled out: `orchestrator/context.py::call_policy_for` mapped `.enabled`
+        # and `.max_targets_per_call` onto `CallPolicy`, but that opened no circuit — nothing
+        # counted failures, nothing cooled down, nothing halted, because `CallPolicy` could not
+        # express a per-target `BackendHealth` and §11.8's `llm/failover.py` did not exist. They
+        # left 2026-09-08 (round VI task 88, ADR-0132): `llm/failover.py::BackendHealth` now
+        # exists, `CallPolicy` grew the two matching fields, `call_policy_for` maps them, and
+        # `llm/client.py`'s `complete()`/`_call_target()` genuinely read
+        # `self._policy.open_after_failures`/`.cooldown_s` (via `BackendHealth`'s own
+        # constructor args) to gate dispatch and back off a `RATE_LIMIT`. Neither collides with
+        # an unrelated field, so the bare scan decides them directly — no `QUALIFIED_MATCH_KEYS`
+        # membership needed, unlike the three siblings above.)
+        #
+        # `on_tier_exhausted` stays inert, but the REASON changed: it is no longer "the breaker
+        # doesn't exist" — it does now — it is the same reason `stubs.on_budget_exhausted` stays
+        # inert below (see "single-value policy keys nothing branches on"): the field is
+        # `Literal["halt"]`, one legal value, and `complete()` already halts unconditionally on
+        # tier exhaustion, so there is no second value for a read of this key to select between.
         "fleet.yaml:llm.failover.on_tier_exhausted",       # settings.py:664
         #
         # --- ADR-0021 anti-anchoring: §3.2 step 5 -----------------------------------------

@@ -49,10 +49,12 @@ from fleet.orchestrator.budgets import Ceilings, CostLedger, Limits
 from fleet.orchestrator.context import RunContext, default_logger
 from fleet.orchestrator.findings import (
     BACKEND_FAILOVER_EVENT,
+    BACKEND_HEALTH_TRANSITION_EVENT,
     BACKEND_UNAVAILABLE,
     CAPABILITY_DRIFT,
     LlmFindingSink,
 )
+from fleet.orchestrator.retry import RetryPolicy
 from fleet.settings import FleetConfig
 from fleet.state import db as dbmod
 from fleet.state.db import StateWriter, connect_ro, initialize_database
@@ -166,7 +168,11 @@ class Harness:
 
 
 async def _build(
-    tmp_path: Path, backend: ScriptedBackend, router: LlmRouter
+    tmp_path: Path,
+    backend: ScriptedBackend,
+    router: LlmRouter,
+    *,
+    llm_policy: CallPolicy | None = None,
 ) -> AsyncIterator[Harness]:
     path = tmp_path / "state" / "fleet.db"
     await initialize_database(path)
@@ -209,7 +215,10 @@ async def _build(
                 work_dir=tmp_path / "work",
                 lease_owner="test-host:test-cid:1:boot",
                 clock=lambda: NOW,
-                llm_policy=CallPolicy(max_targets_per_call=4),
+                llm_policy=llm_policy or CallPolicy(max_targets_per_call=4),
+                # Zero delay: a test proving an entire §11.8 backoff schedule is exhausted must
+                # not spend the real wall-clock seconds that production-tuned schedule reuses.
+                retry_policy=RetryPolicy(backoff_base_s=0.0, backoff_cap_s=0.0),
             )
             yield Harness(ctx=ctx, read_conn=read_conn, backend=backend)
         finally:
@@ -342,6 +351,72 @@ async def test_a_clean_call_emits_no_failover_event(tmp_path: Path) -> None:
         await h.ctx.model_client.complete(ROLE, [Message(role="user", content="x")], Verdict)
         await h.ctx.llm_findings.flush()
         assert await h.events(BACKEND_FAILOVER_EVENT) == []
+
+
+# ======================================================================================
+# §11.8 (ADR-0132) — backend_health_transition
+# ======================================================================================
+
+
+async def test_a_backend_health_transition_becomes_an_event_row(tmp_path: Path) -> None:
+    """Finding 4 (review round 1): `on_health_transition` — the controller-mandated observability
+    callback `LadderModelClient` gains alongside `on_drift`/`on_failover`/`on_llm_call` — had zero
+    test coverage through the real sink; `test_llm_failover.py` only asserted the raw callback
+    LIST, never that a real `RunContext`/`LlmFindingSink` persists it. This module's own docstring
+    names D59 (an event type nobody wired a sink for, silently discarded) as the exact defect
+    class this exists to prevent — an untested fourth sink is that same shape with a different
+    name. Drives a REAL `open_after_failures=1` breaker open through a real `RunContext` and
+    `model_client`, exactly like the other three event-type tests above, and reads the row back
+    out of SQLite rather than off an in-memory list.
+    """
+    exhausted_backoff = [TransportError("429 slow down", trigger="RATE_LIMIT")] * (
+        RetryPolicy().max_transient_retries + 1
+    )
+    backend = ScriptedBackend(
+        HONEST_CAPS,
+        script=[
+            *exhausted_backoff,
+            BackendReply(
+                text=Verdict(summary="second target answered").model_dump_json(),
+                usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),
+                finish_reason="stop",
+            ),
+        ],
+    )
+    async for h in _build(
+        tmp_path,
+        backend,
+        make_router("fake-1", "fake-2"),
+        llm_policy=CallPolicy(max_targets_per_call=4, open_after_failures=1),
+    ):
+        response = await h.ctx.model_client.complete(
+            ROLE, [Message(role="user", content="x")], Verdict
+        )
+        assert response.value.summary == "second target answered"
+
+        assert await h.events(BACKEND_HEALTH_TRANSITION_EVENT) == [], (
+            "the callback must only buffer, exactly like the other three sinks"
+        )
+        await h.ctx.llm_findings.flush()
+
+        events = await h.events(BACKEND_HEALTH_TRANSITION_EVENT)
+        assert len(events) == 1
+        assert events[0]["backend"] == "fake"
+        assert events[0]["model_id"] == "fake-1"
+        assert events[0]["tier"] == str(ModelTier.WORKHORSE)
+        assert events[0]["from_state"] == "UP"
+        assert events[0]["to_state"] == "DOWN"
+
+        # `level` is validated against `obs/events.py`'s `_LEVELS` allowlist by `emitter.emit` —
+        # confirming it landed as "warning" (not silently coerced to "info") is what the false
+        # docstring claim this fix corrected would otherwise have hidden.
+        async with h.read_conn.execute(
+            "SELECT level FROM events WHERE run_id = ? AND event = ?",
+            (RUN, BACKEND_HEALTH_TRANSITION_EVENT),
+        ) as cursor:
+            row = await cursor.fetchone()
+        assert row is not None
+        assert row[0] == "warning"
 
 
 # ======================================================================================
@@ -495,11 +570,21 @@ async def test_the_finding_reports_the_partial_trigger_set_it_actually_holds(
 
     It still refuses `"complete"`: the target that EXHAUSTS the tier never reports its own
     trigger, so completeness is structurally unreachable until `TierUnavailable` carries them.
+
+    **Post-ADR-0132: a single 429 no longer fails over at all** — `_call_target`'s own backoff arm
+    absorbs it on the SAME target. This test now scripts fake-1 returning `RATE_LIMIT` through its
+    ENTIRE backoff schedule (`RetryPolicy().max_transient_retries + 1` = 5 raises: the initial
+    attempt plus every retry the default policy allows) before fake-2 answers — that exhaustion IS
+    the "qualifying failure" §12.43 case (ii) names, and is what still produces exactly one
+    `RATE_LIMIT` failover trigger for fake-1.
     """
+    exhausted_backoff = [TransportError("429 slow down", trigger="RATE_LIMIT")] * (
+        RetryPolicy().max_transient_retries + 1
+    )
     backend = ScriptedBackend(
         HONEST_CAPS,
         script=[
-            TransportError("429 slow down", trigger="RATE_LIMIT"),
+            *exhausted_backoff,
             BackendReply(
                 text=Verdict(summary="ok").model_dump_json(),
                 usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),
