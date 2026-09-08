@@ -10564,3 +10564,21 @@ manual-trigger resolution logic the verb's own docstring promises already exists
 exercised via `_pr_sync_impl`'s `--sync` path; this is CLI-driver wiring, not new-mechanism, per
 task-85's own assessment. Estimated small/cheap, comparable to the D107/D104/D108 bundle's own
 smallest piece (D108).
+
+**Correction (2026-09-08, round VI task 85 fix round 1, opus-tier review) — "the single,
+precisely-scoped residual" above is wrong; annotated here, not rewritten.** The review re-read
+`docs/SPEC.md:7671`'s full literal clause list against task-85's own fixture and found at least
+THREE more sub-clauses the fixture does not yet assert, independent of this D-number's own gap:
+(a) the `stubs` row itself arrives via `_insert_stub_row` (a raw `INSERT INTO stubs`), not
+through a real `--stub-blocked` CLI dispatch — no test in `tests/test_stub_resolution_task79.py`
+drives stub CREATION through the real CLI, only its real-CLI *consequences*; (b) the
+same-transaction atomicity clause ("asserted by killing the process immediately after and
+confirming on resume that state and task agree") has no kill/resume anywhere in the fixture;
+(c) "enqueues exactly **one** `tasks` row of `kind='REVALIDATE'`" is asserted only as
+`revalidation_task_id IS NOT NULL`, never as an exact count; (d) "zero new phase-2 commits...
+zero LLM calls, and an `already_applied` event... the `revalidation_key` is the proof" is not
+asserted at all (the fixture's own `already_applied` string is D107's rewrite-replay event, a
+different mechanism). Wiring `fleet stubs resolve` (this D-number's own scope) remains necessary
+but is no longer sufficient on its own for §12.37 DONE — `docs/CRITERIA_PLAN.md` §37's done bar
+carries the corrected, fuller enumeration; this body is not rewritten, per this file's own
+"annotate, never rewrite" convention.

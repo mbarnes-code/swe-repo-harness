@@ -2539,6 +2539,110 @@ are out of scope here and neither confirmed nor denied as additional §37/§12.3
 left for whichever task next re-measures §37's done bar against `docs/SPEC.md` item 37's literal
 text.
 
+**Update, round VI task 85 (2026-09-08) — the combined real-CLI fixture lands; §37 corrected
+from stale NEW-MECHANISM framing to TEST-ONLY; ONE small, disclosed residual gap keeps §12.37
+from flipping to DONE.** `tests/test_stub_resolution_task79.py::
+test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end` combines every piece D104/
+D107/D108 (task 79) landed, through REAL CLI invocations, for the first time: a real `fleet
+retry` + real `fleet build`/`fleet verify` land the abandoned provider `SUCCEEDED`; a real `fleet
+pr` opens its PR against a `FakeForge`; `forge.merge()` + a real `fleet pr --sync` is what
+DISCOVERS the merge and fires T1 (`orchestrator.stubs.supersede`) for real — not a hand-seeded
+`_supersede_stub_row` — which in the SAME call synchronously runs D107's real label rewrite; a
+real `fleet resume` (not `_run_revalidation_claims_impl` called directly) runs the REVALIDATE
+claiming loop between step 6 and step 7 and (this fixture's all-green `FakeBazel`, permitted per
+task 79's own precedent for the settle/promote half) reaches `RESOLVED`/`SUCCEEDED`/
+`equivalence == 'FULL'`. Two mutations were run against this fixture and both discriminated
+cleanly, at exactly the intended assertion and no other (verified by re-running only this test
+under each mutation, then confirming a `git diff --no-index` against a pre-mutation backup showed
+a genuine, non-zero change before trusting either result, per CLAUDE.md Rule 12): neutering the
+real T1 call inside `_pr_sync_impl`'s per-repo merge branch reddens the very next assertion
+("stub state SUPERSEDED after `--sync`") with the stub still `ACTIVE`; neutering `fleet resume`'s
+`_run_revalidation_claims_impl` call site reddens the very next assertion
+("`revalidation_claims is not None`") with the loop never having run. A cosmetic control (a
+comment-only edit near the merge-sync call) left the test green, and mutation testing was not
+formally run for gaps 1/4/5 (retry, RESOLVED-under-FakeBazel, idempotency) — each of those is
+mechanically forced correct by the fixture's own control flow (a wrong retry means the provider
+never reaches SUCCEEDED and every downstream assertion fails; RESOLVED is a direct DB read no
+mutation was targeted at) or is a straightforward literal-value assertion, so the report treats
+those as adequately covered by the ordinary assertion chain rather than as separately proven
+discriminators — see this task's own report for the full accounting.
+
+**A second, genuine pre-existing defect was found and fixed as a necessary precondition, not
+scope creep: every `FakeBazel`-only test in this file that calls `_reach_active_stub_state` was
+missing the `resolver: FakeResolver` fixture (`cli.RESOLVER_RUNNER` seam) `tests/
+test_build_e2e.py`'s own `resolver` fixture docstring says is "requested by every test in this
+file that runs `fleet build` without a real Bazel."** On any host lacking a real `uv` binary
+(confirmed absent on this task's own host), Phase 3's real dependency-resolution step ran
+un-seamed and failed with `DependencyResolutionFailed`, landing `acme-app-py` at `REQUIRES_HUMAN_
+INTERVENTION` (0 attempts) instead of `DEGRADED` — silently failing EVERY `FakeBazel`-only test
+in this file (`test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label`, `test_d107_
+is_idempotent_on_replay`, `test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_
+passes`, and all three `test_c1_gate_*` tests), reproduced independently on a clean `main`
+checkout at this task's own base commit (`f45e75f`) with zero of this task's edits applied,
+confirming it predates this task rather than being introduced by it. Fixed by adding the missing
+fixture parameter to each affected test's signature (six pre-existing tests plus this task's own
+new one) — `_reach_active_stub_state` itself needed no change, since pytest activates a
+fixture's monkeypatch for the whole test once any test-level parameter requests it, regardless of
+whether the helper function it calls names that parameter too. All nine `FakeBazel`-only tests in
+this file now pass (the tenth, the real-Bazel integration test, needs a real `bazel` binary this
+sandbox does not have and was not touched).
+
+**Why §12.37 is NOT flipped to DONE: this closes every gap the brief NAMED (its own 5-item list),
+but that list is not SPEC item 37's complete literal clause set — a fix-round-1 opus-tier review
+found three more sub-clauses beyond the one below, and the fixture's own docstring now discloses
+all of them (see `tests/test_stub_resolution_task79.py`'s own F2 disclosure).** SPEC's literal
+idempotency clause names THREE triggers — "a replay, a `fleet resume`, and a `fleet stubs
+resolve`" — and the third has zero implementation. `cli.stubs_resolve` validates its
+preconditions and then unconditionally calls `cli._unavailable("stubs resolve", ...)`, raising
+`CommandUnavailableError` before touching any state-mutating code at all (confirmed by driving it
+for real in this task's own fixture, not assumed; allocated **D130**,
+`docs/INTEGRATION_HONESTY.md`). The fixture's own idempotency assertions do pass for all three
+triggers (no `tasks`/`stubs`/`attempts` row is added, scoped to the stub's own consumer/provider
+pair to avoid a confound from `fleet resume`'s own unrelated §11.5 step-8 continuation for OTHER
+repos in the fixture), but for the third trigger this is true for a WEAKER reason than SPEC's
+literal text presumes: SPEC's clause presumes the trigger actually runs its resolution logic and
+finds nothing left to do, and `fleet stubs resolve` never reaches that logic at all.
+
+**Correction (fix round 1, 2026-09-08) — D130's own body originally called this "the single,
+precisely-scoped residual"; that was wrong, corrected there (annotated, not rewritten) and here.**
+Re-reading `docs/SPEC.md:7671`'s full literal clause list against the fixture found THREE more
+unasserted sub-clauses, independent of D130: (a) the `stubs` row itself is hand-seeded via
+`_insert_stub_row` (a raw `INSERT INTO stubs`) inside `_reach_active_stub_state`, never produced by
+a real `--stub-blocked` CLI dispatch — no test in `tests/test_stub_resolution_task79.py` drives
+stub CREATION through the real CLI, only its real-CLI consequences (`tests/test_pr_e2e.py::
+test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` drives
+CREATION alone, never combined with D107/REVALIDATE); (b) the same-transaction atomicity clause —
+SPEC's own text: "asserted by killing the process immediately after and confirming on resume that
+state and task agree" — has no kill/resume anywhere in the fixture; (c) "enqueues exactly **one**
+`tasks` row of `kind='REVALIDATE'`" is asserted only as `revalidation_task_id IS NOT NULL`, never
+as an exact count; (d) "zero new phase-2 commits on `migrate/C`, zero LLM calls, and an
+`already_applied` event... the `revalidation_key` is the proof" is not asserted at all (the
+fixture's own `already_applied` string, asserted by `test_d107_is_idempotent_on_replay` above,
+is D107's rewrite-replay event — a different mechanism from item 37's phase-2-commit-count claim).
+
+**Done bar (revised, complete — supersedes the fix-round-0 "wire `fleet stubs resolve`" framing,
+which named only D130's own gap): four independent pieces, each independently dispatchable, none
+requiring new production logic beyond D130's own CLI-wiring (a-d below reuse machinery this task's
+fixture already exercises for real).**
+(1) **D130 itself** — wire `fleet stubs resolve` to the existing T1 machinery
+(`_fire_t1_for_provider`'s manual-trigger shape, or a thin wrapper over it) so it performs the
+supersede-and-enqueue its own docstring already promises.
+(2) **Stub creation via the real CLI** — extend this fixture (or add a sibling test) to reach the
+`ACTIVE` stub state via a real `fleet transform --stub-blocked` (or `fleet resume --stub-blocked`)
+dispatch, matching `test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_
+for_real`'s own setup, THEN continue into this task's real merge/`--sync`/`resume` chain — the two
+fixtures' setups are compatible in shape; combining them is test-only work.
+(3) **Atomicity** — add a kill-and-resume step immediately after T1's transaction (or the
+REVALIDATE settle transaction) fires, and assert state/task agreement on the resumed read, per
+SPEC's own literal proof method.
+(4) **Exact counts and the zero-cost/`already_applied`/`revalidation_key` claims** — assert
+`COUNT(*) = 1` on the minted `REVALIDATE` task (not merely non-null), and assert the REVALIDATE
+round itself produces zero new `migrate/C` phase-2 commits, zero LLM calls, and its own
+`already_applied`-shaped event, keyed on `revalidation_key` — distinct from D107's own
+`already_applied` (item (d) above must not conflate the two).
+Only once (1)-(4) all close does §12.37's literal text hold in full; wiring D130 alone is
+necessary but was wrongly stated as sufficient in this file's own pre-fix-round-1 text.
+
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
 this entry for the final piece (all 20 sub-clauses COVERED); everything below is kept as history.**
@@ -2726,6 +2830,33 @@ a parameter rather than driving it from a real stub-rot scenario (audit row 39).
 **Done bar:** once §12.37 is wired, drive cases (i)/(ii) through the real stub lifecycle rather
 than direct parameter injection. Sequence after §12.37, not before — closing this first would just
 re-test the same disconnected parameters.
+
+**Update, round VI task 85 (2026-09-08) — the "mostly blocked on §12.37's wiring" framing is now
+stale (the wiring is real and proven end to end, see §37's own update above), but this does NOT
+close §12.39 — this task did not drive cases (i)/(ii) through the real loop, and was not asked
+to.** This task's brief scoped it to §12.37's combined orchestration fixture (retry → real merge
+→ real `pr --sync` → real `resume`'s REVALIDATE step, reaching the PASS/`RESOLVED` outcome) —
+cases (i) `STUB_DIVERGED` and (ii) `BUDGET_EXHAUSTED` are DIFFERENT outcomes of the SAME
+claiming loop (`_run_revalidation_claims_impl`/`settle_revalidation`) this task's fixture already
+drives for real, so the underlying blocker CRITERIA_PLAN's own done bar named is gone — but the
+two cases themselves remain untested against a real stub-rot scenario, exactly as `tests/
+test_stubs.py::test_t3_on_stub_diverged_sends_the_consumer_to_a_human` and `::test_t3_on_budget_
+exhaustion_reuses_the_ledger_breach_and_never_promotes` still describe (both call `settle_
+revalidation`/`settle` directly with a hand-constructed `failure_class`/budget-breach parameter).
+**Done bar (revised, now genuinely buildable, not previously so):** extend this task's own
+fixture (`tests/test_stub_resolution_task79.py::
+test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end`, or a sibling test reusing
+its setup) two ways: (i) after the real T1 supersede + D107 rewrite, plant a genuine divergence in
+the rewritten `migrate/<consumer>` tree (or in the fixture's own real `acme-lib-py` source before
+the provider's rebuild) so the REAL REVALIDATE round's `bazel build`/`bazel test` (or `FakeBazel`
+configured to fail on the exact target) fails while the round's own commit set contains only the
+label rewrite — matching §12.39 case (i)'s own differential rule — and assert `settle_
+revalidation` classifies it `STUB_DIVERGED` through the real claiming loop, not a direct call;
+(ii) re-run the same real orchestration with `stubs.revalidation_max_cost_usd` set below the
+round's known cost and assert `ABANDONED`/`BUDGET_EXHAUSTED` through the same real path. Case
+(iii) needs no further work (already closed). Not attempted by this task — out of its own scope
+and budget, and cited here as a precisely-sized follow-on rather than left as the stale
+"mostly blocked" framing this update retires.
 
 ## 40. No model string outside `config/`
 **DONE (SPEC + code corrected, round-K; AST clause closed round V, 2026-09-01 — now counts

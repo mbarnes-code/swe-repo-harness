@@ -45,6 +45,7 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     DESTINATIONS,
     FakeBazel,
     FakeFilterRepo,
+    FakeResolver,
     _insert_stub_row,
     bazel,
     build,
@@ -57,6 +58,11 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     relocations,
     resolver,
     transformed,
+    verify,
+)
+from tests.test_pr_e2e import (  # noqa: F401  (fixtures used by injection)
+    FakeForge,
+    forge,
 )
 from tests.test_transform_e2e import (  # noqa: F401  (fixtures used by injection)
     base_args,
@@ -182,10 +188,23 @@ def test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label(
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """The literal proof item 3 of the brief asks for. `BuildgenWorker`'s own render step runs
     unseamed (it invokes no `bazel`/`git-filter-repo` at all); only the ORIGINAL provider-failure
     setup above uses `FakeBazel`, matching the existing fixture's own precedent.
+
+    **Round VI task 85 fix:** `resolver` was missing from this signature (and every other
+    `FakeBazel`-only caller of `_reach_active_stub_state` below except the two already fixed)
+    -- a genuine pre-existing gap, not new scope. `_reach_active_stub_state` calls `build()`
+    twice with no `cli.RESOLVER_RUNNER` seam installed, so on any host without a real `uv`
+    binary (confirmed absent on this task's own host) Phase 3's dependency resolution step
+    hits the real, un-seamed resolver and fails with `DependencyResolutionFailed` -- landing
+    `acme-app-py` at `REQUIRES_HUMAN_INTERVENTION` (0 attempts) instead of `DEGRADED`, which is
+    exactly this file's own `_reach_active_stub_state` assertion failing. `resolver`'s own
+    fixture docstring (`tests/test_build_e2e.py`) already says it is "requested by every test in
+    this file that runs `fleet build` without a real Bazel" -- this file's own `FakeBazel`-only
+    tests had simply never requested it. See this task's report for the full account.
     """
     run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
     dest = relocations(filter_repo)[_STUB_CONSUMER]
@@ -223,9 +242,14 @@ def test_d107_is_idempotent_on_replay(
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """Item 7 of the brief: replaying the rewrite (crash-and-retry / a second `fleet resume`)
-    must report `already_applied` and land NO duplicate commit."""
+    must report `already_applied` and land NO duplicate commit.
+
+    **Round VI task 85 fix:** `resolver` added -- see
+    `test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label`'s own docstring above
+    for why (missing `cli.RESOLVER_RUNNER` seam, pre-existing gap)."""
     run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
     _supersede_stub_row(fleet, run_id)
     branch = f"migrate/{_STUB_CONSUMER}"
@@ -537,6 +561,7 @@ def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """Test-proof item 5 (D108): once the REVALIDATE claiming loop's round PASSes, the consumer's
     `phases` VERIFY row reaches `SUCCEEDED` and `stubs.state` reaches `RESOLVED`.
@@ -545,6 +570,10 @@ def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
     brief — the real-Bazel proof above already exercises the same claiming loop's mechanics
     against a real `bazel build`/`bazel test`; this test isolates the settle/D108-write half,
     which that fixture's test-less repos cannot reach under a genuine PASS).
+
+    **Round VI task 85 fix:** `resolver` added -- see
+    `test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label`'s own docstring above
+    for why (missing `cli.RESOLVER_RUNNER` seam, pre-existing gap).
     """
     run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
     dest = relocations(filter_repo)[_STUB_CONSUMER]
@@ -712,6 +741,7 @@ def test_c1_gate_refuses_a_revalidate_round_whose_committed_tree_still_names_a_s
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """C1 (fix round 1, opus-tier review): the mechanical gate this brief demanded, proven as a
     real discriminator. A consumer's stub is superseded (T1's own DB effect) but the committed
@@ -837,6 +867,7 @@ def test_c1_gate_refuses_a_revalidate_round_whose_build_bazel_is_missing(
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """Nit 1. The pre-task-81 gate read a missing `<dest>/BUILD.bazel` as `""` — no stub label
     found — and let the round proceed (fail OPEN). `migrate/<consumer>` never carries a generated
@@ -906,6 +937,7 @@ def test_c1_gate_logs_a_distinct_warning_once_a_round_has_refused_max_attempts_t
     fleet: Path,  # noqa: F811
     monorepo: Path,  # noqa: F811
     filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
 ) -> None:
     """Nit 2. Nothing surfaced a REVALIDATE round refusing forever. This reuses `tasks.
     max_attempts` (already 3 on the row `_insert_revalidate_task` seeds -- ADR-0014's own retry-
@@ -963,3 +995,328 @@ def test_c1_gate_logs_a_distinct_warning_once_a_round_has_refused_max_attempts_t
         "the stuck-round WARNING must stay silent below max_attempts and fire once it is "
         f"reached, exactly once per crossing round: {stuck_warnings_per_round}"
     )
+
+
+# ---------------------------------------------------------------------------------------
+# Round VI task 85 — the combined §12.37/§12.39 real-CLI stub-resolution lifecycle. Every
+# piece above this point drives ONE mechanism at a time (D107's rewrite, the REVALIDATE
+# claiming loop's internals, a hand-seeded T1 supersession). This test combines all of them
+# through REAL CLI invocations for the first time: `fleet retry`, a real PR-merge-driven
+# `fleet pr --sync` T1 trigger (not a hand-seeded `_supersede_stub_row`), the REVALIDATE
+# claiming loop via real `fleet resume` (not `_run_revalidation_claims_impl` called
+# directly), RESOLVED/SUCCEEDED/`equivalence == 'FULL'`, and the idempotency clause.
+#
+# `FakeBazel` throughout (all-green, no `fail=` entries past the initial provider failure
+# `_reach_active_stub_state` seeds) -- permitted by this task's own brief for the
+# orchestration proof (retry -> real merge -> real `pr --sync` -> real `resume`'s REVALIDATE
+# step), which is the actual gap this test exists to close, not Bazel realism (already
+# proven separately, under real Bazel, by `test_d104b_claiming_loop_resolves_the_stub_under_
+# a_real_bazel_build_and_test` above -- that test explicitly does not reach RESOLVED because
+# its fixture repos have no test targets, a disclosed, accepted scope boundary its own brief
+# permits).
+# ---------------------------------------------------------------------------------------
+
+
+def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """§12.37's literal scenario, driven end to end through real CLI verbs -- with ONE
+    disclosed exception (see immediately below).
+
+    **Disclosed, not silently narrowed (round VI task 85 fix round 1, F2): the `stubs` row
+    itself is hand-seeded, not produced by a real `--stub-blocked` CLI dispatch.**
+    `_reach_active_stub_state` (below) reaches its `ACTIVE`/`PUBLISHED_ARTIFACT` stub state via
+    `_insert_stub_row` -- a raw `INSERT INTO stubs` -- exactly as `test_d107_...`/`test_d108_...`
+    above already do, not via `_create_stub_records`/a real `fleet transform --stub-blocked` (or
+    `fleet resume --stub-blocked`) dispatch. §12.37's own opening clause literally requires `C`
+    "migrated with `--stub-blocked`"; no test in this file drives stub CREATION through the real
+    CLI (`tests/test_pr_e2e.py::
+    test_stub_blocked_creation_reaches_degraded_through_the_real_cli_and_feeds_t1_for_real` does,
+    for the CREATION half alone, but stops before combining with D107/REVALIDATE). Everything
+    from the hand-seeded `ACTIVE` row onward in THIS test is real: the `STUB_LIMITED`/`DEGRADED`
+    consequence of that row (step 1 below) is driven for real, as is every later step.
+
+    Setup (unchanged from every test above): `_reach_active_stub_state` leaves `acme-lib-py`
+    `REQUIRES_HUMAN_INTERVENTION` at Phase 3 and `acme-app-py` `DEGRADED` at Phase 3 with an
+    `ACTIVE` stub naming it, under `FakeBazel`.
+
+    From there, every step below is a real CLI invocation:
+
+    1. A REAL `fleet verify --repo acme-app-py` -- not a hand-seeded Phase 4 row -- produces
+       the consumer's own genuine `STUB_LIMITED` `VerificationReport` and `DEGRADED` Phase 4
+       row (task 69's `_eligible_build_units`/`_gated_members` widening + `stub_degrade_
+       transform`) off the hand-seeded stub row (see the disclosure above): this is the
+       real-CLI CONSEQUENCE of §12.37's opening clause, not a from-scratch proof of the clause's
+       own `--stub-blocked` creation half.
+    2. `fleet retry acme-lib-py` (§12.14's audited reopen door) + a REAL `fleet build --repo`
+       + `fleet verify --repo` land the provider `SUCCEEDED` through Phase 4 -- needed for
+       `fleet pr` to have anything to ship (§3.4 step 4's own Phase-4 eligibility gate).
+    3. A REAL `fleet pr --repo acme-lib-py` opens the provider's PR against `FakeForge`.
+    4. `forge.merge("acme-lib-py")` -- a human merges it on the forge, and the harness is told
+       nothing -- then a REAL `fleet pr --sync` is what DISCOVERS the merge: `_pr_sync_impl`'s
+       own per-repo loop writes `MERGED`, fires T1 (`orchestrator.stubs.supersede`) for real,
+       and D107's rewrite runs synchronously in the SAME call, off T1's own real output --
+       never a hand-seeded `_supersede_stub_row`.
+    5. A REAL `fleet resume` runs the REVALIDATE claiming loop between step 6 and step 7
+       (D104(b), ADR-0128) -- not `_run_revalidation_claims_impl` called directly -- and (this
+       fixture's all-green `FakeBazel`) settles PASS, reaching RESOLVED/SUCCEEDED/`equivalence
+       == 'FULL'` (D108).
+    6. Idempotency: a replay (`fleet pr --sync` again), a second `fleet resume`, and `fleet
+       stubs resolve` are each driven for real and `tasks`/`stubs`/`attempts` row counts are
+       asserted unchanged across all three -- see the `fleet stubs resolve` block's own
+       comment for a DISCLOSED finding this task surfaced: that verb has zero implementation.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
+    branch = f"migrate/{_STUB_CONSUMER}"
+
+    # --- 1. a REAL fleet verify for the consumer: genuine STUB_LIMITED report + DEGRADED
+    # Phase 4 row (not a hand-seeded PHASE row like test_d108's own auxiliary check above
+    # discloses doing). DISCLOSED (F2, fix round 1): this is the real-CLI CONSEQUENCE of
+    # §12.37's opening clause, driven off the hand-seeded STUBS row `_reach_active_stub_state`
+    # plants (see this test's own docstring) -- not a from-scratch proof of the clause's own
+    # `--stub-blocked` creation half, which no test in this file drives. ---
+    fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task85")
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        consumer_verified = verify(fleet, "--repo", _STUB_CONSUMER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    assert consumer_verified.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, (
+        consumer_verified.output
+    )
+    consumer_phase4_before = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_before == [("DEGRADED",)], consumer_phase4_before
+    report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert report_row, "the real fleet verify must persist a VerificationReport (§3.4 step 3)"
+    pre_report = json.loads(str(report_row[0][0]))["report"]
+    assert pre_report["equivalence"] == "STUB_LIMITED", pre_report
+    assert pre_report["verified_against_stubs"] == [_STUB_COORD_KEY], pre_report
+
+    # --- 2. fleet retry + a REAL fleet build/verify land the provider SUCCEEDED through
+    # Phase 4 (needed for §3.4 step 4's own eligibility gate below). ---
+    reopened = runner.invoke(
+        app,
+        [
+            *base_args(fleet),
+            "retry",
+            _STUB_PROVIDER,
+            "--reason",
+            "round VI task 85: fixed for real",
+        ],
+        catch_exceptions=False,
+    )
+    assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+
+    # Exit code intentionally NOT asserted SUCCESS on these two `--repo`-scoped calls, matching
+    # `test_d104b_claiming_loop_resolves_the_stub_under_a_real_bazel_build_and_test`'s own
+    # precedent above: the CLI's aggregate exit reflects the WHOLE run's phase rows, including
+    # `acme-app-py`'s still-DEGRADED Phase 4 row from step 1 above (unrelated to this
+    # `--repo acme-lib-py` dispatch) -- the fact that matters is the PROVIDER's own row, asserted
+    # directly below.
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+        verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    provider_phase4 = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase4 == [("SUCCEEDED",)], provider_phase4
+
+    # --- 3. a REAL fleet pr opens the provider's own PR (the consumer stays DRAFTED-only via
+    # its own DEGRADED PR, out of scope for this test -- §12.38 already covers that
+    # separately, and it is not needed to prove this test's own five gaps). ---
+    pr_opened = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+    pr_rows = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = 'PullRequest'",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert pr_rows, "fleet pr must open a real PullRequest record for the provider"
+    assert json.loads(str(pr_rows[0][0]))["state"] in ("OPEN", "DRAFTED"), pr_rows
+
+    # --- 4. gap 2: a REAL PR-merge-driven `fleet pr --sync` T1 trigger. A human merges the
+    # provider's PR on the forge; the harness is told nothing until it polls. ---
+    forge.merge(_STUB_PROVIDER)
+    synced = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert synced.exit_code == ExitCode.SUCCESS, synced.output
+    sync_payload = json.loads(synced.stdout)
+    assert _STUB_PROVIDER in sync_payload["merged"], sync_payload
+
+    stub_after_sync = query(
+        fleet,
+        "SELECT state, revalidation_task_id FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_after_sync] == ["SUPERSEDED"], stub_after_sync
+    assert stub_after_sync[0][1], "D103 gap 2: revalidation_task_id must be stamped by real T1"
+
+    # D107's rewrite fired SYNCHRONOUSLY inside `_pr_sync_impl`, off T1's own real output --
+    # confirmed by reading the ACTUAL committed tree, not just the JSON payload (matching
+    # `test_d107_rewrites_the_committed_migrate_branch_off_the_stub_label`'s own proof shape).
+    assert sync_payload["label_rewrites"].get(_STUB_CONSUMER, "").startswith("committed "), (
+        sync_payload
+    )
+    after_rewrite = _git_show(monorepo, f"{branch}:{dest_consumer}/BUILD.bazel")
+    assert f'"{_PROVIDER_LABEL}"' in after_rewrite, after_rewrite
+    assert f'"{_STUB_LABEL}"' not in after_rewrite, after_rewrite
+
+    # --- 5. gap 3+4: a REAL fleet resume runs the REVALIDATE claiming loop (D104(b)) between
+    # step 6 and step 7 -- never `_run_revalidation_claims_impl` called directly. ---
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        resumed = runner.invoke(
+            app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+    resume_payload = json.loads(resumed.stdout)
+    claims = resume_payload["revalidation_claims"]
+    assert claims is not None, resume_payload
+    outcomes = claims["outcomes"]
+    assert len(outcomes) == 1, outcomes
+    outcome = next(iter(outcomes.values()))
+    assert outcome.startswith("settled: verdict=PASS"), outcome
+    # `stub_reconcile` (which runs BEFORE the claiming loop in the SAME `fleet resume` call)
+    # must not have abandoned the row -- D106's `_stub_awaiting_revalidation` protection. This
+    # row was superseded by an EARLIER, separate command (the `--sync` call above, not THIS
+    # `fleet resume` call), so it is protected via `excluded_awaiting_revalidation`, not via
+    # `excluded_superseded_this_call` (D105's SAME-call protection, which is what a plain
+    # `fleet resume --repoll-prs` would exercise instead -- not this test's own shape).
+    stub_pair_key = f"{_STUB_CONSUMER}→{_STUB_COORD_KEY}"
+    stub_reconcile_report = resume_payload["stub_reconcile"]
+    assert stub_pair_key not in stub_reconcile_report["abandoned"], stub_reconcile_report
+    assert stub_pair_key in stub_reconcile_report["excluded_awaiting_revalidation"], (
+        stub_reconcile_report
+    )
+
+    stub_final = query(
+        fleet,
+        "SELECT state FROM stubs WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert [row[0] for row in stub_final] == ["RESOLVED"], stub_final
+
+    consumer_phase4_after = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_after == [("SUCCEEDED",)], consumer_phase4_after
+
+    post_report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert post_report_row, post_report_row
+    post_report = json.loads(str(post_report_row[0][0]))["report"]
+    assert post_report["equivalence"] == "FULL", post_report
+    assert post_report["verified_against_stubs"] == [], post_report
+
+    d108_findings = query(
+        fleet,
+        "SELECT kind FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'StubConsumerStatusApplied'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert d108_findings, "D108 must write an audited StubConsumerStatusApplied finding"
+
+    # --- 6. gap 5: the idempotency clause. Three real re-triggers; none may add a row FOR THIS
+    # STUB'S OWN CONSUMER/PROVIDER PAIR -- scoped to `_STUB_CONSUMER`/`_STUB_PROVIDER` rather
+    # than a bare fleet-wide total, because a plain `fleet resume` (no `--repo`/`--from-phase`)
+    # ALSO runs §11.5 step 8's ordinary continuation for every OTHER repo in this fixture that
+    # has not yet reached its own terminal phase (`acme-lib-ts`/`acme-app-ts` never had `fleet
+    # verify` driven for them above) -- real, unrelated progress that legitimately adds `attempts`
+    # rows and would make a fleet-wide total assert a false positive, not a defect in the stub
+    # machinery this test exists to prove idempotent. SPEC's own literal text ("triggering the
+    # resolution... adds no further tasks, stubs, or attempts rows") is about the resolution
+    # itself, which this scoping tracks precisely.
+    def _scoped_counts() -> tuple[int, int, int]:
+        tasks_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM tasks WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        stubs_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM stubs WHERE consumer_repo_id = ? AND provider_repo_id = ?",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        attempts_n = query(
+            fleet,
+            "SELECT COUNT(*) FROM attempts WHERE repo_id IN (?, ?)",
+            (_STUB_CONSUMER, _STUB_PROVIDER),
+        )[0][0]
+        return int(tasks_n), int(stubs_n), int(attempts_n)
+
+    before = _scoped_counts()
+
+    # (a) a replay: fleet pr --sync again. The provider is already terminal (MERGED) and the
+    # stub is already RESOLVED (not ACTIVE) -- T1's own `state = 'ACTIVE'` scoping (both the
+    # per-repo loop and the D103 gap-1 sweep) makes a replay a genuine no-op.
+    replay = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert replay.exit_code == ExitCode.SUCCESS, replay.output
+    assert _scoped_counts() == before, ("replay", _scoped_counts(), before)
+
+    # (b) a second fleet resume: the REVALIDATE task is already DONE, so the claiming loop's
+    # own `WHERE kind = 'REVALIDATE' AND status = 'PENDING'` finds nothing to claim.
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        resumed_again = runner.invoke(
+            app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+    resumed_again_payload = json.loads(resumed_again.stdout)
+    assert resumed_again_payload["revalidation_claims"]["outcomes"] == {}, resumed_again_payload[
+        "revalidation_claims"
+    ]
+    assert _scoped_counts() == before, ("second resume", _scoped_counts(), before)
+
+    # (c) `fleet stubs resolve <provider>` -- SPEC's own literal third idempotency trigger.
+    # DISCLOSED FINDING (round VI task 85, not previously flagged by research-47): this CLI
+    # verb has ZERO implementation. `cli.stubs_resolve` validates its preconditions and then
+    # unconditionally calls `cli._unavailable("stubs resolve", ...)`, which raises
+    # `CommandUnavailableError` before touching any state-mutating code at all -- confirmed
+    # here by driving it for real rather than assumed. It genuinely adds no rows, but for a
+    # WEAKER reason than SPEC's literal text presumes ("triggering the resolution... adds no
+    # further rows" presumes the trigger actually runs its resolution logic and finds nothing
+    # to do; this trigger never reaches that logic at all). See this task's report for why
+    # §12.37 is not flipped to DONE over this residual gap.
+    resolve_attempt = runner.invoke(
+        app,
+        [*base_args(fleet), "stubs", "resolve", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert resolve_attempt.exit_code == ExitCode.UNEXPECTED_ERROR, resolve_attempt.output
+    assert "cannot run" in resolve_attempt.output, resolve_attempt.output
+    assert _scoped_counts() == before, ("stubs resolve", _scoped_counts(), before)
