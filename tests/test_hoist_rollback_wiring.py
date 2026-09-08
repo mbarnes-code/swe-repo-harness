@@ -66,6 +66,7 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures, used by injection)
     fleet,
     gazelle,
     monorepo,
+    payload,
     resolver,
     transformed,
 )
@@ -713,7 +714,21 @@ def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contrac
     # The discriminator itself: this call must not raise. Pre-fix, `RollbackAnchorError`
     # propagates uncaught through `catch_exceptions=False` and fails this test with a traceback
     # instead of a normal `Result` — see this task's fix-round report for the old-fails proof.
-    build(fleet, "--no-sandbox")
+    result = build(fleet, "--no-sandbox")
+
+    # Task-77, parked Minor 2 from task-72's own controller review: `_build_impl` used to
+    # discard `_reconcile_hoist_rollbacks`'s return value entirely, so nothing ever read
+    # `HoistRollbackReconciliationEntry.unhoist`/`.error` — proving the JSON payload now surfaces
+    # this real contract's own entry, end to end through the real CLI, not merely constructed by
+    # hand.
+    reconciliations = payload(result)["hoist_rollback_reconciliations"]
+    assert [entry["contract_id"] for entry in reconciliations] == [_CONTRACT_ID]
+    reconciled = reconciliations[0]
+    assert reconciled["unhoist"]["decision"] == "APPLIED"
+    assert reconciled["rollback"] is None, (
+        "execute_hoist_rollback raised before returning a settled HoistRollbackOutcome"
+    )
+    assert reconciled["error"], "the caught RollbackAnchorError's str() must not be dropped"
 
     assert e2e_query(
         fleet, "SELECT status FROM contracts WHERE contract_id = ?", (_CONTRACT_ID,)
@@ -732,6 +747,33 @@ def test_a_hoist_rollback_that_cannot_find_its_anchor_fails_loud_for_one_contrac
     failed_payload = json.loads(failed_findings[0][0])
     assert failed_payload["contract_id"] == _CONTRACT_ID
     assert failed_payload["error_type"] == "RollbackAnchorError"
+    assert reconciled["error"] == failed_payload["detail"], (
+        "the CLI payload's entry and the durable finding's own payload must record the SAME "
+        "exception's str() -- both are `str(exc)` off the identical caught RollbackAnchorError"
+    )
+    # Task-77, parked Minor 1 from task-72's own controller review: the finding's payload must
+    # disclose the half-rolled-back state on its own -- `unhoist_contract`'s DB/graph write
+    # (Decision 2's `contracts.status = 'FAILED'` plus the blast-set demotion) already landed
+    # before `execute_hoist_rollback` raised, and an operator must be able to read that without
+    # cross-referencing the sibling `HoistRollbackDemotion` row for the same run.
+    assert failed_payload["unhoist_decision"] == "APPLIED", (
+        "unhoist_contract's own write already committed -- the fleet is half-rolled-back, not "
+        "untouched"
+    )
+    demotion_findings = e2e_query(
+        fleet,
+        "SELECT repo_id FROM findings WHERE kind = 'HoistRollbackDemotion' AND run_id = ?",
+        (run_id,),
+    )
+    assert [row[0] for row in demotion_findings] == [consumer], (
+        "the owner itself is REQUIRES_HUMAN_INTERVENTION from its own build failure, so "
+        "demote_to_floor short-circuits it to a no-op (task-65 review I3's unresolved_repo_ids "
+        "path) -- only the consumer is actually demoted"
+    )
+    assert failed_payload["db_demoted_repo_ids"] == consumer, (
+        "must equal the sibling HoistRollbackDemotion row's own repo_id set -- the whole point of "
+        "this field is that an operator need not cross-reference it to know what was demoted"
+    )
 
     unrelated_build = _phase_row(fleet, unrelated, 3)
     assert unrelated_build[0] == "SUCCEEDED", (

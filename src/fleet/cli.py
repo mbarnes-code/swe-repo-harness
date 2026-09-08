@@ -4144,7 +4144,13 @@ async def _write_hoist_rollback_demotion_findings(
 
 
 async def _write_hoist_rollback_failed_finding(
-    writer: StateWriter, run_id: str, contract_id: str, exc: BaseException, *, now: datetime
+    writer: StateWriter,
+    run_id: str,
+    contract_id: str,
+    exc: BaseException,
+    *,
+    unhoist: UnhoistOutcome | None,
+    now: datetime,
 ) -> None:
     """One `HoistRollbackFailed` row per contract whose rollback attempt raised (fix round,
     task-72 controller review I2). `repo_id` is `NULL`, mirroring `_write_hoist_rollback_refused_
@@ -4152,9 +4158,24 @@ async def _write_hoist_rollback_failed_finding(
     the whole contract, not of any one repo. UPSERTs on `ux_findings_ident` — this call covers
     exactly one contract, so a plain per-row upsert is correct and safe to re-run: a repeated
     `fleet resume` that hits the identical failure re-derives the identical fingerprint and
-    payload (both are pure functions of `contract_id`/`type(exc)`/`str(exc)`, none of which
-    carries a timestamp or other per-call noise), updating the same row rather than accumulating
-    duplicates."""
+    payload (both are pure functions of `contract_id`/`type(exc)`/`str(exc)`/`unhoist`, none of
+    which carries a timestamp or other per-call noise), updating the same row rather than
+    accumulating duplicates.
+
+    **`unhoist_decision`/`db_demoted_repo_ids` (task-77, parked Minor 1 from task-72's review):**
+    `unhoist` is the settled `UnhoistOutcome` `_reconcile_hoist_rollbacks`'s own loop already
+    holds when this is called — populated with `decision="APPLIED"` exactly when
+    `unhoist_contract`'s own DB/graph write (Decision 2's `contracts.status = 'FAILED'`, plus zero
+    or more `demote_to_floor` demotions) already landed durably before `execute_hoist_rollback`
+    raised, and `None` only in the narrower case that `unhoist_contract` itself raised first (no
+    DB write attempted for this contract at all). Without this, an operator reading a bare
+    `HoistRollbackFailed` row could not tell "the fleet is half-rolled-back — DB demoted, git not
+    yet reverted" from "nothing happened yet for this contract" without cross-referencing sibling
+    `HoistRollbackDemotion` rows for the same `contract_id`. `unhoist_decision` is `""` on the
+    `None` case (payload values are `str`, D44's "no bare bool/sentinel-inside-a-settled-value"
+    precedent applies to the WRITTEN finding too, not only to the in-process dataclass), and
+    `db_demoted_repo_ids` is the comma-joined `demoted_repo_ids` off that same settled outcome
+    (empty string when `unhoist` is `None` or no member was demoted)."""
     finding = GraphFinding(
         kind=HOIST_ROLLBACK_FAILED_FINDING_KIND,
         severity="error",
@@ -4163,6 +4184,10 @@ async def _write_hoist_rollback_failed_finding(
             "contract_id": contract_id,
             "error_type": type(exc).__name__,
             "detail": str(exc),
+            "unhoist_decision": "" if unhoist is None else unhoist.decision,
+            "db_demoted_repo_ids": (
+                "" if unhoist is None else ",".join(sorted(unhoist.demoted_repo_ids))
+            ),
         },
     )
 
@@ -4843,7 +4868,9 @@ async def _reconcile_hoist_rollbacks(
                 forge=forge,
             )
         except (GitError, WorktreeError) as exc:
-            await _write_hoist_rollback_failed_finding(writer, run_id, contract_id, exc, now=now)
+            await _write_hoist_rollback_failed_finding(
+                writer, run_id, contract_id, exc, unhoist=unhoist, now=now
+            )
             entries.append(
                 HoistRollbackReconciliationEntry(
                     contract_id=contract_id,
@@ -11836,7 +11863,7 @@ async def _build_impl(
                 # failure was never characterized -- broader scope than this fix round's mandate
                 # (I2's per-contract isolation). Left as a disclosed gap; see this task's own
                 # fix-round report for the full reasoning.
-                await _reconcile_hoist_rollbacks(
+                hoist_reconciliations = await _reconcile_hoist_rollbacks(
                     read_conn,
                     settings,
                     writer=writer,
@@ -11891,6 +11918,14 @@ async def _build_impl(
         "integration_refs": {
             repo: plan.integration_ref for repo, plan in sorted(plans.items())
         },
+        # §12.31/D111 Leg D (task-77, parked Minor 2 from task-72's review): the whole entry
+        # sequence `_reconcile_hoist_rollbacks` returned, `asdict`-flattened so it survives
+        # `--json` — `unhoist`/`rollback` are `None` on the branches that never ran, and `error`
+        # is set exactly when a `HoistRollbackFailed` finding was recorded for that contract. Was
+        # previously discarded at the call site above (dead return value), so nothing consumed
+        # `HoistRollbackReconciliationEntry`'s `unhoist`/`error` fields; `_build_lines` below is
+        # the first reader.
+        "hoist_rollback_reconciliations": [asdict(entry) for entry in hoist_reconciliations],
         "halt": next((str(r.halt) for r in reports if r.halt is not None), None),
         "exit_code": int(exit_code),
     }
@@ -12148,6 +12183,7 @@ def _report_payload(output: VerifyOutput) -> dict[str, object]:
 def _build_lines(result: Mapping[str, object]) -> list[str]:
     degraded = cast("list[str]", result["adapter_unavailable"])
     blocked = cast("list[str]", result["withheld"])
+    reconciliations = cast("list[Mapping[str, object]]", result["hoist_rollback_reconciliations"])
     lines = [
         f"run {result['run_id']}: {result['succeeded']} built, {result['failed']} needing a "
         f"human over {result['repos']} repo(s) in wave(s) {result['waves']}"
@@ -12163,6 +12199,18 @@ def _build_lines(result: Mapping[str, object]) -> list[str]:
             "emitted as the UNKNOWN adapter's single filegroup with no external dependency in "
             f"MODULE.bazel (§3.3 step 2): {', '.join(degraded[:3])} — recorded as "
             "EcosystemAdapterUnavailable"
+        )
+    if reconciliations:
+        failed = [entry for entry in reconciliations if entry["error"] is not None]
+        lines.append(
+            f"hoist_rollback: {len(reconciliations)} contract(s) reconciled this build, "
+            f"{len(reconciliations) - len(failed)} without error"
+            + (
+                f", {len(failed)} failed (see HoistRollbackFailed finding): "
+                + ", ".join(str(entry["contract_id"]) for entry in failed[:3])
+                if failed
+                else ""
+            )
         )
     return lines
 

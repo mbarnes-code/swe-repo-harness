@@ -1774,6 +1774,25 @@ its new writer; 6 `ruff check` regressions (2 unused imports, 1 ASYNC240, 3 line
 fix-round account: `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`'s fix-round
 section.
 
+**Update, 2026-09-08 (round VI task 77) — two claims above are stale; this criterion is still NOT
+marked DONE.** The round VI task 65 update above named `cli.unhoist_contract` "standalone, zero
+call sites outside its own tests" and its own "Still not built" list named "the production wiring
+(task-67, not yet scoped)" as a future slice. Both are superseded: round VI task 71 (merged
+`293688e`) landed the `git revert -m 1` revert-series execution (ADR-0122 Decisions 4/5,
+`execute_hoist_rollback`), and round VI task 72 (merged `a96e8d7`, with a fix round hardening
+per-contract failure isolation) landed the production wiring itself — `_reconcile_hoist_rollbacks`,
+called from `_build_impl` right after the wave loop, now drives every `HoistBrokeOwner` finding's
+contract through `unhoist_contract` then `execute_hoist_rollback`. **This does not close case (ii)
+or criterion 31.** A gap task-72's own fix round disclosed, and that D122's task-75 fix (`a9636b8`)
+explicitly leaves open (no production call site constructs a `PullRequestDraft` with `contract_id`
+set — "wiring one remains a future task's job"), means `execute_hoist_rollback`'s anchor scan finds
+no contract-owned draft on any real fleet today, so it raises `RollbackAnchorError` for any contract
+whose blast set is non-empty. That failure is caught per contract (task-72 fix round I2) and
+recorded as a `HoistRollbackFailed` finding rather than crashing the whole build, but no real
+revert commit has landed via this path outside a test that hand-seeds `contract_id`.
+`docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here (out of this task's
+own scope — see `.superpowers/sdd/round-VI-criteria-closure/task-77-report.md`).
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
