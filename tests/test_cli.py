@@ -2525,7 +2525,11 @@ def _seed_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
             "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
             (
                 RUN_ID, repo, PR_RECORD_KIND,
-                _fingerprint(RUN_ID, repo, PR_RECORD_KIND), payload,
+                # ADR-0126/D122 (task-75): `_upsert_pr_record`'s fingerprint now includes a 4th
+                # component, `contract_id or ""` -- matched here (`""`, repo-owned) so a later
+                # real write for this same repo (e.g. `_pr_sync_impl`) hits the SAME `findings`
+                # row via `ux_findings_ident` instead of silently inserting a second one.
+                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""), payload,
                 "2026-08-08T12:00:00+00:00",
             ),
         )
@@ -2834,7 +2838,9 @@ def _seed_fresh_pr_record(db: Path, repo: str, *, state: str, url: str) -> None:
             "                      created_at) VALUES (?, ?, ?, 'info', ?, ?, ?)",
             (
                 RUN_ID, repo, PR_RECORD_KIND,
-                _fingerprint(RUN_ID, repo, PR_RECORD_KIND), payload, now,
+                # ADR-0126/D122 (task-75): matches `_upsert_pr_record`'s 4-part fingerprint
+                # (`contract_id or ""`) so a later real write for this repo updates this SAME row.
+                _fingerprint(RUN_ID, repo, PR_RECORD_KIND, ""), payload, now,
             ),
         )
     finally:
@@ -3276,7 +3282,9 @@ def test_resume_repoll_prs_does_not_undo_t1_in_the_same_call(
                 RUN_ID,
                 "acme-utils",
                 PR_RECORD_KIND,
-                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND),
+                # ADR-0126/D122 (task-75): matches the 4-part fingerprint
+                # `_upsert_pr_record` now computes (`contract_id or ""`).
+                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND, ""),
                 payload,
                 old_created_at,
             ),
@@ -3525,7 +3533,9 @@ def test_resume_reconcile_does_not_abandon_a_superseded_stub_across_separate_cal
                 RUN_ID,
                 "acme-utils",
                 PR_RECORD_KIND,
-                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND),
+                # ADR-0126/D122 (task-75): matches the 4-part fingerprint
+                # `_upsert_pr_record` now computes (`contract_id or ""`).
+                _fingerprint(RUN_ID, "acme-utils", PR_RECORD_KIND, ""),
                 payload,
                 stamp,
             ),

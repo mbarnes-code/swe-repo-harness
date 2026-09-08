@@ -4202,13 +4202,15 @@ async def unhoist_contract(
     # invocation; this refusal decision is made once and is irrevocable.
     blocking: set[str] = set()
     for repo_id in blast_set:
-        draft = records.get(repo_id)
+        # Repo-owned lookup: `(repo_id, None)` (ADR-0126/D122). No production call site
+        # constructs a contract-owned draft yet, so this is the only kind of row that exists.
+        draft = records.get((repo_id, None))
         if draft is None or draft.state is not PrState.MERGED:
             continue
         for kind, node_id in descendants(graph.G_order, (NodeKind.REPO.value, repo_id)):
             if kind != NodeKind.REPO.value or node_id in blast_set:
                 continue
-            downstream = records.get(node_id)
+            downstream = records.get((node_id, None))
             if downstream is not None and downstream.state is PrState.MERGED:
                 blocking.add(node_id)
 
@@ -4345,8 +4347,9 @@ async def _ordered_revert_shas(
     directly, not assumed.** `PullRequestDraft.repo_id`'s own docstring: "For a contract PR this is
     the OWNING repo, so the PR stays attributable to a code-owner without a contract needing a
     `phases` row" — `contract_id` is a SEPARATE, optional field on that SAME draft (ADR-0019).
-    `_pr_records`'s dict is keyed by `repo_id` throughout this codebase (e.g. `_render_pr_body`'s
-    own `records[dep]` lookups, keyed by dependency repo ids). So the contract's own draft is found
+    `_pr_records`'s dict is keyed by `(repo_id, contract_id)` (ADR-0126/D122, task-75) — every
+    OTHER lookup in this codebase reads an ordinary repo-owned draft, keyed `(repo_id, None)`,
+    since no production call site sets `contract_id`. So the contract's own draft is found
     by scanning every record for `draft.contract_id == contract_id`, never by a keyed lookup on
     `contract_id` itself. **Also measured, this round: nothing in `src/fleet/` currently
     constructs a `PullRequestDraft` with `contract_id` set** — `_emit_one_pr`'s `PrwriterInput`
@@ -4378,15 +4381,25 @@ async def _ordered_revert_shas(
     # blast-set member -- Decision 2's own query selects on `CONTRACT_IMPL`/`CONTRACT_CONSUME`
     # edges, and the owner necessarily holds a `CONTRACT_IMPL` edge to its own hoisted contract.
     # `PullRequestDraft.repo_id` for the contract's draft IS that owning repo (its own docstring),
-    # so `records.get(owner_repo_id)` would return the EXACT SAME row as `contract_draft` above --
-    # counting it a second time would revert the identical merge sha twice. Skip it here rather
-    # than dedup after the fact, since there is only ever one row per `repo_id` (findings' own
-    # unique constraint; see D122) and comparing `repo_id` is therefore sufficient and exact.
+    # so counting it a second time via a per-repo lookup here would revert the identical merge sha
+    # twice. Skip it here rather than dedup after the fact.
+    #
+    # ADR-0126/D122 (task-75): `_pr_records` is now keyed by `(repo_id, contract_id)`, not
+    # `repo_id` alone, so a genuinely SEPARATE repo-owned draft for `owner_repo_id` (contract_id
+    # `None`) could in principle coexist beside `contract_draft` (contract_id set) without
+    # colliding. No production call site constructs such a second draft today (confirmed, same
+    # measurement as D122's own) -- wiring one is out of this task's scope (and
+    # `execute_hoist_rollback`'s own scope note above), so this `continue` still drops
+    # `owner_repo_id` unconditionally rather than distinguishing the two rows; a future
+    # contract-PR-dispatch task that adds a real owner-repo draft here must revisit this skip.
     owner_repo_id = contract_draft.repo_id if contract_draft is not None else None
     for repo_id in blast_set:
         if repo_id == owner_repo_id:
             continue
-        draft = records.get(repo_id)
+        # Repo-owned lookup: `(repo_id, None)`. `repo_id` here is never `owner_repo_id` (skipped
+        # above), and no production call site sets `contract_id` on any other blast-set member's
+        # draft, so this is always the row that exists for an ordinary consumer.
+        draft = records.get((repo_id, None))
         if draft is not None:
             candidates.append((repo_id, draft))
 
@@ -12401,22 +12414,33 @@ def _forge_token_config(settings: FleetSettings) -> Path | None:
     return (settings.root / configured).resolve()
 
 
-async def _pr_records(conn: aiosqlite.Connection, run_id: str) -> dict[str, PullRequestDraft]:
-    """Every PR this run has opened, as the harness currently believes it (§3.4 step 5's input)."""
+async def _pr_records(
+    conn: aiosqlite.Connection, run_id: str
+) -> dict[tuple[str, str | None], PullRequestDraft]:
+    """Every PR this run has opened, as the harness currently believes it (§3.4 step 5's input).
+
+    Keyed by `(repo_id, contract_id)` (ADR-0126, D122) rather than `repo_id` alone: a contract's
+    own migration PR and its owning repo's own migration PR share one `repo_id` by
+    `PullRequestDraft.repo_id`'s own documented design, so a `repo_id`-only key could only ever
+    surface one of the two. `contract_id` is `None` for an ordinary repo-owned PR, which is every
+    PR this codebase constructs today — no production call site sets `contract_id` yet (D122's
+    own disclosed scope), so this key is `(repo_id, None)` everywhere in practice.
+    """
     rows = await _rows(
         conn,
         "SELECT repo_id, payload FROM findings WHERE run_id = ? AND kind = ? ORDER BY repo_id",
         (run_id, PR_RECORD_KIND),
     )
-    records: dict[str, PullRequestDraft] = {}
+    records: dict[tuple[str, str | None], PullRequestDraft] = {}
     for row in rows:
         try:
-            records[str(row[0])] = PullRequestDraft.model_validate_json(str(row[1]))
+            draft = PullRequestDraft.model_validate_json(str(row[1]))
         except ValidationError as exc:  # Rule 11: a PR we cannot parse is not a PR we may ignore
             raise PrEmissionError(
                 f"the persisted PR record for {row[0]!r} does not validate: {exc}. Refusing to "
                 "continue — treating it as absent would open a SECOND PR for the same repo."
             ) from exc
+        records[(str(row[0]), draft.contract_id)] = draft
     return records
 
 
@@ -12433,7 +12457,7 @@ async def _upsert_pr_record(
         draft.repo_id,
         PR_RECORD_KIND,
         "info",
-        _fingerprint(run_id, draft.repo_id, PR_RECORD_KIND),
+        _fingerprint(run_id, draft.repo_id, PR_RECORD_KIND, draft.contract_id or ""),
         redact_text(draft.model_dump_json()),
         _iso(now),
     )
@@ -12662,9 +12686,13 @@ async def _pr_sync_impl(
     finally:
         await conn.close()
 
+    # Keyed the same as `records` -- `(repo_id, contract_id)` (ADR-0126/D122) -- rather than
+    # collapsing to `repo_id` here, so two coexisting drafts sharing one `repo_id` (a repo's own
+    # PR and its owning contract's PR) each get polled as a distinct entry, not one clobbering
+    # the other in this dict comprehension.
     pollable = {
-        repo_id: draft
-        for repo_id, draft in records.items()
+        key: draft
+        for key, draft in records.items()
         if draft.url and draft.state in NON_TERMINAL_STATES
     }
     gh = _forge(settings)
@@ -12708,7 +12736,16 @@ async def _pr_sync_impl(
                 sink=repository,
                 jsonl_path=events_jsonl_path(settings.root, run_id),
             )
-            for repo_id, draft in sorted(pollable.items()):
+            # Sorted on `(repo_id, contract_id or "")`, not a bare tuple sort: `contract_id` is
+            # `str | None`, and two coexisting drafts CAN share one `repo_id` (ADR-0126/D122), so
+            # a bare tuple compare could try to order `None` against a `str` at that shared
+            # `repo_id`. `repo_id` itself is what every downstream use here needs (`_fire_t1_for_
+            # provider`, `emitter.emit`, the `merged`/`closed`/`unchanged` lists all key on it),
+            # so `contract_id` is discarded once it has done its job of keeping this poll pass
+            # from merging two distinct drafts into one entry.
+            for (repo_id, _contract_id), draft in sorted(
+                pollable.items(), key=lambda item: (item[0][0], item[0][1] or "")
+            ):
                 status = observed.get(draft.url or "")
                 if status is None or status.state is draft.state:
                     unchanged.append(repo_id)
@@ -12791,7 +12828,9 @@ async def _pr_sync_impl(
             # below. That call is idempotent against a replay regardless
             # (`_stub_supersede_inputs` scopes to `state = 'ACTIVE'`), which is what makes this
             # sweep retry-safe on every invocation rather than single-shot.
-            for repo_id, draft in sorted(records.items()):
+            for (repo_id, _contract_id), draft in sorted(
+                records.items(), key=lambda item: (item[0][0], item[0][1] or "")
+            ):
                 if draft.state is not PrState.MERGED:
                     continue
                 t1_superseded.update(
@@ -12802,13 +12841,20 @@ async def _pr_sync_impl(
         finally:
             await read_conn.close()
 
+    # ADR-0126/D122 (task-75): `pollable`/`records` are keyed `(repo_id, contract_id)`, not
+    # `repo_id` alone -- project down to the `repo_id` component before this JSON-facing report,
+    # or the raw tuple keys would leak into `polled`/`terminal` as `[repo_id, contract_id]` pairs
+    # where every other list here (`merged`/`closed`/`unchanged`) is a flat list of repo_id
+    # strings.
+    polled_repo_ids = {key[0] for key in pollable}
+    all_repo_ids = {key[0] for key in records}
     return {
         "run_id": run_id,
-        "polled": sorted(pollable),
+        "polled": sorted(polled_repo_ids),
         "merged": sorted(merged),
         "closed": sorted(closed),
         "unchanged": sorted(unchanged),
-        "terminal": sorted(set(records) - set(pollable)),
+        "terminal": sorted(all_repo_ids - polled_repo_ids),
         # D105: every `stubs` row T1 superseded THIS invocation, as `[consumer_repo_id, coord_key]`
         # pairs (JSON-safe: a `frozenset` of tuples serializes as an array of 2-element arrays).
         # `_resume_impl` reads this straight back into a set of tuples and passes it to
@@ -13081,7 +13127,8 @@ async def _pr_impl(
         existing_urls: set[str] = {
             url
             for candidate in unit
-            if candidate.repo_id in records and (url := records[candidate.repo_id].url)
+            if (candidate.repo_id, None) in records
+            and (url := records[(candidate.repo_id, None)].url)
         }
         if existing_urls:
             if len(existing_urls) > 1:
@@ -13092,7 +13139,7 @@ async def _pr_impl(
                     "this command may silently pick a winner over."
                 )
             url = next(iter(existing_urls))
-            record = records.get(min(member_ids))
+            record = records.get((min(member_ids), None))
             # §12.38/D94: an already-open PR is a PROMOTION candidate, not a plain no-op, once its
             # blocking stub has resolved. `PrState.HELD` is entered ONLY from `DRAFTED`, ONLY by
             # end-of-run `stub_reconcile` abandoning THIS PR's own stub(s) (`enums.py::PrState`
@@ -13118,7 +13165,10 @@ async def _pr_impl(
                 for candidate in unit
                 for dep in candidate.dependencies
                 if dep not in member_ids
-                and (dep not in records or records[dep].state is not PrState.MERGED)
+                and (
+                    (dep, None) not in records
+                    or records[(dep, None)].state is not PrState.MERGED
+                )
             }
         )
         if blocking:
@@ -13202,7 +13252,7 @@ async def _emit_prs(
     *,
     run_id: str,
     units: Sequence[tuple[_PrCandidate, ...]],
-    records: Mapping[str, PullRequestDraft],
+    records: Mapping[tuple[str, str | None], PullRequestDraft],
     ready: bool,
 ) -> tuple[dict[str, str], list[str], dict[str, list[str]], dict[str, str]]:
     """Compose the run and dispatch `PrwriterWorker` once per eligible unit, in stack order.
@@ -13311,7 +13361,7 @@ async def _emit_one_pr(
     settings: FleetSettings,
     unit: Sequence[_PrCandidate],
     *,
-    records: Mapping[str, PullRequestDraft],
+    records: Mapping[tuple[str, str | None], PullRequestDraft],
     monorepo_path: Path,
     pr_root: Path,
     ready: bool,
@@ -13362,8 +13412,10 @@ async def _emit_one_pr(
             dependencies=[
                 DependencyPr(
                     repo_id=dep,
-                    url=records[dep].url if dep in records else None,
-                    state=records[dep].state if dep in records else PrState.DRAFTED,
+                    url=records[(dep, None)].url if (dep, None) in records else None,
+                    state=(
+                        records[(dep, None)].state if (dep, None) in records else PrState.DRAFTED
+                    ),
                 )
                 for dep in dependencies
             ],
@@ -13443,7 +13495,7 @@ def _extract_migration_notes(body: str) -> str:
 def _regenerate_pr_body(
     unit: Sequence[_PrCandidate],
     record: PullRequestDraft,
-    records: Mapping[str, PullRequestDraft],
+    records: Mapping[tuple[str, str | None], PullRequestDraft],
     *,
     draft: bool,
 ) -> str:
@@ -13475,8 +13527,10 @@ def _regenerate_pr_body(
         dependencies=[
             DependencyPr(
                 repo_id=dep,
-                url=records[dep].url if dep in records else None,
-                state=records[dep].state if dep in records else PrState.DRAFTED,
+                url=records[(dep, None)].url if (dep, None) in records else None,
+                state=(
+                    records[(dep, None)].state if (dep, None) in records else PrState.DRAFTED
+                ),
             )
             for dep in dependencies
         ],
@@ -13563,7 +13617,7 @@ async def _promote_prs(
     *,
     run_id: str,
     promotable: Sequence[tuple[tuple[_PrCandidate, ...], str, PullRequestDraft]],
-    records: Mapping[str, PullRequestDraft],
+    records: Mapping[tuple[str, str | None], PullRequestDraft],
 ) -> tuple[dict[str, str], dict[str, str]]:
     """`(promoted, failed)` — §12.38/D94's promotion pass over every unit `_pr_impl` found to be a
     genuine promotion candidate: already open, `HELD`, and with nothing left in `stubs` to protect.
@@ -15201,9 +15255,15 @@ async def _stub_reconcile_inputs(
             # via `_awaiting_merge` — so PENDING here is the honest "no phases row observed"
             # value, not a value chosen to steer the §13 row 45 carve-out.
             status=phase_status.get(provider_id, RepoStatus.PENDING),
-            pr_state=pr_records[provider_id].state if provider_id in pr_records else None,
+            pr_state=(
+                pr_records[(provider_id, None)].state
+                if (provider_id, None) in pr_records
+                else None
+            ),
             pr_created_at=(
-                pr_records[provider_id].created_at if provider_id in pr_records else None
+                pr_records[(provider_id, None)].created_at
+                if (provider_id, None) in pr_records
+                else None
             ),
         )
         for provider_id in provider_ids
@@ -15479,7 +15539,7 @@ async def _apply_stub_reconcile(
             if consumer_ids:
                 pr_records = await _pr_records(db, run_id)
                 for consumer_repo_id in consumer_ids:
-                    draft = pr_records.get(consumer_repo_id)
+                    draft = pr_records.get((consumer_repo_id, None))
                     if draft is None:
                         continue  # no PR record for this consumer — nothing to mark HELD
                     await _upsert_pr_record(
