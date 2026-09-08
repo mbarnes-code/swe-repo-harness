@@ -4636,6 +4636,113 @@ async def execute_hoist_rollback(
 
 
 # --------------------------------------------------------------------------------------
+# §12.31/D111 Leg D, production wiring (round VI task 72, ADR-0122 Decision 7): the trigger that
+# actually connects a `HoistBrokeOwner` finding (Leg C2, `_BuildSink` above, round VI task 66) to
+# `unhoist_contract` (slice 1, task 65) and `execute_hoist_rollback` (slice 2, task 71) — neither
+# of the two has had ANY production call site until this. Decision 7's own text: the input
+# contract is exactly "a `HoistBrokeOwner` finding + `contracts.status = 'FAILED'` exists for
+# contract X", regardless of which leg (C1/C2) produced it — this function does not know or care
+# which, and never writes or re-derives that finding itself (pure consumer, per this task's own
+# out-of-scope list).
+# --------------------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class HoistRollbackReconciliationEntry:
+    """One contract's outcome from one `_reconcile_hoist_rollbacks` pass. `rollback` is `None`
+    exactly when `unhoist.decision == "REFUSED"` — `execute_hoist_rollback` (task 71) is never
+    called on that branch (CLAUDE.md D44 precedent: the shape itself says whether the second call
+    happened, not a sentinel inside a settled value)."""
+
+    contract_id: str
+    unhoist: UnhoistOutcome
+    rollback: HoistRollbackOutcome | None
+
+
+async def _hoist_broke_contract_ids(
+    read_conn: aiosqlite.Connection, run_id: str
+) -> tuple[str, ...]:
+    """Every distinct `contract_id` named by a `HoistBrokeOwner` finding THIS run, sorted for a
+    deterministic processing order across contracts. Read-only over `_BuildSink`'s own write
+    (`cli.py` above) — this re-derives the set fresh on every call rather than tracking "already
+    seen", which is what makes `_reconcile_hoist_rollbacks` safe to re-invoke (idempotency rests
+    on `unhoist_contract`/`execute_hoist_rollback`'s own re-entry guarantees, not on this query
+    remembering anything)."""
+    rows = await _rows(
+        read_conn,
+        "SELECT payload FROM findings WHERE run_id = ? AND kind = 'HoistBrokeOwner'",
+        (run_id,),
+    )
+    contract_ids = {str(json.loads(str(row[0]))["contract_id"]) for row in rows}
+    return tuple(sorted(contract_ids))
+
+
+async def _reconcile_hoist_rollbacks(
+    read_conn: aiosqlite.Connection,
+    settings: FleetSettings,
+    *,
+    writer: StateWriter,
+    run_id: str,
+    forge: Forge,
+    now: datetime,
+) -> tuple[HoistRollbackReconciliationEntry, ...]:
+    """ADR-0122 Decision 7's production trigger. For every `HoistBrokeOwner` finding this run
+    names (`_hoist_broke_contract_ids` above), calls `unhoist_contract` (slice 1) then, only on
+    `APPLIED`, `execute_hoist_rollback` (slice 2) with its `blast_set` — in that order, one
+    contract at a time.
+
+    **Idempotent by construction, not by a tracked "already triggered" flag** (this task's own
+    brief's instruction): both callees are independently safe to re-invoke for the same contract.
+    `unhoist_contract` re-reads `contracts.status`/the blast set fresh inside its own write
+    transaction, and its `demote_to_floor` call no-ops on a row that is no longer `SUCCEEDED` (a
+    repo this function already demoted on an earlier call). `execute_hoist_rollback` computes
+    `already_reverted_shas` from the REAL branch before making any git mutation of its own, so a
+    second call against an already-rolled-back contract commits nothing new. Verified directly by
+    this task's own idempotency e2e proof (two real `fleet build` invocations, same run), not
+    assumed from either docstring.
+
+    Sequential across contracts, not concurrent — matching `_persist_cycle_findings`'s own
+    "one thing at a time" shape for a run-level reconciliation pass, even though
+    `IntegrationMutex` inside `execute_hoist_rollback` would serialize the real git commits anyway.
+
+    **Fail loud, not per-contract isolated (Rule 11).** Neither callee's exceptions
+    (`RollbackAnchorError`, `HoistRollbackConflictError`) are caught here: a genuine precondition
+    failure or should-never-happen race aborts this whole pass rather than being swallowed so a
+    later contract can proceed. This task's brief did not ask for per-contract isolation, and
+    inventing one would be a design decision beyond "pure call-site wiring" — see this task's own
+    report for the disclosed consequence (a contract whose own migration PR was never dispatched
+    with `contract_id` set, D122, raises `RollbackAnchorError` here today, which is a pre-existing
+    gap this task does not fix).
+    """
+    entries: list[HoistRollbackReconciliationEntry] = []
+    for contract_id in await _hoist_broke_contract_ids(read_conn, run_id):
+        unhoist = await unhoist_contract(
+            read_conn, settings, writer=writer, run_id=run_id, contract_id=contract_id, now=now
+        )
+        if unhoist.decision == "REFUSED":
+            entries.append(
+                HoistRollbackReconciliationEntry(
+                    contract_id=contract_id, unhoist=unhoist, rollback=None
+                )
+            )
+            continue
+        rollback = await execute_hoist_rollback(
+            read_conn,
+            settings,
+            run_id=run_id,
+            contract_id=contract_id,
+            blast_set=unhoist.blast_set,
+            forge=forge,
+        )
+        entries.append(
+            HoistRollbackReconciliationEntry(
+                contract_id=contract_id, unhoist=unhoist, rollback=rollback
+            )
+        )
+    return tuple(entries)
+
+
+# --------------------------------------------------------------------------------------
 # fleet transform
 # --------------------------------------------------------------------------------------
 
@@ -11568,6 +11675,22 @@ async def _build_impl(
                     published = True
                     if report.exit_code is not None:
                         break
+                # §12.31/D111 Leg D production wiring (ADR-0122 Decision 7, round VI task 72):
+                # the wave loop above has finished (success or not) and every per-repo write it
+                # made -- including `_BuildSink`'s own `HoistBrokeOwner` finding and
+                # `contracts.status = 'FAILED'` write (task 66) -- is durable, so every contract
+                # this run's HoistBrokeOwner findings name is reconciled here. This is the ONE
+                # place both `fleet build` and `fleet resume`'s Phase 3 continuation pass through
+                # (`_continue_impl` calls `_build_impl` directly for `Phase.BUILD`), so the check
+                # lives here once rather than being duplicated at both callers.
+                await _reconcile_hoist_rollbacks(
+                    read_conn,
+                    settings,
+                    writer=writer,
+                    run_id=run_id,
+                    forge=_forge(settings),
+                    now=_now(),
+                )
                 statuses = await _phase_statuses(read_conn, run_id, Phase.BUILD)
                 violations = _build_criterion(plans, evidence, statuses)
             finally:
