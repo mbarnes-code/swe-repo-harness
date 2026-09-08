@@ -750,6 +750,26 @@ separately blocked on `D121`; JS's is unblocked by this task but not yet exercis
 `real_build()` itself — only through this task's own direct-adapter real-Bazel proof, matching D7's
 scope) and gap 3 (`D116`) remains open regardless.
 
+**Task B re-verified live (round VI task 90, 2026-09-08).** Dispatched on the (as it turned out,
+false — see `docs/PROGRESS.md`'s dated correction at its round-VI-thirty-second-wave checkpoint)
+premise that Task B had "not [been] attempted this session"; re-derived from primary sources
+first and found it already built and merged at round VI task 57 (`68d5a5f`, 2026-09-06), two days
+before that false claim was written. Rather than build a duplicate fixture, this task independently
+re-ran the existing one (`tests/test_build_e2e.py::
+test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`) end to end
+against a live Docker daemon and a real Bazel, from a fresh worktree: **PASSED, 273.33s**, real
+`docker` invocations recorded in `attempts.command` with `--network=none` and `exit_code = 0` for
+both the happy-path and shrink-discriminator repos, and a real `bazel query 'tests(//...)'` count
+backing both. Not a skip: the first two attempts failed on worktree-local tooling gaps
+(`tools/bin/bazel` and `.venv/bin/git-filter-repo`/`uv` are all gitignored and absent from a fresh
+`git worktree`, so `real_build()`'s own seam assertions ran against a genuinely different failure
+— `git-filter-repo is not on PATH` then `'uv' is not installed` — before the environment was
+repaired). This changes nothing about §12.11's status: Task B was already DONE before this task
+ran and stays DONE; the residual (gap 3 `D116`, plus the non-Python `real_build()` nonzero-test-
+target gap this entry and task 87's own text above already name) is unchanged and this task made
+no production code change. Full account in `.superpowers/sdd/round-VI-criteria-closure/
+task-90-report.md`.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.

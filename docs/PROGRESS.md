@@ -10383,3 +10383,28 @@ re-verification):**
 - **§12.11** — D112 fully closed as of this wave (see above); §12.11's own remaining gap is Task B,
   the sandboxed real-Docker combination fixture flagged since round V as needing supervised
   dispatch (subagents can hang on live Docker invocations) — not attempted this session.
+  **Corrected 2026-09-08 (round VI task 90).** The sentence above is FALSE, not merely stale, at
+  the moment it was written: Task B was already built and merged two days earlier, round VI task
+  57, `68d5a5f` (2026-09-06 18:47 UTC) — `tests/test_build_e2e.py::
+  test_a_real_bazel_lock_publish_and_a_real_sandboxed_build_happen_in_the_same_run`, real Bazel
+  Phase A + real sandboxed (`--network=none`) Docker Phase B over two further Python repos.
+  `68d5a5f` is a direct ancestor of this checkpoint's own commit (`34a373d`), so "not attempted
+  this session" could have been verified false by `git merge-base --is-ancestor` before it was
+  written. Task 90 (dispatched to build what this sentence claimed was missing) re-derived Task
+  B's actual state from primary sources first, found it already landed, and instead independently
+  re-ran the existing fixture end to end against a live Docker daemon and a real Bazel: **PASSED,
+  273.33s**, real `docker` invocations recorded in `attempts.command` with `--network=none` and
+  `exit_code = 0`, a real `bazel query 'tests(//...)' ` count backing both the happy-path
+  (`migrated_test_count = 1 >= baseline_test_count = 1`) and the shrink discriminator
+  (`migrated_test_count = 1 < baseline_test_count = 99`, `test_count_regressed` firing correctly
+  while both real Docker build/test steps stayed green) — not a skip, not a mock. Two worktree-
+  local setup gaps had to be closed first (both environment-only, no `src/` change): `tools/bin/
+  bazel` (gitignored, not present in a fresh worktree) and `.venv/bin/git-filter-repo` /
+  `.venv/bin/uv` (ditto) were copied/symlinked in from the primary checkout before the fixture
+  could even reach Phase 3 — see task-90's own report for the full account. **§12.11's true
+  residual, unaffected by this correction: Task B is done; gap 3 (`D116`, `repos.baseline_ok`
+  never written by any production path under the shipped config) remains OPEN; and no non-Python
+  ecosystem has yet proven a nonzero real-Bazel test target through `real_build()`'s own
+  production path (JVM's blocking `D121` bazel_dep gap is itself now FIXED per its own entry, but
+  the JVM real-Bazel proof through `real_build()` has not been re-attempted since). Do not round
+  the `<n> of 48` count up on this account.**
