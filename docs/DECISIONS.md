@@ -14999,7 +14999,7 @@ no-op" is FALSE and was measured false in this same task's own fix round 2.** A 
 invocation over a genuinely still-`REQUIRES_HUMAN_INTERVENTION` provider makes the SELECT return a
 non-zero row (measured `[1]`, `tests/test_build_e2e.py::
 test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new`, formerly named
-`test_a_later_invocations_build_sweep_reads_a_real_row_but_writes_nothing_new` — the SELECT is reachable and non-zero,
+`test_the_build_side_defensive_sweep_is_a_provable_no_op` — the SELECT is reachable and non-zero,
 not a no-op). What IS a no-op, and is the true, narrower claim this paragraph should have made, is
 the WRITE: `_eligible_build_units`'s whole-fleet PASS 1 already gives the same-invocation live
 containment full visibility, so by the time a LATER invocation's sweep finds the still-abandoned
