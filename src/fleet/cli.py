@@ -6584,6 +6584,56 @@ async def _transform_criterion(
     return violations, unprobed
 
 
+async def _repropagate_terminal_providers(
+    read_conn: aiosqlite.Connection,
+    writer: StateWriter,
+    run_id: str,
+    phase: Phase,
+    settings: FleetSettings,
+) -> None:
+    """D126 / ADR-0130: re-broadcast `blocked_by` against providers this run already knows are
+    abandoned, once per invocation, before this invocation's own wave dispatch begins.
+
+    ADR-0127/ADR-0129's pre-seed passes guarantee a phase row exists before dispatch **within one
+    process**. They cannot help a LATER, separate invocation (a `--wave`-scoped sequence, or any
+    `fleet resume` re-entry): `WaveScheduler.propagate_blocked` has exactly one live call site
+    (`orchestrator/runner.py::PhaseRunner._contain`), fired once, synchronously, inside whichever
+    process's wave dispatch first drives a repo to `REQUIRES_HUMAN_INTERVENTION` — and nothing
+    re-fires it for an already-terminal, already-exited provider once that process is gone.
+    `phases.status = REQUIRES_HUMAN_INTERVENTION` is already the durable, invocation-independent
+    record of which repos are cross-wave-blocked; this sweep is the missing re-consultation of it.
+
+    Cheap and a no-op in the common case (`SELECT DISTINCT ...` returns nothing when no provider
+    is on record as abandoned for this phase). For each match, re-invokes `propagate_blocked` —
+    the same, unchanged method the live containment call site uses — which inherits every safety
+    property already reviewed for it (UPDATE-only against `phases`, terminal-status skip, no
+    `BLOCKED -> BLOCKED` self-edge, union-not-replacement, idempotent per its own docstring). A
+    repo excluded by `--repo`/`only` never has a row for this sweep to find, because the pre-seed
+    pass that runs immediately before this sweep already scopes row creation to `only` — so this
+    helper needs no `only` parameter of its own.
+    """
+    rows = await _rows(
+        read_conn,
+        "SELECT DISTINCT repo_id FROM phases "
+        " WHERE run_id = ? AND phase = ? AND status = 'REQUIRES_HUMAN_INTERVENTION'",
+        (run_id, int(phase)),
+    )
+    if not rows:
+        return
+    repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+    scheduler = WaveScheduler(
+        run_id=run_id,
+        phase=phase,
+        store=SqliteSchedulerStore(writer=writer, read_conn=read_conn),
+        db=repository,
+        budgets=settings.config.budgets,
+        clock=_now,
+        descendants=ordering_descendants(await _ordering_pairs(read_conn, settings, run_id)),
+    )
+    for row in rows:
+        await scheduler.propagate_blocked(str(row[0]))
+
+
 async def _transform_impl(
     opts: GlobalOptions,
     settings: FleetSettings,
@@ -6665,6 +6715,14 @@ async def _transform_impl(
                             now=_now(),
                             max_attempts=ladder,
                         )
+                # D126 / ADR-0130: re-propagate `blocked_by` against any provider a PREVIOUS,
+                # already-exited invocation already left REQUIRES_HUMAN_INTERVENTION — the
+                # pre-seed pass above only ever creates rows for waves THIS invocation drives, so
+                # a later-wave dependent admitted by a separate `--wave`-scoped invocation (or any
+                # `fleet resume` re-entry) would otherwise never learn its provider is abandoned.
+                await _repropagate_terminal_providers(
+                    read_conn, writer, run_id, Phase.TRANSFORM, settings
+                )
                 for index in waves:
                     members = members_by_wave[index]
                     if not members:
@@ -11678,6 +11736,17 @@ async def _build_impl(
                 for repo_id, build_files in generated.items():
                     if repo_id in plans:
                         plans[repo_id] = replace(plans[repo_id], gazelle_files=build_files)
+                # D126 / ADR-0130 judgment call 3 (controller ruling: add for defensive
+                # uniformity): `_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1
+                # above already pre-seeds every open wave's BUILD row on every invocation, so a
+                # provider that went RHI in an earlier, already-exited invocation already has
+                # every dependent's row visible to THIS invocation's own live containment call —
+                # this sweep's SELECT is structurally a no-op here (proven, not assumed, by the
+                # regression fixtures). Kept anyway so BUILD does not read as though it lacks a
+                # pattern the other two phases both need, at the cost of one cheap SELECT.
+                await _repropagate_terminal_providers(
+                    read_conn, writer, run_id, Phase.BUILD, settings
+                )
                 # ---- the wave loop: DISPATCH, and nothing else ------------------------------
                 published = False
                 undispatchable: set[str] = set()
@@ -12058,6 +12127,14 @@ async def _verify_impl(
                             now=_now(),
                             max_attempts=MAX_ATTEMPTS,
                         )
+                # D126 / ADR-0130: re-propagate `blocked_by` against any provider a PREVIOUS,
+                # already-exited invocation already left REQUIRES_HUMAN_INTERVENTION — the
+                # pre-seed pass above only ever creates rows for waves THIS invocation drives, so
+                # a later-wave dependent admitted by a separate `--wave`-scoped invocation (or any
+                # `fleet resume` re-entry) would otherwise never learn its provider is abandoned.
+                await _repropagate_terminal_providers(
+                    read_conn, writer, run_id, Phase.VERIFY, settings
+                )
                 for index in waves:
                     members, blocked = gated_by_wave[index]
                     withheld.update(blocked)

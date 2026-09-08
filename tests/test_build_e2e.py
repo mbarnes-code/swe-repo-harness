@@ -1490,6 +1490,60 @@ def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave
         assert statuses[survivor] == ("SUCCEEDED", []), statuses
 
 
+def test_a_verify_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation(
+    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+) -> None:
+    """D126 / ADR-0130 (task-84): the VERIFY-side residual ADR-0129's own judgment call 3 flagged
+    as real-but-out-of-scope — the SAME fixture the test above uses, driven across TWO SEPARATE
+    `fleet verify --wave N` invocations rather than one invocation driving both waves. Mirrors
+    `tests/test_transform_e2e.py::
+    test_a_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation`
+    as closely as `fleet verify`'s own gated PASS structure allows.
+
+    Phase 3 (`build()`) is driven to a clean `SUCCEEDED` for every repo FIRST, so `_gated_members`'s
+    predecessor=BUILD gate admits every repo into VERIFY's wave 0/1 in EITHER invocation. Only
+    after that does the fixture inject the failure, exactly as the single-invocation test above
+    does.
+
+    **Before the fix** (old-fails/new-passes proof recorded in this task's report via the
+    backup-file method, per CLAUDE.md Rule 12 — never `git stash`): `acme-lib-py` reaches
+    `REQUIRES_HUMAN_INTERVENTION` for real inside the FIRST (`--wave 0`) `fleet verify` invocation
+    — its one and only `propagate_blocked` call happens, and finishes, inside that process, before
+    `acme-app-py`'s wave-1 VERIFY row exists anywhere. The SECOND (`--wave 1`) invocation's own
+    pre-seed pass (`_gated_members`, gated on BUILD which already succeeded for every repo) creates
+    `acme-app-py`'s row fresh, but nothing re-fires containment for the already-terminal,
+    already-exited `acme-lib-py`. Measured byte-for-byte against `docs/INTEGRATION_HONESTY.md`'s
+    D126 entry and research-46-report.md §1: `FIRST_EXIT=7, SECOND_EXIT=7,
+    STATUSES={'acme-lib-py': ('REQUIRES_HUMAN_INTERVENTION', []), 'acme-lib-ts': ('SUCCEEDED', []),
+    'acme-app-py': ('SUCCEEDED', []), 'acme-app-ts': ('SUCCEEDED', [])}` — `acme-app-py` reproduces
+    D123/D125's exact original symptom across the invocation boundary.
+
+    **After the fix**, `_repropagate_terminal_providers` runs at the start of the SECOND
+    invocation, immediately after its own gated pre-seed pass and before wave dispatch: it finds
+    `acme-lib-py` durably `REQUIRES_HUMAN_INTERVENTION` on record for `Phase.VERIFY` and re-invokes
+    `propagate_blocked` against it, which now finds `acme-app-py`'s freshly pre-seeded row to write
+    `BLOCKED` into. `acme-app-py` must read `BLOCKED` / `blocked_by == ['acme-lib-py']`.
+    """
+    transformed(fleet)
+    assert build(fleet, "--no-sandbox").exit_code == ExitCode.SUCCESS
+
+    bazel.fail[("build", DESTINATIONS["acme-lib-py"])] = 34
+
+    first = verify(fleet, "--rdeps-limit", "3", "--wave", "0")
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+
+    second = verify(fleet, "--rdeps-limit", "3", "--wave", "1")
+    assert second.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, second.output
+
+    rows = query(fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 4")
+    statuses = {repo_id: (status, json.loads(blocked_by)) for repo_id, status, blocked_by in rows}
+
+    assert statuses["acme-lib-py"][0] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    assert statuses["acme-app-py"] == ("BLOCKED", ["acme-lib-py"]), statuses
+    for survivor in ("acme-lib-ts", "acme-app-ts"):
+        assert statuses[survivor] == ("SUCCEEDED", []), statuses
+
+
 def test_the_build_runs_against_the_immutable_snapshot_and_nothing_else(
     fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:
@@ -2546,6 +2600,57 @@ def test_a_build_failure_is_structured_and_does_not_take_its_siblings_down(
     listed = git(monorepo, "ls-tree", "-r", "--name-only", "integration").splitlines()
     assert f"{DESTINATIONS['acme-app-ts']}/BUILD.bazel" not in listed, listed
     assert f"{DESTINATIONS['acme-lib-ts']}/BUILD.bazel" in listed, listed
+
+
+def test_the_build_side_defensive_sweep_is_a_provable_no_op(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    resolver: FakeResolver,
+) -> None:
+    """D126 / ADR-0130 judgment call 3 (controller ruling, task-84): `_build_impl` also gets
+    `_repropagate_terminal_providers`'s sweep, for defensive uniformity, but the ADR's own
+    analysis (research-46-report.md §3, "why BUILD does not exhibit this residual") says it must
+    be a pure no-op given `_eligible_build_units`'s whole-fleet, `--wave`-independent PASS 1:
+    every invocation already pre-seeds every open wave's BUILD row before dispatch, so nothing can
+    ever be `REQUIRES_HUMAN_INTERVENTION` on record from a PRIOR invocation's provider that this
+    invocation's own live containment could not already reach.
+
+    Per CLAUDE.md's guardrail against trusting a clean result without validating what the
+    instrument actually observed, this does not merely assert the surrounding test stays green.
+    It wraps `cli._rows` to intercept every call whose SQL is the sweep's own distinctive
+    `SELECT DISTINCT repo_id ... status = 'REQUIRES_HUMAN_INTERVENTION'` query and records how
+    many rows each call returned, over this file's own existing RHI-producing fixture shape
+    (mirrors `test_a_build_failure_is_structured_and_does_not_take_its_siblings_down`'s own
+    drive: `acme-app-ts` reaches BUILD `REQUIRES_HUMAN_INTERVENTION` for real via a real `bazel
+    build` exit 34). Two things are asserted, not one: `calls` is non-empty (the sweep's SELECT
+    genuinely ran — the instrument fired, so a silent/broken sweep cannot pass this by never being
+    exercised), and every observed call returned zero rows (the no-op claim, measured rather than
+    assumed).
+    """
+    seen: list[int] = []
+    original_rows = cli._rows
+
+    async def spy(conn: Any, sql: str, params: tuple[object, ...] = ()) -> list[tuple[Any, ...]]:
+        result = await original_rows(conn, sql, params)
+        if "DISTINCT repo_id" in sql and "status = 'REQUIRES_HUMAN_INTERVENTION'" in sql:
+            seen.append(len(result))
+        return result
+
+    monkeypatch.setattr(cli, "_rows", spy)
+
+    fake = FakeBazel(
+        fleet / "artifacts" / "fake-bazel", fail={("build", DESTINATIONS["acme-app-ts"]): 34}
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake)
+    monkeypatch.setattr(cli, "FILTER_REPO_RUNNER", FakeFilterRepo())
+
+    transformed(fleet)
+    result = build(fleet, "--no-sandbox")
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    assert seen, "the sweep's own SELECT never ran — instrument silent, not merely no-op"
+    assert all(count == 0 for count in seen), seen
 
 
 # ---------------------------------------------------------------------------------------

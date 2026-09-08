@@ -684,6 +684,58 @@ def test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_i
     # second fixture for a gap this task does not claim to close.
 
 
+def test_a_provider_reaching_rhi_in_a_separate_earlier_invocation_blocks_its_later_wave_dependent_in_a_second_invocation(
+    fleet: Path,
+) -> None:
+    """D126 / ADR-0130 (task-84): the residual the test above's own comment names as NOT fixed by
+    ADR-0127 — the SAME fixture, driven across TWO SEPARATE `fleet transform --wave N` invocations
+    rather than one invocation driving both waves.
+
+    **Root cause (ADR-0130 / research-46-report.md §2), re-stated for this fixture:**
+    `acme-lib-py`'s RHI transition, and its one and only `WaveScheduler.propagate_blocked` call
+    (`PhaseRunner._contain`, the sole call site in `src/fleet/`), happen entirely inside the FIRST
+    (`--wave 0`) invocation's process. `_open_phase_waves` returns exactly `(0,)` for that
+    invocation, so ADR-0127's pre-seed pass never creates `acme-app-py`'s wave-1 row in that
+    process. The SECOND (`--wave 1`) invocation is a fresh process: its own pre-seed pass creates
+    `acme-app-py`'s row fresh at `PENDING`, but nothing re-fires containment for the
+    already-terminal, already-exited `acme-lib-py` — there is no second call site to do so, prior
+    to this task's fix.
+
+    **Before the fix** (old-fails/new-passes proof recorded in this task's report via the
+    backup-file method, per CLAUDE.md Rule 12 — never `git stash`): `acme-app-py` is admitted and
+    dispatched as an ordinary unblocked repo in the second invocation and reads back `SUCCEEDED` /
+    `blocked_by == []`, reproducing D123's exact original symptom across the invocation boundary.
+    Measured byte-for-byte against `docs/INTEGRATION_HONESTY.md`'s D126 entry and
+    research-46-report.md §1: `FIRST_EXIT=7, SECOND_EXIT=7,
+    ROWS=[('acme-app-py','SUCCEEDED','[]'), ('acme-app-ts','SUCCEEDED','[]'),
+    ('acme-lib-py','REQUIRES_HUMAN_INTERVENTION','[]'), ('acme-lib-ts','SUCCEEDED','[]')]`.
+
+    **After the fix**, `_repropagate_terminal_providers` runs at the start of the SECOND
+    invocation, immediately after its own pre-seed pass and before wave dispatch: it finds
+    `acme-lib-py` durably `REQUIRES_HUMAN_INTERVENTION` on record (`phases.status`, from the FIRST
+    invocation) and re-invokes `propagate_blocked` against it, which now finds `acme-app-py`'s
+    freshly pre-seeded row to write `BLOCKED` into. `acme-app-py` must read `BLOCKED` /
+    `blocked_by == ['acme-lib-py']`, never dispatched at all — §12.14's blast-containment clause,
+    finally honored across a process boundary.
+    """
+    write_rules(fleet, PY_PROVIDER_FAILS_RULE)
+    scanned(fleet)
+
+    first = transform(fleet, "--wave", "0")
+    assert first.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, first.output
+
+    second = transform(fleet, "--wave", "1")
+    assert second.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, second.output
+
+    rows = query(fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 2")
+    statuses = {repo_id: (status, json.loads(blocked_by)) for repo_id, status, blocked_by in rows}
+
+    assert statuses["acme-lib-py"][0] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    assert statuses["acme-app-py"] == ("BLOCKED", ["acme-lib-py"]), statuses
+    for survivor in ("acme-lib-ts", "acme-app-ts"):
+        assert statuses[survivor] == ("SUCCEEDED", []), statuses
+
+
 def test_a_degraded_repo_with_no_rhi_repo_exits_7(fleet: Path) -> None:
     """D93 / SPEC §3.5.1 point 5: a run with a `DEGRADED` repo and NO
     `REQUIRES_HUMAN_INTERVENTION` repo exits **7**, not 0 — the specific trigger D93 names,
