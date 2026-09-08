@@ -13187,11 +13187,22 @@ async def _rewrite_superseded_consumer_labels(
     its own. A per-consumer failure is caught and recorded rather than raised past this loop
     (Rule 11: fail loud, but a drifted or conflicted consumer must not block every OTHER
     consumer's own, independent rewrite in the same `--sync` invocation).
+
+    A missing/unavailable monorepo checkout (`MonorepoUnavailableError`) is caught here rather
+    than left to propagate and abort the WHOLE `_pr_sync_impl` call: T1's own `stubs`/`tasks`
+    write and every OTHER repo's ordinary merge-detection in the same `--sync` invocation are
+    unrelated to whether this follow-on rewrite can run, and a fleet whose monorepo checkout is
+    temporarily unavailable must still observe merges and supersede stubs -- exactly the "async
+    follow-on work" framing ADR-0128 judgment call 1 gives this step. Reported the same way a
+    per-consumer `LabelRewriteError` is.
     """
     consumers = sorted(set(consumer_repo_ids))
     if not consumers:
         return {}
-    monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    try:
+        monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    except MonorepoUnavailableError as exc:
+        return dict.fromkeys(consumers, f"FAILED: {exc}")
     stub_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-resolve"
     read_conn = await connect_ro(path)
     try:
@@ -13527,7 +13538,16 @@ async def _run_revalidation_claims_impl(
     if not candidates:
         return {"claimed": [], "outcomes": {}}
 
-    monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    try:
+        monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    except MonorepoUnavailableError as exc:
+        # Mirrors `_rewrite_superseded_consumer_labels`'s own catch: a temporarily-unavailable
+        # monorepo checkout must not abort the REST of `fleet resume` (steps 1-6 and 8 make no
+        # git/Bazel call at all) -- reported per candidate task rather than raised.
+        return {
+            "claimed": [],
+            "outcomes": {str(row[0]): f"FAILED: {exc}" for row in candidates},
+        }
     revalidate_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-revalidate"
     outcomes: dict[str, str] = {}
     async with StateWriter(path, owner="fleet-resume-revalidate") as writer:
