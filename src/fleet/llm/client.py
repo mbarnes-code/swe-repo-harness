@@ -616,17 +616,18 @@ class LadderModelClient:
                 # straight to the next target, exactly like an immediate failover — no call, no
                 # budget check, no drift check against an endpoint we are not going to use.
                 continue
-            backend = self._backend_for(target)
-            caps = merge_capabilities(backend.declared_capabilities(target), target)
-
-            # Re-checked HERE, per target: the next target may be dearer than the one that just
-            # failed, so a budget cleared once is not a budget cleared for the ladder (§11.2).
-            cap = min(requested, caps.max_output_tokens)
-            self._check_budget(budget, target, estimate_input_tokens(messages), cap)
-
-            mode = negotiate(caps)
-            self._emit_drift(role, route.tier, target, caps, mode)
             try:
+                backend = self._backend_for(target)
+                caps = merge_capabilities(backend.declared_capabilities(target), target)
+
+                # Re-checked HERE, per target: the next target may be dearer than the one that
+                # just failed, so a budget cleared once is not a budget cleared for the ladder
+                # (§11.2).
+                cap = min(requested, caps.max_output_tokens)
+                self._check_budget(budget, target, estimate_input_tokens(messages), cap)
+
+                mode = negotiate(caps)
+                self._emit_drift(role, route.tier, target, caps, mode)
                 response = await self._call_target(
                     role=role,
                     tier=route.tier,
@@ -655,11 +656,27 @@ class LadderModelClient:
                     # RATE_LIMIT it could and CONNECTION/SERVER_ERROR never had one to absorb —
                     # this is never fired for a single 429 mid-backoff. SchemaUnsatisfied never
                     # counts: it is a negotiation-ladder problem (§7.7), not evidence the
-                    # endpoint is unreachable.
+                    # endpoint is unreachable — but a HALF_OPEN probe still needs resolving, so
+                    # it goes through `abandon_probe` instead (a no-op for a non-probing target).
                     self._health.record_failure(target, route.tier)
+                else:
+                    self._health.abandon_probe(target, route.tier)
                 if index + 1 < len(targets):
                     self._emit_failover(role, route.tier, target, targets[index + 1], trigger)
                 continue
+            except BaseException:
+                # Review fix (round 1): every OTHER exit door — `OutputTruncated`, `ModelRefused`,
+                # `BudgetExhausted`, `UnknownBackend`, a cancellation, anything `_check_budget` or
+                # `_backend_for` raises — used to leave a `HALF_OPEN` probe wedged there FOREVER,
+                # because the only two resolutions were `record_success`/`record_failure` above
+                # and neither fires for these. Worse than not building the breaker at all: one
+                # unlucky probe silently kills a target for every worker sharing this client for
+                # the rest of the run. `abandon_probe` is a no-op for a non-probing (UP) target,
+                # so this is safe to call unconditionally before letting the exception propagate
+                # exactly as it always did — this changes no exception's type or message, only
+                # adds the missing resolution.
+                self._health.abandon_probe(target, route.tier)
+                raise
             self._health.record_success(target, route.tier)
             # ADR-0107, §11.8: `index` at the point `_call_target` succeeded IS the failover-hop
             # count for this call — 0 for the first target, 1 for one hop, etc. Stamped only when

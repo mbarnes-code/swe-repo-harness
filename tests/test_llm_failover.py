@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field
 from typing import ClassVar
 
 import pytest
@@ -399,3 +400,142 @@ def test_schema_unsatisfied_never_opens_the_breaker() -> None:
     assert [c["model_id"] for c in backend.calls] == ["m1", "m1", "m2"]
     assert transitions == [], "SchemaUnsatisfied is never a qualifying failure for the breaker"
     assert response.usage.model_id == "m2"
+
+
+def test_schema_unsatisfied_during_a_half_open_probe_abandons_it_to_down_not_wedged() -> None:
+    """Finding 1 (review round 1, a real bug): before this fix, `may_call` returned `False`
+    unconditionally for `HALF_OPEN` and the only two exits were `record_success`/`record_failure`
+    — so a probe resolving via `SchemaUnsatisfied` (an ORDINARY, CAUGHT outcome, not even a
+    propagating exception) left the target wedged at `HALF_OPEN` FOREVER, silently, for the rest
+    of the process. Proven directly: the probe fails via `SchemaUnsatisfied`, the target goes
+    straight back to `DOWN` (not stuck), and — because this is not connectivity evidence —
+    `down_since` is NOT reset, so the very next call is immediately eligible to probe again (no
+    forced extra wait, unlike a genuine `TransportError` failure during a probe)."""
+    clock = MutableClock(0.0)
+    retry_policy = RetryPolicy(max_transient_retries=0, backoff_base_s=0.0, backoff_cap_s=0.0)
+    invalid = BackendReply(
+        text=json.dumps({"verdict": "migrate", "score": "not-an-int"}),
+        usage=TokenUsage(input_tokens=100, output_tokens=20),
+        finish_reason="stop",
+    )
+    backend = FakeBackend(
+        [
+            TransportError("slow down", trigger="RATE_LIMIT"),  # m1 -> DOWN at t=0
+            ok_reply(),  # m2 answers call 1
+            invalid,  # m1's probe at t=11: initial attempt
+            invalid,  # m1's probe: one repair, still invalid -> SchemaUnsatisfied
+            ok_reply(),  # m2 answers call 2 (m1 failed over via SchemaUnsatisfied)
+            ok_reply(),  # m1's SECOND probe, same clock, succeeds -> UP
+        ]
+    )
+    transitions: list[BackendHealthTransition] = []
+    client = build_client(
+        backend,
+        [target("m1"), target("m2")],
+        policy=CallPolicy(open_after_failures=1, cooldown_s=10.0, max_schema_repairs=1),
+        retry_policy=retry_policy,
+        health_transitions=transitions,
+        clock=clock,
+    )
+
+    call(client)  # t=0: m1 -> DOWN
+    clock.value = 11.0
+    response = call(client)  # t=11: m1's probe fails via SchemaUnsatisfied
+
+    assert response.usage.model_id == "m2"
+    assert [t.to_state for t in transitions] == ["DOWN", "HALF_OPEN", "DOWN"]
+    assert transitions[-1].reason.startswith("probe abandoned"), (
+        "abandoned (no connectivity evidence), not treated as a qualifying failure"
+    )
+
+    # The actual proof it is not wedged: down_since was NOT reset by the abandon (the clock has
+    # not moved), so the target is immediately eligible to probe again -- a genuine TransportError
+    # failure during a probe would instead have restarted the 10s cooldown.
+    response2 = call(client)
+    assert response2.usage.model_id == "m1", "immediately probed again — no extra wait imposed"
+    assert [t.to_state for t in transitions] == ["DOWN", "HALF_OPEN", "DOWN", "HALF_OPEN", "UP"]
+
+
+def test_a_propagating_exception_during_a_half_open_probe_still_abandons_it_to_down() -> None:
+    """Finding 1's second required proof: an exception that ESCAPES `complete()` entirely (never
+    caught by the `SchemaUnsatisfied`/`TransportError` clause) must still resolve a `HALF_OPEN`
+    probe before propagating. `BudgetExhausted` stands in for the whole class the review named
+    (`OutputTruncated`/`ModelRefused`/`UnknownBackend`/a cancellation take the identical path,
+    since `abandon_probe` is called from the same catch-all `except BaseException` regardless of
+    which one fires)."""
+    clock = MutableClock(0.0)
+    retry_policy = RetryPolicy(max_transient_retries=0, backoff_base_s=0.0, backoff_cap_s=0.0)
+    backend = FakeBackend(
+        [
+            TransportError("slow down", trigger="RATE_LIMIT"),  # m1 -> DOWN at t=0
+            ok_reply(),  # m2 answers call 1
+            ok_reply(),  # m1's probe succeeds on the FOLLOWING ordinary call
+        ]
+    )
+    transitions: list[BackendHealthTransition] = []
+    client = build_client(
+        backend,
+        [target("m1"), target("m2")],
+        policy=CallPolicy(open_after_failures=1, cooldown_s=10.0),
+        retry_policy=retry_policy,
+        health_transitions=transitions,
+        clock=clock,
+    )
+
+    call(client)  # t=0: m1 -> DOWN
+    clock.value = 11.0
+
+    # A budget too small for the probed target: `_check_budget` raises BEFORE any
+    # `backend.invoke()`, so this exercises the propagating-exception exit door with zero script
+    # consumption — `BudgetExhausted` is never caught by complete()'s
+    # `(SchemaUnsatisfied, TransportError)` clause, so it propagates straight out.
+    starving_budget = client_module.CallBudget(
+        remaining_tokens=1_000_000, remaining_usd=0.000_000_001, deadline=1_000.0
+    )
+    with pytest.raises(client_module.BudgetExhausted):
+        call(client, budget=starving_budget)
+
+    # m1 was claimed as the HALF_OPEN probe before the raise; it must have been abandoned back
+    # to DOWN rather than left permanently wedged.
+    assert [t.to_state for t in transitions] == ["DOWN", "HALF_OPEN", "DOWN"]
+    assert transitions[-1].reason.startswith("probe abandoned")
+
+    # The actual proof it is not wedged: an ordinary next call (no starved budget) probes m1
+    # again and succeeds, rather than skipping it forever.
+    response = call(client)
+    assert response.usage.model_id == "m1"
+    assert [t.to_state for t in transitions] == ["DOWN", "HALF_OPEN", "DOWN", "HALF_OPEN", "UP"]
+
+
+def test_backoff_is_genuinely_consulted_between_retries_not_a_busy_loop() -> None:
+    """Finding 5 (review round 1, minor): the call log alone cannot tell "the client backed off
+    between retries" apart from "the client busy-loops calling `invoke()` in a tight loop that
+    happens to succeed on the Nth try" — both produce an identical sequence of `model_id`s. A spy
+    wrapping `RetryPolicy.backoff_delay` proves `_call_target` genuinely consults the backoff
+    primitive once per retry, with the retry index incrementing each time, rather than looping
+    without ever asking how long to wait."""
+
+    @dataclass(frozen=True, slots=True)
+    class SpyRetryPolicy(RetryPolicy):
+        calls: list[int] = field(default_factory=list, compare=False)
+
+        def backoff_delay(self, retry_index: int) -> float:
+            self.calls.append(retry_index)
+            return 0.0  # still instant — this asserts CONSULTATION, not real timing
+
+    spy = SpyRetryPolicy(max_transient_retries=3)
+    backend = FakeBackend(
+        [
+            TransportError("slow down", trigger="RATE_LIMIT"),
+            TransportError("slow down", trigger="RATE_LIMIT"),
+            TransportError("slow down", trigger="RATE_LIMIT"),
+            ok_reply(),
+        ]
+    )
+    client = build_client(backend, [target("m1")], retry_policy=spy)
+
+    response = call(client)
+
+    assert spy.calls == [1, 2, 3], "backoff consulted once per retry, index incrementing"
+    assert response.usage.model_id == "m1"
+    assert [c["model_id"] for c in backend.calls] == ["m1", "m1", "m1", "m1"]

@@ -15,7 +15,17 @@ here and this module decides whether the target is still worth calling.
   elapsed since it went down, at which point exactly the NEXT call is let through as a probe and
   the state becomes `HALF_OPEN` for the duration of that one call.
 * `HALF_OPEN` — a probe is in flight. A successful reply resets to `UP` (`consecutive_failures`
-  cleared). A qualifying failure sends it back to `DOWN` and restarts the cooldown clock.
+  cleared). A qualifying failure sends it back to `DOWN` and restarts the cooldown clock. Any OTHER
+  outcome — `SchemaUnsatisfied`, `OutputTruncated`, `ModelRefused`, `BudgetExhausted`,
+  `UnknownBackend`, a cancellation, anything that is not success and not a qualifying
+  `TransportError` — abandons the probe (`abandon_probe`) straight back to `DOWN` WITHOUT
+  restarting the cooldown: none of those outcomes is connectivity evidence, so the next call to
+  this target is eligible to probe again immediately (§11.8: only a connection-level/5xx failure or
+  an exhausted `RATE_LIMIT` schedule may ever extend how long a target stays unavailable). Without
+  this, `may_call` returning `False` unconditionally for `HALF_OPEN` and only `record_success`/
+  `record_failure` ever leaving it means a probe resolving any other way wedges the target at
+  `HALF_OPEN` **permanently** — worse than never building the breaker at all, because every future
+  call to every worker sharing this client silently skips a target nothing is actually wrong with.
 
 **Never throttling alone (§11.8).** `record_failure` is called by `complete()` only on the two
 events SPEC §11.8 names as DOWN-worthy: a connection-level failure, a 5xx that survived the
@@ -151,6 +161,35 @@ class BackendHealth:
                 f"{state.consecutive_failures} consecutive qualifying failures "
                 f"(open_after_failures={self.open_after_failures})",
             )
+
+    def abandon_probe(self, target: BackendTarget, tier: ModelTier) -> None:
+        """Any call outcome that is neither success (`record_success`) nor a qualifying
+        `TransportError` failure (`record_failure`) — `SchemaUnsatisfied`, `OutputTruncated`,
+        `ModelRefused`, `BudgetExhausted`, `UnknownBackend`, a cancellation, or anything else the
+        call site did not otherwise handle. A no-op unless the target is `HALF_OPEN`: an ordinary
+        `UP` target hitting one of these needs nothing from the breaker, which is what makes it
+        safe for `complete()` to call this unconditionally on every non-success exit rather than
+        having to track separately whether THIS call was the one probe.
+
+        `down_since` is deliberately left UNCHANGED — this is the one behavioural difference from
+        `record_failure`'s own `HALF_OPEN` branch. None of the outcomes this method exists for is
+        connectivity evidence, so extending the cooldown for them would be exactly the "throttling
+        alone" over-inference §11.8 forbids, pointed at a new class of non-signal. Leaving
+        `down_since` alone means the clock condition `may_call` re-checks is already satisfied (it
+        was, or this probe would not have been claimed), so the very next call to this target is
+        immediately eligible to probe again — the target gets another chance right away rather
+        than being punished for a reason that says nothing about whether it is reachable.
+        """
+        state = self._state_for(target)
+        if state.state != "HALF_OPEN":
+            return
+        self._transition(
+            target,
+            tier,
+            state,
+            "DOWN",
+            "probe abandoned (non-connectivity outcome); cooldown NOT restarted",
+        )
 
     def _transition(
         self,

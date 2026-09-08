@@ -458,16 +458,20 @@ class LlmFindingSink:
     ) -> None:
         """One `backend_health_transition` event (§11.8, ADR-0132). Through `self.emitter`, same
         reasoning as `_write_llm_call`: this sink's payloads are LLM-adjacent, so redaction and
-        `logs/events-<run_id>.jsonl` both go through the one boundary that provides them.
+        `logs/events-<run_id>.jsonl` both go through the one boundary that provides them — and,
+        unlike `_write_failover`'s direct `repository.append_event`, going through `emitter.emit`
+        means `level` is validated against `obs/events.py`'s `_LEVELS` allowlist before it lands
+        (`_build_row` silently coerces anything else to `"info"`), which is why this uses the
+        real member name rather than the "warn" abbreviation `_write_failover` gets away with.
 
-        `level` is `"warn"` for `DOWN` (an operator-actionable state — the target is being
+        `level` is `"warning"` for `DOWN` (an operator-actionable state — the target is being
         skipped) and `"info"` for `HALF_OPEN`/`UP` (routine recovery, not itself actionable).
         """
         if self.emitter is None:
             return
         await self.emitter.emit(
             BACKEND_HEALTH_TRANSITION_EVENT,
-            level="warn" if transition.to_state == "DOWN" else "info",
+            level="warning" if transition.to_state == "DOWN" else "info",
             repo_id=None,  # fleet-level: a target's health is not a property of one repo
             phase=None,
             payload={

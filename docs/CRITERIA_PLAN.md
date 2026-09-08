@@ -2838,7 +2838,7 @@ rather than inheriting a stale verdict"); `TierUnavailable`/exit-8 is unaffected
 exhausted tier. New `llm/failover.py::BackendHealth`, wired into `llm/client.py`'s dispatch loop
 and `_call_target`'s same-target `RATE_LIMIT` backoff arm — see ADR-0132 and D55's Status
 update in `docs/INTEGRATION_HONESTY.md` for the full design and disclosed residuals (the halt
-STRING at `orchestrator/runner.py:640` is unchanged, and the proactive token-bucket/AIMD half of
+STRING at `orchestrator/runner.py:739` is unchanged, and the proactive token-bucket/AIMD half of
 D55's broader framing remains open — neither is this criterion's literal text). `llm_failovers`
 recording (D62) closed round Y task 4 (ADR-0107): `TokenUsage.llm_failovers` is stamped from
 `LadderModelClient.complete()`'s own retry-loop index, wired through `AttemptRow`/

@@ -3694,8 +3694,9 @@ above records what was true when it was written and is left standing. What chang
   `DOWN` and drives the same `TierUnavailable`/exit-8 halt as before — which is §11.8's own
   design (case (ii)'s acceptance bar), not a residual instance of this defect: sustained,
   unrecovering throttling is meant to eventually read as unavailability.
-* **What is NOT closed, disclosed rather than silently left.** (1) `orchestrator/runner.py:640`'s
-  halt STRING is untouched — it still reads `"...is DOWN"` unconditionally on any
+* **What is NOT closed, disclosed rather than silently left.** (1) `orchestrator/runner.py:739`'s
+  halt STRING is untouched in substance (only the comment above it was corrected, fix round 1) —
+  it still reads `"...is DOWN"` unconditionally on any
   `TierUnavailable`, including the narrower edge case where a tier exhausts via `max_targets_
   per_call` before any individual target's `consecutive_failures` reaches `open_after_failures`
   (e.g. `open_after_failures=3` with each of 3 targets failing once) — that halt still fires
@@ -3703,8 +3704,13 @@ above records what was true when it was written and is left standing. What chang
   explicitly left this wording change to implementer judgment, not mandated it; task 88 did not
   take it up, and Rule 14's build-to-the-literal-wording discipline is why. (2) The broader §13
   row 43 framing this entry's title carries — "no rate limiter exists at all" — remains open:
-  the proactive token-bucket/AIMD half (`llm.rate_limit.rpm`/`tpm`/`aimd.*`, 8 `KNOWN_INERT`
-  leaves) is unbuilt, per ADR-0132's own explicit scoping (§12.43(ii)'s literal text is entirely
+  the proactive token-bucket/AIMD half (`llm.rate_limit.rpm`/`tpm`/`aimd.*`) is unbuilt — 8
+  genuine LEAF fields under that prefix are `KNOWN_INERT` (`honor_retry_after`, `defaults.rpm`,
+  `defaults.tpm`, `targets.rpm`, `targets.tpm`, `aimd.shrink_factor`, `aimd.grow_every_s`,
+  `aimd.floor`), plus 2 section-level entries for the same reason (`llm.rate_limit`,
+  `llm.rate_limit.aimd`) — 10 `KNOWN_INERT` entries total under the prefix, re-counted directly
+  against `tests/test_config_keys_are_read.py` rather than inherited from research-48's
+  unattributed "8". Per ADR-0132's own explicit scoping (§12.43(ii)'s literal text is entirely
   about the reactive breaker, not proactive pacing). A sustained, uniform throttle across every
   target in a tier — one no backoff schedule ever resolves — still eventually halts the run at
   exit 8, which is correct per §11.8 but is the scenario an AIMD controller would instead have

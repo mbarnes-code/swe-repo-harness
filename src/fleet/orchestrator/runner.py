@@ -694,16 +694,25 @@ class PhaseRunner[I: WorkerInput, O: WorkerOutput]:
                 #
                 # The finding records the OBSERVATION and refuses to assert a cause — see
                 # `LlmFindingSink.record_backend_unavailable`. `decision.reason` is deliberately
-                # NOT copied into it: `retry.py:196` (and the halt string just below) both say
-                # "every target for the tier is DOWN", and `DOWN` is a `BackendHealth` state that
-                # exists nowhere in `src/` and that §13 row 43 forbids inferring from throttling
-                # alone — which is exactly what a rate-limited account produces here, because
-                # `client.py:532` retires a target without inspecting `TransportError.trigger`.
-                # The message below is left as it stands: correcting that vocabulary spans
-                # `retry.py`, `enums.py:289` and the SPEC, and building the health state machine
-                # that would make it true is §13 row 43's own (large) ticket. A log line scrolls
-                # away; a finding is what a human reads afterwards, so only the finding is fixed
-                # here — it must not carry the claim.
+                # NOT copied into it: `retry.py`'s `BACKEND_UNAVAILABLE` branch (and the halt
+                # string just below) both say "every target for the tier is DOWN". **Corrected
+                # 2026-09-08 (round VI task 88, ADR-0132): `DOWN` is no longer a state with no
+                # representation in `src/` — `llm/failover.py::BackendHealth` is a real per-target
+                # three-state breaker (§12.43 case (ii)), and `llm/client.py`'s `complete()` now
+                # marks a target `DOWN` after `open_after_failures` qualifying failures rather
+                # than ever inferring it from throttling alone (§13 row 43).** The finding still
+                # refuses to assert a cause here, for a narrower reason than before this
+                # correction: `TierUnavailable` can still be raised with no target having actually
+                # reached `BackendHealth.DOWN` — a tier can exhaust via `max_targets_per_call` on
+                # failures below that threshold — so the halt string still cannot be taken as a
+                # diagnosis on its own. `record_backend_unavailable`'s own `asserts_outage`/
+                # `failover_triggers_recorded` fields are the mechanism that already answers this
+                # correctly per row; this comment does not re-derive that design. The halt STRING
+                # below is left exactly as it stood — ADR-0132 judgment call 3 left rewriting it
+                # to implementer judgment rather than mandating it; see `docs/
+                # INTEGRATION_HONESTY.md`'s D55 Status paragraph for the disclosed residual. A log
+                # line scrolls away; a finding is what a human reads afterwards, so the finding's
+                # honesty fields are the enforced guarantee here, not this comment.
                 #
                 # Isolated for the same reason as `_drain_llm_findings`, and here the stake is
                 # higher than a wrong repo verdict: an exception escaping this line propagates
