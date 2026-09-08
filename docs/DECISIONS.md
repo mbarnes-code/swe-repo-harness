@@ -13286,6 +13286,22 @@ contract's `hoist_target_path` names does not exist in any integration worktree,
 `proto_library` would name sources that are not there. Publishing a contract's `BUILD.bazel` is
 blocked on content hoisting, which is an independent feature and stays out of Clause B.
 
+**Annotated 2026-09-08 (round VI task 95) — the PREMISE above is now false; the CONCLUSION still
+holds, and this paragraph is left unedited per this project's annotate-don't-rewrite convention.**
+`filter_repo.py`'s `HOISTED_CONTRACT_TRAILER` now HAS a production caller:
+`cli._ingest_contract_source`, wired as a new PASS 0 in `_build_impl` before the REPO ingest loop
+(round VI task 95's own ADR draft, this file). A `HOISTED`/`MIGRATED` contract's content is now
+genuinely committed onto `integration` at `hoist_target_path`, with the `Hoisted-Contract:`
+trailer, proven end to end with real `git-filter-repo`. **The conclusion is precisely NOT
+affected**: task 95 built the ingest caller only — it did not publish a contract's `BUILD.bazel`,
+did not give a contract a `phases` row, and did not admit CONTRACT nodes to any wave query (all
+three are still explicitly true, unchanged). PASS 2b (Clause B, this ADR) is still read-only and
+still stays out of publishing — see §5.2's own note in research-50-report.md and JC-4's disclosed
+duplication in task 95's ADR draft (this file), which is the reason a published `proto_library`
+still cannot safely name `hoist_target_path` as its only source: the owner's own unfiltered copy
+still lands on the branch too. Full account: `.superpowers/sdd/round-VI-criteria-closure/
+task-95-report.md`.
+
 This is safe to add beside the existing passes because every wave query in the tree already filters
 `node_kind = 'REPO'` (`_open_phase_waves`, `_gated_members`, `_wave_repos`, the ledger rollups,
 `state/projection.py`): a CONTRACT wave member is invisible to `fleet transform`/`fleet build`
@@ -15325,3 +15341,261 @@ preserving property this addendum describes. Independently re-verified (round VI
 tests pass on `main`, and two adversarial mutations of `abandon_probe` (a no-op variant; a
 cooldown-reset variant matching `record_failure`'s branch) each reproduce and redden exactly these
 two tests.
+
+## ADR-DRAFT (task 95) — §12.31 case (ii) prerequisite: `_ingest_contract_source`, the missing
+caller for SPEC §3.3 step 1's already-built contract-merge primitives
+
+**Number is a PLACEHOLDER, not a decision.** Per CLAUDE.md's Central Number Allocation rule, this
+draft was written by a worker (round VI task 95) with no live orchestrator assigning a number at
+dispatch. The next free ADR number should be re-derived form-agnostically (union of the three
+heading forms `docs/INTEGRATION_HONESTY.md` uses, or `\bADR-\d+\b`) at merge time, never inherited
+from this draft or from research-50-report.md's own count — both are stale the moment a sibling
+lane lands. **Do not renumber this heading in place**; the controller assigns the real number when
+merging and updates every cross-reference in the same commit.
+
+**Decision (round VI task 95, based on research-50-report.md).** research-49 sized §12.31 case
+(ii) as needing a whole new contract commit/merge pipeline design (LARGE/HIGH). research-50
+corrected that: the pipeline is *specified* in `docs/SPEC.md:1259-1274` (§3.3 step 1, "Ingesting a
+hoisted contract node", ADR-0011 as amended by ADR-0019), and its primitives — `RelocationSpec.
+source_paths`/`source_prefix`, `SourceProvenance.contract_id`, `already_ingested`'s three-way
+match, `merge_source`'s `--allow-unrelated-histories --no-ff` — are already built and unit-tested
+in `src/fleet/vcs/filter_repo.py`. What was missing was a **caller**: `RelocationSpec(` had
+exactly one production construction site (`cli.py`'s `_ingest_build_source`) and it never set the
+hoisted-contract fields; `default_source_paths()` had zero callers anywhere. This ADR is that
+caller, `_ingest_contract_source` (`src/fleet/cli.py`), wired as a new PASS 0 in `_build_impl`
+before the existing REPO ingest loop.
+
+**Re-verified against this task's own checked-out HEAD (`81f27e3`), not inherited from
+research-50.** `RelocationSpec(`, `SourceProvenance(`, `default_source_paths` callers, and
+`_eligible_contract_units`'s existing PASS 2b call site were all re-read before writing any code;
+research-50's claims held.
+
+**Scope, explicitly.** This is "task 1" of research-50's recommended two-task sequence — the
+ingest caller only. Task 2 (re-anchoring `_ordered_revert_shas` off the `Hoisted-Contract:`
+trailer instead of `PullRequestDraft.contract_id`) is **deliberately not built here** —
+research-50 warns that task 2 before task 1 would revert an owner's whole repo import and call it
+a contract rollback, which is worse than the current `RollbackAnchorError` failure mode. Owner-side
+subtraction (A4 / JC-4 below — excluding a hoisted contract's paths from its owner's own
+relocation) is also not built here; its absence is a disclosed, bounded defect (below), not a
+blocker for this task's own proof bar.
+
+**Controller ruling carried forward, not re-litigated here.** §12.31 case (ii)'s literal trigger —
+"a hoist whose **contract wave** fails `bazel build`" — is architecturally unreachable today
+(every dispatch-side wave reader filters `node_kind='REPO'`, ADR-0119's own safety argument). The
+controller has already ruled this gets an adjudication-pending flag on that specific
+sub-question, with the eventual closing task's proof scenario targeting a REPO-kind consumer wave
+failing downstream of a bad hoist merge instead. This task does not change or depend on that
+ruling — the ingest caller is needed regardless of how it resolves.
+
+### The eight judgment calls (research-50 §3.3), resolved
+
+**JC-1 — which merge does a future revert-series revert: the local ingest merge, or the forge PR
+merge?** Not decided here — this is task 2's call, since it concerns `_ordered_revert_shas`, which
+this task does not touch. Recorded for continuity: research-50 measured that the only existing
+end-to-end rollback proof (`tests/test_hoist_rollback_wiring.py`) already reverts by a **local**
+git-log trailer grep against `integration`, which is the same shape task 2 would need for the
+`Hoisted-Contract:` trailer — a strong hint the two kinds of commit are actually one kind, left for
+task 2 to confirm and act on.
+
+**JC-2 — `ingest()` force-moves `migrate/<source.repo_id>` unconditionally; a contract's
+`SourceProvenance.repo_id` is its OWNER's id, so an unmodified `ingest()` would point
+`migrate/<owner>` at the CONTRACT's merge.** **Resolved: fixed, not merely disclosed.**
+`filter_repo.ingest()` gained a `branch_name: str | None = None` parameter (default unchanged —
+`f"migrate/{source.repo_id}"` — for every existing REPO caller); `_ingest_contract_source` passes
+`branch_name=f"migrate/contract-{slug(contract_id)}"`. The two ingests now never contend over one
+ref, even transiently. **Measured, not assumed, that the transient window was real and not merely
+theoretical**: PASS 1's REPO ingest loop is DB-derived and runs the whole eligible fleet regardless
+of `--wave`/`--repo` (`_eligible_build_units`'s own docstring), but eligibility requires TRANSFORM
+`SUCCEEDED`/`DEGRADED` — a HOISTED contract's own eligibility depends only on `contracts.status`
+and carries no such requirement, so a contract can be ingest-eligible in a `fleet build` invocation
+whose owner is not yet TRANSFORM-complete and therefore not yet REPO-eligible in the SAME
+invocation. Without the fix, `migrate/<owner>` would sit pointed at the contract's merge across
+however many separate `fleet build` invocations elapse before the owner's own wave is reached — not
+a same-invocation-only window. Mutation-tested (below): reverting the `branch_name` argument at the
+`_ingest_contract_source` call site reproduces exactly the failure this fix closes.
+
+**JC-3 — the `<common-prefix>` computation, undefined by SPEC when the owner's carriers share no
+directory.** **Resolved:** `_contract_source_prefix` (`cli.py`) computes `os.path.commonpath` over
+each carrier path's `dirname` (never the raw paths — `commonpath` of one bare path strips the
+filename too), falling back to the empty prefix when the carriers share no directory. Chosen over
+refusing the contract at Phase 3 (research-50's first-named option): a HOISTED contract has already
+passed §3.1 5b's extractability ladder, and refusing it here over a layout preference — not a
+correctness defect — would silently narrow an already-committed decision. The empty-prefix
+fallback is the same `--path-rename ':<dest>/'` idiom `_ingest_build_source` already uses for a
+whole-repo relocation; its disclosed cost is that carriers sharing no directory land one directory
+level deeper than SPEC's single-shared-prefix example (nested under their own relative path inside
+`hoist_target_path`, never lost or collided). **A real `git-filter-repo` defect this task found
+and fixed, not predicted by research-50**: `git-filter-repo` refuses a `--path-rename OLD:NEW`
+whose two sides disagree on trailing-slash convention (measured directly against
+`git_filter_repo.py` 2.47.0's own validation, `"...if one ends with a slash then both must"`) —
+`filter_repo_argv` always renders the NEW side with one, so `_contract_source_prefix` returns the
+prefix WITH a trailing slash whenever non-empty. Caught by the fixture-fleet e2e test below, which
+failed at exactly the git-filter-repo call before this half of the fix was written — see the "found
+during implementation" note below.
+
+**JC-4 — the owner-side subtraction** (excluding a hoisted contract's paths from its owner's own
+relocation plan, so the content does not appear twice). **Deliberately NOT built here — disclosed,
+not silently deferred.** `graph/collisions.py`'s `resolution = f"hoisted:{contract_id}"` route is
+dead in production (`audit_collisions` is called with no `files=` argument; task-60's measurement,
+re-confirmed unchanged at `81f27e3`). Building the cheaper per-owner-row alternative research-50
+sketches (excluding the contract's own carrier paths from the owner's `RelocationSpec` via
+`--invert-paths` or a direct read of the `contracts` row being ingested) is out of this task's
+scope — it touches `_ingest_build_source`'s own REPO-side call, not the contract-side caller this
+task adds.
+
+**This is a real SPEC violation, not merely a layout preference — quoted exactly, not
+paraphrased.** `docs/SPEC.md:1270-1274` (§3.3 step 1, "The owner is ingested normally in its own
+(later) wave") states: *"The owner is ingested normally in its own (later) wave, with one
+subtraction: its relocation plan **excludes** every path already claimed by a `HOISTED` contract
+… The contract's commits therefore appear once, on the contract merge, and **are not duplicated
+onto the owner's merge**."* This task's shipped behavior produces exactly the outcome that
+sentence rules out: a `HOISTED` contract's sources land on the `integration` branch TWICE after
+this task — once at `hoist_target_path` (this task's new merge), once again under the owner's own
+`dest` (the owner's pre-existing, unmodified ingest, which subtracts nothing). Content is never
+lost and the two copies never collide (different destinations), so this does not corrupt the
+tree — but it is a real defect against SPEC's own literal text, not a cosmetic gap, and it is
+filed as one: **`D132`** (`docs/INTEGRATION_HONESTY.md`), `OPEN`, bounded, blocking nothing in
+this task's own scope. The scope call itself — build the ingest caller now, leave the subtraction
+for later — is unchanged and was reviewed and approved; what changed in this fix round is only
+that the resulting gap is now tracked as a defect rather than described as a preference.
+
+**JC-5 — ordering, and the `--wave`/`--repo` interaction.** **Resolved:** the new contract-ingest
+pass reuses the already-existing `_eligible_contract_units` (PASS 2b's own reader), which is
+DB-derived from `wave_members`/`contracts.status` and ignores `--wave`/`--repo`, matching PASS 1's
+own rule for the same reason (`_eligible_build_units`'s docstring). It runs as its own pass,
+unconditionally before the REPO ingest loop — not interleaved by `wave_index` — because every
+contract's own wave is already strictly earlier than its owner's (measured:
+`tests/test_sequence_e2e.py::cycle_fleet`'s own fixture proof, `contract_wave < waves[("REPO",
+owner)]`), and no contract's ingest depends on any REPO's prior ingest, so running the whole
+contract set first is simplest and provably still correct.
+
+**JC-6 — the anchor query's range, and the revert-then-re-hoist interaction.** Not decided here —
+this is task 2's call (`_ordered_revert_shas`'s own anchor range), which this task does not touch.
+Recorded for continuity: research-50 checked, rather than assumed, that a re-hoist after rollback
+cannot reach `already_ingested`'s idempotent-and-merges-nothing hazard through the ordinary path
+(`graph/cycles.py`'s hoist-candidate predicate requires `EXTRACTABLE`, and a `FAILED` contract
+survives a `fleet scan` rebuild per ADR-0123's `carry_over_committed`), so the hazard is a
+disclosed blind spot reachable only if an operator or a future feature flips a `FAILED` row back to
+`EXTRACTABLE` — unaffected by this task, since this task builds no rollback path.
+
+**JC-7 — the foxtrot guard: `-m 1`'s correctness rests entirely on parent order, and nothing
+asserted it.** **Resolved: built, and shared.** `filter_repo.merge_source` now captures the
+integration branch's pre-merge tip and asserts `<merge>^1 == <pre-merge tip>` immediately after
+merging, raising `IngestError` on violation rather than trusting `-m 1` blindly. Lives in
+`merge_source` (not `execute_hoist_rollback`, task 2's territory) because it is cheap, Rule-11
+-shaped, and applies to every ingest caller — a repo's own merge as much as a contract's — for the
+identical reason every one of them may need `git revert -m 1` under §12.31/§12.43. Existing REPO
+ingest tests (`tests/test_vcs.py`, the full `tests/test_build_e2e.py` fast-tier suite) all still
+pass under it, confirming the guard is silent on the correct path and would only ever fire on a
+genuine defect.
+
+**JC-8 — squash/rebase merge at the integration→`main` boundary would destroy the trailer.**
+**Disclosed, not built against** (research-50's own recommendation: not reachable through anything
+the harness does today — `ingest()` always merges locally with `--no-ff` — but an operational
+precondition of the whole mechanism). Stated here as a constraint on how `integration` must be
+promoted to `main`, not as a defect in this task's own code.
+
+### What was built
+
+1. **`_ingest_contract_source`** (`src/fleet/cli.py`), the CONTRACT-node sibling of the existing
+   `_ingest_build_source`. Clones the owning repo's **mirror** (not its Phase-2-transformed
+   worktree, unlike a REPO's own ingest) — SPEC's own words are literal ("its history comes from
+   its owning repo's mirror", `docs/SPEC.md:1259`), and it is also the only causally-correct
+   choice: the owner is ingested in its own LATER wave, so at contract-ingest time the owner's
+   Phase 2 worktree may not exist yet. Filters history to the owner's own carrier `source_paths`
+   (`default_source_paths`'s first production caller), renames via `_contract_source_prefix`
+   (JC-3), and merges into `integration` under `IntegrationMutex` with `Source-Repo:`/
+   `Source-Sha:` (of the owner) plus `Hoisted-Contract: <contract_id>`.
+2. **`filter_repo.ingest()` gains `branch_name`** (JC-2) and **`filter_repo.merge_source()` gains
+   the foxtrot guard** (JC-7) — both shared with the existing REPO ingest path, both additive
+   (default-preserving) for every existing caller.
+3. **PASS 0 in `_build_impl`**, before the existing PASS 1 REPO ingest loop: ingests every
+   `wave_members`-eligible `HOISTED`/`MIGRATED` contract via `_ingest_contract_source`. A
+   per-contract failure is caught (`BuildStepUnavailableError`, `FilterRepoUnavailableError`,
+   `IngestError`, `GitError`, `OSError`) and recorded as a new `ContractIngestFailed` finding
+   (added to both `schema.sql`'s and `docs/SPEC.md`'s `findings.kind` listings, per
+   `tests/test_findings_kinds.py`'s balance check) — the contract's own `HOISTED`/`MIGRATED` row
+   is left untouched (no `unhoist_contract`/rollback triggered; that linkage is out of this task's
+   scope, task 2's territory) and the rest of the run, including the contract's own owner and
+   consumers, still completes.
+
+### Proof
+
+`tests/test_build_e2e.py::test_a_hoisted_contracts_content_is_really_merged_with_the_trailer` —
+the proof vehicle is `tests/test_workers_contracts.py::CYCLE_FLEET` (verbatim), the SAME real npm
+cycle `tests/test_sequence_e2e.py::cycle_fleet` already proves hoists organically (no seeded
+`contracts` row), driven `scan → sequence → transform → build` through the real CLI with **real
+`git-filter-repo`** (only `BAZEL_RUNNER`/`RESOLVER_RUNNER` faked, to stay fast/offline — nothing
+here needs a real Bazel or npm resolution to prove a git-level claim). Asserts, against real git
+objects on the real `integration` branch:
+
+- exactly one merge commit carrying `Hoisted-Contract: proto:acme.identity.v1`, found **two
+  genuinely different ways** — git's own trailer parser (`%(trailers:key=...)`) and a raw,
+  unpathed `git log --grep` — and they agree;
+- it is a real two-parent merge (the foxtrot guard's own invariant, externally re-checked);
+- the tree at that merge contains the contract's real carrier path
+  (`proto/acme/identity/v1/identity.proto`) and does **not** contain the owner's other files
+  (`package.json`, `src/index.ts`) — proof real `--path` filtering ran, not `FakeFilterRepo`'s
+  no-op;
+- a second `fleet build` creates no second hoist merge (`already_present`, real idempotency);
+- `migrate/acme-identity` names the OWNER's own merge (no `Hoisted-Contract:` trailer), and a
+  distinct `migrate/contract-<slug>` branch names the contract's (JC-2).
+- zero `ContractIngestFailed` findings (anti-vacuity: the merge above really happened, nothing was
+  silently swallowed).
+
+**Mutation-tested (CLAUDE.md Rule 12), three real, disclosed mutations, each `git diff`-verified
+non-empty and each individually reverted afterward:**
+
+| Mutation | Result |
+|---|---|
+| Drop `branch_name=` at the `_ingest_contract_source` call site (JC-2's fix removed) | RED — fails at the `migrate/contract-<slug>` branch-existence assertion (`git rev-parse` exits 128, no such ref) |
+| Replace the contract-ingest loop's iterable with `()` (PASS 0 disabled) | RED — fails at "expected exactly one hoist merge, found []" |
+| `source_paths=owner_paths` → `source_paths=()` (no `--path` filtering) | RED — fails at "`package.json` not in tree": `['.bazelversion', 'package.json', 'proto/acme/identity/v1/identity.proto', 'src/index.ts']` |
+
+All three reproduced, all three restored to green afterward. The JC-3 trailing-slash fix was found
+*during* this same test's development, not injected as a mutation afterward: before the fix, every
+real `fleet build` over this fixture raised `git-filter-repo failed (exit 1) ... if one ends with a
+slash then both must`, caught as a `ContractIngestFailed` finding by the anti-vacuity assertion —
+i.e. the test caught a real defect in its own first draft, which is the strongest form of evidence
+that assertion carries any weight at all.
+
+**Not mutation-tested, and disclosed as such:** the foxtrot guard (JC-7) is defensive code with no
+reachable trigger under correct operation in this codebase today (`merge_source` always merges
+*from* the branch it has checked out, so parent order cannot actually diverge) — proving it fires
+would need to fabricate an impossible git state, which is disproportionate to what the guard is
+for. Its only tested property is that it does NOT false-positive on the real happy path (the
+`len(parents) == 2` assertion above, plus the full pre-existing REPO-ingest test suite staying
+green under it).
+
+### Existing coverage re-verified, not merely assumed unaffected
+
+`tests/test_vcs.py`, `tests/test_findings_kinds.py` (findings.kind balance, both listings),
+`tests/test_sequence_e2e.py` (12/12), `tests/test_build_e2e.py -k "not real_bazel"` (64 passed; 10
+failures are a pre-existing worktree-only environment gap — `tools/go/` is gitignored and exists
+only in the primary checkout, not a fresh `git worktree`, unrelated to this task's code and
+reproducible on `main` in any fresh worktree), and
+`tests/test_new_language_touchpoints_e2e.py -k contract_binding_unavailable` (the existing §12.34
+Clause B end-to-end test, which now also exercises this task's new PASS 0 as part of its own real
+`fleet build` — still green, confirming the addition does not regress the one other test already
+driving a HOISTED contract through the build pipeline).
+
+### The EDGE_BREAK/ATOMIC_WAVE gap (research-50 §5.3), NOT built here — routed to the controller
+
+research-50 flagged, while checking its own supporting sentence, that "a re-sequenced SCC that
+falls through to `EDGE_BREAK` or `ATOMIC_WAVE`" (§12.31 case (ii)'s own text) has zero test
+coverage — `tests/test_graph_cycles.py` has zero `FAILED` occurrences. Re-checked independently
+here rather than inherited: `grep -c FAILED tests/test_graph_cycles.py` at `81f27e3` (this task's
+own base) is still **0**, confirming the gap is unchanged. This task's own reading agrees with
+research-50's: the mechanism appears to exist by construction (`graph/cycles.py`'s hoist-candidate
+predicate at `:667-681` requires `ContractStatus.EXTRACTABLE`, so a `FAILED` contract cannot be
+re-proposed and the SCC must fall through), but that is a read of a predicate, not a run — this
+task did not drive a re-sequence after a contract goes `FAILED` and is not sized to. Left as a
+candidate item for the controller to route separately, exactly as research-50 recommended;
+explicitly out of scope for this task per its own brief.
+
+### `docs/CRITERIA_PLAN.md` §31 — untouched
+
+Per this task's brief, §12.31's DONE/OPEN status is not touched here. This task is a prerequisite
+(research-50's "task 1"), not the closing task (task 2, deliberately not built here per the
+warning above). A one-line note is left in `docs/CRITERIA_PLAN.md`'s §31 entry describing what
+this task built and what remains, without changing the status field.

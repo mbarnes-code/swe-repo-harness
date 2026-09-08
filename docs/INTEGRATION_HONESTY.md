@@ -7701,7 +7701,7 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5673`) — the `pre_dispatch` hook that claims a TRANSFORM coarse
+`_TransformClaimHook` (`cli.py:5688`) — the `pre_dispatch` hook that claims a TRANSFORM coarse
 `tasks` row RUNNING, the exact "moves the task row to RUNNING" moment `vcs/commits.py`'s
 `record_task_anchor` docstring already names as `tasks.pre_commit_sha`'s intended write site
 (§3.2 step 6.5) — now reads the real `migrate/<repo>` tip via `record_task_anchor` (read from git
@@ -7936,7 +7936,7 @@ precondition check always fails in production
 **Found by round VI task 45 (2026-09-04), disclosed rather than forced into scope — the task's
 own brief explicitly put `vcs/git.py` and `orchestrator/stubs.py` off-limits, and this gap sits
 one layer up, in PR/ingest topology.** `_ingest_build_source`/`vcs.filter_repo.ingest`
-(`src/fleet/vcs/filter_repo.py:429`) merges each repo's rewritten history directly onto
+(`src/fleet/vcs/filter_repo.py:444`) merges each repo's rewritten history directly onto
 `integration`, never creating a `migrate/<repo>` branch inside the monorepo checkout. This is the
 same family as the pre-existing, already-disclosed `_emit_prs --push` refusal ("not implemented...
 no code path in `src/fleet/vcs/`", `cli.py:10096-10113`) — not something this task introduced.
@@ -9233,12 +9233,25 @@ unedited per this file's own annotate-don't-rewrite convention; it remains liter
 whatever Leg C1 would additionally need. Full details:
 `.superpowers/sdd/round-VI-criteria-closure/task-66-report.md`.
 
+**Annotated 2026-09-08 (round VI task 95) — the quoted ADR-0119 premise above ("nothing in `src/`
+commits hoisted contract content") is now false; the paragraph's own CONCLUSION is unaffected and
+left unedited per this file's own annotate-don't-rewrite convention.** Round VI task 95 built
+`cli._ingest_contract_source`, so hoisted contract content is now genuinely committed onto
+`integration`. **That does NOT close this paragraph's gap.** Task 95 touched only §3.3 step 1's
+INGEST — it did not touch `workers/buildgen.py`'s manifest-driven dependency resolution, and no
+production code populates `BuildUnit.contract_deps` today, unchanged. So the conclusion this
+paragraph draws — "no real manifest-driven dependency on a hoisted contract's package exists for
+a REAL, organically-triggered `bazel build` to fail against" — still holds exactly as stated; only
+the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching annotation in
+`docs/DECISIONS.md` for the fuller account.
+
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2567-2604`, repointed +1 again by round VI task 93's own import addition above it — pure
-insertion, confirmed by exact-line-content match against the current tree; round VI task 83's own
-+1 repoint is superseded, per this file's annotate-in-place convention, not deleted), the ONLY production
+(`cli.py:2568-2605`, repointed +1 again by round VI task 95's own `default_source_paths` import
+addition above it (`from fleet.vcs.filter_repo import (...)`) — pure insertion, confirmed by
+exact-line-content match against the current tree; round VI task 93's own +1 repoint is
+superseded, per this file's annotate-in-place convention, not deleted), the ONLY production
 feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
@@ -9604,6 +9617,20 @@ an unresolvable node, or a `HOISTED` row with no `hoist_target_path` raises unha
 `.superpowers/sdd/round-VI-criteria-closure/task-56-brief.md`. **D113 stays OPEN — decided is not
 built** — this update records the design decision only; §12.34 does not move toward DONE until
 the pass in `ADR-0119` actually lands and is reviewed.
+
+**Annotated 2026-09-08 (round VI task 95) — judgment call 2's premise above ("nothing in `src/`
+commits hoisted contract content") is now false; its DECISION and D113's own OPEN status are
+unaffected and left unedited per this file's own annotate-don't-rewrite convention.** Round VI
+task 95 built `cli._ingest_contract_source` (PASS 0 in `_build_impl`), so hoisted contract content
+now is genuinely committed onto `integration`. **This does not revisit judgment call 2's decision
+or close D113.** The decision itself — PASS 2b stays a narrow READ-ONLY pass, no ingest, no
+publish, no `phases` row, no wave-query admission for CONTRACT nodes — is unchanged by task 95 and
+was never contingent on the premise being permanently true; it was the right shape regardless, and
+task 95 built the ingest as a SEPARATE pass (PASS 0) rather than folding it into PASS 2b. D113
+remains `OPEN` for the same reason it already was: "decided is not built" referred to PASS 2b's
+own emission wiring (built by task 56), and D113's judgment calls never included the ingest
+caller — that gap is now closed, by task 95, but D113 was never scoped to it. See ADR-0119's own
+matching annotation in `docs/DECISIONS.md` for the fuller account.
 
 ## D117 — FIXED, LANDED (round VI task 65, `6f74ea9`, task-scoped review). SPEC's and the
 `DependencyEdge` model's own claim that `edges.retargeted_from_repo_id` makes a contract un-hoist
@@ -10780,9 +10807,10 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:13775`, repointed by round VI task 93's own additions
-earlier in the file — pure insertion, confirmed by exact-line-content match) re-runs
-`VerifyPipelineWorker` directly against the
+`_run_one_revalidation_task` (`cli.py:14023`, repointed +248 by round VI task 95's own additions
+earlier in the file — pure insertion, confirmed by exact-line-content match against the current
+tree; round VI task 93's own repoint is superseded, per this file's annotate-in-place convention,
+not deleted) re-runs `VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
 there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
 SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
@@ -10948,3 +10976,46 @@ D-number covers. Revalidation ordering (open question 1) is likewise untouched a
 **`docs/CRITERIA_PLAN.md`'s §14 entry updated in the same commit**, moving §12.14 to DONE: the
 two remaining named gaps that entry tracked (D124, separately fixed in round VI task 74, and the
 transitive-stub-stacking mechanism) are both now closed.
+
+## D132 — OPEN. §12.31's contract-ingest caller (round VI task 95) violates SPEC's own
+no-duplication sentence: a `HOISTED` contract's sources land on `integration` twice
+
+**Found by round VI task 95's own review round (2026-09-08), allocated by the controller —
+form-agnostic sweep against `main` at `c76fa48` found `D131` as the highest allocated number.**
+
+**The defect, quoted against SPEC rather than paraphrased.** `docs/SPEC.md:1270-1274` (§3.3 step
+1, "The owner is ingested normally in its own (later) wave") states: *"The owner is ingested
+normally in its own (later) wave, with one subtraction: its relocation plan **excludes** every
+path already claimed by a `HOISTED` contract … The contract's commits therefore appear once, on
+the contract merge, and **are not duplicated onto the owner's merge**."*
+
+Round VI task 95 built `cli._ingest_contract_source` (PASS 0 in `_build_impl`), which genuinely
+commits a `HOISTED`/`MIGRATED` contract's content onto `integration` at `hoist_target_path` — the
+first half of §3.3 step 1 SPEC describes. It deliberately did **not** build the "one subtraction"
+half: the owner's own `RelocationSpec` (`_ingest_build_source`, unchanged) still relocates its
+**whole** tree, including the paths a `HOISTED` contract already claimed. The result, exactly as
+SPEC's sentence rules out: a `HOISTED` contract's sources appear **twice** on `integration` — once
+at `hoist_target_path` (the contract's own merge), once again under the owner's own `dest` (the
+owner's unmodified merge).
+
+**Bounded, not a corruption.** Content is never lost, and the two copies never collide (different
+destinations on the tree) — this is a real duplication, not silent data loss and not a merge
+conflict. It was a disclosed, reviewed-and-approved scope call in task 95's own ADR draft (JC-4,
+`docs/DECISIONS.md`): building the owner-side subtraction touches `_ingest_build_source`'s
+REPO-side call, not the contract-side caller task 95 added, and `graph/collisions.py`'s
+`resolution = f"hoisted:{contract_id}"` route is dead in production (`audit_collisions` is called
+with no `files=` argument — task-60's pre-existing measurement, re-confirmed unchanged), so the
+cheap fix path is a fresh per-owner-row exclusion, not a revival of that dead route.
+
+**Blocks nothing in §12.31 case (ii)'s own critical path.** Case (ii) is specifically about a hoist
+that *fails* — the duplication only matters for a hoist that *succeeds*, and even then only for
+whatever eventually reads `hoist_target_path` as a contract's sole, canonical source (a future
+`BUILD.bazel` publish, ADR-0119's own deferred A5). PASS 2b (§12.34 Clause B) never reads the tree
+— it is metadata-only — so this defect does not affect any criterion currently marked DONE.
+
+**Not yet built:** the owner-side subtraction itself. Two candidate shapes, neither chosen here:
+excluding the contract's own carrier paths from the owner's `RelocationSpec` via
+`--invert-paths`/`extra_args`, or a direct per-owner read of the `contracts` table at ingest time.
+See task 95's ADR draft (`docs/DECISIONS.md`, JC-4) for the fuller account.
+
+Full account: `.superpowers/sdd/round-VI-criteria-closure/task-95-report.md`.

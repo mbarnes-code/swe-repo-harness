@@ -1929,6 +1929,36 @@ revert commit has landed via this path outside a test that hand-seeds `contract_
 `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here (out of this task's
 own scope — see `.superpowers/sdd/round-VI-criteria-closure/task-77-report.md`).
 
+**Update, round VI task 95 (research-50's "task 1", a prerequisite, NOT a closing task — this
+criterion's status is intentionally left unchanged by this update).** `_ingest_contract_source`
+(`src/fleet/cli.py`), wired as a new PASS 0 in `_build_impl`, is now a real production caller for
+SPEC §3.3 step 1's already-built contract-merge primitives (`RelocationSpec.source_paths`/
+`source_prefix`, `SourceProvenance.contract_id`, `already_ingested`, `merge_source`'s
+`--allow-unrelated-histories` merge) — before this task, those primitives had zero production
+callers (research-50-report.md §2.1). A `HOISTED`/`MIGRATED` contract's content is now genuinely
+committed to `integration` with the `Hoisted-Contract: <contract_id>` trailer, proven end to end
+with REAL `git-filter-repo` (not the fast-tier `FakeFilterRepo`) against the organic
+`CYCLE_FLEET` hoist fixture — `tests/test_build_e2e.py::
+test_a_hoisted_contracts_content_is_really_merged_with_the_trailer`. Full account and the eight
+resolved judgment calls: ADR-DRAFT (task 95) in `docs/DECISIONS.md` (placeholder number, pending
+controller allocation), `.superpowers/sdd/round-VI-criteria-closure/task-95-report.md`.
+**This does NOT close case (ii) or this criterion.** `_ordered_revert_shas` still anchors on
+`PullRequestDraft.contract_id` (D122's still-open gap), not on this task's new
+`Hoisted-Contract:` trailer — re-anchoring it is research-50's "task 2", deliberately NOT built
+here (building it before task 1 would have reverted an owner's whole repo import and called it a
+contract rollback; now that task 1 exists, task 2 is unblocked and should be dispatched next). Two
+disclosed, bounded gaps this task leaves open: (a) the owner-side subtraction is not built — SPEC's
+own §3.3 step 1 states the contract's "commits therefore appear once, on the contract merge, and
+are not duplicated onto the owner's merge" (`docs/SPEC.md:1273-1274`), and the shipped behavior
+violates that sentence exactly: a hoisted contract's sources land on `integration` twice (once at
+`hoist_target_path`, once under the owner's own `dest`) — never lost, never colliding, but a real
+defect against SPEC's own text, filed as **`D132`** (`docs/INTEGRATION_HONESTY.md`), `OPEN`; (b)
+§12.31(ii)'s own "a re-sequenced SCC that falls through to `EDGE_BREAK` or
+`ATOMIC_WAVE`" clause has zero test coverage (`tests/test_graph_cycles.py` still has zero `FAILED`
+occurrences, re-measured at this task's own base `81f27e3`) — the mechanism appears to exist by
+construction but this was not run, a candidate item for a future task per research-50 §5.3.
+`docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`; not updated here.
+
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
 and `D119`'s blocking fixture bug is fixed; see the dated addenda after the history below for the
@@ -2081,6 +2111,20 @@ a named split seam if the worker finds it's not one-shot after all (stop after t
 decision: `docs/SPEC.md`'s own §12.34 citation had drifted `:7466` → `:7470` (corrected in this
 file's own citations below where present); and a separate Rule-14 flag on §12.32's DONE marking —
 see this file's own §32 entry.
+
+**Annotated 2026-09-08 (round VI task 95) — the "nothing in `src/` ever commits hoisted contract
+content" premise above is now false; left unedited per this project's annotate-don't-rewrite
+convention.** Round VI task 95 built `cli._ingest_contract_source` (PASS 0 in `_build_impl`), a
+real production caller that genuinely commits a `HOISTED`/`MIGRATED` contract's content onto
+`integration` at `hoist_target_path`, with the `Hoisted-Contract:` trailer. **The conclusion this
+paragraph draws from the premise is NOT affected**: PASS 2b (this criterion's own Clause B pass)
+still does not publish a `BUILD.bazel` — it remains read-only, exactly as built by task 56 — so
+"a published `BUILD.bazel` would name sources absent from every worktree" is simply no longer the
+operative reason PASS 2b stays read-only; the reason now is that publishing was never attempted,
+not that the sources are missing. See ADR-0119's own matching annotation in `docs/DECISIONS.md`
+and task 95's ADR draft there for the full account, including the disclosed JC-4 duplication
+(D132) that would still need resolving before a publish could safely name `hoist_target_path` as
+a contract's only source.
 
 **DONE (round VI task 56, 2026-09-06, `57d7171`, merged `5a2f34b`, reviewed Approved zero
 findings).** Built exactly `ADR-0119`'s design: a new read-only PASS 2b in `cli.py::_build_impl`
@@ -2730,8 +2774,10 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:13775`, repointed by round VI task 93 — pure insertion
-earlier in the file, confirmed by exact-line-content match) was read directly: it re-runs
+`_run_one_revalidation_task` (`cli.py:14025`, repointed +250 by round VI task 95's own additions
+earlier in the file — pure insertion, confirmed by exact-line-content match against the current
+tree; round VI task 93's own repoint is superseded, per this file's annotate-in-place convention,
+not deleted) was read directly: it re-runs
 `VerifyPipelineWorker`
 against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
 at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —

@@ -110,6 +110,7 @@ from fleet.models.build import BuildUnit, SupportFile
 from fleet.models.enums import Ecosystem
 from fleet.models.repo import Coordinate
 from fleet.models.state import MigrationState
+from fleet.sandbox.worktree import slug
 from fleet.settings import (
     BCR_DEFAULT_REGISTRY,
     BCR_MIRROR_REGISTRY,
@@ -126,6 +127,7 @@ from tests.conftest import (
     reap_bazel_state,
 )
 from tests.test_bazel import _a_lockfile, _fail_if_registry_unreachable
+from tests.test_cli import MODELS_YAML
 from tests.test_scan_e2e import FIXTURE_REPOS, _fresh_db, _make_repo
 from tests.test_transform_e2e import (  # noqa: F401  (`fleet` is a fixture, used by injection)
     DESTINATIONS,
@@ -136,10 +138,13 @@ from tests.test_transform_e2e import (  # noqa: F401  (`fleet` is a fixture, use
     fleet,
     git,
     query,
+    scan,
     scanned,
+    sequence,
     transform,
     write_rules,
 )
+from tests.test_workers_contracts import CYCLE_FLEET, PROTO_ID
 
 runner = CliRunner()
 
@@ -6953,11 +6958,12 @@ def test_sqlite_is_readable_after_the_two_phases(
 # to prove the WIRING: a real `contracts` row, a real failing `fleet build` dispatch, and a real
 # database left with `status='FAILED'`, a `HoistBrokeOwner` finding, and `phases.attempts`
 # untouched. Building a REAL bazel package at `hoist_target_path` is a separate, much larger lift
-# this task does not need: nothing in `src/fleet` today (a disclosed, pre-existing D113/ADR-0119
-# scope boundary — "narrow read-only PASS 2b, nothing commits hoisted contract content") ever
-# populates `BuildUnit.contract_deps`, so no organic manifest-driven dependency on a hoisted
-# contract's package exists to fail against for real; the `contracts` row is seeded directly,
-# which is this file's own established convention for state a phase upstream of the one under
+# this task does not need: hoisted contract content is genuinely committed onto `integration` as
+# of round VI task 95 (`cli._ingest_contract_source`), but nothing in `src/fleet` today (a
+# disclosed, pre-existing D113/ADR-0119 scope boundary — PASS 2b stays a narrow read-only pass, no
+# publish) ever populates `BuildUnit.contract_deps`, so no organic manifest-driven dependency on a
+# hoisted contract's package exists to fail against for real; the `contracts` row is seeded
+# directly, which is this file's own established convention for state a phase upstream of the one
 # test does not itself organically produce (see e.g. the direct `INSERT INTO stubs` above).
 
 _HOIST_BREAK_CONTRACT_ID = "openapi:acme.shared"
@@ -7103,6 +7109,197 @@ def test_a_real_build_failure_naming_a_hoisted_contracts_package_is_attributed_a
         "_terminate_uncharged) -- this is the assertion that proves retryable=False actually "
         "reached the ladder, not merely that the string match fired"
     )
+
+
+# --------------------------------------------------------------------------------------
+# 7b. §12.31 case (ii) prerequisite: a hoisted contract's content is REALLY merged, with the
+#     `Hoisted-Contract:` trailer, via REAL `git-filter-repo` (round VI task 95)
+# --------------------------------------------------------------------------------------
+# `cli.FILTER_REPO_RUNNER` is left `None` (real) here — unlike every test above section 7, which
+# fakes it — because the whole point is proving `_ingest_contract_source`'s `--path`/
+# `--path-rename` argv really filters the owner's mirror down to the contract's carrier paths and
+# really lands them at `hoist_target_path`, not merely that the merge/trailer machinery runs (that
+# much a fake `git-filter-repo` cannot disprove, since it is a no-op on the tree — see
+# `FakeFilterRepo`'s own docstring). `cli.BAZEL_RUNNER`/`RESOLVER_RUNNER` stay faked: nothing here
+# needs a real Bazel or a real npm/pnpm resolution to prove a git-level claim, and faking them
+# keeps this fast and offline, mirroring `test_a_real_build_failure_naming_a_hoisted_contracts_
+# packages_is_attributed_and_terminal`'s combination of real git evidence with a faked build tool.
+
+#: Verbatim `acme-identity`/`acme-billing` from `CYCLE_FLEET` (`tests/test_workers_contracts.py`)
+#: — the SAME real npm cycle `tests/test_sequence_e2e.py::cycle_fleet` already proves hoists
+#: organically (HOISTED status, `hoist_target_path='proto/acme/identity/v1'`, a wave strictly
+#: before the owner's). Reused as the proof vehicle per research-50-report.md's finding that this
+#: lowers the proof bar — no seeded `contracts` row needed.
+_HOIST_INGEST_FLEET_YAML = """\
+run:
+  monorepo_path: ../acme-monorepo
+  cache_dir: cache/
+  work_dir: work/
+concurrency:
+  cpu_pool_workers: 1
+  docker: 1
+verify:
+  container_memory: 64m
+budgets:
+  max_rss_mb: 512
+preflight:
+  min_free_bytes: 1048576
+"""
+#: No `graph:` section — hoisting is on by default, the configuration under test (same convention
+#: as `tests/test_sequence_e2e.py`'s `FLEET_YAML`). No `build.ruleset_versions:` override either:
+#: `BuildSection`'s shipped defaults already pin `aspect_rules_js`/`aspect_rules_ts`, which every
+#: OTHER npm/TS fixture in this file relies on through the same defaults (`tests/test_transform_
+#: e2e.py`'s own `FLEET_YAML` carries no such override).
+
+
+def _write_hoist_ingest_config(root: Path, sources: Mapping[str, Path]) -> None:
+    config = root / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "fleet.yaml").write_text(_HOIST_INGEST_FLEET_YAML, encoding="utf-8")
+    (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
+    # D21/§11.4: `redaction.history_scrub_file` — real `_ingest_contract_source` reads it too
+    # (`resolve_replace_text`, shared with `_ingest_build_source`), so this must be provisioned
+    # exactly as every other e2e fixture in this suite provisions it.
+    rules_dir = config / "rules"
+    rules_dir.mkdir(parents=True, exist_ok=True)
+    (rules_dir / "secrets.txt").write_text(
+        "regex:-----BEGIN [A-Z ]*PRIVATE KEY-----==>***REDACTED:private_key***\n",
+        encoding="utf-8",
+    )
+    entries = "".join(f"  - name: {name}\n    url: {path}\n" for name, path in sources.items())
+    (config / "repos.yaml").write_text(
+        f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
+    )
+
+
+def _make_hoist_ingest_workspace(tmp_path: Path) -> Path:
+    # All THREE of `CYCLE_FLEET` (owner + 2 consumers) — `min_consumers` (§3.1 5b vi) needs two
+    # real consumers, exactly why `tests/test_sequence_e2e.py::cycle_fleet` uses all three too.
+    sources = {
+        name: _make_repo(tmp_path / "sources", name, dict(files))
+        for name, files in CYCLE_FLEET.items()
+    }
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_hoist_ingest_config(workspace, sources)
+    write_rules(workspace)
+    _fresh_db(workspace / "state" / "fleet.db")
+    return workspace
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("git-filter-repo") is None,
+    reason="git-filter-repo is not on PATH; every other assertion in this file above section 7 "
+    "runs through FakeFilterRepo instead, but that fake is a no-op on the tree and cannot prove "
+    "the real --path/--path-rename argv actually filters and relocates the owner's history",
+)
+def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.31 case (ii) prerequisite (round VI task 95, ADR draft): SPEC §3.3 step 1's
+    contract-ingest sub-step, driven for real. Before this task, `RelocationSpec.source_paths`/
+    `source_prefix` and `SourceProvenance.contract_id` had a unit-level argv test
+    (`tests/test_vcs.py`) and zero production callers — `filter_repo.py`'s own docstring called
+    the trailer mechanism "finished and uncalled" (research-50-report.md §2.1). This is the first
+    test that drives it end to end through the real CLI and the real `git-filter-repo` binary.
+    """
+    workspace = _make_hoist_ingest_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+    assert scan(workspace).exit_code == ExitCode.SUCCESS
+    assert sequence(workspace).exit_code == ExitCode.SUCCESS
+
+    # -- anti-vacuity: the fixture must really hoist, or nothing below means anything ----
+    contract_rows = query(
+        workspace,
+        "SELECT status, hoist_target_path FROM contracts WHERE contract_id = ?",
+        (PROTO_ID,),
+    )
+    assert contract_rows == [("HOISTED", "proto/acme/identity/v1")], contract_rows
+
+    assert transform(workspace).exit_code == ExitCode.SUCCESS
+    monorepo = make_monorepo(workspace)
+    monkeypatch.setattr(cli, "RESOLVER_RUNNER", FakeResolver())
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", FakeBazel(workspace / "artifacts" / "fake-bazel"))
+    assert cli.FILTER_REPO_RUNNER is None, "the seam must be absent for this test to mean anything"
+
+    result = build(workspace, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    # -- anti-vacuity: no ingest failure was silently swallowed -------------------------
+    assert query(
+        workspace,
+        "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'",
+    ) == [], "a ContractIngestFailed finding means the merge below never really happened"
+
+    # -- the merge commit exists, is real, and carries the trailer — read TWO genuinely --
+    # -- different ways (Rule 12): git's own trailer parser, and a raw --grep -----------
+    log = git(
+        monorepo,
+        "log",
+        "integration",
+        "--format=%H",
+        "--grep=^Hoisted-Contract: " + PROTO_ID + "$",
+    ).strip()
+    shas = [line for line in log.splitlines() if line.strip()]
+    assert len(shas) == 1, f"expected exactly one hoist merge, found {shas}"
+    merge_sha = shas[0]
+
+    trailer_read = git(
+        monorepo, "log", "-1", merge_sha, "--format=%(trailers:key=Hoisted-Contract,valueonly)"
+    ).strip()
+    assert trailer_read == PROTO_ID, trailer_read
+
+    # -- a real TWO-PARENT merge, and the foxtrot guard's own invariant (JC-7) ----------
+    parents = git(monorepo, "log", "-1", merge_sha, "--format=%P").strip().split()
+    assert len(parents) == 2, parents
+
+    # -- the tree probe (research-50's recommendation, §7.2 item 7): the contract's real --
+    # -- carrier path is present at hoist_target_path, and the owner's OTHER files (never --
+    # -- named in source_paths) are NOT — proof that real --path filtering ran, not a no-op --
+    tree = git(monorepo, "ls-tree", "-r", "--name-only", merge_sha).strip().splitlines()
+    assert "proto/acme/identity/v1/identity.proto" in tree, tree
+    assert "package.json" not in tree, tree
+    assert "src/index.ts" not in tree, tree
+    assert git(
+        monorepo, "cat-file", "-e", f"{merge_sha}:proto/acme/identity/v1/identity.proto"
+    ) == ""
+
+    # -- idempotency: a second `fleet build` merges nothing new (already_present) -------
+    result2 = build(workspace, "--no-sandbox")
+    assert result2.exit_code == ExitCode.SUCCESS, result2.output
+    log2 = git(
+        monorepo,
+        "log",
+        "integration",
+        "--format=%H",
+        "--grep=^Hoisted-Contract: " + PROTO_ID + "$",
+    ).strip()
+    assert [line for line in log2.splitlines() if line.strip()] == [merge_sha], (
+        "a second build must not create a second hoist merge"
+    )
+
+    # -- JC-2: the owner's OWN `migrate/acme-identity` branch is not clobbered by the ----
+    # -- contract's merge, and a distinct `migrate/contract-<slug>` branch names it ------
+    owner_branch_sha = git(monorepo, "rev-parse", "migrate/acme-identity").strip()
+    assert owner_branch_sha != merge_sha, (
+        "the owner's own migrate branch must point at the OWNER's merge, not the contract's"
+    )
+    owner_trailer = git(
+        monorepo,
+        "log",
+        "-1",
+        owner_branch_sha,
+        "--format=%(trailers:key=Hoisted-Contract,valueonly)",
+    ).strip()
+    assert owner_trailer == "", (
+        f"migrate/acme-identity must carry the OWNER's own merge, not the contract's: "
+        f"{owner_trailer!r}"
+    )
+    contract_branch_sha = git(
+        monorepo, "rev-parse", f"migrate/contract-{slug(PROTO_ID)}"
+    ).strip()
+    assert contract_branch_sha == merge_sha, (contract_branch_sha, merge_sha)
 
 
 # --------------------------------------------------------------------------------------
