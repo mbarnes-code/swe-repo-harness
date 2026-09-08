@@ -1441,6 +1441,71 @@ def test_a_degraded_repo_at_phase_four_with_no_rhi_repo_exits_7(
     assert "REQUIRES_HUMAN_INTERVENTION" not in after.values(), after
 
 
+@pytest.mark.xfail(
+    strict=True,
+    reason=(
+        "D125 (docs/INTEGRATION_HONESTY.md): `_verify_impl`'s wave loop (cli.py, `for index in "
+        "waves: ... for repo_id in members: await repository.upsert_phase(..., Phase.VERIFY, "
+        "...)`) still creates each wave's VERIFY `phases` row LAZILY, per-wave, exactly the shape "
+        "`_transform_impl` had before ADR-0127's fix -- it was never given `_build_impl`'s PASS 1 "
+        "upfront pre-seed. So `acme-app-py`'s wave-1 VERIFY row does not exist yet when "
+        "`acme-lib-py`'s REQUIRES_HUMAN_INTERVENTION transition fires `propagate_blocked` during "
+        "wave 0, the UPDATE-only `append_blocked_by` write silently no-ops, and `acme-app-py` is "
+        "later admitted into wave 1 as an ordinary unblocked repo. strict=True pins the target "
+        "state SPEC 12.14's blast-containment clause describes -- deleting this xfail (never "
+        "loosening it) is how the eventual fix (mirroring ADR-0127, adapted to `_verify_impl`) "
+        "proves itself."
+    ),
+)
+def test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent(
+    fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
+) -> None:
+    """D125 (round VI task 78): does `_verify_impl`'s wave loop have the same cross-wave
+    `blocked_by` propagation gap D123 measured for `_transform_impl` (ADR-0127)? Mirrors that
+    test's own shape (`tests/test_transform_e2e.py::
+    test_a_provider_failing_in_an_earlier_wave_blocks_its_later_wave_dependent_in_one_run`) as
+    closely as `fleet verify`'s own PASS structure allows: `acme-lib-py` (wave 0) reaches
+    `REQUIRES_HUMAN_INTERVENTION` through a REAL VERIFY dispatch (no hand-seeding -- a real
+    `bazel build` failure via the injected `FakeBazel` seam, the same mechanism this file's
+    `test_a_build_failure_is_structured_and_does_not_take_its_siblings_down` uses for Phase 3),
+    and its direct dependent `acme-app-py` is scheduled into a LATER wave (wave 1,
+    `tests/test_scan_e2e.py`'s own `waves["acme-lib-py"] < waves["acme-app-py"]` assertion, which
+    holds identically at Phase 4 since `wave_members` is phase-independent) in the SAME `fleet
+    verify` invocation.
+
+    Phase 3 (`build()`) is driven to a clean `SUCCEEDED` for every repo FIRST, against the same
+    `FakeBazel` instance with an empty `fail` table, so `_gated_members`'s predecessor=BUILD gate
+    admits every repo into VERIFY's wave 0/1. Only AFTER that does the fixture inject the
+    failure (`bazel.fail[("build", DESTINATIONS["acme-lib-py"])] = 34`) -- mutating the same
+    `FakeBazel` instance rather than constructing a second one, since `cli.BAZEL_RUNNER` is bound
+    once by the `bazel` fixture and the seam must stay the one instance both phases dispatch
+    through.
+
+    **Measured (round VI task 78, this xfail's own first red run):**
+    `{'acme-lib-py': ('REQUIRES_HUMAN_INTERVENTION', []), 'acme-lib-ts': ('SUCCEEDED', []),
+    'acme-app-py': ('SUCCEEDED', []), 'acme-app-ts': ('SUCCEEDED', [])}` -- CONFIRMED: the
+    D123-shaped symptom, byte-for-byte the same wrong shape ADR-0127's own discovery fixture
+    measured for TRANSFORM before its fix. See the docstring above's assertion for what SPEC
+    §12.14 actually requires.
+    """
+    transformed(fleet)
+    assert build(fleet, "--no-sandbox").exit_code == ExitCode.SUCCESS
+
+    bazel.fail[("build", DESTINATIONS["acme-lib-py"])] = 34
+
+    result = verify(fleet, "--rdeps-limit", "3")
+    assert result.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, result.output
+
+    rows = query(fleet, "SELECT repo_id, status, blocked_by FROM phases WHERE phase = 4")
+    statuses = {repo_id: (status, json.loads(blocked_by)) for repo_id, status, blocked_by in rows}
+
+    assert statuses["acme-lib-py"][0] == "REQUIRES_HUMAN_INTERVENTION", statuses
+    # §12.14's blast-containment clause requires this to read `("BLOCKED", ["acme-lib-py"])`.
+    assert statuses["acme-app-py"] == ("BLOCKED", ["acme-lib-py"]), statuses
+    for survivor in ("acme-lib-ts", "acme-app-ts"):
+        assert statuses[survivor] == ("SUCCEEDED", []), statuses
+
+
 def test_the_build_runs_against_the_immutable_snapshot_and_nothing_else(
     fleet: Path, monorepo: Path, bazel: FakeBazel  # noqa: F811
 ) -> None:

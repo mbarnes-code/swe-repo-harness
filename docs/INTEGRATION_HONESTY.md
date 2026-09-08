@@ -9803,8 +9803,8 @@ propagation gap and the undesigned transitive-stub-stacking mechanism are untouc
 (D104's separate, still-open `REVALIDATE`-dispatch gap is untouched) — see
 `docs/CRITERIA_PLAN.md`'s §14/§37 entries.
 
-## D125 — OPEN, NOT YET MEASURED WITH A FIXTURE. `_verify_impl`'s wave loop likely has the same
-cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
+## D125 — OPEN, CONFIRMED (round VI task 78). `_verify_impl`'s wave loop has the same cross-wave
+`blocked_by` propagation gap D123 found in `_transform_impl`
 
 **Found by round VI research-43 (2026-09-08), while designing D123's fix (ADR-0127), as a
 byproduct of reading `_transform_impl` alongside its siblings — not independently investigated
@@ -9831,6 +9831,57 @@ structural suspicion.
 mirroring ADR-0127's shape adapted to `_verify_impl`'s own PASS structure. **Not dispatched this
 round** — the controller is deferring this to a future round to avoid over-extending the current
 wave; this entry exists so the finding is not lost between rounds.
+
+**Confirmed, 2026-09-08 (round VI task 78) — measurement only, no fix built, per this task's own
+scope boundary.** `_verify_impl`'s wave loop, re-read fresh against current `HEAD`
+(`src/fleet/cli.py:11968-11983`, line range shifted from research-43's `11687-11702` citation but
+the shape is unchanged): `for index in waves: members, blocked = await _gated_members(...); ...;
+for repo_id in members: await repository.upsert_phase(run_id, repo_id, Phase.VERIFY, now=_now(),
+max_attempts=MAX_ATTEMPTS)` — still lazy, still per-wave, still inside the dispatch loop, exactly
+the shape TRANSFORM had before ADR-0127. It has NOT been changed since research-43 read it.
+
+**Root cause, as measured — identical mechanism to D123's, restated for VERIFY.** `PhaseRunner.
+_contain` -> `WaveScheduler.propagate_blocked` -> `SqliteSchedulerStore.append_blocked_by` fires
+synchronously the moment a VERIFY-phase member reaches `REQUIRES_HUMAN_INTERVENTION`, with the
+full, wave-independent descendant set already correctly computed — but `append_blocked_by`'s
+write is UPDATE-only, and a dependent scheduled into a later VERIFY wave has no `phases` row for
+`Phase.VERIFY` yet at that moment, because that wave's own lazy `upsert_phase` loop iteration has
+not run. The write silently no-ops; the dependent is later admitted into its own wave as an
+ordinary unblocked repo.
+
+**Fixture built and run:** `tests/test_build_e2e.py::
+test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent`,
+mirroring D123's own discovery fixture as closely as `fleet verify`'s own PASS structure allows.
+`acme-lib-py` (wave 0) is driven to a real `REQUIRES_HUMAN_INTERVENTION` through a genuine VERIFY
+dispatch — no hand-seeding — via the same `FakeBazel` seam `tests/test_build_e2e.py`'s Phase-3
+failure test already uses (`bazel.fail[("build", "py/acme_lib_py")] = 34`, injected only AFTER
+Phase 3's own `fleet build` completed clean, so the predecessor gate admits every repo into
+VERIFY). `acme-app-py`, `acme-lib-py`'s real direct dependent, is scheduled into wave 1 in the
+same `fleet verify` invocation. Measured result (real rows, one `fleet verify` call driving both
+waves): `{'acme-lib-py': ('REQUIRES_HUMAN_INTERVENTION', []), 'acme-lib-ts': ('SUCCEEDED', []),
+'acme-app-py': ('SUCCEEDED', []), 'acme-app-ts': ('SUCCEEDED', [])}` — `acme-app-py` reads
+`SUCCEEDED`/`blocked_by == []` where §12.14's blast-containment clause requires
+`BLOCKED`/`['acme-lib-py']`. This is byte-for-byte the same wrong shape ADR-0127's own discovery
+fixture measured for TRANSFORM before its fix (`('acme-app-py','SUCCEEDED','[]')`). **CONFIRMED**,
+not merely a structural suspicion.
+
+**Consequence.** Identical to D123's own: §12.14's blast-containment clause is provably FALSE
+against real production VERIFY dispatch today, independently of D123/ADR-0127's TRANSFORM-only
+fix — a repo abandoned during an early VERIFY wave does not correctly block a later-wave
+dependent within the same `fleet verify` invocation.
+
+**Regression-proof landed as a known-failing test**, not a fix:
+`tests/test_build_e2e.py::test_a_verify_provider_reaching_rhi_in_an_earlier_wave_blocks_its_later_wave_dependent`
+is `@pytest.mark.xfail(strict=True, reason="D125: ...")` — it will hard-fail the instant someone
+fixes `_verify_impl` without deleting this marker, exactly as `tests/test_baseline_ok_exclusion.py`
+(D116) and D123's own TRANSFORM fixture (before ADR-0127) already do.
+
+**Not yet built:** the fix itself — most likely restructuring `_verify_impl` to pre-seed every
+wave's VERIFY `phases` row upfront, before any wave dispatches, mirroring ADR-0127's own shape
+(and `_build_impl`'s PASS 1) exactly. Whether the same TRANSFORM residual D126 tracks (a
+`--wave`-scoped sequence of SEPARATE `fleet verify` invocations) also applies to VERIFY was not
+investigated here — out of this task's own scope, which was measurement only. No task dispatched
+yet for the fix; this entry's confirmation is what makes it dispatch-ready.
 
 ## D126 — OPEN. A `fleet transform --wave N` sequence spanning multiple separate invocations does
 not propagate `blocked_by` across invocation boundaries — the narrower residual of D123 that
