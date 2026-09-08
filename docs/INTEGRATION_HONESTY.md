@@ -4664,6 +4664,13 @@ cited as `cli.py:11015`; at `6a41840` that line is the finding write
 named the wrong half of the block it meant. At `f9cb3f9` the two are `:11345` and `:11350`, both
 inside `stubs_abandon()`, which is the durable anchor and is what this entry now uses.*)
 
+> **Editorial correction (2026-09-08, research-47).** The "Still open" paragraph above says
+> *"`docs/SPEC.md` does not name the kind"* — that half is now stale: `docs/SPEC.md:4403` lists
+> `'StubAbandoned'` in the `findings.kind` enumeration comment. D69 stays OPEN regardless — the
+> entry's other, load-bearing claim is unaffected: `cli.stubs_abandon()`'s raw-SQL state-transition
+> block is still a second encoding of a rule `orchestrator/stubs.py` now owns, and nothing calls
+> `orchestrator.stubs` from that path yet.
+
 ---
 
 **D70 — OPEN, low severity, recorded because the shape is this document's subject. `ruff format

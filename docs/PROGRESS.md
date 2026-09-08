@@ -10157,3 +10157,113 @@ D126 and the same stub-stacking mechanism) — consistent, disclosed Rule 13 pro
 - 2 disclosed nits from the D107/D104/D108 bundle's final review (a fail-open on a missing
   generated build file, no escalation ladder for a permanently-refusing REVALIDATE round) —
   neither reopens the safety gap, both are cheap, low-priority follow-up.
+
+## Round VI, thirty-first wave (2026-09-08) — §12 count corrected: 42 of 48 (measurement fix, not
+new closure). D123/D125/D126 family fully closed. Two stale-heading defects found and corrected.
+
+Dispatched via subagent-driven-development with 5 concurrent lanes (3 workers, 1 research, 1
+audit), following task-80's close-out. Full detail in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; this checkpoint records the headline
+outcomes and the corrected criteria count per Rule 13.
+
+**D123/D125/D126 family (cross-wave `blocked_by` propagation) is now fully closed.** D126 — the
+last piece, a `--wave`-scoped multi-invocation residual shared by TRANSFORM and VERIFY, confirmed
+a genuine SOUNDNESS gap (not merely liveness): a dependent could reach a real, permanent
+`SUCCEEDED` verdict against an already-abandoned provider, via entirely ordinary `--wave N` usage
+on `fleet transform`/`fleet verify`, with no self-healing path through either of `fleet resume`'s
+re-entry mechanisms. Fixed per ADR-0130 (a `_repropagate_terminal_providers` sweep reusing the
+existing, reviewed `propagate_blocked`/`append_blocked_by` machinery, run once per invocation
+before wave dispatch, shared across all three phases). Took two full opus-tier review cycles and
+four fix rounds: the first found the naive design would have broken two real §37 stub-based escape
+hatches (`--stub-blocked`, an `ACTIVE`-stub redirect) and required a genuine departure from the
+ADR's original "reuse unchanged" decision (independently re-derived by the reviewer as correct,
+and for a stronger structural reason than the implementer's own); the second found a real
+behavioral asymmetry bug (`stub_blocked` reaching only TRANSFORM's sweep while `fleet resume
+--stub-blocked` drives all three phases in one invocation) plus a false "provable no-op" claim
+backed by a structurally vacuous test. Every claim across every round was independently
+re-measured by the reviewer rather than trusted from the report — including two separate
+normalised whole-tree sweeps that caught un-swept residue of an earlier round's own retracted
+claim. D123/D125/D126 are all now `FIXED, LANDED`, verified via two independent review passes each
+on the load-bearing claims.
+
+**Two D-numbers found already fixed with stale `OPEN` headings, not actually open — corrected
+rather than duplicated.** D85 (lint-gate detached-worktree divergence) was fixed weeks ago
+(`b76c041`, round G) and never marked; the correction retroactively validates every "lint gate
+clean" claim this session's 35+ worktree-isolated tasks have made. D103 (two gaps in
+`_pr_sync_impl`/T1) was fixed the SAME DAY it was filed, by a sibling lane, and sat `OPEN` for six
+days. Both dispatches' mandatory fresh-re-derivation step (rather than trusting the doc) is what
+caught this — a 2-of-5 hit rate this wave, prompting research-47's follow-on stale-heading sweep.
+
+**D107/D104/D108 bundle's two disclosed review nits closed** (a fail-open on a missing generated
+`BUILD.bazel`, no escalation ladder for a permanently-refusing REVALIDATE round) — both cheap,
+reviewed Approved, no fix loop needed.
+
+**D91 closed**: `tasks.pre_commit_sha` now has a real production writer
+(`_TransformClaimHook.__call__`), unblocking §12.15(i)/§12.45(i) exercisability against a real
+value instead of always-NULL. The dispatch brief's mandatory fresh-re-derivation (D91's own entry
+disclosed it had rotted repeatedly as the tree shifted) correctly diverged from the brief's own
+draft instruction after finding the codebase's actual INSERT-column convention differed — verified
+true against schema.sql by an independent review, not taken on trust.
+
+**A post-merge citation-drift regression was caught and fixed once this wave** (the recurring
+"concurrent lanes shift line numbers under a sibling's already-landed citation" class this project
+has hit repeatedly) — re-running the citation-hygiene gate after every merge, not just at the end
+of the round, is what caught it while it was still a one-line fix.
+
+**A customer directive landed from a separate, concurrent session**: `docs/SPEC.md` §15 (QA/QC and
+Real-Repo Pilot Phase) and ADR-0131, defining a completion gate beyond §12 — additive only, no
+§12 criterion's text/count/scope changed, so Rule 14 is not triggered. Found as uncommitted
+working-tree state in the primary checkout mid-wave (a live concurrent-editor hazard this
+project's guardrails had not previously named); not touched or discarded per CLAUDE.md's
+"investigate before overwriting" guidance, disclosed to the customer directly, committed verbatim
+with their explicit confirmation once clarified.
+
+**§12 count corrected to 42 of 48, up from the 41 carried forward unmeasured since the thirtieth
+wave — a measurement correction, not new closure work.** research-47's fresh Rollup re-derivation
+found §12.6 (D120's fix, task 62) and §12.32 (the bijection test, task 61) both genuinely DONE
+simultaneously as of this wave's `HEAD`; no prior checkpoint had ever credited both together — an
+undercount, not an overclaim, but Rule 13 requires re-measuring rather than carrying forward
+either way. This wave's own D85/D103/D107-bundle/D91/D126 work did not by itself flip any
+criterion (D126 narrows §12.14 further, down to its single remaining named gap, without closing
+it). **Open set, confirmed fresh: §11, §14, §31, §37, §39, §43 (6 of 48).**
+
+**§37's "done bar" in `docs/CRITERIA_PLAN.md` was found stale and needs its own correction pass**
+(not yet applied): its "still-unbuilt NEW-MECHANISM" framing for the `--stub-blocked` stub-creation
+worker is out of date — that worker exists and is fully wired in production today (tasks 67-69, 79;
+D104/D107/D108/D123/D124/D125/D126 all `FIXED, LANDED`). The real remaining gap for §37 (and,
+sharing the same done bar, §39) is TEST-ONLY: no single fixture drives the full literal SPEC
+scenario (`fleet retry` → a real PR-merge-triggered `fleet pr --sync` T1 → `fleet resume`'s
+REVALIDATE step → `RESOLVED`/`FULL` → idempotency across repeat triggers) through the real CLI
+end to end — existing tests prove the pieces separately, never combined. **This is the
+cheapest-identified path to closing up to 2 full criteria** (no design pass needed, unlike §12.31
+case (ii)'s Leg C1/C2 or §12.43 case (ii)'s D55/D58 gap, both still genuinely undesigned).
+
+**One more stale sub-claim found and annotated** (not a full status flip): D69's body said
+"`docs/SPEC.md` does not name the [`StubAbandoned`] kind" — `docs/SPEC.md:4403` now does. D69
+stays `OPEN` — its load-bearing claim (a raw-SQL duplicate encoding in `cli.stubs_abandon()`,
+bypassing `orchestrator.stubs.apply`) is unaffected and still real.
+
+**Status: main green.** Citation-hygiene/findings-kinds/writer-statements gates re-verified clean
+after every merge (94/94 combined), ruff and mypy clean, D126's regression fixtures spot-checked
+passing directly on `main`.
+
+**Remaining open criteria and exactly what closes each, cheapest/highest-leverage first:**
+- **§12.37/§12.39** — a combined, real-CLI end-to-end fixture driving the full stub lifecycle
+  through `retry`→`pr --sync`→`resume` in one test. TEST-ONLY, no design pass needed. Highest
+  leverage identified this wave; targeted next.
+- **§12.14** — down to its single remaining named gap: the still-undesigned transitive-stub-
+  stacking mechanism (a second-layer dependent whose own provider is `DEGRADED`, not directly
+  RHI). Genuinely undesigned, no precedent to mirror.
+- **§12.31** case (ii) — Leg C1 (owner-scoped `FILE_PATH`-collision design, never designed) and
+  Leg C2's `contract_id`-wiring gap (unsized), both flagged real-but-non-gating, never dispatched.
+- **§12.43** case (ii) — the D55/D58 circuit-breaker gap, genuinely unsized, needs its own
+  dedicated design round; untouched all session.
+- **§12.11** — two remaining slices of D112 (`BuildUnit.test_srcs` non-Python population): Rust
+  (`rust_test.crate`/`srcs` mutual exclusivity, a real disclosed analysis-time blocker) and JS
+  (`js_test`'s `deps=` reintroducing D7's bug) — each needs a real adapter fix, not a predicate
+  addition (a correction to this wave's own prior "mechanically similar, no new design" framing);
+  JVM's slice already closed (round VI task 70, previously uncredited in this framing too). Plus
+  D116 (native baseline build, genuinely unbuilt — see D116's own entry).
+- `docs/CRITERIA_PLAN.md`'s §37 section itself needs the stale "unbuilt NEW-MECHANISM" text
+  corrected to reflect the worker's existing production status, independent of building the
+  combined test fixture above.
