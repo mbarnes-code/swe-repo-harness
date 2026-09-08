@@ -9710,3 +9710,32 @@ this project's own precedent treats as needing an ADR — see `RESUME_DEMOTE`/`S
 history), not a mechanical wiring task. No task briefed yet; this is the controller's next dispatch
 candidate for both §12.14 and §12.37, likely as a shared fix since both criteria need the identical
 mechanism.
+
+## D125 — OPEN, NOT YET MEASURED WITH A FIXTURE. `_verify_impl`'s wave loop likely has the same
+cross-wave `blocked_by` propagation gap D123 found in `_transform_impl`
+
+**Found by round VI research-43 (2026-09-08), while designing D123's fix (ADR-0127), as a
+byproduct of reading `_transform_impl` alongside its siblings — not independently investigated
+further, per that research task's own scope boundary.** Verified free before allocating:
+form-agnostic sweep found `D124` as the highest allocated number.
+
+**The suspicion, as read (not yet measured against a real fixture).** `_verify_impl`'s wave loop
+(`src/fleet/cli.py:11687-11702`, cited by research-43 against `HEAD` at the time of that
+research) has the byte-for-byte same structural shape TRANSFORM had before ADR-0127's fix: a
+lazy, per-wave `upsert_phase` call inside the dispatch loop, rather than `_build_impl`'s upfront
+PASS 1 pre-seed. If this reading is correct, a repo reaching `REQUIRES_HUMAN_INTERVENTION` during
+an early VERIFY wave would fail to propagate `blocked_by` to a direct dependent scheduled into a
+later VERIFY wave within the same `fleet verify` invocation — the identical defect D123 measured
+for TRANSFORM, by the same mechanism.
+
+**Why this is disclosed as OPEN rather than assumed fixed by ADR-0127/task-76.** ADR-0127's fix is
+scoped to `_transform_impl` only (its judgment call 2 explicitly declines to touch `_verify_impl`,
+deferring it as this entry). Re-verify this reading fresh against current `HEAD` before acting on
+it — code may have moved since research-43 read it — and confirm with a real fixture (mirroring
+D123's own discovery fixture, adapted to `fleet verify`) before treating this as more than a
+structural suspicion.
+
+**Not yet built:** the fixture that would confirm or refute this, and (if confirmed) a fix
+mirroring ADR-0127's shape adapted to `_verify_impl`'s own PASS structure. **Not dispatched this
+round** — the controller is deferring this to a future round to avoid over-extending the current
+wave; this entry exists so the finding is not lost between rounds.

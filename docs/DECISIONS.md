@@ -14130,3 +14130,212 @@ unbuilt (D122's own disclosed scope), and is task-75's job.
 index for read performance (no evidence of a performance concern exists; do not add one
 speculatively — CLAUDE.md Rule 2); whether any other reader of `_pr_records` beyond the ones
 `mypy --strict` finds needs special-casing.
+## ADR-0127 — D123: `_transform_impl` pre-seeds every wave's `phases` row upfront, mirroring
+`_build_impl`'s already-correct PASS 1, so cross-wave `blocked_by` propagation actually reaches a
+later-wave dependent
+
+**Context.** `docs/INTEGRATION_HONESTY.md`'s D123 (round VI task 69, `cfe82bb`) found, via a real
+`fleet scan` + `fleet transform` fixture on unmodified `main`, that §12.14's blast-containment
+clause (`docs/SPEC.md:7578` item 14: "a repo in `REQUIRES_HUMAN_INTERVENTION` marks exactly its
+transitive dependents over the ordering subgraph `BLOCKED` — no more, no less — and the run
+completes the remaining repos") is provably false: a direct dependent scheduled in a LATER wave
+than its now-RHI provider never gets `blocked_by` populated, because the phase row that write
+would touch does not exist yet at the moment the provider's status is known. No task was briefed;
+this ADR is that design and `task-76-brief.md` is the paired implementation brief.
+
+**Root cause, traced fresh against current `HEAD`.** `_transform_impl`'s wave loop
+(`src/fleet/cli.py:6381-6473`) creates each wave's `phases` rows LAZILY, at the top of that wave's
+own iteration:
+
+```python
+for index in waves:
+    members = await _wave_repos(read_conn, run_id, index, only)
+    ...
+    for repo_id in members:
+        await repository.upsert_phase(run_id, repo_id, Phase.TRANSFORM, now=_now(), max_attempts=ladder)
+    ...
+    report = await _run_transform_wave(...)   # containment (`_contain`) can fire IN HERE
+```
+
+When a member reaches `REQUIRES_HUMAN_INTERVENTION` inside `_run_transform_wave`,
+`PhaseRunner._contain` (`orchestrator/runner.py:1194-1201`) calls
+`WaveScheduler.propagate_blocked` (`orchestrator/scheduler.py:524-540`), which calls
+`SqliteSchedulerStore.append_blocked_by` (`orchestrator/scheduler.py:274-322`) for every
+transitive descendant over the ordering subgraph — correctly computed, with no wave restriction.
+But `append_blocked_by`'s write is an **UPDATE-only** operation: `SELECT phase, status,
+blocked_by FROM phases WHERE run_id = ? AND repo_id = ?`, then `UPDATE ... WHERE run_id = ? AND
+repo_id = ? AND phase = ?`. If a dependent scheduled in wave N+1 has no `phases` row for
+`Phase.TRANSFORM` yet — because wave N+1's own `upsert_phase` loop iteration has not run yet, it
+runs strictly *after* wave N's `_run_transform_wave` call returns — the `SELECT` returns zero rows
+for that phase, `touched` stays 0, and `propagate_blocked` silently does not add it to `blocked`.
+One iteration later, wave N+1's lazy `upsert_phase` runs a plain `INSERT` (fresh row, `PENDING`,
+`blocked_by='[]'`), and `WaveScheduler.admit()` — which treats a phase row that does not exist yet
+as `PENDING` (`status_of`'s own docstring, `scheduler.py:426-430`) and otherwise reads the table
+exactly as it is at call time — has no way to know the row was ever supposed to be blocked. The
+dependent is admitted and dispatched normally.
+
+**This is confirmed a propagation-TIMING gap, not a missing transition edge or a scheduler
+defect**, closing task 2 of this research's brief:
+- `PENDING → BLOCKED` is already a legal edge (`ALLOWED_TRANSITIONS[RepoStatus.PENDING]` includes
+  `RepoStatus.BLOCKED`, `models/enums.py:33-35`).
+- `WaveScheduler.admit()`/`status_of` already correctly treat an existing `BLOCKED` phase row as
+  settled-but-not-admitted (`SETTLED_STATUSES` includes `BLOCKED`, `scheduler.py:72-74`) — this is
+  exactly how a SAME-wave dependent (one whose `phases` row was upserted together with its
+  now-abandoned provider, before either dispatched) is already correctly blocked today. **No
+  code path downstream of the write needs to change** — only *when the write can succeed* needs to
+  change.
+- `orchestrator/reentry.py`'s `still_blocking`/`plan_unblocking` (§11.5 step 6) are lazy readers of
+  live `phases` state, driven only from `fleet resume`, and require no change: once this fix makes
+  a later-wave dependent's `blocked_by` correct at TRANSFORM time, `fleet resume`'s existing
+  removal machinery works over it identically to any other blocked repo.
+
+**§12.14's clause (1) requires the write to land during the SAME `fleet transform` invocation,
+not merely be eventually-correct by the time `fleet resume` next runs.** The clause's own wording
+— "...and the run completes the remaining repos" — describes ONE continuous run in which blocked
+descendants are skipped while unrelated repos proceed; it is not phrased as a two-step
+propagate-then-resume protocol (contrast with §12.14 clause (2), which explicitly says "re-running
+... `SUCCEEDED` removes it," a deliberately later, second-invocation step). This project's own
+prior work independently confirms this reading is the intended one: **`_build_impl` already
+implements the immediate-not-eventual shape as a working precedent.** `_build_impl`'s PASS 1
+(`cli.py:11083-11093`) computes its WHOLE domain (`_eligible_build_units`, "every repo this run may
+ingest," deliberately unscoped by `--wave`/`--repo`) and `upsert_phase`s every eligible repo's BUILD
+row **before any wave dispatches**, so a same-invocation `append_blocked_by` always finds a row to
+touch regardless of which wave the target repo sits in. `tests/test_build_e2e.py`'s "Blocker C"
+fixture already drives this exact shape (a real, un-seeded, two-wave cross-wave containment) with
+zero hand-seeding, which is the working analog `_transform_impl` currently lacks — task-69's own
+report (`.superpowers/sdd/round-VI-criteria-closure/task-69-report.md`, "Concerns" section) already
+names this same comparison and names "an upfront domain-wide `upsert_phase` pass for TRANSFORM,
+mirroring BUILD's" as the fix shape, independently of this research.
+
+`VERIFY`'s wave loop (`cli.py:11687-11702`) has the **identical lazy-per-wave** `upsert_phase`
+structure TRANSFORM does (unlike BUILD) — see "Not decided here" below.
+
+---
+
+### Judgment call 1 — the fix's shape: eager per-event vs. upfront batch pre-seed vs. something else
+
+**Decision: upfront, whole-invocation-domain phase-row pre-seeding, run once before the wave
+dispatch loop begins — mirroring `_build_impl`'s PASS 1 exactly, not a new mechanism.** Concretely,
+inside `_transform_impl`, immediately after `waves = await _open_transform_waves(read_conn, run_id,
+wave)` and before the `for index in waves:` dispatch loop:
+
+1. Compute `members_by_wave: dict[int, tuple[str, ...]]` by calling `_wave_repos(read_conn, run_id,
+   index, only)` once per `index in waves` — the identical call and identical `only` scoping the
+   dispatch loop already uses, just hoisted earlier and memoized so the dispatch loop does not
+   recompute it.
+2. For every `repo_id` in every wave's members (flattened, in any order — `upsert_phase` is
+   idempotent per repo/phase), call `repository.upsert_phase(run_id, repo_id, Phase.TRANSFORM,
+   now=_now(), max_attempts=ladder)` exactly as today, just moved out of the per-wave loop.
+3. The dispatch loop (`for index in waves:`) reads `members = members_by_wave[index]` instead of
+   calling `_wave_repos` again, and its own `upsert_phase` loop is DELETED (redundant — the row
+   already exists from step 2, and `upsert_phase`'s `ON CONFLICT DO UPDATE SET max_attempts =
+   excluded.max_attempts, updated_at = excluded.updated_at` never touches `status` or
+   `blocked_by`, so nothing downstream that reads those columns can tell the difference between
+   "seeded once, upfront" and "seeded per-wave, lazily" for a row that is dispatched normally).
+
+**Why this, not the two other shapes the research brief named:**
+- **Not a "restructure to run propagation eagerly whenever a repo reaches RHI, independent of wave"
+  mechanism.** `propagate_blocked` already runs eagerly, exactly at the moment a repo reaches RHI
+  (`PhaseRunner._contain`, called synchronously inside the same `_run_transform_wave` call that
+  produced the RHI transition) — it already has the FULL, wave-independent descendant set. The
+  defect is not in when propagation FIRES, it is in whether the target ROW EXISTS for it to write
+  into. Building new event-driven machinery here would duplicate `propagate_blocked`'s already-
+  correct logic to solve a problem that is actually one line away.
+- **Not a "post-wave-loop sweep that runs once after all waves in a `_transform_impl` call have
+  executed."** This was checked against SPEC's literal wording (see above) and rejected: a sweep
+  that runs only after every wave has already dispatched would not stop a later wave's own
+  admission decision from proceeding as if the dependent were unblocked — the very failure mode
+  D123 measured. A batch pass must run **before** dispatch, not after it, to have any effect on
+  which repos get admitted.
+- **Is a "batch, upfront" pass**, but scoped to *before dispatch of the run's own waves* rather
+  than *after* — the research brief's two named shapes were not quite the axis that mattered; the
+  actual axis is *before all dispatch* vs. *after all dispatch*, and only the former satisfies
+  SPEC. `_build_impl`'s PASS 1 is exactly this shape, already proven correct in production.
+
+**Why this is minimal and safe (Rule 2, Simplicity First):**
+- No schema change, no new table, no new SQL statement — `upsert_phase`'s `INSERT ... ON CONFLICT
+  DO UPDATE` is already idempotent and already used for exactly this write.
+- No change to `WaveScheduler.admit()`, `SqliteSchedulerStore.append_blocked_by`,
+  `WaveScheduler.propagate_blocked`, `ALLOWED_TRANSITIONS`, or `SETTLED_STATUSES` — every one of
+  these already does the right thing GIVEN a row to work with; this fix supplies the row earlier.
+- No change to `--wave`/`--only` dispatch-filter semantics: the pre-seed pass iterates exactly the
+  same `waves`/`only`-scoped domain the dispatch loop already computes — it does not widen what
+  this invocation processes, only *when* the rows for that already-fixed domain get created.
+- `phases.updated_at`/`max_attempts` for a repo's TRANSFORM row now reflect "when this invocation
+  started planning its domain" rather than "when this wave was actually dispatched" — a real,
+  disclosed but harmless behavior change (see "Disclosed, not a defect" below), identical to what
+  `_build_impl`'s rows have always read.
+
+### Judgment call 2 — does this change `WaveScheduler.admit()` or `ALLOWED_TRANSITIONS`?
+
+**Decision: no. Confirmed, not merely assumed, by reading both.** `admit()`
+(`scheduler.py:478-515`) already partitions members into `blocked`/`settled`/`candidates` purely
+from `status_of(repo_id)`, which is purely a fresh read of the `phases` table — it has no
+wave-scoping logic that would need to change, and no caching that this fix's earlier row-creation
+would go stale against. `ALLOWED_TRANSITIONS[RepoStatus.PENDING]` already contains
+`RepoStatus.BLOCKED` (`models/enums.py:33-35`) — the exact edge `append_blocked_by`'s `transition()`
+call needs, already exercised today for same-wave dependents. D123's own root-cause paragraph
+framed this as "a structural gap in the propagation timing, not a one-off bug in a single call
+site," and re-reading the code confirms that framing is correct: the fix is entirely about *when*
+a write is attempted, never about *what* the write is legally allowed to do.
+
+### Judgment call 3 — `VERIFY`'s identical structural gap (found during this research, NOT in
+D123's scope, NOT fixed by task-76)
+
+**Not decided here — flagged for the controller.** `_verify_impl`'s wave loop
+(`cli.py:11687-11702`) has the byte-for-byte same shape TRANSFORM does today: `for index in waves:
+members, blocked = await _gated_members(...); ...; for repo_id in members: await
+repository.upsert_phase(run_id, repo_id, Phase.VERIFY, ...)` — lazy, per-wave, inside the dispatch
+loop, unlike BUILD's upfront PASS 1. If a repo reaches `REQUIRES_HUMAN_INTERVENTION` during an
+early VERIFY wave and a direct dependent is scheduled into a later VERIFY wave in the SAME `fleet
+verify` invocation, the identical defect D123 measured for TRANSFORM almost certainly reproduces
+for VERIFY, by the same mechanism, for the same reason. **This was not independently reproduced
+with a fixture in this research task** (it is a structural reading, not a measured fact, and this
+task's brief scoped reading to `_transform_impl` specifically) — it is reported here as a strong
+suspicion the controller should allocate a fresh D-number for and dispatch as its own
+research/fix task, rather than silently folding into task-76's scope (which would make task-76
+larger and harder to review than its own D123 citation justifies, and would mean a fix landing
+under one D-number's name that actually closes a different, unverified one). **OPEN QUESTION FOR
+CONTROLLER: allocate a new D-number for the `_verify_impl` structural analog and decide whether it
+is dispatched now or deferred** — this ADR and task-76 do not touch `_verify_impl` in any way.
+
+### Disclosed, not a defect — `phases.updated_at`'s new meaning for TRANSFORM rows
+
+Before this fix, a TRANSFORM row's `updated_at` (from its `upsert_phase` INSERT) reflected the
+moment that wave was actually dispatched. After this fix, it reflects the moment `_transform_impl`
+began planning its domain (before wave 0 dispatches) — identical in kind to what has always been
+true of BUILD's `phases.updated_at`. No test inspected during this research asserts TRANSFORM's
+`phases.updated_at` reflects per-wave dispatch timing specifically (`grep` over
+`tests/test_transform_e2e.py`/`tests/test_scheduler.py` for `updated_at` assertions on TRANSFORM
+rows returns nothing); this is disclosed rather than silently absorbed, per CLAUDE.md's "state what
+you ran" discipline, and task-76's worker must re-confirm this with a fresh grep against `HEAD` at
+implementation time rather than trusting this research's own read.
+
+### Disclosed — `docs/CRITERIA_PLAN.md`'s §14 entry and `docs/INTEGRATION_HONESTY.md`'s D123
+heading are NOT edited by this research (read-only constraint)
+
+Per this research task's own read-only constraint, this ADR does not edit `docs/DECISIONS.md`,
+`docs/CRITERIA_PLAN.md`, or `docs/INTEGRATION_HONESTY.md`. Landing task-76's fix is the point at
+which:
+- D123's entry heading should move `OPEN` → `FIXED, LANDED (<sha>)` (CLAUDE.md's "a status heading
+  is a FIELD" convention) — the body should be annotated with a dated marker, never rewritten.
+- `docs/CRITERIA_PLAN.md`'s §14 entry's own bullet list ("D123 (cross-wave `blocked_by`
+  propagation)... none of which is briefed yet") needs its D123 mention updated to reflect it is now
+  briefed/fixed, leaving D124 and the transitive-stub-stacking mechanism as the remaining named
+  gaps — this is task-76's own landing responsibility (Rule 13/14), not this research's.
+
+---
+
+### Open questions for the controller
+
+1. **The `_verify_impl` structural analog (judgment call 3 above)** — a new D-number allocation and
+   a decision on whether to dispatch a research/fix task for it now or defer. This is a genuine
+   controller call: it is new scope this research surfaced but was not asked to investigate, and
+   whether it is worth interrupting the round for is a prioritization judgment, not a technical
+   fact this research can settle.
+
+No other genuine value judgment was found. The fix shape (judgment call 1), the "no scheduler/
+transition change needed" confirmation (judgment call 2), and the "must land at TRANSFORM time,
+not merely be resume-time-correct" reading of SPEC are each settled by reading the code and the
+SPEC text directly, not by a preference this ADR is guessing at.
+
