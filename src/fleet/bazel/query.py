@@ -93,9 +93,21 @@ def rdeps_query(dest: str, *, affected_only: bool = True) -> str:
     `verify.affected_only=true` (the default) intersects the universe with the rules this repo's
     commits changed, which is what keeps 250 repos × 4 phases × 3 attempts from becoming 3 000
     full-fleet builds. `false` restores the whole closure for a final gate run.
+
+    **D129 (found round VI task 79, ADR-0128's own headline real-Bazel proof) — `set(...)` around
+    `kind_rule_query(dest)` was invalid Bazel query syntax, confirmed against a real `bazel
+    query`**: `set(kind(rule, //dest/...))` is `set()` (a literal LABEL LIST constructor) fed a
+    nested query EXPRESSION, which Bazel rejects — `ERROR: ... syntax error at '( rule ,'`,
+    reproduced in a throwaway single-package workspace with no harness code involved. `rdeps()`'s
+    second argument already accepts an arbitrary query expression directly; `kind(rule, //dest/
+    ...)` needs no `set()` wrapper at all. This had NEVER been exercised against a real `bazel
+    query` anywhere in this tree before (`grep` finds no real-Bazel Phase-4 `verify` test in
+    `tests/`) — every prior test asserted the STRING this function returns, not that Bazel would
+    accept it. Fixed here because it directly blocked D104(b)'s own required real-Bazel proof;
+    unrelated to D107/D104/D108 otherwise, and pre-existing since before this task.
     """
     if affected_only:
-        return f"rdeps(//..., set({kind_rule_query(dest)}))"
+        return f"rdeps(//..., {kind_rule_query(dest)})"
     return f"rdeps(//..., //{dest.strip('/')}/...)"
 
 

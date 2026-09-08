@@ -159,7 +159,13 @@ from fleet.models.graph import (
 )
 from fleet.models.repo import Coordinate, ManifestRef, RawDependency, RepoId
 from fleet.models.state import SCHEMA_VERSION
-from fleet.models.tasks import MAX_ATTEMPTS, PullRequestDraft, StubRecord, VerificationReport
+from fleet.models.tasks import (
+    MAX_ATTEMPTS,
+    FilePatch,
+    PullRequestDraft,
+    StubRecord,
+    VerificationReport,
+)
 from fleet.obs.events import EventEmitter, events_jsonl_path
 from fleet.obs.log import configure as log_configure
 from fleet.obs.redact import redact_text
@@ -173,7 +179,7 @@ from fleet.orchestrator.budgets import (
     WaveBudgetExhausted,
     new_cpu_pool,
 )
-from fleet.orchestrator.context import RunContext, default_logger
+from fleet.orchestrator.context import RunContext, default_logger, lease_owner_id
 from fleet.orchestrator.memory_guard import HostMemorySampler, read_own_rss_bytes
 from fleet.orchestrator.reentry import (
     BlockerState,
@@ -211,6 +217,7 @@ from fleet.orchestrator.stubs import (
     StubDecision,
     StubTransition,
     StubTrigger,
+    settle_revalidation,
 )
 from fleet.orchestrator.stubs import apply as apply_stub_decision
 from fleet.orchestrator.stubs import build_stub_record as _build_stub_record
@@ -280,11 +287,15 @@ from fleet.util.proc import CommandRunner
 from fleet.util.proc import run as proc_run
 from fleet.vcs import build_forge
 from fleet.vcs.commits import (
+    PHASE_TRAILER,
     FleetTrailers,
+    PatchApplyError,
     RollbackAnchorError,
+    apply_and_commit,
     contract_rollback_shas_in_range,
     discard_task,
     find_task_commit,
+    patch_id,
     revert_and_commit,
 )
 from fleet.vcs.filter_repo import (
@@ -319,6 +330,7 @@ from fleet.workers.base import (
 from fleet.workers.buildgen import (
     BuildgenInput,
     BuildgenOutput,
+    BuildgenWorker,
     ExternalRequirement,
     materialize,
 )
@@ -8096,6 +8108,17 @@ class VerifyInput(WorkerInput):
         "there, so the two cannot disagree about which coordinates are live.",
     )
     stub_fidelity: dict[str, StubFidelity] = Field(default_factory=dict)
+    revalidation_round: int = Field(
+        default=0,
+        ge=0,
+        description="D104(a) (round VI task 79, ADR-0128): 0 for an ordinary first-pass Phase 4 "
+        "dispatch; N >= 1 when this dispatch is a REVALIDATE claiming loop's Nth round after a "
+        "stub was superseded (§3.5.1). Threaded straight into `RdepverifyInput.revalidation_round` "
+        "of the same name (previously always defaulted to 0 there, even under a real revalidation "
+        "re-run), so the resulting `VerificationReport.revalidation_round` — the value "
+        "`orchestrator.stubs.settle_revalidation` maxes against `stub.rounds_spent` — reflects the "
+        "round that actually produced it rather than silently reading as round 0 forever.",
+    )
 
 
 class VerifyOutput(WorkerOutput):
@@ -8234,6 +8257,7 @@ class VerifyPipelineWorker(BaseWorker[VerifyInput, VerifyOutput]):
             # `_verify_payloads` is where these are read off the `stubs` table.
             verified_against_stubs=list(payload.verified_against_stubs),
             stub_fidelity=dict(payload.stub_fidelity),
+            revalidation_round=payload.revalidation_round,
         )
 
     @staticmethod
@@ -12927,6 +12951,615 @@ async def _fire_t1_for_provider(
     return superseded_this_call
 
 
+class LabelRewriteError(FleetCliError):
+    """D107 (ADR-0128): a consumer's label rewrite could not be attempted or committed. Reported
+    per-consumer by `_rewrite_superseded_consumer_labels` (Rule 11: fail loud, but never abort an
+    unrelated consumer's own rewrite over one repo's failure) — never raised past that loop in
+    production; raised directly only by callers (tests) driving `_rewrite_one_consumer_label`
+    standalone."""
+
+
+async def _rewrite_one_consumer_label(
+    settings: FleetSettings,
+    monorepo: Git,
+    *,
+    run_id: str,
+    consumer_repo_id: str,
+    facts: Mapping[str, _RepoFacts],
+    internal_deps: Mapping[str, tuple[InternalDep, ...]],
+    manifest_paths: Mapping[str, tuple[str, ...]],
+    owned_keys: frozenset[str],
+    stub_root: Path,
+) -> str:
+    """D107 (ADR-0128, round VI task 79) for ONE consumer: rewrite its generated `BUILD.bazel`
+    dependency label off a resolved stub, commit, and push — SPEC §3.5.1 items 1-3.
+
+    Mirrors three already-tested precedents rather than inventing a fourth mechanism
+    (`docs/DECISIONS.md` ADR-0128 judgment call 3): `cli._plan_build`'s `BuildUnit` assembly
+    (`_dest_sources`/`_external_coordinates`/a fresh `_unit_deps` call), `cli._promote_one_pr`'s
+    rebase-then-`push_force_with_lease` shape, and `vcs/commits.py::apply_and_commit`'s guarded
+    commit. Returns a short human-readable outcome string (`"committed <sha>"`,
+    `"already_applied"`, `"committed <sha> (not pushed: ...)"`); raises `LabelRewriteError` on
+    anything this task's scope does not handle (ADR-0128 judgment call 6: a rebase conflict, or
+    the consumer's branch having drifted since it was last ingested — the "does the branch need a
+    full Phase-2 re-run" case SPEC §3.5.1 step 2 separately describes and this task explicitly
+    does not solve).
+
+    **Precondition check, corrected from the ADR's own literal pseudocode against the ACTUALLY
+    landed branch topology (disclosed in this task's report, not silently substituted).**
+    ADR-0128 judgment call 6 (and SPEC §3.5.1 step 2's own pseudocode) describes comparing
+    `migrate/<consumer>`'s current tree to its own "last Phase-2 commit"'s tree. Empirically,
+    `migrate/<consumer>` in the MONOREPO (the branch this function rebases and pushes, per
+    `_promote_one_pr`'s own identical precedent) is NOT a Phase-2 branch at all:
+    `vcs/filter_repo.py::ingest()` (D115) force-moves it to point at Phase 3's own MERGE commit
+    on every ingest (`await git.create_branch(f"migrate/{source.repo_id}", merge_sha,
+    force=True)`), so its tip's tree is the whole monorepo's tree at that point, not this one
+    repo's — a literal trailer/tree comparison against "the last Fleet-Phase: 2 commit" would
+    reject the ordinary, undrifted, never-before-rewritten case as "drift" on every single
+    consumer, every time. The mechanically equivalent check for what this codebase actually
+    does: every commit unique to `migrate/<consumer>` relative to `integration` (`git rev-list
+    integration..migrate/<consumer>`) must be either NONE (the common case: ingest's merge commit
+    is already folded into `integration`) or a PRIOR round of this exact function's own rewrite
+    (identified by its `Fleet-Phase` trailer, always `int(Phase.BUILD)` here) — anything else is
+    a commit this task does not understand landing on the branch between ingest and now, and is
+    the drift case ADR-0128 judgment call 6 defers rather than solves.
+    """
+    branch = f"migrate/{consumer_repo_id}"
+    base = settings.config.run.monorepo_branch
+    tip = await monorepo.resolve(branch)
+    if tip is None:
+        raise LabelRewriteError(f"{branch!r} does not exist in {monorepo.path}; nothing to rewrite")
+
+    unique_commits = await monorepo.log(f"{base}..{branch}", trailer_keys=[PHASE_TRAILER])
+    build_phase = str(int(Phase.BUILD))
+    unrecognized = [c for c in unique_commits if c.trailer(PHASE_TRAILER) != build_phase]
+    if unrecognized:
+        raise LabelRewriteError(
+            f"{branch!r} carries {len(unrecognized)} commit(s) not reachable from {base!r} and "
+            f"not one of this function's own prior rewrites (newest unrecognized: "
+            f"{unrecognized[0].sha}) -- the branch moved since it was last ingested (SPEC "
+            "§3.5.1 step 2's 'does this need a full Phase-2 re-run' case). ADR-0128 judgment "
+            "call 6 explicitly defers this case; failing loud rather than proceeding"
+        )
+
+    wt = stub_root / consumer_repo_id
+    if await asyncio.to_thread(wt.exists):
+        await monorepo.exec(["worktree", "remove", "--force", str(wt)], check=False)
+        if await asyncio.to_thread(wt.exists):
+            await asyncio.to_thread(shutil.rmtree, wt)
+    await monorepo.exec(["worktree", "prune"])
+    await asyncio.to_thread(stub_root.mkdir, parents=True, exist_ok=True)
+    await monorepo.exec(["worktree", "add", "--force", str(wt), branch])
+    try:
+        consumer_git = Git(wt)
+        clean = await consumer_git.rebase(base)
+        if not clean:
+            await consumer_git.abort_rebase()
+            raise LabelRewriteError(f"rebase of {branch!r} onto {base!r} conflicted")
+        pre_commit_sha = await consumer_git.rev_parse("HEAD")
+
+        fact = facts.get(consumer_repo_id)
+        if fact is None:
+            raise LabelRewriteError(f"{consumer_repo_id!r} has no _RepoFacts row (unscanned?)")
+        overrides = dict(settings.config.build.monorepo_dir_overrides)
+        try:
+            dest = _dest_for(consumer_repo_id, fact, overrides)
+        except (ReservedDestError, ValueError) as exc:
+            raise LabelRewriteError(
+                f"{consumer_repo_id!r}'s destination layout refused: {exc}"
+            ) from exc
+
+        srcs = await _dest_sources(wt, dest)
+        non_test_srcs, test_srcs = _partition_test_srcs(fact.ecosystem, srcs)
+        external = await asyncio.to_thread(
+            _external_coordinates, wt / dest, manifest_paths.get(consumer_repo_id, ()), owned_keys
+        )
+        unit = BuildUnit(
+            unit_id=consumer_repo_id,
+            ecosystem=fact.ecosystem,
+            dest=dest,
+            srcs=non_test_srcs,
+            test_srcs=test_srcs,
+            published=fact.published,
+            internal_deps=list(internal_deps.get(consumer_repo_id, ())),
+            external_coordinates=list({c.key: c for c in external}.values()),
+        )
+        adapter = ecosystems.for_ecosystem(unit.ecosystem)
+        targets = [*adapter.generate_targets(unit), *adapter.test_targets(unit)]
+
+        buildgen_input = BuildgenInput(
+            unit=unit,
+            targets=targets,
+            gazelle=adapter.gazelle_config(unit),
+            # SPEC §3.5.1 item 1: "rewrites the label, and only the label" -- an internal `//`
+            # label swap never touches an external coordinate, so MODULE.bazel (which describes
+            # only external `bazel_dep`/`use_extension` entries) cannot change from this. Skipping
+            # it here means this rewrite needs none of the fleet-wide MODULE.bazel inputs
+            # (`workspace_deps`, `module_targets`, `ruleset_versions`) a single-consumer,
+            # off-cycle re-render has no cheap way to reconstruct (Agent Recommendation, not
+            # SPEC-mandated -- see this task's report for the full reasoning).
+            write_module_bazel=False,
+            ingest=None,
+            log_dir=str((settings.root / "artifacts/logs").resolve()),
+            min_free_bytes=settings.config.preflight.min_free_bytes,
+        )
+        worker_ctx = WorkerContext(
+            run_id=UUID(run_id),
+            repo_id=consumer_repo_id,
+            attempt=1,
+            workdir=str(wt),
+            lease_owner=lease_owner_id(),
+            lease_fence=0,
+            deadline=loop_now() + 600.0,
+            cancel=asyncio.Event(),
+            budget=CallBudget(remaining_tokens=0, remaining_usd=0.0, deadline=loop_now() + 600.0),
+            db=cast(Any, None),  # BuildgenWorker's render step touches no `WorkerContext.db`
+            llm=cast(Any, None),
+            router=cast(Any, None),
+            limits=cast(Any, None),
+            log=default_logger("fleet.stub-resolve"),
+        )
+        worker = BuildgenWorker()
+        if not await worker.preconditions_hold(worker_ctx, buildgen_input):
+            raise LabelRewriteError(
+                f"{consumer_repo_id!r}: BuildgenWorker preconditions do not hold for its own "
+                "re-render (reserved dest, missing worktree, or nothing to render)"
+            )
+        result = await worker.run(worker_ctx, buildgen_input)
+        if result.status != "ok":
+            error = result.error
+            raise LabelRewriteError(
+                f"{consumer_repo_id!r}: BuildgenWorker re-render failed: "
+                f"{error.stderr_tail if error else result.status}"
+            )
+
+        diff_text = await _git_output(wt, ["diff", "--", f"{dest}/BUILD.bazel"])
+        if not diff_text.strip():
+            return "already_applied"  # new_text == old_text: the label is already correct
+
+        # `apply_and_commit` expects a CLEAN tree to apply forward onto -- BuildgenWorker already
+        # wrote the new bytes directly to disk, so the diff above (worktree vs. HEAD) IS the
+        # patch, and the worktree is reset back to HEAD before it is fed in (CLAUDE.md's own
+        # guardrail: a patch built from the worktree's own `git diff` cannot open the
+        # index/worktree staleness gap a candidate-file-based patch can).
+        await consumer_git.exec(["checkout", "--", f"{dest}/BUILD.bazel"])
+        patch_dir = stub_root / f"{consumer_repo_id}-patches"
+        await asyncio.to_thread(patch_dir.mkdir, parents=True, exist_ok=True)
+        patch_file = patch_dir / "BUILD.bazel.patch"
+        await asyncio.to_thread(patch_file.write_text, diff_text, encoding="utf-8")
+        patches = [
+            FilePatch(
+                path=f"{dest}/BUILD.bazel",
+                diff=diff_text,
+                tier=TransformTier.DETERMINISTIC,
+                parse_probe_ok=True,
+            )
+        ]
+        trailers = FleetTrailers(
+            run_id=run_id,
+            repo_id=consumer_repo_id,
+            phase=int(Phase.BUILD),
+            task_id=uuid4(),
+            attempt=1,
+            patch_id=patch_id(patches),
+        )
+        try:
+            outcome = await apply_and_commit(
+                consumer_git,
+                patch=patch_file,
+                subject=f"stub resolution: rewrite {consumer_repo_id}'s dependency label",
+                trailers=trailers,
+                branch=branch,
+                pre_commit_sha=pre_commit_sha,
+            )
+        except PatchApplyError as exc:
+            raise LabelRewriteError(f"{consumer_repo_id!r}: {exc}") from exc
+        if outcome.skipped:
+            return "already_applied"
+
+        try:
+            remote_tip = await _remote_branch_tip(consumer_git, "origin", branch)
+        except GitCommandError as exc:
+            return f"committed {outcome.commit_sha} (not pushed: could not read remote tip: {exc})"
+        if remote_tip is None:
+            return f"committed {outcome.commit_sha} (not pushed: no 'origin' ref for {branch!r})"
+        try:
+            await consumer_git.push_force_with_lease("origin", branch, expected_sha=remote_tip)
+        except (GitCommandError, ValueError) as exc:
+            return (
+                f"committed {outcome.commit_sha} "
+                f"(not pushed: push_force_with_lease refused: {exc})"
+            )
+        return f"committed {outcome.commit_sha}"
+    finally:
+        await monorepo.exec(["worktree", "remove", "--force", str(wt)], check=False)
+        await monorepo.exec(["worktree", "prune"])
+
+
+async def _rewrite_superseded_consumer_labels(
+    settings: FleetSettings, path: Path, *, run_id: str, consumer_repo_ids: Iterable[str]
+) -> dict[str, str]:
+    """D107 (ADR-0128): the label rewrite, for every distinct consumer T1 just superseded.
+
+    Called AFTER `_pr_sync_impl`'s own `StateWriter` transaction has committed (ADR-0128 judgment
+    call 1: "async follow-on work in the same logical trigger, not literally inside the IMMEDIATE
+    transaction, which cannot perform git/Bazel I/O") -- this function performs no SQL write of
+    its own. A per-consumer failure is caught and recorded rather than raised past this loop
+    (Rule 11: fail loud, but a drifted or conflicted consumer must not block every OTHER
+    consumer's own, independent rewrite in the same `--sync` invocation).
+    """
+    consumers = sorted(set(consumer_repo_ids))
+    if not consumers:
+        return {}
+    monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    stub_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-resolve"
+    read_conn = await connect_ro(path)
+    try:
+        facts = await _repo_facts(read_conn)
+        overrides = dict(settings.config.build.monorepo_dir_overrides)
+        internal_deps = await _unit_deps(
+            read_conn, settings, run_id, facts=facts, overrides=overrides
+        )
+        manifest_paths = await _manifest_paths(read_conn)
+        owned_keys = await _owned_coordinate_keys(read_conn)
+    finally:
+        await read_conn.close()
+
+    outcomes: dict[str, str] = {}
+    for consumer_repo_id in consumers:
+        try:
+            outcomes[consumer_repo_id] = await _rewrite_one_consumer_label(
+                settings,
+                monorepo,
+                run_id=run_id,
+                consumer_repo_id=consumer_repo_id,
+                facts=facts,
+                internal_deps=internal_deps,
+                manifest_paths=manifest_paths,
+                owned_keys=owned_keys,
+                stub_root=stub_root,
+            )
+        except LabelRewriteError as exc:
+            outcomes[consumer_repo_id] = f"FAILED: {exc}"
+    return outcomes
+
+
+# --------------------------------------------------------------------------------------
+# D104(b)/(c), D108 (ADR-0128, round VI task 79) -- the REVALIDATE claiming loop
+# --------------------------------------------------------------------------------------
+
+_REVALIDATE_LEASE_TTL_S: Final = 3600
+"""Generous relative to an ordinary phase lease: one REVALIDATE round is a real `bazel build` +
+`bazel test` pass over the consumer's affected-rdeps closure (SPEC §3.5.1 step 3), not a bounded
+SQL transaction."""
+
+
+async def _stub_records_for_revalidation_task(
+    conn: aiosqlite.Connection, run_id: str, task_id: str
+) -> dict[tuple[str, str], StubRecord]:
+    """Every `stubs` row this ONE REVALIDATE task's round covers (`stubs.revalidation_task_id`,
+    D103 gap 2), still `SUPERSEDED` -- keyed `(consumer_repo_id, stub_coord_key)`, exactly
+    `_apply_stub_decisions`'s own `records` shape (and `_stub_supersede_inputs`'s `records`
+    return), scoped by task rather than by provider. A `batched`-policy task can cover more than
+    one coord_key (several providers fixed in the same round); each gets its own
+    `settle_revalidation` call fed the SAME `VerificationReport` (one build+test pass covers
+    every coordinate at once).
+
+    Scoped to `state = 'SUPERSEDED'`: a row this task's own round already settled in an earlier,
+    partially-completed attempt (crash-and-retry) is skipped rather than re-settled, since
+    `settle_revalidation` itself raises on a non-`SUPERSEDED` row.
+    """
+    rows = await _rows(
+        conn,
+        "SELECT consumer_repo_id, provider_repo_id, stub_id, stub_coord_key, state, "
+        "       stub_fidelity, pinned_version, revalidation_round, max_revalidation_rounds, "
+        "       created_at, state_changed_at "
+        "  FROM stubs WHERE run_id = ? AND revalidation_task_id = ? AND state = 'SUPERSEDED' "
+        " ORDER BY stub_coord_key",
+        (run_id, task_id),
+    )
+    out: dict[tuple[str, str], StubRecord] = {}
+    for row in rows:
+        consumer = str(row[0])
+        coord_key = str(row[3])
+        out[(consumer, coord_key)] = StubRecord(
+            stub_id=UUID(str(row[2])),
+            run_id=UUID(run_id),
+            coord_key=coord_key,
+            provider_repo_id=str(row[1]),
+            consumer_repo_ids=[consumer],
+            fidelity=StubFidelity(str(row[5])),
+            pinned_version=None if row[6] is None else str(row[6]),
+            state=StubState(str(row[4])),
+            max_revalidation_rounds=int(row[8]),
+            rounds_spent=int(row[7]),
+            created_at=datetime.fromisoformat(str(row[9])),
+            state_changed_at=datetime.fromisoformat(str(row[10])),
+        )
+    return out
+
+
+async def _current_stub_states_by_consumer(
+    conn: aiosqlite.Connection, run_id: str, consumer_repo_id: str
+) -> dict[str, StubState]:
+    """Every coord_key's CURRENT state for one consumer -- the `sibling_states` map
+    `settle_revalidation` needs to decide T2's `all_clear` (every OTHER coord_key of this
+    consumer already `RESOLVED`). One row per coord_key: the row at that coord_key's own highest
+    `revalidation_round`, since a re-emitted stub inserts a new row rather than mutating the old
+    one (SPEC §3.5.1's append-only audit trail)."""
+    rows = await _rows(
+        conn,
+        "SELECT stub_coord_key, state FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? "
+        "   AND revalidation_round = ("
+        "       SELECT MAX(revalidation_round) FROM stubs s2 "
+        "        WHERE s2.run_id = stubs.run_id AND s2.consumer_repo_id = stubs.consumer_repo_id "
+        "          AND s2.stub_coord_key = stubs.stub_coord_key)",
+        (run_id, consumer_repo_id),
+    )
+    return {str(row[0]): StubState(str(row[1])) for row in rows}
+
+
+def _round_index_from_revalidation_key(revalidation_key_value: str) -> int:
+    """`'r{round}:{hash}'` (`orchestrator.stubs.revalidation_key`) -> the round int. Parsed
+    rather than re-threaded through a new column: the round is already encoded in the ONE
+    identifier `tasks.revalidation_key` carries, and re-deriving it here is cheaper than a
+    schema change for a value used only to stamp `VerifyInput.revalidation_round` (D104-a)."""
+    prefix, _, _ = revalidation_key_value.partition(":")
+    return int(prefix.removeprefix("r"))
+
+
+async def _run_one_revalidation_task(
+    settings: FleetSettings,
+    monorepo: Git,
+    writer: StateWriter,
+    repository: SqliteStateRepository,
+    read_conn: aiosqlite.Connection,
+    *,
+    run_id: str,
+    task_id: str,
+    repo_id: str,
+    revalidation_key_value: str,
+    dest_path: str,
+    revalidate_root: Path,
+    now: datetime,
+) -> str:
+    """D104(b): claim ONE `REVALIDATE` task and, on a won claim, run its round to completion.
+
+    `VerifyPipelineWorker` (unmodified) is re-run against a **fresh checkout of `migrate/<repo_id>`
+    's current tip** -- D107's own rewrite (this same trigger's earlier step) is what makes that
+    tip's committed `BUILD.bazel` name the real label rather than the stub, and
+    `_active_stubs_by_consumer` (unmodified, `state = 'ACTIVE'` only) is what makes
+    `verified_against_stubs` read empty because the DB row genuinely moved to `SUPERSEDED`, not
+    merely because this loop stopped asking about it (ADR-0128's whole safety argument).
+    """
+    claimed = await repository.claim_task_by_id(
+        task_id, worker="fleet-resume-revalidate", now=now, lease_ttl_s=_REVALIDATE_LEASE_TTL_S
+    )
+    if not claimed:
+        return "not_claimed"
+
+    async def fail_back_to_pending(reason: str) -> str:
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "UPDATE tasks SET status = 'PENDING', claimed_by = NULL, "
+                "       lease_expires_at = NULL, fence_token = fence_token + 1 "
+                " WHERE task_id = ? AND status = 'RUNNING'",
+                (task_id,),
+            )
+
+        await writer.submit(unit)
+        return f"FAILED: {reason}"
+
+    async def mark_done() -> None:
+        async def unit(conn: aiosqlite.Connection) -> None:
+            await conn.execute(
+                "UPDATE tasks SET status = 'DONE', claimed_by = NULL, lease_expires_at = NULL "
+                " WHERE task_id = ? AND status = 'RUNNING'",
+                (task_id,),
+            )
+
+        await writer.submit(unit)
+
+    branch = f"migrate/{repo_id}"
+    wt = revalidate_root / repo_id
+    if await asyncio.to_thread(wt.exists):
+        await monorepo.exec(["worktree", "remove", "--force", str(wt)], check=False)
+        if await asyncio.to_thread(wt.exists):
+            await asyncio.to_thread(shutil.rmtree, wt)
+    await monorepo.exec(["worktree", "prune"])
+    await asyncio.to_thread(revalidate_root.mkdir, parents=True, exist_ok=True)
+    try:
+        await monorepo.exec(["worktree", "add", "--detach", "--force", str(wt), branch])
+    except GitCommandError as exc:
+        return await fail_back_to_pending(f"could not cut a worktree from {branch!r}: {exc}")
+
+    try:
+        stub_facts = await _active_stubs_by_consumer(read_conn, run_id)
+        fidelity = stub_facts.get(repo_id, {})
+        round_index = _round_index_from_revalidation_key(revalidation_key_value)
+        payload = VerifyInput(
+            repo_id=repo_id,
+            dest=dest_path,
+            integration_ref=f"refs/heads/{branch}",
+            log_dir=str((settings.root / "artifacts/logs").resolve()),
+            cache_mounts=_cache_mounts(settings),
+            min_free_bytes=settings.config.preflight.min_free_bytes,
+            affected_only=True,
+            verified_against_stubs=sorted(fidelity),
+            stub_fidelity=dict(fidelity),
+            revalidation_round=round_index,
+        )
+        worker_ctx = WorkerContext(
+            run_id=UUID(run_id),
+            repo_id=repo_id,
+            attempt=1,
+            workdir=str(wt),
+            lease_owner=lease_owner_id(),
+            lease_fence=0,
+            deadline=loop_now() + float(settings.config.budgets.task_max_wallclock_s.verify),
+            cancel=asyncio.Event(),
+            budget=CallBudget(
+                remaining_tokens=0,
+                remaining_usd=0.0,
+                deadline=loop_now() + float(settings.config.budgets.task_max_wallclock_s.verify),
+            ),
+            db=cast(Any, None),
+            llm=cast(Any, None),
+            router=cast(Any, None),
+            limits=cast(Any, None),
+            log=default_logger("fleet.stub-revalidate"),
+        )
+        worker = VerifyPipelineWorker(bazel_runner=BAZEL_RUNNER)
+        # No `preconditions_hold` gate here, deliberately: that method exists for `PhaseRunner.
+        # _re_entry`'s CHECKPOINT re-entry question ("may this worker resume ITS OWN prior
+        # partial result?") and is only ever consulted when a checkpoint exists
+        # (`_re_entry`'s own "if checkpoint is None: return ReEntry.FRESH" -- a fresh dispatch
+        # never calls it). Every REVALIDATE claim this loop drives is fresh from
+        # `VerifyPipelineWorker`'s own point of view (no checkpoint concept exists for this
+        # call path), and `VerifyInput.remaining_units=None` -- the correct value for "every
+        # unit is owed" -- would otherwise be misread by `preconditions_hold`'s own re-entry-only
+        # contract (`if payload.remaining_units is None: return False`) as a checkpoint payload
+        # missing its remaining units, refusing every dispatch this loop ever makes.
+        result = await worker.run(worker_ctx, payload)
+        output = result.output
+        report = output.report if output is not None else None
+        if report is None:
+            # The pipeline stopped before RDEPVERIFY ran (its own build/test failed) -- still a
+            # legitimate, DECISIVE verdict for `settle_revalidation` (a FAIL round consumes a
+            # revalidation round exactly like a rdeps-closure failure does), constructed from the
+            # own-build/test facts `VerifyOutput` still carries even on that early exit.
+            report = VerificationReport(
+                run_id=UUID(run_id),
+                repo_id=repo_id,
+                build_ok=output.build_ok if output is not None else False,
+                test_ok=output.test_ok if output is not None else False,
+                verdict="FAIL",
+                verified_against_stubs=sorted(fidelity),
+                stub_fidelity=dict(fidelity),
+                revalidation_round=round_index,
+            )
+
+        stub_records = await _stub_records_for_revalidation_task(read_conn, run_id, task_id)
+        if not stub_records:
+            # Replay: an earlier attempt already settled every coord_key this task covers.
+            await mark_done()
+            return "already_settled"
+        sibling_states = await _current_stub_states_by_consumer(read_conn, run_id, repo_id)
+
+        decisions: list[StubDecision] = []
+        for stub in stub_records.values():
+            decision = settle_revalidation(stub, report, sibling_states=sibling_states)
+            if decision is not None:
+                decisions.append(decision)
+
+        if decisions:
+
+            async def apply_unit(
+                conn: aiosqlite.Connection, _decisions: Sequence[StubDecision] = tuple(decisions)
+            ) -> None:
+                await _apply_stub_decisions(conn, run_id, stub_records, _decisions, now=now)
+
+            await writer.submit(apply_unit)
+            # D108: the `consumer_status -> phases` write, mirroring `stub_degrade_transform`'s
+            # (ADR-0124) transaction shape -- a SEPARATE transaction from the `stubs`/`findings`
+            # write above, exactly as `stub_degrade_transform` is itself already a separate,
+            # later correction over an earlier transaction's `SUCCEEDED` write (ADR-0124's own
+            # precedent for this project). Only T2 all_clear and T3 STUB_DIVERGED ever carry a
+            # `consumer_status` other than DEGRADED (`orchestrator.stubs.settle_revalidation`'s
+            # own docstring) -- T1/T4/T3-reconcile never reach this call at all.
+            for decision in decisions:
+                if decision.consumer_status is RepoStatus.DEGRADED:
+                    continue
+                await repository.apply_stub_consumer_status(
+                    run_id,
+                    decision.consumer_repo_id,
+                    phase=Phase.VERIFY,
+                    new_status=decision.consumer_status,
+                    reason=decision.detail,
+                    now=now,
+                )
+
+        await _record_verification(
+            writer, run_id, repo_id, report, seed=payload.rdeps_sample_seed or "", now=now
+        )
+        await mark_done()
+        outcome = "settled" if decisions else "another_round"
+        return f"{outcome}: verdict={report.verdict} decisions={len(decisions)}"
+    except (GitCommandError, GitError) as exc:
+        return await fail_back_to_pending(f"{repo_id!r}: {exc}")
+    finally:
+        await monorepo.exec(["worktree", "remove", "--force", str(wt)], check=False)
+        await monorepo.exec(["worktree", "prune"])
+
+
+async def _run_revalidation_claims_impl(
+    settings: FleetSettings, path: Path, run_id: str, *, now: datetime
+) -> dict[str, object]:
+    """D104(b) (ADR-0128, round VI task 79): claim and execute every PENDING `REVALIDATE` task.
+
+    A dedicated claiming loop over `tasks WHERE kind = 'REVALIDATE' AND status = 'PENDING'`
+    (`state/repository.py::claim_task_by_id`), NOT a `WaveScheduler`/`wave_members` wave (ADR-0128
+    judgment call 7: `REVALIDATE` tasks sit outside `wave_members` entirely -- no `_run_*_wave`
+    function references `TaskKind.REVALIDATE`). Driven from a new `fleet resume` step, run
+    unconditionally like `stub_reconcile` (see the call site's own comment for the exact
+    insertion point and why it is not renumbered into §11.5's list).
+
+    Candidates are read ONCE at the top of this call: a REVALIDATE round is a real `bazel build`
+    + `bazel test` pass that can run for minutes, and re-reading the candidate set mid-loop would
+    let a task minted by a concurrent `fleet pr --sync` (running in a different process) join a
+    round already in progress with no bound on how long this call takes. A single-operator
+    `fleet resume` invocation is this project's normal shape; a second invocation's own claim
+    attempt on the SAME candidate simply loses `claim_task_by_id`'s CAS and reports `not_claimed`.
+    """
+    read_conn = await connect_ro(path)
+    try:
+        candidates = await _rows(
+            read_conn,
+            "SELECT task_id, repo_id, revalidation_key, dest_path FROM tasks "
+            " WHERE run_id = ? AND kind = 'REVALIDATE' AND status = 'PENDING' "
+            " ORDER BY created_at, task_id",
+            (run_id,),
+        )
+    finally:
+        await read_conn.close()
+
+    if not candidates:
+        return {"claimed": [], "outcomes": {}}
+
+    monorepo, _monorepo_path, _lock_dir = await _monorepo_checkout(settings)
+    revalidate_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-revalidate"
+    outcomes: dict[str, str] = {}
+    async with StateWriter(path, owner="fleet-resume-revalidate") as writer:
+        read_conn = await connect_ro(path)
+        try:
+            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            for row in candidates:
+                task_id, repo_id, revalidation_key_value, dest_path = (
+                    str(row[0]),
+                    str(row[1]),
+                    str(row[2]),
+                    str(row[3]),
+                )
+                outcomes[task_id] = await _run_one_revalidation_task(
+                    settings,
+                    monorepo,
+                    writer,
+                    repository,
+                    read_conn,
+                    run_id=run_id,
+                    task_id=task_id,
+                    repo_id=repo_id,
+                    revalidation_key_value=revalidation_key_value,
+                    dest_path=dest_path,
+                    revalidate_root=revalidate_root,
+                    now=now,
+                )
+        finally:
+            await read_conn.close()
+    return {"claimed": sorted(outcomes), "outcomes": outcomes}
+
+
 async def _pr_sync_impl(
     opts: GlobalOptions, settings: FleetSettings, path: Path, *, run_id: str
 ) -> dict[str, object]:
@@ -13116,6 +13749,16 @@ async def _pr_sync_impl(
     # strings.
     polled_repo_ids = {key[0] for key in pollable}
     all_repo_ids = {key[0] for key in records}
+
+    # D107 (ADR-0128): the label rewrite, for every distinct consumer T1 just superseded above —
+    # run AFTER the `StateWriter` transaction closed (judgment call 1: async follow-on work in
+    # the same logical trigger, never inside the `IMMEDIATE` transaction, which cannot perform
+    # git/Bazel I/O). `t1_superseded` already unions BOTH the newly-observed loop and the D103
+    # gap-1 sweep, so one call here covers everything this invocation superseded.
+    label_rewrites = await _rewrite_superseded_consumer_labels(
+        settings, path, run_id=run_id, consumer_repo_ids={pair[0] for pair in t1_superseded}
+    )
+
     return {
         "run_id": run_id,
         "polled": sorted(polled_repo_ids),
@@ -13130,6 +13773,10 @@ async def _pr_sync_impl(
         # the same-call reconcile-undoes-T1 defect. Carried in the JSON-facing result too, for an
         # operator to see which rows were held back from reconciliation and why.
         "t1_superseded_this_call": sorted(list(pair) for pair in t1_superseded),
+        # D107: `consumer_repo_id -> outcome string` ("committed <sha>", "already_applied", or
+        # "FAILED: ..." — see `_rewrite_one_consumer_label`'s docstring). Empty when no stub was
+        # superseded this invocation.
+        "label_rewrites": label_rewrites,
         "exit_code": int(ExitCode.SUCCESS),
     }
 
@@ -15175,6 +15822,36 @@ async def _resume_impl(
         stub_blocked=stub_blocked,
     )
 
+    # D104(b) (ADR-0128, round VI task 79): the REVALIDATE claiming loop -- sits HERE, between
+    # step 6 (unblocking, just above) and step 7 (projection regen, just below), unnumbered into
+    # §11.5's own list for the SAME reason `stub_reconcile`'s insertion above is: §11.5's steps
+    # 5-8 are cited by number extensively elsewhere in this codebase and its history, and
+    # renumbering risks the exact "sweep for the class, not the reported site" citation-rot
+    # hazard CLAUDE.md §7 warns against, for a gain (one step number) not worth that risk.
+    # `docs/SPEC.md` §11.5 carries the matching prose insertion (this task's own commit).
+    #
+    # ABOVE step 7 because a REVALIDATE round's own effects (a stub reaching `RESOLVED`, a
+    # consumer promoted to `SUCCEEDED` via D108) must land in the SAME regenerated
+    # `migration_state.json`, exactly the reasoning step 6's own comment gives for its position.
+    # BELOW step 6 because D107's own label rewrite (fired synchronously from `_pr_sync_impl`,
+    # not from here) must already be committed on `migrate/<consumer>` before a claimed
+    # REVALIDATE task's `VerifyPipelineWorker` re-run means anything (ADR-0128's whole safety
+    # argument) -- ordering this loop relative to `--repoll-prs` is not this step's job (that
+    # trigger already fired, if requested, earlier in this SAME `fleet resume` call, above the
+    # `stub_reconcile` sweep); this step only needs to run somewhere after step 5's demotion and
+    # before step 7's projection, and step 6's slot is where the SPEC research recommended it
+    # (`docs/DECISIONS.md` ADR-0128).
+    #
+    # `--dry-run` skips this entirely (unlike `stub_reconcile`, which computes a preview under
+    # `--dry-run` too): a REVALIDATE round performs REAL git/Bazel I/O -- a fresh worktree, a real
+    # `bazel build`/`bazel test` -- which is not the "no network call, free to run as a health
+    # check" property §11.5's own preamble claims for steps 1-7 (Agent Recommendation: SPEC does
+    # not pin this choice explicitly, and `pr_sync`'s own `--repoll-prs` gate is the closest
+    # existing precedent for "a step doing real I/O is skipped under --dry-run").
+    revalidation_claims: dict[str, object] | None = None
+    if not dry_run:
+        revalidation_claims = await _run_revalidation_claims_impl(settings, path, run_id, now=now)
+
     projection: str | None = None
     if not dry_run:
         # §11.5 step 7 — the projection is an OUTPUT regenerated from SQLite, never an input.
@@ -15240,6 +15917,11 @@ async def _resume_impl(
         # operator whether an audited quarantine was re-admitted or a subtree is still held, and
         # `applied` is what separates the preview from the write.
         "unblocked_dependents": unblocked,
+        # D104(b) (ADR-0128) -- the REVALIDATE claiming loop's own report: `None` under
+        # `--dry-run` (this step performs real git/Bazel I/O and is skipped there, unlike every
+        # numbered §11.5 step), `{"claimed": [], "outcomes": {}}` when no REVALIDATE task was
+        # PENDING.
+        "revalidation_claims": revalidation_claims,
         # §11.5 step 2. `live_sandbox_names` is in the payload because it is the input an
         # operator has to see to trust the other two keys: "0 orphans reaped" and "every orphan
         # was spared as live" are the same output with opposite meanings.

@@ -2422,6 +2422,36 @@ This paragraph is kept intact per CLAUDE.md's "annotate, never rewrite" ledger d
 > ADR-0113 condition 2; see `docs/SPEC.md` §3.5 item 1's own "not yet wired" sentence, added in
 > this same fix round.
 
+**Update, round VI task 79 (2026-09-08, ADR-0128) — D104/D107/D108 land, bundled per ADR-0128's
+own safety argument.** `docs/INTEGRATION_HONESTY.md` D107 (nothing rewrote a consumer's generated
+`BUILD.bazel` dependency label off a resolved stub — SPEC §3.5.1 item 1 had zero production
+implementation), D104 (`TaskKind.REVALIDATE` had no execution/dispatch path; `settle_revalidation`
+had zero production callers), and D108 (`StubDecision.consumer_status` had zero production
+readers) are now landed in one task: `_pr_sync_impl`'s existing T1 trigger (D102) now also cuts a
+fresh worktree from the consumer's `migrate/<repo>`, rebases it onto the current `integration`
+tip, re-derives the `BuildUnit` (`_unit_deps` reused unmodified — the redirect logic itself was
+already correct, per task 13's Blocker C landing above), re-renders via `BuildgenWorker`
+unmodified, and commits+pushes the diff via `vcs/commits.py::guard`/`apply_and_commit` (D107); a
+new claiming loop over `tasks WHERE kind = 'REVALIDATE' AND status = 'PENDING'`
+(`state/repository.py::claim_task_by_id`, not a `WaveScheduler` wave), driven from a new `fleet
+resume` step between step 6 (unblocking) and step 7 (projection regen), re-runs
+`VerifyPipelineWorker` unmodified against the consumer's now-rewritten tip and calls
+`settle_revalidation` (D104); and a new `SqliteStateRepository.apply_stub_consumer_status`
+method, mirroring `stub_degrade_transform`'s (ADR-0124) transaction shape in the opposite
+direction, promotes the consumer's `phases` row to `SUCCEEDED` (T2 all_clear) or escalates it to
+`REQUIRES_HUMAN_INTERVENTION` (T3 `STUB_DIVERGED`) — the only two `StubDecision` kinds that ever
+carry a non-`DEGRADED` `consumer_status` (D108). See `.superpowers/sdd/round-VI-criteria-
+closure/task-79-report.md` for the full test-proof accounting (which items ran under real Bazel
+vs. `FakeBazel`) and this task's commit SHA.
+
+**Not resolved by this update: whether D104/D107/D108 landing alone is sufficient to mark §37/
+§12.37 DONE, or whether §14's own citation of a shared done bar (D104/D107/D108/D123/D124) means
+D123/D124 (an unrelated blast-containment/re-run-to-SUCCEEDED gap, §14's own scope, untouched by
+this task) must ALSO close first.** This task's brief scoped it to D104/D107/D108 only; D123/D124
+are out of scope here and neither confirmed nor denied as additional §37/§12.37 prerequisites —
+left for whichever task next re-measures §37's done bar against `docs/SPEC.md` item 37's literal
+text.
+
 ## 38. No ready-for-review while a stub is unresolved
 **DONE (round VI research-31 + task 52, 2026-09-05) — see the closure paragraph at the end of
 this entry for the final piece (all 20 sub-clauses COVERED); everything below is kept as history.**

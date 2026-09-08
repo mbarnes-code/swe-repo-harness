@@ -301,6 +301,12 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   --     stub_degrade_transform, ADR-0124: the audit
                                                   --     write paired with the SUCCEEDED->DEGRADED
                                                   --     CAS write in the same transaction
+                                                  -- | 'StubConsumerStatusApplied' -- state/
+                                                  --     repository.py, apply_stub_consumer_status,
+                                                  --     D108/ADR-0128 (round VI task 79): the audit
+                                                  --     write paired with the DEGRADED->{SUCCEEDED,
+                                                  --     REQUIRES_HUMAN_INTERVENTION} CAS write in
+                                                  --     the same transaction
                                                   -- | 'BaselineRed' | 'RuleConflict'
                                                   -- | 'RuleOscillation' | 'UnmergedDependency'
                                                   -- | 'OperatorQuarantine' | 'ConfigDrift'

@@ -71,11 +71,13 @@ import aiosqlite
 from fleet.models.enums import (
     OPERATOR_REOPENED_KIND,
     PHASE_DEMOTED_KIND,
+    STUB_CONSUMER_STATUS_KIND,
     STUB_DEGRADED_KIND,
     OperatorReopen,
     Phase,
     PhaseDemotion,
     RepoStatus,
+    StubConsumerStatusChange,
     StubDegradation,
     TaskKind,
     degrade_for_stub,
@@ -578,6 +580,17 @@ class StateRepository(ReadOnlyRepository, Protocol):
         self, run_id: str, repo_id: str, *, phase: Phase, now: datetime
     ) -> StubDegradation | None: ...
 
+    async def apply_stub_consumer_status(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        phase: Phase,
+        new_status: RepoStatus,
+        reason: str,
+        now: datetime,
+    ) -> StubConsumerStatusChange | None: ...
+
     async def reopen_to_pending(
         self, run_id: str, repo_id: str, *, reason: str, now: datetime
     ) -> OperatorReopen: ...
@@ -1004,6 +1017,31 @@ def _stub_degradation_fingerprint(run_id: str, repo_id: str, phase: Phase) -> st
     """Semantic identity of one stub degradation: this repo, this phase, in this run (mirrors
     `_demotion_fingerprint`)."""
     return sha256_text("\x00".join((run_id, repo_id, STUB_DEGRADED_KIND, str(int(phase)))))
+
+
+# --------------------------------------------------------------------------------------
+# D108 (round VI task 79, ADR-0128) -- the consumer_status -> phases write
+# --------------------------------------------------------------------------------------
+
+#: The correction itself. Same shape as `_STUB_DEGRADE_PHASE_SQL`, guarded in the OPPOSITE
+#: direction: `AND status = 'DEGRADED'` is the fence, because a `StubDecision` carrying a
+#: non-DEGRADED `consumer_status` (T2 all_clear, T3 STUB_DIVERGED) is only ever produced by
+#: `orchestrator.stubs.settle_revalidation` for a consumer whose OWN phase row this same
+#: transaction expects to still read DEGRADED -- a row that moved underneath the read (or was
+#: never DEGRADED to begin with, e.g. a replayed decision applied twice) matches zero rows rather
+#: than being silently overwritten, mirroring `_STUB_DEGRADE_PHASE_SQL`'s own reasoning.
+_STUB_CONSUMER_STATUS_PHASE_SQL: Final = (
+    "UPDATE phases SET status = ?, updated_at = ? "
+    " WHERE run_id = ? AND repo_id = ? AND phase = ? AND status = 'DEGRADED'"
+)
+
+
+def _stub_consumer_status_fingerprint(run_id: str, repo_id: str, phase: Phase) -> str:
+    """Semantic identity of one D108 consumer-status correction: this repo, this phase, in this
+    run (mirrors `_stub_degradation_fingerprint`)."""
+    return sha256_text(
+        "\x00".join((run_id, repo_id, STUB_CONSUMER_STATUS_KIND, str(int(phase))))
+    )
 
 
 # --------------------------------------------------------------------------------------
@@ -2010,6 +2048,88 @@ class SqliteStateRepository:
                     STUB_DEGRADED_KIND,
                     "warn",
                     _stub_degradation_fingerprint(run_id, repo_id, phase),
+                    redact_text(json.dumps(record.payload(), sort_keys=True)),
+                    stamp,
+                ),
+            )
+            return record
+
+        return await self._writer.submit(unit)
+
+    async def apply_stub_consumer_status(
+        self,
+        run_id: str,
+        repo_id: str,
+        *,
+        phase: Phase,
+        new_status: RepoStatus,
+        reason: str,
+        now: datetime,
+    ) -> StubConsumerStatusChange | None:
+        """D108 (ADR-0128): `StubDecision.consumer_status -> phases`, in ONE transaction, for the
+        two `StubDecision` kinds that actually move it -- T2 `RESOLVED` (`new_status=SUCCEEDED`,
+        every sibling stub already `RESOLVED`) and T3 `STUB_DIVERGED`
+        (`new_status=REQUIRES_HUMAN_INTERVENTION`). Mirrors `stub_degrade_transform`'s (ADR-0124)
+        transaction shape exactly, in the opposite direction: one `BEGIN IMMEDIATE`, a CAS
+        `UPDATE phases SET status = ?` guarded on the row still reading `DEGRADED` (never
+        `SUCCEEDED`, as `stub_degrade_transform`'s own CAS guards), a `findings` row recording the
+        correction.
+
+        `phase` is always `Phase.VERIFY` in production -- a REVALIDATE task's own scope is the
+        Phase-4 recheck (`insert_revalidation_task`'s docstring) -- but is taken as a parameter
+        rather than hardcoded, mirroring `stub_degrade_transform`'s own choice, so a caller states
+        which phase's row it means rather than this method assuming one.
+
+        Returns `None`, a genuine no-op rather than an error, when the named phase row is not
+        currently `DEGRADED` -- a replayed decision (a second `fleet resume` re-applying the same
+        already-settled `StubDecision`) finds the row already at `new_status` (or moved on for an
+        unrelated reason) and correctly writes nothing a second time, mirroring
+        `stub_degrade_transform`'s own "speculative call, no error" contract rather than
+        `reopen_to_pending`'s "operator assertion, raise" one -- this is reached from the shared,
+        transition-agnostic `StubDecision` writer (`cli._apply_stub_decisions`), not from an
+        operator naming one repo.
+
+        `new_status` is validated through `models.enums.transition` before anything is written:
+        `RepoStatus.DEGRADED`'s `ALLOWED_TRANSITIONS` entry already names both `SUCCEEDED` and
+        `REQUIRES_HUMAN_INTERVENTION` as ordinary edges (§3.5.1's "DEGRADED is resolvable"), so an
+        illegal target here is a caller bug, not a state a real `StubDecision` can produce -- fail
+        loud rather than silently write `DEGRADED -> DEGRADED` or accept an unlisted status.
+        """
+        transition(RepoStatus.DEGRADED, new_status)
+        stamp = _iso(now)
+
+        async def unit(conn: aiosqlite.Connection) -> StubConsumerStatusChange | None:
+            async with conn.execute(
+                "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                (run_id, repo_id, int(phase)),
+            ) as cursor:
+                row = await cursor.fetchone()
+            if row is None or RepoStatus(str(row[0])) is not RepoStatus.DEGRADED:
+                return None
+
+            cursor = await conn.execute(
+                _STUB_CONSUMER_STATUS_PHASE_SQL,
+                (new_status.value, stamp, run_id, repo_id, int(phase)),
+            )
+            if cursor.rowcount != 1:
+                # The SELECT above, in this same BEGIN IMMEDIATE, already confirmed the row is
+                # DEGRADED at this exact key -- a mismatch here means it moved between the two
+                # reads inside one transaction, which should be structurally impossible.
+                raise RepositoryError(
+                    f"apply_stub_consumer_status: UPDATE matched {cursor.rowcount} rows for "
+                    f"phases({run_id}, {repo_id}, phase={int(phase)}), expected exactly 1"
+                )
+            record = StubConsumerStatusChange(
+                repo_id=repo_id, phase=phase, reason=reason, to_status=new_status
+            )
+            await conn.execute(
+                _DEMOTE_FINDING_SQL,
+                (
+                    run_id,
+                    repo_id,
+                    STUB_CONSUMER_STATUS_KIND,
+                    "info",
+                    _stub_consumer_status_fingerprint(run_id, repo_id, phase),
                     redact_text(json.dumps(record.payload(), sort_keys=True)),
                     stamp,
                 ),

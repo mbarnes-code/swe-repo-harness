@@ -4276,6 +4276,11 @@ CREATE TABLE IF NOT EXISTS findings (             -- cycles, no-manifest, prefli
                                                   -- | 'StubDegraded' (ADR-0124: the audit write,
                                                   --   paired with the SUCCEEDED->DEGRADED CAS
                                                   --   write in the same transaction)
+                                                  -- | 'StubConsumerStatusApplied' (D108/ADR-0128,
+                                                  --   round VI task 79: the audit write paired
+                                                  --   with the DEGRADED->{SUCCEEDED, REQUIRES_
+                                                  --   HUMAN_INTERVENTION} CAS write in the same
+                                                  --   transaction)
                                                   -- | 'BaselineRed' (baseline_build red, §9)
                                                   -- | 'RuleConflict' | 'RuleOscillation' (§7.4)
                                                   -- | 'UnmergedDependency' (§3.4 step 5)
@@ -7348,6 +7353,31 @@ and can be run as a dry-run health check (`fleet resume --dry-run`).
 > same way: it does not gate on `repoll == "polled"` and does not imply `--repoll-prs`), and it
 > too makes no network call, so the "Steps 1-7 make no network call" claim above is unaffected by
 > its insertion. `docs/INTEGRATION_HONESTY.md` D80 carries the same marker.
+
+> **Marker 2026-09-08 (round VI task 79, ADR-0128) — D104(b)'s REVALIDATE claiming loop is a
+> real `fleet resume` step, inserted in the SAME slot as `stub_reconcile` above and for the same
+> reason left unnumbered.** `orchestrator.stubs.settle_revalidation` (T2/T3) had zero production
+> callers (D104) until this task wired a dedicated claiming loop over `tasks WHERE kind =
+> 'REVALIDATE' AND status = 'PENDING'` (`state/repository.py::claim_task_by_id` — NOT a
+> `WaveScheduler` wave: `REVALIDATE` tasks sit outside `wave_members` entirely). It runs **after
+> step 6 (unblocking) and before step 7 (projection regen)** — after `stub_reconcile`'s own slot,
+> not before it — so that a revalidation round's own effects (a stub reaching `RESOLVED`, a
+> consumer promoted to `SUCCEEDED` via the `consumer_status -> phases` write below) land in the
+> SAME regenerated `migration_state.json`, exactly the reasoning step 6's own text gives for its
+> position. Each claimed task re-runs `VerifyPipelineWorker` (unmodified) against the consumer's
+> `migrate/<consumer>` tip — by construction already carrying the real dependency label, never
+> the stub's, because the label rewrite below (item 1) fires from the SAME T1 trigger and lands
+> before a REVALIDATE task minted in the same transaction is ever claimed — and calls
+> `settle_revalidation` with the result. **Unlike `stub_reconcile`, this step is skipped under
+> `--dry-run`**: it performs real git and Bazel I/O (a fresh worktree, an actual `bazel build`/
+> `bazel test`), not the "no network call, free as a health check" property this section's
+> preamble claims for steps 1-7 — an Agent Recommendation, not a SPEC-mandated distinction pinned
+> elsewhere. Also landed in this task: the label-rewrite mechanism SPEC §3.5.1 item 1 above
+> already describes as prose (D107 — previously nothing implemented it), and the
+> `consumer_status -> phases` write (D108) `StubDecision.consumer_status` needs to actually
+> promote a consumer, mirroring `SqliteStateRepository.stub_degrade_transform`'s (ADR-0124)
+> transaction shape in the opposite direction. `docs/INTEGRATION_HONESTY.md` D104/D107/D108 carry
+> the matching status updates.
 
 ### 11.6 Determinism and LLM drift
 
