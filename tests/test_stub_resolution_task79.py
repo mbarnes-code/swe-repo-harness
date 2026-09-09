@@ -1333,6 +1333,178 @@ def test_the_full_stub_lifecycle_resolves_through_the_real_cli_end_to_end(
 
 
 # ---------------------------------------------------------------------------------------
+# Round VI task 103 -- §12.39 case (i): `STUB_DIVERGED` driven through the REAL REVALIDATE
+# claiming loop, off a real differential, not by calling `settle_revalidation` directly with a
+# hand-constructed `failure_class` (`tests/test_stubs.py::
+# test_t3_on_stub_diverged_sends_the_consumer_to_a_human` already proves the classifier's own
+# logic that way -- this test proves the classifier is REACHABLE from a real revalidation round,
+# which it was not before this task's production fix; see `cli._revalidation_round_stub_diverged`
+# and its one caller in `cli._run_one_revalidation_task`).
+# ---------------------------------------------------------------------------------------
+
+
+def test_t3_stub_diverged_is_reached_through_the_real_claiming_loop_not_a_direct_call(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """§12.39 case (i) (`docs/SPEC.md:7678`, prose at `:1915-1922`), driven end to end.
+
+    Shares steps 1-4 verbatim with `test_the_full_stub_lifecycle_resolves_through_the_real_cli_
+    end_to_end` above (real STUB_LIMITED consumer verify, real provider retry/build/verify, a
+    real provider PR merged and discovered by `fleet pr --sync`, D107's real synchronous label
+    rewrite). It diverges only at step 5's `fleet resume`: a DIFFERENT `FakeBazel`, answering the
+    consumer's own `bazel build` with a non-zero exit code, plants the genuine build failure
+    §12.39(i) requires -- while the round's real commit set on `migrate/<consumer>` still
+    contains only Phase-3 (`Fleet-Phase: 3`) emissions (the ordinary label-generation commit plus
+    D107's own rewrite; nothing else touches that branch in this fixture) and the PRECEDING
+    verification (step 1, above) genuinely PASSED `STUB_LIMITED`. Both halves of the differential
+    are real facts the real claiming loop reads back from real DB/git state -- neither is handed
+    in as a parameter.
+
+    **Disclosed, not asserted**: this fixture's `acme-app-py` has no dependent repo
+    (`tests/test_transform_e2e.py::DESTINATIONS` names only the four acme repos, with no
+    `X -> acme-app-py` edge in this suite's fixtures anywhere), so §12.39(i)'s `blocked_by`
+    propagation clause has nothing to propagate to here. research-52 §1.4 traces that
+    propagation to a SEPARATE cross-invocation sweep (`cli.py:6739-6790`) that only runs on a
+    LATER phase dispatch -- out of this test's scope, not silently assumed to hold.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
+    branch = f"migrate/{_STUB_CONSUMER}"
+
+    # --- 1. a REAL fleet verify for the consumer: genuine STUB_LIMITED report + DEGRADED
+    # Phase 4 row (identical to the sibling test's own step 1 above). ---
+    fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task103-green")
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        consumer_verified = verify(fleet, "--repo", _STUB_CONSUMER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    assert consumer_verified.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, (
+        consumer_verified.output
+    )
+    consumer_phase4_before = query(
+        fleet,
+        "SELECT status, attempts FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_before[0][0] == "DEGRADED", consumer_phase4_before
+    attempts_before = consumer_phase4_before[0][1]
+    pre_report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    pre_report = json.loads(str(pre_report_row[0][0]))["report"]
+    assert pre_report["equivalence"] == "STUB_LIMITED", pre_report
+
+    # --- 2. fleet retry + a REAL fleet build/verify land the provider SUCCEEDED through
+    # Phase 4 (needed for §3.4 step 4's own eligibility gate below). ---
+    reopened = runner.invoke(
+        app,
+        [
+            *base_args(fleet),
+            "retry",
+            _STUB_PROVIDER,
+            "--reason",
+            "round VI task 103: fixed for real",
+        ],
+        catch_exceptions=False,
+    )
+    assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+        verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    provider_phase4 = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase4 == [("SUCCEEDED",)], provider_phase4
+
+    # --- 3. a REAL fleet pr opens the provider's own PR. ---
+    pr_opened = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+
+    # --- 4. a REAL PR-merge-driven `fleet pr --sync` T1 trigger; D107's rewrite runs
+    # synchronously, off T1's own real output. ---
+    forge.merge(_STUB_PROVIDER)
+    synced = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert synced.exit_code == ExitCode.SUCCESS, synced.output
+    sync_payload = json.loads(synced.stdout)
+    assert _STUB_PROVIDER in sync_payload["merged"], sync_payload
+    assert sync_payload["label_rewrites"].get(_STUB_CONSUMER, "").startswith("committed "), (
+        sync_payload
+    )
+    after_rewrite = _git_show(monorepo, f"{branch}:{dest_consumer}/BUILD.bazel")
+    assert f'"{_PROVIDER_LABEL}"' in after_rewrite, after_rewrite
+    assert f'"{_STUB_LABEL}"' not in after_rewrite, after_rewrite
+
+    # --- 5. DIVERGED: a REAL fleet resume runs the REVALIDATE claiming loop, but THIS time
+    # under a `FakeBazel` that refuses the consumer's own build -- the genuine, real build
+    # failure that (together with steps 1-4's real facts above) makes §12.39(i)'s differential
+    # true. ---
+    fake_diverged = FakeBazel(
+        fleet / "artifacts" / "fake-bazel-task103-diverged",
+        fail={("build", dest_consumer): 1},
+    )
+    cli.BAZEL_RUNNER = fake_diverged
+    try:
+        resumed = runner.invoke(
+            app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+    resume_payload = json.loads(resumed.stdout)
+    claims = resume_payload["revalidation_claims"]
+    assert claims is not None, resume_payload
+    outcomes = claims["outcomes"]
+    assert len(outcomes) == 1, outcomes
+    outcome = next(iter(outcomes.values()))
+    assert outcome.startswith("settled: verdict=FAIL"), outcome
+
+    # The real claiming loop classified this FAIL round STUB_DIVERGED -- read back from real DB
+    # state (never via a direct `settle_revalidation(..., failure_class=...)` call).
+    stub_final = query(
+        fleet,
+        "SELECT state, abandon_reason FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert stub_final == [("ABANDONED", "STUB_DIVERGED")], stub_final
+
+    consumer_phase4_after = query(
+        fleet,
+        "SELECT status, attempts FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_after == [("REQUIRES_HUMAN_INTERVENTION", attempts_before)], (
+        consumer_phase4_after
+    )
+
+    stub_rot_findings = query(
+        fleet,
+        "SELECT kind FROM findings WHERE run_id = ? AND repo_id = ? AND kind = 'StubRot'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert stub_rot_findings, "STUB_DIVERGED must write a StubRot finding (§13 row 33)"
+
+
+# ---------------------------------------------------------------------------------------
 # Round VI task 97 -- `docs/CRITERIA_PLAN.md` §37's done-bar item (2): a real `--stub-blocked`
 # CREATION dispatch, combined into the SAME continuous fixture as the merge/`--sync`/`resume`/
 # `stubs resolve` RESOLUTION chain the two tests above already prove. Closes the ONE residual
