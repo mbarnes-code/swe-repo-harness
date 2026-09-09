@@ -780,8 +780,26 @@ filed), the `EmptyRepo`-exemption narrowing (dated marker above, mirrors §12.9(
 native baseline builds run in per-ecosystem containers WITH network access, architecturally
 separate from Bazel's own `--network=none` sandbox. Legs A (adapter-side native-baseline
 capability, M, NEW-MECHANISM) through E (delete D116's strict xfail once the chain closes,
-S-M, TEST-ONLY) are sized in `.superpowers/sdd/round-VI-criteria-closure/research-53-report.md`;
-**Leg A is ready for direct dispatch in a future round.** Leg D (container/toolchain provisioning)
+S-M, TEST-ONLY) are sized in `.superpowers/sdd/round-VI-criteria-closure/research-53-report.md`.
+
+**Leg A closed by round VI task 105 (2026-09-09).** `EcosystemAdapter.native_baseline()` (non-
+abstract, `None` default) is implemented for `PyAdapter`/`JsAdapter` — the two ecosystems the real
+fixture fleet ({PyPI, NPM} + one empty repo, re-derived directly against current
+`FIXTURE_REPOS`) actually exercises. A new `native_test_unit_count()` helper counts only
+`rule.endswith("_test")` targets, independently verified exact against every `rule=` literal
+across all six adapters by review — fixes a real double-count hazard in `JsAdapter` (`ts_project` +
+`js_test` would naively count 2, correctly counts 1). The fixture Ruby adapter is confirmed
+byte-for-byte untouched. **Disclosed, load-bearing caveat for Leg B/C**: `test_unit_count` is
+computed via the SAME call the migrated side's own `test_targets()` makes, so it is currently a
+static/ceiling value tautologically identical to what `bazel query` will report for the same
+unit — it cannot yet express "the native suite actually shrank." This is now recorded directly in
+`NativeBaseline`'s class docstring and `Field(description=...)`, and in both adapters'
+`native_baseline()` docstrings (not only a scratch report) — a future Leg B/C must NOT wire this
+value unchanged into `repos.baseline_test_count`, or the count-regression check silently compares
+a value against itself. Reviewed Changes Requested → 1 fix round (corrected 2 wrong report test
+counts, added the caveat to the actual code) → scoped re-review ADDRESSED both, 0 new breakage.
+
+**Leg D (container/toolchain provisioning)
 is what makes this chain LARGE rather than ordinary well-precedented harness work — its size is
 now bounded by ADR-0135's ruling and by research-53's own found narrowing that SPEC's text scopes
 the assertion to *"the fixture run,"* whose current fixture fleet is only {PyPI, npm} plus one
