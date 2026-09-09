@@ -3340,13 +3340,25 @@ Measured in the running interpreter: the real estimate resolves to $0.027 agains
 sub-ceiling. ADR-0136 rules a REVALIDATE round dispatches at a model-talking rung by construction
 (not a contrived round-count ceiling, not leaving rung 1 as-is) and files `D135`
 (`docs/INTEGRATION_HONESTY.md`) for the broader fleet-wide `TokenEstimator`-zero-constructors gap
-this is a narrow instance of. **Done bar (remaining), sized into two legs, not one task:**
-**B1** (NEW-MECHANISM, M) — thread `CostLedger`+`llm_router` into
-`_run_revalidation_claims_impl` mirroring `_emit_prs`'s own precedent (`cli.py:15218`), wrap in the
-first production `SpendScope(kind=SpendKind.REVALIDATION)`, catch `RevalidationBudgetExhausted` →
-`settle_revalidation(budget_breach=)` — **must also fix, in the same commit, a latent
-under-charging bug ADR-0136/`D135` name**: `VerifyPipelineWorker.run`'s success path constructs its
-`WorkerResult` with no `usage=` (`cli.py:8457-8462`). **B2** (TEST-ONLY, S/M, after B1 lands) — the
+this is a narrow instance of. **B1 closed by round VI task 109 (2026-09-09).**
+`_run_one_revalidation_task` now dispatches at `attempt=2` (`context_policy=EVIDENCE_ONLY`,
+`tier=LLM_REPAIR`/`WORKHORSE` for `build_diagnosis`) by construction, replacing the previously
+hardcoded silent rung 1. `_run_revalidation_claims_impl` is wrapped in the first production
+`SpendScope(kind=SpendKind.REVALIDATION)` anywhere in this codebase, mirroring `_emit_prs`'s own
+existing ledger-wiring precedent — independently confirmed by review comparing both call sites
+directly. `RevalidationBudgetExhausted` is caught (narrowly typed, does not swallow
+`RepoBudgetExhausted`/other ledger breaches) and routed to `settle_revalidation(budget_breach=)` —
+the first production caller to ever pass this parameter. The same-commit companion fix
+(`VerifyPipelineWorker.run`'s success path now constructs `WorkerResult` with a real `usage=`) is
+also landed. Reviewed Approved; Rule 12 mutation (`SpendKind.REVALIDATION`→`NORMAL`) independently
+reproduced, reddens both new tests with the exact claimed failure messages, reverts
+byte-identical. The companion fix's own test-coverage gap (neither new test can exercise the
+success-path `usage=` fix, since both need a failing build to reach `_diagnose`) is independently
+confirmed structurally unavoidable today — `BuildverifyWorker.run` only calls `_diagnose` when
+`status != "ok"`, so a success-path run can never have called it; disclosed, not hidden. 1 Minor
+finding deferred (`TokenEstimator.estimate`'s `tier=WORKHORSE` is hardcoded rather than derived
+from the already-resolved `TierRoute` — matches shipped config today, not currently wrong). **B2**
+(TEST-ONLY, S/M, ready to dispatch now that B1 has landed) — the
 real two-round fixture proving `BUDGET_EXHAUSTED` through the real path, the same way task 103
 proved case (i). §12.39 as a whole stays OUT of the `<n> of 48` count until B1 and B2 both land —
 case (i) and (iii) are closed, case (ii) is not.
