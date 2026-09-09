@@ -11233,4 +11233,38 @@ task" — that clause is now dated-corrected to CLOSED, with the done bar narrow
 fixture-fleet vehicle alone. §12.43's own status is untouched (still OPEN, per this task's brief
 — building the case (iv) fixture-fleet vehicle is 43-C's separate, unaddressed remainder).
 
+## D134 — OPEN. `baseline_test_count` unit mismatch: a native test-CASE count would make §12.11's
+own comparison unsatisfiable on any real migrated repo with more than one test
+
+**Found by research-53 (round VI's research task, 2026-09-09), while scoping D116/§12.11's
+native-baseline-build chain into dispatchable legs. Allocated by the round VI controller,
+thirty-sixth wave — form-agnostic sweep (union over `**D<n> — `/`### D<n> — `/`## D<n> — ` in this
+file, and `\bD\d+\b` over `docs/*.md`) found `D133` as the highest allocated number.**
+
+**The gap, as measured.** `docs/SPEC.md` §12.11's own comparison is `bazel query
+'tests(//<dest>/...)' | wc -l >= repos.baseline_test_count`. The left side is a migrated **target**
+count: `ecosystems/py.py` and `jvm.py` each emit exactly ONE `py_test`/equivalent target per
+`BuildUnit`, regardless of how many native test functions that unit's source actually contains —
+the identical structural fact research-52 already used, this same session, to resolve
+`migrated_test_count`'s own column-ambiguity (a sibling column, not this one; see `docs/
+CRITERIA_PLAN.md` §12.39's research-52 update for that resolution). If `repos.baseline_test_count`
+is recorded as a raw native test-**case** count (e.g. `pytest --collect-only | wc -l` against the
+un-migrated repo — the obvious naive implementation), then for any real `BuildUnit` with more than
+one test function, the migrated-side target count (1) will be less than the native-side case count
+(N > 1), and `test_count_regressed` fires `FailureClass.TEST_FAILURE` (non-retryable) on every
+healthy migration of that repo — unsatisfiable as written, not merely imprecise, the same shape
+D116's sibling column ambiguity already had.
+
+**Not yet live.** `repos.baseline_ok`/`repos.baseline_test_count` are never written by any
+production code today (D116, above) — this defect cannot manifest until a future Leg B build task
+gives `baseline_test_count` its first writer. Disclosed now, before that writer exists, so Leg B is
+built against the correct unit from the start rather than shipping this defect and discovering it
+only once §12.11's own comparison starts firing spuriously. **Resolved by ADR-0135** (`docs/
+DECISIONS.md`): `baseline_test_count` must be recorded at the same per-`BuildUnit`-equivalent
+granularity the migrated-side `bazel query` count can produce, not a raw test-case count — Leg B's
+own design task still owes the exact native-side counting unit that satisfies this.
+
+**Not required by this research task to fix**: no code was written; this is a scoping-only finding
+per research-53's own read-only brief.
+
 Full account: `.superpowers/sdd/round-VI-criteria-closure/task-100-report.md`.

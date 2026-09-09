@@ -15694,3 +15694,72 @@ is updated to record this adjudication in the same commit.
 **Alternative rejected.** Building contract-wave dispatch (Leg F, unscoped): would require undoing
 or carving an exception into ADR-0119's wave-reader filter, a change with safety implications for
 every existing REPO-only dispatch path, to serve one criterion's literal wording. Not attempted.
+
+---
+
+## ADR-0135 — §12.11 / D116: three judgment calls resolved for the native-baseline-build chain
+
+**Decision (2026-09-09, round VI controller, thirty-sixth wave, research-53).** research-53
+(`.superpowers/sdd/round-VI-criteria-closure/research-53-report.md`) scoped D116 (no production
+code anywhere writes `repos.baseline_ok`/`repos.baseline_test_count`) into six legs (Leg 0
+adjudication, Legs A-D build, Leg E closes D116) and surfaced three judgment calls blocking every
+build leg. Resolved here so a future round can dispatch Leg A directly.
+
+**1. Unit definition: `baseline_test_count` means native TEST-TARGET-equivalent count, not raw
+test-case count.** SPEC's comparison (`bazel query 'tests(//<dest>/...)' | wc -l >= repos.
+baseline_test_count`) compares against a **migrated** target count, where `py.py`/`jvm.py` each
+emit exactly one `py_test`/equivalent target per `BuildUnit` regardless of native test-file count
+(the identical structural fact research-52 already used to resolve `migrated_test_count`'s own
+column ambiguity this same session, ADR/D116 column-ambiguity note). A `baseline_test_count`
+recorded as a raw native test-CASE count would make this comparison unsatisfiable on any real
+migrated Python/JVM repo with more than one test function — the same failure shape, on the other
+side of the same comparison. **Ruling: `baseline_test_count` must be recorded at the same
+granularity `bazel query`'s migrated-side count can produce** — a per-`BuildUnit`-equivalent count
+of the native repo's own test suites/files, not a raw assertion count. The exact native-side unit
+(per test file? per top-level test package?) is Leg A/B's own design detail, constrained to
+satisfy this equality-of-granularity requirement; not fully specified here. **Filed as `D134`**
+(`docs/INTEGRATION_HONESTY.md`) — a latent defect, not yet live (it cannot manifest until Leg B
+writes `baseline_test_count` for the first time), disclosed now per Rule 13/Guardrail 6 rather than
+left to surface silently once Leg B lands.
+
+**2. `acme-empty` (an `EmptyRepo`) makes "the exclusion set is empty" unsatisfiable regardless of
+mechanism quality — narrowed via Rule 14, not patched with a fabricated `baseline_ok=0`.** No
+worktree is ever cut for an `EmptyRepo` (`workers/clone.py`), so no native baseline build can ever
+run against it — structurally identical to the exact defect §12.9(a) already named and fixed
+2026-08-30 (`docs/SPEC.md`'s own dated correction there: "unsatisfiable as written for the same
+five exemption categories `(c)` already names"). **Ruling: apply the same fix, not a new one.**
+`docs/SPEC.md` §12 item 11's exclusion-set sentence is narrowed (see dated marker there) to exclude
+repos matching §3.1(c)'s enumerated exemptions from the "exclusion set is empty" assertion, the
+same way §12.9(a) already excludes them from its own manifest-coverage assertion. **Rejected
+alternative: writing `baseline_ok=0` for an `EmptyRepo`** — this would fabricate a `BaselineRed`
+finding for a repo that was never built at all, and would break §12.9's own "exactly one exemption
+per category" fixture-fleet closure (an `EmptyRepo` already serves as that criterion's
+`PreflightFailed`/`EmptyRepo` exemplar; giving it a second, contradictory classification here would
+corrupt that closure). The exact enumerated-exemption set for THIS criterion still needs
+confirming against the real fixture fleet when Leg C/E actually lands (research-53 did not
+re-verify all five apply identically here) — that verification is deferred to the landing task,
+not decided by inference here.
+
+**3. Native baseline builds run in per-ecosystem containers WITH network access, architecturally
+separate from Bazel's own hermetic sandbox — not inside it.** research-53 measured that the
+sandbox image provisions zero of the six ecosystems' native toolchains today (no node/mvn/gradle/
+go/cargo/JDK — `python3` is present only as `rules_python`'s bootstrap shim), and that SPEC's
+`--network=none` clause belongs to §12.11's FIRST sentence (Bazel's own build/test, already
+network-isolated) — not to the native baseline measurement, a separate preflight-phase concern
+(`settings.py`'s own `preflight.baseline_build` naming). **Ruling: standard industry practice for a
+one-time preflight measurement of a repo's own native, pre-migration toolchain is to run it with
+network access** (dependency resolution for arbitrary third-party repos in their original npm/
+Maven/Gradle/Cargo/Go-modules form cannot generally be made offline without per-repo vendoring
+work this project has never done for the baseline case) **in a per-ecosystem container Leg D
+provisions, independent of and never added to Bazel's own `--network=none` sandbox.** This keeps
+Bazel's hermetic guarantee (§12.11's first sentence) completely unaffected and avoids teaching
+Bazel's sandbox six new toolchains it was never meant to carry. Leg D's actual size still depends
+on how many of the six ecosystems the fixture fleet's own scope requires (research-53's own found
+narrowing: SPEC's text scopes the assertion to *"the fixture run"*, whose fixture fleet today is
+only {PyPI, npm} plus one empty repo — full six-ecosystem container provisioning is not required to
+close this criterion as literally written, only what the fixture fleet actually exercises).
+
+**Consequence.** Leg 0 (this decision) is complete. Leg A is ready for direct dispatch in a future
+round per research-53's own sizing. Legs B/C/D/E proceed under these three rulings; a future
+landing task still owes its own concrete design details (exact native-count granularity, exact
+exemption set re-verified against the live fixture fleet) within the bounds set here.

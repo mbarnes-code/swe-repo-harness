@@ -743,7 +743,10 @@ now stale — JVM closed at round VI task 70 (this file was never updated for th
 `docs/INTEGRATION_HONESTY.md`'s `## D112` entry, which was), and this task closes the JS/`NPM`
 slice too.** `js.py::test_targets()`'s `deps=`/`srcs=` defect (the same class `**D7 — FIXED, by deletion.**` fixed for
 `js_binary`, plus a missing test-compilation step D7 never needed) is fixed and proven at both the
-FakeBazel and real-Bazel tiers — full account in `## D112`. **Gap 1 is now Rust-only.** Do not
+FakeBazel and real-Bazel tiers — full account in `## D112`. **Gap 1 is now Rust-only.** *(Flagged
+stale by research-53, 2026-09-09: `TEST_SRC_PARTITIONED_ECOSYSTEMS` also includes `CARGO` as of
+current `HEAD` — reported here per Guardrail 7 rather than silently corrected, since re-deriving
+gap 1's true remaining ecosystem set was out of research-53's own scope.)* Do not
 round up the `<n> of 48` count for §12.11 on this account — Task B's own real-Bazel proof still
 needs a nonzero test target through `real_build()`'s own path for a non-Python ecosystem (JVM's is
 separately blocked on `D121`; JS's is unblocked by this task but not yet exercised through
@@ -769,6 +772,21 @@ ran and stays DONE; the residual (gap 3 `D116`, plus the non-Python `real_build(
 target gap this entry and task 87's own text above already name) is unchanged and this task made
 no production code change. Full account in `.superpowers/sdd/round-VI-criteria-closure/
 task-90-report.md`.
+
+**Gap 3 (`D116`) scoped into 6 legs (research-53, round VI thirty-sixth wave, 2026-09-09).** Leg 0
+(adjudication, no code) — RESOLVED this wave, see ADR-0135: unit definition (`baseline_test_count`
+must match the migrated-side's per-`BuildUnit` granularity, not raw test-case count — `D134`
+filed), the `EmptyRepo`-exemption narrowing (dated marker above, mirrors §12.9(a)'s precedent), and
+native baseline builds run in per-ecosystem containers WITH network access, architecturally
+separate from Bazel's own `--network=none` sandbox. Legs A (adapter-side native-baseline
+capability, M, NEW-MECHANISM) through E (delete D116's strict xfail once the chain closes,
+S-M, TEST-ONLY) are sized in `.superpowers/sdd/round-VI-criteria-closure/research-53-report.md`;
+**Leg A is ready for direct dispatch in a future round.** Leg D (container/toolchain provisioning)
+is what makes this chain LARGE rather than ordinary well-precedented harness work — its size is
+now bounded by ADR-0135's ruling and by research-53's own found narrowing that SPEC's text scopes
+the assertion to *"the fixture run,"* whose current fixture fleet is only {PyPI, npm} plus one
+empty repo (not all six ecosystems). Do not round up the `<n> of 48` count for §12.11 on this
+account — no code has landed yet, only scoping and adjudication.
 
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
