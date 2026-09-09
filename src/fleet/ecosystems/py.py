@@ -8,6 +8,7 @@ from typing import ClassVar, Final
 
 from fleet.ecosystems.base import (
     EcosystemAdapter,
+    native_test_unit_count,
     path_segment,
     register,
     select_entrypoint,
@@ -16,6 +17,7 @@ from fleet.ecosystems.base import (
 from fleet.models.build import (
     BuildTarget,
     BuildUnit,
+    NativeBaseline,
     Resolution,
     SupportFile,
     ToolchainRequirement,
@@ -362,6 +364,31 @@ class PyAdapter(EcosystemAdapter):
                 attrs={"python_version": _PYTHON_VERSION},
             )
         ]
+
+    def native_baseline(self, unit: BuildUnit) -> NativeBaseline:
+        """Native (pre-migration) probe for a PyPI distribution: `pip install -e .` (the repo's
+        own dependencies, resolved against its own `pyproject.toml`/`setup.py`, exactly as it
+        would be before this harness ever touched it) then `pytest`, both run with the repo's own
+        (PRE-migration) root as cwd — never `unit.dest`, which is where `layout()` (§3.3) decides
+        the code lands AFTER migration and does not exist yet when a baseline runs (§3.1 step 1,
+        before Phase 2).
+
+        `test_unit_count` is derived from `test_targets(unit)` — 0 or 1, matching this adapter's
+        own one-`py_test`-per-unit collapsing (ADR-0135 ruling 1; see `NativeBaseline`'s
+        docstring). It is never `None`: every `PYPI` unit has SOME native baseline, even a trivial
+        one with zero tests (`tests_lost`, `workers/buildverify.py:686`, expects exactly `0`, not
+        a sentinel, for that case).
+
+        **STATIC, not yet measured** — see `NativeBaseline.test_unit_count`'s own `Field` for the
+        caveat: this reuses the MIGRATED side's own collapsing, so it cannot express a native
+        suite that actually shrank, and Leg B/C must not wire it unchanged into
+        `repos.baseline_test_count`.
+        """
+        return NativeBaseline(
+            build_argv=["python3", "-m", "pip", "install", "-e", "."],
+            test_argv=["python3", "-m", "pytest"],
+            test_unit_count=native_test_unit_count(self.test_targets(unit)),
+        )
 
 
 def _requirements_text(coordinates: Sequence[Coordinate]) -> str:

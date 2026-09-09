@@ -17,6 +17,7 @@ from typing import ClassVar, Final
 from fleet.ecosystems.base import (
     EcosystemAdapter,
     join_segments,
+    native_test_unit_count,
     register,
     select_entrypoint,
     target_name,
@@ -25,6 +26,7 @@ from fleet.models.build import (
     BuildTarget,
     BuildUnit,
     InternalDep,
+    NativeBaseline,
     Resolution,
     SupportFile,
     ToolchainRequirement,
@@ -899,6 +901,35 @@ class JsAdapter(EcosystemAdapter):
                 repo_names=["npm_typescript"],
             )
         ]
+
+    def native_baseline(self, unit: BuildUnit) -> NativeBaseline:
+        """Native (pre-migration) probe for an NPM package: `npm install` then `npm test`, both
+        run with the repo's own (PRE-migration) root as cwd — never `unit.dest`, exactly for
+        `PyAdapter.native_baseline`'s reason: `layout()` (§3.3) has not placed this unit yet when
+        a baseline runs (§3.1 step 1, before Phase 2).
+
+        Plain `npm`, deliberately, not the `pnpm` this adapter's own `resolution()`/
+        `workspace_files()` use for the MIGRATED monorepo build: that pnpm store is THIS harness's
+        own choice for the Bazel side (ADR-0048), never a fact about how the repo's ORIGINAL
+        authors built or tested it. ADR-0135 ruling 3 is explicit that a native baseline probes
+        "arbitrary third-party repos in their original npm/Maven/Gradle/Cargo/Go-modules form".
+
+        `test_unit_count` is derived from `test_targets(unit)` via the shared
+        `native_test_unit_count` helper (0 or 1) rather than `len(test_targets(unit))` (which
+        would double-count: this adapter's own `test_targets()` emits a compile-only `ts_project`
+        alongside its one `js_test` — see `NativeBaseline`'s and `native_test_unit_count`'s own
+        docstrings).
+
+        **STATIC, not yet measured** — see `NativeBaseline.test_unit_count`'s own `Field` for the
+        caveat: this reuses the MIGRATED side's own collapsing, so it cannot express a native
+        suite that actually shrank, and Leg B/C must not wire it unchanged into
+        `repos.baseline_test_count`.
+        """
+        return NativeBaseline(
+            build_argv=["npm", "install"],
+            test_argv=["npm", "test"],
+            test_unit_count=native_test_unit_count(self.test_targets(unit)),
+        )
 
 
 def _js_output(src: str) -> str:
