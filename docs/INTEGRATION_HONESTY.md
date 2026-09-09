@@ -10998,6 +10998,21 @@ verbatim ("a `DEGRADED` provider satisfies the dependent-admission gate, the one
 un-merged provider" (research-49's own named risk for this half): a repo that is merely
 `PENDING`/`BLOCKED`/anything else still blocks normally.
 
+> **Editorial correction (2026-09-09, audit-3).** The paragraph above attributes the quoted text
+> to "SPEC §12.14's third sentence verbatim." The quote is real SPEC text but is **misattributed**:
+> `grep -n "the one case besides" docs/SPEC.md` returns exactly one hit, `docs/SPEC.md:1729`, inside
+> **§3.5 item 4** (`docs/SPEC.md:1723-1738`), not §12.14. §12.14's own third sentence
+> (`docs/SPEC.md:7651`, item 14 under "## 12. Success Criteria") does contain the clause "a
+> `DEGRADED` provider satisfies the dependent-admission gate" but continues differently — "...,
+> which is what makes the stack ship together rather than trading one blocked subtree for one
+> degraded layer plus the same blocked subtree" — never the "the one case besides `SUCCEEDED` with
+> a `MERGED` PR that does" clause quoted above. The correct citation for the exact quoted words is
+> `docs/SPEC.md` §3.5 item 4, line 1729. The substance of (M2) is unaffected — the code correctly
+> implements the DEGRADED-satisfies-the-gate rule stated in §3.5 item 4 and restated (with
+> different wording) in §12.14's own third sentence. Left in place per this file's own
+> annotate-in-place convention (see D69's "Editorial correction" precedent); the original sentence
+> above is not edited.
+
 **Why M1 and M2 had to land together, not independently.** M2 alone (no M1) would let a
 second-layer dependent's draft PR OPEN with a false `FULL` equivalence claim still on it — the
 exact defect this D-number exists to close, just relocated from "PR held forever" to "PR shipped
