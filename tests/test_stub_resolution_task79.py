@@ -20,8 +20,9 @@ import json
 import shutil
 import sqlite3
 import subprocess
+from dataclasses import replace
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 import structlog.testing
@@ -37,12 +38,14 @@ from fleet.cli import (
     _now,
     _pr_records,
     _rewrite_superseded_consumer_labels,
+    _run_one_revalidation_task,
     _run_revalidation_claims_impl,
     _write_pr_record,
     app,
     connect_ro,
     insert_revalidation_task_row,
 )
+from fleet.models.tasks import TokenUsage
 from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     _PROVIDER_LABEL,
     _STUB_CONSUMER,
@@ -67,6 +70,7 @@ from tests.test_build_e2e import (  # noqa: F401  (fixtures used by injection)
     transformed,
     verify,
 )
+from tests.test_llm_client import BackendReply, FakeBackend
 from tests.test_pr_e2e import (  # noqa: F401  (fixtures used by injection)
     _PROVIDER_FAILS_RULE,
     FakeForge,
@@ -655,6 +659,292 @@ def test_d108_promotes_the_consumer_once_a_revalidation_round_genuinely_passes(
         (run_id, _STUB_CONSUMER),
     )
     assert findings, "D108 must write an audited StubConsumerStatusApplied finding"
+
+
+# ---------------------------------------------------------------------------------------
+# ADR-0136/D135 (round VI task 109): §12.39-B1's cost-instrumentation WIRING proof. These two
+# tests construct the scenario more directly than the full-CLI fixtures above (permitted by this
+# task's own brief) -- `cli._run_one_revalidation_task` is called directly, with a hand-built
+# `RunContext` whose `backends={"anthropic": FakeBackend(...)}` answers `build_diagnosis` with a
+# real, priced response. That is what lets the round genuinely SPEND real dollars (or genuinely
+# BREACH a sub-ceiling) with no live `ANTHROPIC_API_KEY` and no network call -- the tests above
+# already prove the round MECHANICS (settle/D108/STUB_DIVERGED) under the real (inert, no-API-key)
+# `anthropic` backend; these two prove the cost half specifically. B2 (a real two-round
+# `BUDGET_EXHAUSTED` fixture through the actual CLI, `docs/SPEC.md` §12.39 case (ii)) is
+# out of scope here per ADR-0136's own two-leg split -- ADR-0136/research-54, §7.
+# ---------------------------------------------------------------------------------------
+
+
+async def _direct_revalidation_dispatch(
+    fleet: Path,  # noqa: F811
+    settings: cli.FleetSettings,
+    *,
+    run_id: str,
+    task_id: str,
+    repo_id: str,
+    dest_path: str,
+    backends: dict[str, object],
+    revalidation_max_cost_usd_override: float | None = None,
+) -> str:
+    """Drives ONE REVALIDATE task through `cli._run_one_revalidation_task` directly, building the
+    same `RunContext`/`CostLedger` shape `_run_revalidation_claims_impl` builds internally --
+    except `backends` (and, for the breach test, the sub-ceiling) are injectable here. Production
+    callers never need this seam, so it is not threaded through `_run_revalidation_claims_impl`'s
+    own signature -- this helper exists only so a test can script a `build_diagnosis` response.
+    """
+    db_path = fleet / "state" / "fleet.db"
+    task_row = query(
+        fleet,
+        "SELECT revalidation_key, max_attempts FROM tasks WHERE task_id = ?",
+        (task_id,),
+    )
+    revalidation_key_value, max_attempts = str(task_row[0][0]), int(task_row[0][1])
+    monorepo_git, _monorepo_path, _lock_dir = await cli._monorepo_checkout(settings)
+    revalidate_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-revalidate"
+    pool = cli.new_cpu_pool(settings.config.concurrency.cpu_pool_workers)
+    try:
+        async with StateWriter(db_path, owner="test-direct-revalidate") as writer:
+            read_conn = await connect_ro(db_path)
+            try:
+                repository = cli.SqliteStateRepository(writer=writer, read_conn=read_conn)
+                ceilings = cli.Ceilings.from_settings(
+                    settings.config.budgets, settings.config.stubs
+                )
+                if revalidation_max_cost_usd_override is not None:
+                    ceilings = replace(
+                        ceilings, revalidation_max_usd=revalidation_max_cost_usd_override
+                    )
+                ledger = cli.CostLedger(repository, run_id=run_id, ceilings=ceilings, clock=_now)
+                run_ctx = cli.RunContext(
+                    run_id=UUID(run_id),
+                    config=settings.config,
+                    writer=writer,
+                    repository=repository,
+                    read_conn=read_conn,
+                    ledger=ledger,
+                    limits=cli.Limits.create(
+                        settings.config.concurrency, ledger=ledger, cpu_pool=pool
+                    ),
+                    llm=cli.llm_router(settings),
+                    log=cli.default_logger("test.stub-revalidate"),
+                    work_dir=revalidate_root,
+                    clock=_now,
+                    harness_version=cli.HARNESS_VERSION,
+                    root=settings.root,
+                    backends=backends,
+                )
+                return await _run_one_revalidation_task(
+                    settings,
+                    monorepo_git,
+                    writer,
+                    repository,
+                    read_conn,
+                    run_ctx,
+                    run_id=run_id,
+                    task_id=task_id,
+                    repo_id=repo_id,
+                    revalidation_key_value=revalidation_key_value,
+                    dest_path=dest_path,
+                    revalidate_root=revalidate_root,
+                    max_attempts=max_attempts,
+                    now=_now(),
+                )
+            finally:
+                await read_conn.close()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
+def _build_diagnosis_reply() -> BackendReply:
+    """A valid `LlmBuildDiagnosis` response, scripted at exactly the `TokenEstimator` floor
+    (`DEFAULT_ROLE_FLOOR = (4_000, 1_000)`) so the ACTUAL cost this test reads back equals the
+    RESERVED estimate exactly ($0.027 under the shipped `WORKHORSE` rate, research-54 §4.3) --
+    a real, round-trip-computed dollar figure, not a hand-picked one."""
+    return BackendReply(
+        text=json.dumps(
+            {
+                "failure_class": "BUILD_ERROR",
+                "root_cause": "round VI task 109 cost-wiring proof: scripted failure",
+                "suggested_action": "n/a",
+                "confidence": 0.5,
+            }
+        ),
+        usage=TokenUsage(input_tokens=4_000, output_tokens=1_000),
+        finish_reason="stop",
+    )
+
+
+def test_d135_a_revalidate_round_under_budget_records_a_real_nonzero_cost(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+) -> None:
+    """§12.39-B1 (ADR-0136/D135): the round now dispatches through `run_ctx.ledger` at a
+    model-talking rung BY CONSTRUCTION, and a genuine `build_diagnosis` call's real dollar cost
+    is recorded in `repo_ledger.revalidation_usd`, under the sub-ceiling.
+
+    A genuinely FAILING consumer build (`fail=` on the consumer's own build unit) is what makes
+    `BuildverifyWorker._diagnose` fire -- `context_policy` is non-None BY CONSTRUCTION now (ADR-
+    0136), so a build failure is what actually reaches the (faked) model this round.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest = relocations(filter_repo)[_STUB_CONSUMER]
+    _supersede_stub_row(fleet, run_id)
+    settings = _load_settings(GlobalOptions(config_path=fleet / "config" / "fleet.yaml"))
+
+    rewritten = asyncio.run(
+        _rewrite_superseded_consumer_labels(
+            settings,
+            fleet / "state" / "fleet.db",
+            run_id=run_id,
+            consumer_repo_ids=[_STUB_CONSUMER],
+        )
+    )
+    assert rewritten[_STUB_CONSUMER].startswith("committed "), rewritten
+
+    before = query(
+        fleet,
+        "SELECT revalidation_usd, spent_usd FROM repo_ledger WHERE run_id = ? AND repo_id = ?",
+        (run_id, _STUB_CONSUMER),
+    )
+    before_revalidation_usd = before[0][0] if before else 0.0
+
+    fake_bazel = FakeBazel(
+        fleet / "artifacts" / "fake-bazel-d135-cost", fail={("build", dest): 1}
+    )
+    cli.BAZEL_RUNNER = fake_bazel
+    try:
+        task_id = str(uuid4())
+        _insert_revalidate_task(fleet, run_id=run_id, task_id=task_id, dest_path=dest)
+        backend = FakeBackend([_build_diagnosis_reply()])
+        outcome = asyncio.run(
+            _direct_revalidation_dispatch(
+                fleet,
+                settings,
+                run_id=run_id,
+                task_id=task_id,
+                repo_id=_STUB_CONSUMER,
+                dest_path=dest,
+                backends={"anthropic": backend},
+            )
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+
+    assert not outcome.startswith("FAILED:"), outcome
+    assert "verdict=FAIL" in outcome, outcome
+    # The scripted backend was actually called (proves `context_policy`/`ctx.llm` genuinely
+    # reached `BuildverifyWorker._diagnose` -- not the pre-existing rung-1 silence).
+    assert len(backend.calls) == 1, backend.calls
+
+    after = query(
+        fleet,
+        "SELECT revalidation_usd, spent_usd FROM repo_ledger WHERE run_id = ? AND repo_id = ?",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert after, "the REVALIDATION dispatch must open/seed this repo's durable ledger row"
+    after_revalidation_usd, after_spent_usd = after[0]
+    # Real, non-zero, and under the $2.00 default sub-ceiling -- exactly research-54 §4.3's
+    # measured $0.027 (WORKHORSE: in=3.0, out=15.0 per Mtok; 4_000 in + 1_000 out tokens).
+    assert after_revalidation_usd - before_revalidation_usd == pytest.approx(0.027), (
+        before_revalidation_usd,
+        after_revalidation_usd,
+    )
+    assert 0.0 < after_revalidation_usd <= 2.0, after_revalidation_usd
+    # `revalidation_usd` and `spent_usd` are the SAME dollars, counted twice for two ceilings
+    # (research-54 §3, `_SETTLE_REPO_REVALIDATION_SQL`) -- never a second, independent quantity.
+    assert after_spent_usd >= after_revalidation_usd, (after_spent_usd, after_revalidation_usd)
+
+
+def test_d135_a_revalidate_round_over_budget_raises_and_routes_through_settle_revalidation(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+) -> None:
+    """§12.39-B1 (ADR-0136/D135): a REVALIDATE round whose reservation would exceed
+    `stubs.revalidation_max_cost_usd` raises `RevalidationBudgetExhausted` -- caught in
+    `_run_one_revalidation_task` and routed to `settle_revalidation(budget_breach=...)`, the
+    kwarg D116/research-52 found was ALWAYS `None` in production before this task.
+
+    The ceiling is overridden to $0.01, below research-54's measured $0.027 `TokenEstimator`
+    estimate for `build_diagnosis`/WORKHORSE -- so `CostLedger.reserve()`'s in-process
+    `_check_subceilings` pre-check breaches BEFORE the worker ever runs (no bazel build at all,
+    no dollar actually spent -- `orchestrator/runner.py::_dispatch`'s own documented property).
+    `FakeBazel` is given no `fail=` entries and must never be asked to build anything.
+    """
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest = relocations(filter_repo)[_STUB_CONSUMER]
+    _supersede_stub_row(fleet, run_id)
+    settings = _load_settings(GlobalOptions(config_path=fleet / "config" / "fleet.yaml"))
+
+    rewritten = asyncio.run(
+        _rewrite_superseded_consumer_labels(
+            settings,
+            fleet / "state" / "fleet.db",
+            run_id=run_id,
+            consumer_repo_ids=[_STUB_CONSUMER],
+        )
+    )
+    assert rewritten[_STUB_CONSUMER].startswith("committed "), rewritten
+
+    fake_bazel = FakeBazel(fleet / "artifacts" / "fake-bazel-d135-breach")  # no fail= entries
+    cli.BAZEL_RUNNER = fake_bazel
+    try:
+        task_id = str(uuid4())
+        _insert_revalidate_task(fleet, run_id=run_id, task_id=task_id, dest_path=dest)
+        backend = FakeBackend([_build_diagnosis_reply()])
+        outcome = asyncio.run(
+            _direct_revalidation_dispatch(
+                fleet,
+                settings,
+                run_id=run_id,
+                task_id=task_id,
+                repo_id=_STUB_CONSUMER,
+                dest_path=dest,
+                backends={"anthropic": backend},
+                revalidation_max_cost_usd_override=0.01,
+            )
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+
+    assert outcome.startswith("budget_exhausted: verdict=FAIL"), outcome
+    # Never dispatched: the breach fires at `reserve()`, before the worker (hence `FakeBazel`)
+    # or the (faked) model is ever reached.
+    assert fake_bazel.calls == [], fake_bazel.calls
+    assert fake_bazel.probes == [], fake_bazel.probes
+    assert backend.calls == [], backend.calls
+
+    stub_final = query(
+        fleet,
+        "SELECT state, abandon_reason FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert stub_final == [("ABANDONED", "BUDGET_EXHAUSTED")], stub_final
+
+    consumer_status = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    # Never a promotion to SUCCEEDED: an exhausted budget means unfinished work
+    # (`orchestrator.stubs.settle_revalidation`'s own docstring). `settle_revalidation`'s budget
+    # branch always sets `consumer_status=DEGRADED` -- `_run_one_revalidation_task`'s own
+    # `apply_stub_consumer_status` write is skipped for exactly that value (D108's own
+    # "only T2/T3-STUB_DIVERGED write" rule), so this fixture (which never seeded a phase-4 row)
+    # legitimately reads back empty rather than a written DEGRADED row.
+    assert all(row[0] != "SUCCEEDED" for row in consumer_status), consumer_status
+
+    breach_findings = query(
+        fleet,
+        "SELECT kind FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'RevalidationBudgetExhausted'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert breach_findings, "a budget breach must write a RevalidationBudgetExhausted finding"
 
 
 # ---------------------------------------------------------------------------------------

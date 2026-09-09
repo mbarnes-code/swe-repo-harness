@@ -105,7 +105,7 @@ from fleet.llm.client import (
     discover,
     registry,
 )
-from fleet.llm.roles import LlmRouter, TierNotConfigured, UnknownProfile
+from fleet.llm.roles import LlmRouter, Role, TierNotConfigured, UnknownProfile
 from fleet.manifests.base import ManifestParseError
 from fleet.manifests.base import adapter_for as manifest_adapter_for
 from fleet.migrations import (
@@ -165,6 +165,7 @@ from fleet.models.tasks import (
     FilePatch,
     PullRequestDraft,
     StubRecord,
+    TokenUsage,
     VerificationReport,
 )
 from fleet.obs.events import EventEmitter, events_jsonl_path
@@ -174,9 +175,14 @@ from fleet.orchestrator.budgets import (
     RUN_BUDGET_EXIT_CODE,
     WAVE_BUDGET_EXIT_CODE,
     Ceilings,
+    CostEstimate,
     CostLedger,
     LedgerBreach,
     Limits,
+    RevalidationBudgetExhausted,
+    SpendKind,
+    SpendScope,
+    TokenEstimator,
     WaveBudgetExhausted,
     new_cpu_pool,
 )
@@ -330,7 +336,10 @@ from fleet.workers.base import (
     WorkerInput,
     WorkerOutput,
     WorkerResult,
+    accumulate,
+    context_policy_for_attempt,
     loop_now,
+    tier_for_attempt,
 )
 from fleet.workers.buildgen import (
     BuildgenInput,
@@ -8435,6 +8444,7 @@ class VerifyPipelineWorker(BaseWorker[VerifyInput, VerifyOutput]):
         )
         landed = [unit for unit in units if unit not in owed]
 
+        buildverify_usage = TokenUsage()
         if VERIFY_UNIT in owed:
             result = await self._workers[BUILDVERIFY_STEP].run(ctx, self._own_tests(payload))
             own: BuildverifyOutput | None = result.output
@@ -8445,6 +8455,13 @@ class VerifyPipelineWorker(BaseWorker[VerifyInput, VerifyOutput]):
             if result.status != "ok":
                 return self._handoff(result, units, landed, output)
             landed.append(VERIFY_UNIT)
+            # D135 (round VI task 109): a passing BUILDVERIFY_STEP can still carry real usage --
+            # `_diagnose` runs on rungs 2-3 for ANY non-ok unit, but `_c_toolchain_gate`'s own
+            # early-return path and a future diagnose-on-success rung would otherwise be dropped
+            # silently the moment a ledger reads `result.usage` from THIS worker's own return
+            # (this is exactly the omission ADR-0136/D135 name, fixed here rather than assumed
+            # inert because it is currently unreachable).
+            buildverify_usage = result.usage
 
         result = await self._workers[RDEPVERIFY_STEP].run(ctx, self._rdeps(payload, output))
         closure: RdepverifyOutput | None = result.output
@@ -8457,6 +8474,7 @@ class VerifyPipelineWorker(BaseWorker[VerifyInput, VerifyOutput]):
             status="ok",
             output=output,
             completed_units=list(dict.fromkeys(landed)),
+            usage=accumulate(buildverify_usage, result.usage),
             evidence=[payload.integration_ref, output.target_pattern_file],
         )
 
@@ -14170,6 +14188,7 @@ async def _run_one_revalidation_task(
     writer: StateWriter,
     repository: SqliteStateRepository,
     read_conn: aiosqlite.Connection,
+    run_ctx: RunContext,
     *,
     run_id: str,
     task_id: str,
@@ -14181,6 +14200,15 @@ async def _run_one_revalidation_task(
     now: datetime,
 ) -> str:
     """D104(b): claim ONE `REVALIDATE` task and, on a won claim, run its round to completion.
+
+    ADR-0136/D135 (round VI task 109): the round now dispatches through `run_ctx.ledger` under
+    `SpendScope(kind=SpendKind.REVALIDATION)`, at a model-talking rung BY CONSTRUCTION (attempt 2,
+    `EVIDENCE_ONLY`/WORKHORSE -- rung 1 is the deterministic Phase-3 rerun this round exists to
+    repeat, and `BuildverifyWorker._diagnose` only ever talks to a model off `ctx.context_policy`).
+    `run_ctx.model_client`/`run_ctx.llm` (the ADR-0023 router) are `run_ctx`'s own, built ONCE per
+    `_run_revalidation_claims_impl` call -- never per task -- mirroring `_emit_prs`'s own
+    ledger-construction precedent (`cli.py`, `fleet pr`'s `_emit_prs`), except this call site
+    actually dispatches THROUGH the ledger (`_emit_prs` never does -- research-54 §9 finding 4).
 
     `VerifyPipelineWorker` (unmodified) is re-run against a **fresh checkout of `migrate/<repo_id>`
     's current tip**. D107's own rewrite (this same trigger's earlier step) is SUPPOSED to make
@@ -14420,54 +14448,119 @@ async def _run_one_revalidation_task(
             stub_fidelity=dict(fidelity),
             revalidation_round=round_index,
         )
-        worker_ctx = WorkerContext(
-            run_id=UUID(run_id),
-            repo_id=repo_id,
-            attempt=1,
-            workdir=str(wt),
-            lease_owner=lease_owner_id(),
-            lease_fence=0,
-            deadline=loop_now() + float(settings.config.budgets.task_max_wallclock_s.verify),
-            cancel=asyncio.Event(),
-            budget=CallBudget(
-                remaining_tokens=0,
-                remaining_usd=0.0,
-                deadline=loop_now() + float(settings.config.budgets.task_max_wallclock_s.verify),
-            ),
-            db=cast(Any, None),
-            llm=cast(Any, None),
-            router=cast(Any, None),
-            limits=cast(Any, None),
-            log=default_logger("fleet.stub-revalidate"),
-        )
-        worker = VerifyPipelineWorker(bazel_runner=BAZEL_RUNNER)
-        # No `preconditions_hold` gate here, deliberately: that method exists for `PhaseRunner.
-        # _re_entry`'s CHECKPOINT re-entry question ("may this worker resume ITS OWN prior
-        # partial result?") and is only ever consulted when a checkpoint exists
-        # (`_re_entry`'s own "if checkpoint is None: return ReEntry.FRESH" -- a fresh dispatch
-        # never calls it). Every REVALIDATE claim this loop drives is fresh from
-        # `VerifyPipelineWorker`'s own point of view (no checkpoint concept exists for this
-        # call path), and `VerifyInput.remaining_units=None` -- the correct value for "every
-        # unit is owed" -- would otherwise be misread by `preconditions_hold`'s own re-entry-only
-        # contract (`if payload.remaining_units is None: return False`) as a checkpoint payload
-        # missing its remaining units, refusing every dispatch this loop ever makes.
-        result = await worker.run(worker_ctx, payload)
-        output = result.output
-        report = output.report if output is not None else None
-        if report is None:
-            # The pipeline stopped before RDEPVERIFY ran (its own build/test failed) -- still a
-            # legitimate, DECISIVE verdict for `settle_revalidation` (a FAIL round consumes a
-            # revalidation round exactly like a rdeps-closure failure does), constructed from the
-            # own-build/test facts `VerifyOutput` still carries even on that early exit.
-            report = VerificationReport(
+
+        def _fail_report() -> VerificationReport:
+            """A FAIL verdict from the facts already known -- used both when the pipeline
+            produced no report of its own (build/test stopped before RDEPVERIFY ran) and when a
+            budget breach refuses the round before the worker ever runs (§12.39(ii) case, ADR-
+            0136): a revalidation round is decisive either way, and `settle_revalidation` needs a
+            `report` positionally regardless of which reason ends it."""
+            return VerificationReport(
                 run_id=UUID(run_id),
                 repo_id=repo_id,
-                build_ok=output.build_ok if output is not None else False,
-                test_ok=output.test_ok if output is not None else False,
+                build_ok=False,
+                test_ok=False,
                 verdict="FAIL",
                 verified_against_stubs=sorted(fidelity),
                 stub_fidelity=dict(fidelity),
                 revalidation_round=round_index,
+            )
+
+        # ADR-0136/D135 (round VI task 109): a REVALIDATE round now dispatches through the
+        # ledger, at a model-talking rung BY CONSTRUCTION -- attempt 2 (`EVIDENCE_ONLY`/
+        # WORKHORSE), the first rung `context_policy_for_attempt` ever resolves to non-None, and
+        # therefore the first at which `BuildverifyWorker._diagnose` (role `build_diagnosis`,
+        # tier WORKHORSE) can actually fire. `estimate` is the SAME `TokenEstimator` §11.2 uses
+        # everywhere else in this codebase, priced off the `build_diagnosis` role's real routed
+        # target -- not an invented number (research-54 §4.3, measured $0.027 under the shipped
+        # default profile). This is the first production `SpendScope(kind=SpendKind.REVALIDATION)`
+        # constructor and the first production `ledger.dispatch()` call outside `PhaseRunner`.
+        attempt = 2
+        deadline = loop_now() + float(settings.config.budgets.task_max_wallclock_s.verify)
+        scope = SpendScope(repo_id=repo_id, task_id=task_id, kind=SpendKind.REVALIDATION)
+        build_diagnosis_role = str(Role.BUILD_DIAGNOSIS)
+        estimate = TokenEstimator().estimate(
+            run_ctx.llm.resolve(build_diagnosis_role).targets[0],
+            role=build_diagnosis_role,
+            tier=ModelTier.WORKHORSE,
+        )
+
+        breach: RevalidationBudgetExhausted | None = None
+        report: VerificationReport | None = None
+        try:
+            async with run_ctx.ledger.dispatch(estimate, scope=scope, deadline=deadline) as (
+                reservation,
+                budget,
+            ):
+                worker_ctx = WorkerContext(
+                    run_id=UUID(run_id),
+                    repo_id=repo_id,
+                    attempt=attempt,
+                    workdir=str(wt),
+                    lease_owner=lease_owner_id(),
+                    lease_fence=0,
+                    deadline=deadline,
+                    cancel=asyncio.Event(),
+                    budget=budget,
+                    db=cast(Any, None),
+                    llm=run_ctx.model_client,
+                    router=run_ctx.llm,
+                    limits=cast(Any, None),
+                    log=default_logger("fleet.stub-revalidate"),
+                    tier=tier_for_attempt(attempt),
+                    context_policy=context_policy_for_attempt(attempt),
+                )
+                worker = VerifyPipelineWorker(bazel_runner=BAZEL_RUNNER)
+                # No `preconditions_hold` gate here, deliberately: that method exists for
+                # `PhaseRunner._re_entry`'s CHECKPOINT re-entry question ("may this worker resume
+                # ITS OWN prior partial result?") and is only ever consulted when a checkpoint
+                # exists (`_re_entry`'s own "if checkpoint is None: return ReEntry.FRESH" -- a
+                # fresh dispatch never calls it). Every REVALIDATE claim this loop drives is fresh
+                # from `VerifyPipelineWorker`'s own point of view (no checkpoint concept exists
+                # for this call path), and `VerifyInput.remaining_units=None` -- the correct value
+                # for "every unit is owed" -- would otherwise be misread by `preconditions_hold`'s
+                # own re-entry-only contract (`if payload.remaining_units is None: return False`)
+                # as a checkpoint payload missing its remaining units, refusing every dispatch
+                # this loop ever makes.
+                result = await worker.run(worker_ctx, payload)
+                reservation.record(
+                    CostEstimate(
+                        in_tokens=result.usage.input_tokens,
+                        out_tokens=result.usage.output_tokens,
+                        usd=result.usage.cost_usd,
+                    )
+                )
+                output = result.output
+                report = output.report if output is not None else None
+                if report is None:
+                    # The pipeline stopped before RDEPVERIFY ran (its own build/test failed) --
+                    # still a legitimate, DECISIVE verdict for `settle_revalidation` (a FAIL round
+                    # consumes a revalidation round exactly like a rdeps-closure failure does),
+                    # constructed from the own-build/test facts `VerifyOutput` still carries even
+                    # on that early exit.
+                    report = VerificationReport(
+                        run_id=UUID(run_id),
+                        repo_id=repo_id,
+                        build_ok=output.build_ok if output is not None else False,
+                        test_ok=output.test_ok if output is not None else False,
+                        verdict="FAIL",
+                        verified_against_stubs=sorted(fidelity),
+                        stub_fidelity=dict(fidelity),
+                        revalidation_round=round_index,
+                    )
+        except RevalidationBudgetExhausted as exc:
+            # Raised by `reserve()` BEFORE the worker ran (`orchestrator/runner.py::_dispatch`'s
+            # own comment: "nothing was dispatched and nothing was spent") -- there is no
+            # `VerificationReport` from this round, so `_fail_report()` stands in for one, exactly
+            # as it does when the pipeline itself stops before RDEPVERIFY runs.
+            breach = exc
+            report = _fail_report()
+
+        if report is None:  # pragma: no cover - every exit path above sets it (Rule 11: fail
+            # loud on an impossible state rather than silently proceeding with `report=None`)
+            raise RuntimeError(
+                f"{repo_id!r}: `_run_one_revalidation_task` produced neither a "
+                "`VerificationReport` nor a `RevalidationBudgetExhausted` breach"
             )
 
         stub_records = await _stub_records_for_revalidation_task(read_conn, run_id, task_id)
@@ -14479,12 +14572,15 @@ async def _run_one_revalidation_task(
 
         # §12.39 case (i), round VI task 103: `STUB_DIVERGED` is only ever a candidate on a
         # FAILing round -- a PASS round is settled by `settle_revalidation`'s own T2 branch below,
-        # never by this one. Reading the differential BEFORE `_record_verification` (further
-        # below) overwrites this repo's single-slot preceding-report row is load-bearing (see
-        # `_revalidation_round_stub_diverged`'s own docstring).
+        # never by this one. A budget breach never reaches this differential: the round never ran,
+        # so there is no build/test evidence to diff against the preceding report. Reading the
+        # differential BEFORE `_record_verification` (further below) overwrites this repo's
+        # single-slot preceding-report row is load-bearing (see `_revalidation_round_stub_
+        # diverged`'s own docstring).
         failure_class = (
             FailureClass.STUB_DIVERGED
-            if report.verdict != "PASS"
+            if breach is None
+            and report.verdict != "PASS"
             and await _revalidation_round_stub_diverged(
                 monorepo,
                 read_conn,
@@ -14499,7 +14595,11 @@ async def _run_one_revalidation_task(
         decisions: list[StubDecision] = []
         for stub in stub_records.values():
             decision = settle_revalidation(
-                stub, report, sibling_states=sibling_states, failure_class=failure_class
+                stub,
+                report,
+                sibling_states=sibling_states,
+                failure_class=failure_class,
+                budget_breach=breach,
             )
             if decision is not None:
                 decisions.append(decision)
@@ -14535,7 +14635,10 @@ async def _run_one_revalidation_task(
             writer, run_id, repo_id, report, seed=payload.rdeps_sample_seed or "", now=now
         )
         await mark_done()
-        outcome = "settled" if decisions else "another_round"
+        if breach is not None:
+            outcome = "budget_exhausted"
+        else:
+            outcome = "settled" if decisions else "another_round"
         return f"{outcome}: verdict={report.verdict} decisions={len(decisions)}"
     except (GitCommandError, GitError) as exc:
         return await fail_back_to_pending(f"{repo_id!r}: {exc}")
@@ -14590,35 +14693,66 @@ async def _run_revalidation_claims_impl(
         }
     revalidate_root = (settings.root / settings.config.run.work_dir).resolve() / "stub-revalidate"
     outcomes: dict[str, str] = {}
-    async with StateWriter(path, owner="fleet-resume-revalidate") as writer:
-        read_conn = await connect_ro(path)
-        try:
-            repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
-            for row in candidates:
-                task_id, repo_id, revalidation_key_value, dest_path = (
-                    str(row[0]),
-                    str(row[1]),
-                    str(row[2]),
-                    str(row[3]),
-                )
-                max_attempts = int(row[4])
-                outcomes[task_id] = await _run_one_revalidation_task(
-                    settings,
-                    monorepo,
-                    writer,
+    # ADR-0136/D135 (round VI task 109): mirrors `_emit_prs`'s own precedent (`CostLedger` +
+    # `llm_router` constructed once per call, never per task) -- except this call site actually
+    # dispatches THROUGH the ledger (`_emit_prs` never does; research-54 §9 finding 4).
+    pool = new_cpu_pool(settings.config.concurrency.cpu_pool_workers)
+    try:
+        async with StateWriter(path, owner="fleet-resume-revalidate") as writer:
+            read_conn = await connect_ro(path)
+            try:
+                repository = SqliteStateRepository(writer=writer, read_conn=read_conn)
+                ledger = CostLedger(
                     repository,
-                    read_conn,
                     run_id=run_id,
-                    task_id=task_id,
-                    repo_id=repo_id,
-                    revalidation_key_value=revalidation_key_value,
-                    dest_path=dest_path,
-                    revalidate_root=revalidate_root,
-                    max_attempts=max_attempts,
-                    now=now,
+                    ceilings=Ceilings.from_settings(settings.config.budgets, settings.config.stubs),
+                    clock=_now,
                 )
-        finally:
-            await read_conn.close()
+                run_ctx = RunContext(
+                    run_id=UUID(run_id),
+                    config=settings.config,
+                    writer=writer,
+                    repository=repository,
+                    read_conn=read_conn,
+                    ledger=ledger,
+                    limits=Limits.create(
+                        settings.config.concurrency, ledger=ledger, cpu_pool=pool
+                    ),
+                    llm=llm_router(settings),
+                    log=default_logger("fleet.stub-revalidate"),
+                    work_dir=revalidate_root,
+                    clock=_now,
+                    harness_version=HARNESS_VERSION,
+                    root=settings.root,
+                )
+                for row in candidates:
+                    task_id, repo_id, revalidation_key_value, dest_path = (
+                        str(row[0]),
+                        str(row[1]),
+                        str(row[2]),
+                        str(row[3]),
+                    )
+                    max_attempts = int(row[4])
+                    outcomes[task_id] = await _run_one_revalidation_task(
+                        settings,
+                        monorepo,
+                        writer,
+                        repository,
+                        read_conn,
+                        run_ctx,
+                        run_id=run_id,
+                        task_id=task_id,
+                        repo_id=repo_id,
+                        revalidation_key_value=revalidation_key_value,
+                        dest_path=dest_path,
+                        revalidate_root=revalidate_root,
+                        max_attempts=max_attempts,
+                        now=now,
+                    )
+            finally:
+                await read_conn.close()
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
     return {"claimed": sorted(outcomes), "outcomes": outcomes}
 
 
