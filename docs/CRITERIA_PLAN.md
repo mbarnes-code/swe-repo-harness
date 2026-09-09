@@ -1678,6 +1678,10 @@ count-agnostic write path (a plain list comprehension with no repo/edge-count br
 independently re-verified by task-scoped review, not assumed.
 
 ## 31. Wrong contract hoist detected and rolled back
+**DONE (round VI task 106, 2026-09-09 — closes `D132`, the sole remaining sub-question left after
+task 104; see that task's update below and this section's tail for the full account). Now counts
+toward the `<n> of 48` tally for the first time.**
+*(Superseded status line, kept for history — was accurate from task 101 through task 104:)*
 **OPEN — PARTIALLY CLOSED (round VI task 101, 2026-09-09, on top of task 96, 2026-09-08): case (i)
 closed (Leg A, task 55); case (ii)'s rollback-TARGET mechanism closed under this round's
 scoped/adjudicated trigger (the `git revert -m 1` of the contract's own `Hoisted-Contract:` merge,
@@ -1699,10 +1703,24 @@ between re-sequence and read reddens this test specifically, 28/28 → 1 failure
 the by-construction argument re-traced directly (neither `graph/cycles.py` nor `graph/sequence.py`
 imports state/orchestrator machinery; the sole attempts-incrementing write site,
 `SqliteStateRepository.complete_phase`, is reached only through `PhaseRunner`'s live orchestration
-loop, unreachable from this test's call path). Reviewed Approved, 0 fix rounds. **What remains
-open for §12.31 as a whole: `D132`** (`docs/INTEGRATION_HONESTY.md`) **— the owner-side
-hoisted-contract-duplication defect, untouched by tasks 96/101/104 and still `OPEN`.** Do not read
-§12.31 as DONE until D132 closes; it is the sole remaining sub-question. *(Superseded initial framing,
+loop, unreachable from this test's call path). Reviewed Approved, 0 fix rounds. **`D132` closed by
+round VI task 106 (2026-09-09).** `_ingest_build_source` (`src/fleet/cli.py`) now excludes every
+path a successfully-landed `HOISTED`/`MIGRATED` contract already claims from that contract's own
+owner's relocation — so the contract's sources appear ONCE on `integration`, never duplicated onto
+the owner's merge, satisfying `docs/SPEC.md:1270-1274`'s literal "one subtraction" text. A shared
+`_contract_owner_paths(cnode)` helper feeds both the contract's own include-filter and the owner's
+new exclude-filter so they can't drift apart; PASS 0 threads owner→paths only for contracts that
+actually landed (a `FAILED`/`REJECTED` contract's paths are never excluded, which would otherwise
+delete the only copy of that content). Proven by a new test diffing the owner's merge against its
+own first parent (not `migrate/<repo_id>`'s cumulative `ls-tree`, which force-moves to the merge
+commit per JC-2 and would read as a false positive either way — caught by the implementer during
+their own test design). Reviewed Changes Requested (1 Important, cosmetic finding: the original
+code comment/report falsely claimed two path forms were both "necessary, verified empirically" for
+the exclusion filter, when only the dest-prefixed form is ever reachable — `git-filter-repo`'s own
+rename rules run before the exclude filters, converging every path to one form first) → 1 fix
+round (independently reproduced the finding, dropped the dead form per Rule 2, corrected the
+comment) → scoped re-review ADDRESSED, 0 new breakage. **§12.31 as a whole is now DONE — all of
+case (i), case (ii), and D132 are closed.** *(Superseded initial framing,
 kept for history: "mechanism doesn't exist —
 NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI, research-22)" — every leg below this
 line has since landed except the two named above.)* `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
