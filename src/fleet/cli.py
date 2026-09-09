@@ -14037,6 +14037,62 @@ def _round_index_from_revalidation_key(revalidation_key_value: str) -> int:
     return int(prefix.removeprefix("r"))
 
 
+async def _revalidation_round_stub_diverged(
+    monorepo: Git,
+    read_conn: aiosqlite.Connection,
+    *,
+    run_id: str,
+    repo_id: str,
+    branch: str,
+    base: str,
+) -> bool:
+    """§12.39 case (i)'s differential rule (`docs/SPEC.md:1915-1922`), derived from real state
+    rather than handed in as a parameter — round VI task 103.
+
+    `STUB_DIVERGED` is reachable ONLY when BOTH halves hold for this exact round:
+
+    - **Half A** — "the immediately preceding stub-limited verification for the same consumer
+      passed." Read from the single-slot `VerificationReport` finding row this repo's own
+      PRECEDING `fleet verify`/revalidation round left in place (`VERIFICATION_KIND`,
+      `_record_verification`'s own upsert target) — read here BEFORE this round's call to
+      `_record_verification` overwrites it (research-52 §1.3's "usable, but fragile" ordering
+      accident: a future reordering, or a second revalidation round reusing this same slot,
+      would destroy the evidence this reads. Disclosed, not solved, here).
+    - **Half B** — "the round's commit set contains only the dependency-label rewrite." Evaluated
+      via `git rev-list <base>..<branch>` filtered on `Fleet-Phase`, the SAME computation
+      `_rewrite_superseded_consumer_labels` already runs to refuse a drifted rebase — reused
+      verbatim rather than re-derived. This is narrower than SPEC's literal "only the
+      dependency-label rewrite": it accepts any Phase-3 (BUILD) emission, not only this specific
+      rewrite's own commit (research-52 §1.3's second disclosed narrowing — a legitimate BUILDGEN
+      re-emission on this branch would also pass this check).
+
+    Both halves are required, and neither is meaningful alone: Half A without Half B would call
+    a legitimate Phase-2 re-run "divergence"; Half B without Half A would call an ordinary FIRST
+    verification failure (never stub-limited to begin with) "divergence" too. This function only
+    answers the differential; it takes no view on whether this round's own build/test verdict
+    failed — the caller applies it only on a FAILing round, matching §12.39(i)'s own
+    "revalidation fail[s]" framing.
+    """
+    preceding_rows = await _rows(
+        read_conn,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? AND kind = ?",
+        (run_id, repo_id, VERIFICATION_KIND),
+    )
+    if not preceding_rows:
+        return False
+    try:
+        preceding_report = json.loads(str(preceding_rows[0][0]))["report"]
+        preceding_equivalence = preceding_report["equivalence"]
+    except (TypeError, ValueError, KeyError):
+        return False
+    if preceding_equivalence != Equivalence.STUB_LIMITED.value:
+        return False
+
+    unique_commits = await monorepo.log(f"{base}..{branch}", trailer_keys=[PHASE_TRAILER])
+    build_phase = str(int(Phase.BUILD))
+    return all(c.trailer(PHASE_TRAILER) == build_phase for c in unique_commits)
+
+
 async def _run_one_revalidation_task(
     settings: FleetSettings,
     monorepo: Git,
@@ -14350,9 +14406,30 @@ async def _run_one_revalidation_task(
             return "already_settled"
         sibling_states = await _current_stub_states_by_consumer(read_conn, run_id, repo_id)
 
+        # §12.39 case (i), round VI task 103: `STUB_DIVERGED` is only ever a candidate on a
+        # FAILing round -- a PASS round is settled by `settle_revalidation`'s own T2 branch below,
+        # never by this one. Reading the differential BEFORE `_record_verification` (further
+        # below) overwrites this repo's single-slot preceding-report row is load-bearing (see
+        # `_revalidation_round_stub_diverged`'s own docstring).
+        failure_class = (
+            FailureClass.STUB_DIVERGED
+            if report.verdict != "PASS"
+            and await _revalidation_round_stub_diverged(
+                monorepo,
+                read_conn,
+                run_id=run_id,
+                repo_id=repo_id,
+                branch=branch,
+                base=settings.config.run.monorepo_branch,
+            )
+            else None
+        )
+
         decisions: list[StubDecision] = []
         for stub in stub_records.values():
-            decision = settle_revalidation(stub, report, sibling_states=sibling_states)
+            decision = settle_revalidation(
+                stub, report, sibling_states=sibling_states, failure_class=failure_class
+            )
             if decision is not None:
                 decisions.append(decision)
 
