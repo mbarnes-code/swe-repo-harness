@@ -1998,10 +1998,17 @@ objects, that the resulting rollback reverts exactly the contract's `Hoisted-Con
 different branch, unchanged as a commit object), and that the revert commit's own diff is confined
 to the hoisted contract's target path.
 
-**Mutation-tested (CLAUDE.md Rule 12), the whole battery (23 tests: 12 in
-`tests/test_hoist_rollback_git.py`, 9 in `tests/test_hoist_rollback_wiring.py`, 2 in
-`tests/test_build_e2e.py`) reproducibly REDDENS against the pre-task-96 `cli.py`/`vcs/commits.py`/
-`vcs/git.py` and GREENS against the fix**, verified via a byte-diff against a pre-mutation backup
+**Mutation-tested (CLAUDE.md Rule 12) — CORRECTED 2026-09-09 (fix round, reviewer re-measurement):
+the real battery is 22 tests (12 in `tests/test_hoist_rollback_git.py`, 9 in
+`tests/test_hoist_rollback_wiring.py`, 1 in `tests/test_build_e2e.py` — `git show abc4c96 --
+tests/test_build_e2e.py | grep '^+def test_'` returns exactly one), of which 11 reproducibly
+REDDEN against the pre-task-96 `cli.py`/`vcs/commits.py`/`vcs/git.py` (8 + 2 + 1) and all 22
+GREEN against the fix.** The prior wording here ("the whole battery (23 tests… reddens)")
+overstated both the total (23 vs the measured 22 — miscounted `tests/test_build_e2e.py`'s
+contribution as 2, not 1) and the discriminating share (implied all 23/22 reddened, when only
+11 of the real 22 do — the other 11 exercise code this task did not touch, e.g. the D122
+coexistence test and the "no anchor at all" tests, and correctly pass under both pre- and
+post-fix code). Verified via a byte-diff against a pre-mutation backup
 (never `HEAD`, never `git stash` — this round's concurrent-lane constraint) both before mutating
 and after restoring; `ruff check` and `mypy` (whole-manifest, no path args) clean on every changed
 file.

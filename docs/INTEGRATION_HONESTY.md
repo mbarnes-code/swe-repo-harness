@@ -9327,11 +9327,17 @@ touches only paths under the hoisted contract's target path. Also re-proven at t
 constructs a real trailer-carrying merge in place of the old hand-seeded-PR-draft recipe) and 2
 existing real end-to-end tests in `tests/test_hoist_rollback_wiring.py` adapted the same way (a new
 `_seed_hoist_merge` helper, matching that module's own established hand-seed-the-precondition
-convention). **Mutation-tested (CLAUDE.md Rule 12): the whole battery (23 tests total) reproducibly
-REDDENS against the pre-task-96 code** (`AttributeError: 'Git' object has no attribute
-'commit_time'` / `RollbackAnchorError` surfacing where a revert was expected) **and GREENS against
-the fix**, verified via a byte-diff against a pre-mutation backup (not `HEAD`, not `git stash`, per
-this round's concurrent-lane constraints) both before mutating and after restoring.
+convention). **Mutation-tested (CLAUDE.md Rule 12) — CORRECTED 2026-09-09 (fix round, reviewer
+re-measurement): the real battery is 22 tests (12 + 9 + 1, `git show abc4c96 --
+tests/test_build_e2e.py | grep '^+def test_'` returns exactly one, not two), of which 11 (8 + 2 +
+1) reproducibly REDDEN against the pre-task-96 code** (`AttributeError: 'Git' object has no
+attribute 'commit_time'` / `RollbackAnchorError` surfacing where a revert was expected — the other
+11 exercise code this task did not touch and correctly pass under both) **and all 22 GREEN against
+the fix**. The prior wording here ("the whole battery (23 tests total) reproducibly REDDENS")
+overstated both the total and the discriminating share; the corrected numbers match this task's
+own report table exactly. Verified via a byte-diff against a pre-mutation backup (not `HEAD`, not
+`git stash`, per this round's concurrent-lane constraints) both before mutating and after
+restoring.
 
 **What remains open — case (ii) is closer, not closed, and the criterion as a whole stays `OPEN`.**
 (a) The literal contract-wave trigger is **adjudication pending**, not resolved — a future round

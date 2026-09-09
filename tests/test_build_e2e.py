@@ -7399,7 +7399,12 @@ def test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_mer
     finding_payload = json.loads(str(raw_payload))
     assert finding_payload["contract_id"] == PROTO_ID
 
-    # -- no HoistRollbackFailed finding: the anchor WAS found (pre-fix, this always fired) -----
+    # -- no HoistRollbackFailed finding -- true under BOTH pre-fix and post-fix code for this ---
+    # -- fixture (no PullRequestDraft is ever seeded here, so pre-fix `_ordered_revert_shas` -----
+    # -- finds an empty candidate set and `execute_hoist_rollback` takes its early "nothing to ---
+    # -- revert" COMMITTED return -- RollbackAnchorError is never reached, so this assertion -----
+    # -- alone does not discriminate; the real discriminator is `reverted == {hoist_sha}` below,--
+    # -- where pre-fix code returns an EMPTY set (verified: fix-round mutation test) -------------
     assert (
         query(workspace, "SELECT payload FROM findings WHERE kind = 'HoistRollbackFailed'") == []
     ), "RollbackAnchorError means the fix did not work -- the anchor must be found via git"
