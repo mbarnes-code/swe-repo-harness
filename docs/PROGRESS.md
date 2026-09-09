@@ -10734,3 +10734,66 @@ re-measurement.
   investigation/fix sizing (not yet scoped this session).
 - **§12.39-B** — needs its own design pass first ("what does a revalidation round cost?") before
   case (ii) can be built without inventing an undisclosed price.
+
+## Round VI, thirty-seventh wave (2026-09-09) — §12.31 fully DONE (D132 closed), §12.11 Leg A
+closed, §12.39-B pricing resolved (ADR-0136), 47/48 measured
+
+Fifth dispatch wave this session (2 build tasks: 105-106, 1 research task: research-54, plus 2 fix
+rounds), continuing directly from the thirty-sixth wave checkpoint. Full detail in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; headline outcomes only here.
+
+**§12.31 now DONE** (task 106, 1 fix round). D132 — the owner-side hoisted-contract-duplication
+defect flagged since round VI task 95 — is fixed: `_ingest_build_source` now excludes every path a
+successfully-landed contract already claims from that contract's own owner's relocation, so the
+content appears once on `integration`, not twice, matching SPEC's literal "one subtraction" text.
+The fix round caught and corrected a real, if cosmetic, overclaim: the original code comment
+claimed two path forms were both "necessary, verified empirically" for the exclusion filter, when
+only one is ever reachable (`git-filter-repo`'s own rename rules run before the exclude filters).
+The implementer independently reproduced the reviewer's finding before acting on it and chose the
+simpler fix (dropping the dead form) over merely re-wording the false claim. **§12.31 case (i),
+case (ii), and D132 are all now closed — the criterion counts toward `<n> of 48` for the first
+time.**
+
+**§12.11 Leg A closed** (task 105, 1 fix round): `EcosystemAdapter.native_baseline()` (non-abstract,
+`None` default, preserving the fixture Ruby adapter's byte-for-byte compatibility per §12.34's own
+guarantee) is implemented for the two ecosystems the real fixture fleet exercises. A genuine
+double-count hazard in the JS adapter (a compile-only `ts_project` target alongside one real
+`js_test`) was found and fixed during implementation, independently verified exact by review against
+every `rule=` literal across all six adapters. The fix round corrected two wrong test counts in the
+implementer's own report and — more importantly — moved a load-bearing caveat (the counted value is
+currently a static ceiling, not yet an independently observed native count) out of a scratch report
+and into the actual code's docstrings, where a future Leg B/C implementer will actually read it.
+**§12.11 remains OPEN** — Legs B-E are unbuilt.
+
+**§12.39-B's revalidation-round pricing resolved with no invented number** (research-54): this
+codebase's only pricing formula (a declared per-Mtok rate × measured tokens, already shipped as
+`TokenEstimator`/`CostLedger`) applies directly to a REVALIDATE round's existing (currently silent)
+`build_diagnosis`/`WORKHORSE` call — measured in the running interpreter to resolve to $0.027
+against a $2.00 sub-ceiling. ADR-0136 rules a REVALIDATE round dispatches at a model-talking rung
+by construction, rejecting both a contrived round-count ceiling and leaving the current silent rung
+as-is. A genuinely broader, fleet-wide gap was found in the same investigation and given its own
+D-number (`D135`, `TokenEstimator` has zero production constructors anywhere) rather than being
+folded into or hidden by this narrower fix. **§12.39 remains OPEN** — sized into B1 (cost
+instrumentation, NEW-MECHANISM) then B2 (the fixture, TEST-ONLY), neither yet dispatched.
+
+**Process note.** Both build tasks this wave went through exactly one fix round each, and in both
+cases the review's finding was independently reproduced by the implementer BEFORE they acted on
+it — matching this project's own "check the primary source, don't just implement a routed finding"
+discipline. One subagent (task 106) again went dormant waiting on its own background pytest run;
+recovered via `SendMessage` resume, no wasted redispatch this time (unlike the task-103 incident in
+the prior wave, where a fresh agent was briefly and mistakenly launched before being caught and
+stopped).
+
+**Status: main green.** Every touched test file independently re-confirmed passing directly on
+`main` by the controller after each merge (40, 148, 41 tests respectively across this wave's three
+merges); ruff clean on every touched file; `mypy` clean throughout, confirmed by review in each
+task's own pinned worktree.
+
+**§12 count: 47 of 48, re-measured directly at `4f29769`** (form-agnostic count of every `## N.`
+entry's own status line). Movers this wave: §12.31 (DONE, new).
+
+**Remaining open criteria (2): §12.11 (Legs B-E), §12.39 (case ii, B1/B2).** Both are fully sized
+with no further research needed — the next round can dispatch build tasks directly:
+- **§12.39-B1** — cost instrumentation on the REVALIDATE path (NEW-MECHANISM, M), per ADR-0136.
+- **§12.11 Leg B** — the `baseline` worker + `SCAN_UNITS` wiring + `_scan_rows` DB write (NEW-
+  MECHANISM, M-L), per research-53/ADR-0135, now unblocked by Leg A's landing.
