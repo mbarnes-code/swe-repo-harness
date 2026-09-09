@@ -1064,6 +1064,24 @@ the regression proof. §12.14's `blocking` list is now empty: D124 and D126 were
 earlier rounds (task 74, task 84), and the transitive-stub-stacking mechanism is closed here.
 **§12.14 is DONE in full.**
 
+**Disclosed residual, 2026-09-09 (audit-3) — DONE status unchanged, coverage shape clarified.**
+The "whole descendant set" closure above (§3.5 item 4) is proven by a **two-hop fixture plus an
+induction argument**, not by a fixture that drives the real wave loop across two waves or that
+reaches a third layer. `tests/test_cli.py::
+test_detect_transform_stub_triggers_inherits_for_a_real_second_layer_dependent` calls
+`_detect_transform_stub_triggers` for `C`, then `_create_stub_records` by hand, then
+`_detect_transform_stub_triggers` for `D` — its own docstring says this is "mirroring the same
+wave-boundary induction the real wave loop performs," never claiming to drive that loop itself.
+No test on `main` calls the real `_transform_impl` wave loop across two dispatched waves for this
+scenario (`grep -n "_transform_impl(" tests/test_cli.py` and `tests/test_transform_e2e.py` find no
+such call for a stub-stacking fixture), and no test carries a third layer (`E`) to confirm the
+induction composes past one hop. The two-hop case is genuinely proven end-to-end through real CLI
+functions and real SQLite (not a hand-built `StubTrigger` asserted against itself); "whole
+descendant set" is closed by composition-plus-argument, one layer at a time, per D131's own
+call-chain reasoning (`cli.py:6932-6949`), not by a measurement of the composition itself. §12.14
+stays **DONE** — this is a disclosure of the proof's actual shape, not a status change; see
+`docs/INTEGRATION_HONESTY.md`'s D131 entry for the fix this closure rests on.
+
 ## 15. Crash safety, Git is the arbiter
 **DONE (landed round P task 1, `6efc506`, reviewed Approved).** SPEC.md item 15's three clauses:
 (i) discard-onto-`tasks.pre_commit_sha` — already covered pre-round with a genuinely
