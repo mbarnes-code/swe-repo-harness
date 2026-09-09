@@ -7302,6 +7302,118 @@ def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
     assert contract_branch_sha == merge_sha, (contract_branch_sha, merge_sha)
 
 
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("git-filter-repo") is None,
+    reason="git-filter-repo is not on PATH; see the section-7b skip note above for why this must "
+    "be the real binary and not FakeFilterRepo",
+)
+def test_a_hoisted_contracts_carrier_path_lands_on_integration_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """D132 (`docs/INTEGRATION_HONESTY.md`), the sole remaining gap in §12.31: SPEC's own "one
+    subtraction" sentence (`docs/SPEC.md:1270-1274`, §3.3 step 1) — "the owner is ingested
+    normally in its own (later) wave, with one subtraction: its relocation plan **excludes**
+    every path already claimed by a `HOISTED` contract ... are not duplicated onto the owner's
+    merge." Before round VI task 106's fix, `_ingest_build_source` (PASS 1) relocated the WHOLE
+    owner tree with no subtraction at all, so `IDENTITY_SOURCE` landed on `integration` TWICE:
+    once at `hoist_target_path` (this contract's own merge, proven by the test above) and once
+    again under the owner's own `dest` (the owner's unmodified whole-repo ingest).
+
+    Same fixture and same real `git-filter-repo` binary as `test_a_hoisted_contracts_content_is_
+    really_merged_with_the_trailer` above (`CYCLE_FLEET`/`PROTO_ID`, no seeded `contracts` row) —
+    this test's job is only the owner-side half that test does not check: whether the owner's OWN
+    merge tree still carries the contract's carrier path after task 106's exclusion.
+    """
+    workspace = _make_hoist_ingest_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+    assert scan(workspace).exit_code == ExitCode.SUCCESS
+    assert sequence(workspace).exit_code == ExitCode.SUCCESS
+
+    contract_rows = query(
+        workspace,
+        "SELECT status, hoist_target_path FROM contracts WHERE contract_id = ?",
+        (PROTO_ID,),
+    )
+    assert contract_rows == [("HOISTED", "proto/acme/identity/v1")], contract_rows
+
+    assert transform(workspace).exit_code == ExitCode.SUCCESS
+    monorepo = make_monorepo(workspace)
+    monkeypatch.setattr(cli, "RESOLVER_RUNNER", FakeResolver())
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", FakeBazel(workspace / "artifacts" / "fake-bazel"))
+    assert cli.FILTER_REPO_RUNNER is None, "the seam must be absent for this test to mean anything"
+
+    result = build(workspace, "--no-sandbox")
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+
+    # -- anti-vacuity: both ingests really landed, nothing was silently swallowed ---------
+    assert query(
+        workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'"
+    ) == [], "a ContractIngestFailed finding means the contract merge never really happened"
+    hoist_shas = [
+        line
+        for line in git(
+            monorepo,
+            "log",
+            "integration",
+            "--format=%H",
+            "--grep=^Hoisted-Contract: " + PROTO_ID + "$",
+        )
+        .strip()
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(hoist_shas) == 1, f"expected exactly one hoist merge, found {hoist_shas}"
+    owner_branch_sha = git(monorepo, "rev-parse", "migrate/acme-identity").strip()
+    assert owner_branch_sha, "the owner's own ingest must really have landed too"
+
+    # -- THE assertion: the contract's carrier path exists EXACTLY ONCE on the whole -----
+    # -- `integration` branch, at `hoist_target_path` and nowhere else -------------------
+    final_tip = git(monorepo, "rev-parse", "integration").strip()
+    full_tree = git(monorepo, "ls-tree", "-r", "--name-only", final_tip).strip().splitlines()
+    proto_paths = [p for p in full_tree if p.endswith("identity.proto")]
+    assert proto_paths == ["proto/acme/identity/v1/identity.proto"], (
+        f"D132: a hoisted contract's carrier path must appear exactly once on `integration`, "
+        f"not duplicated onto its owner's own merge: {proto_paths}"
+    )
+
+    # -- direct evidence, not just the aggregate count: what the OWNER's own merge -------
+    # -- ITSELF introduced onto `integration`, diffed against its own first parent (the ---
+    # -- pre-merge integration tip) — this is the actual site the subtraction touches. -----
+    # -- `migrate/acme-identity`'s own `ls-tree` is NOT this evidence: `ingest()` force- ----
+    # -- moves that branch name to the MERGE commit (`filter_repo.ingest`'s own docstring, --
+    # -- JC-2), whose tree is `integration`'s whole CUMULATIVE state at that point --------
+    # -- (including the contract's own earlier PASS-0 merge, inherited via first parent) ---
+    # -- — so it would show `identity.proto` even under a correct fix, and checking it ----
+    # -- directly would be a false positive against the very defect this test proves fixed.
+    owner_parent1 = git(monorepo, "rev-parse", f"{owner_branch_sha}^1").strip()
+    owner_merge_diff = git(
+        monorepo, "diff", "--name-only", owner_parent1, owner_branch_sha
+    ).strip().splitlines()
+    duplicated_in_owner = [p for p in owner_merge_diff if p.endswith("identity.proto")]
+    assert duplicated_in_owner == [], (
+        f"D132: the owner's own merge must not itself introduce a second copy of a hoisted "
+        f"contract's carrier path, found {duplicated_in_owner} added/changed by "
+        f"{owner_branch_sha} relative to its first parent {owner_parent1}"
+    )
+
+    # -- the owner's OTHER (non-hoisted) files ARE introduced by this same merge — proof ---
+    # -- the exclusion filter did not over-exclude and disable relocation altogether. -----
+    # -- `owner_dest` is derived from the diff itself (never hardcoded/guessed): the -------
+    # -- ONE `package.json` this merge adds names it, mirroring this file's own established
+    # -- convention of measuring a real destination rather than assuming one (see
+    # -- `_CYCLE_CONSUMER_DEST`'s docstring below).
+    package_json_paths = [p for p in owner_merge_diff if p.endswith("/package.json")]
+    assert len(package_json_paths) == 1, owner_merge_diff
+    owner_dest = package_json_paths[0].removesuffix("/package.json")
+    assert f"{owner_dest}/src/index.ts" in owner_merge_diff, owner_merge_diff
+
+    # -- the contract's own merge is unaffected by the owner's later exclusion -----------
+    assert git(
+        monorepo, "cat-file", "-e", f"{hoist_shas[0]}:proto/acme/identity/v1/identity.proto"
+    ) == ""
+
+
 #: The real destination `_dest_for` computes for `CYCLE_FLEET`'s TS consumer, measured directly
 #: (`_dest_paths(read_conn, {})` against a scanned+sequenced copy of this same fixture) rather than
 #: guessed — `DESTINATIONS` (the OTHER fixture's static map, imported above) has no entry for any

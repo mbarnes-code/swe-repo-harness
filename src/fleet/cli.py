@@ -10636,12 +10636,21 @@ async def _ingest_build_source(
     overrides: Mapping[Ecosystem, str],
     monorepo: Git,
     lock_dir: Path,
+    excluded_contract_paths: Sequence[str] = (),
 ) -> _BuildIngest:
     """§3.3 step 1's INGEST for ONE repo, in the order the spec fixes it and before any lease.
 
     1. a **throwaway** clone of `migrate/<repo>` — `git-filter-repo` rewrites every commit and
        drops the origin remote, so pointing it at the Phase 2 worktree would destroy it;
     2. the relocation plan applied to *history* by `git-filter-repo`;
+
+    `excluded_contract_paths` (D132 fix, round VI task 106): this repo's own paths already
+    claimed by a `HOISTED`/`MIGRATED` contract that was SUCCESSFULLY ingested this run — SPEC's
+    "one subtraction" (`docs/SPEC.md:1270-1274`, §3.3 step 1: "its relocation plan excludes every
+    path already claimed by a `HOISTED` contract"). The caller (`_build_impl`'s PASS 0) is the one
+    that knows which contracts this repo owns and which of them actually landed; passed as plain
+    strings here rather than re-querying, so this function stays a pure relocation of whatever
+    domain its caller hands it, exactly as `overrides`/`facts` already are.
     3. `git merge --allow-unrelated-histories` into the integration branch with the ADR-0011
        `Source-Repo:`/`Source-Sha:` trailers, **under `IntegrationMutex`** — the single-writer
        merge queue, unchanged: this repo's merge is still serialized against every other.
@@ -10722,11 +10731,29 @@ async def _ingest_build_source(
     # this clone, `<dest>/` is Phase 2's work and nothing else. Phase 2's rename commit maps to
     # `<dest>/x → <dest>/x`, becomes empty, and is pruned; the result is one uniformly relocated
     # history whose tip is exactly the tree Phase 2 produced.
+    #
+    # D132's owner-side subtraction, in the SAME idempotent-mapping shape as the path-rename pair
+    # just above and for the identical reason: this clone's history is mixed between raw
+    # repo-root paths (every commit behind Phase 2's relocation) and `<dest>/`-prefixed paths (the
+    # tip, and any commit at or after it). `--path`/`--invert-paths` filters on each commit's OWN
+    # path as it existed in that commit — never on the renamed result — so excluding a hoisted
+    # contract's carrier path everywhere in this history needs BOTH forms, exactly as the rename
+    # above needs both a root rule and a collapse rule. `git-filter-repo` --path matches the
+    # literal string given (`default_source_paths`'s own docstring: "matches these literally"),
+    # so this is the same literal set `_ingest_contract_source` keeps via `--path` for the
+    # CONTRACT's own merge — the include-set there and the exclude-set here are computed by the
+    # one shared `_contract_owner_paths`, so they cannot disagree about which paths a hoisted
+    # contract claims.
+    exclude_args: list[str] = []
+    for claimed_path in default_source_paths(excluded_contract_paths):
+        exclude_args += ["--path", claimed_path, "--path", f"{dest}/{claimed_path}"]
+    if exclude_args:
+        exclude_args.append("--invert-paths")
     await relocate(
         clone_dir,
         RelocationSpec(
             dest_path=dest,
-            extra_args=("--path-rename", f"{dest}/{dest}/:{dest}/"),
+            extra_args=("--path-rename", f"{dest}/{dest}/:{dest}/", *exclude_args),
             replace_text=resolve_replace_text(
                 settings.root, settings.config.redaction.history_scrub_file
             ),
@@ -10748,6 +10775,29 @@ async def _ingest_build_source(
         merge_sha=result.merge_sha,
         source_sha=tip,
         already_ingested=result.already_present,
+    )
+
+
+def _contract_owner_paths(cnode: ContractNode) -> tuple[str, ...]:
+    """This contract's own carrier paths, as they sit in its OWNING repo's history — the exact
+    set `_ingest_contract_source` keeps via `--path` (below) and, since D132's fix, the exact set
+    `_ingest_build_source` EXCLUDES via `--invert-paths` from the owner's own relocation, so the
+    two ingests partition the owner's history rather than overlapping it (§3.3 step 1's "one
+    subtraction"). One function, two callers, so the include-set and the exclude-set can never
+    drift apart the way two independently-written filters could.
+
+    `cnode.source_paths` carries every carrier across every repo that vendors this contract
+    (`ContractNode`'s own docstring: "[{repo_id, path, blob_sha}] over every carrier"); filtered
+    to `owning_repo_id` because only the OWNER's copy is what this owner's own ingest could
+    possibly duplicate — a consumer's vendored copy lives in a different repo's own history
+    entirely and this function is never called for one.
+    """
+    return default_source_paths(
+        [
+            entry["path"]
+            for entry in cnode.source_paths
+            if entry.get("repo_id") == cnode.owning_repo_id
+        ]
     )
 
 
@@ -10843,13 +10893,7 @@ async def _ingest_contract_source(
         raise ValueError(
             f"{cnode.contract_id}: {cnode.status.value} with no hoist_target_path/owning_repo_id"
         )
-    owner_paths = default_source_paths(
-        [
-            entry["path"]
-            for entry in cnode.source_paths
-            if entry.get("repo_id") == cnode.owning_repo_id
-        ]
-    )
+    owner_paths = _contract_owner_paths(cnode)
     if not owner_paths:
         raise BuildStepUnavailableError(
             f"{cnode.contract_id}: no source_paths carried by its own owner "
@@ -11920,6 +11964,14 @@ async def _build_impl(
                 # finding and the rest of the fleet — including that contract's own owner and
                 # consumers — still proceeds (ADR-0119's "the run still completes").
                 contract_ingests: dict[str, _ContractIngest] = {}
+                # D132 fix (round VI task 106): the owner-side half of §3.3 step 1's "one
+                # subtraction". Populated only for a contract that actually landed on
+                # `integration` this run (the `else:` below, never the `except:` arm) — a
+                # contract whose ingest FAILED has no merge on the branch yet, so excluding its
+                # paths from the owner's own relocation would delete its only copy of that
+                # content from `integration` entirely, which is a strictly worse outcome than
+                # today's disclosed, bounded duplication.
+                hoisted_owner_paths: dict[str, list[str]] = {}
                 for cnode in await _eligible_contract_units(read_conn, run_id) if waves else ():
                     try:
                         contract_ingests[cnode.contract_id] = await _ingest_contract_source(
@@ -11951,6 +12003,22 @@ async def _build_impl(
                             now=_now(),
                             fingerprint_parts=(run_id, cnode.contract_id, "ingest"),
                         )
+                    else:
+                        # `cnode.owning_repo_id` is never None here: `_ingest_contract_source`
+                        # itself raises `ValueError` before doing anything when it is (an
+                        # unreachable-in-practice internal-invariant check, per that function's
+                        # own comment — `_eligible_contract_units` filters to HOISTED/MIGRATED,
+                        # and `ContractNode._hoistable_is_substantiated` already requires both
+                        # fields whenever `extractable`), and a `ValueError` is not caught above.
+                        # Narrows the type for the type checker and fails loud (Rule 11) rather
+                        # than silently keying a dict on `None` if that invariant is ever violated.
+                        if cnode.owning_repo_id is None:
+                            raise ValueError(
+                                f"{cnode.contract_id}: ingested with no owning_repo_id"
+                            )
+                        hoisted_owner_paths.setdefault(cnode.owning_repo_id, []).extend(
+                            _contract_owner_paths(cnode)
+                        )
                 # ---- PASS 1: INGEST the whole eligible fleet, before the first build ------
                 #
                 # In `(wave_index, repo_id)` order, so §3.1 step 7's "a dependency's merge is on
@@ -11968,6 +12036,7 @@ async def _build_impl(
                             overrides=overrides,
                             monorepo=monorepo,
                             lock_dir=lock_dir,
+                            excluded_contract_paths=hoisted_owner_paths.get(repo_id, ()),
                         )
                     except (
                         BuildStepUnavailableError,
