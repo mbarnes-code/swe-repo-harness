@@ -197,14 +197,15 @@ KNOWN_INERT: frozenset[str] = frozenset(
         "fleet.yaml:transform.anchoring.on_exhausted",         # settings.py:428
         #
         # --- §3.1 the native baseline build/test gate -------------------------------------
-        # The `BaselineBuild` section name appears nowhere outside its declaration; its two
-        # leaves (`enabled`, `timeout_s`) pass the BARE scan only on unrelated matches of those
-        # words — a comment on this very entry said so and then never added the leaves
-        # themselves. Qualified `baseline_build.enabled` / `baseline_build.timeout_s` occur
-        # nowhere for real; both decided via qualified match.
-        "fleet.yaml:preflight.baseline_build",             # settings.py:287
-        "fleet.yaml:preflight.baseline_build.enabled",     # settings.py:274
-        "fleet.yaml:preflight.baseline_build.timeout_s",   # settings.py:275
+        # `preflight.baseline_build`/`.enabled`/`.timeout_s` were removed from here round VI
+        # task 107 (§12.11/D116 Leg B, ADR-0135): `workers/baseline.py` is the first reader of
+        # either leaf (`payload.enabled`/`payload.timeout_s`, threaded from
+        # `settings.config.preflight.baseline_build.{enabled,timeout_s}` by
+        # `cli._scan_payloads`/`cli.ScanPipelineWorker._baseline`), and the section name itself
+        # is now genuinely read too (the same qualified pair, `baseline_build.enabled`, appears
+        # for real in `cli.py`). See `QUALIFIED_MATCH_KEYS` below, which keeps both leaves under
+        # the qualified check rather than deleting their membership entirely — the bare words
+        # still collide with unrelated `enabled`/`timeout_s` fields elsewhere.
         #
         # --- timeouts and ceilings with no consumer ---------------------------------------
         # `budgets.build_timeout_s` left this list at ADR-0080 (§11.5 step 8): `cli.resume`
@@ -352,15 +353,20 @@ QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
         # `llm.max_schema_repairs`). Membership says only *which scan decides the key*, never
         # what the verdict is: for most of these the qualified pair occurs nowhere and the
         # verdict is inert, while the three `llm.` ones are genuinely READ through it since
-        # 2026-08-22 (`orchestrator/context.py::call_policy_for`), and `transform.ladder.
+        # 2026-08-22 (`orchestrator/context.py::call_policy_for`), `transform.ladder.
         # context_policy` is genuinely READ since 2026-09-02 (round EE,
-        # `orchestrator/runner.py:523`) — all four are no longer in `KNOWN_INERT`. They stay here
-        # because the bare-name collision that made the plain scan useless for them is unchanged,
-        # and it is what would let a revert of that wiring go unnoticed. `transform.ladder.
-        # context_policy`'s own qualified pair (`ladder.context_policy`) still would not catch a
-        # revert either, since the real read is spelled `rung.context_policy` — see the
-        # `KNOWN_INERT` comment above for the full disclosure. See the `KNOWN_INERT` comments
-        # above for each specific collision.
+        # `orchestrator/runner.py:523`), and `preflight.baseline_build.enabled`/`.timeout_s` are
+        # genuinely READ since round VI task 107 (§12.11/D116 Leg B, ADR-0135 —
+        # `workers/baseline.py`'s `payload.enabled`/`payload.timeout_s`, threaded from
+        # `cli._scan_payloads`/`cli.ScanPipelineWorker._baseline`, both of which spell the
+        # qualified pair literally: `preflight.baseline_build.enabled`) — none of these six are
+        # any longer in `KNOWN_INERT`. They stay here because the bare-name collision that made
+        # the plain scan useless for them is unchanged (`enabled`/`timeout_s` are common leaf
+        # names elsewhere), and it is what would let a revert of the wiring go unnoticed.
+        # `transform.ladder.context_policy`'s own qualified pair (`ladder.context_policy`) still
+        # would not catch a revert either, since the real read is spelled `rung.context_policy` —
+        # see the `KNOWN_INERT` comment above for the full disclosure. See the `KNOWN_INERT`
+        # comments above for each specific collision.
         "fleet.yaml:transform.ladder.role",
         "fleet.yaml:transform.ladder.context_policy",
         "fleet.yaml:llm.max_schema_repairs",
@@ -636,14 +642,16 @@ def _inert_keys() -> frozenset[str]:
 def test_the_scan_sees_a_real_config_surface() -> None:
     """Guard the guard: a walk that silently yields nothing would pass every other test here.
 
-    The exact count (182, at time of writing) is a tripwire on its own: `len(keys) > 100` would
+    The exact count (186, at time of writing — 182 before round VI task 107 added
+    `preflight.baseline_build.container_image`/`.container_memory`/`.container_cpus`/
+    `.container_network`, §12.11/D116 Leg B) is a tripwire on its own: `len(keys) > 100` would
     still pass if an entire section vanished from the walk (`verify` alone is 8 keys), so the
     per-section coverage loop below is the one that actually catches that regression — the exact
     count just makes any drift, section-sized or not, visible instead of silently tolerated.
     """
     keys = _config_keys()
-    assert len(keys) == 182, (
-        f"walked {len(keys)} keys, expected 182 — recount deliberately (a key was added/removed, "
+    assert len(keys) == 186, (
+        f"walked {len(keys)} keys, expected 186 — recount deliberately (a key was added/removed, "
         "or a whole section was silently dropped from the walk) and update this number"
     )
     for filename, root in ROOTS:

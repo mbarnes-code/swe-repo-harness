@@ -138,10 +138,21 @@ def test_the_exclusion_set_assertion_discriminates_real_db_state_and_is_not_a_ta
 
     db = fleet / "state" / "fleet.db"
 
-    # 1. Real, unmodified state: every repo is NULL (matches the xfail test above).
-    assert _baseline_ok_exclusion_set(fleet) == all_repo_ids, (
-        "expected every repo NULL in the real, unmodified post-build state -- if this changed, "
-        "D116 may already be fixed and the xfail above should be re-checked, not this test"
+    # 1. Real, unmodified state, AS OF round VI task 107 (§12.11/D116 Leg B): `workers/
+    # baseline.py` now measures 4 of this fixture's 5 repos for real (a fast, placeholder-image
+    # container refusal under the shipped config -- `settings.py::BaselineBuild.container_image`'s
+    # own docstring -- still a real, non-fabricated `baseline_ok=0`, not a mock). Only
+    # `acme-empty` stays NULL: `cli._primary_ecosystem` returns `None` for it (no manifest ever
+    # publishes a coordinate for a repo with no commit at all), so `BaselineWorker.run()` takes
+    # its documented "nothing to measure" skip -- exactly ADR-0135 ruling 2's target shape, and
+    # exactly the scenario this test's own comment already anticipated ("if this changed, D116
+    # may already be fixed"). This is NOT Leg E's closure (the `strict=True` xfail immediately
+    # above is untouched and still correctly XFAILs on its own, narrower-but-still-false premise
+    # -- the exclusion set is no longer the WHOLE fleet, but it is still not EMPTY). This
+    # assertion only needed to stop hard-coding the pre-Leg-B premise it was testing against.
+    assert _baseline_ok_exclusion_set(fleet) == ["acme-empty"], (
+        "expected only acme-empty NULL in the real, unmodified post-Leg-B state -- if this "
+        "changed, re-check both this comment and the xfail test above, not just this assertion"
     )
 
     # 2. Bypass normal flow: write a real non-NULL value to every row (never mocked -- a real
