@@ -26,11 +26,18 @@ import pytest
 from pydantic import Field, ValidationError
 
 import fleet.workers as workers_pkg
-from fleet.llm.client import CallBudget
+from fleet.llm.client import (
+    BackendTarget,
+    BudgetExhausted,
+    CallBudget,
+    SchemaUnsatisfied,
+    TierUnavailable,
+)
 from fleet.models.base import LOG_TAIL_BYTES
 from fleet.models.enums import (
     ContextPolicy,
     FailureClass,
+    ModelTier,
     Phase,
     RepoStatus,
     TransformTier,
@@ -48,6 +55,8 @@ from fleet.workers.base import (
     WorkerResult,
     accumulate,
     assert_stateless,
+    classify_exception,
+    error_from_exception,
     implements_preconditions,
     loop_now,
     total_tokens,
@@ -523,6 +532,69 @@ def test_a_failed_result_cannot_be_recorded_as_prose() -> None:
         WorkerResult[Landed](status="partial", completed_units=[])
     with pytest.raises(ValidationError):
         WorkerResult[Landed](status="ok", completed_units=["a"], remaining_units=["a"])
+
+
+# =======================================================================================
+# (5b) D133: the fallback classifier consults a declared `LlmError.failure_class`
+# =======================================================================================
+
+
+def test_classify_exception_consults_a_declared_llm_failure_class() -> None:
+    """`TierUnavailable`/`BudgetExhausted` declare their own `failure_class` (`llm/client.py`).
+
+    Before D133, `classify_exception` never looked — a bare, unwrapped `TierUnavailable`
+    escaping a worker that does not classify its own LLM errors (research-51's finding) fell
+    through every isinstance arm and came out `UNKNOWN`, despite declaring
+    `BACKEND_UNAVAILABLE` at the raise site.
+    """
+    bare = TierUnavailable(ModelTier.HEAVY, ("fake:heavy-1", "fake:heavy-2"))
+    assert classify_exception(bare) is FailureClass.BACKEND_UNAVAILABLE
+
+    budget = BudgetExhausted("would exceed the run's remaining ceiling")
+    assert classify_exception(budget) is FailureClass.BUDGET_EXHAUSTED
+
+
+def test_classify_exception_walks_a_wrapping_exceptions_cause_chain() -> None:
+    """`rewrite.py::_repair` re-raises a caught `LlmError` wrapped: `raise WorkerRepairError(...)
+    from exc` (a plain `RuntimeError`, itself declaring no `failure_class`). Before D133 this
+    wrap lost `TierUnavailable`'s declaration to the generic isinstance arms and misclassified a
+    genuine backend outage as `UNKNOWN` — worse, as a *retryable* `UNKNOWN`, charging the repo an
+    attempt for an outage that was not its fault.
+
+    `error_from_exception` must also recover the exhausted `tier` through the same wrap, so
+    `record_backend_unavailable`'s finding can name it instead of falling back to the whole-run
+    disclosure caveat.
+    """
+    def _wrap(cause: TierUnavailable) -> None:
+        raise RuntimeError("escalation rung failed: tier heavy exhausted") from cause
+
+    origin = TierUnavailable(ModelTier.HEAVY, ("fake:heavy-1",))
+    try:
+        _wrap(origin)
+    except RuntimeError as wrapped:
+        assert classify_exception(wrapped) is FailureClass.BACKEND_UNAVAILABLE
+        error = error_from_exception(wrapped)
+
+    assert error.failure_class is FailureClass.BACKEND_UNAVAILABLE
+    assert error.retryable is False, "BACKEND_UNAVAILABLE is in NON_RETRYABLE"
+    assert error.tier is ModelTier.HEAVY
+
+
+def test_classify_exception_leaves_an_undeclared_llm_error_to_the_generic_arms() -> None:
+    """Not every `LlmError` declares a `failure_class` — only `BudgetExhausted` and
+    `TierUnavailable` do (`llm/client.py`). `SchemaUnsatisfied` — a genuine model-output failure,
+    not a fail-closed infrastructure one — declares none, and `classify_exception`'s generic
+    arms below the new one have never known about LLM-specific exceptions (that finer mapping is
+    `workers/classify.py::_error_for`'s job, the "authoritative", payload-aware classifier this
+    module's docstring says it is only the FALLBACK for). This proves D133 did not turn every
+    `LlmError` into a hard classification wholesale — the walk finds no declared `failure_class`
+    on it (or on any wrapper), so it falls all the way through to `UNKNOWN`, exactly as it did
+    before this fix.
+    """
+    target = BackendTarget(backend="fake", model_id="fake-heavy", price="free")
+    schema_unsatisfied = SchemaUnsatisfied(target, 2, "response failed schema validation twice")
+    assert classify_exception(schema_unsatisfied) is FailureClass.UNKNOWN
+    assert error_from_exception(schema_unsatisfied).tier is None
 
 
 # =======================================================================================

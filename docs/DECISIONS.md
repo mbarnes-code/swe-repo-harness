@@ -15599,3 +15599,55 @@ Per this task's brief, §12.31's DONE/OPEN status is not touched here. This task
 (research-50's "task 1"), not the closing task (task 2, deliberately not built here per the
 warning above). A one-line note is left in `docs/CRITERIA_PLAN.md`'s §31 entry describing what
 this task built and what remains, without changing the status field.
+
+## ADR-0133 — D133: `buildgen.py`'s two `LlmError`-swallowing sites fail loud only on a
+declared-`failure_class` error, never on the rest
+
+**Round VI task 100. ADR number `0133` is the next free number as measured at this task's own
+time of writing (`grep -rhoE "ADR-0[0-9]{3}" docs/ .superpowers/` → highest landed is
+`ADR-0132`) — re-verified immediately before this commit, since tasks 99 and 101 are running
+concurrently in separate worktrees.**
+
+**Context.** research-51 found `workers/buildgen.py`'s `_author` (`:490`) and `_resolve_conflict`
+(`:602`, pre-fix) each catch `LlmError` broadly and fall back to a deterministic `None`, which
+their `run()` caller then reports as `FailureClass.RULE_MISS` / `FailureClass.DEP_CONFLICT`. That
+is correct for a genuine model-output failure (`SchemaUnsatisfied`, `MalformedReply`,
+`ModelRefused`, `OutputTruncated`, `TransportError` — the rung asked, got something unusable, and
+§3.3's own framing treats that as "no template/no resolution, try the next rung or fail the
+repo"). It is WRONG for `BudgetExhausted`/`TierUnavailable` — the two `LlmError`s that declare
+their own `failure_class` `ClassVar` (`llm/client.py`) precisely because they are §11.2/§11.8
+fail-closed conditions, not "the model tried and failed": swallowing either into the same `None`
+fallback reported a run-terminal infrastructure outage as a retryable-by-rung-position repo
+failure and never halted the run for a genuinely dead tier.
+
+**Decision.** At both sites, `except LlmError as exc:` now inspects `getattr(exc, "failure_class",
+None)`: non-`None` (i.e. `BudgetExhausted`/`TierUnavailable`) re-raises, letting the exception
+escape `run()` to `workers/base.py::BaseWorker._run_one`'s generic handler, which the paired
+`classify_exception` fix (`docs/INTEGRATION_HONESTY.md`'s `D133` entry) now classifies correctly.
+Every other `LlmError` keeps the existing deterministic fallback, unchanged.
+
+**Alternatives considered and rejected:**
+1. **Re-raise every `LlmError` unconditionally.** Rejected: this would turn a genuine
+   `SchemaUnsatisfied`/`ModelRefused` at rung 2 into an unhandled worker crash instead of the
+   `RULE_MISS`/`DEP_CONFLICT` result `run()`'s caller already expects and — per the pre-existing,
+   still-passing `test_build_authoring_is_reached_only_after_the_deterministic_path_fails` and
+   `test_a_conflict_at_rung_1_stays_retryable_so_the_ladder_can_reach_the_model` — is load-bearing
+   production behavior this task must not regress (Rule 3, surgical changes).
+2. **Give every `LlmError` a declared `failure_class` instead of branching on `getattr`.**
+   Rejected as a larger, unrequested change: it would touch `SchemaUnsatisfied`/`MalformedReply`/
+   `ModelRefused`/`OutputTruncated`/`TransportError`'s class definitions in `llm/client.py` for a
+   fix this task's brief scopes to the classifier and the two swallow sites, and `TransportError`
+   already has its own correct classification path elsewhere (`workers/classify.py::_error_for`
+   maps it to `TRANSIENT_INFRA`, a RETRYABLE class — giving it a fixed `failure_class` `ClassVar`
+   would be wrong for that site too, since transience is a property of the specific call, not of
+   the exception type).
+3. **A bespoke `isinstance(exc, BudgetExhausted | TierUnavailable)` check at each site**, instead
+   of consulting the declared `failure_class`. Rejected: it re-encodes, at two call sites, exactly
+   the set `classify_exception`'s fix already derives from the `LlmError` hierarchy itself — a
+   third `LlmError` subclass later declaring a `failure_class` would need updating in three places
+   instead of being picked up automatically by the `getattr` check.
+
+**Verification.** `docs/INTEGRATION_HONESTY.md`'s `D133` entry carries the mutation-testing
+account (reverting both sites to their pre-fix content flips the two new
+`tests/test_workers_build.py` tests RED, matching research-51's finding; restoring the fix
+returns them GREEN); not duplicated here.

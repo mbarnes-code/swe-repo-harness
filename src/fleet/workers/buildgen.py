@@ -488,7 +488,17 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
         }
         try:
             response = await author_build_file(ctx.llm, evidence, budget=ctx.budget)
-        except LlmError:
+        except LlmError as exc:
+            if getattr(exc, "failure_class", None) is not None:
+                # D133: `BudgetExhausted`/`TierUnavailable` are the two `LlmError`s that declare
+                # their own `failure_class` (`llm/client.py`) — both §11.2/§11.8 fail-closed
+                # conditions, not "the model tried and produced nothing usable". Swallowing
+                # either into the `None` fallback below used to report a run-terminal outage as
+                # a retryable `RULE_MISS` (the caller's fallback classification, `run()` above)
+                # and never halt the run. Re-raised, it escapes to `_run_bounded`'s generic
+                # handler, which `classify_exception`/`error_from_exception` now classify
+                # correctly (including the tier) instead of guessing here.
+                raise
             return None, TokenUsage()
         package = response.value.package_path.strip("/") or dest
         targets = [
@@ -600,7 +610,13 @@ class BuildgenWorker(BaseWorker[BuildgenInput, BuildgenOutput]):
         }
         try:
             response = await resolve_version_conflict(ctx.llm, evidence, budget=ctx.budget)
-        except LlmError:
+        except LlmError as exc:
+            if getattr(exc, "failure_class", None) is not None:
+                # D133: same reasoning as `_author`'s sibling site — a declared-`failure_class`
+                # `LlmError` is a fail-closed §11.2/§11.8 condition, not an unresolved conflict.
+                # Swallowing it here used to report a run-terminal outage as a retryable
+                # `DEP_CONFLICT` and never halt the run.
+                raise
             return TokenUsage(), None
         decision = validate_override(response.value, requirements)
         if not decision.accepted:

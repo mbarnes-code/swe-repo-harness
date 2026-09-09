@@ -806,6 +806,72 @@ async def test_build_authoring_is_reached_only_after_the_deterministic_path_fail
     assert model.roles == ["build_authoring"]
 
 
+async def test_build_authoring_tier_outage_halts_the_run_instead_of_reporting_a_rule_miss(
+    tmp_path,
+) -> None:
+    """D133: `_author`'s `except LlmError` used to swallow a live tier outage into `None`, and
+    the caller (`run()`, above) reported it as `RULE_MISS` — indistinguishable from "the model
+    tried and proposed nothing usable" — instead of the run-terminal `BACKEND_UNAVAILABLE`
+    §11.8 owes a dead tier. Worse than a plain misclassification: rung 1's `None` (deterministic
+    path never even tried, `ctx.context_policy is None`) and a genuine rung-2 tier outage used to
+    look identical to every caller.
+
+    `UnavailableModelClient` is this file's own DEFAULT `llm` (when `model=None`, see
+    `make_ctx`): its `complete()` raises a REAL `TierUnavailable(WORKHORSE, ...)` — exactly what
+    a genuinely dead WORKHORSE tier raises, nothing hand-built. Driven through `execute()`, the
+    same bounded wrapper `orchestrator/runner.py` calls in production, not `run()` in isolation.
+    """
+    empty = BuildgenInput(unit=_unit(), write_module_bazel=False)
+    # rung 2 == EVIDENCE_ONLY == WORKHORSE; `_author` is reached
+    ctx = make_ctx(tmp_path, attempt=2)
+    execution = await BuildgenWorker().execute(ctx, empty)
+
+    failure = execution.last_error
+    assert failure is not None, "the rung must fail, not report success with no output"
+    assert failure.failure_class is FailureClass.BACKEND_UNAVAILABLE, (
+        f"misclassified as {failure.failure_class}"
+    )
+    assert failure.retryable is False
+    assert failure.tier is ModelTier.WORKHORSE
+    assert execution.status is RepoStatus.PENDING, "an outage is not this repo's fault (§11.8)"
+
+
+async def test_conflict_resolution_tier_outage_halts_the_run_instead_of_reporting_dep_conflict(
+    tmp_path,
+) -> None:
+    """D133: `_resolve_conflict`'s sibling swallow — same reasoning as `_author`'s test above,
+    `DEP_CONFLICT` in place of `RULE_MISS`. A dead tier used to look exactly like an MVS conflict
+    the model tried and failed to resolve, instead of the §11.8 run-terminal outage it actually
+    is.
+    """
+    payload = BuildgenInput(
+        unit=_unit(),
+        targets=[BuildTarget(package="java/com/acme/widget", name="w", rule="java_library")],
+        workspace_deps=[_dep()],
+        requirements=[
+            ExternalRequirement(
+                coord_key="maven:com.acme:commons", repo_id="a", version_spec="31"
+            ),
+            ExternalRequirement(
+                coord_key="maven:com.acme:commons", repo_id="b", version_spec="33"
+            ),
+        ],
+        ruleset_versions={"rules_jvm_external": "6.0"},
+    )
+    # rung 2 == EVIDENCE_ONLY; default `llm` raises TierUnavailable
+    ctx = make_ctx(tmp_path, attempt=2)
+    execution = await BuildgenWorker().execute(ctx, payload)
+
+    failure = execution.last_error
+    assert failure is not None
+    assert failure.failure_class is FailureClass.BACKEND_UNAVAILABLE, (
+        f"misclassified as {failure.failure_class}"
+    )
+    assert failure.retryable is False
+    assert failure.tier is ModelTier.WORKHORSE
+    assert execution.status is RepoStatus.PENDING
+
+
 async def test_buildgen_refuses_the_reserved_scc_namespace(tmp_path) -> None:
     """`_scc/` belongs to the §3.1 6e coarsened targets, and the reservation is enforced.
 

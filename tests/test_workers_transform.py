@@ -45,6 +45,7 @@ from fleet.llm.client import (
     Message,
     ModelResponse,
     StreamEvent,
+    TierUnavailable,
 )
 from fleet.llm.roles import SPEC_ROLE_TIERS, LlmRouter, Role
 from fleet.llm.schemas import LlmEscalationProposal, LlmPatchProposal, ProposedFileEdit
@@ -203,6 +204,49 @@ class FakeModelClient:
 
     async def capabilities(self, role: str) -> ModelCapabilities:
         return ModelCapabilities()
+
+
+class TierUnavailableClient:
+    """A `ModelClient` whose tier is genuinely dead (§11.8) — a REAL `TierUnavailable` out of
+    `complete()`, exactly what an exhausted tier raises. Not a hand-built exception object: this
+    is `ctx.llm`, the one §7.7 call surface, and the exception crosses it for real (D133).
+    """
+
+    def __init__(
+        self, tier: ModelTier, targets_tried: Sequence[str] = ("fake:fake-heavy",)
+    ) -> None:
+        self._tier = tier
+        self._targets_tried = tuple(targets_tried)
+
+    async def complete[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        tier_override: ModelTier | None = None,
+        max_output_tokens: int | None = None,
+        timeout_s: float | None = None,
+        budget: CallBudget | None = None,
+    ) -> ModelResponse[T]:
+        raise TierUnavailable(self._tier, self._targets_tried)
+
+    async def _empty(self) -> AsyncIterator[StreamEvent]:
+        return
+        yield StreamEvent()  # pragma: no cover - never reached; makes this an async generator
+
+    def stream[T: BaseModel](
+        self,
+        role: str,
+        messages: Sequence[Message],
+        response_model: type[T],
+        *,
+        budget: CallBudget | None = None,
+    ) -> AsyncIterator[StreamEvent]:
+        return self._empty().__aiter__()  # pragma: no cover - rewrite only ever calls complete()
+
+    async def capabilities(self, role: str) -> ModelCapabilities:
+        raise NotImplementedError  # pragma: no cover
 
 
 class ScriptedBackend:
@@ -1452,6 +1496,44 @@ def test_a_rung_the_budget_cannot_pay_for_never_reaches_the_transport(tmp_path: 
 
     assert backend.prompts == [], "spend is refused before the transport, never after"
     assert log_entries(repo, anchor) == []
+
+
+def test_a_tier_outage_at_the_escalation_rung_surfaces_as_backend_unavailable(
+    tmp_path: Path,
+) -> None:
+    """D133: the ESCALATION rung's `except LlmError: raise WorkerRepairError(...) from exc`
+    (`rewrite.py:730-731`) wraps a real `TierUnavailable` in a plain `RuntimeError`. Driven
+    through `execute()` — the same bounded wrapper `orchestrator/runner.py` actually calls,
+    not `run()` directly — this used to come out `UNKNOWN` and *retryable*, charging the repo
+    an attempt for an outage that was not its fault, instead of the run-terminal
+    `BACKEND_UNAVAILABLE` §11.8 owes a dead tier.
+
+    `TierUnavailableClient` raises a REAL `TierUnavailable` out of `ctx.llm.complete()` — the
+    same call surface `escalate_repair` uses in production — so `WorkerRepairError` is the
+    genuine exception this rung raises, not a hand-built stand-in for it.
+    """
+    unit = f"{DEST}/mod.py"
+    repo, anchor = make_repo(tmp_path, {unit: "alpha\n"})
+    worker = worker_with(FakeRewriter({}))  # no rule matches: the deterministic rung finds nothing
+    ctx = make_ctx(
+        repo,
+        attempt=3,  # DEFAULT_LADDER[2] == EVIDENCE_PLUS_REJECTED_APPROACHES == LLM_ESCALATION
+        llm=TierUnavailableClient(ModelTier.HEAVY, ("fake:heavy-1", "fake:heavy-2")),
+    )
+
+    execution = asyncio.run(
+        worker.execute(ctx, rewrite_payload(anchor, [unit], rules=[]), max_attempts=3)
+    )
+
+    failure = execution.last_error
+    assert failure is not None, "the rung must fail, not report success with no output"
+    assert failure.failure_class is FailureClass.BACKEND_UNAVAILABLE, (
+        f"misclassified as {failure.failure_class}"
+    )
+    assert failure.retryable is False
+    assert failure.tier is ModelTier.HEAVY
+    assert execution.status is RepoStatus.PENDING, "an outage is not this repo's fault (§11.8)"
+    assert log_entries(repo, anchor) == [], "nothing lands when the escalation rung never answers"
 
 
 # =======================================================================================

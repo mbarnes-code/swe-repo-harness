@@ -68,7 +68,7 @@ from uuid import UUID
 
 from pydantic import Field, model_validator
 
-from fleet.llm.client import BudgetExhausted, CallBudget
+from fleet.llm.client import BudgetExhausted, CallBudget, LlmError, TierUnavailable
 from fleet.models.base import FleetModel, TruncatedStr
 from fleet.models.enums import (
     ContextPolicy,
@@ -550,13 +550,43 @@ def unfinished_units[O: WorkerOutput](
     return [unit for unit in all_units if unit not in done]
 
 
+def _llm_origin(exc: BaseException) -> LlmError | None:
+    """The nearest `LlmError` in `exc`'s own type or its `__cause__` chain (D133).
+
+    A worker that classifies its own LLM errors never reaches `classify_exception` — this is the
+    fallback path only, for a worker that re-raises a caught `LlmError` wrapped in a domain
+    exception (`rewrite.py::_repair`: `raise WorkerRepairError(...) from exc`). Without the walk,
+    that wrap loses `TierUnavailable`'s declared `failure_class` to the coarse isinstance arms
+    below and misclassifies a backend outage as `UNKNOWN`. Bounded against a `__cause__` cycle —
+    nothing here trusts one is impossible, only that normal code does not construct one.
+    """
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, LlmError):
+            return current
+        current = current.__cause__
+    return None
+
+
 def classify_exception(exc: BaseException) -> FailureClass:
     """Coarse, exception-shaped classification — the fallback path only.
 
     The authoritative classifier inspects the *response payload* (ADR-0014) and lives in
     `fleet.orchestrator.retry`; this exists so that an exception escaping a worker is still
     recorded as a typed failure instead of crashing the wave.
+
+    An `LlmError` (direct, or wrapped per `_llm_origin`) that declares its own `failure_class`
+    (D133: only `BudgetExhausted` and `TierUnavailable` do, in `llm/client.py`) is consulted
+    FIRST, ahead of the generic isinstance arms — those two are §11.2/§11.8 fail-closed
+    classifications and must survive a wrap the same way they would survive a bare raise.
     """
+    origin = _llm_origin(exc)
+    if origin is not None:
+        declared: FailureClass | None = getattr(origin, "failure_class", None)
+        if declared is not None:
+            return declared
     if isinstance(exc, BudgetExhausted):
         return BudgetExhausted.failure_class
     if isinstance(exc, TimeoutError):
@@ -577,13 +607,22 @@ def error_from_exception(exc: BaseException) -> WorkerError:
 
     `exception_type` is the qualified name and `stderr_tail` the message — never a formatted
     traceback (§11.4: a traceback carries local variables, and locals carry credentials).
+
+    `tier` is populated when classification traced to a `TierUnavailable` (D133), direct or
+    wrapped, so `record_backend_unavailable`'s `tier=` arm (`orchestrator/runner.py`) can name
+    the actually-exhausted tier instead of falling back to the whole-run disclosure caveat
+    (`findings.py`'s `tier_known=False` wording) — the same signal `workers/classify.py::_error_for`
+    already carries for its own tier-aware caller.
     """
     failure_class = classify_exception(exc)
+    origin = _llm_origin(exc)
+    tier = origin.tier if isinstance(origin, TierUnavailable) else None
     return WorkerError(
         failure_class=failure_class,
         retryable=is_retryable(failure_class),
         stderr_tail=str(exc),
         exception_type=f"{type(exc).__module__}.{type(exc).__qualname__}",
+        tier=tier,
     )
 
 
