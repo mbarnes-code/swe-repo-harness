@@ -3377,6 +3377,18 @@ brief):**
   test-only router forcing `classify`'s role onto `ModelTier.HEAVY` (production `config/models.yaml`
   never does; nothing stops a test `LlmRouter` from doing so) may be a smaller vehicle than fixing
   or rearchitecting rewrite.py's HEAVY path — an implementer decision, not made here.
+  **Corrected 2026-09-09 (round VI task 100, `D133`): the classification question above is now
+  CLOSED, not merely flagged.** research-51 (this round's research task) first corrected task 94's
+  premise that `rewrite.py` is "the one real production HEAVY-tier caller" — there are three, in
+  two files (`workers/buildgen.py`'s `_author`/`_resolve_conflict` swallow `LlmError` entirely,
+  which is worse than a misclassification). Task 100 then fixed `workers/base.py::
+  classify_exception` to consult a declared `LlmError.failure_class` (walking `__cause__`, so
+  `rewrite.py`'s wrap needed no change of its own) and made `buildgen.py`'s two sites re-raise a
+  declared-`failure_class` `LlmError` instead of swallowing it. All three sites now correctly
+  surface `BACKEND_UNAVAILABLE`, mutation-tested against the pre-fix code (`docs/
+  INTEGRATION_HONESTY.md`'s `D133` entry has the full account). **This closes the classification
+  obstacle only — it does not itself build a HEAVY-tier fixture-fleet vehicle for case (iv)**;
+  43-C's done bar below is updated accordingly.
 - Case (iv)'s other sub-assertions (a real CLI exit status 8, "every target tried" driven through an
   actually-unreachable target rather than a synthesized `WorkerError`, a real `fleet resume` CLI
   invocation rather than a direct `reap_expired_phase_leases` call) remain unproven, per
@@ -3388,11 +3400,12 @@ brief):**
   either 43-A/43-B or 43-C's own scoping (research-49 flagged it as a structural obstacle behind
   case (iv) specifically, not as a fifth work item).
 
-**Done bar (remaining):** 43-C in full (case (iv)'s untested sub-assertions plus the rewrite.py
-classification question above, which the controller must adjudicate before dispatching a build
-task), case (iii)'s together-not-separately gap, and the fixture-fleet framing clause. §12.43 must
-stay OUT of the `<n> of 48` count until 43-C closes or the controller issues a disclosed Rule-14
-adjudication narrowing the criterion's text.
+**Done bar (remaining):** 43-C in full (case (iv)'s untested sub-assertions — the classification
+question above is now CLOSED by `D133`, round VI task 100, so building the fixture-fleet vehicle
+is the sole remaining lift for case (iv), not a fix-then-vehicle sequence), case (iii)'s
+together-not-separately gap, and the fixture-fleet framing clause. §12.43 must stay OUT of the
+`<n> of 48` count until 43-C closes or the controller issues a disclosed Rule-14 adjudication
+narrowing the criterion's text.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,

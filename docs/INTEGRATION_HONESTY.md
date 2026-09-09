@@ -11112,3 +11112,90 @@ excluding the contract's own carrier paths from the owner's `RelocationSpec` via
 See task 95's ADR draft (`docs/DECISIONS.md`, JC-4) for the fuller account.
 
 Full account: `.superpowers/sdd/round-VI-criteria-closure/task-95-report.md`.
+
+## D133 — FIXED, LANDED (`d1ecfdf`). 3 production HEAVY-tier call sites mishandled a fail-closed
+`LlmError` instead of surfacing `BACKEND_UNAVAILABLE` (§12.43 case (iv), §11.8)
+
+**Found by research-51 (round VI's research task, 2026-09-08), upgrading a single site task 94
+reported into a 3-site defect across 2 files. Allocated by round VI task 100 — form-agnostic
+sweep against `main` at `a98bcc2` found `D132` as the highest allocated number.**
+
+**The defect, quoted against the code rather than paraphrased.** `docs/SPEC.md` §12.43 case (iv)
+requires a HEAVY-tier outage to fail closed: exit 8, a `BackendUnavailable` finding naming the
+tier, the repo left `PENDING` (never `REQUIRES_HUMAN_INTERVENTION`), no `llm_cache` row served
+from another tier, a valid checkpoint, and a real `fleet resume` picking the repo back up. That
+chain depends on `WorkerError.failure_class` reaching `FailureClass.BACKEND_UNAVAILABLE`
+(`orchestrator/retry.py`'s `RetryPolicy.decide` special-cases exactly that value to
+`terminal_status=RepoStatus.PENDING` and `RunHalted`). Three production call sites never produced
+it:
+
+- `workers/rewrite.py:718` (`escalate_repair`, the `ESCALATION` role's HEAVY rung) — `except
+  LlmError as exc: raise WorkerRepairError(f"...") from exc` (`:730-731`) wraps the caught error in
+  a plain `RuntimeError`. `workers/base.py::classify_exception` — the fallback classifier every
+  escaped exception goes through (`workers/base.py::BaseWorker._run_one`) — never consulted
+  `LlmError.failure_class`, so even a BARE, unwrapped `TierUnavailable` came out `UNKNOWN`, and
+  *retryable*: charging the repo an attempt for an outage that was not its fault, in direct
+  violation of §11.2/§11.8's fail-closed intent.
+- `workers/buildgen.py:490` (`_author`, `BUILD_AUTHORING`'s HEAVY escape hatch) and `:602`
+  (`_resolve_conflict`, `CONFLICT_RESOLUTION`) **— both citations are to the PRE-FIX tree; the fix
+  below inserts lines above the second site, so post-fix the `_resolve_conflict` call itself
+  moved to `:612`** — `except LlmError: return None, TokenUsage()` /
+  `except LlmError: return TokenUsage(), None`. Worse than a misclassification: the exception
+  never escaped at all. Each site's caller in `run()` read the `None` and reported
+  `FailureClass.RULE_MISS` / `FailureClass.DEP_CONFLICT` respectively (non-retryable at this rung,
+  since `ctx.context_policy is not None`) — a live tier outage was indistinguishable from "the
+  model tried and genuinely found nothing", and the run never halted for a dead tier at all.
+
+**Root cause was narrow, confirmed by direct measurement before writing the fix**: only two
+`LlmError` subclasses declare a `failure_class` `ClassVar` at all — `BudgetExhausted`
+(`BUDGET_EXHAUSTED`) and `TierUnavailable` (`BACKEND_UNAVAILABLE`), both `llm/client.py`.
+`classify_exception`'s isinstance arms never checked for either declaration; only
+`workers/classify.py::_error_for` (a worker-local, payload-aware classifier, not the shared
+fallback) already did the right thing for `TierUnavailable`.
+
+**Fix (`d1ecfdf`).** `workers/base.py::classify_exception` now walks the exception and its
+`__cause__` chain (`_llm_origin`) for the nearest `LlmError` and, if it declares a `failure_class`,
+returns that ahead of the generic isinstance arms — this alone closes `rewrite.py`'s site with
+*no change to `rewrite.py` itself*, since `WorkerRepairError` wraps the original `TierUnavailable`
+via `raise ... from exc`. `error_from_exception` also recovers `TierUnavailable.tier` through the
+same walk, so `record_backend_unavailable`'s finding can name the actually-exhausted tier instead
+of falling back to the whole-run disclosure caveat (`findings.py`'s `tier_known=False` wording).
+
+`buildgen.py`'s two swallow sites needed a separate judgment call, disclosed rather than silently
+folded into the classifier fix: each now re-raises the caught `LlmError` only when it declares a
+`failure_class` (a fail-closed §11.2/§11.8 condition) and keeps the existing deterministic
+fallback otherwise — a genuine model-output failure (`SchemaUnsatisfied`, `MalformedReply`, etc.,
+which declare none) still falls back to `RULE_MISS`/`DEP_CONFLICT` unchanged, which is correct:
+those are not infrastructure outages. The re-raised exception then escapes `run()` and is
+classified by the fixed `classify_exception` path, exactly like `rewrite.py`'s site. Rationale
+and rejected alternatives (re-raise unconditionally; give every `LlmError` a `failure_class`;
+duplicate an `isinstance` check at each site) recorded in `docs/DECISIONS.md`'s `ADR-0133`.
+
+**Verified with real triggers, mutation-tested.** `tests/test_workers_base.py` carries 3 direct
+`classify_exception`/`error_from_exception` unit tests (a bare `TierUnavailable`, one wrapped in a
+bare `RuntimeError` via `raise ... from`, and a control — `SchemaUnsatisfied`, declaring no
+`failure_class`, must stay `UNKNOWN` unchanged). `tests/test_workers_transform.py` drives a real
+`RewriteWorker` through `execute()` (the same bounded wrapper `orchestrator/runner.py` calls) at
+the `LLM_ESCALATION` rung, with a `TierUnavailableClient` fake raising a genuine `TierUnavailable`
+out of `ctx.llm.complete()` — the real §7.7 call surface, not a hand-built exception object.
+`tests/test_workers_build.py` adds two `BuildgenWorker.execute()` tests (one per swallow site),
+reusing that file's own pre-existing `UnavailableModelClient` fake (already raises a real
+`TierUnavailable`) at rung 2. Reverting both source files to their `a98bcc2` (pre-fix) content
+flips all 3 site tests and 2 of the 3 base.py unit tests RED — `RULE_MISS` / `DEP_CONFLICT` /
+`UNKNOWN`-misclassification, matching this entry's finding exactly — while the undeclared-`LlmError`
+control test stays green in both states, confirming the fix is scoped to declared-`failure_class`
+`LlmError`s only. Restoring the fix returns all 5 to green.
+
+**Independent of §12.43-C.** research-51 recommended dispatching this defect separately from
+§12.43-C's fixture-fleet task (which proves case (iv) end to end on a real fixture) precisely
+because the two are independent code paths — this D-number's fix does not itself move §12.43 to
+DONE, and §12.43-C's own task (if/when dispatched) should NOT re-open this D-number to do so.
+
+**`docs/CRITERIA_PLAN.md`'s §12.43 (43-C) entry updated in this same commit**: it had flagged this
+exact classification defect (task 94's "measured code-reading finding, not a proven live defect")
+as part of 43-C's done bar, requiring "the controller must adjudicate before dispatching a build
+task" — that clause is now dated-corrected to CLOSED, with the done bar narrowed to the
+fixture-fleet vehicle alone. §12.43's own status is untouched (still OPEN, per this task's brief
+— building the case (iv) fixture-fleet vehicle is 43-C's separate, unaddressed remainder).
+
+Full account: `.superpowers/sdd/round-VI-criteria-closure/task-100-report.md`.
