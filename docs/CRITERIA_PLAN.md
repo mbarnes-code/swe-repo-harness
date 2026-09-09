@@ -3294,10 +3294,26 @@ zero diff). Reviewed Approved, Rule 12 mutation independently reproduced twice b
 fail-loud logging gap on a near-unreachable malformed-payload branch). **Case (ii)
 `BUDGET_EXHAUSTED` intentionally NOT attempted** — independently re-confirmed by review, not
 merely inherited from the report: `SpendKind.REVALIDATION` still has zero production constructors,
-so driving it would require inventing an undisclosed price (Rule 1). **Done bar (remaining):**
-§12.39-B's own design pass (a declared per-round price per the criterion's own "the round's known
-cost" phrase), then case (ii) driven the same way case (i) just was. §12.39 as a whole stays OUT
-of the `<n> of 48` count — case (i) and (iii) are closed, case (ii) is not.
+so driving it would require inventing an undisclosed price (Rule 1). **§12.39-B design pass
+complete (research-54, round VI thirty-seventh wave, 2026-09-09; see ADR-0136, `docs/DECISIONS.md`).**
+No invented price needed: this codebase's only pricing formula (declared per-Mtok rate from
+`config/models.yaml` × measured tokens, already-shipped `TokenEstimator`/`CostLedger`) applies
+directly — `BuildverifyWorker._diagnose` (`build_diagnosis`/`WORKHORSE`) already sits inside a
+REVALIDATE round, silent only because rung 1 is hardcoded and no ledger wraps the dispatch.
+Measured in the running interpreter: the real estimate resolves to $0.027 against a $2.00
+sub-ceiling. ADR-0136 rules a REVALIDATE round dispatches at a model-talking rung by construction
+(not a contrived round-count ceiling, not leaving rung 1 as-is) and files `D135`
+(`docs/INTEGRATION_HONESTY.md`) for the broader fleet-wide `TokenEstimator`-zero-constructors gap
+this is a narrow instance of. **Done bar (remaining), sized into two legs, not one task:**
+**B1** (NEW-MECHANISM, M) — thread `CostLedger`+`llm_router` into
+`_run_revalidation_claims_impl` mirroring `_emit_prs`'s own precedent (`cli.py:15218`), wrap in the
+first production `SpendScope(kind=SpendKind.REVALIDATION)`, catch `RevalidationBudgetExhausted` →
+`settle_revalidation(budget_breach=)` — **must also fix, in the same commit, a latent
+under-charging bug ADR-0136/`D135` name**: `VerifyPipelineWorker.run`'s success path constructs its
+`WorkerResult` with no `usage=` (`cli.py:8457-8462`). **B2** (TEST-ONLY, S/M, after B1 lands) — the
+real two-round fixture proving `BUDGET_EXHAUSTED` through the real path, the same way task 103
+proved case (i). §12.39 as a whole stays OUT of the `<n> of 48` count until B1 and B2 both land —
+case (i) and (iii) are closed, case (ii) is not.
 
 ## 40. No model string outside `config/`
 **DONE (SPEC + code corrected, round-K; AST clause closed round V, 2026-09-01 — now counts

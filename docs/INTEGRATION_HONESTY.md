@@ -11233,6 +11233,8 @@ task" — that clause is now dated-corrected to CLOSED, with the done bar narrow
 fixture-fleet vehicle alone. §12.43's own status is untouched (still OPEN, per this task's brief
 — building the case (iv) fixture-fleet vehicle is 43-C's separate, unaddressed remainder).
 
+Full account: `.superpowers/sdd/round-VI-criteria-closure/task-100-report.md`.
+
 ## D134 — OPEN. `baseline_test_count` unit mismatch: a native test-CASE count would make §12.11's
 own comparison unsatisfiable on any real migrated repo with more than one test
 
@@ -11267,4 +11269,33 @@ own design task still owes the exact native-side counting unit that satisfies th
 **Not required by this research task to fix**: no code was written; this is a scoping-only finding
 per research-53's own read-only brief.
 
-Full account: `.superpowers/sdd/round-VI-criteria-closure/task-100-report.md`.
+## D135 — OPEN. `TokenEstimator` has zero production constructors fleet-wide — every cost
+reservation is `ZERO_COST`, so every §11.2 ceiling fires only after an overshoot, never before
+
+**Found by research-54 (round VI's research task, 2026-09-09), while designing §12.39-B's
+revalidation-round pricing. Allocated by the round VI controller, thirty-seventh wave —
+form-agnostic sweep found `D134` as the highest allocated number.**
+
+**The gap, as measured.** `TokenEstimator` (the cost-estimation primitive `CostLedger`/
+`SpendScope` machinery is built around) has **zero production constructors anywhere in `src/`**,
+and `PhaseRunner(estimate=)` is never passed at any of its four call sites. This means every
+production cost reservation, fleet-wide — not merely the REVALIDATION path §12.39-B is about — is
+`ZERO_COST` today: a budget ceiling can only be discovered breached AFTER the spend that breached
+it, never reserved against in advance. This is broader than §12.39 case (ii)'s own gap (which
+`SpendKind.REVALIDATION`'s own separate absence of constructors compounds, not causes).
+
+**Consequence, scoped precisely.** §12.39-B's own B1 build task (ADR-0136, `docs/DECISIONS.md`)
+fixes this for the REVALIDATION path only, by threading `CostLedger`+`llm_router` into
+`_run_revalidation_claims_impl`. This D-number stays `OPEN` after B1 lands — B1 does not, and is
+not required to, fix every other production path's own `ZERO_COST` reservation. Disclosed here so
+a future reader does not read B1's landing as having closed the general fleet-wide gap.
+
+**A related, narrower latent bug found in the same investigation, for whichever task eventually
+touches it:** `VerifyPipelineWorker.run`'s success path constructs its `WorkerResult` with no
+`usage=` (`cli.py:8457-8462`) — any future ledger reading `result.usage` from this path would
+silently under-charge. ADR-0136 requires §12.39-B's own B1 task to fix this specific instance in
+the same commit (since B1's ledger reads exactly this path); the general fix (auditing every other
+`WorkerResult` construction site for the same omission) is not scoped to B1 and remains open here.
+
+**Not required by this research task to fix**: no code was written; this is a scoping-only finding
+per research-54's own read-only brief.

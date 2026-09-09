@@ -15763,3 +15763,54 @@ close this criterion as literally written, only what the fixture fleet actually 
 round per research-53's own sizing. Legs B/C/D/E proceed under these three rulings; a future
 landing task still owes its own concrete design details (exact native-count granularity, exact
 exemption set re-verified against the live fixture fleet) within the bounds set here.
+
+---
+
+## ADR-0136 — §12.39-B: a REVALIDATE round is priced via the existing `TokenEstimator`/
+`CostLedger` machinery, at a model-talking rung by construction
+
+**Decision (2026-09-09, round VI controller, thirty-seventh wave, research-54).** research-54
+(`.superpowers/sdd/round-VI-criteria-closure/research-54-report.md`) found that pricing a
+REVALIDATE round for §12.39 case (ii) `BUDGET_EXHAUSTED` needs no invented number at all: this
+codebase's only pricing formula (a declared per-Mtok rate from `config/models.yaml` × measured
+tokens, already shipped as `TokenEstimator`/`CostLedger`) already applies — `BuildverifyWorker.
+_diagnose` (`build_diagnosis` role, `WORKHORSE` tier) already sits inside a REVALIDATE round and is
+silent only because `ctx.llm=None`/`context_policy=None` (rung 1 hardcoded) and no ledger wraps the
+dispatch. Measured directly in the running interpreter: `TokenEstimator.estimate(...)` for this
+exact call resolves to $0.027 against a $2.00 sub-ceiling, every input already declared. Three
+judgment calls resolved here so a future round can dispatch B1 directly.
+
+**1. The rung question.** With today's universal `ZERO_COST` reservation, a budget breach can only
+fire AFTER `revalidation_usd` exceeds `max_usd` — contradicting case (ii)'s own `<= max_usd`
+clause — so a non-zero estimate is mandatory, and "non-zero `revalidation_usd`" additionally needs
+a round that actually spends (both SPEC's round and the implemented one are correctly free at
+rung 1). research-54 named three options: **R1** leave rung 1 as-is (breach reachable, but
+"non-zero" stays false, forcing its own Rule-14 adjudication later); **R2** key non-zero cost off
+`attempt = revalidation_round` via a contrived `max_revalidation_rounds: 3` config (an invented
+threshold, not a derived one); **R3** a REVALIDATE round dispatches at a model-talking rung BY
+CONSTRUCTION, using the already-shipped `build_diagnosis`/`WORKHORSE` role. **Ruling: R3.** R1
+defers the problem rather than solving it and still needs its own future adjudication; R2
+substitutes one invented number (a price) for another (a round-count ceiling) and buys nothing.
+R3 uses only mechanisms this codebase already ships and prices REVALIDATE the same way every other
+priced call in this system is priced — no new axis, no new number, just wiring an existing rung
+through a path that currently skips it.
+
+**2. `D135` filed — the general `TokenEstimator`-zero-constructors gap, fleet-wide, not just
+revalidation.** research-54 found `TokenEstimator` has ZERO production constructors anywhere, and
+`PhaseRunner(estimate=)` is never passed at any of its four call sites — so EVERY production cost
+reservation fleet-wide is `ZERO_COST` today, and every `§11.2` ceiling currently fires only after
+an overshoot, not before. B1 (below) fixes this for the REVALIDATION path only, leaving this
+broader gap disclosed rather than silently implied-fixed by one path's repair.
+
+**3. A latent under-charging bug B1 must fix in the same commit.** `VerifyPipelineWorker.run`'s
+success path constructs its `WorkerResult` with no `usage=` (`cli.py:8457-8462`) — B1's own ledger
+would silently under-charge the moment it starts reading `result.usage` from this path. Recorded
+here and in `docs/CRITERIA_PLAN.md` §39-B's done bar so a future B1 dispatch does not lose it.
+
+**Sizing, not a single task.** B1 (cost instrumentation on the REVALIDATE path: thread
+`CostLedger`+`llm_router` into `_run_revalidation_claims_impl` mirroring `_emit_prs`'s own
+precedent at `cli.py:15218`, wrap in the first production `SpendScope(kind=SpendKind.
+REVALIDATION)`, catch `RevalidationBudgetExhausted` → `settle_revalidation(budget_breach=)` — NEW
+MECHANISM, M, includes the `VerifyPipelineWorker` fix above) lands first; B2 (the §12.39 case (ii)
+two-round fixture proving `BUDGET_EXHAUSTED` through the real path — TEST-ONLY, S/M) lands only
+after B1. §12.39 stays OUT of the `<n> of 48` count until both land.
