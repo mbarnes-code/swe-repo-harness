@@ -10559,3 +10559,96 @@ round up to 44 on inference.
   build dispatch — not cheap, lowest leverage of the remaining items.
 - **New, not-yet-D-numbered defect**: the 3-site HEAVY-tier `LlmError` misclassification
   (`rewrite.py`/`buildgen.py`) — small, parallel, independent of 43-C's fixture work.
+
+## Round VI, thirty-fifth wave (2026-09-09) — §12.43-C substantially closed, D133 closed, §12.31's
+second sub-question closed, §12.39 resized, one real merge conflict hand-resolved
+
+Third dispatch wave this session (5 subagent tasks: 99-101, research-52, audit-3), continuing
+directly from the 33rd/34th wave checkpoint. Full detail in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; headline outcomes only here.
+
+**§12.43-C substantially closed** (task 99, TEST-ONLY): a real two-arm HEAVY-tier failure-halt
+fixture (`tests/test_heavy_tier_outage_e2e.py`) — a live stub server as control over a real socket,
+and two truly-unreachable closed loopback ports as the outage, avoiding the bind-then-close TOCTOU
+race research-51 flagged. Genuinely novel: the first test to drive `ClassifyWorker` through the
+real CLI against an *unmonkeypatched* backend registry (two pre-existing tests already did this via
+a monkeypatched registry — the task's own initial claim overstated this as "first at all," caught
+and corrected during review). Case (iii)'s two halves (schema-exhaustion and `CapabilityDrift`) are
+now proven together in one induced call, closing that residual too. §12.43 correctly stays OPEN —
+PARTIALLY CLOSED, not DONE: two residuals are precisely disclosed (the criterion's "on the fixture
+fleet" framing clause remains open for cases (i)-(iii); case (iv)'s paired
+`--deterministic-only` clause isn't re-proven on this specific fixture), plus a named proof limit
+the review's own mutation surfaced (the fixture cannot discriminate the
+`PENDING`-vs-`REQUIRES_HUMAN_INTERVENTION` policy choice on the halt path, only the observed
+outcome — recorded honestly rather than silently left implied-proven).
+
+**D133 closed** (task 100): the 3-site HEAVY-tier `LlmError` misclassification research-51 found
+(upgrading task 94's original 1-site finding) is fixed centrally in
+`workers/base.py::classify_exception`, which now walks the exception/`__cause__` chain for a
+declared `LlmError.failure_class` before falling through to generic isinstance handling — fixing
+`rewrite.py`'s misclassification without disturbing any already-correct branch. `buildgen.py`'s two
+sites, which previously swallowed `LlmError` entirely and returned a silent deterministic fallback,
+now fail loud under a new design decision (ADR-0133), architecturally verified safe: nothing
+downstream re-swallows the re-raised error, and the existing `BACKEND_UNAVAILABLE` terminal
+handling is unmodified. All three sites independently mutation-verified by review.
+
+**§12.31's second disclosed sub-question closed** (task 101, TEST-ONLY): two new tests drive a
+re-sequenced SCC through both the `EDGE_BREAK` and `ATOMIC_WAVE` fall-through paths, reusing
+existing fixtures — no hand-built resolution state, no production code changed. Only the
+trigger-unreachability adjudication (the literal "contract wave fails `bazel build`" trigger,
+architecturally unreachable per ADR-0119, flagged "adjudication pending" since task 96) now remains
+open for §12.31.
+
+**§12.39 resized** (research-52): the criterion's "TEST-ONLY, mostly blocked on §12.37" framing was
+stale in both directions. Two real structural production gaps found: `settle_revalidation`'s only
+production caller never passes `failure_class=`/`budget_breach=`, so `STUB_DIVERGED` is unreachable
+in production; `SpendKind.REVALIDATION` has zero production constructors anywhere, so
+`RevalidationBudgetExhausted` can never fire and revalidation cost tracking is permanently pinned at
+zero. Recommends a split: §12.39-A (buildable now, small) and §12.39-B (needs a design pass first —
+"what does a revalidation round cost?" — to avoid an undisclosed invented price or a quiet Rule 14
+violation). **D116's column ambiguity resolved** with a decisive argument (not preference): the
+schema comment's "test-case count" reading is unsatisfiable given the ecosystem emitters' actual
+one-target-per-`BuildUnit` granularity — the "test-target count" reading is correct.
+
+**One real merge conflict, hand-resolved.** Task 99's branch was cut before task 100 merged; both
+touched `docs/CRITERIA_PLAN.md`'s §43 "Done bar" paragraph — task 100's merge updated it to note
+D133's closure, task 99's branch still carried the pre-task-100 stale version followed by its own
+substantial new content. Resolved by hand (no `checkout --ours/--theirs`): struck through the stale
+paragraph with a dated "Superseded" annotation carrying task 100's update forward, kept task 99's
+full block unchanged beneath it — no information from either side dropped, documented in the merge
+commit (`98f3a40`).
+
+**Two minor overclaims from wave 34's independent audit swept clean** (audit-3): a misattributed
+SPEC citation in D131's ledger entry, and an incomplete disclosure of what the "whole descendant
+set" closure claim for §12.14 actually proves versus what it implies — both fixed as purely
+additive, dated annotations, §12.14's DONE status correctly left unchanged.
+
+**Status: main green.** Citation-hygiene/findings-kinds/writer-statements gates re-verified clean
+after every merge this wave, ruff and mypy clean throughout (130 source files), every touched test
+file independently re-confirmed passing directly on `main` by the controller after each merge (94,
+190, 92 tests respectively across this wave's three merges) — not merely trusted from review.
+
+**Session total: three full dispatch waves (17 subagent tasks: 89-101 plus 4 fix-only rounds), zero
+unresolved findings, every fix-loop closed within 1-2 rounds, one real merge conflict hand-resolved
+and fully documented, zero destructive incidents.**
+
+**§12 count: NOT re-measured this wave's close — deliberately disclosed rather than guessed, per
+Rule 13.** This wave's work plausibly moves the count (§12.43 substantially closed but stays OPEN by
+its own disclosed residuals; §12.31 down to one open sub-question) without fully closing either.
+The next round should open with a fresh Rollup re-derivation against current `HEAD` before picking
+its own next target.
+
+**Remaining open criteria (5, as of the last full measurement — research-51's 43/48 at `ce65208`,
+now stale by this wave's own work): §12.11, §12.31, §12.37 [pending credit], §12.39, §12.43.**
+Cheapest/highest-leverage first:
+- **§12.39-A** — buildable now (cases iii+i, on the existing task-79 fixture), small, no further
+  research needed.
+- **§12.31** — only the trigger-unreachability adjudication remains: a real controller decision
+  (build contract-wave dispatch, contradicting ADR-0119's deliberate safety scoping, or formally
+  narrow the criterion's literal text via disclosed Rule-14 adjudication), not more building.
+- **§12.43** — the two residuals research-51 priced as "nearly free" (driving cases i-iii on the
+  existing fixture skeleton) plus the `--deterministic-only` re-run on the broken-HEAVY config;
+  either could take §12.43 fully to DONE.
+- **§12.39-B** — needs its own design pass first ("what does a revalidation round cost?").
+- **§12.11** — `D116` confirmed LARGE/NEW-MECHANISM, needs its own dedicated design-research pass
+  before any build dispatch; lowest leverage of the remaining items.
