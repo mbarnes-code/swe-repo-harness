@@ -1403,9 +1403,12 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1323-1335`, moved by round VI task 73's `rules_java`
-pin addition to `BuildSection.ruleset_versions`, and before that by round VI task 58's
-`GraphSection.forbidden_contract_ids` addition) already had the complete, correct arithmetic
+`validate_memory_budget` (`settings.py:1360-1372`, repointed +37 by round VI task 107's own
+docstring expansion above it — pure insertion, confirmed by exact-line-content match against the
+current tree; the prior citation (`settings.py:1323-1335`, round VI task 73, itself noting earlier
+moves by task 73's `rules_java` pin addition to `BuildSection.ruleset_versions` and, before that,
+round VI task 58's `GraphSection.forbidden_contract_ids` addition) is superseded, per this file's
+annotate-in-place convention, not deleted) already had the complete, correct arithmetic
 with zero callers — wired into `cli.py::_load_settings` via a new injectable
 `_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.
 resource_guard`). Closed a real scope surprise along the way: the shipped memory-budget defaults
@@ -3005,10 +3008,12 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14040`, repointed +15 by round VI task 96's own additions
-earlier in the file — pure insertion, confirmed by exact-line-content match against the current
-tree; round VI task 95's own repoint (`cli.py:14025`) is superseded, per this file's
-annotate-in-place convention, not deleted) was read directly: it re-runs
+`_run_one_revalidation_task` (`cli.py:14285`, repointed +245 by round VI tasks 103, 106, 109, and
+107's cumulative edits to this file and to this function itself (task 109's ADR-0136/D135 change
+threads a new `run_ctx: RunContext` parameter through it, so this is not a pure insertion at the
+function level — but this citation's own cited `async def` line is textually unchanged, confirmed
+against the current tree); round VI task 96's own repoint (`cli.py:14040`) is superseded, per this
+file's annotate-in-place convention, not deleted) was read directly: it re-runs
 `VerifyPipelineWorker`
 against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
 at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —
