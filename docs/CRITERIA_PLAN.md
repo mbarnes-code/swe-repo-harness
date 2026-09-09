@@ -3350,9 +3350,20 @@ stays green).
 **Done bar:** met in full. Nothing remains open for §12.42.
 
 ## 43. Failover layered, bounded, fail-closed
-**Case (ii) closed (round VI task 88, ADR-0132, `6d5c721`) — pending controller confirmation
-that this closes §12.43 as a whole; the arithmetic below is this task's own claim, not a
-`<n> of 48` headline update.** Case (ii)'s literal text ("a target that returns 429 through its
+**OPEN — PARTIALLY CLOSED (round VI task 99, 2026-09-09): this answers the "pending controller
+confirmation" question the superseded line below left open — NO, §12.43 is not yet fully proven.**
+Cases (i) and (ii) closed (round VI tasks 88/94); case (iii) closed at component level, both
+halves in one induced call (round VI task 99); case (iv) closed through the real CLI on a real
+fixture fleet (round VI task 99) EXCEPT its own paired `--deterministic-only` clause, which
+remains open on this specific fixture; the criterion's "on the fixture fleet" framing clause
+remains open for cases (i)-(iii), which are still proven only at unit/component level. See the
+task-99 update far below for the full breakdown, the two named residuals, and a named
+mutation-testing limit on one sub-assertion. Do not read this line as DONE; §12.43 stays OUT of
+the `<n> of 48` count.
+*(Superseded initial framing, kept for history: "Case (ii) closed (round VI task 88, ADR-0132,
+`6d5c721`) — pending controller confirmation that this closes §12.43 as a whole; the arithmetic
+below is this task's own claim, not a `<n> of 48` headline update.")* Case (ii)'s literal text
+("a target that returns 429 through its
 entire §11.8 backoff schedule is marked DOWN after `open_after_failures`, is not called again
 until `cooldown_s` has elapsed, and one `HALF_OPEN` probe restores it — asserted against a
 recorded call log, so a busy-loop against a throttled endpoint fails the test") is proven by
@@ -3476,12 +3487,151 @@ brief):**
   either 43-A/43-B or 43-C's own scoping (research-49 flagged it as a structural obstacle behind
   case (iv) specifically, not as a fifth work item).
 
-**Done bar (remaining):** 43-C in full (case (iv)'s untested sub-assertions — the classification
-question above is now CLOSED by `D133`, round VI task 100, so building the fixture-fleet vehicle
-is the sole remaining lift for case (iv), not a fix-then-vehicle sequence), case (iii)'s
-together-not-separately gap, and the fixture-fleet framing clause. §12.43 must stay OUT of the
-`<n> of 48` count until 43-C closes or the controller issues a disclosed Rule-14 adjudication
-narrowing the criterion's text.
+**Done bar (remaining), as of the paragraph above (round VI task 94):** ~~43-C in full (case (iv)'s
+untested sub-assertions plus the rewrite.py classification question above, which the controller
+must adjudicate before dispatching a build task), case (iii)'s together-not-separately gap, and
+the fixture-fleet framing clause.~~ **Superseded (round VI task 100, `D133`):** the classification
+question above is now CLOSED — `workers/base.py::classify_exception` was fixed to consult a
+declared `LlmError.failure_class`, correctly surfacing `BACKEND_UNAVAILABLE` at all three sites
+(`rewrite.py`'s misclassification, `buildgen.py`'s two swallow sites). This left building the
+fixture-fleet vehicle for case (iv) as the sole remaining lift, not a fix-then-vehicle sequence.
+§12.43 must stay OUT of the `<n> of 48` count until 43-C closes or the controller issues a
+disclosed Rule-14 adjudication narrowing the criterion's text.
+
+**43-C substantially closed by round VI task 99 (TEST-ONLY), narrowed per research-51's re-sizing
+(`.superpowers/sdd/round-VI-criteria-closure/research-51-report.md`) — case (iii) fully closed;
+case (iv) closed EXCEPT the two residuals named below (one of which is a clause INSIDE case
+(iv)'s own sentence, not a separate case) — still NOT counted in `<n> of 48`.**
+
+research-51 corrected task 94's premise: there are THREE production HEAVY-tier call sites, not
+one (`rewrite.py`'s `LLM_ESCALATION` rung plus TWO in `buildgen.py`, the latter swallowing
+`LlmError` outright — worse than the misclassification task 94 found), and — the load-bearing
+fact that made 43-C a SINGLE task rather than a two-task split — `llm/roles.py`'s
+`SPEC_ROLE_TIERS` is "documentation and a default for tests, never authority: the active
+`config/models.yaml` decides." Routing `repo_classify` to `HEAVY` in a fixture's own
+`config/models.yaml` is therefore a LEGAL operator configuration (the same mechanism 4 existing
+e2e fixtures already use to write their own `models.yaml`), not a test-only monkeypatch, and
+`workers/classify.py` already classifies `TierUnavailable` correctly via its own `_error_for` —
+so this vehicle does NOT depend on the rewrite.py/buildgen.py misclassification, which stays
+task 100's separate, independent, production-code scope (a different worktree; not touched here).
+
+**Case (iv), through the real CLI on a real fixture fleet** — new file
+`tests/test_heavy_tier_outage_e2e.py`, two arms over the identical config skeleton and the
+identical two-repo fixture fleet (only the two HEAVY targets' `base_url`s differ):
+- **Arm 1 (control, and Rule 12's discriminator for arm 2):** both HEAVY targets point at
+  `tests/fixtures/llm/stub_openai_server.py`'s real loopback server; `fleet scan` runs WITHOUT
+  `--skip-classify` and completes (exit 0, both repos SUCCEEDED, `llm_cache` carries a real
+  `tier='HEAVY', backend='openai_compatible', structured_output_mode='JSON_SCHEMA'` row per
+  repo). **Corrected from an earlier overclaim**: this is NOT the first test to drive
+  `ClassifyWorker` through the real CLI — `tests/test_cli.py`'s
+  `test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_llm_cache` (and a
+  sibling scan) already do, with the backend registry monkeypatched
+  (`monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ScriptedClassify()})`).
+  What is genuinely novel (research-51's own flagged "one real unknown") is driving
+  `ClassifyWorker` through the real CLI against an UNMONKEYPATCHED backend registry, over a real
+  socket. Separately, "15/15 prior e2e scan calls pass `--skip-classify`" re-measures to **12**
+  real `runner.invoke(...)` argument sites — a raw `grep` for the flag returns 15, but 3 of those
+  are prose mentions in a docstring, not an actual CLI argument. Neither correction changes the
+  arm's own function: it proves arm 2's exit 8 is attributable to the outage, not to an unrelated
+  defect in this fixture.
+- **Arm 2 (the outage):** both HEAVY targets point at two DISTINCT reserved, unbound loopback
+  ports (`127.0.0.1:1`, `127.0.0.1:2` — never bind-then-close, which research-51 flagged as a
+  TOCTOU race), each independently confirmed at the raw-socket layer to refuse instantly before
+  the CLI is ever invoked. Asserts, against real state read back from SQLite and a real
+  `migration_state.json`: exit code **8**; a `BackendUnavailable` finding whose `observed` text
+  names `HEAVY` and BOTH configured target model ids, with `failover_triggers_scope='tier'`;
+  zero repos `REQUIRES_HUMAN_INTERVENTION`; zero `llm_cache` rows for `role='repo_classify'` at
+  ANY tier (not merely zero at a tier other than HEAVY — `llm_cache` only ever holds a
+  successfully negotiated call, so this is the "zero served by another tier" sub-clause exactly;
+  "zero calls landed AT ALL" is proven BY CONSTRUCTION from the raw-socket refusal, since no TCP
+  handshake against either port can ever complete); a valid checkpoint, read back through the
+  real `MigrationState` Pydantic model (not `json.loads`); and a real `fleet resume` CLI
+  invocation whose JSON payload's `continuation.scan_floor_not_continued` names both repos and
+  `continuation.driven == []`, with both `phases` rows landing `PENDING`.
+  - **One real-timing fact this test had to isolate, disclosed rather than hidden:**
+    `orchestrator/retry.py`'s `BACKEND_UNAVAILABLE`/TERMINATE branch deliberately does NOT write
+    `PENDING` at halt time — its own comment says "the lease is left to expire" — so
+    `phases.status` is still `RUNNING` immediately after the halt, and a `fleet resume` run
+    milliseconds later genuinely reclaims nothing (measured directly: `stale_running_reset: 0`)
+    because `phases.heartbeat_ttl_seconds` carries the schema's hardcoded `DEFAULT 300` —
+    `claim_phase` never stamps a config-derived value there, a pre-existing defect already
+    disclosed in `docs/INTEGRATION_HONESTY.md`'s "`run.stale_after_s` leaves `KNOWN_INERT`"
+    section (explicitly left un-numbered there: "claims no D-number"), re-confirmed rather than
+    re-cited from a D-number that does not exist — see `cli.py`'s own
+    `_STALE_HEARTBEAT_PREDICATE` comment for the two-clock design this produces — and a resume
+    only milliseconds old has not crossed it by either clock. The test backdates `heartbeat_at`
+    by 400s via a direct SQL write between the halted scan and the `fleet resume` call —
+    isolating resume's real §11.5-step-3 reclaim
+    logic from the real 300+ second wall-clock wait a live rerun would otherwise need, the same
+    technique `tests/test_scan_e2e.py::test_a_degraded_repo_with_no_rhi_repo_exits_7` already
+    uses to isolate one mechanism from another. The halt itself, the finding, the checkpoint and
+    every other assertion in this file are entirely real; only the wall clock between the halt
+    and the moment `fleet resume` is entitled to reclaim the lease is simulated.
+  - Mutation-verified: routing `classify.py`'s `_error_for` `TierUnavailable` branch to
+    `FailureClass.UNKNOWN` instead of `BACKEND_UNAVAILABLE` (exactly the misclassification
+    research-51 found on `rewrite.py`'s own HEAVY path) reddens the exit-code assertion loudly —
+    the run instead exhausts retries and exits **7** (`REQUIRES_HUMAN_INTERVENTION`) — confirming
+    this test is sensitive to the real classification chain rather than to construction alone.
+    Reverted; `git diff --stat src/` empty after.
+  - **A named limit, found by review and re-confirmed directly rather than taken on trust:**
+    mutating `orchestrator/retry.py::_terminal_status`'s `BACKEND_UNAVAILABLE` special case away
+    (so it returns `RepoStatus.REQUIRES_HUMAN_INTERVENTION` like every other non-retryable class,
+    instead of `RepoStatus.PENDING`) does **NOT** redden this fixture — both tests still pass.
+    Root cause, verified by reading the call path rather than assumed: `runner.py`'s
+    `BACKEND_UNAVAILABLE` TERMINATE branch never calls `_complete()` at all (unlike every OTHER
+    TERMINATE branch — the ladder-exhausted RHI case, `DISK_EXHAUSTED`) — it writes the finding
+    and raises `RunHalted` directly, so `decide()`'s `terminal_status` value (`PENDING` today) is
+    constructed but **never read** on this path; the row simply stays whatever it already was
+    (`RUNNING`, per "the lease is left to expire"). **So this fixture's "zero repos
+    `REQUIRES_HUMAN_INTERVENTION`" and "resume finds them `PENDING`" assertions do NOT
+    discriminate the `PENDING`-vs-`REQUIRES_HUMAN_INTERVENTION` *policy choice* encoded in
+    `_terminal_status` — they only prove the OBSERVED outcome (repos end up non-terminal, then
+    `PENDING` after resume's own independent staleness-driven reclaim), which is true regardless
+    of what `terminal_status` says, because nothing on this path ever reads it.** Closing this
+    gap would need a mutation-sensitive instrument reading `RetryDecision.terminal_status` (or
+    `decide()`'s return value) directly, or a production change making the halt path consult it —
+    neither attempted here; recorded as a disclosed limit, not fixed.
+
+**Case (iii), both halves in ONE induced call** — new test in `tests/test_llm_findings.py`,
+`test_schema_exhaustion_and_capability_drift_together_in_one_induced_call`, per research-51's own
+sizing for this item ("Independent of the HEAVY vehicle — component-level, `ScriptedBackend`; S;
+could be split off and done first"). A new `TieredScriptedBackend` (per-target capabilities/script,
+unlike the file's existing `ScriptedBackend`'s uniform-per-backend shape) drives ONE
+`LadderModelClient.complete()` call whose first target never returns schema-valid output and
+exhausts `llm.max_schema_repairs` (raising `SchemaUnsatisfied`, failing over with trigger
+`SCHEMA_UNSATISFIED`), landing on a second target whose ACTUAL capabilities fall a rung below its
+own declared `structured_output_modes` PROMISE — `negotiate()` lands on `PROMPTED` where
+`JSON_SCHEMA` was promised, exactly `CapabilityDrift`. Both a persisted `backend_failover` event
+and a persisted `CapabilityDrift` finding are asserted from the SAME call, closing the residual
+that previously had each half proven only in a separate call
+(`test_llm_client.py::test_schema_violation_buys_one_repair_then_fails_the_target_over` for the
+first half, `test_a_drift_computed_by_the_client_becomes_a_findings_row` above for the second).
+Mutation-verified: loosening `client.py`'s repair-exhaustion check by one (`repairs >=
+max_schema_repairs` → `repairs >`) reddens the test loudly via `TieredScriptedBackend`'s own
+"called more times than scripted" assertion. Reverted; `git diff --stat src/` empty after.
+
+**Two residuals remain, stated precisely rather than papered over:**
+1. **The criterion's "on the fixture fleet" framing clause is now dissolved for case (iv) ONLY.**
+   Cases (i)-(iii) remain proven at unit/component level against `FakeBackend`/`ScriptedBackend`
+   — never driven through the real CLI on a real fixture fleet. research-51 flagged this as a
+   live question for the closing task to answer explicitly, and recommended driving (i)-(iii) on
+   the fixture too as "nearly free" once the skeleton exists; that extension was judged out of
+   this task's scope (the brief's own case-(iv)/case-(iii) sub-assertion list does not name it)
+   and is NOT attempted here.
+2. **Case (iv)'s own sentence carries a second clause this task does not close on THIS fixture:**
+   "the same fixture under `fleet transform --deterministic-only` completes its rule-resolvable
+   repos with exit 0 and dispatches no LLM call at all." That property is proven elsewhere
+   (`tests/test_transform_e2e.py:1158`) but not re-run against `test_heavy_tier_outage_e2e.py`'s
+   own broken-HEAVY config — research-51 treats it as a structural obstacle behind case (iv)
+   specifically, not a separate work item, and the brief dispatching this task did not name it
+   among case (iv)'s sub-assertions either.
+
+Neither residual is a NEW-MECHANISM gap — both are narrow, disclosed, TEST-ONLY extensions of
+work this task already built the skeleton for.
+
+**Done bar (remaining), current:** the two residuals above. §12.43 must stay OUT of the
+`<n> of 48` count until both close (or the controller issues a disclosed Rule-14 adjudication
+narrowing the criterion's text to accept the current coverage as sufficient).
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,

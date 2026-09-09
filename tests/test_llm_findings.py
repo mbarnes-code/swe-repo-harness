@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -300,6 +300,134 @@ async def test_an_honest_backend_writes_no_drift_finding(tmp_path: Path) -> None
         # is unconditional on every completed provider call, drift or no drift.
         assert await h.ctx.llm_findings.flush() == 1
         assert await h.findings(CAPABILITY_DRIFT) == []
+
+
+# ======================================================================================
+# §12.43 case (iii) — schema exhaustion AND capability drift, in ONE induced scenario
+# ======================================================================================
+#
+# research-51 / round VI task 99: `docs/CRITERIA_PLAN.md` §43 recorded case (iii)'s two halves
+# ("a target that never returns schema-valid output exhausts `llm.max_schema_repairs`, fails
+# over on `SCHEMA_UNSATISFIED`, and writes a `CapabilityDrift` finding when the achieved rung is
+# below the profile's declared one") as proven only SEPARATELY — schema exhaustion in
+# `test_llm_client.py::test_schema_violation_buys_one_repair_then_fails_the_target_over`, drift
+# in `test_a_drift_computed_by_the_client_becomes_a_findings_row` above, neither in the same
+# induced call as the other. This section closes that residual: ONE `complete()` call whose
+# first target exhausts its repairs and whose SECOND target (the one the failover lands on)
+# under-delivers its own declared promise.
+
+
+class TieredScriptedBackend:
+    """Like `ScriptedBackend` above, but capabilities and script are PER TARGET (keyed by
+    `model_id`) rather than uniform across the whole backend name. Case (iii)'s combined
+    scenario needs two different capability profiles behind one backend: target 1 never
+    validates (exhausts schema repairs) and target 2's ACTUAL capabilities fall a rung below its
+    declared `structured_output_modes` PROMISE (the drift `negotiate()`/`promised_mode` compare).
+    """
+
+    name: ClassVar[str] = "fake"
+    version: ClassVar[int] = 1
+
+    def __init__(
+        self,
+        per_target: Mapping[str, tuple[ModelCapabilities, Sequence[BackendReply | Exception]]],
+    ) -> None:
+        self._caps = {model_id: caps for model_id, (caps, _script) in per_target.items()}
+        self._scripts = {model_id: list(script) for model_id, (_caps, script) in per_target.items()}
+        self.calls: list[str] = []
+
+    def declared_capabilities(self, target: BackendTarget) -> ModelCapabilities:
+        return self._caps[target.model_id]
+
+    async def invoke(
+        self,
+        target: BackendTarget,
+        messages: Sequence[Message],
+        schema: dict[str, object] | None,
+        mode: StructuredOutputMode,
+        *,
+        max_output_tokens: int,
+        timeout_s: float,
+    ) -> BackendReply:
+        self.calls.append(target.model_id)
+        script = self._scripts[target.model_id]
+        if not script:
+            raise AssertionError(f"{target.model_id} called more times than scripted")
+        nxt = script.pop(0)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+
+def _schema_invalid_reply() -> BackendReply:
+    """Schema-VALID JSON, model-INVALID content — `summary` must be a `str` and an `int` fails
+    Pydantic validation, a genuine schema violation (matches `test_llm_client.py`'s own
+    `invalid_reply()` shape)."""
+    return BackendReply(
+        text=json.dumps({"summary": 123}),
+        usage=TokenUsage(input_tokens=10, output_tokens=3),
+        finish_reason="stop",
+    )
+
+
+async def test_schema_exhaustion_and_capability_drift_together_in_one_induced_call(
+    tmp_path: Path,
+) -> None:
+    """§12.43 case (iii), both halves, ONE `complete()` call. `fake-1` never returns schema-valid
+    output and exhausts `llm.max_schema_repairs` (default 1: initial + one repair, both invalid),
+    raising `SchemaUnsatisfied` and failing over with trigger `SCHEMA_UNSATISFIED`. `fake-2` then
+    answers — the call itself succeeds — but its ACTUAL capabilities (`DRIFTING_CAPS`:
+    `supports_json_schema=False`) fall a rung below what it PROMISES
+    (`structured_output_modes=(JSON_SCHEMA, PROMPTED)`), so `negotiate()` lands on `PROMPTED`
+    where `JSON_SCHEMA` was promised — exactly `CapabilityDrift`, on the SAME call the failover
+    happened in, not a second one."""
+    backend = TieredScriptedBackend(
+        {
+            "fake-1": (HONEST_CAPS, [_schema_invalid_reply(), _schema_invalid_reply()]),
+            "fake-2": (
+                DRIFTING_CAPS,
+                [
+                    BackendReply(
+                        text=Verdict(summary="fake-2 answered under drift").model_dump_json(),
+                        usage=TokenUsage(input_tokens=10, output_tokens=3, model_id="fake-2"),
+                        finish_reason="stop",
+                    )
+                ],
+            ),
+        }
+    )
+    async for h in _build(tmp_path, backend, make_router("fake-1", "fake-2")):
+        response = await h.ctx.model_client.complete(
+            ROLE, [Message(role="user", content="does this repo migrate?")], Verdict
+        )
+        assert response.value.summary == "fake-2 answered under drift"
+        # fake-1: initial + one repair (both invalid) = 2 calls, then failover to fake-2 = 1 call.
+        assert backend.calls == ["fake-1", "fake-1", "fake-2"]
+
+        await h.ctx.llm_findings.flush()
+
+        drift_rows = await h.findings(CAPABILITY_DRIFT)
+        assert len(drift_rows) == 1, (
+            "the drift must be attributed to fake-2 (the target that actually answered under "
+            "drift), not fake-1 (which never got far enough to negotiate a rung)"
+        )
+        repo_id, severity, _, payload = drift_rows[0]
+        assert repo_id is None  # fleet-level, same reasoning as every sibling drift row above
+        assert severity == "warn"
+        assert payload["role"] == ROLE
+        assert payload["model_id"] == "fake-2"
+        assert payload["promised"] == str(StructuredOutputMode.JSON_SCHEMA)
+        assert payload["actual"] == str(StructuredOutputMode.PROMPTED)
+
+        failover_events = await h.events(BACKEND_FAILOVER_EVENT)
+        assert len(failover_events) == 1, (
+            "the schema-exhaustion half of this same call must ALSO be visible, as the "
+            "backend_failover event §11.8 records for any failover trigger"
+        )
+        assert failover_events[0]["trigger"] == "SCHEMA_UNSATISFIED"
+        assert failover_events[0]["from_model_id"] == "fake-1"
+        assert failover_events[0]["to_model_id"] == "fake-2"
+        assert failover_events[0]["role"] == ROLE
 
 
 # ======================================================================================
