@@ -378,6 +378,11 @@ class PyAdapter(EcosystemAdapter):
         docstring). It is never `None`: every `PYPI` unit has SOME native baseline, even a trivial
         one with zero tests (`tests_lost`, `workers/buildverify.py:686`, expects exactly `0`, not
         a sentinel, for that case).
+
+        **STATIC, not yet measured** — see `NativeBaseline.test_unit_count`'s own `Field` for the
+        caveat: this reuses the MIGRATED side's own collapsing, so it cannot express a native
+        suite that actually shrank, and Leg B/C must not wire it unchanged into
+        `repos.baseline_test_count`.
         """
         return NativeBaseline(
             build_argv=["python3", "-m", "pip", "install", "-e", "."],

@@ -131,3 +131,164 @@ Test summary: `tests/test_ecosystems.py` 108/108 pass (6 new tests, one parametr
 Concerns: see "Concerns for Leg B" above — the struct shape is landed and stable, but its
 `test_unit_count` field is a static, migrated-side-matching declaration, not yet a real measured
 native test count (that requires actually running `test_argv`, which is Leg B/C's job).
+
+---
+
+## Fix round (review verdict: Changes Requested, 2 Important findings)
+
+**Per CLAUDE.md's own convention ("annotate it, never rewrite it"): the numbers above are left as
+originally written. This section corrects them and records what was actually wrong, re-measured
+directly rather than taken on the reviewer's word.**
+
+### Finding 1 — three wrong numbers in the original report, all re-verified myself
+
+**`tests/test_ecosystems.py` count.** The original report's "102 → 108" framing was wrong; the
+correct before/after is **92 → 102**. Re-measured directly:
+
+```
+$ .venv/bin/python -m pytest tests/test_ecosystems.py --collect-only -q | tail -1
+102 tests collected in 0.10s          # at HEAD (78d1a5c), my committed change
+
+$ git show 6ae84c7:tests/test_ecosystems.py > /tmp/parent_test_ecosystems.py
+$ .venv/bin/python -m pytest /tmp/parent_test_ecosystems.py --collect-only -q | tail -1
+92 tests collected in 0.52s           # at the parent commit, before my change
+```
+
+92 → 102 is a delta of +10, matching the 6 new test functions plus the 5-case parametrize
+(-1 for the base function itself counted once): 5 new non-parametrized tests + 1 parametrized
+test × 5 cases = 10. Confirmed.
+
+**`tests/test_new_language_touchpoints_e2e.py` count.** The original report's "36/36" was wrong
+by 9x. Re-measured directly:
+
+```
+$ .venv/bin/python -m pytest tests/test_new_language_touchpoints_e2e.py -v | tail -8
+tests/test_new_language_touchpoints_e2e.py::test_ruby_fixture_touchpoints_require_zero_src_fleet_changes PASSED [ 25%]
+tests/test_new_language_touchpoints_e2e.py::test_ruby_fixture_scans_sequences_transforms_and_builds_end_to_end PASSED [ 50%]
+tests/test_new_language_touchpoints_e2e.py::test_the_decoy_ecosystem_substitutes_through_the_nested_unbound_contract_kinds_annotation PASSED [ 75%]
+tests/test_new_language_touchpoints_e2e.py::test_contract_binding_unavailable_finding_and_unbound_contract_kinds_end_to_end PASSED [100%]
+============================== 4 passed in 6.70s ===============================
+```
+
+The file has exactly **4** test functions, all pass. Corrected: **4/4**, not "36/36".
+
+**`ruff format --check` undercount.** The original report claimed "only ONE pre-existing reformat
+opportunity". Re-measured per-file, on my committed branch (`78d1a5c`):
+
+```
+$ for f in src/fleet/ecosystems/base.py src/fleet/ecosystems/js.py src/fleet/ecosystems/py.py \
+           src/fleet/models/build.py tests/test_ecosystems.py; do
+    echo "--- $f ---"; .venv/bin/python -m ruff format --check "$f" | tail -1
+  done
+--- src/fleet/ecosystems/base.py ---
+1 file already formatted
+--- src/fleet/ecosystems/js.py ---
+1 file would be reformatted
+--- src/fleet/ecosystems/py.py ---
+1 file would be reformatted
+--- src/fleet/models/build.py ---
+1 file would be reformatted
+--- tests/test_ecosystems.py ---
+1 file would be reformatted
+```
+
+**4 of 5 files** need reformatting, not 1. I then verified independently (not taking the
+reviewer's word) that all 4 pre-date this task, by checking out the PARENT commit's content for
+each of the 5 files in place (`git checkout 6ae84c7 -- <paths>`, re-run the identical check, then
+restore with `git checkout 78d1a5c -- <paths>`):
+
+```
+=== at parent 6ae84c7 (checked out in place) ===
+--- src/fleet/ecosystems/base.py ---
+1 file already formatted
+--- src/fleet/ecosystems/js.py ---
+1 file would be reformatted
+--- src/fleet/ecosystems/py.py ---
+1 file would be reformatted
+--- src/fleet/models/build.py ---
+1 file would be reformatted
+--- tests/test_ecosystems.py ---
+1 file would be reformatted
+```
+
+Identical set (js.py, py.py, build.py, test_ecosystems.py) at the parent commit — confirming "all
+4 pre-existing, nothing introduced by this task" is TRUE, exactly as the reviewer found. Only the
+report's stated COUNT ("only ONE") was wrong; the underlying substantive claim ("nothing
+introduced") holds and is now independently re-verified rather than re-asserted.
+
+**Corrected numbers, for citation going forward:** `tests/test_ecosystems.py` 92→102 (108/108 is
+wrong); `tests/test_new_language_touchpoints_e2e.py` 4/4 (36/36 is wrong);
+`ruff format --check` 4 of 5 changed files pre-existing-dirty (1 of 5 is wrong).
+
+### Finding 2 — the static `test_unit_count` caveat now lives in the code, not only in this report
+
+Added a caveat sentence to three places (Guardrail 7: fix the code and its doc listing in the
+same change — here the "doc" IS the pydantic field description, the thing a future Leg B
+implementer reads without ever finding this scratch report):
+
+1. `NativeBaseline.test_unit_count`'s `Field(description=...)` in `src/fleet/models/build.py` —
+   the primary site, stating plainly that this is a STATIC value derived from
+   `native_test_unit_count(self.test_targets(unit))`, not an independently observed native count,
+   and that Leg B/C must not wire it unchanged into `repos.baseline_test_count` or it silently
+   defeats `test_count_regressed`'s own purpose.
+2. `NativeBaseline`'s class docstring — a shorter pointer to the same caveat, for a reader who
+   scans the class docstring before individual field descriptions.
+3. `PyAdapter.native_baseline`'s and `JsAdapter.native_baseline`'s own docstrings — a one-line
+   pointer at each concrete implementation site, since that's where a Leg B implementer will
+   actually be looking when deciding what to do with the return value.
+
+Diff (surgical — `git diff --stat` against `78d1a5c`):
+
+```
+ src/fleet/ecosystems/js.py |  5 +++++
+ src/fleet/ecosystems/py.py |  5 +++++
+ src/fleet/models/build.py  | 18 +++++++++++++++++-
+ 3 files changed, 27 insertions(+), 1 deletion(-)
+```
+
+**Self-caught mid-fix error, disclosed rather than hidden:** while re-verifying the ruff-format
+claim above I ran `ruff format` (no `--check`) directly on `py.py`/`js.py`/`build.py` to inspect
+what it would change — this actually REWROTE all three files with every pre-existing formatting
+fix (Rule 3 violation: touching code far outside this task's scope, e.g. `_requirements_text`'s
+line wrapping in `py.py`, the `_DEFAULT_TSCONFIG` blank-line/quote-style in `js.py`, an unrelated
+quote-escaping choice in `build.py`'s `ToolchainRequirement.attrs` docstring). Caught immediately
+via `git diff --stat` showing far more churn than the two caveat edits should have produced;
+fixed by `git checkout HEAD -- <the 3 files>` (reverting to the already-committed `78d1a5c` state)
+and re-applying only the two intended caveat edits via `Edit`, never invoking bare `ruff format`
+again. Final diff re-verified minimal (shown above) before re-running the covering set.
+
+### Re-run of the full covering set, after both fixes
+
+```
+$ .venv/bin/python -m pytest tests/test_ecosystems.py tests/test_new_language_touchpoints_e2e.py \
+                              tests/test_config_keys_are_read.py -q
+........................................................................ [ 48%]
+........................................................................ [ 97%]
+....                                                                     [100%]
+148 passed in 17.60s        # 102 + 4 + 42 = 148
+
+$ .venv/bin/python -m ruff check src/fleet/ecosystems/base.py src/fleet/ecosystems/py.py \
+                                 src/fleet/ecosystems/js.py src/fleet/models/build.py \
+                                 tests/test_ecosystems.py
+All checks passed!
+
+$ .venv/bin/python -m mypy
+Success: no issues found in 130 source files
+
+$ (per-file ruff format --check, repeated after the fix) -> same 4-of-5 pre-existing state,
+  unchanged by the caveat additions (confirmed above).
+```
+
+### Corrected status
+
+**DONE.** Commit range: `agent/roundvi-task105` = two commits on `main`@`6ae84c7`
+(`78d1a5c` the original Leg A implementation, plus one fix-round commit landing this section and
+the code caveats — see `git log agent/roundvi-task105` in the worktree for the exact second SHA).
+
+**Corrected one-line test summary:** `tests/test_ecosystems.py` 102/102 (92 before this task);
+`tests/test_new_language_touchpoints_e2e.py` 4/4; `tests/test_config_keys_are_read.py` 42/42;
+ruff check clean; ruff format --check shows 4 of 5 changed files with pre-existing (not
+introduced) reformat opportunities; mypy clean (130 files).
+
+**Concerns:** none new. The `test_unit_count` caveat (Finding 2) is now discoverable from the code
+itself at three sites, closing the "report-only caveat" gap the review named.

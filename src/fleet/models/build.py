@@ -285,6 +285,13 @@ class NativeBaseline(FleetModel):
     that adapter's own `test_targets(unit)` entries whose `rule` is an actual Bazel TEST rule
     (`rule.endswith("_test")`, the convention every test rule macro in this fleet uses:
     `py_test`/`java_test`/`js_test`/`go_test`/`rust_test`), never a raw file or assertion count.
+
+    **`test_unit_count` is STATIC today, not yet a measurement — see its own `Field` for the
+    caveat a future Leg B/C must not skip.** Every adapter implemented so far (round VI task 105,
+    Leg A) derives it from the adapter's OWN migrated-side `test_targets()`, so it is guaranteed
+    to equal what the migrated `bazel query` will report and therefore cannot yet express "the
+    native suite actually shrank" — wiring it unchanged into `repos.baseline_test_count` would
+    make the count-regression check compare a value against itself.
     """
 
     build_argv: list[str] = Field(
@@ -302,7 +309,16 @@ class NativeBaseline(FleetModel):
         ge=0,
         description="The native test suite's size at the SAME per-BuildUnit granularity "
         "test_targets() produces on the migrated side (ADR-0135 ruling 1) -- NOT a raw "
-        "test-case or test-file count.",
+        "test-case or test-file count. CAVEAT (Leg A, round VI task 105): every adapter "
+        "implemented so far derives this via native_test_unit_count(self.test_targets(unit)) "
+        "-- i.e. it is a STATIC value re-deriving the MIGRATED side's own test-target count, "
+        "not yet an independently observed count of the native repo's actual test suite. A "
+        "future Leg B/C must NOT wire this straight through to repos.baseline_test_count "
+        "unchanged: doing so makes the count-regression check (test_count_regressed, "
+        "workers/buildverify.py) compare a value against itself and silently defeats the exact "
+        "hazard ADR-0135 exists to catch. Leg B/C owes a REAL measurement -- parsed from "
+        "actually running test_argv in a container -- before this field's value may reach the "
+        "repos table.",
     )
 
 

@@ -919,6 +919,11 @@ class JsAdapter(EcosystemAdapter):
         would double-count: this adapter's own `test_targets()` emits a compile-only `ts_project`
         alongside its one `js_test` — see `NativeBaseline`'s and `native_test_unit_count`'s own
         docstrings).
+
+        **STATIC, not yet measured** — see `NativeBaseline.test_unit_count`'s own `Field` for the
+        caveat: this reuses the MIGRATED side's own collapsing, so it cannot express a native
+        suite that actually shrank, and Leg B/C must not wire it unchanged into
+        `repos.baseline_test_count`.
         """
         return NativeBaseline(
             build_argv=["npm", "install"],
