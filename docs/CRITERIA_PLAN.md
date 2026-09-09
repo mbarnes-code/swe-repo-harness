@@ -3273,6 +3273,32 @@ round's known cost and assert `ABANDONED`/`BUDGET_EXHAUSTED` through the same re
 and budget, and cited here as a precisely-sized follow-on rather than left as the stale
 "mostly blocked" framing this update retires.
 
+**Update, research-52 (2026-09-09) — resized into §12.39-A/§12.39-B.** Two real structural
+production gaps found: `cli.py`'s only production caller of `settle_revalidation` never passed
+`failure_class=`/`budget_breach=`, so `STUB_DIVERGED` was unreachable in production
+(§12.39-A, below); `SpendKind.REVALIDATION` has zero production constructors anywhere in `src/`,
+so `RevalidationBudgetExhausted` can never fire and `repo_ledger.revalidation_usd` is pinned at
+`0.0` (§12.39-B — needs its own design pass, "what does a revalidation round cost?", before it can
+be built without inventing an undisclosed price).
+
+**§12.39-A case (i) `STUB_DIVERGED` closed by round VI task 103 (2026-09-09).** A new test drives a
+genuine build failure (`FakeBazel`'s pre-existing `fail=` parameter) through a real REVALIDATE
+round via the real CLI, reading `STUB_DIVERGED` back from real `stubs.state`/`findings` rows — not
+a hand-constructed `failure_class`. Required exactly the small production fix research-52
+predicted: a new ~54-line derivation function (`_revalidation_round_stub_diverged` in `cli.py`)
+computes the SPEC differential from a real `findings` row and wires it through the caller
+(78 insertions/1 deletion, one file; `orchestrator/stubs.py`'s `settle_revalidation` itself has
+zero diff). Reviewed Approved, Rule 12 mutation independently reproduced twice by review
+(reverting the `failure_class=` kwarg reddens exactly the new test, 1 failed/60 passed in the
+61-test covering set; reverts clean, 61/61 both times), 1 Minor non-blocking finding deferred (a
+fail-loud logging gap on a near-unreachable malformed-payload branch). **Case (ii)
+`BUDGET_EXHAUSTED` intentionally NOT attempted** — independently re-confirmed by review, not
+merely inherited from the report: `SpendKind.REVALIDATION` still has zero production constructors,
+so driving it would require inventing an undisclosed price (Rule 1). **Done bar (remaining):**
+§12.39-B's own design pass (a declared per-round price per the criterion's own "the round's known
+cost" phrase), then case (ii) driven the same way case (i) just was. §12.39 as a whole stays OUT
+of the `<n> of 48` count — case (i) and (iii) are closed, case (ii) is not.
+
 ## 40. No model string outside `config/`
 **DONE (SPEC + code corrected, round-K; AST clause closed round V, 2026-09-01 — now counts
 toward the `<n> of 48` tally for the first time; the exclusion marker below is retired.)** The
