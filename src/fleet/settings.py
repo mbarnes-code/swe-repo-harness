@@ -277,10 +277,47 @@ class BudgetsSection(Section):
 
 
 class BaselineBuild(Section):
-    """§3.1: the native build/test gate §14.1 claims to have, run before any transformation."""
+    """§3.1: the native build/test gate §14.1 claims to have, run before any transformation.
+
+    `enabled`/`timeout_s` were declared but read nowhere until round VI task 107 (§12.11/D116 Leg
+    B, ADR-0135): `workers/baseline.py` is the first reader of either.
+
+    **`container_image`/`container_memory`/`container_cpus`/`container_network` are Leg B's own
+    addition**, matching `VerifySection.container_image`'s shape one section up (same name,
+    deliberately, over the plainer `image` — the ratchet in `test_config_keys_are_read.py`
+    resolves collisions with a common word by QUALIFYING the match against the immediate parent
+    field name, which only helps when the reader text actually spells `baseline_build.
+    container_image`; matching the sibling section's exact leaf name is Rule 8 read-before-
+    writing applied to naming, not merely to shape). ADR-0135 ruling 3 requires the native
+    baseline to run in a SEPARATE, NETWORKED container from Bazel's own `--network=none` sandbox
+    — never inside it — and Leg D (round VI task 108, dispatched the same wave as Leg B) owns
+    building that image. Leg D had not landed when Leg B did, so `container_image` defaults to an
+    UNBUILT placeholder tag: `docker run` on it fails LOUDLY and FAST (measured:
+    ~0.3s, exit 125, "pull access denied") — the identical "unbuilt image" failure mode
+    `verify.container_image`'s own docstring already documents, not a crash and not a silent
+    no-op. This is a deliberate interim posture disclosed here and in `workers/baseline.py`'s own
+    docstring: an operator who has built or been handed a real Leg D image points this setting at
+    it; until then, every native baseline measurement records `baseline_ok=False` for a real,
+    fast, non-catastrophic reason (see `workers/baseline.py::_classify`), never a hang and never
+    an unhandled exception (the worker's own contract: a native build's own failure NEVER escalates
+    the repo's status — Leg C, not built here, owns the red path). `network` defaults to
+    `"bridge"`, unlike `verify.network`'s `"none"` — a native baseline needs the network access
+    ADR-0135 ruling 3 grants it (arbitrary third-party dependency resolution), which is the whole
+    reason it runs in a SEPARATE container rather than Bazel's own."""
 
     enabled: bool = True
     timeout_s: int = Field(default=1800, gt=0)
+    container_image: str | None = Field(
+        default="fleet-baseline:leg-d-pending",
+        description="Local docker tag for the native-baseline container (ADR-0135 ruling 3). "
+        "`None` runs build_argv/test_argv directly on the harness host instead of inside a "
+        "container -- an explicit, narrower escape hatch for a controlled fixture, never the "
+        "shipped default (see this field's class docstring for why the shipped default is an "
+        "unbuilt placeholder tag, not None).",
+    )
+    container_memory: str = "2g"
+    container_cpus: str = "2.0"
+    container_network: str = "bridge"
 
 
 class PreflightSection(Section):

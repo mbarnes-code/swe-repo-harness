@@ -341,6 +341,7 @@ from fleet.workers.base import (
     loop_now,
     tier_for_attempt,
 )
+from fleet.workers.baseline import BaselineInput, BaselineOutput
 from fleet.workers.buildgen import (
     BuildgenInput,
     BuildgenOutput,
@@ -1206,9 +1207,19 @@ fleet is one synthetic wave. It is deliberately NOT written to `waves`: those ro
 `fleet sequence`'s, and planting a pseudo-plan there would leave a stale member behind for every
 repo the real plan later excludes."""
 
-SCAN_UNITS: Final[tuple[str, ...]] = ("clone", "interrogate", "classify", "symbolindex")
+SCAN_UNITS: Final[tuple[str, ...]] = (
+    "clone",
+    "interrogate",
+    "classify",
+    "symbolindex",
+    "baseline",
+)
 """§3.1 steps 1–4, in order, and each name is the REGISTRY key of the worker that performs it —
-`get_worker(unit)`, never a constructor call on a concrete class (§7.2)."""
+`get_worker(unit)`, never a constructor call on a concrete class (§7.2). `baseline` (round VI
+task 107, §12.11/D116 Leg B, ADR-0135) is appended LAST rather than inserted after `interrogate`,
+the only step whose output it reads (`state.interrogate.manifests`): it needs nothing from
+`classify`/`symbolindex`, and appending preserves every existing position `_step`'s match already
+assigns."""
 
 CONTRACTS_SCOPE: Final = "contracts"
 """The `repo_id` §3.1 step 5b's dispatch runs under. 5b is FLEET-wide — it is re-derived for the
@@ -1255,6 +1266,20 @@ class ScanInput(WorkerInput):
     resource_patterns: dict[str, str] = Field(default_factory=dict)
     dynamic_patterns: dict[str, str] = Field(default_factory=dict)
     api_contract_patterns: dict[str, str] = Field(default_factory=dict)
+    baseline_enabled: bool = True
+    baseline_timeout_s: int = Field(default=1800, gt=0)
+    baseline_image: str | None = None
+    baseline_container_memory: str = "2g"
+    baseline_container_cpus: str = "2.0"
+    baseline_container_network: str = "bridge"
+    baseline_log_dir: str = Field(
+        default="artifacts/logs",
+        min_length=1,
+        description="Where the native build/test's full stream lands (`LoggedRunner`, shared "
+        "with `buildverify`/`rdepverify`). The default is a relative fallback for a payload built "
+        "without going through `_scan_payloads`; every real caller passes the run's resolved "
+        "absolute path.",
+    )
     remaining_units: tuple[str, ...] | None = None
 
 
@@ -1271,6 +1296,7 @@ class ScanOutput(WorkerOutput):
     interrogate: InterrogateOutput | None = None
     classify: ClassifyOutput | None = None
     symbol_batches: tuple[SymbolIndexOutput, ...] = ()
+    baseline: BaselineOutput | None = None
     findings: tuple[str, ...] = ()
 
 
@@ -1354,6 +1380,8 @@ class ScanPipelineWorker(BaseWorker[ScanInput, ScanOutput]):
                 return await self._interrogate(ctx, payload, state)
             case "classify":
                 return await self._classify(ctx, payload, state)
+            case "baseline":
+                return await self._baseline(ctx, payload, state)
             case _:
                 return await self._symbolindex(ctx, payload, state)
 
@@ -1411,6 +1439,33 @@ class ScanPipelineWorker(BaseWorker[ScanInput, ScanOutput]):
         )
         if result.output is not None:
             state.classify = result.output
+        return self._halt_on(result, state)
+
+    async def _baseline(
+        self, ctx: WorkerContext, payload: ScanInput, state: _ScanState
+    ) -> WorkerResult[ScanOutput] | None:
+        """§12.11/D116 Leg B (round VI task 107, ADR-0135). Reads only `state.interrogate`'s
+        manifests — needs nothing from `classify`/`symbolindex`, which is why `baseline` is
+        appended LAST in `SCAN_UNITS` rather than inserted after `interrogate`."""
+        worker = cast("BaseWorker[BaselineInput, BaselineOutput]", self._workers["baseline"])
+        manifests = () if state.interrogate is None else state.interrogate.manifests
+        result = await worker.run(
+            ctx,
+            BaselineInput(
+                repo_id=payload.repo_id,
+                ecosystem=_primary_ecosystem(manifests),
+                enabled=payload.baseline_enabled,
+                timeout_s=payload.baseline_timeout_s,
+                image=payload.baseline_image,
+                container_memory=payload.baseline_container_memory,
+                container_cpus=payload.baseline_container_cpus,
+                container_network=payload.baseline_container_network,
+                min_free_bytes=payload.min_free_bytes,
+                log_dir=payload.baseline_log_dir,
+            ),
+        )
+        if result.output is not None:
+            state.baseline = result.output
         return self._halt_on(result, state)
 
     async def _symbolindex(
@@ -1513,6 +1568,7 @@ class _ScanState:
     interrogate: InterrogateOutput | None = None
     classify: ClassifyOutput | None = None
     symbol_batches: list[SymbolIndexOutput] = field(default_factory=list)
+    baseline: BaselineOutput | None = None
     findings: list[str] = field(default_factory=list)
     gated: bool = False
 
@@ -1523,6 +1579,7 @@ class _ScanState:
             interrogate=self.interrogate,
             classify=self.classify,
             symbol_batches=tuple(self.symbol_batches),
+            baseline=self.baseline,
             findings=tuple(dict.fromkeys(self.findings)),
         )
 
@@ -1690,6 +1747,25 @@ class _ScanSink:
             await self._repository.insert_symbols(rows)
 
 
+def _primary_ecosystem(manifests: Sequence[ManifestRef]) -> Ecosystem | None:
+    """The repo's primary published ecosystem — resolved the SAME way `_scan_rows` resolves
+    `repos.primary_coord_key` below (`min(coord.key for coord in published)`), read for its
+    ecosystem instead of its key. Used only by `ScanPipelineWorker._baseline` (§12.11/D116 Leg B,
+    round VI task 107), so the `baseline` worker's adapter choice can never disagree with what
+    Phase 3's own `_repo_facts`/`facts.ecosystem` later selects for the identical repo — both are
+    one derivation from the same manifest set, not two independent guesses that could drift.
+    `None` when the repo publishes no coordinate at all (no manifest yet, or a manifest that
+    parses but declares nothing) — `baseline` skips cleanly for that case (see its own docstring).
+    """
+    keyed = [(ref.publishes.key, ref.ecosystem) for ref in manifests if ref.publishes is not None]
+    if not keyed:
+        return None
+    # `key=` compares ONLY the coordinate key, matching `_scan_rows`'s own `min(coord.key for ...)`
+    # exactly — never falling back to comparing `Ecosystem` members (which plain `Enum` does not
+    # order) on a tie.
+    return min(keyed, key=lambda item: item[0])[1]
+
+
 def _scan_rows(
     run_id: str, output: ScanOutput, stamp: str
 ) -> Callable[[aiosqlite.Connection], Coroutine[Any, Any, None]]:
@@ -1736,6 +1812,22 @@ def _scan_rows(
                     json.dumps([eco.value for eco in ecosystems]),
                     min((coord.key for coord in published), default=None),
                     "unknown" if output.classify is None else output.classify.kind,
+                    stamp,
+                    output.repo_id,
+                ),
+            )
+        if output.baseline is not None:
+            # §12.11/D116 Leg B (round VI task 107, ADR-0135): the first production write of
+            # either column. `output.baseline` is only ever non-None when the `baseline` worker
+            # actually measured something (an adapter with `native_baseline()` support, enabled) —
+            # see `workers/baseline.py::BaselineOutput`'s own docstring — so both columns always
+            # move together here, never one NULL beside a written other.
+            await conn.execute(
+                "UPDATE repos SET baseline_ok = ?, baseline_test_count = ?, updated_at = ? "
+                " WHERE repo_id = ?",
+                (
+                    int(output.baseline.baseline_ok),
+                    output.baseline.baseline_test_count,
                     stamp,
                     output.repo_id,
                 ),
@@ -2181,6 +2273,7 @@ def _scan_payloads(
     preflight = settings.config.preflight
     by_id = {entry.name: entry for entry in fleet}
     cache_dir = str((settings.root / settings.config.run.cache_dir / "git").resolve())
+    baseline_log_dir = str((settings.root / "artifacts/logs").resolve())
 
     async def build(
         *, repo_id: str, phase: Phase, attempt: int, remaining_units: Sequence[str] | None
@@ -2205,6 +2298,13 @@ def _scan_payloads(
             resource_patterns=dict(scan.resource_patterns),
             dynamic_patterns=dict(scan.dynamic_patterns),
             api_contract_patterns=dict(scan.api_contract_patterns),
+            baseline_enabled=preflight.baseline_build.enabled,
+            baseline_timeout_s=preflight.baseline_build.timeout_s,
+            baseline_image=preflight.baseline_build.container_image,
+            baseline_container_memory=preflight.baseline_build.container_memory,
+            baseline_container_cpus=preflight.baseline_build.container_cpus,
+            baseline_container_network=preflight.baseline_build.container_network,
+            baseline_log_dir=baseline_log_dir,
             remaining_units=None if remaining_units is None else tuple(remaining_units),
         )
 
