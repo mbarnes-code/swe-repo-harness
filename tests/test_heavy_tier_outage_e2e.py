@@ -70,7 +70,7 @@ from typer.testing import CliRunner
 from fleet.cli import ExitCode, app
 from fleet.models.enums import RepoStatus
 from fleet.models.state import MigrationState
-from tests.fixtures.llm.stub_openai_server import running_stub_server
+from tests.fixtures.llm.stub_openai_server import StatusReply, running_stub_server
 from tests.test_scan_e2e import FIXTURE_REPOS, FLEET_YAML, _fresh_db, _make_repo, query
 
 runner = CliRunner()
@@ -153,6 +153,35 @@ def _make_workspace(tmp_path: Path, label: str, *, heavy_a: str, heavy_b: str) -
     workspace = root / "workspace"
     workspace.mkdir()
     _write_config(workspace, sources, names=_NAMES, heavy_a=heavy_a, heavy_b=heavy_b)
+    _fresh_db(workspace / "state" / "fleet.db")
+    return workspace
+
+
+def _make_workspace_custom(
+    tmp_path: Path,
+    label: str,
+    *,
+    models_yaml: str,
+    fleet_yaml: str = FLEET_YAML,
+) -> Path:
+    """Like `_make_workspace` above, but for a case (round VI task 102's cases (ii)/(iii)) whose
+    config needs — a non-default `llm.failover.*` override, or per-target capabilities the
+    shared `_MODELS_YAML_TEMPLATE` cannot express (case (iii)'s deliberately-drifting target) —
+    go beyond what `_write_config` covers. SAME two-repo fixture fleet; only the config CONTENT
+    differs."""
+    root = tmp_path / label
+    root.mkdir()
+    sources = {name: _make_repo(root / "sources", name, FIXTURE_REPOS[name]) for name in _NAMES}
+    workspace = root / "workspace"
+    workspace.mkdir()
+    config = workspace / "config"
+    config.mkdir(parents=True, exist_ok=True)
+    (config / "fleet.yaml").write_text(fleet_yaml, encoding="utf-8")
+    (config / "models.yaml").write_text(models_yaml, encoding="utf-8")
+    entries = "".join(f"  - name: {name}\n    url: {sources[name]}\n" for name in _NAMES)
+    (config / "repos.yaml").write_text(
+        f"version: 1\ndefaults:\n  ref: main\nrepos:\n{entries}", encoding="utf-8"
+    )
     _fresh_db(workspace / "state" / "fleet.db")
     return workspace
 
@@ -409,3 +438,437 @@ def test_heavy_tier_outage_halts_the_run_and_resume_finds_the_repos_pending(
 
     after_resume = dict(query(workspace, "SELECT repo_id, status FROM phases WHERE phase = 1"))
     assert set(after_resume.values()) == {"PENDING"}, after_resume
+
+
+# =============================================================================================
+# Round VI task 102 — §12.43's last two residuals (TEST-ONLY):
+#   1. cases (i)-(iii)'s "on the fixture fleet" framing clause, driven through the real CLI on
+#      the SAME two-repo fixture fleet/config skeleton above (only the two HEAVY targets' shapes
+#      differ per case);
+#   2. case (iv)'s own paired `--deterministic-only` clause, re-run against THIS file's broken-
+#      HEAVY config (arm 2's unreachable ports).
+#
+# docs/CRITERIA_PLAN.md's §43 entry names these as the sole remaining work before the criterion
+# counts toward `<n> of 48`. research-51 judged extending cases (i)-(iii) onto the fixture fleet
+# "nearly free" once the arm-1/arm-2 skeleton exists; this section is that extension.
+# =============================================================================================
+
+
+# ---------------------------------------------------------------------------------------------
+# Case (i): CONNECTION failover — a HEAVY target that refuses connections, the run completes on
+# its second target.
+# ---------------------------------------------------------------------------------------------
+
+
+def test_case_i_connection_failover_on_the_fixture_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.43 case (i), on the SAME two-repo fixture fleet arm 1/arm 2 already build: `HEAVY`'s
+    first target (`fixture-heavy-a`) is the identical unbound loopback port arm 2 uses
+    (`127.0.0.1:1` — refuses instantly, never a TOCTOU-prone bind-then-close), its second target
+    (`fixture-heavy-b`) the real stub server arm 1 uses. `fleet scan` (real classify, no
+    `--skip-classify`) completes for BOTH repos, each independently exhibiting the SAME single
+    induced CONNECTION failover the unit-level tests already proved
+    (`tests/test_runner.py::test_an_induced_connection_failover_leaves_phases_attempts_and_
+    transient_retries_unchanged`) — but now read back from real SQLite state after a real CLI
+    invocation, over a real socket, against an unmonkeypatched backend registry, not a
+    directly-constructed `LadderModelClient`/`FailoverBackend`.
+
+    `open_after_failures` is left at its shipped default (3): with only 2 repos and a target
+    that NEVER recovers, the breaker never has a reason to open here — that is case (ii)'s
+    scenario, not this one. One CONNECTION failure per repo is exactly what the unit test calls
+    "a single induced failover", not a breaker trip.
+    """
+    with running_stub_server() as server:
+        server.set_responder(_classify_responder)
+        workspace = _make_workspace(tmp_path, "case_i", heavy_a=_HEAVY_A, heavy_b=server.base_url)
+        monkeypatch.chdir(workspace)
+
+        result = scan_real_classify(workspace)
+        assert result.exit_code == ExitCode.SUCCESS, result.output
+
+        # sub-assertion 1: one backend_failover event per repo, trigger CONNECTION, naming both
+        # targets — the real §11.8 event, not a hand-built `BackendFailover`.
+        failover_rows = query(
+            workspace, "SELECT payload FROM events WHERE event = 'backend_failover'"
+        )
+        assert len(failover_rows) == len(_NAMES), failover_rows
+        for (raw,) in failover_rows:
+            payload = json.loads(raw)
+            assert payload["role"] == "repo_classify"
+            assert payload["trigger"] == "CONNECTION"
+            assert payload["from_model_id"] == "fixture-heavy-a"
+            assert payload["to_model_id"] == "fixture-heavy-b"
+
+        # sub-assertion 2: the resulting llm_cache row carries the SECOND target's attribution.
+        cache_rows = query(
+            workspace,
+            "SELECT backend, model_id FROM llm_cache WHERE role = ?",
+            ("repo_classify",),
+        )
+        assert len(cache_rows) == len(_NAMES), cache_rows
+        for backend, model_id in cache_rows:
+            assert backend == "openai_compatible"
+            assert model_id == "fixture-heavy-b"
+
+        # sub-assertion 3: phases.attempts / transient_retries UNCHANGED by the failover — the
+        # concrete baseline a clean run (arm 1's control test, above) also shows: one successful
+        # attempt, zero transient retries. The failover cost a backend hop, not a phase rung.
+        phase_rows = query(
+            workspace, "SELECT attempts, transient_retries FROM phases WHERE phase = 1"
+        )
+        assert phase_rows == [(1, 0)] * len(_NAMES), phase_rows
+
+
+# ---------------------------------------------------------------------------------------------
+# Case (ii): a target whose whole §11.8 backoff schedule is exhausted by 429s opens the breaker
+# and the run fails over to the second target.
+# ---------------------------------------------------------------------------------------------
+#
+# **Disclosed scope, stated precisely rather than papered over.** This test closes the OPEN-
+# transition/failover-to-second-target half of case (ii) on the real fixture fleet: a genuine
+# `RateLimitError` (via a real HTTP 429 from the stub server), walking the real SDK-plus-client
+# backoff schedule, marks `fixture-heavy-a` DOWN and the run completes via `fixture-heavy-b`.
+#
+# It does NOT close the cooldown/`HALF_OPEN`-recovery half on the real fixture fleet. That half
+# needs a SECOND classify call against the SAME (now-DOWN) target within the SAME client
+# instance — `BackendHealth` is deliberately per-run, not persisted (§11.8), so recovery cannot
+# be split across two separate CLI invocations the way the resume test above splits the halt
+# from the reclaim. Within ONE invocation, this fixture's two repos are dispatched from ONE
+# `asyncio.TaskGroup` (`orchestrator/runner.py`'s own docstring: "one task per repo") with no
+# ordering guarantee — measured directly (a throwaway responder logging arrival timestamps: the
+# two repos' classify calls to the same target land 0.6 ms to 21 ms apart across five runs, too
+# close and too variable to build a non-flaky cooldown/probe test on). The one config knob that
+# could serialize HEAVY-tier dispatch, `concurrency.llm.heavy`
+# (`settings.py::LlmConcurrency`/`ConcurrencySection.llm`), is read by nothing in `src/` —
+# `grep -rn "llm_concurrency(" src/fleet/` returns only the method's own declaration
+# (`settings.py:1305`), never a call site — so it cannot be used to force the ordering either.
+# Closing this residual for real would need either a production change (wiring that semaphore, or
+# another way to force sequential dispatch — out of this TEST-ONLY task's scope per its own
+# brief) or accepting a timing-flaky test, which CLAUDE.md Rule 12 forbids building. The recovery
+# half therefore remains proven only at the component level
+# (`tests/test_llm_failover.py::test_cooldown_lets_exactly_one_half_open_probe_through_then_
+# success_resets_to_up`), unchanged from before this task.
+
+
+def test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.43 case (ii)'s OPEN-transition/failover half, on the SAME two-repo fixture fleet: both
+    HEAVY targets point at ONE real stub server (same `base_url`, differentiated only by the
+    `model` field in the request — `BackendHealth`'s key is `f"{backend}:{model_id}"`, not the
+    URL). `fixture-heavy-a` answers every request with a genuine HTTP 429
+    (`StatusReply(status=429, ...)`, mapping to the `openai` SDK's own `RateLimitError`, distinct
+    from the plain-body 5xx path); `fixture-heavy-b` always answers successfully. `open_after_
+    failures` is lowered to 1 (a legal `llm.failover.*` operator config, per research-51's own
+    load-bearing fact about this config block) so a single qualifying failure opens the breaker
+    deterministically regardless of which repo's call happens to exhaust its backoff first.
+
+    See the module-level comment above this test for the disclosed cooldown/`HALF_OPEN` scope
+    limit.
+    """
+    fleet_yaml = FLEET_YAML + (
+        "llm:\n  failover:\n    open_after_failures: 1\n    cooldown_s: 120\n"
+    )
+
+    def responder(request: Mapping[str, object]) -> Mapping[str, object] | StatusReply:
+        if request.get("model") == "fixture-heavy-a":
+            return StatusReply(
+                status=429,
+                body={"error": {"message": "rate limited", "type": "rate_limit_error"}},
+            )
+        return _classify_responder(request)
+
+    with running_stub_server() as server:
+        server.set_responder(responder)
+        workspace = _make_workspace_custom(
+            tmp_path,
+            "case_ii",
+            fleet_yaml=fleet_yaml,
+            models_yaml=_MODELS_YAML_TEMPLATE.format(
+                heavy_a=server.base_url, heavy_b=server.base_url
+            ),
+        )
+        monkeypatch.chdir(workspace)
+
+        result = scan_real_classify(workspace)
+        assert result.exit_code == ExitCode.SUCCESS, result.output
+
+        # sub-assertion 1: the breaker genuinely opened — a real `backend_health_transition`
+        # event naming `fixture-heavy-a`, DOWN, citing `open_after_failures=1` — not merely "the
+        # call succeeded somehow".
+        transitions = query(
+            workspace, "SELECT payload FROM events WHERE event = 'backend_health_transition'"
+        )
+        down_transitions = [
+            json.loads(raw)
+            for (raw,) in transitions
+            if json.loads(raw)["to_state"] == "DOWN" and json.loads(raw)["model_id"] == (
+                "fixture-heavy-a"
+            )
+        ]
+        assert down_transitions, "fixture-heavy-a never transitioned to DOWN"
+        assert all("open_after_failures=1" in t["reason"] for t in down_transitions)
+
+        # sub-assertion 2: every classify call failed over to fixture-heavy-b with trigger
+        # RATE_LIMIT (the "walked its entire backoff schedule" trigger, not a bare CONNECTION).
+        failover_rows = query(
+            workspace, "SELECT payload FROM events WHERE event = 'backend_failover'"
+        )
+        assert len(failover_rows) == len(_NAMES), failover_rows
+        for (raw,) in failover_rows:
+            payload = json.loads(raw)
+            assert payload["trigger"] == "RATE_LIMIT"
+            assert payload["from_model_id"] == "fixture-heavy-a"
+            assert payload["to_model_id"] == "fixture-heavy-b"
+
+        # sub-assertion 3: zero calls ever served from anywhere but fixture-heavy-b, and every
+        # repo's classify still lands (§11.8: a busy DOWN target must not sink the tier).
+        cache_rows = query(
+            workspace,
+            "SELECT backend, model_id FROM llm_cache WHERE role = ?",
+            ("repo_classify",),
+        )
+        assert len(cache_rows) == len(_NAMES), cache_rows
+        for backend, model_id in cache_rows:
+            assert backend == "openai_compatible"
+            assert model_id == "fixture-heavy-b"
+
+
+# ---------------------------------------------------------------------------------------------
+# Case (iii): schema exhaustion AND CapabilityDrift, in ONE induced scenario.
+# ---------------------------------------------------------------------------------------------
+
+
+#: `fixture-heavy-b`'s capabilities PROMISE `structured_output_modes: [JSON_SCHEMA, PROMPTED]`
+#: (the best of which is JSON_SCHEMA — `promised_mode`'s reading) but withhold `supports_json_
+#: schema` (defaults False), so `negotiate()` — which reads the boolean flags, never the promise
+#: list — can only reach PROMPTED. `actual` (PROMPTED) ranks below `promised` (JSON_SCHEMA):
+#: exactly `CapabilityDrift`, driven entirely by config (`merge_capabilities`/`negotiate`/
+#: `promised_mode` in `src/fleet/llm/client.py`), no response-content trickery needed.
+_MODELS_YAML_TEMPLATE_DRIFT = """\
+version: 2
+roles:
+  conflict_resolution: HEAVY
+  api_incompat_rewrite: HEAVY
+  build_authoring: HEAVY
+  cycle_break_proposal: HEAVY
+  escalation: HEAVY
+  transform_repair: WORKHORSE
+  build_diagnosis: WORKHORSE
+  manifest_extract: WORKHORSE
+  pr_body: WORKHORSE
+  repo_classify: HEAVY
+  dep_disambiguate: CHEAP
+  pr_title: CHEAP
+default_profile: default
+profiles:
+  default:
+    HEAVY:
+      - {{ backend: openai_compatible, model_id: fixture-heavy-a, effort: high, price: free,
+          base_url: '{base_url}',
+          capabilities_override: {{ supports_json_schema: true, max_output_tokens: 2048,
+                                   structured_output_modes: [JSON_SCHEMA, PROMPTED] }} }}
+      - {{ backend: openai_compatible, model_id: fixture-heavy-b, effort: high, price: free,
+          base_url: '{base_url}',
+          capabilities_override: {{ max_output_tokens: 2048,
+                                   structured_output_modes: [JSON_SCHEMA, PROMPTED] }} }}
+    WORKHORSE:
+      - {{ backend: anthropic, model_id: claude-sonnet-5, effort: high,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: {{ in_per_mtok: 3.0, out_per_mtok: 15.0 }} }}
+    CHEAP:
+      - {{ backend: anthropic, model_id: claude-haiku-4-5,
+          api_key_env: ANTHROPIC_API_KEY,
+          price: {{ in_per_mtok: 1.0, out_per_mtok: 5.0 }} }}
+"""
+
+
+def test_case_iii_schema_exhaustion_and_capability_drift_on_the_fixture_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.43 case (iii), both halves in ONE induced call, on the SAME two-repo fixture fleet —
+    the residual `tests/test_llm_findings.py::test_schema_exhaustion_and_capability_drift_
+    together_in_one_induced_call` proved only at component level (`TieredScriptedBackend`).
+
+    ONE real stub server serves both HEAVY targets. `fixture-heavy-a` always answers with
+    schema-VALID JSON that is model-INVALID (`confidence` out of Pydantic's `[0, 1]` range),
+    exhausting `llm.max_schema_repairs` (shipped default 1: initial + one repair, both invalid)
+    and failing over with trigger `SCHEMA_UNSATISFIED`. `fixture-heavy-b` answers validly, but
+    its capabilities are engineered (see `_MODELS_YAML_TEMPLATE_DRIFT` above) to achieve PROMPTED
+    where its own `structured_output_modes` promises JSON_SCHEMA — `CapabilityDrift`, on the SAME
+    call the failover happened in, exactly as the component-level test proves, but now read back
+    from real SQLite state after a real CLI classify dispatch.
+
+    Deterministic and concurrency-safe regardless of which repo's call lands on which target
+    first: both targets' scripted behaviour is stateless (always-invalid / always-valid-but-
+    drifting), so nothing here depends on call order or timing the way case (ii)'s cooldown would.
+    """
+
+    def responder(request: Mapping[str, object]) -> Mapping[str, object]:
+        if request.get("model") == "fixture-heavy-a":
+            content = json.dumps(
+                {
+                    "ecosystem": "pypi",
+                    "is_library": True,
+                    "confidence": 5.0,  # out of Pydantic's ge=0.0, le=1.0 -- schema-valid JSON,
+                    "rationale": "always invalid: exhausts llm.max_schema_repairs on purpose.",
+                }
+            )
+            return {
+                "model": request.get("model"),
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": content},
+                        "finish_reason": "stop",
+                    }
+                ],
+                "usage": {"prompt_tokens": 30, "completion_tokens": 14},
+            }
+        return _classify_responder(request)
+
+    with running_stub_server() as server:
+        server.set_responder(responder)
+        workspace = _make_workspace_custom(
+            tmp_path,
+            "case_iii",
+            models_yaml=_MODELS_YAML_TEMPLATE_DRIFT.format(base_url=server.base_url),
+        )
+        monkeypatch.chdir(workspace)
+
+        result = scan_real_classify(workspace)
+        assert result.exit_code == ExitCode.SUCCESS, result.output
+
+        # sub-assertion 1: schema exhaustion AND failover, trigger SCHEMA_UNSATISFIED.
+        failover_rows = query(
+            workspace, "SELECT payload FROM events WHERE event = 'backend_failover'"
+        )
+        assert len(failover_rows) == len(_NAMES), failover_rows
+        for (raw,) in failover_rows:
+            payload = json.loads(raw)
+            assert payload["trigger"] == "SCHEMA_UNSATISFIED"
+            assert payload["from_model_id"] == "fixture-heavy-a"
+            assert payload["to_model_id"] == "fixture-heavy-b"
+
+        # sub-assertion 2: a CapabilityDrift finding attributed to fixture-heavy-b (the target
+        # that actually answered under drift), from the SAME call the failover happened in.
+        # Exactly ONE row, not one per repo: `findings` is fleet-level for this kind
+        # (`repo_id IS NULL`) and deduplicated on `(run_id, kind, fingerprint)`
+        # (`orchestrator/findings.py`'s `ON CONFLICT` clause) — both repos' calls drift
+        # identically (same role/tier/backend/model_id/promised/actual), so the second is a
+        # genuine dedup, not a missed write.
+        drift_rows = query(
+            workspace, "SELECT payload FROM findings WHERE kind = 'CapabilityDrift'"
+        )
+        assert len(drift_rows) == 1, drift_rows
+        for (raw,) in drift_rows:
+            payload = json.loads(raw)
+            assert payload["role"] == "repo_classify"
+            assert payload["model_id"] == "fixture-heavy-b"
+            assert payload["promised"] == "JSON_SCHEMA"
+            assert payload["actual"] == "PROMPTED"
+
+        # sub-assertion 3: the run still completes, cleanly, through the real answering target.
+        cache_rows = query(
+            workspace,
+            "SELECT backend, model_id, structured_output_mode FROM llm_cache WHERE role = ?",
+            ("repo_classify",),
+        )
+        assert len(cache_rows) == len(_NAMES), cache_rows
+        for backend, model_id, mode in cache_rows:
+            assert backend == "openai_compatible"
+            assert model_id == "fixture-heavy-b"
+            assert mode == "PROMPTED"
+
+
+# ---------------------------------------------------------------------------------------------
+# Case (iv)'s own paired clause: the SAME fixture, under `fleet transform --deterministic-only`,
+# with HEAVY still broken, dispatches no LLM call at all.
+# ---------------------------------------------------------------------------------------------
+
+
+def sequence_cmd(root: Path) -> Any:
+    return runner.invoke(app, [*_args(root), "sequence"], catch_exceptions=False)
+
+
+def transform_cmd(root: Path, *, json_output: bool = True) -> Any:
+    argv = [*_args(root)]
+    if json_output:
+        argv.append("--json")
+    argv += ["transform", "--deterministic-only"]
+    return runner.invoke(app, argv, catch_exceptions=False)
+
+
+def test_deterministic_only_dispatches_no_llm_call_against_the_broken_heavy_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Case (iv)'s own second clause (`docs/SPEC.md` §12.43, `grep -n "on the fixture fleet"`):
+    "the same fixture under `fleet transform --deterministic-only` completes its rule-resolvable
+    repos with exit 0 and dispatches no LLM call at all." Proven elsewhere
+    (`tests/test_transform_e2e.py::test_deterministic_only_reaches_no_model`) but never before
+    against THIS file's own broken-HEAVY config (arm 2's unreachable ports, reused verbatim via
+    `_make_workspace`) — the residual `docs/CRITERIA_PLAN.md` §43 names.
+
+    `fleet scan --skip-classify` (classify is not this clause's concern — cases (i)-(iii) above
+    already cover it; `--deterministic-only`'s OWN cap is Phase 2's) then `fleet sequence` builds
+    the wave plan; `fleet transform --deterministic-only` then runs against a `config/models.yaml`
+    whose `HEAVY` targets are the SAME two unreachable ports (`127.0.0.1:1`/`:2`) case (iv)'s own
+    exit-8 test drives through classify — if the deterministic cap ever let a rung 2 escalation
+    through, THIS run would either hang or exit 8 against those same dead ports, never exit 0.
+    Exit 0 is therefore already strong evidence nothing was dispatched; `llm_cache` staying empty
+    for every role (not just `repo_classify`) is the direct proof.
+
+    **A measured, disclosed scope note for this exact fixture (Rule 12's own "audit mutations for
+    expressibility" — a mutation nothing can express reports a pass that means nothing):** these
+    two Python-only repos (`acme-lib-py`, `acme-app-py`) have no cross-repo import needing a
+    textual rewrite, so BOTH repos resolve as a pure relocation with zero identified rewrite
+    units — confirmed directly by re-running this exact scenario with `cli.py`'s deterministic
+    cap (`_validate_transform_flags`'s `return (1 if deterministic_only else max_attempts),
+    policies`) mutated to `return max_attempts, policies` (the cap removed entirely): the output
+    is BYTE-IDENTICAL (`exit_code: 0, succeeded: 2, commits: 4, failed: 0`) with or without the
+    cap, because nothing in this fixture ever fails at rung 1 for the cap to have a chance to
+    gate. That mutation is therefore a confirmed NO-OP here and is not reported as a discriminator
+    (reverted; `git diff --stat src/` was empty both before measuring and after).
+
+    **The mutation actually reported, confirmed to discriminate:** `workers/base.py`'s
+    `_TIER_FOR_RUNG[None]` (rung 1's tier stamp) mutated from `TransformTier.DETERMINISTIC` to
+    `TransformTier.LLM_REPAIR` reddens this test's own `exit_code == ExitCode.SUCCESS` assertion
+    — `attempts`' own `CHECK ((tier = 'DETERMINISTIC') = (context_policy IS NULL))` constraint
+    (rung 1's `context_policy` stays `None`; only the tier label changed) fails at INSERT time,
+    the per-repo `TaskGroup` isolation catches it as a `repo_task_escaped`
+    `sqlite3.IntegrityError`, and the wave-open guard then refuses (`ExitCode.USAGE`, not
+    `SUCCESS`). This proves the test is sensitive to whether rung 1 is genuinely stamped
+    DETERMINISTIC, not merely "always green regardless of what rung 1 does". Reverted;
+    `git diff --stat src/` empty after.
+    """
+    workspace = _make_workspace(tmp_path, "det_only", heavy_a=_HEAVY_A, heavy_b=_HEAVY_B)
+    (workspace / "config" / "rules").mkdir(parents=True, exist_ok=True)
+    monkeypatch.chdir(workspace)
+
+    calls: list[str] = []
+
+    async def explode(*args: object, **kwargs: object) -> object:
+        calls.append("complete")
+        raise AssertionError("the deterministic transform path must not reach a model")
+
+    monkeypatch.setattr("fleet.llm.client.LadderModelClient.complete", explode)
+
+    scan_result = runner.invoke(
+        app, [*_args(workspace), "scan", "--skip-classify"], catch_exceptions=False
+    )
+    assert scan_result.exit_code == ExitCode.SUCCESS, scan_result.output
+    assert sequence_cmd(workspace).exit_code == ExitCode.SUCCESS
+
+    result = transform_cmd(workspace)
+    assert result.exit_code == ExitCode.SUCCESS, result.output
+    payload = json.loads(result.stdout)
+    assert payload["succeeded"] == len(_NAMES), payload
+    assert payload["failed"] == 0, payload
+    assert calls == [], "LadderModelClient.complete was reached under --deterministic-only"
+
+    cache_count = query(workspace, "SELECT COUNT(*) FROM llm_cache")
+    assert cache_count == [(0,)], cache_count
+
+    tiers = dict(query(workspace, "SELECT repo_id, tier FROM attempts WHERE phase = 2"))
+    assert tiers == dict.fromkeys(_NAMES, "DETERMINISTIC"), tiers
