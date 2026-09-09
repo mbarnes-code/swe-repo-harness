@@ -1642,14 +1642,18 @@ count-agnostic write path (a plain list comprehension with no repo/edge-count br
 independently re-verified by task-scoped review, not assumed.
 
 ## 31. Wrong contract hoist detected and rolled back
-**OPEN — PARTIALLY CLOSED (round VI task 96, 2026-09-08): case (i) closed (Leg A, task 55); case
-(ii)'s rollback-TARGET mechanism now closed under this round's scoped/adjudicated trigger (the
-`git revert -m 1` of the contract's own `Hoisted-Contract:` merge, never the owner's); case (ii)'s
-LITERAL trigger ("a hoist whose contract wave fails `bazel build`") remains adjudication pending
-(dated marker at `docs/SPEC.md` §12.31), and its "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" /
-"phases.attempts unchanged for every SCC member" clauses remain untested — see the task-96 update
-below for the precise breakdown. Do not read this line as DONE; two real sub-questions remain
-open.** *(Superseded initial framing, kept for history: "mechanism doesn't exist —
+**OPEN — PARTIALLY CLOSED (round VI task 101, 2026-09-09, on top of task 96, 2026-09-08): case (i)
+closed (Leg A, task 55); case (ii)'s rollback-TARGET mechanism closed under this round's
+scoped/adjudicated trigger (the `git revert -m 1` of the contract's own `Hoisted-Contract:` merge,
+never the owner's); case (ii)'s "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" clause is now also
+closed (task 101, TEST-ONLY — see that task's own update below). What remains open: case (ii)'s
+LITERAL trigger ("a hoist whose contract wave fails `bazel build`") stays adjudication pending
+(dated marker at `docs/SPEC.md` §12.31 — a real architectural decision, not a build, explicitly out
+of task 101's scope), and its separate "`phases.attempts` unchanged for every SCC member" clause
+(task 96's own disclosure, distinct from the fall-through clause SPEC's own dated marker names)
+remains untested — no task has been dispatched against it yet. Do not read this line as DONE; two
+real sub-questions remain open, one fewer than before task 101.** *(Superseded initial framing,
+kept for history: "mechanism doesn't exist —
 NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI, research-22)" — every leg below this
 line has since landed except the two named above.)* `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
 Zero `git revert` call sites exist in the entire codebase. `_hoist_contracts` is a pure in-memory
@@ -2041,6 +2045,60 @@ above; this task did not drive a re-sequence after a contract goes `FAILED` and 
 stays `OPEN` overall** — see the status line at the top of this section for the precise breakdown.
 `docs/INTEGRATION_HONESTY.md` D111's heading stays `OPEN`, with a dated update recording this leg.
 Full account: `.superpowers/sdd/round-VI-criteria-closure/task-96-report.md`.
+
+**Update, round VI task 101 (2026-09-09, TEST-ONLY) — closes the SECOND sub-question `docs/SPEC.md`
+§12.31's own dated marker names: the "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" clause.** The
+mechanism was verified correct by construction, not defective — no production code changed
+(`src/fleet/graph/cycles.py` is byte-identical to `HEAD` throughout this task, confirmed by
+`git hash-object` == `git rev-parse HEAD:...`). Two new tests in `tests/test_graph_cycles.py` each
+drive TWO real `break_cycles` calls over the same graph (never a hand-built `SccResolution`/
+`CycleFinding`): pass 1 genuinely hoists a contract (`CONTRACT_HOIST`, `status=HOISTED`); the
+contract is then flipped to `status=FAILED` (a `model_copy`, mirroring exactly the DB write a real
+`HoistBrokeOwner` finding drives at the CLI layer, which `cycles.py` itself never performs); pass 2
+re-sequences the SAME pre-hoist graph edges (the "next graph build" ADR-0122 describes — edges are
+read-time excluded for a non-HOISTED/MIGRATED contract, never reconstructed, and this fixture's
+pre-hoist repo-repo row was never regenerated, so pass 2 reuses it directly) against the now-FAILED
+contract:
+- `test_a_rolled_back_hoist_re_sequences_to_edge_break` (new 3-repo fixture,
+  `edge_break_after_rollback_fleet`) asserts the re-sequenced SCC resolves `EDGE_BREAK`, a real
+  edge is suppressed, and the SCC is genuinely dissolved.
+- `test_a_rolled_back_hoist_re_sequences_to_atomic_wave` reuses the existing `six_repo_hub_cycle`
+  fixture (already proven to flip to `ATOMIC_WAVE` under `hoist_contracts=False`) but drives it
+  through the genuine two-pass hoist-then-fail-then-resequence shape instead, which is what
+  actually exercises `committed`'s status filter (`cycles.py:429`) and `_hoist_contracts`'
+  candidacy filter (`cycles.py:672`) — the `hoist_contracts=False`/no-`contracts=` paths never touch
+  either.
+
+Both tests also assert the FAILED contract is never (re-)committed (`report.hoisted_contracts ==
+()`), never re-enters `nodes` (no `CONTRACT`-kind node in the re-sequenced graph), and therefore
+never reaches `wave_members` (`assign_waves(...).contract_members == ()`).
+
+**Mutation-tested (CLAUDE.md Rule 12).** Two mutations, each verified to have actually changed the
+file (`diff -u` against a pre-mutation backup, never `HEAD`/`git stash`, before AND after
+restoring): (1) widening `committed`'s status filter (`cycles.py:429`) to also admit
+`ContractStatus.FAILED` — both new tests reddened, the other 25 pre-existing tests in the file
+stayed green (not an implausible all-fail); (2) widening `_hoist_contracts`' candidacy filter
+(`cycles.py:672`) from `status is EXTRACTABLE` to `status in (EXTRACTABLE, FAILED)` — same result,
+both new tests reddened, the other 25 stayed green. A cosmetic control (an inline comment added to
+the same `committed` dict-comprehension line, no behavior change) left both new tests green, ruling
+out a layout-sensitive false discriminator. Production code was restored byte-identical to `HEAD`
+after each mutation and confirmed via `git hash-object`. `ruff check` clean on the changed file;
+`mypy` not run against `tests/` — this project's `pyproject.toml` scopes `[tool.mypy] packages =
+["fleet"]`, so tests are outside strict-mypy's own declared scope, consistent with this file's
+established convention for other TEST-ONLY closures.
+
+**What this task does NOT close.** (a) The literal contract-wave trigger-unreachability
+adjudication — unchanged, out of scope per this task's own brief. (b) `phases.attempts` unchanged
+for every SCC member — task 96's own disclosure named this alongside the fall-through clause as
+untested; this task's brief scoped it specifically to the fall-through clause `docs/SPEC.md`'s own
+dated marker names, which does not itself mention `phases.attempts` (task 96's paragraph is broader
+than SPEC's marker on this point) — so `phases.attempts` remains a genuinely separate, untested
+sub-clause, not covered here, and no task is yet dispatched against it. (c) D132 (task 95's
+owner-side-duplication defect) is untouched and stays `OPEN`. **This criterion stays `OPEN`
+overall** — see the status line at the top of this section. `docs/INTEGRATION_HONESTY.md` D111's
+heading stays `OPEN` (not updated by this task; the fall-through mechanism was a test-coverage gap,
+not a defect D111 was tracking a fix for).
+Full account: `.superpowers/sdd/round-VI-criteria-closure/task-101-report.md`.
 
 ## 32. Adapter registries total, delegation honest
 **DONE (re-closed 2026-09-06, round VI task 61, `2d19310` — the missing bijection test now exists
