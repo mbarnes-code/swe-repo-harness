@@ -10408,3 +10408,154 @@ re-verification):**
   production path (JVM's blocking `D121` bazel_dep gap is itself now FIXED per its own entry, but
   the JVM real-Bazel proof through `real_build()` has not been re-attempted since). Do not round
   the `<n> of 48` count up on this account.**
+
+## Round VI, thirty-third and thirty-fourth waves (2026-09-08/09) — D130 wired, D131/§12.14 closed,
+D132 filed, §12.31 rollback mechanism built, §12.37 CLOSED, worktree tooling hardened, count
+re-measured to 43/48
+
+Two dispatch waves (12 subagent tasks total: 89-98 plus 2 fix-only rounds), continuing directly
+from the 32nd wave's checkpoint, which deliberately deferred a fresh §12 Rollup re-measurement.
+Full detail, including every review cycle, fix round, and independent audit, lives in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; this checkpoint records headline outcomes
+only.
+
+**Wave 33 (tasks 89-95, plus research-49 and an independent audit):**
+- **D130 wired**: `fleet stubs resolve` (previously an unconditional `CommandUnavailableError`) now
+  reuses the real T1/REVALIDATE machinery via `_fire_t1_for_provider`, with same-transaction
+  atomicity (kill/resume proof), an exact one-`REVALIDATE`-row assertion, and a zero-new-commits/
+  zero-LLM-calls idempotency assertion, all through the real CLI. Also fixed a real pre-existing
+  defect this wiring exposed: `operator_triggered` was never threaded through, so
+  `stubs.revalidation: manual` policy could never fire T1 from any caller. Task 89 correctly
+  declined to flip §12.37 to DONE — its own done-bar text named a 4th residual item (stub creation
+  via a real CLI dispatch) the dispatch brief had omitted, disclosed rather than papered over.
+- **D131 — §12.14 (transitive stub-stacking) CLOSED.** `detect_stub_triggers` gained an inheritance
+  branch propagating `DEGRADED` status to second-layer-and-beyond dependents (not just direct RHI
+  consumers) via `active_stub_facts_by_provider`, preserving the `EMPTY_FAILING` exception;
+  `_pr_impl`'s admission gate was widened so a transitively-affected member can no longer claim a
+  false `Equivalence.FULL`. A live, measured defect (a second-layer dependent ending `SUCCEEDED`
+  with a false FULL-equivalence claim, its PR held forever) was reproduced pre-fix and closed
+  post-fix, mutation-verified both ways.
+- **D132 filed** (OPEN, bounded): building §12.31 case (ii)'s prerequisite (the contract-ingest
+  caller — `_ingest_contract_source`, wired to `vcs/filter_repo.py`'s existing, previously-uncalled
+  primitives via a new `Hoisted-Contract:` trailer-carrying merge) surfaced a genuine, disclosed
+  duplication defect: a hoisted contract's content lands on `integration` twice (once at the
+  contract's own merge, once again under the owner's unmodified `dest`) — never lost, never
+  colliding, but contradicting `docs/SPEC.md`'s literal "not duplicated onto the owner's merge"
+  sentence. §12.31's status was correctly left unchanged (this was the prerequisite task, not the
+  closing task).
+- One real, previously-untested code path closed: `llm/failover.py`'s
+  `BackendHealth.record_success`'s `consecutive_failures = 0` reset had zero test coverage (a
+  46-test independent audit sweep found nothing that would catch its silent removal); now covered
+  by a discriminating mutation-verified test.
+- One recurring citation-drift class hardened: the `_fire_t1_for_provider` citation, hand-repointed
+  five times this session alone as `cli.py` grew above it, is now a commit-bound anchor immune to
+  future line-number drift.
+- Four documentation-staleness items closed via an independent audit's findings: D112's status
+  field (stale `PARTLY ADDRESSED` despite all four ecosystem slices being closed), a stale D121
+  cross-reference, a `docs/PROGRESS.md` wording defect (fast-tier run mislabeled "real-Bazel",
+  annotated not rewritten), and an undocumented ADR-0132 review fix (`abandon_probe`, now recorded
+  in a dated addendum so a future reconciler can't silently undo it against the ADR's stale
+  description).
+- **§12.43 narrowed via 43-A/43-B** (TEST-ONLY): four previously zero-coverage sub-assertions
+  (`phases.attempts`/`transient_retries` invariance, the N>1 above-threshold circuit-breaker leg)
+  now have real-dispatch-path, mutation-verified tests. 43-C (the larger HEAVY-tier fixture
+  residual) deliberately not attempted — correctly declined rather than fabricated.
+- **§12.31's prerequisite built** (task 95, "task 1" of a controller-ruled two-task sequence): the
+  contract-ingest caller, proven via real `git-filter-repo` (not a mock), a real two-parent merge,
+  real path filtering, idempotent on repeat build, three real mutations RED/restored-green. A
+  genuine controller ruling was required mid-wave: §12.31(ii)'s literal SPEC trigger ("a contract
+  wave fails `bazel build`") is architecturally unreachable under this project's wave-dispatch
+  design (a deliberate `node_kind='REPO'`-only filter, per ADR-0119's safety scoping) — ruled as an
+  "adjudication pending" flag rather than silently building contract-wave dispatch to manufacture
+  the literal trigger, with the closing task's proof scenario scoped instead to the closest
+  reachable analogous trigger (a REPO-kind consumer wave failing downstream of a bad hoist).
+- **§12.11's Task B premise corrected**: the checkpoint text this session inherited (see the
+  correction above, task 90) was independently re-confirmed still accurate; §12.11's own true
+  residual (`D116`) is untouched and unaffected.
+- Fresh §12 Rollup (research-49): **42 of 48** at that wave's `HEAD` — unchanged from the prior
+  measurement, since the wave's own work narrowed three criteria without fully closing any of them
+  (consistent with task 89's correct refusal to overclaim).
+
+**Wave 34 (tasks 96-98, plus research-51 and a second independent audit)** — survived one
+platform-wide session rate-limit interruption mid-wave (all 5 dispatches failed simultaneously on
+both sonnet and opus tiers; recovered via `SendMessage` resume rather than a fresh redispatch, per
+this session's own memory on agent dormancy):
+- **§12.31 case (ii)'s rollback mechanism CLOSED** (task 96, "task 2" of the ruled sequence):
+  `cli._ordered_revert_shas` re-anchored off the real `Hoisted-Contract:` git trailer (a new
+  `vcs.commits.find_contract_hoist_merge`) instead of `PullRequestDraft.contract_id`, which D122
+  had already shown no production code ever sets. The rollback now correctly identifies and targets
+  the contract's own merge under the controller-scoped trigger. A Rule 14 dated marker was added to
+  `docs/SPEC.md` itself, carrying the controller's ruling out of the SDD ledger and into the
+  tracked doc for the first time. **§12.31 correctly stays OPEN** — two disclosed sub-questions
+  remain (the literal trigger's unreachability, and an untested `EDGE_BREAK`/`ATOMIC_WAVE` clause)
+  — a qualified "PARTIALLY CLOSED" heading was used rather than an overclaimed DONE flip.
+- **§12.37 CLOSED** (task 97): the last of its four done-bar items — stub creation via a genuine
+  `fleet resume --stub-blocked` CLI dispatch (not a seeded row) — chained into task 89's existing
+  retry→sync→resume proof, so the whole scenario (creation through resolution) is now one
+  continuous real-CLI-driven proof matching SPEC's literal text.
+- **Worktree-tooling friction closed for good** (task 98): a recurring problem hit independently
+  twice this session (tasks 90 and 94: a fresh `git worktree add` has no `tools/bin/{bazel,
+  ast-grep,gh}` or `.venv` binaries, since they're gitignored) turned out to have a pre-existing
+  partial fix (`tools/worktree/new-worktree.sh`, since 2026-08-18) that only worked for worktrees
+  it creates itself at its own space-containing-path convention — never for the space-free
+  scratchpad paths every dispatched task in this session actually uses. Extracted the shared
+  provisioning logic into `tools/worktree/lib-provision.sh` and added
+  `tools/worktree/provision-existing.sh <path>` to provision an already-existing worktree in place;
+  proven end to end against the exact 81 tests that were previously failing, under a fully stripped
+  `PATH`.
+- Fresh §12 Rollup (research-51): **43 of 48** — the mover is §12.14 (D131), confirmed in code, not
+  narrative. Also: **§12.43-C sized down** from a feared multi-task breakdown to ONE TEST-ONLY task
+  — the full HEAVY-tier failure-halt chain was traced end to end through existing code, and a
+  two-arm fixture design (a live stub server as control, two closed ports as the outage, on a
+  reserved low port to avoid a bind-then-close TOCTOU race) is ready to dispatch without further
+  research. A **real defect was upgraded**: task 94's original 1-site `rewrite.py` misclassification
+  finding (a `WorkerRepairError`-wrapped `TierUnavailable` reads as `FailureClass.UNKNOWN` instead
+  of `BACKEND_UNAVAILABLE`) is actually 3 production HEAVY-tier call sites across 2 files —
+  `buildgen.py`'s two sites are worse, silently swallowing the LLM error entirely and returning a
+  deterministic fallback with no disclosure. Root cause is narrow (`base.py::classify_exception`
+  never consults `LlmError.failure_class`), recommended as its own small parallel task, not folded
+  into 43-C. **D116** (§12.11's true residual) reconfirmed OPEN, LARGE, genuinely NEW-MECHANISM,
+  needing its own design-research pass before any build dispatch — plus a hidden Rule-14 hazard
+  flagged for whoever picks it up (`schema.sql`'s `baseline_test_count` column doc is ambiguous
+  between a target-count and a test-case-count reading, and §12.11's `>=` comparison needs which
+  one resolved before building against it).
+- Independent audit (audit-2) re-verified D131/§12.14, D132's filing, the four ADR-0119-premise
+  annotations, §12.37's pre-task-97 `PARTLY ADDRESSED` status, and all gates/ruff/mypy — all
+  CONFIRMED. Two Minor overclaims found in D131's own ledger entry (a misattributed SPEC citation;
+  an incompletely-disclosed induction-argument gap in the "whole descendant set" closure claim) —
+  logged for a future doc-hygiene sweep, not urgent.
+
+**Both waves' task reviews caught real, worth-fixing issues before merge** — none required more
+than one fix round: task 94's own new documentation text broke the citation-hygiene gate on its
+first landing (fixed same-day); task 96's mutation-battery claim was overstated ~2× in three
+places, caught by an independent re-measurement and corrected in the two tracked docs (the report's
+own gitignored scratch-file residual was patched directly by the controller, not part of the merged
+diff). Zero findings were silently discarded; every Minor was explicitly deferred and logged rather
+than dropped.
+
+**Status: main green.** Citation-hygiene/findings-kinds/writer-statements gates re-verified clean
+after every one of the 8 merges this session (89 through 98), ruff and mypy clean throughout (130
+source files), every touched test file independently re-confirmed passing directly on `main` by the
+controller after each merge (354, 106, 172, 140, 275, 94, 94, 169 tests respectively across the
+merges where a full re-run was practical) — not merely trusted from the task review.
+
+**§12 count: 43 of 48, measured at `ce65208`** (research-51), predating wave 34's own §12.37
+closure (task 97). Per Rule 13, the next round must re-measure directly against current `HEAD`
+before crediting §12.37's flip or picking further targets — this checkpoint deliberately does not
+round up to 44 on inference.
+
+**Remaining open criteria (5, pending re-measurement): §12.11, §12.31, §12.37 [pending credit],
+§12.39, §12.43.** Cheapest/highest-leverage first:
+- **§12.43-C** — ONE TEST-ONLY task, fully sized (two-arm HEAVY-tier fixture design ready), no
+  further research needed. Highest leverage identified this session.
+- **§12.31** — rollback mechanism closed; remaining gaps are the disclosed sub-questions
+  (unreachable literal trigger needs a real adjudication decision, not a build; the
+  `EDGE_BREAK`/`ATOMIC_WAVE` clause needs a TEST-ONLY fixture) — no new mechanism required.
+- **§12.39** — its own `docs/CRITERIA_PLAN.md` entry states it is unrelated to §12.37's done bar
+  (different sub-cases: `STUB_DIVERGED`, `BUDGET_EXHAUSTED`, batching) — untouched this session,
+  needs its own fresh scoping pass.
+- **§12.11** — `D116` confirmed LARGE/NEW-MECHANISM (native per-ecosystem build/test runner across
+  6 ecosystems, container images, the write path), needs its own design-research pass before a
+  build dispatch — not cheap, lowest leverage of the remaining items.
+- **New, not-yet-D-numbered defect**: the 3-site HEAVY-tier `LlmError` misclassification
+  (`rewrite.py`/`buildgen.py`) — small, parallel, independent of 43-C's fixture work.
