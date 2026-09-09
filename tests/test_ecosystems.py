@@ -29,6 +29,7 @@ from fleet.models.build import BuildTarget, BuildUnit, InternalDep, Resolution, 
 from fleet.models.enums import ContractKind, Ecosystem
 from fleet.models.repo import Coordinate
 from fleet.settings import BuildSection
+from tests.fixtures.adapters.ruby_ecosystem import make_ruby_ecosystem_adapter
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SRC_ROOT = REPO_ROOT / "src"
@@ -621,6 +622,119 @@ def test_py_maps_a_distribution_to_python_targets() -> None:
     assert (dep.extension, dep.repo_name) == ("pip.parse", "pypi")
     (toolchain,) = adapter.toolchain_requirements()
     assert (toolchain.ruleset, toolchain.extension) == ("rules_python", "python.toolchain")
+
+
+# =======================================================================================
+# `native_baseline` — §12.11/D116's Leg A capability (ADR-0135, `docs/DECISIONS.md`)
+# =======================================================================================
+
+#: The two ecosystems the real fixture fleet exercises (research-53 + ADR-0135; confirmed
+#: against `tests/test_scan_e2e.py::FIXTURE_REPOS` at the top of this task, unchanged since).
+_NATIVE_BASELINE_IMPLEMENTED: frozenset[Ecosystem] = frozenset({Ecosystem.PYPI, Ecosystem.NPM})
+
+
+def test_py_native_baseline_reports_a_plausible_build_test_and_count() -> None:
+    """A unit WITH native tests: `test_unit_count` must be `1` (this adapter's own one-`py_test`-
+    per-unit collapsing), never the raw test-FILE count, or `test_count_regressed`
+    (`workers/buildverify.py:695`) would false-fire the moment a healthy migration compared a
+    real native test-case/file count against a migrated `bazel query` target count (ADR-0135
+    ruling 1, D134)."""
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    unit = _unit(
+        "acme-svc",
+        Ecosystem.PYPI,
+        "py/acme-svc",
+        srcs=["acme_svc/__init__.py"],
+        test_srcs=["tests/test_a.py", "tests/test_b.py", "tests/conftest.py"],
+    )
+    baseline = adapter.native_baseline(unit)
+    assert baseline is not None
+    assert baseline.build_argv[0:2] == ["python3", "-m"]
+    assert baseline.test_argv[0:2] == ["python3", "-m"]
+    assert baseline.test_unit_count == len(adapter.test_targets(unit)) == 1
+
+
+def test_py_native_baseline_reports_zero_for_a_unit_with_no_native_tests() -> None:
+    """`tests_lost` (`workers/buildverify.py:686`) requires a green baseline with zero native
+    tests to record `0`, never a sentinel — the same distinction §12.11's schema comment
+    (`baseline_test_count … NOT NULL DEFAULT 0, CHECK >= 0`) makes at the column level."""
+    adapter = ecosystems.for_ecosystem(Ecosystem.PYPI)
+    unit = _unit("acme-lib", Ecosystem.PYPI, "py/acme-lib", srcs=["acme_lib/__init__.py"])
+    baseline = adapter.native_baseline(unit)
+    assert baseline is not None
+    assert baseline.test_unit_count == 0
+    assert baseline.test_argv, "a test command must still be declared even with 0 native tests"
+
+
+def test_js_native_baseline_does_not_double_count_the_compile_only_ts_project() -> None:
+    """`JsAdapter.test_targets()` emits TWO `BuildTarget`s for a unit with tests (a compile-only
+    `ts_project` plus one `js_test`), so a naive `len(test_targets(unit))` would report `2` —
+    double what `bazel query 'tests(//<dest>/...)'` (which only matches actual TEST rules) would
+    ever return. This is the exact scenario `native_test_unit_count`/`NativeBaseline` exist to
+    get right: `test_unit_count` must stay `1`."""
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    unit = _unit(
+        "acme-ui",
+        Ecosystem.NPM,
+        "ts/acme/ui",
+        srcs=["src/main.ts"],
+        test_srcs=["src/main.test.ts"],
+        published=Coordinate(ecosystem=Ecosystem.NPM, group="@acme", name="ui"),
+    )
+    targets = adapter.test_targets(unit)
+    assert len(targets) == 2, "fixture assumption: a ts_project compile target plus one js_test"
+    assert [t.rule for t in targets] == ["ts_project", "js_test"]
+
+    baseline = adapter.native_baseline(unit)
+    assert baseline is not None
+    assert baseline.build_argv == ["npm", "install"]
+    assert baseline.test_argv == ["npm", "test"]
+    assert baseline.test_unit_count == 1
+
+
+def test_js_native_baseline_reports_zero_for_a_unit_with_no_native_tests() -> None:
+    adapter = ecosystems.for_ecosystem(Ecosystem.NPM)
+    unit = _unit(
+        "acme-ui",
+        Ecosystem.NPM,
+        "ts/acme/ui",
+        srcs=["src/main.ts"],
+        published=Coordinate(ecosystem=Ecosystem.NPM, group="@acme", name="ui"),
+    )
+    baseline = adapter.native_baseline(unit)
+    assert baseline is not None
+    assert baseline.test_unit_count == 0
+
+
+@pytest.mark.parametrize("eco", sorted(set(Ecosystem) - _NATIVE_BASELINE_IMPLEMENTED))
+def test_an_unimplemented_adapter_inherits_the_default_none_native_baseline(
+    eco: Ecosystem,
+) -> None:
+    """The other five `Ecosystem` members (Leg A's disclosed residual, ADR-0135) have not
+    implemented `native_baseline` and must keep answering `None` — the base class default,
+    never a crash — so `repos.baseline_ok` stays NULL for their repos rather than the pipeline
+    failing outright."""
+    adapter = ecosystems.for_ecosystem(eco)
+    unit = _unit("u", eco, f"{adapter.monorepo_dir}/u", srcs=["a.txt"])
+    assert adapter.native_baseline(unit) is None
+
+
+def test_a_fixture_adapter_for_a_brand_new_language_inherits_the_default_none_native_baseline() -> (
+    None
+):
+    """The exact guarantee `native_baseline`'s non-abstract design protects (§12.34, ADR-0135):
+    a fixture adapter for a language this fleet has never shipped — built with the MINIMAL
+    5-abstract-method surface `tests/fixtures/adapters/ruby_ecosystem.py` already uses for
+    §12.34's own touchpoint test — must still construct and answer `None`, with ZERO changes to
+    that fixture file. Constructed directly (never registered/discovered), so this does not need
+    §12.34's decoy-`Ecosystem`-member monkeypatch machinery: the class only needs a REAL
+    `Ecosystem` member to satisfy `register()`'s non-empty check, and this test never calls
+    `register()` at all.
+    """
+    ruby_adapter_cls = make_ruby_ecosystem_adapter(Ecosystem.PYPI)
+    adapter = ruby_adapter_cls()
+    unit = _unit("acme-gem", Ecosystem.PYPI, "ruby/acme-gem", srcs=["lib/acme_gem.rb"])
+    assert adapter.native_baseline(unit) is None
 
 
 def test_go_delegates_to_gazelle_and_emits_no_targets() -> None:

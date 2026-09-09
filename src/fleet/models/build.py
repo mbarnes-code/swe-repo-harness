@@ -260,6 +260,52 @@ class Resolution(FleetModel):
         return self
 
 
+class NativeBaseline(FleetModel):
+    """An `EcosystemAdapter`'s declaration of how to measure one `BuildUnit`'s PRE-migration,
+    native (non-Bazel) build and test suite — the producer §12.11/D116 names and no adapter has
+    ever built before (ADR-0135, `docs/DECISIONS.md`; Leg A of the native-baseline-build chain).
+
+    **Data, not an action, for `Resolution`'s own reason above:** the adapter stays pure (§7.5) —
+    no subprocess, no network, no filesystem read outside `unit.dest` — and a future worker (Leg
+    B, not built by this task) is what actually runs `build_argv`/`test_argv`, through the
+    `CommandRunner` seam, inside the per-ecosystem NETWORKED container ADR-0135 ruling 3 places
+    architecturally outside Bazel's own `--network=none` sandbox — never inside it.
+
+    **`test_unit_count`'s granularity is the load-bearing fact (ADR-0135 ruling 1, filed as
+    `D134`).** SPEC's own comparison is `bazel query 'tests(//<dest>/...)' | wc -l` against
+    `repos.baseline_test_count` — a count of MIGRATED TEST-RULE targets (`bazel/query.py::
+    tests_query`), and `py.py`/`jvm.py`/`js.py` each collapse an arbitrary number of native test
+    files into at most ONE such target per `BuildUnit` (`test_targets()`; `js.py` emits a second,
+    non-test `ts_project` compile target alongside its `js_test`, which `bazel query 'tests(...)'`
+    does not count). A native-side count of raw test CASES or test FILES is therefore a
+    different unit than what it is compared against, and would false-fire
+    `workers/buildverify.py::test_count_regressed` on a perfectly healthy migration the moment
+    more than one native test exists. `test_unit_count` MUST therefore be computed at the SAME
+    per-`BuildUnit` granularity `test_targets()` already uses on the migrated side — the number of
+    that adapter's own `test_targets(unit)` entries whose `rule` is an actual Bazel TEST rule
+    (`rule.endswith("_test")`, the convention every test rule macro in this fleet uses:
+    `py_test`/`java_test`/`js_test`/`go_test`/`rust_test`), never a raw file or assertion count.
+    """
+
+    build_argv: list[str] = Field(
+        default_factory=list,
+        description="The native build/install command, argv only (never a shell string), run "
+        "with the unit's own PRE-migration repo root as cwd. Empty for a dialect with no "
+        "separate build step (pytest collects and runs directly; there is nothing to compile).",
+    )
+    test_argv: list[str] = Field(
+        min_length=1,
+        description="The native test command, argv only, run with the unit's own PRE-migration "
+        "repo root as cwd, after `build_argv` (if any) succeeds.",
+    )
+    test_unit_count: int = Field(
+        ge=0,
+        description="The native test suite's size at the SAME per-BuildUnit granularity "
+        "test_targets() produces on the migrated side (ADR-0135 ruling 1) -- NOT a raw "
+        "test-case or test-file count.",
+    )
+
+
 class BuildPlan(FleetModel):
     """bazel/emit.py's output for one unit. Persisted as the buildgen worker's checkpoint;
     `artifacts/build/<run_id>/<unit>.plan.json`."""

@@ -41,6 +41,7 @@ from fleet.models.build import (
     BuildTarget,
     BuildUnit,
     GazelleConfig,
+    NativeBaseline,
     Resolution,
     SupportFile,
     ToolchainRequirement,
@@ -65,6 +66,7 @@ __all__ = [
     "library_loads",
     "library_rules",
     "monorepo_dirs",
+    "native_test_unit_count",
     "package_relative",
     "path_segment",
     "register",
@@ -207,6 +209,21 @@ def select_entrypoint(srcs: Sequence[str], candidates: Sequence[str]) -> str | N
         if matches:
             return sorted(matches)[0]
     return None
+
+
+def native_test_unit_count(test_targets: Sequence[BuildTarget]) -> int:
+    """`NativeBaseline.test_unit_count`'s shared derivation (ADR-0135 ruling 1): the number of
+    `test_targets` entries that are an actual Bazel TEST rule, never a raw `len(test_targets)`.
+
+    Ecosystem-NEUTRAL for the same reason `union_workspace_files` is: `js.py::test_targets()`
+    returns a compile-only `ts_project` alongside its one `js_test`, so counting every entry would
+    report 2 test units for something `bazel query 'tests(//<dest>/...)'` (and a real native test
+    runner) would both call ONE. Every test-rule macro any adapter in this fleet emits ends in
+    `_test` (`py_test`, `java_test`, `js_test`, and `rust.py`'s own `rust_test` targets, should a
+    future adapter call this helper) — Bazel's own test-rule naming convention, not a
+    per-ecosystem guess this function would have to special-case.
+    """
+    return sum(1 for target in test_targets if target.rule.endswith("_test"))
 
 
 def union_workspace_files(
@@ -508,6 +525,31 @@ class EcosystemAdapter(ABC):
         coordinates in ANY of these units owes nothing either.
         """
         _ = units
+        return None
+
+    def native_baseline(self, unit: BuildUnit) -> NativeBaseline | None:
+        """This unit's PRE-migration, native (non-Bazel) build+test probe (§12.11/D116,
+        ADR-0135's Leg A) — or `None` if this adapter declares no native-baseline capability.
+
+        **Non-abstract, deliberately (ADR-0135's own reasoning, `docs/DECISIONS.md`).** §12.34's
+        acceptance test requires that adding a language show ZERO changed files in `src/fleet/`
+        outside `models/enums.py`, and `tests/fixtures/adapters/ruby_ecosystem.py` is a fixture
+        adapter this repo already ships that would break under a new `@abstractmethod` here. A
+        defaulted method breaks neither guarantee — the fixture adapter inherits this default
+        unmodified and answers `None`, exactly like `resolution()` above for a dialect that needs
+        none.
+
+        Implemented only by the adapters whose ecosystem the real fixture fleet
+        (`tests/test_scan_e2e.py::FIXTURE_REPOS`) actually exercises — not speculatively for
+        every `Ecosystem` member (CLAUDE.md Rule 2, YAGNI). An adapter that has not implemented
+        this keeps `repos.baseline_ok` NULL forever for its ecosystem, which is a disclosed
+        residual (ADR-0135), not a crash: nothing downstream treats `None` as an error.
+
+        Per §12.6/ADR-0100, this knowledge MUST live here and nowhere else — a driver branching
+        `if ecosystem == ...` to decide whether a native baseline exists is exactly what this
+        method exists to make unnecessary.
+        """
+        _ = unit
         return None
 
     # ---------------------------------------------------------------- shared, non-overridden
