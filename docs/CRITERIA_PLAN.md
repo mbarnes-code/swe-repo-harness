@@ -826,6 +826,34 @@ the assertion to *"the fixture run,"* whose current fixture fleet is only {PyPI,
 empty repo (not all six ecosystems). Do not round up the `<n> of 48` count for §12.11 on this
 account — no code has landed yet, only scoping and adjudication.
 
+**Leg D closed by round VI task 108 (2026-09-09), on branch `agent/roundvi-task108` (not yet
+merged to main at time of writing).** `docker/fleet-baseline.Dockerfile` — Debian bookworm-slim,
+network-enabled (`FROM` chain has no `--network=none` anywhere near it, unlike
+`fleet-build.Dockerfile`) — provisions exactly the two toolchains the re-confirmed fixture fleet
+needs: `python3`/`python3-pip` (+ `pytest`/`pytest-asyncio` baked in at build time, since neither
+fixture Python repo's `pyproject.toml` declares pytest as a dependency) and `nodejs`/`npm` (apt,
+Debian bookworm's own packages — 3.11/18.20, not the migrated side's 3.12/TS-5.6.3 pins, which is
+correct per ADR-0135 ruling 3: a native baseline probes the repo's OWN pre-migration environment,
+never the harness's post-migration one). Two arbitrary-uid fixes mirror `fleet-build.Dockerfile`'s
+own HOME/USER precedent, applied to pip instead of Bazel: `PIP_BREAK_SYSTEM_PACKAGES=1` (Debian's
+PEP-668 gate otherwise refuses `pip install -e .` outright) and `PIP_USER=1` + a world-writable
+`HOME=/home/fleet` (an arbitrary host uid has no write access to root-owned system
+site-packages). `preflight.baseline_build` gained `container_image`/`container_memory`/
+`container_cpus`/`network` (`settings.py`), mirroring `VerifySection`'s own four fields exactly —
+disclosed as inert in `tests/test_config_keys_are_read.py` (qualified match required: the bare
+names collide with `VerifySection`'s genuinely-wired identical field names) pending Leg B's
+`spec_for_attempt` wiring. Verified LIVE (Docker was available in this sandbox, not merely
+assumed): `tests/test_baseline_container.py`, 3 tests, all green against a REAL built image
+(`docker build -f docker/fleet-baseline.Dockerfile -t fleet-baseline:py3.11-node18 docker/`) via
+the production `spec_for_attempt`/`docker_run_argv`/`ContainerSandbox` path — a real
+`pip install -e .` resolving a real PyPI dependency (`requests`) then `pytest` passing, a real
+`npm install` resolving a real npm dependency (`left-pad`) then `npm test` passing, and the
+arbitrary-uid/no-`--env` fix proven directly (not assumed) the same way
+`test_the_fleet_build_image_runs_bazels_lookups_as_an_unmapped_uid` proves it for the sibling
+image. Full report: `.superpowers/sdd/round-VI-criteria-closure/task-108-report.md`. Does **not**
+close D116 or move the `<n> of 48` count — Leg B (the worker), Leg C (the red path) and Leg E
+(the fixture strengthening + xfail deletion) remain open.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
