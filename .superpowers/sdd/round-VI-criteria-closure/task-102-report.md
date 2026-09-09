@@ -155,3 +155,84 @@ Per the brief, `docs/CRITERIA_PLAN.md`'s §43 entry is left for the controller t
    discriminates the test but via a different mechanism (a schema CHECK constraint) than "the cap
    correctly refuses an escalation that would otherwise happen" — worth the controller's own
    read before treating this sub-clause as airtight.
+
+---
+
+## Fix round (post-review): case (ii)'s cooldown/HALF_OPEN-recovery half — now closed
+
+**The review finding was correct, and my original blocker claim was wrong.** I had grepped for
+`llm_concurrency(` (a literal method name) and found only its own unused declaration
+(`settings.py:1305`), and concluded no config knob could serialize HEAVY-tier dispatch. The
+reviewer traced the actual data flow, which does not go through that method at all:
+
+- `settings.py:228-238` — `LlmConcurrency.heavy` (default 2), `for_tier()`.
+- `orchestrator/budgets.py:1131-1140` — `Limits.create()` builds a `ResizableLimiter` per tier,
+  sized from `concurrency.llm.for_tier(tier)`.
+- `workers/classify.py:162` — `async with ctx.limits.for_tier(tier):` wraps the ENTIRE
+  `ctx.llm.complete(...)` call in `ClassifyWorker` — the exact worker every test in this file
+  drives.
+
+Setting `concurrency.llm.heavy: 1` in the fixture's `fleet.yaml` (a legal, already-declared
+operator config path — `FLEET_YAML` already has a `concurrency:` block) genuinely serializes the
+two repos' classify dispatch. **Measured directly, not assumed:** a responder logging arrival
+order showed `fixture-heavy-a`'s full 15-raw-request retry-and-failover sequence (repo 1)
+complete entirely before repo 2's first request to that target ever arrived — no interleaving,
+confirmed by inspecting the raw call log, the same way the earlier (wrong) 0.6-21ms-apart
+measurement was obtained, just with the config leaf added.
+
+### What was added
+
+`tests/test_heavy_tier_outage_e2e.py::test_case_ii_cooldown_and_half_open_recovery_on_the_fixture_fleet`,
+placed directly after the existing `test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet`
+(left completely unmodified, still proving the OPEN-transition/failover half with a large
+`cooldown_s` that deliberately never recovers). The new test:
+
+- Serializes dispatch with `concurrency.llm.heavy: 1`.
+- Sets `open_after_failures: 1` (repo 1's single qualifying failure opens the breaker) and
+  `cooldown_s: 0` — the schema's own integer floor (`llm.failover.cooldown_s: int`, a fractional
+  value is rejected at config load, confirmed directly: `Input should be a valid integer, got a
+  number with a fractional part`). `cooldown_s: 0` makes `may_call`'s elapsed check
+  (`self.clock() - state.down_since < self.cooldown_s`) unconditionally false regardless of real
+  wall-clock timing (`elapsed < 0` can never hold), so recovery does not depend on racing repo 2's
+  start against repo 1's finish — it is eligible to probe the instant it checks.
+- `fixture-heavy-a`'s responder answers 429 for its own first 20 raw requests (a threshold
+  measured and set with margin above repo 1's exact, deterministic 15-request exhaustion count —
+  `max_transient_retries=4` × up to `_SDK_TRANSIENT_RETRIES=2` retries + 1 initial SDK attempt =
+  5 × 3 = 15, governed by hardcoded module constants, not jitter) and succeeds after that, so
+  whichever request turns out to be repo 2's `HALF_OPEN` probe lands on a real success.
+- Asserts the full lifecycle from real `backend_health_transition` events:
+  `UP -> DOWN` ("N consecutive qualifying failures"), `DOWN -> HALF_OPEN` ("cooldown elapsed;
+  probing"), `HALF_OPEN -> UP` ("probe succeeded"); exactly one `backend_failover` event (repo
+  1's, trigger `RATE_LIMIT`); `llm_cache` showing ONE row on `fixture-heavy-b` (repo 1's
+  failover) and ONE on the RECOVERED `fixture-heavy-a` (repo 2's probe) — not two on
+  `fixture-heavy-b`, which is what a silently-failed recovery would read as; and a bounded raw
+  call-log length (16-35 requests total), the busy-loop-avoidance half of case (ii)'s own
+  sentence, over the SAME recorded call log the unit-level test already uses this technique for.
+
+### Rule 12 mutation for the new test
+
+`llm/failover.py::record_success` mutated to return immediately (before clearing
+`consecutive_failures`'s transition / ever calling `_transition(..., "UP", ...)`) — reddens ONLY
+the new recovery test (6/7 tests in the file still passed); the assertion that fails is the
+`UP`-transition check in the lifecycle list, exactly the property this mutation removes. Reverted;
+`git diff --stat src/` confirmed empty both before and after.
+
+### Verification (fix round)
+
+- `tests/test_heavy_tier_outage_e2e.py`: 7/7 passed (the 6 from the original round + the new
+  recovery test).
+- Full covering set (`test_heavy_tier_outage_e2e.py`, `test_llm_failover.py`,
+  `test_llm_findings.py`, `test_transform_e2e.py`, `test_llm_openai_stub_server_e2e.py`,
+  `test_local_profile_e2e.py`): 68/68 passed.
+- `ruff check` on both changed files: clean.
+- `mypy` (whole-manifest scope): identical 57-error total as before this fix round (zero new
+  errors introduced).
+- `git diff --stat src/`: empty at the end of the fix round.
+
+### Case (ii) status: now FULLY closed on the real fixture fleet
+
+Both halves — the OPEN-transition/failover-to-second-target half (proven by the original,
+unmodified test) and the cooldown/`HALF_OPEN`-recovery half (proven by the new test) — are now
+driven through the real CLI on the real two-repo fixture fleet. Residual 1 of
+`docs/CRITERIA_PLAN.md` §43 (the "on the fixture fleet" framing clause) is therefore closed in
+full for cases (i), (ii), and (iii) — no partial-closure caveat remains for case (ii).

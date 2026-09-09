@@ -522,33 +522,26 @@ def test_case_i_connection_failover_on_the_fixture_fleet(
 
 # ---------------------------------------------------------------------------------------------
 # Case (ii): a target whose whole §11.8 backoff schedule is exhausted by 429s opens the breaker
-# and the run fails over to the second target.
+# and the run fails over to the second target; a later probe past cooldown restores it.
 # ---------------------------------------------------------------------------------------------
 #
-# **Disclosed scope, stated precisely rather than papered over.** This test closes the OPEN-
-# transition/failover-to-second-target half of case (ii) on the real fixture fleet: a genuine
-# `RateLimitError` (via a real HTTP 429 from the stub server), walking the real SDK-plus-client
-# backoff schedule, marks `fixture-heavy-a` DOWN and the run completes via `fixture-heavy-b`.
-#
-# It does NOT close the cooldown/`HALF_OPEN`-recovery half on the real fixture fleet. That half
-# needs a SECOND classify call against the SAME (now-DOWN) target within the SAME client
-# instance — `BackendHealth` is deliberately per-run, not persisted (§11.8), so recovery cannot
-# be split across two separate CLI invocations the way the resume test above splits the halt
-# from the reclaim. Within ONE invocation, this fixture's two repos are dispatched from ONE
-# `asyncio.TaskGroup` (`orchestrator/runner.py`'s own docstring: "one task per repo") with no
-# ordering guarantee — measured directly (a throwaway responder logging arrival timestamps: the
-# two repos' classify calls to the same target land 0.6 ms to 21 ms apart across five runs, too
-# close and too variable to build a non-flaky cooldown/probe test on). The one config knob that
-# could serialize HEAVY-tier dispatch, `concurrency.llm.heavy`
-# (`settings.py::LlmConcurrency`/`ConcurrencySection.llm`), is read by nothing in `src/` —
-# `grep -rn "llm_concurrency(" src/fleet/` returns only the method's own declaration
-# (`settings.py:1305`), never a call site — so it cannot be used to force the ordering either.
-# Closing this residual for real would need either a production change (wiring that semaphore, or
-# another way to force sequential dispatch — out of this TEST-ONLY task's scope per its own
-# brief) or accepting a timing-flaky test, which CLAUDE.md Rule 12 forbids building. The recovery
-# half therefore remains proven only at the component level
-# (`tests/test_llm_failover.py::test_cooldown_lets_exactly_one_half_open_probe_through_then_
-# success_resets_to_up`), unchanged from before this task.
+# **Corrected (round VI task 102 fix round) — the recovery half IS closable on the real fixture
+# fleet, and the note this replaces was wrong about why not.** That note claimed no config knob
+# in `src/` could serialize HEAVY-tier dispatch, based on a literal grep for `llm_concurrency(` —
+# a method that is real but genuinely unused (`settings.py:1305`'s own declaration is the only
+# hit). Review traced the ACTUAL data flow, which does not go through that method at all:
+# `settings.py`'s `LlmConcurrency.for_tier()` sizes a `ResizableLimiter` per tier in
+# `orchestrator/budgets.py::Limits.create()`, and `workers/classify.py:162` wraps `ClassifyWorker`'s
+# entire `ctx.llm.complete(...)` call in `async with ctx.limits.for_tier(tier):` — exactly the
+# worker both tests below drive. Setting `concurrency.llm.heavy: 1` (a legal, already-declared
+# `fleet.yaml` section — see `FLEET_YAML`'s own `concurrency:` block) genuinely serializes the two
+# repos' classify calls: measured directly, `fixture-heavy-a`'s raw request timestamps show one
+# repo's full retry-and-failover sequence (15 raw HTTP attempts, ~13s) complete before the second
+# repo's first request ever arrives — no interleaving, confirmed by inspecting arrival order, not
+# assumed. `test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet` above still proves the
+# OPEN-transition/failover half (with a large `cooldown_s` so recovery deliberately never
+# triggers, keeping that test's scope narrow); the test below closes the cooldown/`HALF_OPEN`
+# recovery half the note used to disclaim.
 
 
 def test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet(
@@ -633,6 +626,137 @@ def test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet(
         for backend, model_id in cache_rows:
             assert backend == "openai_compatible"
             assert model_id == "fixture-heavy-b"
+
+
+#: `fixture-heavy-a`'s own retry-and-failover sequence (client `max_transient_retries=4` × up to
+#: `_SDK_TRANSIENT_RETRIES=2` retries + 1 initial SDK attempt = 5 × 3 = 15 raw HTTP requests,
+#: measured directly, deterministic — jitter only varies the SLEEP between them, never the
+#: COUNT) always completes within its own first 15 raw requests. This threshold is set well
+#: above that (20, not 15) so repo 1's own exhaustion can never accidentally cross it, while
+#: staying well inside repo 2's own retry budget (it needs at most 5 more failing attempts,
+#: comfortably under its own 15-request ceiling) — repo 2's probe succeeds quickly rather than
+#: needing its own full retry budget.
+_CASE_II_RECOVERY_SUCCESS_AFTER: int = 20
+
+
+def test_case_ii_cooldown_and_half_open_recovery_on_the_fixture_fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.43 case (ii)'s cooldown/`HALF_OPEN`-recovery half, on the real fixture fleet —
+    `docs/CRITERIA_PLAN.md` §43's residual the review round on this task found was NOT actually
+    blocked (see the corrected module comment above `test_case_ii_backend_health_breaker_opens_
+    on_the_fixture_fleet`).
+
+    `concurrency.llm.heavy: 1` genuinely serializes the two repos' classify dispatch (`workers/
+    classify.py:162`'s `async with ctx.limits.for_tier(tier):` around the whole `ctx.llm.
+    complete(...)` call, sized from this exact config leaf via `orchestrator/budgets.py::Limits.
+    create()`), so repo 1's entire retry-and-failover sequence against `fixture-heavy-a`
+    completes before repo 2's classify call ever starts — no interleaving, unlike the concurrent
+    dispatch this task's first attempt measured. `open_after_failures: 1` opens the breaker on
+    repo 1's single qualifying failure; `cooldown_s: 0` (the schema's own integer floor — a
+    fractional value is rejected at config load) makes the very next `may_call` check
+    unconditionally eligible to probe (`elapsed < 0` can never hold), which is repo 2's — so
+    recovery does not depend on any wall-clock race between repo 1 finishing and repo 2 starting.
+    `fixture-heavy-a`'s responder answers 429 for its own first `_CASE_II_RECOVERY_SUCCESS_AFTER`
+    requests (covering repo 1's entire exhaustion with margin) and succeeds after that, so
+    whichever request is repo 2's `HALF_OPEN` probe eventually lands on a real success.
+
+    Asserts the full lifecycle read back from real SQLite events after a real CLI invocation:
+    `UP -> DOWN` (repo 1's exhaustion), `DOWN -> HALF_OPEN` ("cooldown elapsed; probing"),
+    `HALF_OPEN -> UP` ("probe succeeded") — and that repo 2's own `llm_cache` row is attributed
+    to the RECOVERED `fixture-heavy-a`, not `fixture-heavy-b`, proving the probe's success was
+    real and not a leftover failover.
+    """
+    fleet_yaml = FLEET_YAML.replace(
+        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n",
+        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n  llm:\n    heavy: 1\n",
+    ) + "llm:\n  failover:\n    open_after_failures: 1\n    cooldown_s: 0\n"
+    assert "llm:\n    heavy: 1\n" in fleet_yaml, "the concurrency.llm.heavy override did not apply"
+
+    calls_a: list[int] = []
+
+    def responder(request: Mapping[str, object]) -> Mapping[str, object] | StatusReply:
+        if request.get("model") != "fixture-heavy-a":
+            return _classify_responder(request)
+        calls_a.append(1)
+        if len(calls_a) <= _CASE_II_RECOVERY_SUCCESS_AFTER:
+            return StatusReply(
+                status=429,
+                body={"error": {"message": "rate limited", "type": "rate_limit_error"}},
+            )
+        content = json.dumps(
+            {
+                "ecosystem": "pypi",
+                "is_library": True,
+                "confidence": 0.9,
+                "rationale": "recovered: this is fixture-heavy-a answering after its HALF_OPEN "
+                "probe succeeded.",
+            }
+        )
+        return {
+            "model": "fixture-heavy-a",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {"role": "assistant", "content": content},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 30, "completion_tokens": 14},
+        }
+
+    with running_stub_server() as server:
+        server.set_responder(responder)
+        workspace = _make_workspace_custom(
+            tmp_path,
+            "case_ii_recovery",
+            fleet_yaml=fleet_yaml,
+            models_yaml=_MODELS_YAML_TEMPLATE.format(
+                heavy_a=server.base_url, heavy_b=server.base_url
+            ),
+        )
+        monkeypatch.chdir(workspace)
+
+        result = scan_real_classify(workspace)
+        assert result.exit_code == ExitCode.SUCCESS, result.output
+
+        # The full lifecycle, in order: UP -> DOWN -> HALF_OPEN -> UP.
+        transitions = [
+            json.loads(raw)
+            for (raw,) in query(
+                workspace, "SELECT payload FROM events WHERE event = 'backend_health_transition'"
+            )
+        ]
+        a_transitions = [t for t in transitions if t["model_id"] == "fixture-heavy-a"]
+        assert [t["to_state"] for t in a_transitions] == ["DOWN", "HALF_OPEN", "UP"], a_transitions
+        assert "open_after_failures=1" in a_transitions[0]["reason"], a_transitions[0]
+        assert "cooldown elapsed" in a_transitions[1]["reason"], a_transitions[1]
+        assert "probe succeeded" in a_transitions[2]["reason"], a_transitions[2]
+
+        # Exactly one failover (repo 1's), and it is NOT the whole story — repo 2 recovered.
+        failover_rows = query(
+            workspace, "SELECT payload FROM events WHERE event = 'backend_failover'"
+        )
+        assert len(failover_rows) == 1, failover_rows
+        (failover_payload,) = (json.loads(raw) for (raw,) in failover_rows)
+        assert failover_payload["trigger"] == "RATE_LIMIT"
+        assert failover_payload["to_model_id"] == "fixture-heavy-b"
+
+        # llm_cache: one row landed on fixture-heavy-b (repo 1's failover), one on the RECOVERED
+        # fixture-heavy-a (repo 2's probe) — not two on fixture-heavy-b, which is what it would
+        # read if the recovery silently never happened and repo 2 just failed over too.
+        cache_rows = query(
+            workspace, "SELECT model_id FROM llm_cache WHERE role = ?", ("repo_classify",)
+        )
+        assert sorted(model_id for (model_id,) in cache_rows) == [
+            "fixture-heavy-a",
+            "fixture-heavy-b",
+        ], cache_rows
+
+        # The busy-loop half of case (ii)'s own sentence, over the recorded call log: repo 1's
+        # exhaustion and repo 2's probe together must not exceed a bounded, accounted-for number
+        # of raw requests to fixture-heavy-a — never an unbounded poll.
+        assert 16 <= len(calls_a) <= _CASE_II_RECOVERY_SUCCESS_AFTER + 15, len(calls_a)
 
 
 # ---------------------------------------------------------------------------------------------
