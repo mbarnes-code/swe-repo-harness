@@ -799,6 +799,26 @@ value unchanged into `repos.baseline_test_count`, or the count-regression check 
 a value against itself. Reviewed Changes Requested → 1 fix round (corrected 2 wrong report test
 counts, added the caveat to the actual code) → scoped re-review ADDRESSED both, 0 new breakage.
 
+**Leg B closed by round VI task 107 (2026-09-09).** New `src/fleet/workers/baseline.py`
+(`BaselineWorker`, registered `"baseline"`, appended to `SCAN_UNITS`) invokes each repo's adapter's
+`native_baseline()` (Leg A) via the existing container-sandbox invocation pattern, in a separate
+networked container per ADR-0135, and writes real observed `repos.baseline_ok`/
+`repos.baseline_test_count` via `_scan_rows`. **Critically, honors Leg A's own disclosed caveat**:
+`baseline_test_count` is derived from the worker's OWN observed test-run outcome, never from
+`NativeBaseline.test_unit_count`'s static ceiling value — independently verified by review reading
+`_classify` directly. `preflight.baseline_build.enabled`/`.timeout_s` are genuinely read for the
+first time; the matching `KNOWN_INERT` entries in `tests/test_config_keys_are_read.py` are deleted
+in the same commit, while the `.enabled`/`.timeout_s` `QUALIFIED_MATCH_KEYS` entries are
+deliberately KEPT — a disclosed deviation from the brief's literal text, independently verified
+correct against the file's own qualified-match contract (deleting them would regress collision
+protection). Leg D's container image doesn't exist yet; the worker's `container_image` defaults to
+a placeholder tag that fails fast and loud (~0.3s, exit 125) rather than hanging, pending
+coordination with Leg D. Reviewed Changes Requested (1 Important finding: this task's own change
+falsified the premise of a previously-green control test in `tests/test_baseline_ok_exclusion.py`,
+which assumed every repo's `baseline_ok` stays NULL in an unmodified run) → 1 fix round (corrected
+exactly that one assertion in isolation, leaving the `strict=True` xfail test and Leg E's broader
+scope untouched) → scoped re-review ADDRESSED, confirmed not an accidental XPASS, 0 new breakage.
+
 **Leg D (container/toolchain provisioning)
 is what makes this chain LARGE rather than ordinary well-precedented harness work — its size is
 now bounded by ADR-0135's ruling and by research-53's own found narrowing that SPEC's text scopes
