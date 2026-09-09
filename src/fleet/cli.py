@@ -10732,21 +10732,23 @@ async def _ingest_build_source(
     # `<dest>/x → <dest>/x`, becomes empty, and is pruned; the result is one uniformly relocated
     # history whose tip is exactly the tree Phase 2 produced.
     #
-    # D132's owner-side subtraction, in the SAME idempotent-mapping shape as the path-rename pair
-    # just above and for the identical reason: this clone's history is mixed between raw
-    # repo-root paths (every commit behind Phase 2's relocation) and `<dest>/`-prefixed paths (the
-    # tip, and any commit at or after it). `--path`/`--invert-paths` filters on each commit's OWN
-    # path as it existed in that commit — never on the renamed result — so excluding a hoisted
-    # contract's carrier path everywhere in this history needs BOTH forms, exactly as the rename
-    # above needs both a root rule and a collapse rule. `git-filter-repo` --path matches the
-    # literal string given (`default_source_paths`'s own docstring: "matches these literally"),
-    # so this is the same literal set `_ingest_contract_source` keeps via `--path` for the
-    # CONTRACT's own merge — the include-set there and the exclude-set here are computed by the
-    # one shared `_contract_owner_paths`, so they cannot disagree about which paths a hoisted
-    # contract claims.
+    # D132's owner-side subtraction. Excludes ONLY the `<dest>/`-prefixed form of each claimed
+    # path, not the raw (pre-relocation) form — measured, not assumed, via three real
+    # `git-filter-repo` runs (round VI task 106 fix round, correcting this comment's own earlier,
+    # false "both forms are necessary, verified empirically" claim). `newname()` (`git_filter_
+    # repo.py`) walks `path_changes` — every `--path`/`--path-rename` entry, filters and renames
+    # alike — IN COMMAND-LINE ORDER for each path, mutating its own working `pathname` on every
+    # `rename` entry it passes before any LATER `filter` entry is evaluated. `filter_repo_argv`
+    # always emits both `--path-rename` rules (the whole-repo relocation just above, and its own
+    # idempotency-collapse rule) before `extra_args`, so by the time our `--path`/`--invert-paths`
+    # entries are reached, EVERY path — raw-origin or already `<dest>/`-prefixed — has already been
+    # rewritten to the one converged `<dest>/`-prefixed form; a filter checked against the raw form
+    # can therefore never match anything. Confirmed both directions: the dest-prefixed form alone
+    # reproduces this fix's own proof test passing; the raw form alone reproduces it FAILING with
+    # the exact duplicate this fix exists to remove.
     exclude_args: list[str] = []
     for claimed_path in default_source_paths(excluded_contract_paths):
-        exclude_args += ["--path", claimed_path, "--path", f"{dest}/{claimed_path}"]
+        exclude_args += ["--path", f"{dest}/{claimed_path}"]
     if exclude_args:
         exclude_args.append("--invert-paths")
     await relocate(

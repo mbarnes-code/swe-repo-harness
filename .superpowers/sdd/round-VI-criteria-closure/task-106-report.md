@@ -43,6 +43,14 @@ task builds that missing subtraction.
    prefix already rooted there). I verified this empirically, not just by argument — see
    "What I got wrong first" below.
 
+   > **CORRECTION (fix round, same day):** this paragraph's "both forms are necessary... verified
+   > empirically" claim is FALSE — the raw form is dead code in this call path (only the
+   > `<dest>/`-prefixed form ever matches, given `filter_repo_argv`'s fixed argument ordering).
+   > Left as-written above for an accurate history of what this task originally claimed; see "Fix
+   > round" below for the reviewer's finding, my own independent reproduction of it, the root
+   > cause, and the landed correction (the raw-form `--path` entry was dropped from the code
+   > entirely, per Rule 2).
+
 3. **`_build_impl`'s PASS 0 loop** (the one that calls `_ingest_contract_source` for every
    eligible `HOISTED`/`MIGRATED` contract) now also records, in a new `else:` branch that only
    runs on a **successful** ingest, `cnode.owning_repo_id -> _contract_owner_paths(cnode)` into a
@@ -207,3 +215,73 @@ current, dated statement that D132 is the sole remaining gap for §12.31 as a *c
 per the same entry). If that ledger statement is accurate — and it reads as a carefully
 cross-checked claim, not an offhand one, complete with its own superseded-framing history — then
 this task's fix, once merged and the ledger updated, closes both D132 and §12.31 as a whole.
+
+## Fix round (review Changes Requested — 1 Important, cosmetic)
+
+**Reviewer's finding.** The rest of the review confirmed the fix, the shared
+`_contract_owner_paths` helper, the PASS-0 landed-contracts-only guard, the test-design
+correction, and the Rule 12 mutation as genuinely correct — the one Important finding was
+against my own claim, not the code's behavior. My original comment (and this report, above)
+asserted "both forms [raw and `<dest>/`-prefixed] are necessary... I verified this empirically."
+The reviewer built the same mixed-history scenario and ran real `git-filter-repo` three ways:
+both forms together → correct; dest-prefixed form ALONE → identical correct exclusion; raw form
+ALONE → fails, the duplicate survives. Root cause: `filter_repo_argv` emits both `--path-rename`
+rules (the whole-repo relocation and its own idempotency-collapse rule) BEFORE `extra_args`, and
+`git_filter_repo.py`'s `newname()` walks `path_changes` — every `--path`/`--path-rename` entry,
+filters and renames alike — in command-line order, mutating a path's own working name on every
+`rename` entry it passes before any LATER `filter` entry is evaluated. So by the time our
+`--path`/`--invert-paths` entries run, every path (raw-origin or already-prefixed) has already
+converged to the single `<dest>/`-prefixed form; a filter against the raw form can never match.
+My original "verified empirically" claim was false — I had run the combined (both-forms) case and
+confirmed the FIX worked, which is not the same as verifying EACH form's individual necessity,
+and I did not run the isolating trials that would have caught this before it shipped.
+
+**What I did to fix it.** Before touching anything, I reproduced the reviewer's finding myself
+rather than taking it on trust (this project's own "receiving code review" discipline): with the
+original committed code as a baseline, I tried the dest-prefixed form alone (test passes) and the
+raw form alone (test fails with exactly the predicted duplicate,
+`ts/acme/identity/proto/acme/identity/v1/identity.proto`, surviving). Both trials reproduced
+precisely what the reviewer reported. I also read `git_filter_repo.py`'s `newname()` directly
+(`.venv/lib/python3.12/site-packages/git_filter_repo.py:3848-3874`) to confirm the mechanism the
+reviewer named, rather than accepting the root-cause explanation on its word alone.
+
+**Decision: (a) — dropped the raw-form `--path` entry as dead weight**, per CLAUDE.md Rule 2
+(simplicity) and the reviewer's own stated preference. It is empirically proven unreachable in
+this exact call path given `filter_repo_argv`'s fixed argument ordering, so keeping it as
+"defensive redundancy" would just be carrying an inert argument with no test able to distinguish
+its presence from its absence — the opposite of what defensive redundancy is for. `src/fleet/
+cli.py`'s comment above the exclusion loop is rewritten to state the true, single-form behavior
+and the mechanism behind it, replacing the false "both forms, verified empirically" claim; this
+report's own earlier "What I got wrong first" section is left as an accurate historical record of
+a DIFFERENT, real mistake (the `migrate/<repo_id>` cumulative-tree false-positive in my first test
+draft) — that section's claims were re-checked now too and hold; only the "both forms necessary"
+claim, made separately in the code comment and in this report's original "What was built" section
+item 2, was false.
+
+**Diff, this fix round:** `src/fleet/cli.py` only — the exclusion loop now emits one `--path`
+per claimed path (dest-prefixed form only) instead of two, and the comment above it is rewritten.
+15 insertions / 13 deletions net.
+
+**Rule 12 mutation, re-run against the simplified code.** Backed up, then changed
+`default_source_paths(excluded_contract_paths)` to `default_source_paths(())` in the (now
+single-form) loop — confirmed via `git diff --numstat --no-index` that this changed exactly 1
+line before trusting any result. The proof test reddened identically to the original mutation
+trial: `proto_paths == ['proto/acme/identity/v1/identity.proto',
+'ts/acme/identity/proto/acme/identity/v1/identity.proto']`. Reverted from backup; `git diff
+--stat src/` after revert showed only the intended comment/loop simplification (15+/13-), nothing
+from the mutation trial.
+
+**Re-run covering set (fix round):**
+- `test_a_hoisted_contracts_carrier_path_lands_on_integration_exactly_once` +
+  `test_a_hoisted_contracts_content_is_really_merged_with_the_trailer` +
+  `test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_merge` — 3 passed.
+- `tests/test_hoist_rollback_git.py` + `tests/test_hoist_rollback_wiring.py` +
+  `tests/test_transform_e2e.py` — 41 passed.
+- Whole `tests/test_build_e2e.py` — 87 passed in 801.97s (~13m22s), clean `bazel disk` line (peak
+  4.59 GiB / ceiling 6 GiB, residual output bases 0 bytes).
+- `ruff check src/fleet/cli.py` — all checks passed. `python -m mypy` (whole package, no path
+  args) — Success: no issues found in 130 source files.
+
+No other concerns from the fix round. The underlying fix, test, and D132/§12.31 closure
+assessment above are unchanged by this round — only the false necessity claim about the raw path
+form is corrected.
