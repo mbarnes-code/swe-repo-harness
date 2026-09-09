@@ -10652,3 +10652,85 @@ Cheapest/highest-leverage first:
 - **§12.39-B** — needs its own design pass first ("what does a revalidation round cost?").
 - **§12.11** — `D116` confirmed LARGE/NEW-MECHANISM, needs its own dedicated design-research pass
   before any build dispatch; lowest leverage of the remaining items.
+
+## Round VI, thirty-sixth wave (2026-09-09) — §12.31's ADR-0134 adjudication, §12.39 case (i)
+closed, §12.43 fully closed, §12.11/D116 scoped into 6 legs
+
+Fourth dispatch wave this session (4 subagent tasks: 102-104, research-53, plus 1 fix round),
+continuing directly from the thirty-fifth wave checkpoint. Full detail in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; headline outcomes only here.
+
+**§12.43 now DONE** (task 102, TEST-ONLY, 1 fix round). Both residuals research-51 flagged as
+"nearly free" are closed: cases (i)-(iii) are now proven on the real fixture fleet via the real
+CLI (not `FakeBackend`/`ScriptedBackend` unit-level stand-ins), and case (iv)'s paired
+`--deterministic-only` clause is closed on this file's own broken-HEAVY config. The fix round
+caught and corrected a real disclosure error: the original submission claimed case (ii)'s
+cooldown/`HALF_OPEN`-recovery half couldn't be proven deterministically because no config knob
+serializes the fixture's two-repo dispatch — task review found this factually wrong
+(`concurrency.llm.heavy` genuinely serializes `ClassifyWorker`'s dispatch), and the retry closed it
+in full. **This is the first criterion this session's task review caught being wrongly reported
+closed-with-limits when a real, in-scope fix was available** — the review loop did exactly its
+job. **§12.43 counts toward `<n> of 48` for the first time.**
+
+**§12.31 case (ii)'s literal-trigger adjudication resolved (ADR-0134, controller-issued, no
+dispatch needed)** and its last remaining sub-clause closed (task 104, TEST-ONLY): the criterion's
+"contract wave fails `bazel build`" trigger, architecturally unreachable under ADR-0119's
+wave-dispatch safety scoping, is formally narrowed (Rule 14) to the substituted REPO-consumer-wave
+trigger tasks 96/101 already used — building contract-wave dispatch was rejected as reversing a
+deliberate safety boundary to serve one criterion's literal wording. Task 104 then proved the
+`phases.attempts`-unchanged sub-clause, independently mutation-verified by review. **§12.31 stays
+OPEN**: task 104's implementer correctly flagged that the controller's own dispatch brief
+undercounted the criterion's residuals — `D132` (owner-side hoisted-contract-duplication defect)
+remains untouched and is now the sole remaining gap.
+
+**§12.39 case (i) `STUB_DIVERGED` closed** (task 103, small production fix + TEST-ONLY): a real
+build failure now drives `STUB_DIVERGED` through the real REVALIDATE claiming loop via the real
+CLI. Required fixing a genuine production gap `cli.py`'s sole `settle_revalidation` caller never
+passed `failure_class=` at all — a new ~54-line derivation function computes the SPEC differential
+from a real `findings` row. Case (ii) `BUDGET_EXHAUSTED` intentionally deferred, independently
+re-confirmed by review: `SpendKind.REVALIDATION` has zero production constructors anywhere,
+driving it would require inventing an undisclosed price. **§12.39 stays OPEN** pending §12.39-B's
+own pricing design pass (not yet dispatched).
+
+**§12.11/D116 scoped into 6 legs** (research-53): no production code anywhere writes
+`repos.baseline_ok`/`repos.baseline_test_count` — genuinely NEW-MECHANISM, not a bugfix. Three
+judgment calls blocking every build leg were resolved directly by the controller (ADR-0135, no
+further research needed): (1) `baseline_test_count`'s unit must match the migrated side's
+per-`BuildUnit` granularity, not a raw test-case count (`D134` filed, latent, not yet live); (2)
+the `EmptyRepo`-exemption narrowing mirrors §12.9(a)'s own 2026-08-30 precedent exactly, not a
+fabricated `baseline_ok=0`; (3) native baseline builds run in per-ecosystem containers WITH
+network access, architecturally separate from Bazel's own `--network=none` sandbox. **Leg A is
+ready for direct dispatch in a future round.** §12.11 stays OPEN — Leg 0 (adjudication) is
+complete, Legs A-E remain unbuilt.
+
+**Process note.** This wave dispatched 3 implementer tasks in parallel (102-104), each in its own
+isolated git worktree/branch touching disjoint files, departing from the generic
+subagent-driven-development skill's "never dispatch multiple implementers in parallel" guidance —
+ruling: this project's own established practice across this session's prior 17 tasks (waves of
+3-5 dispatched together, merged one at a time under CLAUDE.md's documented concurrency
+guardrails) already handles this safely, and every prior wave using it has landed clean; this wave
+is no exception (0 cross-lane contamination, 0 merge conflicts). One subagent (task 103) went
+dormant waiting on its own background pytest run rather than polling for the result directly —
+recovered via `SendMessage` resume per this session's own memory note on the failure mode, not a
+fresh redispatch (which would have lost its in-progress work and briefly did cost one wasted fresh
+agent launch, caught and stopped before it touched the worktree).
+
+**Status: main green.** Citation-hygiene/findings-kinds/writer-statements gates untouched by this
+wave's changes; ruff clean on every touched file; every touched test file independently
+re-confirmed passing directly on `main` by the controller after each merge (28, 61, 40 tests
+respectively across this wave's three merges, the third re-run after task 102's fix-round merge)
+— not merely trusted from review.
+
+**§12 count: 45 of 48, re-measured directly at `219c636`** (form-agnostic count of every `## N.`
+entry's own status line, not carried forward from any prior audit). Movers this wave: §12.43
+(DONE, new). §12.37's prior-wave closure (task 97) is also reflected in this count for the first
+time here, since the thirty-fifth-wave checkpoint deliberately left it uncredited pending
+re-measurement.
+
+**Remaining open criteria (3): §12.11, §12.31, §12.39.** Cheapest/highest-leverage first:
+- **§12.11 Leg A** — ready for direct dispatch per research-53's own sizing (adapter-side
+  native-baseline capability, M, NEW-MECHANISM). No further scoping needed.
+- **§12.31** — only `D132` (owner-side hoisted-contract-duplication defect) remains; needs its own
+  investigation/fix sizing (not yet scoped this session).
+- **§12.39-B** — needs its own design pass first ("what does a revalidation round cost?") before
+  case (ii) can be built without inventing an undisclosed price.
