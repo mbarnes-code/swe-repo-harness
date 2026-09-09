@@ -9354,6 +9354,19 @@ what is left is the trigger adjudication and the re-sequence clause. `docs/CRITE
 entry is updated in the same commit with the precise breakdown. Full account:
 `.superpowers/sdd/round-VI-criteria-closure/task-96-report.md`.
 
+**Update, round VI task 101 (2026-09-09, TEST-ONLY):** clause (b)'s "falls through to
+`EDGE_BREAK`/`ATOMIC_WAVE`" half is now closed — `tests/test_graph_cycles.py`'s two new tests drive
+a real re-sequence to each strategy after a real hoist-then-`FAILED` flip. The
+`phases.attempts`-unchanged half of clause (b) remains untested.
+
+**Update, round VI controller, thirty-sixth wave (2026-09-09, ADR-0134): clause (a) is now
+DECIDED, not adjudication-pending.** Contract-wave dispatch will not be built (would reverse
+ADR-0119's deliberate safety scoping for one literal trigger already proven equivalently by a
+substituted, reachable trigger). `docs/SPEC.md` §12 item 31's case (ii) trigger clause is formally
+narrowed (Rule 14) to that substituted trigger — full decision and rejected alternative at
+ADR-0134. D111 stays `OPEN`: the `phases.attempts`-unchanged half of clause (b) is the sole
+remaining gap, dispatched this wave as task 104.
+
 ## D112 — FIXED, LANDED (round VI task 87 merge, `26b065b`). `BuildUnit.test_srcs` is never
 populated by any production ecosystem adapter — no adapter can ever emit a real nonzero test
 target

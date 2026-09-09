@@ -15651,3 +15651,46 @@ Every other `LlmError` keeps the existing deterministic fallback, unchanged.
 account (reverting both sites to their pre-fix content flips the two new
 `tests/test_workers_build.py` tests RED, matching research-51's finding; restoring the fix
 returns them GREEN); not duplicated here.
+
+---
+
+## ADR-0134 — §12.31 case (ii): the literal "contract wave fails `bazel build`" trigger is
+formally narrowed, not built
+
+**Decision (2026-09-09, round VI controller, thirty-sixth wave, orders/1102-1103-1104/research-53
+dispatch).** `docs/SPEC.md` §12 item 31's case (ii) has carried a dated "Adjudication pending"
+marker since round VI task 96 (2026-09-08): its literal trigger — "a hoist whose **contract
+wave** fails `bazel build`" — is architecturally unreachable under this project's current
+wave-dispatch design, because every dispatch-side wave reader filters to `node_kind='REPO'`
+(ADR-0119's own deliberate safety scoping; a contract-kind wave is computed and persisted in
+`wave_members` but never itself dispatched). That marker deliberately left open two paths: build
+contract-wave dispatch to manufacture the literal trigger, or formally narrow the criterion's text
+via Rule 14 to the closest reachable analogous trigger (a REPO-kind consumer wave failing
+downstream of a bad hoist merge) — which tasks 96 and 101 already used, provisionally, to prove
+every other clause of case (ii) without this formal step.
+
+**Ruling: narrow, do not build.** Building contract-wave dispatch would reverse ADR-0119's
+deliberate safety scoping — a considered decision, not a stale artifact — solely to manufacture one
+literal test trigger that the substituted trigger already exercises equivalently for every other
+observable clause (the `HoistBrokeOwner` finding, `contracts.status='FAILED'`, the `git revert -m
+1` anchored on the `Hoisted-Contract:` trailer, the edge un-hoisting, and — pending task 104 below —
+the `phases.attempts`-unchanged clause). Reversing a deliberate safety boundary to satisfy a
+criterion's literal wording, when a functionally equivalent reachable trigger already proves the
+same downstream behavior, is the weaker engineering choice; CLAUDE.md Rule 14 exists precisely so
+this kind of narrowing is a disclosed decision, not silent drift.
+
+**What changes.** `docs/SPEC.md` §12 item 31's case (ii) trigger clause is narrowed from "a hoist
+whose contract wave fails `bazel build`" to "a hoist whose contract wave is discovered wrong when a
+REPO-kind consumer wave downstream of it fails `bazel build`" — the dated marker in `docs/SPEC.md`
+itself and `docs/CRITERIA_PLAN.md` §31 are updated in this same commit per Rule 14's co-location
+requirement. This is a genuine narrowing (scope, not wording-only) — disclosed here rather than let
+drift, per Guardrail 7.
+
+**Consequence for `<n> of 48`.** Once task 104 (the `phases.attempts`-unchanged sub-clause, the
+last untested clause of case (ii)) lands, §12.31 case (ii) is satisfied under the narrowed text and
+§12.31 as a whole (cases (i) and (ii)) counts toward the tally. `D111` (`docs/INTEGRATION_HONESTY.md`)
+is updated to record this adjudication in the same commit.
+
+**Alternative rejected.** Building contract-wave dispatch (Leg F, unscoped): would require undoing
+or carving an exception into ADR-0119's wave-reader filter, a change with safety implications for
+every existing REPO-only dispatch path, to serve one criterion's literal wording. Not attempted.

@@ -1646,13 +1646,17 @@ independently re-verified by task-scoped review, not assumed.
 closed (Leg A, task 55); case (ii)'s rollback-TARGET mechanism closed under this round's
 scoped/adjudicated trigger (the `git revert -m 1` of the contract's own `Hoisted-Contract:` merge,
 never the owner's); case (ii)'s "falls through to `EDGE_BREAK`/`ATOMIC_WAVE`" clause is now also
-closed (task 101, TEST-ONLY — see that task's own update below). What remains open: case (ii)'s
-LITERAL trigger ("a hoist whose contract wave fails `bazel build`") stays adjudication pending
-(dated marker at `docs/SPEC.md` §12.31 — a real architectural decision, not a build, explicitly out
-of task 101's scope), and its separate "`phases.attempts` unchanged for every SCC member" clause
-(task 96's own disclosure, distinct from the fall-through clause SPEC's own dated marker names)
-remains untested — no task has been dispatched against it yet. Do not read this line as DONE; two
-real sub-questions remain open, one fewer than before task 101.** *(Superseded initial framing,
+closed (task 101, TEST-ONLY — see that task's own update below). **Resolved 2026-09-09 (round VI
+controller, thirty-sixth wave, ADR-0134): the literal-trigger adjudication is now DECIDED, not
+pending.** Building contract-wave dispatch to manufacture the literal "contract wave fails `bazel
+build`" trigger was rejected (would reverse ADR-0119's deliberate safety scoping); the criterion's
+case (ii) trigger clause is formally narrowed (Rule 14) to the substituted trigger tasks 96/101
+already used — "a hoist whose contract wave is discovered wrong when a REPO-kind consumer wave
+downstream of it fails `bazel build`" — dated marker at `docs/SPEC.md` §12 item 31, full decision
+at ADR-0134. What remains open: the separate "`phases.attempts` unchanged for every SCC member"
+clause (task 96's own disclosure, distinct from the fall-through clause) remains untested —
+dispatched this wave as task 104. Do not read this line as DONE until task 104 reports; one real
+sub-question remains open.** *(Superseded initial framing,
 kept for history: "mechanism doesn't exist —
 NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI, research-22)" — every leg below this
 line has since landed except the two named above.)* `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
@@ -3360,6 +3364,9 @@ remains open for cases (i)-(iii), which are still proven only at unit/component 
 task-99 update far below for the full breakdown, the two named residuals, and a named
 mutation-testing limit on one sub-assertion. Do not read this line as DONE; §12.43 stays OUT of
 the `<n> of 48` count.
+**Update, round VI thirty-sixth wave (2026-09-09, task 102 dispatched):** both residuals above
+dispatched as a single TEST-ONLY task — see this file's `## 39`-adjacent wave notes in
+`docs/PROGRESS.md` for dispatch bookkeeping; this line updates on task 102's own report, not before.
 *(Superseded initial framing, kept for history: "Case (ii) closed (round VI task 88, ADR-0132,
 `6d5c721`) — pending controller confirmation that this closes §12.43 as a whole; the arithmetic
 below is this task's own claim, not a `<n> of 48` headline update.")* Case (ii)'s literal text
