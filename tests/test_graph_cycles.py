@@ -285,6 +285,42 @@ def not_shared_fleet() -> tuple[list[GraphNode], list[DependencyEdge], list[Cont
     return graph_nodes, edges, contracts, contract_id
 
 
+def edge_break_after_rollback_fleet() -> (
+    tuple[list[GraphNode], list[DependencyEdge], list[ContractNode], str]
+):
+    """§12.31 case (ii): a 2-repo SCC that hoists cleanly on a first `break_cycles` pass, and
+    whose feedback edge — carried by the contract's OWN generated-code import, `kind=API_CONTRACT`
+    at `confidence=0.7`, deliberately below `ATOMIC_DECLARED_DEP_CONFIDENCE` — is genuinely
+    breakable once the hoist is gone, so the re-sequence after a rollback falls to `EDGE_BREAK`
+    rather than `ATOMIC_WAVE`.
+
+    `acme-c` plays the same role it plays in `multi_chord_fleet` (§12.31 Leg A, round VI task 55):
+    a second, non-SCC consumer whose own `API_CONTRACT` edge into the owner keeps the contract's
+    post-retarget consumer count at 2 (>= `scan.contracts.min_consumers`), so the FIRST pass really
+    hoists (this fixture is not `not_shared_fleet` — that one is built to be REJECTED, this one is
+    built to succeed and then be rolled back from outside the hoist mechanism, mirroring a
+    `HoistBrokeOwner` build failure discovered downstream rather than a not-shared rejection
+    discovered inside 6c-H itself).
+    """
+    contract_id = "proto:acme.hub.v1"
+    graph_nodes = nodes("acme-hub", "acme-spoke-0", "acme-c")
+    edges = [
+        edge("acme-hub", "acme-spoke-0", kind=EdgeKind.DECLARED_DEP, confidence=1.0,
+             path="package.json"),
+        edge("acme-spoke-0", "acme-hub", kind=EdgeKind.API_CONTRACT, confidence=0.7,
+             path="src/gen/spoke_pb.ts"),
+        edge("acme-c", "acme-hub", kind=EdgeKind.API_CONTRACT, confidence=0.7,
+             path="src/gen/c_pb.ts"),
+    ]
+    contracts = [
+        contract(
+            contract_id, owner="acme-hub", owner_path="proto/hub.proto",
+            consumers={"acme-spoke-0": "src/gen/spoke_pb.ts", "acme-c": "src/gen/c_pb.ts"},
+        ),
+    ]
+    return graph_nodes, edges, contracts, contract_id
+
+
 def ring_cycle(n: int) -> tuple[list[GraphNode], list[DependencyEdge], tuple[str, ...]]:
     """`n` repos in one ring — `acme-00 -> acme-01 -> ... -> acme-{n-1} -> acme-00` — all
     `DECLARED_DEP` at confidence 1.0 and no contract anywhere: a genuine SCC of `n` members, not a
@@ -601,6 +637,110 @@ def test_the_same_6_repo_cycle_flips_to_atomic_wave_under_no_hoist_contracts() -
     )
     assert report_flag.hoisted_contracts == report_no_contracts.hoisted_contracts == ()
     assert report_flag.edges == report_no_contracts.edges
+
+
+def test_a_rolled_back_hoist_re_sequences_to_edge_break() -> None:
+    """§12.31 case (ii)'s own text: "...every affected edge un-hoisted -- its contract-kind row
+    excluded from the next graph build and the untouched pre-hoist repo->repo row standing in its
+    place ... -- a re-sequenced SCC that falls through to `EDGE_BREAK` or `ATOMIC_WAVE`". Round VI
+    task 96 built the rollback-TARGET mechanism (which merge gets reverted) but left this
+    fall-through clause with zero test coverage (`tests/test_graph_cycles.py` had zero `FAILED`
+    occurrences); this test is that coverage's `EDGE_BREAK` half.
+
+    Two REAL `break_cycles` calls over the SAME graph, not one hand-built resolution:
+
+    Pass 1 hoists the contract for real (`CONTRACT_HOIST`, `hoisted_contracts[0].status ==
+    HOISTED`) -- exactly what a genuine `fleet sequence` run does before a downstream
+    `HoistBrokeOwner` finding is even possible.
+
+    Pass 2 re-sequences with the SAME pre-hoist graph edges (the "next graph build" per ADR-0122:
+    the hoisted contract's edges are read-time excluded, never reconstructed, and the untouched
+    pre-hoist repo->repo row -- built into this fixture from the start, never regenerated -- stands
+    in their place) and the SAME contract now carrying `status=FAILED` -- the transition a real
+    `HoistBrokeOwner` finding drives at the DB layer (`cli.py`'s `_BuildSink`), reproduced here as a
+    `model_copy` because `cycles.py` itself never performs that write; it only has to behave
+    correctly once handed the result. `break_cycles`'s own construction is what does the rest: the
+    FAILED contract fails BOTH of `committed`'s membership test (`status in (HOISTED, MIGRATED)`,
+    `cycles.py:429`) and `_hoist_contracts`'s candidacy filter (`status is EXTRACTABLE`,
+    `cycles.py:672`), so nothing re-hoists it and the 2-repo SCC is live again -- and its one
+    feedback edge (`API_CONTRACT` at 0.7, not a `DECLARED_DEP` at >=0.95) is genuinely breakable,
+    so 6d suppresses it and the SCC resolves `EDGE_BREAK`.
+    """
+    graph_nodes, edges, contracts, contract_id = edge_break_after_rollback_fleet()
+    graph = build_graph(graph_nodes, edges)
+
+    first = break_cycles(graph, contracts=contracts)
+    res1 = first.resolutions[0]
+    assert res1.break_strategy is BreakStrategy.CONTRACT_HOIST
+    assert res1.hoisted_contract_ids == (contract_id,)
+    assert len(first.hoisted_contracts) == 1
+    assert first.hoisted_contracts[0].status is ContractStatus.HOISTED
+
+    failed = first.hoisted_contracts[0].model_copy(
+        update={"status": ContractStatus.FAILED, "status_detail": "hoist_broke_owner"}
+    )
+    second = break_cycles(graph, contracts=[failed])
+
+    assert second.hoisted_contracts == (), "a FAILED contract is never (re-)committed"
+    assert len(second.resolutions) == 1
+    res2 = second.resolutions[0]
+    assert res2.scc_id == res1.scc_id, (
+        "membership is unchanged (acme-hub, acme-spoke-0) -- this is the SAME SCC re-sequenced, "
+        "not a differently-shaped one; scc_id is content-derived over membership alone"
+    )
+    assert res2.hoisted_contract_ids == (), "the failed contract must not be re-hoisted"
+    assert res2.break_strategy is BreakStrategy.EDGE_BREAK
+    assert res2.broken_edge_keys != ()
+    assert _live_component(second.graph.G_dag, res2.members) == (), (
+        "6d's break must have actually dissolved the SCC"
+    )
+
+    # every contract-kind node/edge is gone from the re-sequenced graph -- the FAILED contract
+    # never re-enters `nodes`, so it can never reach `wave_members` either.
+    assert not any(kind == NodeKind.CONTRACT.value for kind, _ in second.graph.G.nodes)
+    plan = assign_waves(second)
+    assert plan.contract_members == ()
+
+
+def test_a_rolled_back_hoist_re_sequences_to_atomic_wave() -> None:
+    """§12.31 case (ii)'s `ATOMIC_WAVE` half of the same fall-through clause. Reuses
+    `six_repo_hub_cycle` -- already proven by `test_the_same_6_repo_cycle_flips_to_atomic_wave_
+    under_no_hoist_contracts` to flip to `ATOMIC_WAVE` when hoisting is unavailable -- but drives
+    it through the genuine two-pass rollback shape (hoist for real, then fail it, then
+    re-sequence) rather than through `hoist_contracts=False`/no-`contracts=` config, which never
+    exercises `committed`'s status filter or `_hoist_contracts`' candidacy filter at all.
+    """
+    graph_nodes, edges, contracts, _contract_id = six_repo_hub_cycle()
+    spokes = [n.node_id for n in graph_nodes if n.node_id != "acme-hub"]
+    graph = build_graph(graph_nodes, edges)
+
+    first = break_cycles(graph, contracts=contracts)
+    res1 = first.resolutions[0]
+    assert res1.break_strategy is BreakStrategy.CONTRACT_HOIST
+    assert len(first.hoisted_contracts) == 1
+    assert first.hoisted_contracts[0].status is ContractStatus.HOISTED
+
+    failed = first.hoisted_contracts[0].model_copy(
+        update={"status": ContractStatus.FAILED, "status_detail": "hoist_broke_owner"}
+    )
+    second = break_cycles(graph, contracts=[failed])
+
+    assert second.hoisted_contracts == ()
+    assert len(second.resolutions) == 1
+    res2 = second.resolutions[0]
+    assert res2.scc_id == res1.scc_id, "same 6-member SCC, re-sequenced -- not a new one"
+    assert sorted(res2.members) == sorted(["acme-hub", *spokes])
+    assert res2.hoisted_contract_ids == ()
+    assert res2.break_strategy is BreakStrategy.ATOMIC_WAVE
+    assert res2.broken_edge_keys == (), "ATOMIC_WAVE means 6d could not dissolve it either"
+
+    plan = assign_waves(second)
+    assert plan.contract_members == ()
+    repo_waves = {
+        plan.wave_index_by_node[(NodeKind.REPO.value, repo_id)] for repo_id in res2.members
+    }
+    assert repo_waves == {0}, "all 6 repos land in the one atomic wave, none pinned to the failed "\
+        "contract's old wave"
 
 
 # =======================================================================================
