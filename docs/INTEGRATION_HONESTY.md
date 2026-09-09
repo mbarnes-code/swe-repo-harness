@@ -9367,6 +9367,13 @@ narrowed (Rule 14) to that substituted trigger — full decision and rejected al
 ADR-0134. D111 stays `OPEN`: the `phases.attempts`-unchanged half of clause (b) is the sole
 remaining gap, dispatched this wave as task 104.
 
+**Update, round VI task 104 (2026-09-09, TEST-ONLY): the `phases.attempts`-unchanged half of
+clause (b) is now closed.** Independently mutation-verified by task review (injected
+attempts-incrementing `UPDATE` reddens the new test specifically; reverts clean) and the
+by-construction call-path argument re-traced directly by the reviewer, not merely trusted. `D111`
+stays `OPEN`: `D132` (the owner-side hoisted-contract-duplication defect) is the sole remaining
+gap for §12.31 as a whole.
+
 ## D112 — FIXED, LANDED (round VI task 87 merge, `26b065b`). `BuildUnit.test_srcs` is never
 populated by any production ecosystem adapter — no adapter can ever emit a real nonzero test
 target

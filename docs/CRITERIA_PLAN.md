@@ -1653,10 +1653,20 @@ build`" trigger was rejected (would reverse ADR-0119's deliberate safety scoping
 case (ii) trigger clause is formally narrowed (Rule 14) to the substituted trigger tasks 96/101
 already used — "a hoist whose contract wave is discovered wrong when a REPO-kind consumer wave
 downstream of it fails `bazel build`" — dated marker at `docs/SPEC.md` §12 item 31, full decision
-at ADR-0134. What remains open: the separate "`phases.attempts` unchanged for every SCC member"
-clause (task 96's own disclosure, distinct from the fall-through clause) remains untested —
-dispatched this wave as task 104. Do not read this line as DONE until task 104 reports; one real
-sub-question remains open.** *(Superseded initial framing,
+at ADR-0134. **Closed by round VI task 104 (2026-09-09, TEST-ONLY):** the separate "`phases.
+attempts` unchanged for every SCC member" clause (task 96's own disclosure, distinct from the
+fall-through clause) is now proven — a new test in `tests/test_graph_cycles.py` seeds real
+nonzero `phases.attempts` via the real `SqliteStateRepository`, drives the same real
+hoist/flip-to-`FAILED`/re-sequence flow task 101 established, and asserts `attempts` unchanged
+after. Independently mutation-verified by review (an injected `attempts`-incrementing `UPDATE`
+between re-sequence and read reddens this test specifically, 28/28 → 1 failure; reverts clean) and
+the by-construction argument re-traced directly (neither `graph/cycles.py` nor `graph/sequence.py`
+imports state/orchestrator machinery; the sole attempts-incrementing write site,
+`SqliteStateRepository.complete_phase`, is reached only through `PhaseRunner`'s live orchestration
+loop, unreachable from this test's call path). Reviewed Approved, 0 fix rounds. **What remains
+open for §12.31 as a whole: `D132`** (`docs/INTEGRATION_HONESTY.md`) **— the owner-side
+hoisted-contract-duplication defect, untouched by tasks 96/101/104 and still `OPEN`.** Do not read
+§12.31 as DONE until D132 closes; it is the sole remaining sub-question. *(Superseded initial framing,
 kept for history: "mechanism doesn't exist —
 NEW-MECHANISM, now `D111`, confirmed multi-leg (round VI, research-22)" — every leg below this
 line has since landed except the two named above.)* `ContractStatus.FAILED` is declared but never assigned anywhere in `src/fleet/`.
