@@ -743,6 +743,121 @@ def test_a_rolled_back_hoist_re_sequences_to_atomic_wave() -> None:
         "contract's old wave"
 
 
+async def test_a_rolled_back_hoist_leaves_phases_attempts_unspent_for_every_scc_member(
+    tmp_path: Path,
+) -> None:
+    """§12.31 case (ii)'s own text, the half task 101's two tests above never checked: "...a
+    re-sequenced SCC that falls through to `EDGE_BREAK` or `ATOMIC_WAVE`, `phases.attempts`
+    **unchanged** for every SCC member...". Round VI task 104.
+
+    Drives the SAME real hoist -> flip-to-`FAILED` -> re-sequence flow as
+    `test_a_rolled_back_hoist_re_sequences_to_edge_break` above (identical fixture, identical two
+    `break_cycles` passes), and wraps it with a REAL `phases` table: seed both SCC members
+    (`acme-hub`, `acme-spoke-0`) at a nonzero `attempts` value via the real
+    `SqliteStateRepository`/`schema.sql` (never 0, so an accidental increment is visible rather
+    than coinciding with a fresh row's own default), then re-read the same rows afterwards.
+
+    BY CONSTRUCTION, not by mutation -- confirmed by reading the code, not by assuming it:
+    `break_cycles` (`src/fleet/graph/cycles.py`) and `assign_waves`
+    (`src/fleet/graph/sequence.py`) are both pure functions over in-memory `FleetGraph`/
+    `CycleReport`/`WavePlan` objects. Neither takes a DB connection parameter, and neither
+    module's import block (checked directly) names `aiosqlite`, `fleet.state`,
+    `fleet.orchestrator` or `fleet.cli` -- so there is no path from this test's call sequence to
+    any SQL write at all, let alone one touching `phases`. The ONLY function anywhere in this
+    codebase that increments `phases.attempts` is
+    `SqliteStateRepository.complete_phase` (`src/fleet/state/repository.py:1664`, whose own
+    `update_sql` does `SET attempts = attempts + 1` unconditionally -- the sole
+    "SET attempts = attempts + 1"/"attempts=attempts" write site in `repository.py` and `cli.py`
+    combined, confirmed by grep over both files), reached only through
+    `PhaseRunner._dispatch`'s live orchestration loop (`src/fleet/orchestrator/runner.py`) --
+    machinery `break_cycles`/`assign_waves` never call and, per the import check above, could not
+    reach even transitively. So this test is a real-DB proof of a real property that the
+    production import graph already makes true before the test body runs a single assertion; it
+    exists to catch a FUTURE regression (e.g. a re-sequence path growing a DB write) rather than a
+    live one.
+    """
+    from datetime import UTC, datetime
+
+    from fleet.models.enums import Phase
+    from fleet.state.db import StateWriter, connect_ro, initialize_database
+    from fleet.state.repository import SqliteStateRepository
+
+    graph_nodes, edges, contracts, _contract_id = edge_break_after_rollback_fleet()
+    graph = build_graph(graph_nodes, edges)
+    scc_member_ids = ("acme-hub", "acme-spoke-0")  # the 2-repo SCC this fixture drives
+
+    db_path = tmp_path / "state" / "fleet.db"
+    await initialize_database(db_path)
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    run_id = "test-run-task104"
+    seed_attempts = 1
+
+    async with StateWriter(db_path, owner="test-task104-phases-attempts") as writer:
+        read_conn = await connect_ro(db_path)
+        try:
+            repo = SqliteStateRepository(writer=writer, read_conn=read_conn)
+            await repo.upsert_run(
+                run_id, started_at=now, config_sha256="0" * 64, harness_version="0.1.0"
+            )
+            for repo_id in scc_member_ids:
+                await repo.upsert_repo(
+                    repo_id, name=repo_id, url=f"https://example.invalid/{repo_id}", now=now
+                )
+                await repo.upsert_phase(run_id, repo_id, Phase.BUILD, now=now)
+
+            async def _seed_attempts(conn: object) -> None:
+                for repo_id in scc_member_ids:
+                    await conn.execute(  # type: ignore[attr-defined]
+                        "UPDATE phases SET attempts = ? "
+                        "WHERE run_id = ? AND repo_id = ? AND phase = ?",
+                        (seed_attempts, run_id, repo_id, int(Phase.BUILD)),
+                    )
+
+            await writer.submit(_seed_attempts)
+
+            before = {
+                repo_id: await repo.get_phase(run_id, repo_id, Phase.BUILD)
+                for repo_id in scc_member_ids
+            }
+            for repo_id in scc_member_ids:
+                row = before[repo_id]
+                assert row is not None
+                assert row.attempts == seed_attempts, "seed did not take -- fixture bug, not SUT"
+
+            # the real rollback/re-sequence flow -- identical to
+            # test_a_rolled_back_hoist_re_sequences_to_edge_break above.
+            first = break_cycles(graph, contracts=contracts)
+            res1 = first.resolutions[0]
+            assert res1.break_strategy is BreakStrategy.CONTRACT_HOIST
+            assert first.hoisted_contracts[0].status is ContractStatus.HOISTED
+
+            failed = first.hoisted_contracts[0].model_copy(
+                update={"status": ContractStatus.FAILED, "status_detail": "hoist_broke_owner"}
+            )
+            second = break_cycles(graph, contracts=[failed])
+            res2 = second.resolutions[0]
+            assert res2.scc_id == res1.scc_id
+            assert res2.break_strategy is BreakStrategy.EDGE_BREAK
+            assert sorted(res2.members) == sorted(scc_member_ids)
+            assign_waves(second)  # §3.1 step 7, same as the EDGE_BREAK test above
+
+            after = {
+                repo_id: await repo.get_phase(run_id, repo_id, Phase.BUILD)
+                for repo_id in scc_member_ids
+            }
+        finally:
+            await read_conn.close()
+
+    for repo_id in scc_member_ids:
+        row = after[repo_id]
+        assert row is not None
+        assert row.attempts == seed_attempts, (
+            f"{repo_id}'s phases.attempts moved from {seed_attempts} to {row.attempts} across a "
+            "rolled-back hoist's re-sequence -- the harness's own bad hypothesis must not consume "
+            "one of this repo's three chances (§12.31 case (ii))"
+        )
+
+
 # =======================================================================================
 # (2) scc_id — content-derived, superseded, never renumbered
 # =======================================================================================
