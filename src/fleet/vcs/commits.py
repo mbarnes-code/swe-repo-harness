@@ -43,10 +43,12 @@ import hashlib
 import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Final, Protocol
 from uuid import UUID
 
+from fleet.vcs.filter_repo import HOISTED_CONTRACT_TRAILER, SOURCE_REPO_TRAILER
 from fleet.vcs.git import Git, GitCommandError, GitError
 
 __all__ = [
@@ -55,6 +57,7 @@ __all__ = [
     "TASK_ID_TRAILER",
     "TRAILER_PREFIX",
     "CommitOutcome",
+    "ContractHoistMerge",
     "FleetTrailers",
     "GuardOutcome",
     "PatchApplyError",
@@ -66,6 +69,7 @@ __all__ = [
     "commits_in_range",
     "contract_rollback_shas_in_range",
     "discard_task",
+    "find_contract_hoist_merge",
     "find_task_commit",
     "guard",
     "patch_id",
@@ -436,6 +440,63 @@ async def contract_rollback_shas_in_range(
         if match:
             reverted.add(match.group(1))
     return frozenset(reverted)
+
+
+@dataclass(frozen=True, slots=True)
+class ContractHoistMerge:
+    """The real `git merge --allow-unrelated-histories` commit `vcs.filter_repo.ingest()` made for
+    one hoisted contract (`cli._ingest_contract_source`, round VI task 95's PASS 0 caller) —
+    round VI task 96's §12.31 case (ii) revert-series anchor for the contract's OWN entry.
+
+    Never a `PullRequestDraft` (D122's gap: no production writer sets `contract_id` on one) and
+    never a SQLite row (§12.31(ii)'s own "not by a SQLite row" text) — only this commit, found by
+    git's own trailer parser. `owning_repo_id` rides on the SAME commit's `Source-Repo:` trailer
+    (`filter_repo.SourceProvenance.trailers()` always stamps both together), so identifying the
+    contract's owner costs no second read of any kind, git or SQL.
+    """
+
+    merge_sha: str
+    owning_repo_id: str
+    merged_at: datetime
+
+
+async def find_contract_hoist_merge(
+    git: Git, *, branch: str, contract_id: str
+) -> ContractHoistMerge | None:
+    """The newest commit on `branch` carrying `Hoisted-Contract: <contract_id>`, or `None`.
+
+    Deliberately UNSCOPED (the whole of `branch`, never `<phases.pre_commit_sha>..branch`):
+    `scoped_range`'s own docstring says an unbounded range is a caller's deliberate choice, correct
+    only when the guard it feeds does not need phase-scoping. A hoist merge is not anchored to any
+    one phase's `pre_commit_sha` — it lands in PASS 0, potentially runs/waves before the downstream
+    consumer wave whose failure eventually triggers a rollback. This mirrors
+    `vcs.filter_repo.already_ingested`'s own identical choice (`git.log(branch, ...)`, no range
+    argument at all) for the identical reason: discovery across arbitrarily many earlier phases,
+    not one.
+
+    Returns the NEWEST matching commit (git log's default, reverse-chronological order).
+    round VI task 95's ADR draft (JC-6, carried from research-50) measured that today at most one
+    such commit can exist per contract per branch through the ordinary path —
+    `graph/cycles.py`'s hoist-candidate predicate excludes any non-`EXTRACTABLE` contract, so a
+    `FAILED` contract (this function's very caller's postcondition, `unhoist_contract`) can never
+    be re-proposed for hoisting and so can never produce a second merge that way. "Newest" is a
+    defensive choice against that invariant ever being relaxed (e.g. an operator or a future
+    feature flipping a `FAILED` row back to `EXTRACTABLE`, JC-6's disclosed blind spot) — not a
+    currently-exercised branch, and not proven here, exactly as the ADR draft disclosed it.
+    """
+    found = await git.log(branch, trailer_keys=[HOISTED_CONTRACT_TRAILER, SOURCE_REPO_TRAILER])
+    for commit in found:
+        if commit.trailer(HOISTED_CONTRACT_TRAILER) != contract_id:
+            continue
+        owner = commit.trailer(SOURCE_REPO_TRAILER)
+        if owner is None:
+            # Should-never-happen (`_ingest_contract_source` always stamps both trailers
+            # together, `SourceProvenance.trailers()`) — skip rather than construct a result with
+            # a fabricated owner, mirroring `already_ingested`'s own three-way-match discipline.
+            continue
+        merged_at = await git.commit_time(commit.sha)
+        return ContractHoistMerge(merge_sha=commit.sha, owning_repo_id=owner, merged_at=merged_at)
+    return None
 
 
 async def record_task_anchor(git: Git, branch: str) -> str:

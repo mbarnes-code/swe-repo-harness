@@ -7302,6 +7302,188 @@ def test_a_hoisted_contracts_content_is_really_merged_with_the_trailer(
     assert contract_branch_sha == merge_sha, (contract_branch_sha, merge_sha)
 
 
+#: The real destination `_dest_for` computes for `CYCLE_FLEET`'s TS consumer, measured directly
+#: (`_dest_paths(read_conn, {})` against a scanned+sequenced copy of this same fixture) rather than
+#: guessed — `DESTINATIONS` (the OTHER fixture's static map, imported above) has no entry for any
+#: `CYCLE_FLEET` repo.
+_CYCLE_CONSUMER_DEST = "ts/acme/billing"
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    shutil.which("git-filter-repo") is None,
+    reason="git-filter-repo is not on PATH; see the section-7b skip note above for why this must "
+    "be the real binary and not FakeFilterRepo",
+)
+def test_a_hoist_rollback_targets_the_real_contract_merge_not_the_owners_own_merge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§12.31 case (ii)'s CLOSING task (round VI task 96): re-anchoring `_ordered_revert_shas` off
+    the `Hoisted-Contract:` trailer instead of a `PullRequestDraft` (D122's gap; see
+    `_ordered_revert_shas`'s own docstring in `cli.py`).
+
+    **The controller's scoped trigger, per this round's ruling** (task-96-brief.md): §12.31(ii)'s
+    literal text — "a hoist whose CONTRACT WAVE fails `bazel build`" — is architecturally
+    unreachable today (every dispatch-side wave reader filters `node_kind='REPO'`, ADR-0119's own
+    safety argument; `cycle_fleet`'s own `wave_members` rows above prove a CONTRACT wave exists
+    and is never dispatched). This test drives the closest reachable analogous trigger instead: a
+    REAL organic hoist (task 95's own proof vehicle, `CYCLE_FLEET`/`cycle_fleet`) followed by a
+    REPO-KIND CONSUMER's (`acme-billing`, never the owner `acme-identity`) `bazel build` failing
+    with stderr naming the hoisted package — the wrong-hoist is discovered when the CONSUMING wave
+    fails, exactly as the ruling scopes it.
+
+    Before this task, `_ordered_revert_shas` found the contract's own entry by scanning
+    `PullRequestDraft`s for `contract_id` — a field research-50-report.md §2.3 measured no
+    production call site ever sets, so on a real fleet the anchor scan always found nothing and
+    `execute_hoist_rollback` always raised `RollbackAnchorError`, caught per-contract as a
+    `HoistRollbackFailed` finding. This is the first test to prove the FIXED path end to end: the
+    rollback finds the anchor via git (never a `PullRequestDraft`, never seeded at all here — this
+    fixture seeds NO PR rows for anything), and the commit it reverts really is the contract's
+    hoist merge, never `acme-identity`'s own repo-migration merge.
+    """
+    workspace = _make_hoist_ingest_workspace(tmp_path)
+    monkeypatch.chdir(workspace)
+    assert scan(workspace).exit_code == ExitCode.SUCCESS
+    assert sequence(workspace).exit_code == ExitCode.SUCCESS
+    assert transform(workspace).exit_code == ExitCode.SUCCESS
+
+    monorepo = make_monorepo(workspace)
+    monkeypatch.setattr(cli, "RESOLVER_RUNNER", FakeResolver())
+    fail_stderr = (
+        f"ERROR: /work/{_CYCLE_CONSUMER_DEST}/BUILD.bazel:5:12: no such target "
+        f"'//proto/acme/identity/v1:pkg': target 'pkg' not declared in package "
+        "'proto/acme/identity/v1'\n"
+    )
+    fake_bazel = _bazel_seam_failing_one_dest(
+        workspace / "artifacts" / "fake-bazel-task96",
+        fail_dest=_CYCLE_CONSUMER_DEST,
+        fail_stderr=fail_stderr,
+    )
+    monkeypatch.setattr(cli, "BAZEL_RUNNER", fake_bazel)
+    assert cli.FILTER_REPO_RUNNER is None, "the seam must be absent for this test to mean anything"
+
+    build(workspace, "--no-sandbox")  # exit code not asserted: acme-billing fails on purpose
+
+    # -- anti-vacuity: the hoist merge really landed, exactly as section 7b's own test proves --
+    assert query(
+        workspace, "SELECT payload FROM findings WHERE kind = 'ContractIngestFailed'"
+    ) == [], "a ContractIngestFailed finding means the merge below never really happened"
+    hoist_shas = (
+        git(
+            monorepo,
+            "log",
+            "integration",
+            "--format=%H",
+            "--grep=^Hoisted-Contract: " + PROTO_ID + "$",
+        )
+        .strip()
+        .splitlines()
+    )
+    assert len(hoist_shas) == 1, f"expected exactly one hoist merge, found {hoist_shas}"
+    hoist_sha = hoist_shas[0]
+
+    # -- the contract genuinely FAILED, attributed to the CONSUMER's build, not the owner's ----
+    assert query(
+        workspace, "SELECT status FROM contracts WHERE contract_id = ?", (PROTO_ID,)
+    ) == [("FAILED",)], "the consumer's stderr must have been attributed to this contract"
+    findings = query(
+        workspace, "SELECT repo_id, payload FROM findings WHERE kind = 'HoistBrokeOwner'"
+    )
+    assert len(findings) == 1, findings
+    finding_repo_id, raw_payload = findings[0]
+    assert finding_repo_id == "acme-billing", (
+        "the CONSUMER's build is what failed -- the closest reachable analogue to §12.31(ii)'s "
+        "unreachable literal 'contract wave fails bazel build' trigger, per this round's "
+        "controller ruling"
+    )
+    finding_payload = json.loads(str(raw_payload))
+    assert finding_payload["contract_id"] == PROTO_ID
+
+    # -- no HoistRollbackFailed finding -- true under BOTH pre-fix and post-fix code for this ---
+    # -- fixture (no PullRequestDraft is ever seeded here, so pre-fix `_ordered_revert_shas` -----
+    # -- finds an empty candidate set and `execute_hoist_rollback` takes its early "nothing to ---
+    # -- revert" COMMITTED return -- RollbackAnchorError is never reached, so this assertion -----
+    # -- alone does not discriminate; the real discriminator is `reverted == {hoist_sha}` below,--
+    # -- where pre-fix code returns an EMPTY set (verified: fix-round mutation test) -------------
+    assert (
+        query(workspace, "SELECT payload FROM findings WHERE kind = 'HoistRollbackFailed'") == []
+    ), "RollbackAnchorError means the fix did not work -- the anchor must be found via git"
+
+    # -- the rollback really landed, and it targeted the CONTRACT's merge specifically ---------
+    from fleet.vcs.commits import contract_rollback_shas_in_range
+    from fleet.vcs.git import Git as _Git
+
+    git_obj = _Git(monorepo)
+    reverted = asyncio.run(
+        contract_rollback_shas_in_range(
+            git_obj, pre_commit_sha=hoist_sha, branch="integration", contract_id=PROTO_ID
+        )
+    )
+    assert reverted == {hoist_sha}, (
+        f"the rollback must revert exactly the contract's OWN hoist merge {hoist_sha!r}, "
+        f"nothing else -- got {reverted!r}"
+    )
+
+    # -- never the owner's own repo-migration merge: named by a DIFFERENT sha and DIFFERENT ----
+    # -- branch (JC-2), and its own trailer carries NO `Hoisted-Contract:` (section 7b's own -----
+    # -- proof, re-checked here after the rollback specifically) -------------------------------
+    owner_branch_sha = git(monorepo, "rev-parse", "migrate/acme-identity").strip()
+    assert owner_branch_sha != hoist_sha, "the owner's own merge and the contract's must differ"
+    owner_hoist_trailer = git(
+        monorepo,
+        "log",
+        "-1",
+        owner_branch_sha,
+        "--format=%(trailers:key=Hoisted-Contract,valueonly)",
+    ).strip()
+    assert owner_hoist_trailer == "", (
+        f"migrate/acme-identity must never be the rollback's target: {owner_hoist_trailer!r}"
+    )
+    assert owner_branch_sha not in reverted, "the owner's own merge must never be reverted"
+    # The owner's own merge is UNTOUCHED as a commit object (a revert, never a rewrite).
+    assert git(monorepo, "log", "-1", "--format=%H", owner_branch_sha).strip() == owner_branch_sha
+
+    # -- the repo state after the revert is genuinely clean: the hoisted content is gone at ----
+    # -- its extracted path, and NOTHING ELSE on `integration` was touched by the revert -------
+    tip = git(monorepo, "rev-parse", "integration").strip()
+    tree_after = git(monorepo, "ls-tree", "-r", "--name-only", tip).strip().splitlines()
+    assert "proto/acme/identity/v1/identity.proto" not in tree_after, (
+        "the hoisted content must be gone from the extracted path after the revert"
+    )
+    # `hoist_sha^..tip` is the WHOLE remainder of the run (PASS 1's other repo ingests land in
+    # between too), so it is not the right range to prove "nothing else was touched" -- the
+    # REVERT COMMIT's own diff against its own parent is. Found by the SAME `Fleet-Contract-
+    # Rollback-Id:` trailer `contract_rollback_shas_in_range` (above) reads, since that helper
+    # itself returns only the ORIGINAL shas, not the revert commits' own.
+    revert_commit_shas = (
+        git(
+            monorepo,
+            "log",
+            "integration",
+            "--format=%H",
+            "--grep=^Fleet-Contract-Rollback-Id: " + PROTO_ID + "$",
+        )
+        .strip()
+        .splitlines()
+    )
+    assert len(revert_commit_shas) == 1, (
+        f"expected exactly one revert commit for this contract, found {revert_commit_shas}"
+    )
+    revert_commit_sha = revert_commit_shas[0]
+    revert_stat = git(
+        monorepo, "diff", "--stat", f"{revert_commit_sha}^..{revert_commit_sha}"
+    ).strip()
+    changed_paths = {
+        line.split("|", 1)[0].strip() for line in revert_stat.splitlines() if "|" in line
+    }
+    assert changed_paths and all(
+        path.startswith("proto/acme/identity/v1/") for path in changed_paths
+    ), (
+        "the revert commit's OWN diff must touch only paths under the hoisted contract's own "
+        f"target path, nothing else -- got {changed_paths!r}"
+    )
+
+
 # --------------------------------------------------------------------------------------
 # 8. the REAL BUILD-file generator
 # --------------------------------------------------------------------------------------

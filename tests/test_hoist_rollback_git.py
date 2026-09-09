@@ -141,6 +141,41 @@ async def _merge_feature(
     return await git.rev_parse("integration")
 
 
+async def _merge_hoist(
+    monorepo: Path,
+    *,
+    contract_id: str,
+    owner_repo_id: str,
+    file_name: str,
+    text: str,
+    subject: str,
+    feature_branch: str,
+) -> str:
+    """A real merge commit carrying `Source-Repo:`/`Hoisted-Contract:` trailers -- the SAME shape
+    `vcs.filter_repo.ingest()` produces for a real hoisted-contract merge (round VI task 95's
+    `_ingest_contract_source`), so `vcs.commits.find_contract_hoist_merge` (round VI task 96) finds
+    it exactly as it would find a real one. Round VI task 96: replaces this file's prior recipe of
+    a plain `_merge_feature` PLUS a hand-seeded `PullRequestDraft.contract_id` (the WRONG
+    mechanism this task's research (research-50-report.md §2.3) found: that recipe let a test
+    revert what was, in production, always the OWNING repo's own migration merge, never any real
+    contract content).
+
+    100%-trailer-shaped (no prose line in the block, matching `filter_repo.merge_message()`'s own
+    construction) -- research-50-report.md §7.2 item 2 measured that this is the ONLY form
+    `git interpret-trailers`' 25% heuristic parses without repo config for a custom key.
+    """
+    message = (
+        f"{subject}\n\nSource-Repo: {owner_repo_id}\nSource-Sha: {'0' * 40}\n"
+        f"Hoisted-Contract: {contract_id}\n"
+    )
+    await _sh(monorepo, "checkout", "-q", "-b", feature_branch)
+    await _write_and_commit(monorepo, file_name, text, "feature commit")
+    await _sh(monorepo, "checkout", "-q", "integration")
+    await _sh(monorepo, "merge", "-q", "--no-ff", "-m", message, feature_branch)
+    git = Git(monorepo, timeout_s=60)
+    return await git.rev_parse("integration")
+
+
 # -- a real sqlite DB, seeded exactly as `_pr_records` reads it ---------------------------------
 @pytest.fixture
 async def db_path(tmp_path: Path) -> Path:
@@ -244,13 +279,21 @@ async def test_execute_hoist_rollback_commits_a_real_multi_merge_revert_series(
     tmp_path: Path, db_path: Path
 ) -> None:
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="contract.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    # `merge_contract`'s `merged_at` now comes from the REAL commit clock (round VI task 96,
+    # `find_contract_hoist_merge`/`Git.commit_time`), not a value this test controls -- so the two
+    # FAKE-forge blast-set timestamps below are anchored relative to it, not to the module-level
+    # `T0` (which sits in the past relative to "now" and would silently invert the expected
+    # reverse-chronological order this test asserts).
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -268,13 +311,6 @@ async def test_execute_hoist_rollback_commits_a_real_multi_merge_revert_series(
     tip_before = await Git(monorepo, timeout_s=60).rev_parse("integration")
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
     _seed_pr(db_path, repo_id="blast-b", url="https://forge.invalid/b/pull/1", state=PrState.MERGED)
     _seed_pr(
@@ -286,9 +322,8 @@ async def test_execute_hoist_rollback_commits_a_real_multi_merge_revert_series(
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
-            "https://forge.invalid/b/pull/1": _status(merge_b, T0 + timedelta(hours=2)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
+            "https://forge.invalid/b/pull/1": _status(merge_b, hoist_time + timedelta(hours=2)),
         }
     )
 
@@ -346,13 +381,19 @@ async def test_execute_hoist_rollback_refuses_the_whole_series_on_a_genuine_dry_
 ) -> None:
     monorepo = await _init_monorepo(tmp_path)
     # The contract's own hoist edits shared.txt.
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="shared.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    # `merge_contract`'s `merged_at` is now the REAL commit clock (round VI task 96) -- anchor the
+    # FAKE-forge blast-a timestamp relative to it, not to the module-level `T0` (see Proof 1's
+    # identical note).
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     # blast-a's merge is unrelated (different file) -- its own revert stages cleanly.
     merge_a = await _merge_feature(
         monorepo,
@@ -368,19 +409,11 @@ async def test_execute_hoist_rollback_refuses_the_whole_series_on_a_genuine_dry_
     tip_before = await git.rev_parse("integration")
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
         }
     )
 
@@ -420,13 +453,16 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_and_aborts(
     tmp_path: Path, db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="contract.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -438,19 +474,11 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_and_aborts(
     tip_before_race = await git.rev_parse("integration")
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
         }
     )
 
@@ -511,13 +539,16 @@ async def test_execute_hoist_rollback_resumes_after_a_crash_without_re_reverting
     tmp_path: Path, db_path: Path
 ) -> None:
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="contract.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -528,19 +559,11 @@ async def test_execute_hoist_rollback_resumes_after_a_crash_without_re_reverting
     git = Git(monorepo, timeout_s=60)
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
         }
     )
 
@@ -600,56 +623,82 @@ async def test_execute_hoist_rollback_resumes_after_a_crash_without_re_reverting
 
 
 # --------------------------------------------------------------------------------------
-# `_ordered_revert_shas` in isolation: the contract-record-lookup correction this task's own
-# research verified (scanning for `draft.contract_id`, never a keyed `records.get(contract_id)`).
+# `_ordered_revert_shas` in isolation: round VI task 96's re-anchor. The contract's own entry now
+# comes from the `Hoisted-Contract:` trailer on a REAL git merge, never from a `PullRequestDraft`
+# -- replaces this file's prior test of the OLD (task-71/95-era) PR-draft-scan mechanism, which
+# research-50-report.md §2.3 found let a test revert an owning repo's WHOLE migration merge and
+# call it a contract rollback.
 # --------------------------------------------------------------------------------------
-async def test_ordered_revert_shas_finds_the_contracts_own_draft_by_scanning_not_by_key(
-    db_path: Path,
+async def test_ordered_revert_shas_finds_the_contracts_own_merge_by_trailer_not_by_pr_draft(
+    tmp_path: Path, db_path: Path
 ) -> None:
+    monorepo = await _init_monorepo(tmp_path)
+    merge_contract = await _merge_hoist(
+        monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
+        file_name="contract.txt",
+        text="hoisted\n",
+        subject="merge contract hoist",
+        feature_branch="feat-contract",
+    )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
+
     _seed_run(db_path)
+    # The OWNER's own repo-migration PR is a SEPARATE row (contract_id=None), pointing at a
+    # DIFFERENT sha than the contract's hoist merge -- proves the owner-repo skip below excludes
+    # it by STRUCTURE (repo_id == owning_repo_id, read off the merge's own `Source-Repo:` trailer),
+    # never because this row happens to BE the contract's own entry (task 71/72's now-obsolete
+    # reason, see `_ordered_revert_shas`'s own docstring).
     _seed_pr(
         db_path,
         repo_id=OWNER_REPO,
         url="https://forge.invalid/owner/pull/1",
         state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
+        contract_id=None,
     )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
-        {
-            "https://forge.invalid/owner/pull/1": _status("c" * 40, T0),
-            "https://forge.invalid/a/pull/1": _status("a" * 40, T0 + timedelta(hours=1)),
-        }
+        {"https://forge.invalid/a/pull/1": _status("a" * 40, hoist_time + timedelta(hours=1))}
     )
 
     read_conn = await connect_ro(db_path)
     try:
-        # A keyed lookup on `contract_id` alone (the WRONG mechanism this task's research ruled
-        # out) would find nothing at `records[CONTRACT_ID]` -- `_pr_records` is keyed by
-        # `(repo_id, contract_id)` (ADR-0126/D122, task-75), never by `contract_id` alone. This
-        # proves the scan is what actually works.
         entries = await _ordered_revert_shas(
-            read_conn, RUN_ID, forge, contract_id=CONTRACT_ID, blast_set=("blast-a",)
+            read_conn,
+            RUN_ID,
+            forge,
+            monorepo=Git(monorepo, timeout_s=60),
+            integration_branch="integration",
+            contract_id=CONTRACT_ID,
+            blast_set=(OWNER_REPO, "blast-a"),
         )
     finally:
         await read_conn.close()
 
+    # The owner's own PR ("https://forge.invalid/owner/pull/1") is excluded -- `forge.view()` is
+    # never called for it, proving the skip happens BEFORE any forge lookup, on the owner_repo_id
+    # comparison alone.
+    assert forge.calls == ["https://forge.invalid/a/pull/1"]
     assert entries == (
         OrderedRevertEntry(
-            repo_id="blast-a", merge_sha="a" * 40, merged_at=T0 + timedelta(hours=1)
+            repo_id="blast-a", merge_sha="a" * 40, merged_at=hoist_time + timedelta(hours=1)
         ),
-        OrderedRevertEntry(repo_id=None, merge_sha="c" * 40, merged_at=T0),
+        OrderedRevertEntry(repo_id=None, merge_sha=merge_contract, merged_at=hoist_time),
     )
 
 
-async def test_execute_hoist_rollback_raises_loud_when_the_contracts_own_pr_is_unresolvable(
+async def test_execute_hoist_rollback_raises_loud_when_no_hoist_merge_trailer_exists(
     tmp_path: Path, db_path: Path
 ) -> None:
-    """No contract-tagged PR draft at all (research-40's own measured gap: nothing in `src/fleet/`
-    currently constructs one in production) -- but a non-empty blast set with a real MERGED PR --
-    must raise loud (Rule 11) rather than silently pick a wrong anchor for Decision 5's resume
-    query, per this function's own documented precondition."""
+    """No merge on `integration` carries a `Hoisted-Contract:` trailer for this contract (round VI
+    task 96's re-anchor) -- but a non-empty blast set with a real MERGED PR -- must raise loud
+    (Rule 11) rather than silently pick a wrong anchor for Decision 5's resume query, per this
+    function's own documented precondition. Formerly named
+    `..._raises_loud_when_the_contracts_own_pr_is_unresolvable` (task 71-era, the PR-draft
+    anchor); the fixture is unchanged -- it never seeded a contract merge OR a contract-tagged PR
+    draft, so it already exercised "no anchor at all" under either mechanism."""
     monorepo = await _init_monorepo(tmp_path)
     merge_a = await _merge_feature(
         monorepo,
@@ -681,9 +730,15 @@ async def test_execute_hoist_rollback_raises_loud_when_the_contracts_own_pr_is_u
 async def test_execute_hoist_rollback_is_a_no_op_when_nothing_is_merged_yet(
     tmp_path: Path, db_path: Path
 ) -> None:
-    """No MERGED PR anywhere (contract or blast set) -- nothing to revert, a settled `COMMITTED`
-    with every tuple empty, never a crash on an absent anchor (the anchor-required path is only
-    reached once there is something non-empty to anchor)."""
+    """No MERGED PR anywhere (contract or blast set) and no `Hoisted-Contract:` merge on
+    `integration` either -- nothing to revert, a settled `COMMITTED` with every tuple empty, never
+    a crash on an absent anchor (the anchor-required path is only reached once there is something
+    non-empty to anchor). Round VI task 96: `_monorepo_checkout` now runs unconditionally at the
+    top of `execute_hoist_rollback` (needed to search for the hoist trailer regardless of blast-set
+    contents), so this fixture needs a real (empty-of-hoist) monorepo -- a real production
+    invocation always has one by this point too, since `unhoist_contract`'s own APPLIED
+    precondition already requires the contract to have been HOISTED (ingested)."""
+    await _init_monorepo(tmp_path)
     _seed_run(db_path)
     _seed_pr(
         db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.DRAFTED
@@ -724,75 +779,41 @@ def test_hoist_rollback_conflict_error_is_a_git_error() -> None:
 # --------------------------------------------------------------------------------------
 # Fix round (controller review, opus-tier task-scoped review of commit a8403d7):
 #
-# C1 -- `_ordered_revert_shas` must dedupe the owning repo's blast-set entry against the
-# contract's own draft (the SAME persisted row): Decision 2's own query always makes the owner a
-# blast-set member (its `CONTRACT_IMPL` edge is exactly what the query selects on), and every
-# EXISTING fixture used a separate owner vs. blast-set repo -- exactly the "two anchors that
-# coincide" hazard CLAUDE.md warns about, which is why nothing above caught it.
+# C1 -- `_ordered_revert_shas` must exclude the owning repo's OWN blast-set entry from the revert
+# series. Originally (task 71/72) this was a same-row DEDUP: the owner's PR record and the
+# contract's own draft were the SAME persisted row. Round VI task 96 re-anchored the contract's
+# own entry off the `Hoisted-Contract:` trailer instead of a `PullRequestDraft` -- see
+# `test_ordered_revert_shas_finds_the_contracts_own_merge_by_trailer_not_by_pr_draft`, which now
+# covers this exact fixture shape (owner present in `blast_set`, with its own SEPARATE PR record)
+# as part of proving the trailer-based lookup itself; C1's original isolation test is retired here
+# as redundant with it, not merely renamed, since its OWN premise ("the owner's PR record and the
+# contract's own draft are the SAME row") is no longer true under the new mechanism.
 # C2 -- the CAS-style tip re-check must run INSIDE `IntegrationMutex`, not before acquiring it.
 # I3 -- a real-pass conflict must `abort_revert()` before `HoistRollbackConflictError` raises.
 # --------------------------------------------------------------------------------------
-async def test_ordered_revert_shas_dedupes_the_owning_repo_against_the_contracts_own_draft(
-    db_path: Path,
-) -> None:
-    """C1: a `blast_set` containing the OWNING repo (Decision 2's own query always produces this)
-    must not yield two `OrderedRevertEntry` rows for the identical merge sha -- the owner's PR
-    record and the contract's own draft are the SAME row (`PullRequestDraft.repo_id` is the
-    OWNING repo for a contract PR)."""
-    _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
-    _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
-
-    forge = FakeForge(
-        {
-            "https://forge.invalid/owner/pull/1": _status("c" * 40, T0),
-            "https://forge.invalid/a/pull/1": _status("a" * 40, T0 + timedelta(hours=1)),
-        }
-    )
-
-    read_conn = await connect_ro(db_path)
-    try:
-        # The OWNING repo IS in the blast set -- this is the fixture shape the review named as
-        # missing from every prior test (all of which used a separate owner vs. blast member).
-        entries = await _ordered_revert_shas(
-            read_conn, RUN_ID, forge, contract_id=CONTRACT_ID, blast_set=(OWNER_REPO, "blast-a")
-        )
-    finally:
-        await read_conn.close()
-
-    assert len(entries) == 2, f"expected exactly 2 deduplicated entries, got {entries!r}"
-    assert [entry.merge_sha for entry in entries].count("c" * 40) == 1, (
-        "the owner/contract merge sha must appear exactly once"
-    )
-    assert entries == (
-        OrderedRevertEntry(
-            repo_id="blast-a", merge_sha="a" * 40, merged_at=T0 + timedelta(hours=1)
-        ),
-        OrderedRevertEntry(repo_id=None, merge_sha="c" * 40, merged_at=T0),
-    )
-
-
 async def test_execute_hoist_rollback_dedupes_owner_in_blast_set_and_commits_cleanly(
     tmp_path: Path, db_path: Path
 ) -> None:
-    """C1, end to end with real git: before the fix, this exact fixture landed the first revert
-    commit for real and then died on an uncaught conflict re-reverting the SAME sha a second
-    time, leaving a PARTIAL series committed and `REVERT_HEAD` set on the shared checkout. After
-    the fix, exactly 2 commits land (not 3) and the repo ends up clean."""
+    """C1, end to end with real git: before the ORIGINAL fix (task 71/72), this fixture's shape
+    landed the first revert commit for real and then died on an uncaught conflict re-reverting the
+    SAME sha a second time. Round VI task 96 re-anchored the mechanism itself (see the module
+    banner above); this test now proves the owner is excluded from the blast-set loop by
+    STRUCTURE (`repo_id == owning_repo_id`, read off the merge's own `Source-Repo:` trailer) even
+    though the owner's own repo-migration PR is a genuinely SEPARATE, resolvable row (contract_id
+    unset) -- not merely because no such row exists. `FakeForge` has no entry for the owner's URL
+    at all, so an accidental `forge.view()` call for it raises loud rather than silently
+    succeeding, which is what makes "excluded, not merely absent" a real assertion here."""
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="contract.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -803,20 +824,20 @@ async def test_execute_hoist_rollback_dedupes_owner_in_blast_set_and_commits_cle
     git = Git(monorepo, timeout_s=60)
 
     _seed_run(db_path)
+    # The owner's OWN repo-migration PR -- a genuinely separate row (contract_id unset),
+    # deliberately NOT in `FakeForge`'s dict below, so a stray `forge.view()` call for it fails
+    # loud instead of silently resolving.
     _seed_pr(
         db_path,
         repo_id=OWNER_REPO,
         url="https://forge.invalid/owner/pull/1",
         state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
+        contract_id=None,
     )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
-        {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
-        }
+        {"https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1))}
     )
 
     read_conn = await connect_ro(db_path)
@@ -834,7 +855,7 @@ async def test_execute_hoist_rollback_dedupes_owner_in_blast_set_and_commits_cle
         await read_conn.close()
 
     assert outcome.decision == "COMMITTED"
-    assert outcome.ordered_shas == (merge_a, merge_contract), "deduplicated: 2 entries, not 3"
+    assert outcome.ordered_shas == (merge_a, merge_contract), "the owner's OWN PR must be excluded"
     assert outcome.newly_reverted_shas == (merge_a, merge_contract)
     assert not (monorepo / "contract.txt").exists()
     assert not (monorepo / "a.txt").exists()
@@ -853,13 +874,16 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_while_holding_the
     committed while holding it. The fixed CAS re-check (now inside the `async with` block, read
     immediately after acquiring) must still catch this."""
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="contract.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -871,19 +895,11 @@ async def test_execute_hoist_rollback_detects_a_tip_moved_race_while_holding_the
     tip_before_race = await git.rev_parse("integration")
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
         }
     )
 
@@ -939,13 +955,16 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
     call to `revert_and_commit` genuinely conflicts. Asserts the raise happens AND the repo is
     left clean afterward (no `REVERT_HEAD`, no dirty index), proving the abort actually ran."""
     monorepo = await _init_monorepo(tmp_path)
-    merge_contract = await _merge_feature(
+    merge_contract = await _merge_hoist(
         monorepo,
+        contract_id=CONTRACT_ID,
+        owner_repo_id=OWNER_REPO,
         file_name="shared.txt",
         text="hoisted\n",
         subject="merge contract hoist",
         feature_branch="feat-contract",
     )
+    hoist_time = await Git(monorepo, timeout_s=60).commit_time(merge_contract)
     merge_a = await _merge_feature(
         monorepo,
         file_name="a.txt",
@@ -956,19 +975,11 @@ async def test_execute_hoist_rollback_aborts_the_revert_before_raising_on_a_real
     git = Git(monorepo, timeout_s=60)
 
     _seed_run(db_path)
-    _seed_pr(
-        db_path,
-        repo_id=OWNER_REPO,
-        url="https://forge.invalid/owner/pull/1",
-        state=PrState.MERGED,
-        contract_id=CONTRACT_ID,
-    )
     _seed_pr(db_path, repo_id="blast-a", url="https://forge.invalid/a/pull/1", state=PrState.MERGED)
 
     forge = FakeForge(
         {
-            "https://forge.invalid/owner/pull/1": _status(merge_contract, T0),
-            "https://forge.invalid/a/pull/1": _status(merge_a, T0 + timedelta(hours=1)),
+            "https://forge.invalid/a/pull/1": _status(merge_a, hoist_time + timedelta(hours=1)),
         }
     )
 

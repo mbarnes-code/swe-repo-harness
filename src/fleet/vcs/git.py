@@ -36,6 +36,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Final
 
@@ -513,6 +514,17 @@ class Git:
             if value in commit.trailers.get(key, ()):
                 return commit.sha
         return None
+
+    async def commit_time(self, rev: str) -> datetime:
+        """Committer date of `rev` (`%cI`, ISO 8601 with offset), parsed.
+
+        Committer date, not author date — the same field `_RealMergeForge`
+        (`tests/test_hoist_rollback_wiring.py`) already reads with the identical format string to
+        answer an equivalent "when did this merge really land" question for a forge-resolved PR,
+        so this mirrors an existing, already-proven convention rather than introducing a new one
+        (round VI task 96, §12.31 case (ii)'s trailer-anchored revert-series ordering)."""
+        raw = await self.text(["log", "-1", "--format=%cI", rev])
+        return datetime.fromisoformat(raw)
 
     # -- diffs --------------------------------------------------------------------------
     async def diff_stat(
