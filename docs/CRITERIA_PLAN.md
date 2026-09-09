@@ -3408,6 +3408,10 @@ stays green).
 **Done bar:** met in full. Nothing remains open for §12.42.
 
 ## 43. Failover layered, bounded, fail-closed
+**DONE (round VI task 102, 2026-09-09 — closes the two residuals task 99 left open; see that
+task's update below and this section's tail for the full account). Now counts toward the
+`<n> of 48` tally for the first time.**
+*(Superseded status line, kept for history — was accurate from task 99 through task 101:)*
 **OPEN — PARTIALLY CLOSED (round VI task 99, 2026-09-09): this answers the "pending controller
 confirmation" question the superseded line below left open — NO, §12.43 is not yet fully proven.**
 Cases (i) and (ii) closed (round VI tasks 88/94); case (iii) closed at component level, both
@@ -3418,9 +3422,28 @@ remains open for cases (i)-(iii), which are still proven only at unit/component 
 task-99 update far below for the full breakdown, the two named residuals, and a named
 mutation-testing limit on one sub-assertion. Do not read this line as DONE; §12.43 stays OUT of
 the `<n> of 48` count.
-**Update, round VI thirty-sixth wave (2026-09-09, task 102 dispatched):** both residuals above
-dispatched as a single TEST-ONLY task — see this file's `## 39`-adjacent wave notes in
-`docs/PROGRESS.md` for dispatch bookkeeping; this line updates on task 102's own report, not before.
+**Both residuals CLOSED by round VI task 102 (2026-09-09, TEST-ONLY).** New tests in
+`tests/test_heavy_tier_outage_e2e.py` drive cases (i), (ii), and (iii) through the real CLI against
+the real two-repo fixture fleet, reading outcomes back from real SQLite state rather than a
+directly-constructed `LadderModelClient` — dissolving the criterion's "on the fixture fleet"
+framing clause for all three cases. Case (iv)'s paired `--deterministic-only` clause is also
+closed on this file's own broken-HEAVY config (zero LLM calls dispatched, rule-resolvable repos
+complete exit 0) — the deterministic-only test's "obvious" mutation (`cli.py`'s attempt cap) is a
+confirmed no-op on this exact fixture (no rule-ladder touchpoints to gate); a genuinely
+discriminating substitute (`workers/base.py`'s tier-ladder mapping) is used instead, independently
+reproduced by review. **Case (ii) required one fix round**: the original submission's disclosed
+reason for leaving the cooldown/`HALF_OPEN`-recovery half unproven ("no config knob serializes
+dispatch") was reviewed and found factually wrong — `concurrency.llm.heavy` genuinely serializes
+`ClassifyWorker`'s dispatch (`LlmConcurrency.for_tier()` → `Limits.create()`'s `ResizableLimiter`
+→ `workers/classify.py:162`'s `async with ctx.limits.for_tier(tier):`). The fix round retried with
+`concurrency.llm.heavy: 1` + `open_after_failures: 1` + `cooldown_s: 0`, proving the full
+`UP → DOWN → HALF_OPEN → UP` lifecycle deterministically (measured: repo 1's full
+retry-and-failover sequence completes before repo 2's first request arrives). Reviewed Changes
+Requested (1 Important finding, the case (ii) disclosure above) → 1 fix round → scoped re-review
+ADDRESSED, both Rule 12 mutations independently reproduced by review in both rounds (plus one the
+reviewer chose itself, `llm/failover.py`'s `record_failure` threshold), no new breakage. TEST-ONLY
+throughout (`git diff --stat src/` empty across both rounds). **Both of §12.43's remaining
+residuals are now closed — §12.43 counts toward the `<n> of 48` tally.**
 *(Superseded initial framing, kept for history: "Case (ii) closed (round VI task 88, ADR-0132,
 `6d5c721`) — pending controller confirmation that this closes §12.43 as a whole; the arithmetic
 below is this task's own claim, not a `<n> of 48` headline update.")* Case (ii)'s literal text
@@ -3690,9 +3713,8 @@ max_schema_repairs` → `repairs >`) reddens the test loudly via `TieredScripted
 Neither residual is a NEW-MECHANISM gap — both are narrow, disclosed, TEST-ONLY extensions of
 work this task already built the skeleton for.
 
-**Done bar (remaining), current:** the two residuals above. §12.43 must stay OUT of the
-`<n> of 48` count until both close (or the controller issues a disclosed Rule-14 adjudication
-narrowing the criterion's text to accept the current coverage as sufficient).
+**Done bar: met in full, round VI task 102 (2026-09-09).** Both residuals above are closed — see
+this section's top status line and the task-102 update above it. Nothing remains open for §12.43.
 
 ## 44. Cache not poisoned across backends
 **DONE (round W, 2026-09-01) — all 6 sub-clauses of the original audit's "1 of 6 full, 4 partial,
