@@ -55,10 +55,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-#: One decoded chat-completions request in, one response body out. `set_responder` is the escape
-#: hatch for a test that needs to react to what was actually sent (e.g. reflect the requested
-#: `model`, or answer differently per role) rather than a fixed queue of canned bodies.
-Responder = Callable[[Mapping[str, object]], Mapping[str, object]]
+#: One decoded chat-completions request in, one response body out — or a `StatusReply` when the
+#: test needs a non-200 status. `set_responder` is the escape hatch for a test that needs to
+#: react to what was actually sent (e.g. reflect the requested `model`, or answer differently per
+#: role) rather than a fixed queue of canned bodies.
+Responder = Callable[[Mapping[str, object]], "Mapping[str, object] | StatusReply"]
 
 
 class StubServerError(AssertionError):
@@ -71,6 +72,19 @@ class StubServerError(AssertionError):
 class OffLoopbackConnectionAttempt(AssertionError):
     """Raised the instant `assert_loopback_only()`'s guard sees a `socket.connect()` whose target
     host is not loopback. §12.41's "no external network reachable" proof point, made mechanical."""
+
+
+@dataclass(frozen=True)
+class StatusReply:
+    """A scripted reply carrying an explicit HTTP status code — round VI task 102's own addition,
+    for §12.43 case (ii)'s real-CLI vehicle: a genuine `429` (which the `openai` SDK maps to
+    `RateLimitError`, distinct from the 5xx/`APIStatusError` path a plain body cannot reach).
+    `queue_reply`/`set_responder` still accept a bare `Mapping` for every existing caller — that
+    continues to mean "200, this body", exactly as before this class existed; only a test that
+    needs a NON-200 status wraps its body in one of these."""
+
+    status: int
+    body: Mapping[str, object]
 
 
 # -------------------------------------------------------------------------------------------
@@ -126,7 +140,7 @@ class RecordingChatCompletionsServer:
             self._responder = responder
             self._replies = []
 
-    def _answer(self, request_body: dict[str, object]) -> Mapping[str, object]:
+    def _answer(self, request_body: dict[str, object]) -> Mapping[str, object] | StatusReply:
         with self._lock:
             self.requests.append(request_body)
             if self._responder is not None:
@@ -160,8 +174,11 @@ def _make_handler(server: RecordingChatCompletionsServer) -> type[BaseHTTPReques
             raw = self.rfile.read(length) if length else b"{}"
             try:
                 decoded = _decode_object(raw)
-                response_body = server._answer(decoded)
-                status = 200
+                answer = server._answer(decoded)
+                if isinstance(answer, StatusReply):
+                    response_body, status = answer.body, answer.status
+                else:
+                    response_body, status = answer, 200
             except Exception as exc:  # the stub must answer, never hang the client
                 response_body = {"error": {"message": str(exc)}}
                 status = 500
