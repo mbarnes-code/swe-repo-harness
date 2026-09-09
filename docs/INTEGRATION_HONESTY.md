@@ -11105,8 +11105,10 @@ D-number covers. Revalidation ordering (open question 1) is likewise untouched a
 two remaining named gaps that entry tracked (D124, separately fixed in round VI task 74, and the
 transitive-stub-stacking mechanism) are both now closed.
 
-## D132 — OPEN. §12.31's contract-ingest caller (round VI task 95) violates SPEC's own
-no-duplication sentence: a `HOISTED` contract's sources land on `integration` twice
+## D132 — FIXED, LANDED (round VI task 106, `753ab50`+`b858ab3`, merged; task-scoped review
+Changes Requested → 1 fix round → scoped re-review ADDRESSED). §12.31's contract-ingest caller
+(round VI task 95) violated SPEC's own no-duplication sentence: a `HOISTED` contract's sources
+landed on `integration` twice
 
 **Found by round VI task 95's own review round (2026-09-08), allocated by the controller —
 form-agnostic sweep against `main` at `c76fa48` found `D131` as the highest allocated number.**
@@ -11147,6 +11149,35 @@ excluding the contract's own carrier paths from the owner's `RelocationSpec` via
 See task 95's ADR draft (`docs/DECISIONS.md`, JC-4) for the fuller account.
 
 Full account: `.superpowers/sdd/round-VI-criteria-closure/task-95-report.md`.
+
+**Fixed, round VI task 106 (2026-09-09).** Built the "excluding the contract's own carrier paths
+from the owner's `RelocationSpec` via `--invert-paths`" candidate named above (the
+`graph/collisions.py` dead-route alternative was deliberately not revived, per this same task's own
+brief). `_ingest_build_source` now accepts `excluded_contract_paths` and adds a
+`--path <dest>/<raw> --invert-paths` exclusion to its `git-filter-repo` invocation for every path a
+successfully-landed `HOISTED`/`MIGRATED` contract already claims from that owner. A shared
+`_contract_owner_paths(cnode)` helper feeds both the contract's own include-filter and the owner's
+new exclude-filter, so the two lists cannot drift apart. `_build_impl`'s PASS 0 loop threads
+owner→paths only inside the `try/except/else`'s `else` arm — a contract that failed to ingest never
+contributes its paths to the exclusion set, which would otherwise delete the only copy of that
+content. Proven by a new test diffing the owner's merge against its own first parent (not
+`migrate/<repo_id>`'s cumulative `ls-tree`, which force-moves to the merge commit per JC-2 and would
+read as a false positive either way regardless of whether the fix works — caught by the implementer
+during their own test design, not by review). Mutation-verified twice (once by the implementer,
+once independently reproduced by review): reverting the exclusion to a no-op reddens the new test's
+headline assertion, showing both copies of the contract's carrier path.
+
+**One correction from the fix-round review**: the original landed code carried both a raw-path and
+a dest-prefixed `--path` exclusion entry, with a comment claiming "both forms are necessary,
+verified empirically." Review found this false by building the exact scenario: `git-filter-repo`'s
+own `--path-rename` rules are emitted before `extra_args` in `filter_repo_argv`, and
+`newname()` walks path-changes in that order, so every path has already converged to the
+dest-prefixed form by the time the exclude filter runs — the raw-form entry was dead code. The
+implementer independently reproduced this before acting on it, then removed the dead entry (Rule 2)
+and corrected the comment; re-verified by a scoped re-review with its own independent mutation.
+
+**This closes §12.31 as a whole** — `docs/CRITERIA_PLAN.md` §31 records case (i), case (ii), and
+this D-number as all now closed.
 
 ## D133 — FIXED, LANDED (`d1ecfdf`). 3 production HEAVY-tier call sites mishandled a fail-closed
 `LlmError` instead of surfacing `BACKEND_UNAVAILABLE` (§12.43 case (iv), §11.8)
