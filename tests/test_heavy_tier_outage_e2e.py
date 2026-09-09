@@ -16,10 +16,19 @@ file's own `config/models.yaml` (shipped default: `CHEAP`) is therefore a LEGAL 
 configuration, not a test-only monkeypatch — the same mechanism 4 existing e2e fixtures already
 use to write their own `config/models.yaml` (`test_contracts_criterion_scale.py`,
 `test_new_language_touchpoints_e2e.py`, `test_collisions_wiring.py`,
-`test_hoist_rollback_wiring.py`). It is what makes `ClassifyWorker` — the ONE role every existing
-e2e fixture skips via `--skip-classify` (15/15 call sites, per research-51) — a legitimate vehicle
-for a HEAVY-tier outage, with no dependency on `workers/rewrite.py`'s separately-tracked
-`LlmError` misclassification (round VI task 100, a different worktree; not touched here).
+`test_hoist_rollback_wiring.py`). It is what makes `ClassifyWorker` a legitimate vehicle for a
+HEAVY-tier outage, with no dependency on `workers/rewrite.py`'s separately-tracked `LlmError`
+misclassification (round VI task 100, a different worktree; not touched here).
+
+`ClassifyWorker` is skipped by MOST, not every, existing e2e fixture: 12 real
+`runner.invoke(...)` scan sites across the suite pass `--skip-classify` (re-measured — a raw
+`grep -n -- --skip-classify tests/*.py` returns 15, but 3 of those are prose mentions in a
+docstring, not an actual CLI argument). `tests/test_cli.py` has TWO sites that drive
+`ClassifyWorker` through the real CLI already — with the backend registry monkeypatched
+(`monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ScriptedClassify()})`),
+not skipped. What is genuinely novel here (research-51's own flagged "one real unknown") is
+driving `ClassifyWorker` through the real CLI against an UNMONKEYPATCHED backend registry, over
+a real socket — no existing fixture had done that.
 
 Two arms over the SAME config skeleton and the SAME two-repo fixture fleet — only the two HEAVY
 targets' `base_url`s differ:
@@ -153,8 +162,8 @@ def _args(root: Path) -> list[str]:
 
 
 def scan_real_classify(root: Path, *, json_output: bool = False) -> Any:
-    """`fleet scan` with NO `--skip-classify` — the one flag every other e2e fixture in this
-    suite passes (research-51: 15/15 existing call sites). This is deliberately the ONLY
+    """`fleet scan` with NO `--skip-classify` — the flag 12 of the suite's real `runner.invoke`
+    scan sites pass (re-measured; see the module docstring). This is deliberately the ONLY
     difference from the shared `scan()` helpers elsewhere in this test suite."""
     argv = [*_args(root)]
     if json_output:
@@ -209,9 +218,17 @@ def test_heavy_tier_control_arm_classify_dispatches_through_the_real_stub_server
     """Rule 12's discriminator for the outage test below: SAME config skeleton, SAME two-repo
     fleet, HEAVY's two targets pointed at a REAL live server instead of two dead ports. `fleet
     scan` — without `--skip-classify` — completes, and every `repo_classify` `llm_cache` row was
-    negotiated for real at tier HEAVY through `openai_compatible`. This is also the first test in
-    this suite to drive `ClassifyWorker` through the real CLI at all (research-51's own "one real
-    unknown" flag)."""
+    negotiated for real at tier HEAVY through `openai_compatible`.
+
+    **Not the first test to drive `ClassifyWorker` through the real CLI — corrected from an
+    overclaim in an earlier draft.** `tests/test_cli.py`'s
+    `test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_llm_cache` (and a
+    sibling scan a few hundred lines later) already invoke `fleet scan` with no `--skip-classify`
+    and reach `ClassifyWorker`, via `monkeypatch.setattr(client_module, "registry", lambda: {...})`
+    — a substituted backend registry, not a real socket. The genuinely novel property here,
+    stated precisely: the first test to drive `ClassifyWorker` through the real CLI against an
+    UNMONKEYPATCHED backend registry, over a real socket (research-51's own "one real unknown"
+    flag — no existing fixture had done that)."""
     with running_stub_server() as server:
         server.set_responder(_classify_responder)
         workspace = _make_workspace(

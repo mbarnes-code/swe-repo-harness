@@ -3274,9 +3274,20 @@ stays green).
 **Done bar:** met in full. Nothing remains open for §12.42.
 
 ## 43. Failover layered, bounded, fail-closed
-**Case (ii) closed (round VI task 88, ADR-0132, `6d5c721`) — pending controller confirmation
-that this closes §12.43 as a whole; the arithmetic below is this task's own claim, not a
-`<n> of 48` headline update.** Case (ii)'s literal text ("a target that returns 429 through its
+**OPEN — PARTIALLY CLOSED (round VI task 99, 2026-09-09): this answers the "pending controller
+confirmation" question the superseded line below left open — NO, §12.43 is not yet fully proven.**
+Cases (i) and (ii) closed (round VI tasks 88/94); case (iii) closed at component level, both
+halves in one induced call (round VI task 99); case (iv) closed through the real CLI on a real
+fixture fleet (round VI task 99) EXCEPT its own paired `--deterministic-only` clause, which
+remains open on this specific fixture; the criterion's "on the fixture fleet" framing clause
+remains open for cases (i)-(iii), which are still proven only at unit/component level. See the
+task-99 update far below for the full breakdown, the two named residuals, and a named
+mutation-testing limit on one sub-assertion. Do not read this line as DONE; §12.43 stays OUT of
+the `<n> of 48` count.
+*(Superseded initial framing, kept for history: "Case (ii) closed (round VI task 88, ADR-0132,
+`6d5c721`) — pending controller confirmation that this closes §12.43 as a whole; the arithmetic
+below is this task's own claim, not a `<n> of 48` headline update.")* Case (ii)'s literal text
+("a target that returns 429 through its
 entire §11.8 backoff schedule is marked DOWN after `open_after_failures`, is not called again
 until `cooldown_s` has elapsed, and one `HALF_OPEN` probe restores it — asserted against a
 recorded call log, so a busy-loop against a throttled endpoint fails the test") is proven by
@@ -3394,9 +3405,10 @@ must adjudicate before dispatching a build task), case (iii)'s together-not-sepa
 the fixture-fleet framing clause. §12.43 must stay OUT of the `<n> of 48` count until 43-C closes
 or the controller issues a disclosed Rule-14 adjudication narrowing the criterion's text.
 
-**43-C closed for case (iv) and case (iii) by round VI task 99 (TEST-ONLY), narrowed per
-research-51's re-sizing (`.superpowers/sdd/round-VI-criteria-closure/research-51-report.md`) —
-still NOT counted in `<n> of 48`; two residuals remain, stated precisely below.**
+**43-C substantially closed by round VI task 99 (TEST-ONLY), narrowed per research-51's re-sizing
+(`.superpowers/sdd/round-VI-criteria-closure/research-51-report.md`) — case (iii) fully closed;
+case (iv) closed EXCEPT the two residuals named below (one of which is a clause INSIDE case
+(iv)'s own sentence, not a separate case) — still NOT counted in `<n> of 48`.**
 
 research-51 corrected task 94's premise: there are THREE production HEAVY-tier call sites, not
 one (`rewrite.py`'s `LLM_ESCALATION` rung plus TWO in `buildgen.py`, the latter swallowing
@@ -3417,10 +3429,18 @@ identical two-repo fixture fleet (only the two HEAVY targets' `base_url`s differ
   `tests/fixtures/llm/stub_openai_server.py`'s real loopback server; `fleet scan` runs WITHOUT
   `--skip-classify` and completes (exit 0, both repos SUCCEEDED, `llm_cache` carries a real
   `tier='HEAVY', backend='openai_compatible', structured_output_mode='JSON_SCHEMA'` row per
-  repo). This is also the first test in the whole suite to drive `ClassifyWorker` through the
-  real CLI at all — research-51's own flagged "one real unknown" (15/15 prior e2e scan calls
-  pass `--skip-classify`) — and it proves arm 2's exit 8 is attributable to the outage, not to an
-  unrelated defect in this fixture.
+  repo). **Corrected from an earlier overclaim**: this is NOT the first test to drive
+  `ClassifyWorker` through the real CLI — `tests/test_cli.py`'s
+  `test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_llm_cache` (and a
+  sibling scan) already do, with the backend registry monkeypatched
+  (`monkeypatch.setattr(client_module, "registry", lambda: {"anthropic": _ScriptedClassify()})`).
+  What is genuinely novel (research-51's own flagged "one real unknown") is driving
+  `ClassifyWorker` through the real CLI against an UNMONKEYPATCHED backend registry, over a real
+  socket. Separately, "15/15 prior e2e scan calls pass `--skip-classify`" re-measures to **12**
+  real `runner.invoke(...)` argument sites — a raw `grep` for the flag returns 15, but 3 of those
+  are prose mentions in a docstring, not an actual CLI argument. Neither correction changes the
+  arm's own function: it proves arm 2's exit 8 is attributable to the outage, not to an unrelated
+  defect in this fixture.
 - **Arm 2 (the outage):** both HEAVY targets point at two DISTINCT reserved, unbound loopback
   ports (`127.0.0.1:1`, `127.0.0.1:2` — never bind-then-close, which research-51 flagged as a
   TOCTOU race), each independently confirmed at the raw-socket layer to refuse instantly before
@@ -3460,6 +3480,24 @@ identical two-repo fixture fleet (only the two HEAVY targets' `base_url`s differ
     the run instead exhausts retries and exits **7** (`REQUIRES_HUMAN_INTERVENTION`) — confirming
     this test is sensitive to the real classification chain rather than to construction alone.
     Reverted; `git diff --stat src/` empty after.
+  - **A named limit, found by review and re-confirmed directly rather than taken on trust:**
+    mutating `orchestrator/retry.py::_terminal_status`'s `BACKEND_UNAVAILABLE` special case away
+    (so it returns `RepoStatus.REQUIRES_HUMAN_INTERVENTION` like every other non-retryable class,
+    instead of `RepoStatus.PENDING`) does **NOT** redden this fixture — both tests still pass.
+    Root cause, verified by reading the call path rather than assumed: `runner.py`'s
+    `BACKEND_UNAVAILABLE` TERMINATE branch never calls `_complete()` at all (unlike every OTHER
+    TERMINATE branch — the ladder-exhausted RHI case, `DISK_EXHAUSTED`) — it writes the finding
+    and raises `RunHalted` directly, so `decide()`'s `terminal_status` value (`PENDING` today) is
+    constructed but **never read** on this path; the row simply stays whatever it already was
+    (`RUNNING`, per "the lease is left to expire"). **So this fixture's "zero repos
+    `REQUIRES_HUMAN_INTERVENTION`" and "resume finds them `PENDING`" assertions do NOT
+    discriminate the `PENDING`-vs-`REQUIRES_HUMAN_INTERVENTION` *policy choice* encoded in
+    `_terminal_status` — they only prove the OBSERVED outcome (repos end up non-terminal, then
+    `PENDING` after resume's own independent staleness-driven reclaim), which is true regardless
+    of what `terminal_status` says, because nothing on this path ever reads it.** Closing this
+    gap would need a mutation-sensitive instrument reading `RetryDecision.terminal_status` (or
+    `decide()`'s return value) directly, or a production change making the halt path consult it —
+    neither attempted here; recorded as a disclosed limit, not fixed.
 
 **Case (iii), both halves in ONE induced call** — new test in `tests/test_llm_findings.py`,
 `test_schema_exhaustion_and_capability_drift_together_in_one_induced_call`, per research-51's own
