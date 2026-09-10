@@ -207,6 +207,18 @@ KNOWN_INERT: frozenset[str] = frozenset(
         # the qualified check rather than deleting their membership entirely — the bare words
         # still collide with unrelated `enabled`/`timeout_s` fields elsewhere.
         #
+        # `container_image`/`container_memory`/`container_cpus`/`container_network` (Leg B's own
+        # addition, same task) need NO entry here at all: `workers/baseline.py`'s `_argv` spells
+        # all four as `payload.container_*`, threaded from these exact config keys by
+        # `cli._scan_payloads`, so the BARE scan already finds a genuine reader — the fact that
+        # `container_image`/`container_memory`/`container_cpus` ALSO happen to match
+        # `VerifySection`'s identically-named, separately-wired fields is a coincidence that
+        # costs nothing here (both matches are real reads of real config), unlike the `aimd.
+        # floor`-style collisions elsewhere in this file where only one side is genuine.
+        # (Round VI task 108, Leg D: repointed `container_image`'s default at the real, verified
+        # image built this task — no config-surface changes of its own; see
+        # `docs/CRITERIA_PLAN.md`'s Leg D entry.)
+        #
         # --- timeouts and ceilings with no consumer ---------------------------------------
         # `budgets.build_timeout_s` left this list at ADR-0080 (§11.5 step 8): `cli.resume`
         # resolves the continuation's `_build_impl` timeout from it rather than from a literal,

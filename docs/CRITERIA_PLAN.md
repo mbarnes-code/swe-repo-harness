@@ -826,6 +826,65 @@ the assertion to *"the fixture run,"* whose current fixture fleet is only {PyPI,
 empty repo (not all six ecosystems). Do not round up the `<n> of 48` count for §12.11 on this
 account — no code has landed yet, only scoping and adjudication.
 
+**Leg D closed by round VI task 108, ONE FIX ROUND (2026-09-09/10), on branch
+`agent/roundvi-task108` (not yet merged to main at time of writing).** `docker/
+fleet-baseline.Dockerfile` — Debian bookworm-slim, network-enabled (`FROM` chain has no
+`--network=none` anywhere near it, unlike `fleet-build.Dockerfile`) — provisions exactly the two
+toolchains the re-confirmed fixture fleet needs: `python3`/`python3-pip` (+ `pytest`/
+`pytest-asyncio` baked in at build time, since neither fixture Python repo's `pyproject.toml`
+declares pytest as a dependency) and `nodejs`/`npm` (apt, Debian bookworm's own packages —
+3.11/18.20, not the migrated side's 3.12/TS-5.6.3 pins, which is correct per ADR-0135 ruling 3: a
+native baseline probes the repo's OWN pre-migration environment, never the harness's
+post-migration one). `settings.py::BaselineBuild.container_image`'s default (Leg B's own field,
+merged `121665e` after this task's original `main`@`fa6e1d7` dispatch) was repointed at the real
+built image — this task added NO competing config fields of its own; the first-round diff that
+did was dropped entirely during the fix round below.
+
+**First-round review: Changes Requested, 2 Critical findings — both fixed, this same branch.**
+(1) The image only worked when `build_argv`/`test_argv` were joined into ONE `sh -c` container
+invocation — a premise about Leg B's shape that was never checked against Leg B's actual landed
+code (`workers/baseline.py::BaselineWorker._argv` calls `spec_for_attempt` TWICE, once per step,
+each its own separately-`--rm`'d container). Reproduced directly: `pip install -e .` in one real
+`docker run`, `pytest` in a genuinely separate one against the same bind-mounted worktree →
+`ModuleNotFoundError: No module named 'requests'`, because the original image's `PIP_USER=1` +
+plain `HOME=/home/fleet` put the install in the FIRST container's own ephemeral layer. Fixed by
+`ENV PYTHONUSERBASE=/work/.fleet-baseline-pyuser` — Python's `site` module consults this before
+deriving a default from `$HOME`, and `/work` is the one path both of `BaselineWorker`'s separate
+containers bind-mount to the SAME host directory — with no change to `native_baseline()`'s own
+argv. Re-reproduced clean after the fix: two genuinely separate `docker run`s, same bind mount,
+`pytest` now finds `requests`. (2) The settings-surface diff independently re-added the SAME
+class of fields Leg B had already landed, under different names (`network` vs. `container_
+network`) and a different `container_image` type (non-optional vs. Leg B's `str | None`) — fixed
+by dropping the competing fields entirely and using Leg B's own field names/types verbatim,
+updating only `container_image`'s default value.
+
+**Verified LIVE, both rounds** (Docker was available in this sandbox throughout, not merely
+assumed): `tests/test_baseline_container.py` now drives the REAL, unmodified `fleet.workers.
+baseline.BaselineWorker` (not a hand-rolled re-implementation of its invocation shape) — 3 tests,
+all green: a real PyPI repo (`requests` dependency) and a real npm repo (`left-pad` dependency)
+each measured `baseline_ok=True`/`baseline_test_count=1` through Leg B's actual two-separate-
+container shape, plus the arbitrary-uid/no-`--env` image contract proven directly the same way
+`test_the_fleet_build_image_runs_bazels_lookups_as_an_unmapped_uid` proves it for the sibling
+image. Also re-ran whole-file, unmodified except as this entry discloses: `tests/
+test_config_keys_are_read.py`, `tests/test_sandbox.py`, `tests/test_settings.py`, `tests/
+test_baseline_ok_exclusion.py` (D116's own xfail correctly still open), `tests/
+test_workers_baseline.py`, and Leg B's own `tests/test_baseline_scan_e2e.py` — one test there
+(`test_the_shipped_default_config_records_baseline_ok_false_fast_...`) had its unbuilt-image
+premise invalidated by this task's own `container_image` default repoint and needed a narrow,
+disclosed fix (name the unbuilt tag explicitly in the fixture's own config override, rather than
+relying on the shipped default happening to be unbuilt) — not a reopening of Leg B's design, a
+direct consequence of the exact default-value change the review asked for. All 160 tests across
+these files pass (1 expected xfail). A citation-drift self-check this task ALSO introduced and
+then caught and fixed in the same round: this task's own settings.py docstring insertion shifted
+two line-anchored citations (`docs/INTEGRATION_HONESTY.md`'s `BaselineBuild.enabled` and this
+file's own `validate_memory_budget` citation) — repointed per this file's own annotate-in-place
+convention; `tests/test_integration_honesty_citations.py` (70/70) confirms clean.
+
+Full report, including the first round's false "matches Leg B's shape" claim and how it was
+caught: `.superpowers/sdd/round-VI-criteria-closure/task-108-report.md`. Does **not** close D116
+or move the `<n> of 48` count — Leg C (the red path) and Leg E (the fixture strengthening + xfail
+deletion) remain open.
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
@@ -1403,12 +1462,14 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1360-1372`, repointed +37 by round VI task 107's own
-docstring expansion above it — pure insertion, confirmed by exact-line-content match against the
-current tree; the prior citation (`settings.py:1323-1335`, round VI task 73, itself noting earlier
-moves by task 73's `rules_java` pin addition to `BuildSection.ruleset_versions` and, before that,
-round VI task 58's `GraphSection.forbidden_contract_ids` addition) is superseded, per this file's
-annotate-in-place convention, not deleted) already had the complete, correct arithmetic
+`validate_memory_budget` (`settings.py:1369-1381`, repointed +9 by round VI task 108's own dated
+addendum paragraph to `BaselineBuild`'s docstring, earlier in the same file — pure insertion,
+confirmed by exact-line-content match against the current tree; the round VI task 107 citation
+(`settings.py:1360-1372`) is superseded in turn, per this file's annotate-in-place convention, not
+deleted; that one had itself superseded `settings.py:1323-1335`, round VI task 73, itself noting
+earlier moves by task 73's `rules_java` pin addition to `BuildSection.ruleset_versions` and,
+before that, round VI task 58's `GraphSection.forbidden_contract_ids` addition) already had the
+complete, correct arithmetic
 with zero callers — wired into `cli.py::_load_settings` via a new injectable
 `_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.
 resource_guard`). Closed a real scope surprise along the way: the shipped memory-budget defaults

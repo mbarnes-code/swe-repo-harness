@@ -186,18 +186,29 @@ def test_disabling_baseline_build_leaves_baseline_ok_null(
     assert rows == [(None, 0)], rows
 
 
-def test_the_shipped_default_config_records_baseline_ok_false_fast_not_a_hang_or_a_network_call(
+def test_an_unbuilt_configured_image_records_baseline_ok_false_fast_not_a_hang_or_a_network_call(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The OTHER half of the container-posture contract: under the SHIPPED default config (no
-    `preflight.baseline_build` override at all -- `BaselineBuild.container_image`'s own pydantic
-    default, an unbuilt placeholder tag), a real `fleet scan` over a repo whose native baseline
-    WOULD need real network to resolve (a `package.json` declaring a real external dependency)
-    still completes fast and green, because `docker run` on an unbuilt local tag fails in
-    well under a second with no pull attempted against an unreachable dependency at all.
-    `settings.py`'s own docstring measured this at ~0.3s / exit 125 ("pull access denied") by
-    hand; this test proves it through the real CLI within a generous 25s ceiling -- proof against
-    a hang, not a tight timing assertion.
+    """The OTHER half of the container-posture contract: an operator-configured, UNBUILT local
+    docker tag, a real `fleet scan` over a repo whose native baseline WOULD need real network to
+    resolve (a `package.json` declaring a real external dependency) still completes fast and
+    green, because `docker run` on an unbuilt local tag fails in well under a second with no pull
+    attempted against an unreachable dependency at all. `settings.py`'s own docstring measured
+    this at ~0.3s / exit 125 ("pull access denied") by hand; this test proves it through the real
+    CLI within a generous 25s ceiling -- proof against a hang, not a tight timing assertion.
+
+    **Corrected 2026-09-10 (round VI task 108, Leg D landed).** This test used to rely on the
+    SHIPPED PYDANTIC DEFAULT itself being an unbuilt placeholder tag (`fleet-baseline:
+    leg-d-pending`) -- true only in the interim between Leg B landing and Leg D landing. Leg D
+    (`docker/fleet-baseline.Dockerfile`) now exists and repointed that default at a REAL image;
+    on any host where an operator has actually run the documented `docker build`, the shipped
+    default is no longer unbuilt, and this test's old premise ("the default config" ⇒ "an unbuilt
+    image") would silently start asserting a fact about the HOST's build state instead of a fact
+    about this contract. Fixed by naming the unbuilt tag EXPLICITLY in the fixture's own
+    `preflight.baseline_build.container_image` override (the placeholder tag Leg B originally
+    shipped as the default, reused here as a deliberately-nonexistent local tag no `docker build`
+    in this repo ever produces) -- the fast-fail contract this test exists to prove is unchanged,
+    only its coupling to whichever tag happens to be the current pydantic default is removed.
     """
     real_dep_repo = {
         "package.json": (
@@ -234,7 +245,13 @@ def test_the_shipped_default_config_records_baseline_ok_false_fast_not_a_hang_or
             "  max_rss_mb: 512\n"
             "preflight:\n"
             "  min_free_bytes: 1048576\n"
-            # deliberately NO `baseline_build:` block -- the shipped pydantic default governs.
+            "  baseline_build:\n"
+            # Named EXPLICITLY rather than left to the pydantic default (round VI task 108, Leg
+            # D landed): this is the placeholder tag Leg B's own default used to be, kept here
+            # as a deliberately-nonexistent local tag so the fast-fail contract this test proves
+            # does not depend on whether an operator has actually built Leg D's real image on
+            # the host running this test.
+            "    container_image: fleet-baseline:leg-d-pending\n"
         ),
     )
     _fresh_db(workspace / "state" / "fleet.db")

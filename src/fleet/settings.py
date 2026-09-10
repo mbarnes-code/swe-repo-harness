@@ -303,17 +303,26 @@ class BaselineBuild(Section):
     the repo's status — Leg C, not built here, owns the red path). `network` defaults to
     `"bridge"`, unlike `verify.network`'s `"none"` — a native baseline needs the network access
     ADR-0135 ruling 3 grants it (arbitrary third-party dependency resolution), which is the whole
-    reason it runs in a SEPARATE container rather than Bazel's own."""
+    reason it runs in a SEPARATE container rather than Bazel's own.
+
+    **Updated 2026-09-10 (round VI task 108, Leg D landed):** the paragraph above describes Leg
+    B's own interim state, correctly, as of when Leg B shipped — it is no longer the shipped
+    default. Leg D's real, verified image now exists (`docker/fleet-baseline.Dockerfile`,
+    `fleet-baseline:py3.11-node18`) and `container_image`'s default was repointed at it (the
+    `Field(description=...)` below carries the current fact); the `leg-d-pending` placeholder and
+    its fast-fail-125 behaviour remain true of any OTHER unbuilt tag an operator might configure,
+    just no longer of the shipped default itself."""
 
     enabled: bool = True
     timeout_s: int = Field(default=1800, gt=0)
     container_image: str | None = Field(
-        default="fleet-baseline:leg-d-pending",
+        default="fleet-baseline:py3.11-node18",
         description="Local docker tag for the native-baseline container (ADR-0135 ruling 3). "
-        "`None` runs build_argv/test_argv directly on the harness host instead of inside a "
-        "container -- an explicit, narrower escape hatch for a controlled fixture, never the "
-        "shipped default (see this field's class docstring for why the shipped default is an "
-        "unbuilt placeholder tag, not None).",
+        "Round VI task 108 (Leg D) built `docker/fleet-baseline.Dockerfile` and repoints this "
+        "default at the real, verified image, replacing the `fleet-baseline:leg-d-pending` "
+        "placeholder Leg B shipped before Leg D landed. `None` runs build_argv/test_argv "
+        "directly on the harness host instead of inside a container -- an explicit, narrower "
+        "escape hatch for a controlled fixture, never the shipped default.",
     )
     container_memory: str = "2g"
     container_cpus: str = "2.0"
