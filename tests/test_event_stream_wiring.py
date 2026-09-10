@@ -291,7 +291,7 @@ def test_a_dropped_pr_merged_event_fails_the_run_loudly_and_names_what_was_lost(
 
 def _run_context_call_sites() -> list[ast.Call]:
     """Every `RunContext(...)` call in `src/fleet/cli.py`, found by walking the real source —
-    not by grepping the five call sites this docstring already knows about, which is exactly the
+    not by grepping the six call sites this docstring already knows about, which is exactly the
     kind of hand-maintained list Guardrail 6 warns rots ("derive from the body").
     """
     source = Path(cli_module.__file__).read_text(encoding="utf-8")
@@ -315,11 +315,13 @@ def test_every_run_context_call_site_in_cli_passes_root(workspace: Path) -> None
     `root` is `Path | None = None` by design (the same optional-collaborator shape as
     `llm_cache`/`llm_policy`/`backends` on this dataclass).
 
-    Only ONE of `cli.py`'s five real sites (`_run_scan_wave`, `_run_transform_wave`,
-    `_run_build_wave`, `_run_verify_wave`, `_emit_prs`) is exercised end-to-end for this by
+    Only ONE of `cli.py`'s six real sites (`_run_scan_wave`, `_run_transform_wave`,
+    `_run_build_wave`, `_run_verify_wave`, `_emit_prs`, `_run_revalidation_claims_impl` — the
+    last added by round VI task 109's §12.39-B1 cost instrumentation on the REVALIDATE path,
+    after this test's "five" count was written) is exercised end-to-end for this by
     `test_fleet_pr_llm_calls_reach_the_event_stream_with_every_spec_1218_field` in
     `tests/test_pr_e2e.py` (the `_emit_prs` one) — a full e2e per site would mean standing up a
-    real scan/transform/build wave four more times just to prove one keyword argument survived,
+    real scan/transform/build wave five more times just to prove one keyword argument survived,
     which is disproportionate to what it guards. This structural sweep is the cheap alternative:
     it does not prove `root=settings.root` resolves to the right VALUE at any one site (the e2e
     test above already proves that for the one it drives), but it does prove every site still
@@ -332,8 +334,8 @@ def test_every_run_context_call_site_in_cli_passes_root(workspace: Path) -> None
     AST-counted" already documents in prose for `policy=None`, made executable here for `root=`.
     """
     sites = _run_context_call_sites()
-    assert len(sites) == 5, (
-        f"expected exactly 5 `RunContext(` call sites in cli.py, found {len(sites)} at lines "
+    assert len(sites) == 6, (
+        f"expected exactly 6 `RunContext(` call sites in cli.py, found {len(sites)} at lines "
         f"{[node.lineno for node in sites]} — update this sweep's expectation deliberately if a "
         "site was added or removed, don't just raise the number to make it pass"
     )
