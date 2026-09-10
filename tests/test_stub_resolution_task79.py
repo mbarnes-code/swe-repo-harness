@@ -1795,6 +1795,207 @@ def test_t3_stub_diverged_is_reached_through_the_real_claiming_loop_not_a_direct
 
 
 # ---------------------------------------------------------------------------------------
+# Round VI task 112 -- §12.39 case (ii): `BUDGET_EXHAUSTED` driven through the REAL REVALIDATE
+# claiming loop via a real `fleet resume`, exactly like case (i)'s test above -- not by calling
+# `settle_revalidation`/`_run_one_revalidation_task` directly with a hand-built `budget_breach`
+# (`tests/test_budgets.py::test_revalidation_is_a_subceiling_inside_the_repo_ceiling` and this
+# file's own `test_d135_a_revalidate_round_over_budget_raises_and_routes_through_settle_
+# revalidation` above already prove the classifier/ledger mechanics that way -- task 109/B1's own
+# direct-dispatch tests). This test proves the SAME breach is reachable from a real revalidation
+# round dispatched by the real CLI claiming loop, ADR-0136/B1's wiring end to end (`cli.py`'s
+# `_run_one_revalidation_task`/`_run_revalidation_claims_impl`).
+# ---------------------------------------------------------------------------------------
+
+
+def test_t3_budget_exhausted_is_reached_through_the_real_claiming_loop_not_a_direct_call(
+    fleet: Path,  # noqa: F811
+    monorepo: Path,  # noqa: F811
+    filter_repo: FakeFilterRepo,  # noqa: F811
+    resolver: FakeResolver,  # noqa: F811
+    forge: FakeForge,  # noqa: F811
+) -> None:
+    """§12.39 case (ii) (`docs/SPEC.md:7678`, prose at `:1915-1922`), driven end to end.
+
+    Shares steps 1-4 verbatim with the sibling `test_t3_stub_diverged_is_reached_through_the_
+    real_claiming_loop_not_a_direct_call` above (real STUB_LIMITED consumer verify, real provider
+    retry/build/verify, a real provider PR merged and discovered by `fleet pr --sync`, D107's real
+    synchronous label rewrite). It diverges in TWO ways from that sibling test:
+
+    1. Before any of it runs, `config/fleet.yaml` gets one appended section --
+       `stubs.revalidation_max_cost_usd: 0.0135` -- HALF of the real, measured `TokenEstimator`
+       estimate for `build_diagnosis`/WORKHORSE under this fixture's own `MODELS_YAML`
+       (`tests/test_cli.py`: WORKHORSE prices in=$3.0/Mtok, out=$15.0/Mtok; B1's `cli.py:14582`
+       construction site is `TokenEstimator()` with no floor override, so `DEFAULT_ROLE_FLOOR`
+       (4_000 in + 1_000 out tokens) applies uncontested -- 4_000*3.0/1e6 + 1_000*15.0/1e6 ==
+       0.027 exactly, independently re-derived here from the config values actually in this
+       worktree's tree (Guardrail 6), matching ADR-0136/research-54/task 109's own $0.027
+       measurement, and re-confirmed live via `TokenEstimator().estimate(...)` against the real
+       resolved `build_diagnosis` target under this exact fixture's settings before this test was
+       written). The append happens BEFORE `_reach_active_stub_state` cuts the run whose `runs.
+       config_digests` becomes this run's own §10 baseline (written at `fleet scan`/`transform`
+       time, `cli.py:2338`) -- `stubs` is one of the 15 §10 drift sections (`settings.py`'s
+       `CONFIG_SECTIONS`), so lowering it any LATER (e.g. between step 4 and step 5) would trip
+       `fleet resume`'s own config-drift refusal instead of reaching the REVALIDATE round at all.
+       Lowering it before the run starts means it is simply this run's own ceiling from the start
+       -- never a drift.
+    2. Step 5's `fleet resume` runs under a plain, always-succeeding `FakeBazel` (no `fail=`
+       entries) -- unlike the STUB_DIVERGED sibling, this consumer's own REVALIDATE round never
+       reaches a build outcome at all: `RevalidationBudgetExhausted` is raised by `CostLedger.
+       reserve()` BEFORE `VerifyPipelineWorker` ever runs (`orchestrator/runner.py::_dispatch`'s
+       own documented "nothing was dispatched and nothing was spent" property, `cli.py:14582-
+       14586`'s estimate computed before the `async with run_ctx.ledger.dispatch(...)` block
+       worker.run() sits inside). **Disclosed, not asserted**: `fake_bazel.calls` is NOT asserted
+       empty here (unlike task 109's own direct-dispatch sibling below) -- a real `fleet resume`
+       against this fixture's multi-repo config also advances OTHER repos' ordinary Phase 3/4
+       work in the same call (this fixture seeds `.ts` repos alongside the `.py` stub pair under
+       test), so `fake_bazel` genuinely is asked to build things this round -- just never anything
+       under this consumer's own `dest_consumer`/REVALIDATE path, which the DB state below (never
+       a promotion, `stubs.state == ABANDONED`) is what actually proves.
+    """
+    config = fleet / "config" / "fleet.yaml"
+    with config.open("a", encoding="utf-8") as fh:
+        fh.write("stubs:\n  revalidation_max_cost_usd: 0.0135\n")
+
+    run_id = _reach_active_stub_state(fleet, monorepo, filter_repo)
+    dest_consumer = relocations(filter_repo)[_STUB_CONSUMER]
+    branch = f"migrate/{_STUB_CONSUMER}"
+
+    # --- 1. a REAL fleet verify for the consumer: genuine STUB_LIMITED report + DEGRADED
+    # Phase 4 row (identical to the STUB_DIVERGED sibling's own step 1). ---
+    fake_green = FakeBazel(fleet / "artifacts" / "fake-bazel-task112-green")
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        consumer_verified = verify(fleet, "--repo", _STUB_CONSUMER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    assert consumer_verified.exit_code == ExitCode.REQUIRES_HUMAN_INTERVENTION, (
+        consumer_verified.output
+    )
+    consumer_phase4_before = query(
+        fleet,
+        "SELECT status, attempts FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert consumer_phase4_before[0][0] == "DEGRADED", consumer_phase4_before
+    pre_report_row = query(
+        fleet,
+        "SELECT payload FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'VerificationReport' ORDER BY finding_id DESC LIMIT 1",
+        (run_id, _STUB_CONSUMER),
+    )
+    pre_report = json.loads(str(pre_report_row[0][0]))["report"]
+    assert pre_report["equivalence"] == "STUB_LIMITED", pre_report
+
+    # --- 2. fleet retry + a REAL fleet build/verify land the provider SUCCEEDED through
+    # Phase 4 (needed for §3.4 step 4's own eligibility gate below). ---
+    reopened = runner.invoke(
+        app,
+        [
+            *base_args(fleet),
+            "retry",
+            _STUB_PROVIDER,
+            "--reason",
+            "round VI task 112: fixed for real",
+        ],
+        catch_exceptions=False,
+    )
+    assert reopened.exit_code == ExitCode.SUCCESS, reopened.output
+
+    cli.BAZEL_RUNNER = fake_green
+    try:
+        build(fleet, "--no-sandbox", "--repo", _STUB_PROVIDER, json_output=False)
+        verify(fleet, "--repo", _STUB_PROVIDER, json_output=False)
+    finally:
+        cli.BAZEL_RUNNER = None
+    provider_phase4 = query(
+        fleet,
+        "SELECT status FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_PROVIDER),
+    )
+    assert provider_phase4 == [("SUCCEEDED",)], provider_phase4
+
+    # --- 3. a REAL fleet pr opens the provider's own PR. ---
+    pr_opened = runner.invoke(
+        app,
+        [*base_args(fleet), "--json", "pr", "--repo", _STUB_PROVIDER],
+        catch_exceptions=False,
+    )
+    assert pr_opened.exit_code == ExitCode.SUCCESS, pr_opened.output
+
+    # --- 4. a REAL PR-merge-driven `fleet pr --sync` T1 trigger; D107's rewrite runs
+    # synchronously, off T1's own real output. ---
+    forge.merge(_STUB_PROVIDER)
+    synced = runner.invoke(
+        app, [*base_args(fleet), "--json", "pr", "--sync"], catch_exceptions=False
+    )
+    assert synced.exit_code == ExitCode.SUCCESS, synced.output
+    sync_payload = json.loads(synced.stdout)
+    assert _STUB_PROVIDER in sync_payload["merged"], sync_payload
+    assert sync_payload["label_rewrites"].get(_STUB_CONSUMER, "").startswith("committed "), (
+        sync_payload
+    )
+    after_rewrite = _git_show(monorepo, f"{branch}:{dest_consumer}/BUILD.bazel")
+    assert f'"{_PROVIDER_LABEL}"' in after_rewrite, after_rewrite
+    assert f'"{_STUB_LABEL}"' not in after_rewrite, after_rewrite
+
+    # --- 5. BUDGET_EXHAUSTED: a REAL fleet resume runs the REVALIDATE claiming loop; the
+    # round's reservation (attempt 2, `EVIDENCE_ONLY`/WORKHORSE, $0.027) breaches the $0.0135
+    # ceiling lowered above -- `RevalidationBudgetExhausted` fires BEFORE `VerifyPipelineWorker`
+    # ever runs for THIS consumer's REVALIDATE round (no `fail=` entries needed to prove it; see
+    # this test's own docstring point 2 for why `fake_bazel.calls` is not asserted empty here --
+    # other repos' ordinary phase work in this same multi-repo fixture legitimately builds). ---
+    fake_bazel = FakeBazel(fleet / "artifacts" / "fake-bazel-task112-breach")
+    cli.BAZEL_RUNNER = fake_bazel
+    try:
+        resumed = runner.invoke(
+            app, [*base_args(fleet), "--json", "resume"], catch_exceptions=False
+        )
+    finally:
+        cli.BAZEL_RUNNER = None
+    resume_payload = json.loads(resumed.stdout)
+    claims = resume_payload["revalidation_claims"]
+    assert claims is not None, resume_payload
+    outcomes = claims["outcomes"]
+    assert len(outcomes) == 1, outcomes
+    outcome = next(iter(outcomes.values()))
+    assert outcome.startswith("budget_exhausted: verdict=FAIL"), outcome
+
+    # The real claiming loop classified this FAIL round BUDGET_EXHAUSTED -- read back from real
+    # DB state (never via a direct `settle_revalidation(..., budget_breach=...)` call).
+    stub_final = query(
+        fleet,
+        "SELECT state, abandon_reason FROM stubs "
+        " WHERE run_id = ? AND consumer_repo_id = ? AND stub_coord_key = ?",
+        (run_id, _STUB_CONSUMER, _STUB_COORD_KEY),
+    )
+    assert stub_final == [("ABANDONED", "BUDGET_EXHAUSTED")], stub_final
+
+    consumer_phase4_after = query(
+        fleet,
+        "SELECT status, attempts FROM phases WHERE run_id = ? AND repo_id = ? AND phase = 4",
+        (run_id, _STUB_CONSUMER),
+    )
+    # `settle_revalidation`'s budget branch always sets `consumer_status=DEGRADED`
+    # (`orchestrator/stubs.py::settle_revalidation`'s own docstring, precedence clause 1) --
+    # `_run_one_revalidation_task`'s `apply_stub_consumer_status` write is skipped for exactly
+    # that value (D108's own "only T2/T3-STUB_DIVERGED write" rule), so the consumer's Phase 4
+    # row is untouched by this round and stays exactly what step 1 left it: DEGRADED, never a
+    # promotion to SUCCEEDED.
+    assert consumer_phase4_after == consumer_phase4_before, (
+        consumer_phase4_before,
+        consumer_phase4_after,
+    )
+
+    breach_findings = query(
+        fleet,
+        "SELECT kind FROM findings WHERE run_id = ? AND repo_id = ? "
+        "  AND kind = 'RevalidationBudgetExhausted'",
+        (run_id, _STUB_CONSUMER),
+    )
+    assert breach_findings, "a budget breach must write a RevalidationBudgetExhausted finding"
+
+
+# ---------------------------------------------------------------------------------------
 # Round VI task 97 -- `docs/CRITERIA_PLAN.md` §37's done-bar item (2): a real `--stub-blocked`
 # CREATION dispatch, combined into the SAME continuous fixture as the merge/`--sync`/`resume`/
 # `stubs resolve` RESOLUTION chain the two tests above already prove. Closes the ONE residual
