@@ -3361,6 +3361,9 @@ independently reproduced the Rule-12 mutation, the old-passes/new-fails discrimi
 before. **All 20 sub-clauses of §12.38 are now COVERED. §12.38 is closed.**
 
 ## 39. Bounded, priced rework; stub rot reaches a human
+**DONE (round VI task 112, 2026-09-10) — closes B2, the last remaining sub-question; see this
+section's tail for the full account. Now counts toward the `<n> of 48` tally for the first time.**
+*(Superseded status line, kept for history — was accurate through task 109:)*
 **OPEN — mixed, 18 sub-clauses — TEST-ONLY, mostly blocked on §12.37's wiring.** Case (iii)
 (batched=1/eager=3 cost comparison) is well covered. Cases (i)/(ii) only test what's handed in as
 a parameter rather than driving it from a real stub-rot scenario (audit row 39).
@@ -3443,11 +3446,26 @@ success-path `usage=` fix, since both need a failing build to reach `_diagnose`)
 confirmed structurally unavoidable today — `BuildverifyWorker.run` only calls `_diagnose` when
 `status != "ok"`, so a success-path run can never have called it; disclosed, not hidden. 1 Minor
 finding deferred (`TokenEstimator.estimate`'s `tier=WORKHORSE` is hardcoded rather than derived
-from the already-resolved `TierRoute` — matches shipped config today, not currently wrong). **B2**
-(TEST-ONLY, S/M, ready to dispatch now that B1 has landed) — the
-real two-round fixture proving `BUDGET_EXHAUSTED` through the real path, the same way task 103
-proved case (i). §12.39 as a whole stays OUT of the `<n> of 48` count until B1 and B2 both land —
-case (i) and (iii) are closed, case (ii) is not.
+from the already-resolved `TierRoute` — matches shipped config today, not currently wrong). **B2
+closed by round VI task 112 (2026-09-10, TEST-ONLY).** New test in `tests/
+test_stub_resolution_task79.py` drives the same real stub-lifecycle steps as case (i)'s sibling
+test up through a real REVALIDATE round via the real CLI (`fleet resume`), with
+`stubs.revalidation_max_cost_usd` set to half the real measured cost of B1's wired
+`build_diagnosis`/`WORKHORSE` dispatch ($0.027, re-derived from `DEFAULT_ROLE_FLOOR` ×
+`WORKHORSE` pricing — not invented, independently re-confirmed exact by review).
+`RevalidationBudgetExhausted` is raised through the real `SpendScope(kind=REVALIDATION)` dispatch,
+caught, and routed to `settle_revalidation(budget_breach=...)`, landing on
+`ABANDONED`/`BUDGET_EXHAUSTED` — read back from real `stubs`/`findings` DB state, no
+hand-constructed parameter. `git diff --stat src/` empty — B1 already built every production
+wiring this test exercises. Unlike task 109's direct-dispatch sibling tests, this test does not
+assert `fake_bazel.calls == []` (a real multi-repo `fleet resume` legitimately dispatches other
+fixture repos' unrelated build work in the same call) — the DB-read assertions are precisely
+filtered by `repo_id`/`task_id`/`stub_coord_key`, making the attribution airtight without that
+assertion, independently confirmed by review. Reviewed Approved, 0 findings; Rule 12 mutation
+(`SpendKind.REVALIDATION`→`NORMAL`) independently reproduced from scratch, reddens exactly this
+test, reverts byte-identical. **§12.39 as a whole is now DONE — cases (i), (ii), and (iii) are all
+closed**, independently re-verified by review against this entry's own text before crediting the
+closure.
 
 ## 40. No model string outside `config/`
 **DONE (SPEC + code corrected, round-K; AST clause closed round V, 2026-09-01 — now counts
