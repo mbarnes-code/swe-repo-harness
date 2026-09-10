@@ -11290,8 +11290,9 @@ fixture-fleet vehicle alone. §12.43's own status is untouched (still OPEN, per 
 
 Full account: `.superpowers/sdd/round-VI-criteria-closure/task-100-report.md`.
 
-## D134 — OPEN. `baseline_test_count` unit mismatch: a native test-CASE count would make §12.11's
-own comparison unsatisfiable on any real migrated repo with more than one test
+## D134 — FIXED, LANDED (round VI task 107, `121665e`). `baseline_test_count` unit mismatch: a
+native test-CASE count would make §12.11's own comparison unsatisfiable on any real migrated repo
+with more than one test
 
 **Found by research-53 (round VI's research task, 2026-09-09), while scoping D116/§12.11's
 native-baseline-build chain into dispatchable legs. Allocated by the round VI controller,
@@ -11324,6 +11325,15 @@ own design task still owes the exact native-side counting unit that satisfies th
 **Not required by this research task to fix**: no code was written; this is a scoping-only finding
 per research-53's own read-only brief.
 
+**Fixed, round VI task 107 (2026-09-09).** `workers/baseline.py::_classify` derives
+`baseline_test_count` from the TEST step's own observed exit code (0 → 1, pytest's exit 5 "no
+tests collected" → 0), never from `NativeBaseline.test_unit_count`'s static ceiling — confirmed by
+the final whole-session review (2026-09-10) that exactly one `BuildUnit` exists per repo
+(`cli.py:11236`), so per-`BuildUnit` granularity IS per-repo granularity here and ADR-0135's
+ruling is satisfied as written, closing this defect's own scope. (D136, filed the same day, is a
+separate, unrelated defect: the shipped default's `BaselineRed` gate has no floor against
+exempting the whole fleet — it does not reopen this defect's own unit-mismatch question.)
+
 ## D135 — OPEN. `TokenEstimator` has zero production constructors fleet-wide — every cost
 reservation is `ZERO_COST`, so every §11.2 ceiling fires only after an overshoot, never before
 
@@ -11354,3 +11364,52 @@ the same commit (since B1's ledger reads exactly this path); the general fix (au
 
 **Not required by this research task to fix**: no code was written; this is a scoping-only finding
 per research-54's own read-only brief.
+
+## D136 — OPEN. The shipped default config silently exempts most of the fleet from migration under
+§3.1(c)'s `BaselineRed` exemption, and `check_criterion_c` has no floor to catch it
+
+**Found by the round VI controller's final whole-session review (2026-09-10), closing out
+§12.11's own Legs A-E (tasks 105-113). Allocated by the round VI controller — form-agnostic sweep
+found `D135` as the highest allocated number.**
+
+**The gap, as measured.** With all of §12.11's Legs A-E landed, this chain exists on the SHIPPED
+DEFAULT config and nothing guards it: `preflight.baseline_build.enabled = True`
+(`settings.py:316`) + `container_image = "fleet-baseline:py3.11-node18"` — an image **nothing
+builds automatically** (no Makefile target, no CI step, not part of
+`tools/worktree/provision-existing.sh`; only a comment in `docker/fleet-baseline.Dockerfile:6`
+naming how to build it by hand) → `workers/baseline.py`'s `_invoke`/`_classify` collapse **every**
+non-zero outcome into `baseline_ok=False` — an `OSError` (no `docker` on `PATH`), a container exit
+125 (image not built), and a genuinely broken native build are all indistinguishable to this
+mechanism → `cli.py::_gate_baseline_red` writes `BaselineRed` + `phases.status='SKIPPED'` for any
+of them → `graph/sequence.py::_exemptions_for` accepts `baseline-red` as one of §3.1(c)'s five
+enumerated exemptions → `check_criterion_c` has **no floor**: if every repo in the fleet is
+exempted this way, `expected` and `members` are both empty, their lengths match, and the criterion
+reports `ok=True` over an **empty wave plan**. A fleet that cannot run Docker at all — or whose
+baseline image was simply never built — silently migrates zero repos while every green check
+passes.
+
+**Not hypothetical — this session's own fixtures measured it three times and treated it as test
+hygiene, not a shipped-default hazard.** `tests/test_scan_e2e.py`'s own comment: "3 of this
+fleet's 5 repos" go `SKIPPED` under the shipped default. `tests/test_sequence_e2e.py`: `payload
+["repos"]` goes from 3 to 0 because all three fixture repos get gated `BaselineRed`/`SKIPPED`.
+`tests/test_baseline_ok_exclusion.py`: 3 of 4 non-empty repos red. Two of the three reasons those
+specific repos go red are structural to this project's own purpose, not repo brokenness —
+unresolvable internal cross-repo dependency names (the defining property of a fleet being merged
+*into* a monorepo) and an absent `npm test` script, a misclassification `workers/baseline.py`'s own
+docstring already names. The session's response each time was `preflight.baseline_build.enabled:
+false` in the affected test's own fixture config — correct for test hygiene in each individual
+case, but it means the shipped default's REAL behavior is now exercised in only two purpose-built
+places in the whole suite, and the finding was never escalated from "this fixture needs an
+override" to "the shipped default has no floor and no infrastructure-fault signal."
+
+**Not yet built.** A design is owed, not decided here: at minimum, (1) a loud preflight
+distinguishing "docker/image unavailable" (an infrastructure fault, arguably its own
+non-retryable-but-loud failure class) from "this repo's native build is genuinely red" — mirroring
+the existing pattern at `workers/clone.py:467`'s `require_lfs_binary`/`shutil.which` check, which
+already refuses loudly rather than silently miscategorizing; and (2) a floor on
+`check_criterion_c` so a wave plan reduced to nothing by exemptions cannot report `ok=True`.
+Neither is built here. The two stale docstrings this same review found (`workers/baseline.py`
+lines 15-23 and `settings.py:300-303`, both still claiming "Leg C, a future task, owns the red
+path" — falsified once Leg C landed, and never updated by any of the legs that landed after it)
+should be corrected in the same future change, since they are what would mislead whoever picks
+this up.
