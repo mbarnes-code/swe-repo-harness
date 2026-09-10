@@ -196,3 +196,141 @@ change via diff-against-backup).
    not resolve the regression above.
 3. Pre-existing, unrelated `ruff format` drift in `src/fleet/cli.py` (three blocks, confirmed
    identical on bare `main` before this task) — not touched, per Rule 3.
+
+---
+
+## Fix round (coordinator-dispatched, same session) — the disclosed regression, fixed
+
+**Per CLAUDE.md's own convention ("annotate it, never rewrite it"): everything above is left as
+originally written. This section records what the fix round found and changed.** The coordinator
+independently reproduced the disclosed regression (`tests/test_scan_e2e.py` alone timed out at
+100s) and asked for the recommended fix to actually be implemented, plus an explicit sweep for
+other newly-affected shared fixtures rather than assuming only the two named files were hit.
+
+### What was implemented
+
+`src/fleet/cli.py`/`tests/test_baseline_scan_e2e.py` are **UNCHANGED** (`git diff --stat` against
+them is empty) — the red-path gate itself, and its own dedicated live proof, are exactly as
+originally committed.
+
+1. **`tests/conftest.py`** (new, session-wide): `BASELINE_BUILD_DISABLED_YAML` (a
+   `preflight.baseline_build: {enabled: false}` YAML fragment) and a `baseline_build_yaml` fixture
+   returning it. Auto-discovered by every test module in `tests/` — no import required — which is
+   what makes this robust against the exact gap the audit below found (a file importing `fleet`
+   without also importing a fixture by name).
+2. **`tests/test_transform_e2e.py`**: `FLEET_YAML` gained a `{baseline_build_yaml}` placeholder
+   under `preflight:`; `_write_config` and the `fleet` fixture now thread a `baseline_build_yaml`
+   parameter through (function-level default is `BASELINE_BUILD_DISABLED_YAML`, matching the
+   fixture's own default, so a direct caller that omits the parameter still gets the safe value —
+   see the audit finding below on why this matters); the two other direct
+   `FLEET_YAML.format(engine_module=...)` call sites (the blind-engine and indeterminate-engine
+   tests) now also pass `baseline_build_yaml=BASELINE_BUILD_DISABLED_YAML` explicitly.
+3. **`tests/test_scan_e2e.py`**: `FLEET_YAML`'s own `preflight:` block gained a hardcoded
+   `baseline_build: {enabled: false}` (no indirection needed — nothing overrides this file's
+   `FLEET_YAML` string the way `test_transform_e2e.py`'s needed to stay overridable).
+4. **`tests/test_baseline_ok_exclusion.py`**: a LOCAL `baseline_build_yaml` fixture returning `""`
+   (no override at all) — pytest resolves a fixture request against the closest-defined scope
+   first, so this file keeps proving §12.11's "shipped config" premise (`preflight.baseline_build`
+   genuinely unconfigured) without forking `test_transform_e2e.fleet`'s otherwise-identical setup.
+5. **Four MORE shared fixture files found by audit, not assumed absent**: `tests/
+   test_sequence_e2e.py`, `tests/test_collisions_wiring.py`, `tests/
+   test_contracts_criterion_scale.py`, `tests/test_workers_contracts.py` — each defines its OWN
+   separate `FLEET_YAML`/fixture fleet (real `package.json`s under custom `@acme/...` names,
+   never `test_scan_e2e.FIXTURE_REPOS` itself) and drives a real `fleet scan` through the CLI with
+   no `baseline_build` override. Found by auditing every file that (a) writes a real npm/PyPI
+   manifest AND (b) actually invokes `fleet scan` via `CliRunner` — not merely by grepping for
+   `FIXTURE_REPOS`. Each gained the same hardcoded `baseline_build: {enabled: false}` block in its
+   own `preflight:` section. `test_sequence_e2e.py`'s own docstring records the measured before-fix
+   symptom (`test_a_contract_cycle_is_dissolved_by_scan_then_sequence`: `payload["repos"]` 3 → 0).
+
+### A structural gap the audit found and closed (not merely the two named files)
+
+Auditing `tests/test_build_e2e.py` (which imports `fleet`/`_write_config` from
+`test_transform_e2e.py` and calls `_write_config(workspace, sources,
+engine_module="fleet_fixture_engine")` directly, bypassing the `fleet` fixture) surfaced two
+distinct problems in the first draft of this fix:
+
+- **A default-value divergence.** `_write_config`'s own function-level default for
+  `baseline_build_yaml` was `""` (enabled) while the `fleet` fixture's default (via the
+  `baseline_build_yaml` fixture) was `BASELINE_BUILD_DISABLED_YAML` (disabled) — so a direct
+  caller omitting the parameter silently got the DANGEROUS default. Fixed by making the two
+  defaults identical.
+- **A fixture-resolution failure.** With `baseline_build_yaml` defined locally inside
+  `test_transform_e2e.py`, `test_build_e2e.py`'s own request for the `fleet` fixture failed
+  outright (`fixture 'baseline_build_yaml' not found`) because that file never imports the name.
+  This would have silently affected every file importing `fleet`/`_write_config` without also
+  importing the override fixture. Fixed structurally by moving the fixture to `tests/conftest.py`
+  (auto-discovered, no import needed) rather than patching each call site — `tests/
+  test_local_profile_e2e.py` has the identical call shape and is fixed by the same move.
+
+### Before/after measurements
+
+Timing comparisons are against `main`@`a01e004` (the commit immediately before this task's own
+first commit, `3beeebd` — i.e. Legs B and D already landed, Leg C not yet wired), run in the
+primary checkout, vs. this worktree after the fix round:
+
+| File | Before (main@a01e004) | After (this fix round) |
+|---|---|---|
+| `tests/test_scan_e2e.py` | 33 passed in **126.40s** | 33 passed in **32.34s** |
+| `tests/test_transform_e2e.py` | 20 passed in **89.95s** | 20 passed in **41.66s** |
+
+Both return to fast, non-hanging runtimes (no real `docker` invocation at all now that
+`baseline_build` is disabled for their fixtures) — closer to Leg B's own original report
+(~43s/~95s combined, pre-Leg-D placeholder image) than to the real-image-driven durations the
+coordinator's own reproduction (a 100s timeout) measured.
+
+Correctness (pass/fail), full files, no `-k`, this worktree after the fix:
+
+| File | Result |
+|---|---|
+| `tests/test_baseline_scan_e2e.py` (UNCHANGED — Leg C's own live proof) | 4/4 pass |
+| `tests/test_workers_baseline.py` | 18/18 pass |
+| `tests/test_scan_e2e.py` | 33/33 pass |
+| `tests/test_transform_e2e.py` | 20/20 pass |
+| `tests/test_baseline_ok_exclusion.py` | 1 passed, 1 xfailed (unchanged from before Leg C) |
+| `tests/test_graph_sequence.py` | unaffected, all pass |
+| `tests/test_config_keys_are_read.py` | unaffected, all pass |
+| `tests/test_sequence_e2e.py` | 12/12 pass (was 11 passed/1 failed before this fix) |
+| `tests/test_collisions_wiring.py` | pass (part of the 48/48 combined run below) |
+| `tests/test_contracts_criterion_scale.py` | pass (part of the 48/48 combined run below) |
+| `tests/test_workers_contracts.py` | pass (part of the 48/48 combined run below) |
+| (the four above, combined) | 48/48 pass in 22.37s |
+| `tests/test_build_e2e.py::test_a_monorepo_dir_override_really_moves_the_destination` | pass (was a fixture-resolution ERROR before the conftest.py move) |
+| `tests/test_local_profile_e2e.py` (whole file) | 2/2 pass |
+| `tests/test_pr_e2e.py` (whole file — reuses the exact `acme-app-*`/`acme-lib-*` repos) | 25/25 pass in 127.44s |
+| `tests/test_hoist_rollback_wiring.py` (whole file) | 9/9 pass |
+| `tests/test_no_state_outside_git.py` + `tests/test_prepare_before_admit.py` (whole files) | 7/7 pass |
+| `tests/test_stub_resolution_task79.py` (2 representative tests; whole-file collection clean, 22 tests) | 2/2 pass |
+| `tests/test_cli.py::test_a_disk_ceiling_refusal_leaves_a_prior_projection_file_untouched` (the one test in this file reusing `FIXTURE_REPOS`) | pass |
+| `tests/test_new_language_touchpoints_e2e.py` (whole file) | 1 passed, 3 failed — **pre-existing, unrelated**: identical 3 failures reproduced on bare `main`@`a01e004` before this task (a `TypeError: type 'types.UnionType' is not subscriptable` in a decoy-ecosystem test helper); this file's own fixture is Ruby-only, and `native_baseline()` has no Ruby implementation (confirmed by reading `src/fleet/ecosystems/*.py` directly — only `js.py`/`py.py` implement it), so it was never at risk from this task's own change in the first place |
+
+**Files audited and confirmed NOT independently affected** (either they don't drive a real `fleet
+scan` at all, or their fixture fleet has no adapter with `native_baseline()` support): `tests/
+test_ecosystems.py` (comment reference only, no real import), `tests/test_heavy_tier_outage_e2e.py`
+and `tests/test_memory_guard_e2e.py` (both build their config from `test_scan_e2e.FLEET_YAML`
+directly/via `.replace()`/`+`, none touching the `preflight:` block, so both inherit the fix
+automatically — confirmed by reading every call site, not assumed).
+
+`ruff check`/`ruff format --check` on every touched file: clean (two pieces of pre-existing,
+unrelated `ruff format` drift in `tests/test_transform_e2e.py` and `tests/conftest.py`, confirmed
+byte-identical to bare `main`, left untouched per Rule 3). `mypy` (whole-manifest, no path args):
+clean, 131 source files (this project's `mypy_path`/`packages` scope is `src/fleet`, so the test
+files touched here are outside its strict-checked surface, consistent with every prior task's own
+verification in this round).
+
+### Concerns carried forward
+
+1. This audit was thorough but not exhaustive over literally every test file in `tests/` — the
+   audit method (files driving a real `fleet scan` AND declaring a real npm/PyPI manifest AND not
+   already overriding `baseline_build`) is disclosed above so the controller can judge its
+   completeness; no file matching that description was found un-fixed.
+2. `workers/baseline.py`'s own disclosed npm "missing test script" misclassification remains
+   unfixed (Leg C/E territory, per the original report above) — irrelevant to this fix round since
+   every affected fixture now has the worker disabled entirely rather than relying on a corrected
+   classification.
+
+### Corrected status
+
+**DONE.** Commit range: `agent/roundvi-task111` = `a01e004..<fix-round-sha>` (see `git log
+agent/roundvi-task111` in the worktree for the exact fix-round SHA) — two commits total on top of
+`main`@`a01e004`: `3beeebd` (the original Leg C implementation) then this fix round's commit.

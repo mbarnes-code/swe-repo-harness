@@ -55,6 +55,32 @@ from tests.test_build_e2e import (  # noqa: F401  (`bazel`/`filter_repo`/etc. ar
 from tests.test_transform_e2e import fleet, query  # noqa: F401  (`fleet` is a fixture)
 
 
+@pytest.fixture
+def baseline_build_yaml() -> str:
+    """**Round VI task 111 fix round.** `tests/conftest.py`'s own session-wide `baseline_build_yaml`
+    fixture now disables `preflight.baseline_build` BY DEFAULT for every e2e fixture fleet in this
+    suite (`BASELINE_BUILD_DISABLED_YAML`, that fixture's own docstring explains why: most shared
+    fixture repos across this suite were never vetted to succeed under a REAL native build, and
+    §12.11 Leg C's red-path gate turns their pre-existing failures into a real `SKIPPED`,
+    corrupting assertions that have nothing to do with baseline behavior).
+
+    THIS file's entire premise is the opposite: proving §12.11's "the exclusion set is empty
+    under the SHIPPED config" sentence, which requires `preflight.baseline_build` to be left
+    COMPLETELY unconfigured (no override at all) so `BaselineBuild.enabled`'s pydantic default
+    genuinely governs -- exactly what the module docstring above calls "the shipped config".
+    Overriding this fixture locally (pytest resolves a fixture request against the CALLING test
+    module's own fixture registry first, before falling back to `conftest.py`) is what lets this
+    file keep that opposite requirement without forking `tests.test_transform_e2e.fleet`'s
+    otherwise-identical setup (git repos, engine module, rules).
+
+    This reintroduces Leg C's red-path gate for this file's own two tests, exactly as it fired
+    before this fix round -- measured, unaffected: both tests still pass (1 passed, 1 xfailed),
+    because neither reads `phases.status` or wave membership, only `repos.baseline_ok IS NULL`,
+    which is insensitive to whether the red-gated repos are excluded from the wave plan.
+    """
+    return ""
+
+
 def _baseline_ok_exclusion_set(root: Path) -> list[str]:
     """`repos.baseline_ok IS NULL` rows -- the set SPEC §12.11's last sentence
     (`docs/SPEC.md:7447`) requires the fixture run to prove empty under the shipped config."""

@@ -47,6 +47,7 @@ from typer.testing import CliRunner
 
 from fleet.cli import ExitCode, app
 from fleet.llm.client import LlmError
+from tests.conftest import BASELINE_BUILD_DISABLED_YAML
 from tests.test_cli import MODELS_YAML
 from tests.test_scan_e2e import FIXTURE_REPOS, _fresh_db, _make_repo
 
@@ -88,10 +89,21 @@ preflight:
   # kilobytes: the gate really runs here, it simply passes. The refusal itself is asserted where
   # it belongs, against a floor no volume can clear (`test_cli.py`, `test_workers_scan.py`).
   min_free_bytes: 1048576
+{baseline_build_yaml}\
 """
 #: §11.3/§12.22: `concurrency.docker`/`verify.container_memory`/`budgets.max_rss_mb` above are
 #: lowered the same way `min_free_bytes` is -- see the note on `tests/test_scan_e2e.py`'s
 #: `FLEET_YAML`.
+#:
+#: `{baseline_build_yaml}` above is spliced in from the SESSION-WIDE `baseline_build_yaml` fixture
+#: (`tests/conftest.py` -- see `BASELINE_BUILD_DISABLED_YAML`'s own docstring there for why this
+#: is a conftest-level fixture, auto-discovered by every test module, rather than one local to
+#: this file: a local one is invisible to a file that imports `fleet` without also importing the
+#: fixture by name, which is exactly the gap round VI task 111's own fix round found in
+#: `tests/test_build_e2e.py`/`tests/test_local_profile_e2e.py`). `tests/
+#: test_baseline_ok_exclusion.py` overrides it locally to `""` (no override at all) for its own
+#: opposite premise.
+
 
 #: A real `Rewriter` (§7.4): pure `source` → patch, no worktree read, no tool on PATH. It is a
 #: search/replace driven by the rule's own params, with `{{dest_path}}`/`{{repo_id}}` rendered
@@ -221,11 +233,18 @@ rules:
 # ---------------------------------------------------------------------------------------
 
 
-def _write_config(root: Path, sources: dict[str, Path], *, engine_module: str) -> None:
+def _write_config(
+    root: Path,
+    sources: dict[str, Path],
+    *,
+    engine_module: str,
+    baseline_build_yaml: str = BASELINE_BUILD_DISABLED_YAML,
+) -> None:
     config = root / "config"
     config.mkdir(parents=True, exist_ok=True)
     (config / "fleet.yaml").write_text(
-        FLEET_YAML.format(engine_module=engine_module), encoding="utf-8"
+        FLEET_YAML.format(engine_module=engine_module, baseline_build_yaml=baseline_build_yaml),
+        encoding="utf-8",
     )
     (config / "models.yaml").write_text(MODELS_YAML, encoding="utf-8")
     # D21/§11.4: `redaction.history_scrub_file` defaults to `config/rules/secrets.txt` and
@@ -268,12 +287,18 @@ def write_rules(root: Path, *bodies: str) -> None:
 
 
 @pytest.fixture
-def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
+def fleet(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, baseline_build_yaml: str
+) -> Iterator[Path]:
     """Five real git repos, a config bundle with `dest:` per repo, a rules file, and an engine.
 
     The engine module is written into the workspace and the workspace is put on `sys.path`: that
     IS the §9 injection seam (`transform.engines` is a name → module map), so nothing here
     monkeypatches a worker or a pipeline.
+
+    `baseline_build_yaml` is requested as a fixture, not a hardcoded default, precisely so
+    `tests/test_baseline_ok_exclusion.py` can override it locally -- see
+    `BASELINE_BUILD_DISABLED_YAML`'s own docstring above.
     """
     sources = {
         name: _make_repo(tmp_path / "sources", name, files)
@@ -281,7 +306,12 @@ def fleet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     }
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    _write_config(workspace, sources, engine_module="fleet_fixture_engine")
+    _write_config(
+        workspace,
+        sources,
+        engine_module="fleet_fixture_engine",
+        baseline_build_yaml=baseline_build_yaml,
+    )
     _write_engine(workspace, "fleet_fixture_engine", probe_available=True)
     _write_engine(workspace, "fleet_fixture_blind_engine", probe_available=False)
     write_rules(workspace, TS_IMPORT_RULE)
@@ -900,7 +930,11 @@ def test_the_parse_probe_is_reported_as_not_run_when_no_engine_can_run_it(
     """
     config = fleet / "config" / "fleet.yaml"
     config.write_text(
-        FLEET_YAML.format(engine_module="fleet_fixture_blind_engine"), encoding="utf-8"
+        FLEET_YAML.format(
+            engine_module="fleet_fixture_blind_engine",
+            baseline_build_yaml=BASELINE_BUILD_DISABLED_YAML,
+        ),
+        encoding="utf-8",
     )
     scanned(fleet)
     result = transform(fleet)
@@ -982,7 +1016,11 @@ def test_an_indeterminate_probe_blocks_the_run_unlike_a_genuinely_missing_engine
     )
     config = fleet / "config" / "fleet.yaml"
     config.write_text(
-        FLEET_YAML.format(engine_module="fleet_fixture_indeterminate_engine"), encoding="utf-8"
+        FLEET_YAML.format(
+            engine_module="fleet_fixture_indeterminate_engine",
+            baseline_build_yaml=BASELINE_BUILD_DISABLED_YAML,
+        ),
+        encoding="utf-8",
     )
     scanned(fleet)
 

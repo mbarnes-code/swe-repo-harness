@@ -68,6 +68,21 @@ preflight:
   # kilobytes: the gate really runs here, it simply passes. The refusal itself is asserted where
   # it belongs, against a floor no volume can clear (`test_cli.py`, `test_workers_scan.py`).
   min_free_bytes: 1048576
+  # §12.11/D116 Leg C (round VI task 111, fix round): this file's fixture repos were never
+  # vetted to succeed under a REAL native build/test -- `acme-app-py`/`acme-app-ts` declare a
+  # cross-repo dependency (`acme-lib-py`/`@acme/lib`) that is deliberately unpublished (so
+  # `test_transform_e2e.py`'s edge-inference tests have something to detect), and `acme-lib-ts`
+  # declares no `"test"` script at all. Under the shipped default (`enabled: true`,
+  # `container_image` now a real, built image since Leg D landed -- round VI task 108), all
+  # three genuinely fail their native baseline, and Leg C's own red-path gate (this same task)
+  # turns that pre-existing-but-inert fact into a real `phases.status = 'SKIPPED'` for 3 of this
+  # fleet's 5 repos -- corrupting every assertion in this file and in `test_transform_e2e.py`
+  # that expects all four non-empty repos to participate normally. This file tests scanning/
+  # sequencing/wave-layering, never baseline behavior itself, so the fix is to disable the
+  # worker here entirely (`tests/test_baseline_scan_e2e.py` is the one place this project wants
+  # the real gate genuinely exercised, live, against fixtures built and vetted for it).
+  baseline_build:
+    enabled: false
 """
 """§11.3/§12.22: `concurrency.docker`/`verify.container_memory`/`budgets.max_rss_mb` above are
 lowered the same way `min_free_bytes` is -- the shipped defaults (4 x 8 GiB + 4 GiB = 36864 MiB)

@@ -97,6 +97,15 @@ budgets:
   max_rss_mb: 512
 preflight:
   min_free_bytes: 1048576
+  # §12.11/D116 Leg C (round VI task 111, fix round): this fixture's `package.json`s were never
+  # vetted to succeed under a REAL native build -- they declare no `"test"` script, and some
+  # (`test_two_repos_...`) declare a genuinely cross-repo dependency name unpublished by design.
+  # Leg C's own red-path gate turns that pre-existing native-baseline failure into a real
+  # `phases.status = 'SKIPPED'`, corrupting this file's own collision/wave assertions, which have
+  # nothing to do with baseline behavior. Disabled here entirely for the same reason `tests/
+  # test_scan_e2e.py`'s own `FLEET_YAML` disables it.
+  baseline_build:
+    enabled: false
 """
 #: §11.3/§12.22: the concurrency/verify/budgets keys above are lowered the same way
 #: `min_free_bytes` is -- see the note on `tests/test_scan_e2e.py`'s `FLEET_YAML`.

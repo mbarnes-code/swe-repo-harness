@@ -157,6 +157,41 @@ def _no_real_docker_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "RSS_READER", _zero_own_rss_bytes)
 
 
+BASELINE_BUILD_DISABLED_YAML = "  baseline_build:\n    enabled: false\n"
+"""§12.11/D116 Leg C (round VI task 111, fix round). A `preflight:` YAML fragment
+(2-space-indented, ready to splice under a `preflight:` block that already declares at least one
+sibling key such as `min_free_bytes`) that disables the native-baseline worker.
+
+**Why this lives in `conftest.py`, session-wide, rather than in whichever e2e file first needed
+it.** §12.11 Leg C wires a genuine native build/test failure to `RepoStatus.SKIPPED` for the
+first time (`src/fleet/cli.py::_gate_baseline_red`) — and several e2e fixture fleets across this
+suite declare real `package.json`/`pyproject.toml` manifests that were only ever vetted to parse
+correctly, never to succeed under a REAL `npm install`/`pip install` + test run (most declare no
+`"test"` script at all, or a deliberately-unpublished cross-repo dependency name so this suite's
+own edge-inference/hoist/collision tests have something to detect). Once Leg C is wired, EVERY
+such fixture that leaves `preflight.baseline_build` at its shipped default (`enabled: true`) is
+consequentially affected — measured directly across `tests/test_scan_e2e.py`,
+`tests/test_transform_e2e.py`, `tests/test_sequence_e2e.py`, `tests/test_collisions_wiring.py`,
+`tests/test_contracts_criterion_scale.py`, and `tests/test_workers_contracts.py`; none of them
+test baseline behavior itself. The ONE fixture that genuinely needs the shipped, unmodified
+default is `tests/test_baseline_ok_exclusion.py`, whose entire premise is proving §12.11's "the
+exclusion set is empty under the SHIPPED config" sentence -- it overrides the `baseline_build_yaml`
+fixture below LOCALLY, to `""` (no override), which pytest resolves ahead of this session-wide one
+for tests in that module (closer-scope fixtures always win). `tests/test_baseline_scan_e2e.py` is
+the one place this project wants the red path genuinely exercised live, against fixtures
+purpose-built and vetted for it -- it does not use this fixture at all.
+"""
+
+
+@pytest.fixture
+def baseline_build_yaml() -> str:
+    """The default `preflight.baseline_build` YAML override every e2e fixture fleet in this
+    suite splices in, unless a test module locally overrides this fixture (see
+    `BASELINE_BUILD_DISABLED_YAML`'s own docstring immediately above for why, and for the one
+    file that does)."""
+    return BASELINE_BUILD_DISABLED_YAML
+
+
 @pytest.fixture
 def frozen_now() -> datetime:
     """A fixed tz-aware instant, so round-trip equality is not a race against the clock."""
