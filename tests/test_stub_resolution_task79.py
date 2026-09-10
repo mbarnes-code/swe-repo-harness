@@ -810,9 +810,7 @@ def test_d135_a_revalidate_round_under_budget_records_a_real_nonzero_cost(
     )
     before_revalidation_usd = before[0][0] if before else 0.0
 
-    fake_bazel = FakeBazel(
-        fleet / "artifacts" / "fake-bazel-d135-cost", fail={("build", dest): 1}
-    )
+    fake_bazel = FakeBazel(fleet / "artifacts" / "fake-bazel-d135-cost", fail={("build", dest): 1})
     cli.BAZEL_RUNNER = fake_bazel
     try:
         task_id = str(uuid4())

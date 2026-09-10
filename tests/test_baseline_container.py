@@ -100,8 +100,7 @@ def _write_py_fixture(root: Path) -> None:
     module's own docstring names.
     """
     (root / "pyproject.toml").write_text(
-        '[project]\nname = "acme-lib-py"\nversion = "2.0.1"\n'
-        'dependencies = ["requests>=2.31"]\n'
+        '[project]\nname = "acme-lib-py"\nversion = "2.0.1"\ndependencies = ["requests>=2.31"]\n'
     )
     pkg = root / "acme_lib_py"
     pkg.mkdir()
@@ -114,7 +113,7 @@ def _write_py_fixture(root: Path) -> None:
         "import requests  # proves the network-resolved dependency actually imports\n\n\n"
         "def test_normalize():\n"
         '    assert normalize("ACME") == "acme"\n'
-        "    assert requests.__name__ == \"requests\"\n"
+        '    assert requests.__name__ == "requests"\n'
     )
 
 

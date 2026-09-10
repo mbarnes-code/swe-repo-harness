@@ -311,7 +311,17 @@ class BaselineBuild(Section):
     `fleet-baseline:py3.11-node18`) and `container_image`'s default was repointed at it (the
     `Field(description=...)` below carries the current fact); the `leg-d-pending` placeholder and
     its fast-fail-125 behaviour remain true of any OTHER unbuilt tag an operator might configure,
-    just no longer of the shipped default itself."""
+    just no longer of the shipped default itself.
+
+    **Updated 2026-09-10 (round VI task 116, Leg C landed):** a SEPARATE falsification in the same
+    paragraph above, not the one Leg D's annotation just above addresses. "Leg C, not built here,
+    owns the red path" is stale — Leg C (round VI task 111) landed and now DOES escalate a genuine
+    native-build/test failure: `cli.py::_gate_baseline_red`, run at scan time downstream of
+    `workers/baseline.py`, reads the `baseline_ok=0` that worker already wrote and, in one
+    transaction, flips the repo's `phases` row to `SKIPPED` and inserts a `BaselineRed` finding.
+    "Never escalates the repo's status" was true of Leg B alone and is false of the system as a
+    whole today; see `workers/baseline.py`'s own docstring (also updated 2026-09-10) for the
+    worker-vs-gate split this now requires stating precisely."""
 
     enabled: bool = True
     timeout_s: int = Field(default=1800, gt=0)

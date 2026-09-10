@@ -297,7 +297,22 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # Note, added at `54b2c80` (round R final-fix): re-measured at this commit, 123 dirty / 160 clean
 # / 283 scanned — the denominator moved (see module docstring note); the pinned count below did
 # not.
-_RUFF_FORMAT_DIRTY_BASELINE = 123
+# Note, added round VI task 116: re-measured against the `b9524af` file list directly (diffed,
+# not re-derived from a report's stale count). 6 files went newly dirty and 1 (`tests/test_retry.
+# py`, unmodified content, moved to `tests/unit/test_retry.py` by an unrelated sibling task) both
+# left and re-entered the set — net +6, landing at 129 before this task's own fix. 3 of those 6
+# were brand-new test files from this round's own work (`tests/test_baseline_container.py`,
+# `tests/test_heavy_tier_outage_e2e.py`, `tests/test_stub_resolution_task79.py`) with narrow,
+# self-contained format drift and no unrelated pre-existing content at stake — reformatted in
+# place per this file's own stated policy, not pinned. The other 3 are pre-existing, already-
+# committed `.superpowers/sdd/.../task-{78,80,105}-report.md` reports written by OTHER tasks,
+# whose dirty code fences are verbatim historical quotations of exact code as it existed at named
+# commits (e.g. "Before (pre-fix, `b4bc8be`)") — reformatting them would rewrite what those
+# quotations show, which is out of scope for this task and contrary to the project's own
+# annotate-never-rewrite convention for historical records. Those 3 are pinned instead: 123 + 3 =
+# 126. `tests/unit/test_retry.py`'s pre-existing dirty content (unrelated to this task, moved but
+# not reformatted) is left as-is, already accounted for in the wash above.
+_RUFF_FORMAT_DIRTY_BASELINE = 126
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE

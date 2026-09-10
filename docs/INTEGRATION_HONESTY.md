@@ -9881,11 +9881,12 @@ form-agnostic sweeps: zero sites anywhere in `src/fleet/` ever `UPDATE`/`INSERT`
 baseline_ok` or `repos.baseline_test_count` (both columns are read in several places —
 `_RepoFacts.baseline_ok`/`baseline_test_count` in `cli.py`, the `SELECT` at `cli.py:7368`,
 `graph/sequence.py::_exemptions_for`'s `baseline_ok.get(repo_id) == 0` — and written nowhere), and
-`BaselineBuild.enabled` (`settings.py:316`, repointed +8 by round VI task 108's own dated
+`BaselineBuild.enabled` (`settings.py:326`, repointed +10 by round VI task 116's own dated
 addendum paragraph to this same class's docstring — pure insertion, confirmed by exact-line-
-content match against the current tree; the round VI task 107 citation (`settings.py:308`) is
-superseded in turn, per this file's annotate-in-place convention, not deleted; the original
-citation (`settings.py:282`, round VI task 54) was superseded by that one) itself is read nowhere
+content match against the current tree; the round VI task 108 citation (`settings.py:316`) is
+superseded in turn, per this file's annotate-in-place convention, not deleted; that one had
+itself superseded `settings.py:308`, round VI task 107; the original citation (`settings.py:282`,
+round VI task 54) was superseded by that one) itself is read nowhere
 outside `settings.py` (`grep
 -rn "baseline_build" src/fleet/` returns only its own declaration at `settings.py:295`). There is
 no production code path, gated on the config flag or otherwise, that ever runs the native
@@ -11413,3 +11414,10 @@ lines 15-23 and `settings.py:300-303`, both still claiming "Leg C, a future task
 path" — falsified once Leg C landed, and never updated by any of the legs that landed after it)
 should be corrected in the same future change, since they are what would mislead whoever picks
 this up.
+
+**Updated 2026-09-10 (round VI task 116):** the two stale docstrings named above are corrected —
+`workers/baseline.py` lines 15-23 and `settings.py:300-303` (via a dated annotation beside Leg D's
+own, matching this same paragraph's existing convention) now describe the worker-vs-gate split
+(`cli.py::_gate_baseline_red`) accurately. This does NOT close D136 — the design gap above (no
+loud infra-fault preflight, no floor on `check_criterion_c`) remains "Not yet built" and out of
+scope for task 116, which fixed only the two docstrings this same entry named.

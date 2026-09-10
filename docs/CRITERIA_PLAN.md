@@ -1535,14 +1535,14 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1369-1381`, repointed +9 by round VI task 108's own dated
+`validate_memory_budget` (`settings.py:1379-1391`, repointed +10 by round VI task 116's own dated
 addendum paragraph to `BaselineBuild`'s docstring, earlier in the same file — pure insertion,
-confirmed by exact-line-content match against the current tree; the round VI task 107 citation
-(`settings.py:1360-1372`) is superseded in turn, per this file's annotate-in-place convention, not
-deleted; that one had itself superseded `settings.py:1323-1335`, round VI task 73, itself noting
-earlier moves by task 73's `rules_java` pin addition to `BuildSection.ruleset_versions` and,
-before that, round VI task 58's `GraphSection.forbidden_contract_ids` addition) already had the
-complete, correct arithmetic
+confirmed by exact-line-content match against the current tree; the round VI task 108 citation
+(`settings.py:1369-1381`) is superseded in turn, per this file's annotate-in-place convention, not
+deleted; that one had itself superseded `settings.py:1360-1372`, round VI task 107, which had
+itself superseded `settings.py:1323-1335`, round VI task 73, itself noting earlier moves by task
+73's `rules_java` pin addition to `BuildSection.ruleset_versions` and, before that, round VI task
+58's `GraphSection.forbidden_contract_ids` addition) already had the complete, correct arithmetic
 with zero callers — wired into `cli.py::_load_settings` via a new injectable
 `_read_host_mem_total_mb()` `/proc/meminfo` reader (same DI pattern as `PhaseRunner.
 resource_guard`). Closed a real scope surprise along the way: the shipped memory-budget defaults
