@@ -194,3 +194,84 @@ as a whole" despite the round's own most recent text saying only Leg E remained 
 at face value and did not second-guess it, since re-adjudicating it was not this task's brief and
 would be exactly the kind of unilateral Rule-14-flavored ruling the brief tells me to flag rather
 than make.
+
+---
+
+## Fix round (coordinator-dispatched, same session) — two Minor findings from review, addressed
+
+**Per this project's "annotate it, never rewrite it" convention: everything above is left exactly
+as originally written. This section records what the fix round found and changed.** Task 113 was
+reviewed and merged to `main` (`52752f4`) with 0 Critical findings and §12.11 confirmed closed as
+a whole; two Minor findings were raised for a quick follow-up fix round on this same branch
+(already-merged, so this lands as a small follow-up merge).
+
+### Finding 1 — missing Docker-availability skipif guard
+
+The closure test's own new assertions (`baseline_ok["acme-lib-py"] == 1`,
+`test_count["acme-lib-py"] > 0`, and the three named `== 0` assertions) require the real native-
+baseline container to genuinely SUCCEED, not merely run — a portability risk on a machine without
+`docker`/the built `fleet-baseline:py3.11-node18` image, where the test would FAIL rather than
+SKIP.
+
+**Fix:** imported `_IMAGE_OK`/`_IMAGE_WHY` directly from `tests.test_baseline_container` (the
+exact same helper that file's own tests use — chose importing over re-implementing the shape
+locally, since it is literally the SAME image being checked, not a different one with its own skip
+message the way `test_sandbox.py`'s and `test_baseline_container.py`'s own gates deliberately stay
+un-shared) and added `@pytest.mark.skipif(not _IMAGE_OK, reason=f"fleet baseline image unusable:
+{_IMAGE_WHY}")` to the closure test only.
+
+**Deliberately NOT added to the discriminator test**, with the reasoning now recorded in that
+test's own docstring: it only asserts NULL-set membership, and `workers/baseline.py::_measure`'s
+own control flow makes that claim independent of whether the container succeeds — a build/test
+step that can't even start (`docker` missing, an `OSError` `_invoke` catches) still returns
+`(False, 0, ...)` (never NULL), and so does a container that starts but exits non-zero (daemon
+unreachable, image unbuilt). The only way a non-empty repo's `baseline_ok` stays NULL is
+`payload.ecosystem is None`, which has nothing to do with Docker. Verified this reasoning two ways
+rather than asserting it:
+
+1. Monkeypatched `shutil.which` to hide `docker` and called `test_baseline_container.
+   _baseline_image_usable()` directly: returned `(False, 'docker CLI not on PATH')` — confirms the
+   underlying helper's own gating logic.
+2. Force-set `_IMAGE_OK = False` on both the `test_baseline_container` and
+   `test_baseline_ok_exclusion` module objects (via a throwaway probe test, deleted after use) and
+   re-ran the file: the closure test correctly **SKIPPED** (`fleet baseline image unusable:
+   SIMULATED: docker CLI not on PATH`), and the discriminator test **PASSED**, unaffected —
+   confirming both the skip mechanism fires correctly and the un-guarded test's own claim held
+   independent of the (simulated) image-unusable state.
+
+### Finding 2 — stale docstring sentence
+
+`baseline_build_yaml`'s local-override docstring (originally around line 126) still read, present
+tense, "both tests still pass (1 passed, 1 xfailed)" — stale the moment this task's own earlier
+work deleted the `strict=True` xfail (the file is now 2 passed, 0 xfailed). **Fix:** reworded to
+state the file is "2 passed, 0 xfailed" now and to avoid re-pinning an exact count that would go
+stale again the next time a test is added or removed to this file — the substantive point (neither
+test reads `phases.status`/wave membership) is unchanged and kept.
+
+### Verification
+
+- `tests/test_baseline_ok_exclusion.py`: **2 passed** (re-run after both fixes).
+- `ruff check`/`ruff format --check` on the changed file: clean (one import-order fix needed —
+  `test_baseline_container` import had to sort before `test_build_e2e`'s multi-line import; fixed,
+  re-verified clean).
+- `mypy` (whole-manifest, no path args): clean, 131 source files.
+- Broader check beyond the brief's own ask, to confirm the new cross-file import didn't regress
+  anything: `tests/test_baseline_ok_exclusion.py` + `tests/test_baseline_container.py` + `tests/
+  test_baseline_scan_e2e.py` + `tests/test_workers_baseline.py` combined — **27/27 pass**.
+- `git diff --stat src/`: empty (still no production code change).
+
+### Status
+
+**DONE.**
+
+Commit range: `agent/roundvi-task113` = `947983e..<fix-round-sha>` (four commits total on top of
+`main`@`947983e`: `3ab7c6e` test change, `8343649` D116 closure, `cb7c078` original report, plus
+this fix round's own commit — see `git log agent/roundvi-task113` for the exact fix-round SHA).
+This branch was already merged to `main` at `52752f4` before this fix round; the new commit is a
+small follow-up the controller will merge separately, per the controller's own note.
+
+Confirmation both fixes are in place: (1) the skipif guard is on the closure test, imports the
+same `_IMAGE_OK`/`_IMAGE_WHY` helper `test_baseline_container.py` already uses (not
+reinvented), and was verified to actually skip under a simulated image-unusable state; (2) the
+stale "(1 passed, 1 xfailed)" sentence is corrected and no longer pins a count that will go stale
+again.
