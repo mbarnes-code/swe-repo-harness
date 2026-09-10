@@ -11406,9 +11406,10 @@ override" to "the shipped default has no floor and no infrastructure-fault signa
 **Not yet built.** A design is owed, not decided here: at minimum, (1) a loud preflight
 distinguishing "docker/image unavailable" (an infrastructure fault, arguably its own
 non-retryable-but-loud failure class) from "this repo's native build is genuinely red" — mirroring
-the existing pattern at `workers/clone.py:467`'s `require_lfs_binary`/`shutil.which` check, which
-already refuses loudly rather than silently miscategorizing; and (2) a floor on
-`check_criterion_c` so a wave plan reduced to nothing by exemptions cannot report `ok=True`.
+the existing pattern at `workers/clone.py`'s `shutil.which("git-lfs")` check (guarded by the
+`require_lfs_binary` field, `clone.py:123`, and consulted at `clone.py:467`), which already refuses
+loudly rather than silently miscategorizing; and (2) a floor on `check_criterion_c` so a wave plan
+reduced to nothing by exemptions cannot report `ok=True`.
 Neither is built here. The two stale docstrings this same review found (`workers/baseline.py`
 lines 15-23 and `settings.py:300-303`, both still claiming "Leg C, a future task, owns the red
 path" — falsified once Leg C landed, and never updated by any of the legs that landed after it)

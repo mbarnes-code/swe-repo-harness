@@ -309,10 +309,17 @@ def test_ruff_check_is_clean_across_the_whole_repository():
 # whose dirty code fences are verbatim historical quotations of exact code as it existed at named
 # commits (e.g. "Before (pre-fix, `b4bc8be`)") — reformatting them would rewrite what those
 # quotations show, which is out of scope for this task and contrary to the project's own
-# annotate-never-rewrite convention for historical records. Those 3 are pinned instead: 123 + 3 =
-# 126. `tests/unit/test_retry.py`'s pre-existing dirty content (unrelated to this task, moved but
-# not reformatted) is left as-is, already accounted for in the wash above.
-_RUFF_FORMAT_DIRTY_BASELINE = 126
+# annotate-never-rewrite convention for historical records. Those 3 are pinned instead, not
+# reformatted.
+# **Corrected 2026-09-10 (round VI controller, fortieth wave): 126 above was wrong the moment it
+# landed — not a new drift, a parallel-merge collision.** Round VI task 115 (a sibling hotfix,
+# reformatting-neutral on its own two touched files) merged to `main` between this pin's own
+# branch point and this commit, changing the whole-repo file set `ruff format --check .` walks.
+# Re-measured directly via this test's own exact command
+# (`ruff format --check --no-cache --output-format=concise .`) against current `main`: **123**,
+# not 126. The 3 pinned report files are independently re-confirmed still dirty for the same
+# reason stated above (unchanged). Do not carry 126 forward; 123 is this pin's true current value.
+_RUFF_FORMAT_DIRTY_BASELINE = 123
 
 _FORMAT_PER_FILE = re.compile(
     r"^(?P<path>\S+):\d+:\d+: unformatted: File would be reformatted$", re.MULTILINE
