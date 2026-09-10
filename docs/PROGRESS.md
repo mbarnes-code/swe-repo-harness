@@ -10889,3 +10889,65 @@ session. Flagged to the user directly rather than silently adopted or silently i
 affect any of this wave's own findings, which were all independently reproduced by human-legible
 means (direct source reads, real `docker run` invocations, real `pytest` runs) regardless of
 whether any reviewer used it.
+
+## Round VI, thirty-ninth wave (2026-09-10) — §12.11 Legs C+E closed, §12.39-B2 closed; **48 of 48
+SPEC §12 criteria now DONE, the first time in this project's history**
+
+Seventh and closing dispatch wave this session (2 build tasks: 111-112, 1 build task: 113, plus 2
+citation-drift hotfixes), continuing directly from the thirty-eighth wave checkpoint. Full detail
+in `.superpowers/sdd/round-VI-criteria-closure/progress.md`; headline outcomes only here.
+
+**§12.39 closed as a whole** (task 112, B2, 0 fix rounds): a real two-round CLI fixture proves
+`BUDGET_EXHAUSTED` through B1's own wiring (task 109, prior wave), with the budget threshold
+derived from a real measured cost ($0.027, re-verified exact by review), not invented. Cases (i),
+(ii), and (iii) are all now closed.
+
+**§12.11 closed as a whole** (tasks 111 and 113, 2 fix rounds total). Task 111 (Leg C) built the
+red path — a repo whose real native build genuinely fails now gets `BaselineRed`/`SKIPPED`/
+`baseline_ok=0` atomically, verified by construction (not just fixture inspection) that no repo can
+match two exemption categories at once. Its fix round is this wave's second-clearest lesson about
+parallel-dispatch cost: wiring the gate made several widely-shared e2e fixture files' pre-existing,
+previously-inert native-baseline failures newly consequential, timing out one file entirely — fixed
+via a shared, opt-in `conftest.py` fixture rather than per-file patches, which the controller
+initially asked for narrowly but which turned out to be the structurally correct broader scope (the
+implementer's own audit of every real-scan-driving file caught a genuine fixture-resolution gap a
+narrower fix would have missed).
+
+Task 113 (Leg E) then reconciled the criterion's own `strict=True` xfail with an already-landed
+Rule-14 narrowing (ADR-0135) neither prior task had circled back to apply to the xfail's own literal
+assertion, strengthened the fixture non-vacuously (a real passing native test so
+`baseline_test_count > 0` is genuinely expressible; three explicitly-named genuinely-broken builds
+so `baseline_ok=0`/`BaselineRed` are genuinely expressible, not accidents nobody named), and deleted
+the xfail — the deletion itself being the proof, per this project's own established precedent. This
+task's review was dispatched at maximum scrutiny (opus-tier, re-reading this criterion's entire
+multi-round history) specifically because closing it meant closing the whole SPEC — it found the
+closure genuinely sound, and along the way corrected a stale residual sentence (falsely claiming a
+non-Python real-Bazel proof was "blocked on a defect that had already been fixed weeks earlier") that
+neither of the two prior lanes who touched that sentence had caught, because the tree had moved
+underneath each of them in turn.
+
+**Two more citation-drift hotfixes, same recurring hazard as the prior wave.** This session's own
+heavy documentation output, combined with `src/fleet/cli.py` growing by ~90-250 lines per task
+across five separate merges this wave, drifted line-number citations twice more — caught each time
+before the next merge compounded it, fixed both times using this project's established
+repoint-annotation convention. The pattern is now well-understood enough that the second occurrence
+was fixed directly by the controller rather than needing its own dispatch round-trip.
+
+**Status: main green** through every one of this wave's merges, independently re-confirmed by the
+controller after each — including two intra-wave citation-drift regressions caught and fixed before
+they could compound, and one self-made checkpoint-arithmetic error (see the correction on the
+thirty-seventh wave's own entry above) caught and disclosed rather than silently carried forward.
+
+**§12 count: 48 of 48, re-measured directly at `62d13de`** — a fresh, form-agnostic re-derivation
+(every one of the file's 48 `## N.` entries individually checked for a `**DONE` status line), not
+carried forward from any prior claim, given the stakes of this specific number. **This is the first
+time this project has reached 48 of 48 since §12's acceptance bar was defined.**
+
+**What's left before this can be called truly finished, not just criterion-closed:**
+- One small fix round for task 113 is still in flight as this checkpoint is written (2 disclosed
+  Minor findings: a missing Docker-availability skipif guard on the new closure test, and one stale
+  docstring sentence — neither blocks the 48/48 measurement above, both are portability/cosmetic).
+- A final, whole-session review of this entire multi-wave effort (tasks 102-113, this session's
+  full scope) is still owed before this work is considered ready to hand off, per this project's
+  own subagent-driven-development discipline: closing the LAST criterion is not the same
+  verification event as a broad final review of everything accumulated getting there.
