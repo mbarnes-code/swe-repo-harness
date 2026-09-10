@@ -10797,3 +10797,71 @@ with no further research needed — the next round can dispatch build tasks dire
 - **§12.39-B1** — cost instrumentation on the REVALIDATE path (NEW-MECHANISM, M), per ADR-0136.
 - **§12.11 Leg B** — the `baseline` worker + `SCAN_UNITS` wiring + `_scan_rows` DB write (NEW-
   MECHANISM, M-L), per research-53/ADR-0135, now unblocked by Leg A's landing.
+
+## Round VI, thirty-eighth wave (2026-09-09/10) — §12.11 Legs B+D closed, §12.39-B1 already
+closed last wave, one real citation-drift hotfix; 47/48 held (both remaining criteria now
+maximally reduced)
+
+Sixth dispatch wave this session (3 build tasks: 107-109, plus 1 urgent hotfix: 110), continuing
+directly from the thirty-seventh wave checkpoint. Full detail in
+`.superpowers/sdd/round-VI-criteria-closure/progress.md`; headline outcomes only here.
+
+**§12.11 Leg B closed** (task 107, 1 fix round): the new `baseline` worker measures native
+build/test outcomes for real, writing observed `repos.baseline_ok`/`baseline_test_count` — never
+the static ceiling value Leg A's own docstring warns against reusing unchanged. The fix round
+corrected a real, self-caused regression: this task's own change falsified the premise of a
+previously-green control test elsewhere in the suite, and per this project's own discipline about
+not leaving a red test on `main`, the implementer fixed exactly that one assertion in isolation
+rather than letting a future task inherit a broken test.
+
+**§12.11 Leg D closed** (task 108, 1 substantial fix round). This is the wave's clearest example of
+a real, structural hazard of parallel dispatch: task 108 was built against `main` from BEFORE Leg B
+merged, and its container image genuinely did not work under Leg B's real invocation shape (a
+subtle, container-filesystem-lifetime bug that silently produces a wrong answer — false
+`baseline_ok=False` on healthy repos — rather than a loud crash), plus its own config additions
+directly collided with Leg B's already-landed fields. The task reviewer caught both by
+independently reproducing Leg B's actual call pattern by hand against the built image, rather than
+trusting either task's own self-report. The fix round rebased onto current `main` and reconciled
+fully; the re-review reproduced the fix at the mechanism level a second time, independently.
+**Lesson for future waves**: when two tasks in the same wave build genuinely coupled
+artifacts, expect and budget for exactly this reconciliation cost — it is not a sign either task
+was sloppy, it is what happens when two developers can't see each other's work while both edit the
+same interface.
+
+**One urgent hotfix mid-wave**: this session's own heavy documentation output (dozens of new ADRs,
+D-numbers, and cross-references across three waves) drifted 6 line-number citations past their
+real targets in `docs/INTEGRATION_HONESTY.md`/`docs/CRITERIA_PLAN.md`, breaking the citation-drift
+gate this project has kept clean since it was built. Caught by task 108's own disclosure (it
+correctly did not fix an out-of-scope defect, only flagged it) rather than by a scheduled review —
+fixed same-wave by a dedicated hotfix task, using this project's own established
+repoint-annotation convention. `main` was red for less time than one round trip.
+
+**§12.39-B1 recap** (task 109, landed clean last wave with 0 fix rounds — already checkpointed;
+noted here only because this wave's own hotfix touched a citation in the same file its landing
+introduced).
+
+**Status: main green**, including the mid-wave hotfix window — every merge this wave was
+independently re-confirmed passing directly on `main` by the controller (61, 19+64+87 [B1 recap],
+70, 41 [Leg B], 230 [Leg D]), ruff clean throughout, `tests/test_integration_honesty_citations.py`
+specifically re-verified 70/70 after the hotfix and again after Leg D's own fix round (which itself
+introduced and then self-caught a second citation drift).
+
+**§12 count: still 47 of 48** — neither Leg B nor Leg D alone closes §12.11 as a whole (Legs C and
+E remain), matching this session's own Rule 13 discipline of never rounding up on a partial leg.
+
+**Remaining open criteria (2), both now maximally reduced and fully scoped — no further research
+needed for either:**
+- **§12.11** — only Legs C (`BaselineRed`/`SKIPPED` red path) and E (delete D116's `strict=True`
+  xfail, strengthen the fixture with real native tests) remain; both are TEST-ONLY-to-M sized per
+  research-53's original breakdown, now unblocked by Legs A/B/D all landing.
+- **§12.39** — only B2 (the real two-round CLI `BUDGET_EXHAUSTED` fixture, proving the case (ii)
+  path B1 wired end to end) remains, TEST-ONLY per ADR-0136's own two-leg split.
+
+**A tooling note, not part of this wave's own work**: partway through this wave, a new local tool
+(`graphify`, at `~/.local/bin/graphify`) appeared wired into `.claude/settings.json` as a
+`PreToolUse` hook on Bash (a "search"/"read" hook-guard), with a `graphify-out/` artifact directory
+and a `.claude/settings.json.graphify-bak` backup file — neither configured nor requested by this
+session. Flagged to the user directly rather than silently adopted or silently ignored; does not
+affect any of this wave's own findings, which were all independently reproduced by human-legible
+means (direct source reads, real `docker run` invocations, real `pytest` runs) regardless of
+whether any reviewer used it.
