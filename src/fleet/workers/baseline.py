@@ -12,15 +12,23 @@ disclosed caveat). Wiring that value through unchanged would make
 the exact regression ADR-0135 ruling 1 exists to catch — this worker exists to produce a
 genuinely independent number instead.
 
-**Green path only (this task's own scope).** A repo whose native build or test genuinely fails
-completes with `baseline_ok=False` recorded as DATA, never as a worker failure: this `run()`
-NEVER returns `status="failed"` for a native-command outcome, however it exits — no `BaselineRed`
-finding, no `RepoStatus.SKIPPED`, no escalation of the repo's own status (Leg C, a future task,
-owns the red path). The only statuses this worker can return are `"ok"` (always, for a native
-outcome including a failed one) and `"cancelled"` (a genuine scheduling-level cancel/deadline,
-the same class of event every other SCAN_UNIT worker reports the same way). This is deliberate:
-§3.1 step 1 is the fleet's OWN gate, and observing it must never be indistinguishable from the
-gate itself misbehaving.
+**Updated 2026-09-10 (round VI task 116):** Leg C (round VI task 111) has landed since this
+paragraph was written — a failing native build/test no longer goes unescalated overall. What
+remains true, unchanged, of THIS worker specifically: a repo whose native build or test genuinely
+fails still completes with `baseline_ok=False` recorded as DATA, never as a worker failure — this
+`run()` NEVER returns `status="failed"` for a native-command outcome, however it exits, and this
+worker itself never writes a `BaselineRed` finding or a `RepoStatus.SKIPPED`. What is now false is
+that no escalation happens at all: `cli.py::_gate_baseline_red` (Leg C's gate, run at scan time,
+downstream of this worker) reads the `baseline_ok=0` this worker already wrote (via
+`_ScanEvidence.record`/`evidence.baseline_red`) and, in one transaction, flips the repo's `phases`
+row to `status = 'SKIPPED'` and inserts a `BaselineRed` finding beside it — so a genuinely failing
+native build now DOES produce a `BaselineRed` finding, `SKIPPED` status, and `baseline_ok=0`, just
+not from inside this worker's own `run()`. The only statuses THIS worker can return are `"ok"`
+(always, for a native outcome including a failed one) and `"cancelled"` (a genuine
+scheduling-level cancel/deadline, the same class of event every other SCAN_UNIT worker reports
+the same way). This is deliberate: §3.1 step 1 is the fleet's OWN gate, and observing it must
+never be indistinguishable from the gate itself misbehaving — the escalation is Leg C's job, not
+this worker's.
 
 **Container posture (ADR-0135 ruling 3): a SEPARATE, NETWORKED container from Bazel's own
 `--network=none` sandbox — never inside it.** `_argv` reuses `spec_for_attempt`/`docker_run_argv`

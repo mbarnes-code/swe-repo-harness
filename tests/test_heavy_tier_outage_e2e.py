@@ -596,9 +596,8 @@ def test_case_ii_backend_health_breaker_opens_on_the_fixture_fleet(
         down_transitions = [
             json.loads(raw)
             for (raw,) in transitions
-            if json.loads(raw)["to_state"] == "DOWN" and json.loads(raw)["model_id"] == (
-                "fixture-heavy-a"
-            )
+            if json.loads(raw)["to_state"] == "DOWN"
+            and json.loads(raw)["model_id"] == ("fixture-heavy-a")
         ]
         assert down_transitions, "fixture-heavy-a never transitioned to DOWN"
         assert all("open_after_failures=1" in t["reason"] for t in down_transitions)
@@ -667,10 +666,13 @@ def test_case_ii_cooldown_and_half_open_recovery_on_the_fixture_fleet(
     to the RECOVERED `fixture-heavy-a`, not `fixture-heavy-b`, proving the probe's success was
     real and not a leftover failover.
     """
-    fleet_yaml = FLEET_YAML.replace(
-        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n",
-        "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n  llm:\n    heavy: 1\n",
-    ) + "llm:\n  failover:\n    open_after_failures: 1\n    cooldown_s: 0\n"
+    fleet_yaml = (
+        FLEET_YAML.replace(
+            "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n",
+            "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n  llm:\n    heavy: 1\n",
+        )
+        + "llm:\n  failover:\n    open_after_failures: 1\n    cooldown_s: 0\n"
+    )
     assert "llm:\n    heavy: 1\n" in fleet_yaml, "the concurrency.llm.heavy override did not apply"
 
     calls_a: list[int] = []
@@ -882,9 +884,7 @@ def test_case_iii_schema_exhaustion_and_capability_drift_on_the_fixture_fleet(
         # (`orchestrator/findings.py`'s `ON CONFLICT` clause) — both repos' calls drift
         # identically (same role/tier/backend/model_id/promised/actual), so the second is a
         # genuine dedup, not a missed write.
-        drift_rows = query(
-            workspace, "SELECT payload FROM findings WHERE kind = 'CapabilityDrift'"
-        )
+        drift_rows = query(workspace, "SELECT payload FROM findings WHERE kind = 'CapabilityDrift'")
         assert len(drift_rows) == 1, drift_rows
         for (raw,) in drift_rows:
             payload = json.loads(raw)
