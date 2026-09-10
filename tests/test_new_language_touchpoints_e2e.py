@@ -53,7 +53,9 @@ the corrected order.
 
 from __future__ import annotations
 
+import functools
 import json
+import operator
 import subprocess
 import sys
 import typing
@@ -62,7 +64,7 @@ from concurrent.futures import Executor, ThreadPoolExecutor
 from contextlib import contextmanager
 from enum import StrEnum
 from pathlib import Path
-from types import ModuleType
+from types import ModuleType, UnionType
 from typing import Any
 
 import pytest
@@ -322,6 +324,14 @@ def _substitute_ecosystem(annotation: object, decoy: type) -> object:
     new_args = tuple(_substitute_ecosystem(arg, decoy) for arg in args)
     if new_args == args:
         return annotation
+    # `types.UnionType` (PEP-604 `X | Y`) is a DIFFERENT runtime type from `typing.Union` (the
+    # old-style `Union[X, Y]` form handled by `copy_with` below) even though `typing.get_origin`
+    # returns it as the "origin" for both spellings of an equivalent union: it is not
+    # parameterized/subscriptable the way a generic alias is (`origin[new_args]` raises
+    # `TypeError: type 'types.UnionType' is not subscriptable`), so it must be reconstructed by
+    # re-`|`-ing its (substituted) members instead.
+    if origin is UnionType:
+        return functools.reduce(operator.or_, new_args)
     if hasattr(annotation, "copy_with"):
         return annotation.copy_with(new_args)
     assert origin is not None
@@ -365,44 +375,54 @@ def _decoy_ruby_ecosystem() -> Iterator[RealEcosystem]:
     )
     ruby_member: RealEcosystem = getattr(decoy, "RUBY")  # noqa: B009 (mypy can't see decoy's members)
 
+    # Everything below that mutates process-global state (the module bindings, pydantic's
+    # per-field annotations, the ecosystem/manifest adapter registries) lives inside this ONE
+    # try/finally, not just the `yield` -- a failure partway through substitution (e.g. a type
+    # this walk doesn't yet know how to reconstruct) must never leak patched state into whatever
+    # test runs next. `saved_fields` is restored from exactly what it recorded, so even a
+    # mid-sweep exception only leaves entries for fields that were actually mutated, and
+    # `mp.undo()`/`reset_adapters()`/`discover(force=True)` are each safe to call unconditionally
+    # (idempotent no-ops on anything never patched/registered in the first place).
     mp = pytest.MonkeyPatch()
-    for module, attr in _ECOSYSTEM_MODULE_BINDINGS:
-        mp.setattr(module, attr, decoy)  # raising=True is the default -- exactly the fix
-
     saved_fields: list[tuple[type[FleetModel], str, Any]] = []
-    rebuilt: set[type[FleetModel]] = set()
-    for mod_name, module in list(sys.modules.items()):
-        if not mod_name.startswith("fleet"):
-            continue
-        for attr_name in dir(module):
-            obj = getattr(module, attr_name, None)
-            if not isinstance(obj, type) or not issubclass(obj, FleetModel):
-                continue
-            if obj is FleetModel or obj in rebuilt:
-                continue
-            changed = False
-            for field_name, field_info in obj.model_fields.items():
-                if _mentions_ecosystem(field_info.annotation):
-                    saved_fields.append((obj, field_name, field_info.annotation))
-                    substituted = _substitute_ecosystem(field_info.annotation, decoy)
-                    field_info.annotation = typing.cast("type[Any] | None", substituted)
-                    changed = True
-            if changed:
-                rebuilt.add(obj)
-    for model_cls in rebuilt:
-        model_cls.model_rebuild(force=True)
-
-    manifests_base.register(make_ruby_manifest_adapter(ruby_member))
-    ecosystems_base.register(make_ruby_ecosystem_adapter(ruby_member))
-    manifests_base.discover(force=True)
-    ecosystems_base.discover(force=True)
-
     try:
+        for module, attr in _ECOSYSTEM_MODULE_BINDINGS:
+            mp.setattr(module, attr, decoy)  # raising=True is the default -- exactly the fix
+
+        rebuilt: set[type[FleetModel]] = set()
+        for mod_name, module in list(sys.modules.items()):
+            if not mod_name.startswith("fleet"):
+                continue
+            for attr_name in dir(module):
+                obj = getattr(module, attr_name, None)
+                if not isinstance(obj, type) or not issubclass(obj, FleetModel):
+                    continue
+                if obj is FleetModel or obj in rebuilt:
+                    continue
+                changed = False
+                for field_name, field_info in obj.model_fields.items():
+                    if _mentions_ecosystem(field_info.annotation):
+                        saved_fields.append((obj, field_name, field_info.annotation))
+                        substituted = _substitute_ecosystem(field_info.annotation, decoy)
+                        field_info.annotation = typing.cast("type[Any] | None", substituted)
+                        changed = True
+                if changed:
+                    rebuilt.add(obj)
+        for model_cls in rebuilt:
+            model_cls.model_rebuild(force=True)
+
+        manifests_base.register(make_ruby_manifest_adapter(ruby_member))
+        ecosystems_base.register(make_ruby_ecosystem_adapter(ruby_member))
+        manifests_base.discover(force=True)
+        ecosystems_base.discover(force=True)
+
         yield ruby_member
     finally:
+        restored_classes: set[type[FleetModel]] = set()
         for model_cls, field_name, original in saved_fields:
             model_cls.model_fields[field_name].annotation = original
-        for model_cls in rebuilt:
+            restored_classes.add(model_cls)
+        for model_cls in restored_classes:
             model_cls.model_rebuild(force=True)
         mp.undo()
         ecosystems_base.reset_adapters()
