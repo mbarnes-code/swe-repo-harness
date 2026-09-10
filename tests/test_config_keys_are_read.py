@@ -388,10 +388,6 @@ QUALIFIED_MATCH_KEYS: frozenset[str] = frozenset(
         "fleet.yaml:transform.anchoring.enabled",
         "fleet.yaml:preflight.baseline_build.enabled",
         "fleet.yaml:preflight.baseline_build.timeout_s",
-        "fleet.yaml:preflight.baseline_build.container_image",
-        "fleet.yaml:preflight.baseline_build.container_memory",
-        "fleet.yaml:preflight.baseline_build.container_cpus",
-        "fleet.yaml:preflight.baseline_build.network",
         "fleet.yaml:transform.stub_blocked",
         "fleet.yaml:llm.cache_mode",
     }

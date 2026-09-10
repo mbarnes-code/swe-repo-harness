@@ -8,12 +8,28 @@ Same discipline as `test_sandbox.py`'s two live-daemon tests: gate on the image 
 LOCALLY (never pull — a registry round-trip would make a green run depend on someone else's
 uptime) and skip LOUDLY, naming why, rather than let an absent daemon look like a pass.
 
-This is Leg D only — proving the IMAGE genuinely has a working Python+pytest and Node+npm
-toolchain with network access, invocable through this codebase's own `spec_for_attempt`/
-`ContainerSandbox` machinery. It does not build `src/fleet/workers/baseline.py` (Leg B, a sibling
-task) and does not touch the shipped `tests/test_scan_e2e.py::FIXTURE_REPOS` fixtures, which have
-no native test files of their own yet (a disclosed Leg E gap, not this task's to close) — the
-fixture content used below is a LOCAL, throwaway repo shaped identically to the real
+**Corrected 2026-09-10 (round VI task 108 fix round, review Critical finding 1).** The two
+container-driving tests below used to build their own `spec_for_attempt` call with `command=
+["sh", "-c", "<build> && <test>"]` — ONE joined container invocation — on the stated (and false)
+premise that this is how Leg B's worker would call it. It is not: `src/fleet/workers/baseline.py`
+(Leg B, landed round VI task 107, merged to `main` at `121665e` — AFTER this task's original
+`main`@`fa6e1d7` dispatch) calls `spec_for_attempt` TWICE, once per step, each in its OWN
+separately-named (`-baseline-build`/`-baseline-test`), separately-`--rm`'d container. The two
+tests below now drive the REAL, UNMODIFIED `fleet.workers.baseline.BaselineWorker` — not a
+hand-rolled re-implementation of its shape — so there is no second chance for this suite's own
+premise about Leg B to drift from Leg B's actual code again. This is also what caught the real
+image defect the joined-invocation version could not see: `PIP_USER=1` + a plain `HOME=` landed
+Python installs in the FIRST container's own ephemeral layer, invisible to the SECOND container's
+`pytest` — fixed in `docker/fleet-baseline.Dockerfile` via `PYTHONUSERBASE=/work/...` (see that
+file's own dated comment).
+
+This is still Leg D's own suite — proving the IMAGE genuinely has a working Python+pytest and
+Node+npm toolchain with network access, now proven specifically under Leg B's real two-container
+invocation shape. It does not modify `src/fleet/workers/baseline.py` itself (Leg B, merged and
+reviewed — this task's job is to make the image work with what Leg B actually does, not to ask
+Leg B to change) and does not touch the shipped `tests/test_scan_e2e.py::FIXTURE_REPOS` fixtures,
+which have no native test files of their own yet (a disclosed Leg E gap, not this task's to
+close) — the fixture content used below is a LOCAL, throwaway repo shaped identically to the real
 `acme-lib-py`/`acme-lib-ts` fixtures (same dependency declarations: `requests>=2.31`,
 `left-pad@^1.3.0`) plus one real test file, so this suite can prove the toolchain rather than
 merely assert it exists.
@@ -29,14 +45,15 @@ from uuid import UUID
 
 import pytest
 
-from fleet.sandbox.container import (
-    ContainerSandbox,
-    ContainerSpec,
-    docker_run_argv,
-    spec_for_attempt,
-)
+from fleet import ecosystems
+from fleet.models.enums import Ecosystem
+from fleet.sandbox.container import ContainerSandbox, ContainerSpec, docker_run_argv
 from fleet.settings import PreflightSection
 from fleet.util.proc import run
+from fleet.workers.baseline import BaselineInput, BaselineWorker
+from tests.test_workers_scan import make_ctx
+
+ecosystems.discover()  # idempotent (base.py::discover) -- for_ecosystem() needs it populated
 
 RUN_ID = UUID("00000000-0000-4000-8000-0000000010c8")  # task 108
 BASELINE_IMAGE = PreflightSection().baseline_build.container_image
@@ -44,7 +61,7 @@ BASELINE_IMAGE = PreflightSection().baseline_build.container_image
 gives for `VerifySection.container_image`: this suite is about the image the fleet will actually
 run, so retagging `settings.py` must move the test with it."""
 
-BASELINE_NETWORK = PreflightSection().baseline_build.network
+BASELINE_NETWORK = PreflightSection().baseline_build.container_network
 BASELINE_MEMORY = PreflightSection().baseline_build.container_memory
 BASELINE_CPUS = PreflightSection().baseline_build.container_cpus
 
@@ -134,77 +151,84 @@ def _write_js_fixture(root: Path) -> None:
     )
 
 
+def _real_baseline_payload(*, ecosystem: Ecosystem, worktree: Path) -> BaselineInput:
+    """Leg B's own real config surface (`preflight.baseline_build`), read from the SAME setting
+    the shipped default now points at (`BASELINE_IMAGE`, etc.) — never a hand-typed re-statement
+    of Leg B's field values, so a drift in `settings.py`'s defaults shows up here too."""
+    return BaselineInput(
+        repo_id="acme-baseline-live",
+        ecosystem=ecosystem,
+        worktree_path=str(worktree),
+        image=BASELINE_IMAGE,
+        container_memory=BASELINE_MEMORY,
+        container_cpus=BASELINE_CPUS,
+        container_network=BASELINE_NETWORK,
+        log_dir=str(worktree / "logs-not-touched"),  # runner=run is injected below; never read
+    )
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(not _IMAGE_OK, reason=f"fleet baseline image unusable: {_IMAGE_WHY}")
-async def test_the_baseline_image_runs_a_real_pip_install_and_pytest_with_network(
+async def test_the_real_baseline_worker_measures_a_pypi_repo_through_two_real_containers(
     tmp_path: Path,
 ) -> None:
-    """The Python half of the brief's scope item 1: a real interpreter + `pytest`, run through
-    this codebase's own `spec_for_attempt`/`docker_run_argv`/`ContainerSandbox` — the identical
-    machinery Bazel's own sandbox invokes (`workers/buildverify.py::BuildverifyWorker._argv`) —
-    against a mounted worktree, as the arbitrary HOST uid `current_user_spec()` produces, with
-    real network access to resolve a real PyPI dependency (`requests`).
+    """Drives the REAL, UNMODIFIED `fleet.workers.baseline.BaselineWorker` (Leg B, merged and
+    reviewed) — not a hand-rolled re-implementation of its invocation shape — against a real
+    docker daemon and this task's real built image, with a real PyPI dependency (`requests`).
 
-    Two argv, joined by `sh -c '... && ...'` exactly as `EcosystemAdapter.native_baseline()`
-    documents ("run ... after `build_argv` (if any) succeeds") — this is the shape Leg B's own
-    `spec_for_attempt` call is expected to build, restated here as a proof rather than guessed.
+    `BaselineWorker._argv`/`_measure` build TWO separate `spec_for_attempt` calls internally, one
+    per step (`-baseline-build`, `-baseline-test`), each its own `--rm`'d container mounting the
+    SAME `worktree` at `/work` — this test asserts the OUTPUT (`baseline_ok`, `baseline_test_
+    count`, both exit codes), not the argv shape, precisely because the argv shape is Leg B's own
+    code and this task's job is to prove the IMAGE works with it, not to re-assert Leg B's own
+    already-reviewed internals.
     """
     _write_py_fixture(tmp_path)
-    spec = spec_for_attempt(
-        run_id=RUN_ID,
-        repo="acme-lib-py",
-        attempt=1,
-        image=BASELINE_IMAGE,
-        command=["sh", "-c", "python3 -m pip install -e . && python3 -m pytest -q"],
-        worktree=tmp_path,
-        memory=BASELINE_MEMORY,
-        cpus=BASELINE_CPUS,
-        network=BASELINE_NETWORK,
-    )
-    assert spec.network != "none", (
-        "ADR-0135 ruling 3: a native baseline must NOT run under Bazel's own network=none "
-        "posture, or dependency resolution against the real PyPI cannot succeed"
-    )
+    ctx = make_ctx(tmp_path, seconds_left=180.0)
+    worker = BaselineWorker(runner=run)  # the REAL fleet.util.proc.run, real docker/pip/pytest
+    payload = _real_baseline_payload(ecosystem=Ecosystem.PYPI, worktree=tmp_path)
 
-    result = await ContainerSandbox().run(spec, timeout_s=180)
+    result = await worker.run(ctx, payload)
 
-    assert result.ok, result.stderr_tail
-    assert "1 passed" in result.stdout_tail, result.stdout_tail
+    assert result.status == "ok", result.error
+    assert result.output is not None
+    assert result.output.build_exit_code == 0, "the build (pip install -e .) step failed"
+    assert result.output.test_exit_code == 0, "the test (pytest) step failed"
+    assert result.output.baseline_ok is True, (
+        "a healthy PyPI repo with a real third-party dependency must measure baseline_ok=True "
+        "through Leg B's real two-separate-container invocation shape"
+    )
+    assert result.output.baseline_test_count == 1
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not _IMAGE_OK, reason=f"fleet baseline image unusable: {_IMAGE_WHY}")
-async def test_the_baseline_image_runs_a_real_npm_install_and_test_with_network(
+async def test_the_real_baseline_worker_measures_an_npm_repo_through_two_real_containers(
     tmp_path: Path,
 ) -> None:
-    """The Node.js/npm half of scope item 2, mirroring the Python test above exactly:
-    `JsAdapter.native_baseline()`'s own argv (`npm install` then `npm test`), run against a real
-    third-party npm dependency (`left-pad`) resolved over the real network, through the same
-    production container machinery.
-    """
+    """The Node.js/npm half of the test above, same shape: the REAL `BaselineWorker` against a
+    real npm dependency (`left-pad`), through two real, separate containers."""
     _write_js_fixture(tmp_path)
-    spec = spec_for_attempt(
-        run_id=RUN_ID,
-        repo="acme-lib-ts",
-        attempt=1,
-        image=BASELINE_IMAGE,
-        command=["sh", "-c", "npm install && npm test"],
-        worktree=tmp_path,
-        memory=BASELINE_MEMORY,
-        cpus=BASELINE_CPUS,
-        network=BASELINE_NETWORK,
-    )
+    ctx = make_ctx(tmp_path, seconds_left=180.0)
+    worker = BaselineWorker(runner=run)
+    payload = _real_baseline_payload(ecosystem=Ecosystem.NPM, worktree=tmp_path)
 
-    result = await ContainerSandbox().run(spec, timeout_s=180)
+    result = await worker.run(ctx, payload)
 
-    assert result.ok, result.stderr_tail
+    assert result.status == "ok", result.error
+    assert result.output is not None
+    assert result.output.build_exit_code == 0, "the build (npm install) step failed"
+    assert result.output.test_exit_code == 0, "the test (npm test) step failed"
+    assert result.output.baseline_ok is True
+    assert result.output.baseline_test_count == 1
 
 
 @pytest.mark.integration
 @pytest.mark.skipif(not _IMAGE_OK, reason=f"fleet baseline image unusable: {_IMAGE_WHY}")
 async def test_the_baseline_image_survives_an_unmapped_uid_with_no_env_passed() -> None:
-    """`docker_run_argv` passes no `--env` unless the caller supplies `env=`, and Leg D's own
-    `spec_for_attempt` calls above supply none — so `PIP_BREAK_SYSTEM_PACKAGES`/`PIP_USER`/`HOME`
+    """`docker_run_argv` passes no `--env` unless the caller supplies `env=`, and neither
+    `BaselineWorker._argv` (the two tests above, real production code) nor this test's own
+    `ContainerSpec` supply one — so `PIP_BREAK_SYSTEM_PACKAGES`/`PIP_USER`/`PYTHONUSERBASE`/`HOME`
     (the arbitrary-uid fixes `docker/fleet-baseline.Dockerfile` documents as load-bearing) must
     survive as image `ENV`, the same fact `test_sandbox.py`'s
     `test_the_fleet_build_image_runs_bazels_lookups_as_an_unmapped_uid` asserts for the sibling
@@ -216,11 +240,15 @@ async def test_the_baseline_image_survives_an_unmapped_uid_with_no_env_passed() 
     here would prove a directory-permissions fact about the HOST, not about this image — exactly
     why `test_the_fleet_build_image_runs_bazels_lookups_as_an_unmapped_uid` mounts nothing for
     its own probe. What this proves instead: `$HOME` is writable by an uid the image never saw at
-    build time, and pip's own break-system-packages/user-site environment survives with no
-    `--env` on the `docker run` line — real production behaviour is a bind-mounted worktree the
-    HOST already owns, which the two tests above cover under the REAL host uid.
+    build time, and pip's own break-system-packages/user-site/PYTHONUSERBASE environment survives
+    with no `--env` on the `docker run` line — real production behaviour (a bind-mounted
+    worktree the HOST already owns, and the actual persistence-across-two-containers fact) is
+    what the two tests above cover under the REAL host uid.
     """
-    probe = "echo HOME=$HOME; touch $HOME/probe.txt && echo WRITABLE; env | grep ^PIP_"
+    probe = (
+        "echo HOME=$HOME; touch $HOME/probe.txt && echo WRITABLE; "
+        "env | grep -E '^PIP_|^PYTHONUSERBASE'"
+    )
     spec = ContainerSpec(
         image=BASELINE_IMAGE,
         name=f"fleet-{RUN_ID}-baseline-env-probe",
@@ -239,3 +267,4 @@ async def test_the_baseline_image_survives_an_unmapped_uid_with_no_env_passed() 
     assert "WRITABLE" in result.stdout_tail, result.stdout_tail
     assert "PIP_BREAK_SYSTEM_PACKAGES=1" in result.stdout_tail, result.stdout_tail
     assert "PIP_USER=1" in result.stdout_tail, result.stdout_tail
+    assert "PYTHONUSERBASE=/work/.fleet-baseline-pyuser" in result.stdout_tail, result.stdout_tail

@@ -9880,10 +9880,11 @@ form-agnostic sweeps: zero sites anywhere in `src/fleet/` ever `UPDATE`/`INSERT`
 baseline_ok` or `repos.baseline_test_count` (both columns are read in several places —
 `_RepoFacts.baseline_ok`/`baseline_test_count` in `cli.py`, the `SELECT` at `cli.py:7368`,
 `graph/sequence.py::_exemptions_for`'s `baseline_ok.get(repo_id) == 0` — and written nowhere), and
-`BaselineBuild.enabled` (`settings.py:308`, repointed +26 by round VI task 107's own expansion of
-this class's docstring (from 1 line to 27) above it — pure insertion, confirmed by exact-line-
-content match against the current tree; the original citation (`settings.py:282`, round VI task 54)
-is superseded, per this file's annotate-in-place convention, not deleted) itself is read nowhere
+`BaselineBuild.enabled` (`settings.py:316`, repointed +8 by round VI task 108's own dated
+addendum paragraph to this same class's docstring — pure insertion, confirmed by exact-line-
+content match against the current tree; the round VI task 107 citation (`settings.py:308`) is
+superseded in turn, per this file's annotate-in-place convention, not deleted; the original
+citation (`settings.py:282`, round VI task 54) was superseded by that one) itself is read nowhere
 outside `settings.py` (`grep
 -rn "baseline_build" src/fleet/` returns only its own declaration at `settings.py:295`). There is
 no production code path, gated on the config flag or otherwise, that ever runs the native

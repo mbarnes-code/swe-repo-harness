@@ -67,18 +67,43 @@ RUN python3 -m pip install --no-cache-dir pytest pytest-asyncio
 # the PEP-668 gate lifted, an arbitrary host uid has no write access to root-owned system
 # site-packages (`/usr/lib/python3.11/dist-packages`) -- exactly the `--user`/system split
 # `current_user_spec()`'s own docstring already names for the bind-mounted worktree, applied here
-# to Python's own install target. `PIP_USER=1` makes an unmodified `pip install -e .` land in
-# `$HOME/.local/lib/python3.11/site-packages` instead, which the world-writable `$HOME` below
-# makes writable by any uid. Both the repo's own package (installed at container-run time, user
-# site) and `pytest` (installed at image-build time, system site, as root) end up on the SAME
-# interpreter's `sys.path` -- Python's `site` module includes both by default -- so
-# `python3 -m pytest` sees both without any `PYTHONPATH` plumbing.
+# to Python's own install target.
 ENV PIP_USER=1
+
+# **Corrected 2026-09-10 (round VI task 108 fix round, Critical finding 1).** An earlier version
+# of this image paired `PIP_USER=1` with a plain `HOME=/home/fleet`, which lands the install
+# under `/home/fleet/.local/...` -- a path INSIDE the container's own ephemeral filesystem layer,
+# not under the bind-mounted worktree. That is silently correct for a single `docker run` (both
+# steps in the SAME container see it) and silently WRONG for `workers/baseline.py`'s real,
+# landed shape: `BaselineWorker._argv` calls `spec_for_attempt` TWICE, once per step
+# (`-baseline-build` / `-baseline-test`), each its own SEPARATELY NAMED, SEPARATELY `--rm`'d
+# container -- so a package installed under the first container's `/home/fleet` is gone before
+# the second container (the test step) ever starts, and `python3 -m pytest` fails
+# `ModuleNotFoundError` on any real third-party dependency (measured directly: two real, separate
+# `docker run`s against the same bind-mounted `acme-lib-py`-shaped fixture, `requests` installed
+# in the first, `ModuleNotFoundError: No module named 'requests'` in the second, before this fix).
+#
+# The fix: `PYTHONUSERBASE` -- which Python's own `site` module consults BEFORE deriving a
+# default from `$HOME` -- is pointed INSIDE `/work`, the one path both of `BaselineWorker`'s
+# separate containers bind-mount to the SAME host directory (`native_baseline()`'s own docstring:
+# both steps run "with the unit's own PRE-migration repo root as cwd", and `_argv` passes the
+# SAME `worktree` to both `spec_for_attempt` calls). `pip install --user -e .` (what `PIP_USER=1`
+# turns the UNMODIFIED `native_baseline()` argv into) now writes under
+# `/work/.fleet-baseline-pyuser/`, which is a real file on the HOST, so the second container's
+# bind mount of the SAME host directory sees it immediately -- no shared volume, no named volume,
+# no change to `native_baseline()`'s own argv, just where Python's `site` module resolves "the
+# user site" to. `.fleet-baseline-pyuser` is scoped under the fixture's own PRE-migration
+# worktree, exactly like a `.venv` a real developer might create there -- harmless leftover state
+# in a throwaway clone, never written into the migrated monorepo Bazel actually builds.
+ENV PYTHONUSERBASE=/work/.fleet-baseline-pyuser
 
 # The SAME arbitrary-uid problem `fleet-build.Dockerfile` already solved for Bazel
 # (`GetUserName()`/exit 36), restated here for pip/npm rather than borrowed by reference: a
-# passwd-less uid gets `HOME=/` from Docker, which is unwritable, and both `pip install --user`
-# and `npm install`'s local caches need SOMEWHERE to write. World-writable because the uid is not
+# passwd-less uid gets `HOME=/` from Docker, which is unwritable, and `npm install`'s local cache
+# needs SOMEWHERE to write (`pip`'s own cache dir would too, but `PYTHONUSERBASE` above already
+# gives it a real install target under `/work`; an unwritable pip CACHE only slows a build down
+# with a warning, never fails it, so `$HOME` is not on pip's critical path any more -- kept
+# regardless, since `npm`'s own cache still needs it). World-writable because the uid is not
 # known at build time -- the fleet passes the HOST user's uid/gid, which differs per machine, so
 # no `chown` here can be correct, exactly as the fetch-side comment there explains for its own
 # `/home/fleet`.
