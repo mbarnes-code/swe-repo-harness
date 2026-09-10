@@ -91,6 +91,7 @@ from pathlib import Path
 import pytest
 
 from fleet.cli import ExitCode
+from tests.test_baseline_container import _IMAGE_OK, _IMAGE_WHY
 from tests.test_build_e2e import (  # noqa: F401  (`bazel`/`filter_repo`/etc. are fixtures, used
     bazel,  # by injection -- `gazelle`/`resolver` are transitive deps of
     build,  # the `bazel` fixture and must be importable here too)
@@ -122,10 +123,13 @@ def baseline_build_yaml() -> str:
     file keep that opposite requirement without forking `tests.test_transform_e2e.fleet`'s
     otherwise-identical setup (git repos, engine module, rules).
 
-    This reintroduces Leg C's red-path gate for this file's own two tests, exactly as it fired
-    before this fix round -- measured, unaffected: both tests still pass (1 passed, 1 xfailed),
-    because neither reads `phases.status` or wave membership, only `repos.baseline_ok IS NULL`,
-    which is insensitive to whether the red-gated repos are excluded from the wave plan.
+    This reintroduces Leg C's red-path gate for this file's own two tests. **Round VI task 113
+    fix round:** the sentence here used to read "both tests still pass (1 passed, 1 xfailed)" --
+    stale after task 113 deleted the `strict=True` xfail (both tests now genuinely PASS, so the
+    file is 2 passed, 0 xfailed). Reworded to avoid pinning an exact count that goes stale again
+    the next time a test is added or removed: what matters is that neither test reads
+    `phases.status` or wave membership, only `repos.baseline_ok IS NULL`, which is insensitive to
+    whether the red-gated repos are excluded from the wave plan.
     """
     return ""
 
@@ -174,6 +178,7 @@ def _baseline_ok_exclusion_set(root: Path) -> list[str]:
     )
 
 
+@pytest.mark.skipif(not _IMAGE_OK, reason=f"fleet baseline image unusable: {_IMAGE_WHY}")
 def test_the_baseline_ok_exclusion_set_is_empty_under_the_shipped_config(
     fleet: Path,  # noqa: F811
     tmp_path: Path,
@@ -275,6 +280,25 @@ def test_the_exclusion_set_assertion_discriminates_real_db_state_and_is_not_a_ta
     needed; today, after Legs B/C, only `acme-empty` is NULL. So this test proves
     `_baseline_ok_exclusion_set` is a real, non-tautological read of `repos.baseline_ok` by
     driving the SAME real database in both directions:
+
+    **Round VI task 113 fix round: deliberately NOT `@pytest.mark.skipif(not _IMAGE_OK, ...)`
+    guarded, unlike the closure test above.** That test asserts SPECIFIC values requiring the
+    native-baseline container to genuinely SUCCEED (`acme-lib-py` measured green with a nonzero
+    test count; three named repos measured red for their own specific reasons) -- values only a
+    working image can produce. This test only asserts the NULL SET's membership, which
+    `workers/baseline.py::_measure`'s own control flow makes independent of whether the container
+    succeeds: a build/test step that fails to even START (`docker` missing from `PATH`, an
+    `OSError` `_invoke` catches) still returns `(False, 0, ...)`, never leaves `baseline_ok` NULL,
+    and neither does a container that starts but exits non-zero (daemon unreachable, image
+    unbuilt -- `workers/baseline.py`'s own docstring: "fails fast, exit 125, never a hang"). The
+    ONLY way a non-empty repo's `baseline_ok` stays NULL is `payload.ecosystem is None`
+    (`BaselineWorker.run`'s own early return), which has nothing to do with Docker. So this test's
+    own claim -- exactly `acme-empty` NULL -- holds whether or not the container succeeds, as long
+    as `docker`'s absence (if any) surfaces as a real, observed failure rather than a hang; it is
+    guarded by the SAME real subprocess-based container invocation the closure test uses, so a
+    genuinely hanging daemon would still hang here too, but that failure mode is pre-existing and
+    common to every other e2e test in this suite that touches a container, not specific to this
+    test's own claim.
 
     1. the real, unmodified post-build state has exactly `acme-empty` NULL -- reproducing the
        measured state the closure test above depends on, from a second, independent assertion
