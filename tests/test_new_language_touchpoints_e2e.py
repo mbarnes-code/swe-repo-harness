@@ -245,7 +245,23 @@ build:
     rules_ruby: "3.5.0"
 preflight:
   min_free_bytes: 1048576
+  baseline_build:
+    enabled: false
 """
+#: `baseline_build: enabled: false` (round VI task 114, hotfix): `acme-identity`/`acme-billing`
+#: (verbatim `CYCLE_FLEET`, `tests.test_workers_contracts`, which already carries this same
+#: override for the identical reason) were never vetted to succeed a real native build/test --
+#: §12.11/D116 Leg C's real native-baseline red path (round VI task 111) marks both `BaselineRed`/
+#: `SKIPPED` under the shipped default (verified directly against this fixture: `phases.status`
+#: for both really is `SKIPPED`, with a `BaselineRed` finding on each). This particular test does
+#: not currently fail from it -- `acme-gem` (Ruby, no `native_baseline()` support -- see
+#: `ecosystems/base.py`'s default, unoverridden by the fixture adapter) stays a live, non-exempt
+#: wave member, so `sequence`/`build` still have something to admit -- but disabling it here
+#: keeps this fixture from silently depending on that coincidence, matches the sibling fixture's
+#: own override, and is the disclosed fix for a hazard this file's own DB state proves is real.
+#: (Clause A's `_FLEET_YAML` above is NOT given the same override: its only repo is the Ruby
+#: fixture, which can never reach `evidence.baseline_red` at all -- the override there would be
+#: vacuous by construction, not merely untriggered.)
 
 
 def _make_clause_b_workspace(tmp_path: Path) -> Path:
