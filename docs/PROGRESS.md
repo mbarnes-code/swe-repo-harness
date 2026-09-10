@@ -10737,6 +10737,13 @@ re-measurement.
 
 ## Round VI, thirty-seventh wave (2026-09-09) — §12.31 fully DONE (D132 closed), §12.11 Leg A
 closed, §12.39-B pricing resolved (ADR-0136), 47/48 measured
+**Corrected 2026-09-10 (round VI controller, thirty-ninth wave): "47/48" below is wrong by one —
+re-counting `docs/CRITERIA_PLAN.md` at this wave's own close commit (`4f29769`) gives 46 DONE / 2
+OPEN (§12.11, §12.39), not 47/1. The error was an uncaught arithmetic slip made while writing this
+checkpoint, not a stale carry-forward from an earlier round — caught only when this same mistake's
+downstream copy (the thirty-eighth wave checkpoint below) was being corrected in turn. Left in
+place per this file's own annotate-in-place convention; do not read "47/48" below as ever having
+been true.**
 
 Fifth dispatch wave this session (2 build tasks: 105-106, 1 research task: research-54, plus 2 fix
 rounds), continuing directly from the thirty-sixth wave checkpoint. Full detail in
@@ -10791,6 +10798,10 @@ task's own pinned worktree.
 
 **§12 count: 47 of 48, re-measured directly at `4f29769`** (form-agnostic count of every `## N.`
 entry's own status line). Movers this wave: §12.31 (DONE, new).
+**Corrected 2026-09-10: this line is wrong by one — 46 of 48 is what `4f29769` actually measures**
+(the very next paragraph's own "Remaining open criteria (2)" already contradicts "47 of 48"
+internally — 48 minus 2 is 46, not 47 — and this correction should have been caught by re-reading
+the paragraph it sits beside, not only by a later wave's audit).
 
 **Remaining open criteria (2): §12.11 (Legs B-E), §12.39 (case ii, B1/B2).** Both are fully sized
 with no further research needed — the next round can dispatch build tasks directly:
@@ -10801,6 +10812,15 @@ with no further research needed — the next round can dispatch build tasks dire
 ## Round VI, thirty-eighth wave (2026-09-09/10) — §12.11 Legs B+D closed, §12.39-B1 already
 closed last wave, one real citation-drift hotfix; 47/48 held (both remaining criteria now
 maximally reduced)
+**Corrected 2026-09-10 (round VI controller, thirty-ninth wave): this heading has two errors,
+both caught only later, not at the time.** (1) "47/48 held" is wrong — 46/48 is what the prior
+wave actually measured (see the correction on that wave's own checkpoint above), so this wave
+holding it steady means 46/48 held, not 47/48. (2) "§12.39-B1 already closed last wave" is wrong
+in the other direction — B1 is task 109, and task 109 was dispatched and merged THIS wave (the
+thirty-eighth), not the thirty-seventh; re-read this wave's own dispatch list two paragraphs below
+("dispatch: tasks 107-109"), which already states this correctly — the heading contradicts the
+body it introduces. Both are disclosed here rather than silently fixed, per this file's own
+annotate-in-place convention.
 
 Sixth dispatch wave this session (3 build tasks: 107-109, plus 1 urgent hotfix: 110), continuing
 directly from the thirty-seventh wave checkpoint. Full detail in
@@ -10848,6 +10868,10 @@ introduced and then self-caught a second citation drift).
 
 **§12 count: still 47 of 48** — neither Leg B nor Leg D alone closes §12.11 as a whole (Legs C and
 E remain), matching this session's own Rule 13 discipline of never rounding up on a partial leg.
+**Corrected 2026-09-10: "still 46 of 48"** — the count this wave held steady at was 46, per the
+correction on the prior wave's own checkpoint above; the reasoning in this paragraph (neither Leg
+B nor Leg D closes §12.11 alone) is correct and unaffected, only the carried-forward number was
+off by one.
 
 **Remaining open criteria (2), both now maximally reduced and fully scoped — no further research
 needed for either:**
