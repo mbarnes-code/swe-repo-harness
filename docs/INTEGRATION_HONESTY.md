@@ -9856,7 +9856,8 @@ still exits 0 with real data wired through). **Piece (a)+(b) closing §9(d) is u
 remains correctly landed. Piece (c) is retired, not merely deferred — do not dispatch it.** Full
 account in `docs/CRITERIA_PLAN.md`'s §27 entry.
 
-## D116 — OPEN. Nothing in `src/fleet/` ever writes `repos.baseline_ok` or
+## D116 — FIXED, LANDED (round VI task 113, `3ab7c6e`, on branch `agent/roundvi-task113`; Legs B/C
+landed round VI tasks 107/111). Nothing in `src/fleet/` ever writes `repos.baseline_ok` or
 `repos.baseline_test_count` — under the shipped default config, §12.11's last sentence's
 "exclusion set" is the WHOLE fleet, not the empty set it requires
 
@@ -9914,6 +9915,23 @@ helper is a genuine, non-tautological `repos.baseline_ok IS NULL` read against r
 **Not yet built:** the native baseline build measurement itself — what repo kinds it can run
 against, how it maps to `baseline_ok`/`baseline_test_count`, and where in Phase 1/Phase 3 it
 belongs. No design choice is made here.
+
+**FIXED (2026-09-10, round VI task 113, Leg E, `3ab7c6e`).** Legs B (round VI task 107) and C
+(round VI task 111) together now write a real, non-NULL `repos.baseline_ok`/
+`baseline_test_count` for every non-empty fixture repo (measured directly: 3 red via a real
+`BaselineRed` finding, 1 green) — only `acme-empty` stays NULL, exactly ADR-0135 ruling 2's
+target shape (`EmptyRepo` never gets a worktree cut, so its baseline can never be measured, by
+construction). ADR-0135 (`docs/DECISIONS.md`) narrowed §12.11's own last sentence in the same
+spirit as §12.9(a)'s prior correction: "the exclusion set is empty" → "the exclusion set contains
+only repos matching one of §3.1(c)'s five enumerated exemptions" — `docs/SPEC.md`'s own dated
+marker at that sentence. `tests/test_baseline_ok_exclusion.py`'s `strict=True` xfail asserted the
+OLD, unnarrowed sentence and was itself stale relative to that already-landed narrowing; round VI
+task 113 corrected the assertion to the narrowed claim (checked against a real `fleet sequence`
+invocation, not a re-implementation of the exemption rules), strengthened the fixture so
+`baseline_test_count > 0` and `baseline_ok = 0` are both genuinely expressible (not vacuously
+"green, 0 tests" for everyone — research-53's own explicit requirement), and deleted the xfail
+marker. Full account, including the three Rule 12 mutation proofs: `.superpowers/sdd/
+round-VI-criteria-closure/task-113-report.md`.
 
 ## D118 — FIXED, LANDED (round VI task 57, `3348935`+`faec3f3`, merged; task-scoped review
 Approved both waves). `BuildverifyWorker._test_query_argv` passed the SANDBOXED
