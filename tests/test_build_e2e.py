@@ -7144,12 +7144,24 @@ budgets:
   max_rss_mb: 512
 preflight:
   min_free_bytes: 1048576
+  baseline_build:
+    enabled: false
 """
 #: No `graph:` section — hoisting is on by default, the configuration under test (same convention
 #: as `tests/test_sequence_e2e.py`'s `FLEET_YAML`). No `build.ruleset_versions:` override either:
 #: `BuildSection`'s shipped defaults already pin `aspect_rules_js`/`aspect_rules_ts`, which every
 #: OTHER npm/TS fixture in this file relies on through the same defaults (`tests/test_transform_
 #: e2e.py`'s own `FLEET_YAML` carries no such override).
+#: `baseline_build: enabled: false` (round VI task 114, hotfix): §12.11/D116 Leg C (task 111)
+#: wired a real native-baseline red path -- `CYCLE_FLEET`'s `acme-identity`/`acme-billing` (from
+#: `tests.test_workers_contracts`) were never vetted to succeed under a real native build/test,
+#: so under the shipped default they now go `BaselineRed`/`SKIPPED` and the hoist-ingest contract
+#: this fixture exists to prove is never ingested. Task 111's own sweep (grep for files that
+#: REQUEST the shared `baseline_build_yaml` conftest fixture) structurally could not find this
+#: constant: it is a MODULE-LEVEL STRING LITERAL written by `_write_hoist_ingest_config`, a plain
+#: function, not a pytest fixture -- so the literal override is inlined directly here instead of
+#: spliced via `{baseline_build_yaml}`, exactly as `tests/test_scan_e2e.py`'s own `FLEET_YAML`
+#: does for the same reason (that file's config is also a plain module constant).
 
 
 def _write_hoist_ingest_config(root: Path, sources: Mapping[str, Path]) -> None:

@@ -2032,7 +2032,13 @@ def test_status_digest_is_byte_identical_across_two_clean_db_runs_under_a_warm_l
         "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n"
         "verify:\n  container_memory: 64m\n"
         "budgets:\n  max_rss_mb: 512\n"
-        "preflight:\n  min_free_bytes: 1048576\n"
+        # §12.11/D116 Leg C (round VI task 111/114): `acme-lib`/`acme-app` are real npm
+        # manifests, never vetted to succeed a real native build/test -- the shipped
+        # `baseline_build` default marks both `BaselineRed`/`SKIPPED`, which exempts them from
+        # `sequence`'s wave assignment and zeroes `wave_members` even though scan/edges still
+        # populate normally (the SKIP is a retroactive status flip applied after Phase 1
+        # settles, per `cli.py::_gate_baseline_red`'s own docstring).
+        "preflight:\n  min_free_bytes: 1048576\n  baseline_build:\n    enabled: false\n"
     )
     repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
         f"  - name: {name}\n    url: {path}\n" for name, path in sources.items()
@@ -2339,7 +2345,13 @@ def test_status_digest_differs_when_a_fixture_source_file_mutates_between_two_cl
         "concurrency:\n  cpu_pool_workers: 1\n  docker: 1\n"
         "verify:\n  container_memory: 64m\n"
         "budgets:\n  max_rss_mb: 512\n"
-        "preflight:\n  min_free_bytes: 1048576\n"
+        # §12.11/D116 Leg C (round VI task 111/114): `acme-lib`/`acme-app` are real npm
+        # manifests, never vetted to succeed a real native build/test -- the shipped
+        # `baseline_build` default marks both `BaselineRed`/`SKIPPED`, which exempts them from
+        # `sequence`'s wave assignment and zeroes `wave_members` even though scan/edges still
+        # populate normally (the SKIP is a retroactive status flip applied after Phase 1
+        # settles, per `cli.py::_gate_baseline_red`'s own docstring).
+        "preflight:\n  min_free_bytes: 1048576\n  baseline_build:\n    enabled: false\n"
     )
     repos_yaml = "version: 1\ndefaults:\n  ref: main\nrepos:\n" + "".join(
         f"  - name: {name}\n    url: {path}\n" for name, path in sources.items()
