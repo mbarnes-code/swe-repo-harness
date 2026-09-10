@@ -28,6 +28,7 @@ requiring a real Docker daemon at all, only a real `docker` binary that fails to
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -35,12 +36,14 @@ from typing import Any
 
 import pytest
 
+from fleet.cli import ExitCode
 from tests.test_scan_e2e import (
     _fresh_db,
     _make_repo,
     _write_config,
     query,
     scan,
+    sequence,
 )
 
 FLEET_YAML_HOST_BASELINE = """\
@@ -268,3 +271,89 @@ def test_an_unbuilt_configured_image_records_baseline_ok_false_fast_not_a_hang_o
         "WHERE repo_id = 'acme-baseline-needs-network'",
     )
     assert rows == [(0, 0)], rows
+
+
+def test_a_genuinely_broken_native_baseline_is_skipped_with_a_baseline_red_finding(
+    baseline_fleet: Path,
+) -> None:
+    """§12.11/D116 Leg C (round VI task 111): the RED path, closing half of
+    `state/schema.sql:335`'s standing caveat ("several names are READ by Python that nothing
+    writes ('BaselineRed', 'PreflightFailed', 'RuleConflict')") for `BaselineRed`.
+
+    Reuses this module's OWN `acme-baseline-red` fixture (a real, offline, native TEST failure --
+    `node -e "process.exit(1)"`, no docker/network needed, `container_image: null`) rather than
+    `tests/test_scan_e2e.py::FIXTURE_REPOS`: that shared, 5-repo fixture fleet is reused by many
+    OTHER e2e suites (`test_scan_e2e.py`, `test_transform_e2e.py`,
+    `test_baseline_ok_exclusion.py`) that assert its repos participate in scanning/sequencing
+    normally, and -- measured directly before writing this test -- 3 of its 4 non-empty repos
+    (`acme-app-py`, `acme-app-ts`, `acme-lib-ts`) now genuinely fail their native baseline under
+    the current shipped default (`container_image: fleet-baseline:py3.11-node18`, round VI task
+    108/Leg D): `acme-app-py`/`acme-app-ts` because their manifests declare an unresolvable
+    cross-repo dependency name that was never meant to hit a real registry (`acme-lib-py`/
+    `@acme/lib` -- deliberately internal-only, for edge-inference testing), and `acme-lib-ts`
+    because it declares no `"test"` script at all (`workers/baseline.py`'s own disclosed, named
+    limit: an absent npm test script is misclassified as a failure, not "no native tests" --
+    explicitly left to "Leg C/E" to refine, which this task does not attempt, being out of its own
+    narrow scope). Wiring this task's red-path gate onto THAT shared fixture fleet would flip 3 of
+    5 repos to `SKIPPED` and break numerous unrelated assertions in those other files -- reported
+    to the controller as a disclosed, measured concern (see this task's own report), not
+    silently patched around here. This module's own two-repo `baseline_fleet` sidesteps the
+    conflict entirely: it is not reused by any other suite, so there is no other assertion for the
+    new gate to collide with, and its two repos (green, red) trivially cannot match more than one
+    §3.1 (c) exemption between them -- neither is empty, config-skipped, quarantined, or part of a
+    cycle.
+    """
+    result = scan(baseline_fleet)
+    assert result.exit_code == 0, result.output
+
+    # 1. `repos.baseline_ok` (already proven by the sibling test above; re-asserted here so this
+    # test is self-contained about the three facts it goes on to check together).
+    ok_rows = dict(
+        query(
+            baseline_fleet,
+            "SELECT repo_id, baseline_ok FROM repos "
+            "WHERE repo_id IN ('acme-baseline-green', 'acme-baseline-red')",
+        )
+    )
+    assert ok_rows == {"acme-baseline-green": 1, "acme-baseline-red": 0}, ok_rows
+
+    # 2. `phases.status` -- the red repo's Phase 1 row is SKIPPED, the green repo's is not (no
+    # legal §6 edge out of SUCCEEDED exists for the driver to have moved it there instead).
+    phase_status = dict(
+        query(
+            baseline_fleet,
+            "SELECT repo_id, status FROM phases WHERE phase = 1 "
+            "AND repo_id IN ('acme-baseline-green', 'acme-baseline-red')",
+        )
+    )
+    assert phase_status["acme-baseline-red"] == "SKIPPED", phase_status
+    assert phase_status["acme-baseline-green"] != "SKIPPED", phase_status
+
+    # 3. The `BaselineRed` finding -- exactly one row, for the red repo only, never the green one
+    # (this is also the "no repo matches two exemptions" check for THIS fleet: the red repo's
+    # `findings` rows are entirely and only this one kind).
+    red_findings = query(
+        baseline_fleet,
+        "SELECT repo_id, kind, severity FROM findings WHERE repo_id IN "
+        "('acme-baseline-green', 'acme-baseline-red')",
+    )
+    assert red_findings == [("acme-baseline-red", "BaselineRed", "error")], red_findings
+
+    # 4. The CONSUMER side: `graph/sequence.py::_exemptions_for`/`check_criterion_c`, exercised
+    # for real through `fleet sequence` against the real DB state `scan` just wrote above (not a
+    # synthetic/mocked `_exemptions_for` call with hand-typed facts -- `tests/
+    # test_graph_sequence.py` already proves the pure-function contract that way; this is the
+    # real, end-to-end wiring the brief's own "done looks like" section asks for). §3.1's Phase 1
+    # exit condition (SPEC criterion 9) is checked inside `fleet sequence` itself
+    # (`cli.py::_phase1_exit_report` -> `graph.sequence.check_criteria`) and raises
+    # `SequenceCriterionError` (exit 6, `ExitCode.UNRESOLVED_FINDINGS`) the instant ANY repo absent
+    # from `wave_members` fails to match EXACTLY one of (c)'s five exemptions -- so a clean exit 0
+    # here is only possible if `_exemptions_for` genuinely recognized `acme-baseline-red` under
+    # the `baseline-red` exemption (matched via `skipped and finding("BaselineRed") and
+    # baseline_ok.get(repo_id) == 0`) and matched it EXACTLY ONCE, not zero or two times.
+    seq_result = sequence(baseline_fleet)
+    assert seq_result.exit_code == ExitCode.SUCCESS, seq_result.output
+    payload = json.loads(seq_result.output)
+    assert "acme-baseline-red" in payload["excluded"], payload
+    assert "acme-baseline-red" not in payload["wave_index_by_repo"], payload
+    assert "acme-baseline-green" in payload["wave_index_by_repo"], payload

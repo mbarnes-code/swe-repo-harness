@@ -200,6 +200,14 @@ budgets:
   max_rss_mb: 512
 preflight:
   min_free_bytes: 1048576
+  # §12.11/D116 Leg C (round VI task 111, fix round): this fixture's `package.json`s were never
+  # vetted to succeed under a REAL native build (no `"test"` script, some declare cross-repo
+  # dependency names unpublished by design). Leg C's own red-path gate turns that pre-existing
+  # native-baseline failure into a real `phases.status = 'SKIPPED'`, corrupting this file's own
+  # contract/hoist assertions, which have nothing to do with baseline behavior. Disabled here
+  # entirely for the same reason `tests/test_scan_e2e.py`'s own `FLEET_YAML` disables it.
+  baseline_build:
+    enabled: false
 """
 """No `graph:` section: contract extraction and hoisting are both on by default
 (`ContractsSection.enabled`, `GraphSection.hoist_contracts`), which is the configuration under
