@@ -885,6 +885,34 @@ caught: `.superpowers/sdd/round-VI-criteria-closure/task-108-report.md`. Does **
 or move the `<n> of 48` count — Leg C (the red path) and Leg E (the fixture strengthening + xfail
 deletion) remain open.
 
+**Leg C closed by round VI task 111, ONE FIX ROUND (2026-09-10).** New gate (mirroring the
+existing `_gate_empty_repos` precedent) writes all three facts `_exemptions_for`'s own conjunction
+requires — a `BaselineRed` finding, `phases.status='SKIPPED'` (phase 1), and `repos.baseline_ok=0`
+— atomically, for any repo whose adapter supports native baseline measurement but whose real
+build/test genuinely fails. Verified by construction, not merely by fixture inspection, that no
+repo can match two §3.1(c) exemptions simultaneously: `ScanPipelineWorker.run()` breaks the unit
+loop before `baseline` ever runs for an `EmptyRepo` or a hard clone failure, and `BaselineRed`'s
+`SKIPPED` requirement is mutually exclusive with `PreflightFailed`/manual-SCC's
+`REQUIRES_HUMAN_INTERVENTION` by the status column itself. **Fix round (controller-dispatched):**
+wiring this gate for the first time made several widely-shared e2e fixture files' genuine,
+pre-existing native-baseline failures newly consequential — previously inert, now spinning up real
+Docker containers on every scan test in files that don't test baseline functionality at all;
+independently reproduced by the controller as a 100+ second timeout on `tests/test_scan_e2e.py`
+alone. Fixed via a new `conftest.py` fixture (`baseline_build_yaml`, non-autouse, opt-in by name)
+rather than per-file patches — the broader structural scope was the right call: the implementer's
+own audit of every real-`fleet-scan`-driving file caught a genuine fixture-resolution gap in
+`test_build_e2e.py`/`test_local_profile_e2e.py` a narrower fix would have missed. Restored:
+`test_scan_e2e.py` 126.40s→33.26s (33/33 both), `test_transform_e2e.py` 89.95s→41.66s (20/20 both),
+`test_sequence_e2e.py` 11 passed/1 failed→12/12, plus `test_collisions_wiring.py`/
+`test_contracts_criterion_scale.py`/`test_workers_contracts.py` fixed proactively.
+`test_baseline_ok_exclusion.py` gets its own local override of the SAME fixture name (pytest
+resolves a fixture request against the calling module's own registry first) so it can keep testing
+the opposite premise SPEC's own "shipped config" text requires — D116's `strict=True` xfail is
+correctly untouched and still open. Reviewed Approved, 0 blocking findings (1 Minor: incomplete
+disclosure of pre-existing, harmless ruff-format drift in a few more files). Rule 12 mutation
+independently reproduced. **Only Leg E (delete D116's `strict=True` xfail, strengthen the fixture
+with real native tests) remains open for §12.11 as a whole.**
+
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
 sampling, resolvable PR URLs, and the cross-repo unmerged-dependency gate proven non-trivially.
