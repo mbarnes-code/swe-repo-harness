@@ -1662,10 +1662,25 @@ class _ScanEvidence:
     truncated: set[str] = field(default_factory=set)
     gated: dict[str, tuple[str, ...]] = field(default_factory=dict)
     """repo_id → finding kinds, for every repo §3.1 step 1 gated out of the fleet."""
+    baseline_red: dict[str, BaselineOutput] = field(default_factory=dict)
+    """repo_id → the red `BaselineOutput`, for every repo §12.11/D116 Leg C gates out of the
+    fleet (§3.1 (c)'s `BaselineRed` exemption, `docs/SPEC.md:797`). Populated only when the
+    adapter genuinely attempted a native measurement (`output.baseline is not None`, ruling out
+    "disabled"/"no adapter support" — Leg B's own `None`-returning green-path skip) AND that
+    measurement came back false — never for the `NativeBaseline is None` skip §12.11 Leg B
+    already handles cleanly. Mirrors `gated` above exactly: an accumulator `_gate_baseline_red`
+    (this module, right beside `_gate_empty_repos`) drains after the whole scan wave completes,
+    the one place a genuinely-failed native build/test is turned into a repo-level `SKIPPED` +
+    `BaselineRed` finding, matching `_gate_empty_repos`'s own documented rationale (the clone/
+    baseline workers' own contracts correctly report an observed failure as `ok` DATA, never as a
+    worker failure -- there is no legal §6 state-machine edge out of `SUCCEEDED`, so the gate is
+    applied here, by the driver, exactly as `fleet quarantine` applies an operator's removal)."""
 
     def record(self, output: ScanOutput) -> None:
         if output.clone is not None and not output.clone.preflight_ok:
             self.gated[output.repo_id] = output.findings or ("EmptyRepo",)
+        if output.baseline is not None and not output.baseline.baseline_ok:
+            self.baseline_red[output.repo_id] = output.baseline
         if output.interrogate is not None:
             by_path = {ref.path: ref for ref in output.interrogate.manifests}
             for dep in output.interrogate.dependencies:
@@ -2069,6 +2084,7 @@ async def _scan_impl(
                     evidence=evidence,
                 )
                 gated = await _gate_empty_repos(writer, run_id, evidence, now=_now())
+                baseline_gated = await _gate_baseline_red(writer, run_id, evidence, now=_now())
                 edges = await _persist_scan_edges(
                     settings,
                     repository=repository,
@@ -2124,7 +2140,7 @@ async def _scan_impl(
         "run_id": run_id,
         "repos": len(fleet),
         "succeeded": sum(1 for s in statuses.values() if s is RepoStatus.SUCCEEDED),
-        "skipped": sorted(gated),
+        "skipped": sorted(set(gated) | set(baseline_gated)),
         "failed": len(attention),
         "attention": attention,
         "edges": edges,
@@ -2430,6 +2446,77 @@ async def _gate_empty_repos(
                 )
                 for repo_id, kinds in rows
                 for kind in kinds
+            ],
+        )
+
+    await writer.submit(unit)
+    return tuple(repo_id for repo_id, _ in rows)
+
+
+async def _gate_baseline_red(
+    writer: StateWriter, run_id: str, evidence: _ScanEvidence, *, now: datetime
+) -> tuple[str, ...]:
+    """§12.11/D116 Leg C, §3.1 (c)'s `BaselineRed` exemption: a repo whose adapter genuinely
+    supports a native baseline and whose native build/test genuinely fails is `SKIPPED`, with its
+    finding — never an error, and never `NativeBaseline is None`'s existing green-path skip
+    (`workers/baseline.py`'s own docstring; that case leaves `output.baseline` `None` and never
+    reaches `evidence.baseline_red` at all -- see `_ScanEvidence.record`).
+
+    **Structurally identical to `_gate_empty_repos` immediately above, for the identical reason.**
+    `BaselineWorker.run()` (correctly, per its own module docstring) NEVER returns
+    `status="failed"` for a native-command outcome -- a build/test failure is recorded as
+    `baseline_ok=False` DATA, so the `ScanPipelineWorker` chain it runs inside completes
+    `SUCCEEDED` regardless. The §6 state machine has no edge out of `SUCCEEDED`, so -- exactly as
+    `_gate_empty_repos`'s own docstring states for the identical shape -- the only legal route
+    into `SKIPPED` is a driver write applied after the phase has already settled, audited by the
+    `BaselineRed` finding written beside it in the SAME transaction (never one write without the
+    other: `repos.baseline_ok = 0` is already durable from `_scan_rows`'s own earlier, per-repo
+    write -- `output.baseline.baseline_ok` is exactly what gated this repo into
+    `evidence.baseline_red` in the first place -- so by the time this unit commits, all three
+    facts `graph/sequence.py::_exemptions_for` conjoins (`BaselineRed` finding + `phases.status =
+    'SKIPPED'` + `repos.baseline_ok = 0`) are durable together; a crash strictly between
+    `_scan_rows`'s commit and this one leaves only `baseline_ok = 0` durable, the same disclosed
+    window `_gate_empty_repos`/`repos.preflight_ok` already accepts for the identical structural
+    reason -- a re-scan re-measures and re-gates the repo idempotently, never silently losing the
+    fact).
+    """
+    if not evidence.baseline_red:
+        return ()
+    stamp = _iso(now)
+    rows = sorted(evidence.baseline_red.items())
+
+    async def unit(conn: aiosqlite.Connection) -> None:
+        await conn.executemany(
+            "UPDATE phases SET status = 'SKIPPED', updated_at = ? "
+            " WHERE run_id = ? AND repo_id = ? AND phase = 1 AND status <> 'SKIPPED'",
+            [(stamp, run_id, repo_id) for repo_id, _ in rows],
+        )
+        await conn.executemany(
+            "INSERT INTO findings (run_id, repo_id, kind, severity, fingerprint, payload, "
+            "                      created_at) VALUES (?, ?, 'BaselineRed', 'error', ?, ?, ?) "
+            "ON CONFLICT (run_id, IFNULL(repo_id, ''), kind, fingerprint) "
+            "DO UPDATE SET payload = excluded.payload, created_at = excluded.created_at",
+            [
+                (
+                    run_id,
+                    repo_id,
+                    _fingerprint(run_id, repo_id, "BaselineRed"),
+                    redact_text(
+                        json.dumps(
+                            {
+                                "repo_id": repo_id,
+                                "ecosystem": (
+                                    None if out.ecosystem is None else out.ecosystem.value
+                                ),
+                                "build_exit_code": out.build_exit_code,
+                                "test_exit_code": out.test_exit_code,
+                            },
+                            sort_keys=True,
+                        )
+                    ),
+                    stamp,
+                )
+                for repo_id, out in rows
             ],
         )
 
