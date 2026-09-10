@@ -586,6 +586,10 @@ violation and asserting the correct rejection (the probe-returns-False test plan
 violation and asserting the correct rejection.
 
 ## 11. Phase 3 exit condition — real bazel + sandboxed, together
+**DONE (round VI task 113, 2026-09-10) — closes gap 3 (`D116`, Leg E), the last remaining gap; see
+this section's tail for the full account. Now counts toward the `<n> of 48` tally for the first
+time.**
+*(Superseded status line, kept for history — was accurate through task 111:)*
 **OPEN — SCALE-FIXTURE, sized and split into two tasks (round VI, research-24, 2026-09-03).**
 "Sandboxed path is still red" (`INTEGRATION_HONESTY.md` §29/§31-33) means *never exercised
 successfully end to end*, not *cannot succeed* — §32's controlled matrix (ADR-0064) already proved,
@@ -746,12 +750,24 @@ slice too.** `js.py::test_targets()`'s `deps=`/`srcs=` defect (the same class `*
 FakeBazel and real-Bazel tiers — full account in `## D112`. **Gap 1 is now Rust-only.** *(Flagged
 stale by research-53, 2026-09-09: `TEST_SRC_PARTITIONED_ECOSYSTEMS` also includes `CARGO` as of
 current `HEAD` — reported here per Guardrail 7 rather than silently corrected, since re-deriving
-gap 1's true remaining ecosystem set was out of research-53's own scope.)* Do not
-round up the `<n> of 48` count for §12.11 on this account — Task B's own real-Bazel proof still
-needs a nonzero test target through `real_build()`'s own path for a non-Python ecosystem (JVM's is
-separately blocked on `D121`; JS's is unblocked by this task but not yet exercised through
-`real_build()` itself — only through this task's own direct-adapter real-Bazel proof, matching D7's
-scope) and gap 3 (`D116`) remains open regardless.
+gap 1's true remaining ecosystem set was out of research-53's own scope.)* *(Corrected 2026-09-10,
+round VI task 113's own review: the sentence below was stale on two counts and is superseded, kept
+for history only — do not cite it.)* ~~Do not round up the `<n> of 48` count for §12.11 on this
+account — Task B's own real-Bazel proof still needs a nonzero test target through `real_build()`'s
+own path for a non-Python ecosystem (JVM's is separately blocked on `D121`; JS's is unblocked by
+this task but not yet exercised through `real_build()` itself — only through this task's own
+direct-adapter real-Bazel proof, matching D7's scope) and gap 3 (`D116`) remains open regardless.~~
+**"Blocked on `D121`" was already false when written**: `D121`'s heading has read `FIXED, LANDED`
+since round VI task 73 (2026-09-07), and `D112`'s own dated task-92 correction already retired this
+exact framing ("not yet written, no longer blocked" — not "blocked on `D121`"). Separately,
+`tests/test_build_e2e.py::test_a_rust_integration_test_target_runs_and_passes_under_a_real_bazel`
+landed a real `real_build()` proof for CARGO (a non-Python ecosystem) 7 minutes after this
+sentence was first written — neither lane was wrong when it wrote its own text; the tree moved
+underneath both. **This residual does not block §12.11 as a whole**: §12.11's own literal text
+names no specific ecosystem, and ADR-0135/SPEC's "the fixture run" wording scopes the criterion's
+assertion to the actual fixture fleet ({PyPI, NPM} + one empty repo) — a JS/JVM `real_build()`
+test-target proof is follow-on work worth having, not a gap in this criterion's own text. Gap 3
+(`D116`) is closed below (Leg E, round VI task 113).
 
 **Task B re-verified live (round VI task 90, 2026-09-08).** Dispatched on the (as it turned out,
 false — see `docs/PROGRESS.md`'s dated correction at its round-VI-thirty-second-wave checkpoint)
@@ -912,6 +928,35 @@ correctly untouched and still open. Reviewed Approved, 0 blocking findings (1 Mi
 disclosure of pre-existing, harmless ruff-format drift in a few more files). Rule 12 mutation
 independently reproduced. **Only Leg E (delete D116's `strict=True` xfail, strengthen the fixture
 with real native tests) remains open for §12.11 as a whole.**
+
+**Leg E closed by round VI task 113 (2026-09-10) — §12.11 is DONE, closing the whole criterion.**
+Reconciled the exclusion-set xfail with ADR-0135's already-landed narrowing: the stale
+`_baseline_ok_exclusion_set(fleet) == []` assertion is replaced with a real proof that every
+NULL-`baseline_ok` repo is absent from the wave plan under a real `fleet sequence` `SUCCESS` —
+verified at the source (`graph/sequence.py::check_criterion_c` requires exactly one §3.1(c)
+exemption per excluded repo; `cli.py`'s own exit-code gate turns any violation into a non-`SUCCESS`
+exit), stronger than a hardcoded exemption list and stable against the fixture fleet's own shape
+changing. Fixture strengthened non-vacuously: `acme-lib-py` gets a real, genuinely-passing pytest
+test (`test_normalize.py`), so `baseline_test_count > 0` is actually expressible; three repos
+(`acme-app-py`, `acme-app-ts`, `acme-lib-ts`) are named explicitly as the genuinely-broken-build
+case (unresolvable cross-repo package names / missing test script — a structural, reproducible
+property of this fixture fleet, not an accident) so a future fixture fix can't silently make this
+proof vacuous unnoticed. `strict=True` xfail fully deleted (not loosened), per this project's own
+D97 precedent — the deletion is the proof. `D116`'s heading moved `OPEN` → `FIXED, LANDED` with an
+appended, dated marker; the original body untouched. Reviewed with maximum scrutiny given the
+stakes (opus-tier, re-reading §11's entire history): Approved, 0 Critical findings — confirmed no
+older residual (see the corrected paragraph above) blocks the whole-criterion claim. **One result
+stronger than the task itself claimed**: because `acme-lib-py` now genuinely reaches
+`baseline_ok=1, baseline_test_count=1`, the closure test's `build(...) == SUCCESS` assertion means
+`buildverify`'s real `bazel query 'tests(//…)'` comparison ran and passed UNSEEDED through the
+shipped pipeline for the first time — every prior exercise of that comparison (Task B) seeded
+`baseline_ok` by direct `UPDATE` because D116 made it unreachable any other way. 2 of 3 Rule 12
+mutations independently reproduced by review from scratch, each reddening the specific assertion
+predicted; full 77/77 covering-set run reproduced exactly; `git diff --stat main..HEAD -- src/`
+confirmed empty (TEST-ONLY). 1 fix round requested for 2 disclosed Minor findings (a missing
+Docker-availability skipif guard on the closure test, matching `test_baseline_container.py`'s own
+pattern; one stale docstring sentence) — not blocking merge, both cosmetic/portability, not
+correctness. **Nothing remains open for §12.11.**
 
 ## 12. Phase 4 exit condition
 **DONE.** The only criterion the audit found fully covered — rdeps closure with disclosed
