@@ -7701,9 +7701,9 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5814`, repointed +109 by round VI tasks 109 and 107's own additions
-above it — pure insertion, confirmed by exact-line-content match against the current tree; round VI
-task 96's own repoint (`cli.py:5703`) is superseded, per this file's annotate-in-place convention,
+`_TransformClaimHook` (`cli.py:5901`, repointed +87 by round VI task 111's own additions above it —
+pure insertion, confirmed by exact-line-content match against the current tree; round VI tasks 109
+and 107's own repoint (`cli.py:5814`) is superseded, per this file's annotate-in-place convention,
 not deleted) — the `pre_dispatch` hook that claims a TRANSFORM coarse
 `tasks` row RUNNING, the exact "moves the task row to RUNNING" moment `vcs/commits.py`'s
 `record_task_anchor` docstring already names as `tasks.pre_commit_sha`'s intended write site
@@ -9251,9 +9251,9 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2678-2715`, repointed +109 by round VI tasks 109 and 107's own additions above it — pure
-insertion, confirmed by exact-line-content match against the current tree; round VI task 96's own
-repoint (`cli.py:2569-2606`) is superseded, per this file's annotate-in-place convention, not
+(`cli.py:2767-2802`, repointed +89 by round VI task 111's own additions above it — pure insertion,
+confirmed by exact-line-content match against the current tree; round VI tasks 109 and 107's own
+repoint (`cli.py:2678-2715`) is superseded, per this file's annotate-in-place convention, not
 deleted), the
 ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
@@ -10924,12 +10924,11 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14285`, repointed +245 by round VI tasks 103, 106, 109, and
-107's cumulative edits to this file and to this function itself (task 109's ADR-0136/D135 change
-threads a new `run_ctx: RunContext` parameter through it, so this is not a pure insertion at the
-function level — but this citation's own cited `async def` line is textually unchanged, confirmed
-against the current tree); round VI task 96's own repoint (`cli.py:14038`) is superseded, per this
-file's annotate-in-place convention, not deleted) re-runs `VerifyPipelineWorker` directly against the
+`_run_one_revalidation_task` (`cli.py:14372`, repointed +87 by round VI task 111's own additions
+above it — pure insertion, confirmed by exact-line-content match against the current tree; round VI
+task 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion
+history through tasks 103/106/107/109) is superseded, per this file's annotate-in-place convention,
+not deleted) re-runs `VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
 there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
 SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
