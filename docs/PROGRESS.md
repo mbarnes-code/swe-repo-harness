@@ -10951,3 +10951,79 @@ time this project has reached 48 of 48 since §12's acceptance bar was defined.*
   full scope) is still owed before this work is considered ready to hand off, per this project's
   own subagent-driven-development discipline: closing the LAST criterion is not the same
   verification event as a broad final review of everything accumulated getting there.
+
+## Round VI, fortieth wave (2026-09-10/11) — the final whole-session review's own findings fixed;
+genuine whole-suite verification: 2577 passed, 13 failed (all network-registry-dependent, none
+attributable to this session)
+
+Eighth dispatch wave this session (3 hotfix tasks: 114-116, plus 2 additional small fixes the
+controller made directly after both landed), closing out what the final whole-session review
+found. Full detail in `.superpowers/sdd/round-VI-criteria-closure/progress.md`.
+
+**The review that mattered most this session was the one at the very end.** After the thirty-ninth
+wave closed §12.11 and §12.39 — bringing this project's own `<n> of 48` count to 48 for the first
+time — a dedicated final whole-session review (opus-tier, reading the entire session's 57-commit
+diff) found that the count itself was accurate but the session's own repeated "main green"
+checkpoints were not: 18 real test failures existed on `main`, at least 9 traced precisely to two
+root causes in this session's own work, both invisible to the per-task verification method every
+prior wave had used (running "every touched test file" — a covering set derived from *which files
+a task edited*, not from *what actually executes or reflects over the changed code*, exactly the
+failure mode this project's own CLAUDE.md §6 already names and predicts).
+
+**Root cause 1**: round VI task 111's own class-sweep (fixing an earlier wave's regression) missed
+a 6th literal config block — a module-level string literal written by a plain function, not
+eligible for the fixture-injection pattern the original sweep checked for. **Root cause 2**: round
+VI task 107 introduced the first PEP-604 union type annotation (`Ecosystem | None`) anywhere in the
+modules a separate test file's own reflection-based ecosystem-substitution logic walks, and that
+logic only handled the older `typing.Union` form — plus a second, related bug where the same
+mechanism didn't restore patched state on failure, making the blast radius order-dependent.
+
+Both were fixed this wave (tasks 114 and 115), by sweeping with a genuinely different, more
+thorough method each time — not by patching the one instance a review happened to name. A third,
+independent cleanup task (116) re-pinned a stale lint-gate baseline and corrected two docstrings
+two earlier legs had left falsified by a third leg landing later. **Two more small
+parallel-dispatch collisions surfaced immediately after these three hotfixes merged** — the exact
+shared-counter hazard this project's CLAUDE.md already documents at length for concurrent lanes —
+and were caught and fixed directly by the controller within minutes, rather than needing their own
+dispatch round-trip: a lint-gate pin that was correct for one hotfix's own branch state went stale
+the instant a sibling hotfix also merged and changed the whole-repo file count it measures, and a
+citation the controller itself had written earlier this wave turned out to cite a usage site in
+the format the citation-drift gate expects to resolve to a definition.
+
+**The final verification, done properly this time**: a genuine whole-`tests/`-directory run, not a
+scoped selection — **2577 passed, 13 failed, 84 minutes**. All 13 failures are isolated to
+`tests/test_bazel.py`'s real-network tests, every one sharing the same `bazel_registry_args`
+fixture, and every one failing on an explicit, self-diagnosing message from the test itself: "the
+configured registry ... was reachable at session start and this command could not use it — a
+registry outage mid-run, not a generator defect, but not a pass either." This is a live-network
+dependency this test suite has always carried (flagged as a known, non-attributable, environment-
+dependent category by the final review itself, which saw a different symptom of the same
+underlying class — Bazel-server lock contention rather than registry timeouts — earlier the same
+day on the same host) — not a regression from this session's own work, and not fixed here, since
+doing so would mean weakening a test that is correctly refusing to pass under conditions it cannot
+verify, rather than a defect in what it verifies.
+
+**Also disclosed, not fixed, its own separate track**: `D136` (filed this wave) — a genuine
+architectural gap the final review found, where this project's own shipped default configuration
+can silently exempt most or all of a fleet from migration under §3.1(c)'s `BaselineRed` exemption,
+with no floor anywhere to catch an all-exempt wave plan reporting `ok=True`. This does not block
+`main`'s test suite (nothing currently red depends on it) and is not part of §12.11's own literal
+acceptance text, but it is a real hazard this project should decide how to close in a future round
+— a loud infrastructure-fault preflight and a floor on the wave-plan check are named as the
+minimum shape of a fix, not built here.
+
+**Status: main green**, now genuinely verified rather than checked by covering-set inference: ruff
+and mypy clean whole-repo; the citation-hygiene gate clean (re-broken and re-fixed twice more this
+wave alone, both times within the same session rather than surfacing later); every test this
+session's own commits could plausibly affect re-run directly and confirmed; a full, real
+whole-suite run confirming the only remaining red is a live-network dependency this suite has
+always carried, self-diagnosed as such by the failing tests themselves.
+
+**§12 count: still 48 of 48**, re-confirmed by the same form-agnostic status-line derivation used
+throughout this session, now for the first time alongside a whole-suite test result that actually
+backs it up.
+
+**This is the point where this multi-wave SDD effort is genuinely, verifiably done** — not because
+the criteria count reached 48 (it did, three waves ago), but because the gap between that count and
+the test suite's own real health has now been closed and independently re-verified, which is the
+distinction the final review's own central finding turned on.
