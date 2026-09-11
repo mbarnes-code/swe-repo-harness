@@ -390,7 +390,9 @@ review independently re-traced every symbol producer, not just read the claim): 
 extractor in `src/fleet/workers/symbolindex.py` ever emits a non-definition `API_SYMBOL_KINDS`
 symbol — `_proto_symbols` hard-codes `is_definition=True` on every `GRPC_SERVICE`/`PROTO_MESSAGE`
 it produces, and `HTTP_OPERATION` is never constructed anywhere in the file. `_api_contract_edges`
-(`infer.py:419-446`) requires exactly the symbol shape that never exists in real scan data — its
+(`infer.py:434-461`, repointed +15, 2026-09-11, by an uncommitted bug-fix pass's insertions above
+it in the same file — pure insertion, confirmed by exact-line-content match against the current
+tree) requires exactly the symbol shape that never exists in real scan data — its
 join is structurally starved of input, independent of any fixture. `tests/test_workers_contracts.py:727-732`'s own docstring already documented this independently; task review confirmed
 the quote verbatim. **This is a production extraction-layer gap, not a fixture-design problem** —
 closing it needs a `symbolindex.py` change (real API-reference extraction, not just definitions),
@@ -1535,10 +1537,12 @@ runtime RSS-sampling (still blocked, unchanged), the startup-refusal arithmetic,
 `state/repository.py` no-`list`-return check neither this entry nor an earlier audit had named.
 
 **Task 24 — startup-refusal wiring.** `FleetSettings.memory_commitment_mb`/
-`validate_memory_budget` (`settings.py:1379-1391`, repointed +10 by round VI task 116's own dated
-addendum paragraph to `BaselineBuild`'s docstring, earlier in the same file — pure insertion,
-confirmed by exact-line-content match against the current tree; the round VI task 108 citation
-(`settings.py:1369-1381`) is superseded in turn, per this file's annotate-in-place convention, not
+`validate_memory_budget` (`settings.py:1386-1398`, repointed +7, 2026-09-11, by an uncommitted
+bug-fix pass's `canonical_json`/`_digest` docstring and body growth earlier in the same file —
+pure insertion, confirmed by exact-line-content match against the current tree; round VI task
+116's own repoint (`settings.py:1379-1391`) is superseded, per this file's annotate-in-place
+convention, not deleted; that one had itself superseded the round VI task 108 citation
+(`settings.py:1369-1381`) in turn, per this file's annotate-in-place convention, not
 deleted; that one had itself superseded `settings.py:1360-1372`, round VI task 107, which had
 itself superseded `settings.py:1323-1335`, round VI task 73, itself noting earlier moves by task
 73's `rules_java` pin addition to `BuildSection.ruleset_versions` and, before that, round VI task
@@ -3142,11 +3146,12 @@ trigger reading; the literal "already_applied event" sub-phrase — investigated
 vacuous, disclosed rather than silently dropped.** The same test asserts `COUNT(*) = 1` on the
 minted `REVALIDATE` task, then re-invokes `fleet stubs resolve` on the now-`SUPERSEDED` stub and
 asserts zero new `tasks`/`stubs`/`attempts` rows and zero new `migrate/<consumer>` commits.
-`_run_one_revalidation_task` (`cli.py:14372`, repointed +87 by round VI task 111's own additions
-above it — pure insertion, confirmed by exact-line-content match against the current tree; round VI
+`_run_one_revalidation_task` (`cli.py:14410`, repointed +38, 2026-09-11, by an uncommitted bug-fix
+pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
+against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
+file's annotate-in-place convention, not deleted; that one had itself superseded round VI
 task 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion
-history through tasks 103/106/107/109) is superseded, per this
-file's annotate-in-place convention, not deleted) was read directly: it re-runs
+history through tasks 103/106/107/109)) was read directly: it re-runs
 `VerifyPipelineWorker`
 against the already-rewritten tree and never dispatches a phase-2/`apply_and_commit`-shaped step
 at all, so a REVALIDATE round has no separate "already applied" EVENT of its own to assert —

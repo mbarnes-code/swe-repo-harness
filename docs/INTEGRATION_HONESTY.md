@@ -1439,7 +1439,10 @@ asserts on `EdgeRow` in memory passes.
 **FIXED, 2026-09-03 (round VI task 31, commit `d4cfc3e`, merge `31357cd`).** The brief this task
 was dispatched against assumed `EdgeRow` already carried `retargeted_from_repo_id` — investigation
 found that was false: that field belongs to `DependencyEdge` (`models/graph.py:141`), a
-structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:359-381`) had no such
+structurally distinct in-memory inference class; `EdgeRow` (`state/repository.py:360-382`,
+repointed +1, 2026-09-11, by an uncommitted bug-fix pass's `PhaseRow.transient_retries` field
+addition above it in the same file — pure insertion, confirmed by exact-line-content match
+against the current tree) had no such
 field at all. The real fix touched three things, not one: (1) added the field to `EdgeRow`
 itself, (2) added it to `insert_edges`'s SQL column list and params (now sixteen columns, not
 fifteen), (3) updated both production call sites (`_persist_scan_edges`, `_persist_contract_edges`
@@ -7491,7 +7494,11 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
 
 1. `src/fleet/orchestrator/runner.py:964` (`_terminate_uncharged`) and `runner.py:1055`
    (`_record_diagnostics`) both issue raw `UPDATE phases SET … last_error = ?, …` statements that
-   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1284-1286`)
+   never call `complete_phase` and never call `redact_text`. `_detail()` (`runner.py:1334-1336`,
+   repointed +50, 2026-09-11, by an uncommitted bug-fix pass's insertions above it in the same
+   file (a `ReservationRefusedError`/`BudgetRefusedError` except-clause pair plus smaller
+   insertions higher up) — pure insertion, confirmed by exact-line-content match against the
+   current tree)
    returns `error.stderr_tail`, which for a generic `except Exception` is `str(exc)` — the exact
    unredacted-source shape D88's own docstring names. `_terminate_uncharged` is reached from
    `RetryPolicy.decide` returning a non-retryable TERMINATE (`runner.py:704-711`) and is
@@ -7501,9 +7508,11 @@ fixed exactly one of these three, at exactly one of `phases.last_error`'s call s
    projected state with no redaction call anywhere in that module (confirmed by grep).
    `_record_diagnostics` is reached on `RetryAction.RETRY_TRANSIENT` and leaves the unredacted
    value in the column for the retry window, permanently if the process dies there.
-2. `record_attempt` (`state/repository.py:2755-2823`, repointed +20 by round VI task 83's D91
-   fix growing `claim_task_by_id` above it — pure insertion, confirmed by exact-line-content
-   match against the current tree) passes `row.stdout_tail`/`row.stderr_tail`
+2. `record_attempt` (`state/repository.py:2757-2825`, repointed +2, 2026-09-11, by an uncommitted
+   bug-fix pass's `PhaseRow.transient_retries` field addition earlier in the same file — pure
+   insertion, confirmed by exact-line-content match against the current tree; round VI task 83's
+   own repoint (`state/repository.py:2755-2823`) is superseded, per this file's annotate-in-place
+   convention, not deleted) passes `row.stdout_tail`/`row.stderr_tail`
    into its INSERT params with no redaction call — D88's own pattern, in the same file, ~750
    lines below the fix, not applied to the sibling columns SPEC:6987 names in the same sentence.
    Production caller `_AttemptWriter.record` (repointed fresh below, moved repeatedly by round VI
@@ -7701,10 +7710,11 @@ wire through (`record_task_anchor` is REWRITE/RELOCATE-specific, called only fro
 scenario is specifically the `git apply`/`git commit` REWRITE mutation flow), so this scope
 boundary does not block the criteria this defect names.
 
-`_TransformClaimHook` (`cli.py:5901`, repointed +87 by round VI task 111's own additions above it —
-pure insertion, confirmed by exact-line-content match against the current tree; round VI tasks 109
-and 107's own repoint (`cli.py:5814`) is superseded, per this file's annotate-in-place convention,
-not deleted) — the `pre_dispatch` hook that claims a TRANSFORM coarse
+`_TransformClaimHook` (`cli.py:5928`, repointed +27, 2026-09-11, by an uncommitted bug-fix pass's
+insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match against
+the current tree; round VI task 111's own repoint (`cli.py:5901`) is superseded, per this file's
+annotate-in-place convention, not deleted; that one had itself superseded round VI tasks 109 and
+107's own repoint (`cli.py:5814`)) — the `pre_dispatch` hook that claims a TRANSFORM coarse
 `tasks` row RUNNING, the exact "moves the task row to RUNNING" moment `vcs/commits.py`'s
 `record_task_anchor` docstring already names as `tasks.pre_commit_sha`'s intended write site
 (§3.2 step 6.5) — now reads the real `migrate/<repo>` tip via `record_task_anchor` (read from git
@@ -8677,7 +8687,9 @@ this full 3-piece build land as tested-but-inert infrastructure on a real tree.
 risk; a REVALIDATE claiming loop built without D107 first is actively UNSAFE, not merely inert,
 and this is now a live production risk, not a hypothetical.** `VerificationReport.
 verified_against_stubs` is a pure pass-through of `RdepverifyInput.verified_against_stubs`
-(`workers/rdepverify.py:123-128`), itself populated from a `stubs.state = 'ACTIVE'` query
+(`workers/rdepverify.py:124-129`, repointed +1, 2026-09-11, by an uncommitted bug-fix pass's added
+`exception_type_name` import above it in the same file — pure insertion, confirmed by
+exact-line-content match against the current tree), itself populated from a `stubs.state = 'ACTIVE'` query
 (`cli._active_stubs_by_consumer`) — not derived from inspecting what Bazel actually built. The
 instant a stub row flips to `SUPERSEDED` (T1), that query reads empty regardless of whether the
 consumer's committed `BUILD.bazel` was ever rewritten off the stub label. A REVALIDATE task built
@@ -9251,10 +9263,11 @@ the premise it was quoting from ADR-0119 has moved. See ADR-0119's own matching 
 **Fix round, round VI task 66 (2026-09-06) — controller review (opus-tier) independently
 reproduced every finding against a real seeded schema or a fresh pytest run; all fixed.**
 (C1, critical) The ADR-0123 decision above was INERT in production: `cli._committed_contracts`
-(`cli.py:2767-2802`, repointed +89 by round VI task 111's own additions above it — pure insertion,
-confirmed by exact-line-content match against the current tree; round VI tasks 109 and 107's own
-repoint (`cli.py:2678-2715`) is superseded, per this file's annotate-in-place convention, not
-deleted), the
+(`cli.py:2794-2829`, repointed +27, 2026-09-11, by an uncommitted bug-fix pass's insertions above
+it in `cli.py` — pure insertion, confirmed by exact-line-content match against the current tree;
+round VI task 111's own repoint (`cli.py:2767-2802`) is superseded, per this file's
+annotate-in-place convention, not deleted; that one had itself superseded round VI tasks 109 and
+107's own repoint (`cli.py:2678-2715`)), the
 ONLY production feeder of `carry_over_committed`'s `committed` argument,
 still selected `WHERE status IN ('HOISTED','MIGRATED','FORBIDDEN')` — no `'FAILED'` — so a real
 `FAILED` row was silently dropped and RE-DERIVED AS `EXTRACTABLE` on the next `fleet scan`,
@@ -10925,11 +10938,12 @@ repeat-trigger reading of it**: the same test's final section re-invokes `fleet 
 on the now-`SUPERSEDED` stub and asserts zero new `tasks`/`stubs`/`attempts` rows and zero new
 commits on `migrate/<consumer>`. **The literal "already_applied event... keyed on
 revalidation_key" sub-phrase of (4b) was investigated, not merely left unasserted**:
-`_run_one_revalidation_task` (`cli.py:14372`, repointed +87 by round VI task 111's own additions
-above it — pure insertion, confirmed by exact-line-content match against the current tree; round VI
-task 109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion
-history through tasks 103/106/107/109) is superseded, per this file's annotate-in-place convention,
-not deleted) re-runs `VerifyPipelineWorker` directly against the
+`_run_one_revalidation_task` (`cli.py:14410`, repointed +38, 2026-09-11, by an uncommitted bug-fix
+pass's insertions above it in `cli.py` — pure insertion, confirmed by exact-line-content match
+against the current tree; round VI task 111's own repoint (`cli.py:14372`) is superseded, per this
+file's annotate-in-place convention, not deleted; that one had itself superseded round VI task
+109's own repoint (`cli.py:14285`, itself noting the same function's non-pure-insertion history
+through tasks 103/106/107/109)) re-runs `VerifyPipelineWorker` directly against the
 already-rewritten tree — it never dispatches a phase-2/`apply_and_commit`-shaped step at all, so
 there is no separate "already applied" EVENT for a REVALIDATE round's own phase-2 work to emit;
 SPEC's "zero new phase-2 commits" reading holds vacuously by construction (REVALIDATE
@@ -11422,3 +11436,33 @@ own, matching this same paragraph's existing convention) now describe the worker
 (`cli.py::_gate_baseline_red`) accurately. This does NOT close D136 — the design gap above (no
 loud infra-fault preflight, no floor on `check_criterion_c`) remains "Not yet built" and out of
 scope for task 116, which fixed only the two docstrings this same entry named.
+
+## D137 — OPEN. `CachingModelClient.scoped()` (ADR-0021's anti-anchoring key component) is never
+called anywhere in `src/fleet/` — the cache key never actually varies by `context_policy`
+
+**Found 2026-09-11 by a `/code-review -high` background review pass across `src/fleet/`. Allocated
+by the round VI controller — form-agnostic sweep found `D136` as the highest allocated number.**
+
+**The gap, as measured.** `RunContext.__post_init__` (`orchestrator/context.py:271`) constructs
+exactly one `CachingModelClient` per run with the class's own field defaults, and
+`RunContext.worker_context()` (`context.py:335`) hands that same instance to every worker as
+`llm=self.model_client` — verified by `git grep -rn '\.scoped(' src/fleet/ tests/`, which returns
+**zero** hits under `src/fleet/`; the method is exercised only by `tests/test_llm_cache.py:340-341`.
+**ADR-0021** (`docs/DECISIONS.md:910`) is explicit that the escalation ladder's anti-anchoring
+guarantee depends on `context_policy`/`rejected_approach_digest` being bound into the `llm_cache`
+key per rung — `CachingModelClient.scoped()` (`llm/cache.py:436-463`) is the mechanism that does the
+binding, and it is dead code in production.
+
+**Failure this permits.** Two runs (or one run under an operator `--context-policy` override
+mid-ladder) that render the same prompt text under two *different* declared context policies — e.g.
+one rung meant to run under `EVIDENCE_PLUS_REJECTED_APPROACHES` and another under
+`EVIDENCE_PLUS_PRIORS`, both happening to have an empty refutation/priors set to render — produce a
+cache key whose `context_policy`/`rejected_approach_digest` components are always the unscoped
+class default, not the policy that actually ran. The second run silently serves the first run's
+cached answer, defeating the exact anti-anchoring guarantee ADR-0021 exists to give.
+
+**Not yet built.** Wiring is owed, not decided here: `RunContext` (or `worker_context`) needs to call
+`.scoped(context_policy=..., rejected_approach_digest=...)` with the values actually in force for
+the ladder rung about to run, rather than handing out one unscoped instance for the run's whole
+lifetime. This needs its own design pass (where in the call chain the current rung's policy is
+known vs. where `model_client` is currently constructed) and is deliberately not attempted here.
